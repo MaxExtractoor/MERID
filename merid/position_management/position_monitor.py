@@ -172,6 +172,144 @@ def _is_settlement_guard_override(exit_reason: ExitReason) -> bool:
     return exit_reason == ExitReason.SETTLEMENT_GUARD and _settlement_bypass_env_enabled()
 
 
+def _settlement_guard_sell_justified(
+    position: "Position",
+    snapshot: "ExitPriceSnapshot",
+    seconds_to_expiry: float,
+) -> bool:
+    """Return True only when selling before settlement beats settling.
+
+    Near expiry the alternative to a market sell is automatic settlement:
+    settlement pays the full outcome value with no taker fee and no spread,
+    while selling at the bid costs both.  A sell is therefore justified only
+    when a *trusted* settlement-model evaluation shows the market paying a
+    premium over the calibrated hold value (``net_sell > p_held_cal +
+    margin``).  When the model cannot be trusted (``vol_source=none``,
+    incoherent book, missing calibration) the market bid is already the best
+    available estimate of settlement value — selling donates spread+fee for
+    no information advantage, so the position rides to settlement.
+
+    Fails toward settle (False) on any eval error: an unjustified sell at
+    expiry is exactly the premature-loss defect this gate exists to prevent.
+    """
+    try:
+        if os.environ.get("MERID_SETTLEMENT_GUARD_EV_GATE", "1") != "1":
+            return True  # legacy unconditional forced-sell behavior
+        from decimal import Decimal as _D
+
+        from merid.event_venues.kalshi.market_state import (
+            get_kalshi_market_state_store,
+        )
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            get_exit_evaluator,
+        )
+
+        store = get_kalshi_market_state_store()
+        kalshi_state = store.get(position.market_id) if store is not None else None
+        unified_state = (
+            store.get_unified(position.market_id)
+            if store is not None and hasattr(store, "get_unified")
+            else None
+        )
+        held_side = (
+            position.outcome_side
+            or position.thesis_side
+            or position.side.value
+        )
+        fair_value = (
+            _get_fair_value_cents(unified_state, position.side.value)
+            if unified_state is not None
+            else None
+        )
+        executable_bid = (
+            _get_executable_exit_cents(kalshi_state, position.side.value)
+            if kalshi_state is not None
+            else None
+        )
+        if executable_bid is None and snapshot is not None:
+            executable_bid = snapshot.own_side_bid_cents
+        book_age_ms = (
+            _book_age_ms(kalshi_state) if kalshi_state is not None else None
+        )
+        if book_age_ms is None and snapshot is not None:
+            book_age_ms = snapshot.book_age_ms
+
+        ev = get_exit_evaluator().evaluate(
+            position,
+            market_key=position.market_id,
+            held_side=held_side,
+            canonical_reason="expiry_liquidation",
+            quantity_contracts=position.size,
+            kalshi_state=kalshi_state,
+            unified_state=unified_state,
+            fair_value_cents=fair_value,
+            executable_bid_cents=executable_bid,
+            book_age_ms=book_age_ms,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        trusted = (
+            bool(getattr(ev, "model_inputs_satisfactory", False))
+            and getattr(ev, "p_held_calibrated_cents", None) is not None
+            and getattr(ev, "net_sell_value_cents", None) is not None
+            and bool(getattr(ev, "quote_coherent", False))
+            and bool(getattr(ev, "quote_sequence_confirmed", False))
+        )
+        if getattr(get_exit_evaluator(), "policy", None) is not None and getattr(
+            get_exit_evaluator().policy, "require_rti", False
+        ):
+            trusted = trusted and bool(getattr(ev, "rti_execution_eligible", False))
+        if not trusted:
+            logger.info(
+                "[SETTLEMENT-GUARD-HOLD] position=%s market=%s tte=%.1fs - "
+                "eval untrusted (inputs_ok=%s p_cal=%s net_sell=%s coherent=%s seq=%s); "
+                "riding to settlement instead of donating spread+fee at bid",
+                position.position_id[:8],
+                position.market_id,
+                seconds_to_expiry,
+                getattr(ev, "model_inputs_satisfactory", None),
+                getattr(ev, "p_held_calibrated_cents", None),
+                getattr(ev, "net_sell_value_cents", None),
+                getattr(ev, "quote_coherent", None),
+                getattr(ev, "quote_sequence_confirmed", None),
+            )
+            return False
+        p_cal = _D(str(ev.p_held_calibrated_cents))
+        net_sell = _D(str(ev.net_sell_value_cents))
+        margin = _D(os.environ.get("MERID_SETTLEMENT_GUARD_SELL_MARGIN_CENTS", "0"))
+        if net_sell > p_cal + margin:
+            logger.info(
+                "[SETTLEMENT-GUARD-SELL] position=%s market=%s tte=%.1fs - "
+                "market premium: net_sell=%sc > p_cal=%sc + margin=%sc",
+                position.position_id[:8],
+                position.market_id,
+                seconds_to_expiry,
+                net_sell,
+                p_cal,
+                margin,
+            )
+            return True
+        logger.info(
+            "[SETTLEMENT-GUARD-HOLD] position=%s market=%s tte=%.1fs - "
+            "no premium: net_sell=%sc <= p_cal=%sc + margin=%sc; riding to settlement",
+            position.position_id[:8],
+            position.market_id,
+            seconds_to_expiry,
+            net_sell,
+            p_cal,
+            margin,
+        )
+        return False
+    except Exception as exc:
+        logger.warning(
+            "[SETTLEMENT-GUARD-HOLD] position=%s market=%s - eval failed (%s); "
+            "defaulting to settlement",
+            position.position_id[:8],
+            position.market_id,
+            exc,
+        )
+        return False
+
+
 def _get_hard_loss_cap_cents() -> int:
     """Load per-position hard unrealized loss cap from active profile (cents)."""
     try:
@@ -2707,24 +2845,35 @@ class PositionMonitor:
                 )
             )
 
-        # CRITICAL FIX (2026-08-25): Settlement guard - forced exit at T-2min (120s).
+        # CRITICAL FIX (2026-08-25): Settlement guard - exit check at T-2min (120s).
         # Previously positions rode into settlement unmanaged (the "settlement trap"):
         # expired markets were simply dropped from monitoring with no exit enforcement.
-        # Force a market exit while there is still a live order book.
+        #
+        # 2026-09-24: the guard is now EV-gated instead of an unconditional market
+        # sell.  At T<=120s the alternative to selling is not "keep holding" — it
+        # is automatic settlement, which costs no fee and no spread.  Selling at
+        # the bid therefore only makes sense when a trusted eval shows the market
+        # pays a real premium over the calibrated settlement value; otherwise the
+        # position rides to settlement (the poller + reconciliation manage it).
+        # Live incident: XRP YES@68 was sold at 48c at T-104s while the model
+        # was untrusted (vol_source=none) — settle paid 100c, the sell locked -23c.
         _settlement_guard_seconds = _get_settlement_guard_seconds()
         try:
             _secs_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
             if _secs_to_expiry is not None and 0 < _secs_to_expiry <= _settlement_guard_seconds:
-                logger.warning(
-                    "[POSITION-MONITOR] SETTLEMENT-GUARD forced exit: position=%s market=%s side=%s "
-                    "tte=%.1fs <= %.0fs - exiting before settlement",
-                    position.position_id[:8],
-                    position.market_id,
-                    position.side.value,
-                    _secs_to_expiry,
-                    _settlement_guard_seconds,
-                )
-                _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"seconds_to_expiry": _secs_to_expiry, "guard_seconds": _settlement_guard_seconds})
+                if _settlement_guard_sell_justified(position, snapshot, _secs_to_expiry):
+                    logger.warning(
+                        "[POSITION-MONITOR] SETTLEMENT-GUARD forced exit: position=%s market=%s side=%s "
+                        "tte=%.1fs <= %.0fs - market premium over settle value, exiting before settlement",
+                        position.position_id[:8],
+                        position.market_id,
+                        position.side.value,
+                        _secs_to_expiry,
+                        _settlement_guard_seconds,
+                    )
+                    _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"seconds_to_expiry": _secs_to_expiry, "guard_seconds": _settlement_guard_seconds})
+                # else: no candidate — the position expires in place and is
+                # removed by _is_expired_market -> settlement reconciliation.
                 # Continue evaluating candidates; the central resolver will choose the final exit.
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Settlement guard check failed: %s", e)
@@ -3711,18 +3860,21 @@ class PositionMonitor:
         except Exception as e:
             logger.warning("[POSITION-MONITOR] Could not get time to expiry for emergency flatten: %s", e)
 
-        # CRITICAL FIX (2026-08-25): Emergency flatten in last 60 seconds ALWAYS.
-        # The settlement guard at T-2min (120s) is the primary defence; this is a
-        # fail-safe backstop.  Holding an underwater position to expiry was the
-        # dominant P&L leak, so we now force-close unconditionally.
+        # CRITICAL FIX (2026-08-25): Emergency flatten in last 60 seconds —
+        # EV-gated since 2026-09-24.  The original unconditional flatten assumed
+        # settlement was unmanaged (the "settlement trap"); settlement is now
+        # reconciled, so a sell is only justified when the market pays a premium
+        # over calibrated settle value — otherwise the position settles for free.
         if time_to_expiry_seconds <= 60.0:
-            logger.warning(
-                "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs pnl=%dc - forcing full exit before expiry",
-                position.position_id[:8],
-                time_to_expiry_seconds,
-                position.unrealized_pnl_cents
-            )
-            _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"emergency_flatten": True, "time_to_expiry_seconds": time_to_expiry_seconds})
+            if _settlement_guard_sell_justified(position, snapshot, float(time_to_expiry_seconds)):
+                logger.warning(
+                    "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs pnl=%dc - market premium over settle value, forcing exit",
+                    position.position_id[:8],
+                    time_to_expiry_seconds,
+                    position.unrealized_pnl_cents
+                )
+                _add_candidate(ExitReason.SETTLEMENT_GUARD, current_price_cents, None, metadata={"emergency_flatten": True, "time_to_expiry_seconds": time_to_expiry_seconds})
+            # else: ride to settlement — selling at bid donates spread+fee.
             # Continue evaluating candidates; the central resolver will choose the final exit.
 
         # CRITICAL FIX: 2026-07-15 - Load staged exit stages from YAML config
