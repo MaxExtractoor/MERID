@@ -353,6 +353,93 @@ async def test_ws_snapshot_isolates_concurrent_state_mutation():
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_locked_ws_divergent_allows_rest_marketable_and_resyncs():
+    """2026-09-25: a locked WS top (bid==ask) diverging from a fresh REST pull is
+    a split-tape artifact — one ladder side is awaiting its delta.  Prefer the
+    fresh marketable REST quote for execution AND mark the WS book for resync
+    so the frozen top does not keep vetoing orders."""
+    # WS YES locked at 79/79 -> NO-space book 21/21 (locked).  REST YES 70/74
+    # -> NO ask = 30c; divergence vs locked WS NO-ask 21c is 9c > tolerance.
+    state = _make_ws_state(best_bid_cents=79, best_ask_cents=79)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    intent = _make_intent(price_cents=30)  # BUY_NO @30 marketable vs REST ask 30
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent,
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+    # Locked divergent WS must be marked for resync, not trusted as-is.
+    store._set_snapshot_complete.assert_called_once_with(
+        intent.ticker, False, "ws_locked_divergent"
+    )
+    store._set_book_health.assert_called_once_with(
+        intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_locked_divergent"
+    )
+    store._maybe_trigger_book_recovery.assert_called_once_with(
+        intent.ticker, "ws_locked_divergent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_locked_ws_divergent_blocks_when_rest_not_marketable():
+    """Locked divergent WS with a fresh but non-marketable REST still rejects —
+    the REST-preference only applies when the fresh quote can actually fill."""
+    state = _make_ws_state(best_bid_cents=79, best_ask_cents=79)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    intent = _make_intent(price_cents=10)  # below REST NO ask 30c -> not marketable
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent,
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "stale_ws" in result.reason
+    store._set_snapshot_complete.assert_called_once_with(
+        intent.ticker, False, "ws_stale_at_order"
+    )
+    store._maybe_trigger_book_recovery.assert_called_once_with(
+        intent.ticker, "ws_stale_at_order"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_unlocked_ws_divergent_blocks_not_marketable():
+    """A fresh, *unlocked* WS book that diverges from REST is trusted as the
+    live feed — an order marketable on REST but not on WS still rejects."""
+    state = _make_ws_state()  # fresh 79/80
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    intent = _make_intent(price_cents=10)  # below WS NO ask 21c
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent,
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "not_marketable" in result.reason
+
+
 def _make_exit_intent(side="yes", action="sell", price_cents=40):
     intent = _make_intent(side=side, action=action, price_cents=price_cents)
     intent.entry_or_exit = "exit"

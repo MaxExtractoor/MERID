@@ -491,7 +491,11 @@ def build_liquidation_quote(
     book_health = str(getattr(primary, "book_health", "") or "").upper()
     data_quality = str(getattr(primary, "data_quality", "") or "").upper()
     ask = _same_side_ask_cents(primary, held)
-    crossed = bid is not None and ask is not None and bid >= ask
+    # Kalshi binary books legitimately lock (bid == ask) during fast crosses —
+    # the resting bid remains executable.  Only a strict cross (bid > ask)
+    # indicates a corrupt split-tape book.  This matches the market-state
+    # convention, which also tolerates locked and only fails strict inversion.
+    crossed = bid is not None and ask is not None and bid > ask
     coherent = (
         not crossed
         and transition not in _INVALID_TRANSITIONS

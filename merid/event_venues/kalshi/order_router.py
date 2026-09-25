@@ -4433,27 +4433,51 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
-        # 2) WebSocket is stale; trust REST if it is fresh and marketable.
-        if ws_age_ms > max_ws_age_ms:
+        # 2) WebSocket is stale, or its top-of-book is internally locked
+        #    (bid == ask) while diverging from a fresh REST pull.  The delta
+        #    stream is one-sided per message, so mid-move the ladder can sit
+        #    momentarily locked while one side awaits its delta; a locked WS
+        #    top that disagrees with a just-fetched REST book is a split-tape
+        #    artifact, not an executable quote — trust REST when the order is
+        #    marketable there, otherwise quarantine and resync as before.
+        ws_locked = ws_book["bid_cents"] >= ws_book["ask_cents"]
+        if ws_age_ms > max_ws_age_ms or ws_locked:
             if rest_age_ms <= max_rest_age_ms and rest_marketable:
                 logger.warning(
                     "EXECUTION-QUOTE-MODE ticker=%s mode=REST_AUTHORITATIVE decision=ALLOW "
                     "reason=stale_ws_rest_marketable ws_age_ms=%.0f rest_age_ms=%.0f "
-                    "order_price=%dc action=%s",
+                    "order_price=%dc action=%s ws_locked=%s",
                     intent.ticker, ws_age_ms, rest_age_ms,
                     getattr(intent, "price_cents", None),
                     getattr(intent, "action", ""),
+                    ws_locked,
                 )
+                # A locked WS top that diverged this far is out of sync with
+                # the exchange; re-anchor it so the next order sees a real book.
+                if ws_locked and market_state_store is not None:
+                    try:
+                        market_state_store._set_snapshot_complete(
+                            intent.ticker, False, "ws_locked_divergent"
+                        )
+                        market_state_store._set_book_health(
+                            intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_locked_divergent"
+                        )
+                        market_state_store._maybe_trigger_book_recovery(
+                            intent.ticker, "ws_locked_divergent"
+                        )
+                    except Exception as _lk_err:
+                        logger.debug("locked-book resync mark failed for %s: %s", intent.ticker, _lk_err)
                 return None
             logger.error(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=STALE_WS decision=BLOCKED "
                 "reason=stale_ws_or_not_marketable ws_age_ms=%.0f rest_age_ms=%.0f "
-                "rest_marketable=%s",
-                intent.ticker, ws_age_ms, rest_age_ms, rest_marketable,
+                "rest_marketable=%s ws_locked=%s",
+                intent.ticker, ws_age_ms, rest_age_ms, rest_marketable, ws_locked,
             )
             if market_state_store is not None:
                 market_state_store._set_snapshot_complete(intent.ticker, False, "ws_stale_at_order")
                 market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "ws_stale_at_order")
+                market_state_store._maybe_trigger_book_recovery(intent.ticker, "ws_stale_at_order")
             if _is_exit:
                 logger.warning(
                     "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "

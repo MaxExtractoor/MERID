@@ -1203,3 +1203,31 @@ def test_no_held_tail_with_dual_curve_is_provisional():
         rti_observation=_make_rti(),
     )
     assert "no_dual_provisional" not in ev2.detail
+
+
+def test_no_held_tail_with_real_curve_is_not_provisional():
+    """A NO-held position in the tail with a real per-side NO curve gets its
+    calibrated cap applied — model inputs stay satisfactory and the salvage
+    economics are evaluated instead of structurally vetoed."""
+    evaluator, _registry = _make_evaluator(
+        tail_calibrator=_stub_calibrator(dual_no=False),
+        require_calibrated_model=True,
+    )
+    position = _make_position(side="no", entry=60)
+    state = _make_state(yes_bid=80, yes_ask=82, no_bid=20, no_ask=22,
+                        seconds_to_expiry=600.0)
+    state.annualized_vol_source = "rti_realized"
+
+    ev = evaluator.evaluate(
+        position,
+        market_key=MARKET,
+        canonical_reason="value_switch_exit",
+        kalshi_state=state,
+        fair_value_cents=50,
+        seconds_to_expiry=600.0,
+        rti_observation=_make_rti(),
+    )
+    assert "no_dual_provisional" not in ev.detail
+    assert ev.model_calibration_no_dual is False
+    # Held price 20c maps onto the stub NO curve -> cap applied, not identity.
+    assert ev.p_held_calibrated_cents == 20

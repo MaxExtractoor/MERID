@@ -154,7 +154,14 @@ def test_rejects_cost_basis_override_yes(monkeypatch):
     )
     d = _make_decision(spot=100.0, strike=100.0, yes_ask=20.0, no_ask=80.0)
     assert d.selected_outcome is None
-    assert d.no_trade_reason == "cost_basis_override_yes"
+    # The dense per-side tail fit (n~70K obs) prices a 20c YES contract at a
+    # ~19-24% observed win rate, so the edge gate now rejects before the
+    # cost-basis min-p gate is reached; both are valid rejections of a
+    # cheap sub-50% YES.
+    assert d.no_trade_reason in (
+        "cost_basis_override_yes",
+        "yes_edge_below_threshold",
+    )
 
 
 def test_rejects_cost_basis_override_no(monkeypatch):
@@ -328,17 +335,18 @@ def test_tail_calibration_caps_cheap_yes_belief(monkeypatch):
     )
     assert d.selected_outcome is None
     # The raw model p_yes would be ~0.94, but the tail calibration forces it
-    # close to the observed actual win rate in the 0-19c bucket (near 0).
-    assert float(d.p_yes_calibrated) <= 0.10
+    # to the observed actual win rate + 5% buffer.  The dense refit (70K obs)
+    # measures ~9.7-12% WR at ~10c -> cap ~0.15, still crushing the model belief.
+    assert float(d.p_yes_calibrated) <= 0.20
 
 
-def test_no_dual_tail_cap_skips_moderate_raw_p_no(monkeypatch):
-    """A moderate raw p_no on a dual NO curve must not be over-capped to 0.05.
+def test_real_no_tail_cap_applies_moderate_raw_p_no(monkeypatch):
+    """With a real per-side NO curve (2026-09-25 refit), a moderate raw p_no on
+    a 5c NO ask is capped to the observed NO-held win rate + buffer.
 
-    The NO curve in the current JSON is the YES dual, which says a 5c NO-held
-    contract wins 0% of the time.  When the Bachelier model itself says p_no is
-    moderate (>= the dual raw floor), the cap should be skipped so the dual
-    does not structurally suppress the NO side.
+    The 39K-observation fit says a 5c NO-held contract wins ~0% of the time, so
+    the cap applies directly — no dual shrinkage softening needed since the
+    curve is no longer a YES mirror.
     """
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 0.0
@@ -346,8 +354,7 @@ def test_no_dual_tail_cap_skips_moderate_raw_p_no(monkeypatch):
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_CHEAP_TAIL_P_EXCEPTION", 0.0
     )
-    # Spot ~0.18% above strike gives a moderate raw p_no (~0.25) for a 5c NO ask,
-    # which should be above the dual raw floor and therefore not over-capped.
+    # Spot ~0.18% above strike gives a moderate raw p_no (~0.25) for a 5c NO ask.
     d = _make_decision(
         spot=100.18,
         strike=100.0,
@@ -357,14 +364,15 @@ def test_no_dual_tail_cap_skips_moderate_raw_p_no(monkeypatch):
         no_ask=5.0,
     )
     _ind = d.indicators or {}
-    # NO entry is in the cheap-price tail, but the raw p_no should be moderate.
-    assert _ind.get("tail_cap_no_reason") == "dual_continuous_shrinkage"
+    assert _ind.get("tail_cap_no_reason") == "real_curve"
     assert _ind.get("tail_calibration_no_weight") == 0.0
-    assert float(d.p_no_calibrated) > 0.15
+    assert _ind.get("tail_calibration_no_applied") is True
+    # Observed WR at 5c NO ≈ 0% + 5% buffer -> cap ≈ 0.05 (min-p floor).
+    assert float(d.p_no_calibrated) <= 0.10
 
 
-def test_no_dual_tail_cap_applies_cheap_raw_p_no(monkeypatch):
-    """A cheap raw p_no on a dual NO curve is still capped to the dual tail."""
+def test_real_no_tail_cap_applies_cheap_raw_p_no(monkeypatch):
+    """A cheap raw p_no on the real NO curve is capped to the observed tail."""
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 0.0
     )
@@ -372,7 +380,7 @@ def test_no_dual_tail_cap_applies_cheap_raw_p_no(monkeypatch):
         "merid.prediction.trade_decision.MERID_CHEAP_TAIL_P_EXCEPTION", 0.0
     )
     # Spot far above strike makes the Bachelier model itself believe NO is very
-    # unlikely, so p_no is in the cheap-tail region and the dual cap applies.
+    # unlikely, so p_no is in the cheap-tail region and the cap applies.
     d = _make_decision(
         spot=102.0,
         strike=100.0,
@@ -382,9 +390,10 @@ def test_no_dual_tail_cap_applies_cheap_raw_p_no(monkeypatch):
         no_ask=5.0,
     )
     _ind = d.indicators or {}
-    assert _ind.get("tail_cap_no_reason") == "dual_continuous_shrinkage"
-    assert _ind.get("tail_calibration_no_weight") == 1.0
-    # The raw p_no was cheap and the dual cap should keep it near or below 0.10.
+    assert _ind.get("tail_cap_no_reason") == "real_curve"
+    assert _ind.get("tail_calibration_no_weight") == 0.0
+    # The raw p_no is already at/below the observed tail cap, so the cap need
+    # not move it — p_no stays near the 0.05 floor.
     assert float(d.p_no_calibrated) <= 0.10
 
 
