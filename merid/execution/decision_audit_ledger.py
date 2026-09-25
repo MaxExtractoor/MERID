@@ -252,6 +252,7 @@ class DecisionAuditLedger:
         self.db_path = Path(db_path) if db_path else _DB_PATH
         self._lock = threading.Lock()
         self._db_ready = False
+        self._shared_conn: Optional[sqlite3.Connection] = None
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
 
     def _ensure_db(self) -> None:
@@ -269,13 +270,32 @@ class DecisionAuditLedger:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
 
     def _conn(self, isolation_level: Optional[str] = "IMMEDIATE") -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
-        conn.isolation_level = isolation_level
-        conn.row_factory = sqlite3.Row
-        if isolation_level is not None:
+        # Reuse a single persistent connection for writes.  Opening a fresh
+        # connection to the 400MB+ audit DB measured ~30s on this host (cold
+        # file-cache/AV scan), and because every writer holds ``self._lock``
+        # across the connect, the whole decision pipeline serialized behind
+        # it (faulthandler: all decision threads parked at ``with self._lock``).
+        # The shared connection is guarded by the same lock and created with
+        # check_same_thread=False.  ``with conn:`` still commits/rolls back per
+        # call; only the connect itself is amortized.  ``isolation_level=None``
+        # (schema init) keeps a one-shot connection so autocommit DDL semantics
+        # are unchanged.
+        if isolation_level is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=10)
+            conn.isolation_level = None
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000")
+            return conn
+        if self._shared_conn is None:
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False
+            )
+            conn.isolation_level = isolation_level
+            conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        return conn
+            conn.execute("PRAGMA busy_timeout = 5000")
+            self._shared_conn = conn
+        return self._shared_conn
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Idempotent migrations for the point-in-time audit ledger."""
