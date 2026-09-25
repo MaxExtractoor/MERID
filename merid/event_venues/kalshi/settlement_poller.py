@@ -730,7 +730,13 @@ class KalshiSettlementPoller:
         - Exactly-once grading: each valid settlement produces one grading event
         """
         self._poll_count += 1
-        
+
+        # Sweep orphaned decision outcomes FIRST: after a restart the
+        # ``_graded_settlements`` cache is empty, so the account settlement
+        # feed re-grades its entire lookback window below and can take many
+        # minutes to drain — orphan outcomes must not queue behind it.
+        await self._sweep_orphaned_decision_outcomes()
+
         # Calculate lookback window
         now = datetime.now(timezone.utc)
         start_time = now - timedelta(hours=self.config.lookback_hours)
@@ -815,9 +821,6 @@ class KalshiSettlementPoller:
                 f"(total cached: {len(self._settlement_cache)}, "
                 f"ungraded backlog: {len(self._ungraded_backlog)})"
             )
-
-        # Sweep decision outcomes for markets we evaluated but never entered.
-        await self._sweep_orphaned_decision_outcomes()
 
     async def _sweep_orphaned_decision_outcomes(self) -> None:
         """Settle pending decision outcomes on markets the account never held.
