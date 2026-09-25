@@ -592,6 +592,16 @@ class KalshiVenueClient(EventVenueClient):
             self._client_loop_id = None
             self._http_client = None
 
+    async def reset_http_client(self) -> None:
+        """Public wrapper: drop the current loop's pooled HTTP client.
+
+        Called by the order router after a submission timeout — a hung request
+        on a reused keep-alive socket means the pool may hold dead connections
+        that httpx cannot detect until read. Rebuilding gives the next attempt
+        fresh TCP+TLS.
+        """
+        await self._reset_http_client_after_loop_error()
+
     def _get_current_loop_id(self) -> Optional[int]:
         """Get ID of current event loop, or None if no loop running."""
         try:
@@ -762,7 +772,10 @@ class KalshiVenueClient(EventVenueClient):
                 limits=httpx.Limits(
                     max_connections=200,
                     max_keepalive_connections=50,
-                    keepalive_expiry=30.0,
+                    # Short keepalive: Kalshi's LB half-closes idle sockets and
+                    # httpx can't detect a CLOSE_WAIT conn as dead until read,
+                    # so POSTs reused dead sockets and hung (2026-09-25 wedge).
+                    keepalive_expiry=10.0,
                 ),
                 headers={
                     "User-Agent": "MERID-Kalshi-Client/1.0",
@@ -1371,22 +1384,34 @@ class KalshiVenueClient(EventVenueClient):
             except httpx.TimeoutException as e:
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
+                    # A timed-out request on a reused keep-alive connection is
+                    # the dead-socket signature (peer FIN/RST invisible to httpx
+                    # until read, esp. Windows proactor). Drop the pool so the
+                    # retry opens a fresh connection instead of re-hanging.
+                    try:
+                        await self._reset_http_client_after_loop_error()
+                    except Exception:
+                        pass
                     # Jittered exponential backoff
                     wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
                     logger.warning(
-                        f"[kalshi] {operation_name} timeout, retrying in {wait_time:.2f}s "
+                        f"[kalshi] {operation_name} timeout, HTTP pool reset, retrying in {wait_time:.2f}s "
                         f"(attempt {attempt + 1})"
                     )
                     await asyncio.sleep(wait_time)
                     continue
-                    
+
             except (httpx.ConnectError, httpx.ReadError) as e:
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
+                    try:
+                        await self._reset_http_client_after_loop_error()
+                    except Exception:
+                        pass
                     # Jittered exponential backoff
                     wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
                     logger.warning(
-                        f"[kalshi] {operation_name} connection error, retrying in {wait_time:.2f}s "
+                        f"[kalshi] {operation_name} connection error, HTTP pool reset, retrying in {wait_time:.2f}s "
                         f"(attempt {attempt + 1}): {e}"
                     )
                     await asyncio.sleep(wait_time)
