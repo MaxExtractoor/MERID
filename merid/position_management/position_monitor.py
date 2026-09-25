@@ -310,6 +310,171 @@ def _settlement_guard_sell_justified(
         return False
 
 
+# 2026-09-25: Mid-trade loss/thesis exits are EV-gated.  On a 0/100 binary the
+# expected value of holding to settlement is the (calibrated) held-side
+# probability; selling pays a second taker fee plus spread.  Triggering
+# edge_decay / current_edge_reversal / time_stop / model_invalidation the
+# moment a noisy dip makes a reason "true" locks the loss at the model's most
+# pessimistic price — the dominant premature-loss pattern in live fills
+# (winners sold at 1-50c below entry that then settled in-the-money).  These
+# reasons may only liquidate when the settlement evaluator independently
+# concludes net liquidation beats the conservative (risk-reserved) hold value
+# — i.e. the market is paying a premium over a calibrated, risk-adjusted hold.
+# Catastrophic hard-risk exits (loss cap, stop loss, risk, continuation,
+# operational/manual) and all profit exits (take-profit, trail, ratchet,
+# scale-out, 99c) remain mechanical and are never gated here.
+_LOSS_EXIT_EV_GATED_REASONS = frozenset({
+    ExitReason.EDGE_DECAY,
+    ExitReason.CURRENT_EDGE_REVERSAL,
+    ExitReason.TIME_STOP,
+    ExitReason.MODEL_INVALIDATION_LOSS_EXIT,
+})
+
+
+def _loss_exit_ev_gate_enabled() -> bool:
+    """Env kill-switch for the mid-trade loss-exit EV gate (default on)."""
+    return os.environ.get("MERID_LOSS_EXIT_EV_GATE", "1") != "0"
+
+
+def _loss_exit_ev_justified(
+    position: "Position",
+    snapshot: Optional["ExitPriceSnapshot"],
+    seconds_to_expiry: Optional[float],
+) -> Tuple[bool, Any]:
+    """Return (allowed, evaluation) for a mid-trade loss/thesis exit.
+
+    Runs the settlement-aligned evaluator as a *discretionary* value-switch:
+    the exit is allowed only when ``net_sell > conservative_hold + margin``
+    persists for the configured consecutive-eval count on a trusted book and
+    calibrated model.  Any data/provenance/model failure fails toward hold —
+    for a capped-loss binary, riding to settlement preserves the residual
+    option value that selling at/below fair donates.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import (
+            get_kalshi_market_state_store,
+        )
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            EvDecision,
+            get_exit_evaluator,
+        )
+
+        store = get_kalshi_market_state_store()
+        kalshi_state = store.get(position.market_id) if store is not None else None
+        unified_state = (
+            store.get_unified(position.market_id)
+            if store is not None and hasattr(store, "get_unified")
+            else None
+        )
+        held_side = (
+            position.outcome_side
+            or position.thesis_side
+            or position.side.value
+        )
+        fair_value = (
+            _get_fair_value_cents(unified_state, position.side.value)
+            if unified_state is not None
+            else None
+        )
+        executable_bid = (
+            _get_executable_exit_cents(kalshi_state, position.side.value)
+            if kalshi_state is not None
+            else None
+        )
+        if executable_bid is None and snapshot is not None:
+            executable_bid = snapshot.own_side_bid_cents
+        book_age_ms = (
+            _book_age_ms(kalshi_state) if kalshi_state is not None else None
+        )
+        if book_age_ms is None and snapshot is not None:
+            book_age_ms = snapshot.book_age_ms
+        if seconds_to_expiry is None:
+            seconds_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
+
+        ev = get_exit_evaluator().evaluate(
+            position,
+            market_key=position.market_id,
+            held_side=held_side,
+            canonical_reason="value_switch_exit",
+            quantity_contracts=position.size,
+            kalshi_state=kalshi_state,
+            unified_state=unified_state,
+            fair_value_cents=fair_value,
+            executable_bid_cents=executable_bid,
+            book_age_ms=book_age_ms,
+            seconds_to_expiry=seconds_to_expiry,
+        )
+        return ev.decision == EvDecision.SELL_SIGNALLED, ev
+    except Exception as exc:
+        logger.warning(
+            "[LOSS-EXIT-EV-HOLD] position=%s market=%s - eval failed (%s); "
+            "holding instead of selling on unverifiable data",
+            position.position_id[:8],
+            position.market_id,
+            exc,
+        )
+        return False, None
+
+
+def _filter_ev_gated_exit_candidates(
+    position: "Position",
+    candidates: List["ExitDecision"],
+    snapshot: Optional["ExitPriceSnapshot"],
+    seconds_to_expiry: Optional[float],
+) -> List["ExitDecision"]:
+    """Drop gated loss/thesis-exit candidates that fail the EV justification.
+
+    A gated candidate (edge_decay / current_edge_reversal / time_stop /
+    model_invalidation_loss_exit) survives only when the settlement evaluator
+    signals ``SELL`` — the market is paying a premium over the calibrated,
+    risk-reserved hold value.  Ungated reasons (profit exits, hard-risk exits,
+    settlement, operational) pass through untouched, so an EV-vetoed loss exit
+    can never suppress a take-profit or trailing exit raised in the same tick.
+    """
+    if not _loss_exit_ev_gate_enabled():
+        return candidates
+    gated = [c for c in candidates if c.reason in _LOSS_EXIT_EV_GATED_REASONS]
+    if not gated:
+        return candidates
+    # Same convention as the stop-loss arming/spread guards: synthetic or
+    # legacy test positions without fill provenance keep trigger-level
+    # behavior so unit tests can exercise the paths.  Production positions are
+    # always created from trusted fills, so provenance is guaranteed there.
+    has_fill_provenance = (
+        getattr(position, "fill_source", None) is not None
+        or getattr(position, "entry_fill_id", None) is not None
+    )
+    if not has_fill_provenance:
+        return candidates
+    ev_ok, ev = _loss_exit_ev_justified(position, snapshot, seconds_to_expiry)
+    if ev_ok:
+        logger.info(
+            "[LOSS-EXIT-EV-PASS] position=%s market=%s allowed=%s "
+            "net_sell=%s cons_hold=%s margin=%s consecutive=%s",
+            position.position_id[:8],
+            position.market_id,
+            [c.reason.value for c in gated],
+            getattr(ev, "net_sell_value_cents", None),
+            getattr(ev, "conservative_hold_cents", None),
+            getattr(ev, "switch_margin_cents", None),
+            getattr(ev, "consecutive_breach", None),
+        )
+        return candidates
+    logger.info(
+        "[LOSS-EXIT-EV-VETO] position=%s market=%s vetoed=%s decision=%s "
+        "detail=%s bid=%s net_sell=%s cons_hold=%s - holding",
+        position.position_id[:8],
+        position.market_id,
+        [c.reason.value for c in gated],
+        getattr(ev, "decision", None),
+        getattr(ev, "detail", None),
+        getattr(ev, "bid_cents", None),
+        getattr(ev, "net_sell_value_cents", None),
+        getattr(ev, "conservative_hold_cents", None),
+    )
+    return [c for c in candidates if c.reason not in _LOSS_EXIT_EV_GATED_REASONS]
+
+
 def _get_hard_loss_cap_cents() -> int:
     """Load per-position hard unrealized loss cap from active profile (cents)."""
     try:
@@ -4249,6 +4414,16 @@ class PositionMonitor:
                 metadata={"policy_action": policy.action.value},
             )
 
+        # 2026-09-25: EV gate for mid-trade loss/thesis exits.  Selling at or
+        # below model fair on a transient dip locks the loss the entry edge was
+        # sized to survive — the measured dominant premature-loss pattern
+        # (contracts sold at 1-50c under entry that settled in-the-money).
+        # Gated reasons emit only when the settlement evaluator concludes the
+        # liquidation premium beats the calibrated, risk-reserved hold value.
+        candidates = _filter_ev_gated_exit_candidates(
+            position, candidates, snapshot, time_to_expiry
+        )
+
         # Central resolver: choose the single highest-priority exit among all candidates.
         winning = get_exit_resolver().resolve(candidates, position.position_id)
 
@@ -4593,6 +4768,14 @@ class PositionMonitor:
         # below, so we sell at the market before the price can fall to the hard
         # stop.  This is a limit-like active stop: it exits at a better fill when
         # the thesis dies, while the hard stop remains the always-on floor.
+        #
+        # 2026-09-25: EV-gated submission.  bid >= fair fires on *convergence*,
+        # which is also exactly what an underwater position looks like at the
+        # model's most pessimistic price — selling there locked −15 to −30c
+        # losses on contracts that later settled winners.  The candidate is
+        # still recorded for audit, but it may only submit when the settlement
+        # evaluator independently confirms the sale beats the conservative
+        # (calibrated, risk-reserved) hold value.
         if (
             fair_value is not None
             and position.stop_loss_price_cents is not None
@@ -4614,18 +4797,41 @@ class PositionMonitor:
                 hard_stop_cents=position.stop_loss_price_cents,
             )
             record_stop_candidate(edge_candidate)
-            maybe_submit_stop_candidate_sync(edge_candidate)
-            logger.info(
-                "[STOP-LOSS-EDGE-DECAY-CANDIDATE] position=%s price=%dc fair=%dc sl=%dc "
-                "edge_decay=%dc entry_edge=%dc current_edge=%dc - hybrid stop triggers at fair",
-                position.position_id[:8],
-                current_price_cents,
-                fair_value,
-                position.stop_loss_price_cents,
-                edge_candidate.edge_decay_exit_cents,
-                edge_candidate.entry_edge_cents or 0,
-                edge_candidate.current_edge_cents or 0,
-            )
+            _ev_submit_ok = True
+            _ev_detail = None
+            if _loss_exit_ev_gate_enabled():
+                _ev_submit_ok, _ev_obj = _loss_exit_ev_justified(
+                    position, snapshot, seconds_to_expiry
+                )
+                _ev_detail = (
+                    f"{getattr(_ev_obj, 'decision', None)}:{getattr(_ev_obj, 'detail', None)}"
+                    if _ev_obj is not None
+                    else "eval_failed"
+                )
+            if _ev_submit_ok:
+                maybe_submit_stop_candidate_sync(edge_candidate)
+                logger.info(
+                    "[STOP-LOSS-EDGE-DECAY-CANDIDATE] position=%s price=%dc fair=%dc sl=%dc "
+                    "edge_decay=%dc entry_edge=%dc current_edge=%dc - hybrid stop triggers at fair",
+                    position.position_id[:8],
+                    current_price_cents,
+                    fair_value,
+                    position.stop_loss_price_cents,
+                    edge_candidate.edge_decay_exit_cents,
+                    edge_candidate.entry_edge_cents or 0,
+                    edge_candidate.current_edge_cents or 0,
+                )
+            else:
+                logger.info(
+                    "[STOP-LOSS-EDGE-DECAY-EV-VETO] position=%s price=%dc fair=%dc sl=%dc "
+                    "edge_decay=%dc ev=%s - EV gate vetoed sale at/below conservative hold",
+                    position.position_id[:8],
+                    current_price_cents,
+                    fair_value,
+                    position.stop_loss_price_cents,
+                    edge_candidate.edge_decay_exit_cents,
+                    _ev_detail,
+                )
             return False, "edge-decay-candidate"
 
         # Legacy price stop: still converted to a StopCandidate, never directly submitted.
