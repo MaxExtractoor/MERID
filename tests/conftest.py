@@ -1406,7 +1406,31 @@ def _snapshot_durable_state() -> _Dict[str, _Tuple]:
     return snap
 
 
+def _live_server_running() -> bool:
+    """True when the live 15m server is accepting connections on its port.
+
+    A running server continuously mutates ``data/`` (fills ledger WAL, decision
+    audit, rejections, shadow RTI).  While it is up, the durable-state diff
+    cannot attribute writes to tests, so pollution findings must downgrade to a
+    warning instead of failing the run.
+    """
+    import socket as _socket
+
+    port = int(_os.environ.get("MERID_LIVE_PROBE_PORT", "8011"))
+    try:
+        with _socket.socket() as s:
+            s.settimeout(0.25)
+            return s.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        return False
+
+
+_server_up_at_start = False
+
+
 def pytest_sessionstart(session):
+    global _server_up_at_start
+    _server_up_at_start = _live_server_running()
     _durable_snapshot.clear()
     _durable_snapshot.update(_snapshot_durable_state())
 
@@ -1442,6 +1466,18 @@ def pytest_sessionfinish(session, exitstatus):
         if path not in after:
             violations.append(f"DELETED  {path}")
     if violations:
+        if _server_up_at_start or _live_server_running():
+            # The live server owned data/ writes for the entire session; the
+            # diff cannot attribute changes to tests.  Warn, don't fail.
+            print(
+                "\n"
+                "=" * 72 + "\n"
+                "DATA/ CHANGED DURING TESTS (live server running — writes\n"
+                "unattributable, not failing):\n"
+                + "\n".join(f"  {v}" for v in sorted(violations))
+                + "\n" + "=" * 72 + "\n"
+            )
+            return
         report = (
             "\n"
             "=" * 72 + "\n"

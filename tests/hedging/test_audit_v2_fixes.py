@@ -60,10 +60,13 @@ class TestApplyFillActionAware(unittest.TestCase):
         pos.apply_fill(contracts=10, price_cents=58, fee_cents=2, side="yes", action="sell")
         self.assertEqual(pos.contracts, 0)
 
-    def test_default_action_buy_preserves_legacy_behavior(self):
+    def test_missing_action_fill_quarantined(self):
+        """Fail-closed direction handling (d87a3776): a fill with no action
+        must NOT fabricate a buy default — it is quarantined and the position
+        is left unchanged."""
         pos = self._make_pos()
         pos.apply_fill(contracts=5, price_cents=52, fee_cents=2, side="yes")
-        self.assertEqual(pos.contracts, 15)
+        self.assertEqual(pos.contracts, 10)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -80,7 +83,9 @@ class TestBracketLifecycleHooks(unittest.TestCase):
         from merid.event_venues.kalshi.position_cache import KalshiPositionCache
         src = inspect.getsource(KalshiPositionCache.on_fill)
         self.assertIn("_cancel_brackets", src)
-        self.assertIn("position.contracts == 0", src)
+        # Full close is detected on canonical centi-contracts (quantity_cc),
+        # not the display contracts field (2026-08-09 canonicalization).
+        self.assertIn("position.quantity_cc == 0", src)
 
     def test_on_fill_resizes_brackets_on_add(self):
         from merid.event_venues.kalshi.position_cache import KalshiPositionCache
