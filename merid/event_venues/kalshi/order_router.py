@@ -2363,6 +2363,9 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.position_management.position_monitor",
     # Position cache - executes resting bracket orders (TP/SL) for exit policy enforcement
     "merid.event_venues.kalshi.position_cache",
+    # Stop candidates - audited reduce-only IOC/FOK closes (invariants enforced
+    # in stop_candidate.py before routing; gated by MERID_ENABLE_STOP_CANDIDATE_SUBMISSION)
+    "merid.event_venues.kalshi.stop_candidate",
     # Kalshi tools - used by agent_grid_15m for direct execution routing
     "merid.prediction.kalshi_tools",
     # Web 15m main entry point for 15m crypto trading

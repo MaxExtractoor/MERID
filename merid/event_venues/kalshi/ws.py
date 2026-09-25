@@ -1616,7 +1616,9 @@ class KalshiWebSocket(EventVenueStream):
                             if not isinstance(msg_data, dict):
                                 msg_data = {}
                             channel = msg_data.get("channel")
-                            sid = data.get("sid")
+                            # Kalshi nests sid inside msg: {"msg": {"channel": ..., "sid": N}}.
+                            # Top-level fallback kept for protocol variants.
+                            sid = msg_data.get("sid") or data.get("sid")
                             if channel and sid:
                                 self._subscription_ids[channel] = sid
                                 logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
