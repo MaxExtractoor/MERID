@@ -127,6 +127,7 @@ class TailProbabilityCalibrator:
         buffer: float = 0.05,
         n_trades: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
+        per_asset: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         # Legacy single-curve path: use one curve for both sides.
         if held_prices is not None and actual_probs is not None:
@@ -163,6 +164,50 @@ class TailProbabilityCalibrator:
         # the mirror image, so this detection is conservative.
         self.no_curve_is_dual = self._check_no_curve_is_dual()
 
+        # Per-asset curves (hierarchical: refit script shrinks each asset's
+        # bucket rates toward this pooled curve with κ pseudo-observations).
+        # A sub-curve is only used when it carries enough observations —
+        # thin assets silently fall back to the pooled curve so a sparse fit
+        # cannot dominate a decision.  Gate is env-tunable for tests.
+        self._per_asset: Dict[str, "TailProbabilityCalibrator"] = {}
+        self._per_asset_n: Dict[str, int] = {}
+        for _name, _sub in (per_asset or {}).items():
+            try:
+                sub_cal = TailProbabilityCalibrator(
+                    yes_held_prices=_sub.get("yes_held_prices"),
+                    yes_actual_probs=_sub.get("yes_actual_probs"),
+                    no_held_prices=_sub.get("no_held_prices"),
+                    no_actual_probs=_sub.get("no_actual_probs"),
+                    buffer=float(_sub.get("buffer", buffer)),
+                    n_trades=int(_sub.get("n", 0) or 0),
+                )
+            except Exception:
+                continue
+            key = str(_name).upper()
+            self._per_asset[key] = sub_cal
+            self._per_asset_n[key] = int(_sub.get("n", 0) or 0)
+
+    @staticmethod
+    def _min_asset_obs() -> int:
+        try:
+            return max(0, int(os.getenv("MERID_TAIL_CALIBRATION_MIN_ASSET_OBS", "500")))
+        except Exception:
+            return 500
+
+    def has_asset_curve(self, asset: Optional[str]) -> bool:
+        """True when a populated per-asset curve with enough observations exists."""
+        if not asset:
+            return False
+        key = str(asset).upper()
+        sub = self._per_asset.get(key)
+        return (
+            sub is not None
+            and self._per_asset_n.get(key, 0) >= self._min_asset_obs()
+        )
+
+    def _asset_curve(self, asset: Optional[str]) -> Optional["TailProbabilityCalibrator"]:
+        return self._per_asset.get(str(asset).upper()) if self.has_asset_curve(asset) else None
+
     def _check_no_curve_is_dual(self) -> bool:
         if not self.yes_held_prices or not self.no_held_prices:
             return False
@@ -185,21 +230,31 @@ class TailProbabilityCalibrator:
                 return False
         return True
 
-    def p_yes(self, held_yes_price: float) -> float:
+    def p_yes(self, held_yes_price: float, asset: Optional[str] = None) -> float:
         """Actual P(YES wins) for a YES-held contract at ``held_yes_price``."""
+        sub = self._asset_curve(asset)
+        if sub is not None:
+            return sub.p_yes(held_yes_price)
         return self._lookup(held_yes_price, self.yes_held_prices, self.yes_actual_probs)
 
-    def p_no(self, held_no_price: float) -> float:
+    def p_no(self, held_no_price: float, asset: Optional[str] = None) -> float:
         """Actual P(NO wins) for a NO-held contract at ``held_no_price``."""
+        sub = self._asset_curve(asset)
+        if sub is not None:
+            return sub.p_no(held_no_price)
         return self._lookup(held_no_price, self.no_held_prices, self.no_actual_probs)
 
-    def cap_p_yes(self, p_yes_model: float, held_yes_price: float) -> float:
+    def cap_p_yes(
+        self, p_yes_model: float, held_yes_price: float, asset: Optional[str] = None
+    ) -> float:
         """Cap model P(YES) at actual + buffer for a YES-held price."""
-        return min(p_yes_model, self.p_yes(held_yes_price) + self.buffer)
+        return min(p_yes_model, self.p_yes(held_yes_price, asset=asset) + self.buffer)
 
-    def cap_p_no(self, p_no_model: float, held_no_price: float) -> float:
+    def cap_p_no(
+        self, p_no_model: float, held_no_price: float, asset: Optional[str] = None
+    ) -> float:
         """Cap model P(NO) at actual + buffer for a NO-held price."""
-        return min(p_no_model, self.p_no(held_no_price) + self.buffer)
+        return min(p_no_model, self.p_no(held_no_price, asset=asset) + self.buffer)
 
     @staticmethod
     def _lookup(price: float, held_prices: List[float], actual_probs: List[float]) -> float:
@@ -219,7 +274,7 @@ class TailProbabilityCalibrator:
     def to_dict(self) -> Dict[str, Any]:
         metadata = dict(self.metadata)
         metadata["no_curve_is_dual"] = self.no_curve_is_dual
-        return {
+        out = {
             "yes_held_prices": self.yes_held_prices,
             "yes_actual_probs": self.yes_actual_probs,
             "no_held_prices": self.no_held_prices,
@@ -228,6 +283,19 @@ class TailProbabilityCalibrator:
             "n_trades": self.n_trades,
             "metadata": metadata,
         }
+        if self._per_asset:
+            out["per_asset"] = {
+                name: {
+                    "yes_held_prices": sub.yes_held_prices,
+                    "yes_actual_probs": sub.yes_actual_probs,
+                    "no_held_prices": sub.no_held_prices,
+                    "no_actual_probs": sub.no_actual_probs,
+                    "buffer": sub.buffer,
+                    "n": self._per_asset_n.get(name, sub.n_trades),
+                }
+                for name, sub in self._per_asset.items()
+            }
+        return out
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TailProbabilityCalibrator":
@@ -248,6 +316,7 @@ class TailProbabilityCalibrator:
             buffer=data.get("buffer", 0.05),
             n_trades=data.get("n_trades", 0),
             metadata=data.get("metadata", {}),
+            per_asset=data.get("per_asset"),
         )
 
     @classmethod
