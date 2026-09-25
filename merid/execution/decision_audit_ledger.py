@@ -808,6 +808,52 @@ class DecisionAuditLedger:
                 exc,
             )
 
+    def pending_unsettled_tickers(
+        self,
+        now: Optional[float] = None,
+        grace_s: float = 120.0,
+        lookback_s: float = 12 * 3600.0,
+        limit: int = 60,
+    ) -> List[Tuple[str, float]]:
+        """Tickers whose decisions are still PENDING though the market closed.
+
+        ``/portfolio/settlements`` only reports markets the account held a
+        position in, so markets we evaluated but never entered never produce
+        settlement events — their decision outcomes would stay PENDING
+        forever.  The settlement poller sweeps these via a direct
+        ``/markets/{ticker}`` lookup.  Bounded to recent tickers so the sweep
+        never walks the full history.
+        """
+        if not _is_enabled():
+            return []
+        self._ensure_db()
+        now_ts = now if now is not None else time.time()
+        cutoff = now_ts - grace_s
+        floor = now_ts - lookback_s
+        try:
+            with self._lock, self._conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
+                    FROM strategy_decisions d
+                    JOIN strategy_decision_outcomes o
+                      ON d.decision_id = o.decision_id
+                    WHERE o.outcome_status = 'PENDING'
+                      AND d.close_ts < ?
+                      AND d.close_ts > ?
+                    GROUP BY d.ticker
+                    ORDER BY close_ts DESC
+                    LIMIT ?
+                    """,
+                    (cutoff, floor, limit),
+                ).fetchall()
+            return [(r["ticker"], float(r["close_ts"])) for r in rows]
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] pending_unsettled_tickers failed: %s", exc
+            )
+            return []
+
     def record_data_gap(
         self,
         *,

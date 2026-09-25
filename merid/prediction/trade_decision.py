@@ -1985,7 +1985,7 @@ def compute_trade_decision(
         ):
             tail_calibration_yes_configured = True
             tail_cap_yes_reason = "real_curve"
-            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
+            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry, asset=asset)
             if abs(p_yes_for_yes - p_yes_for_yes_pre_cap) > 1e-9:
                 tail_calibration_yes_applied = True
     # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
@@ -2020,7 +2020,7 @@ def compute_trade_decision(
             tail_calibration_no_configured = True
             if tail_calibrator.no_curve_is_dual:
                 tail_calibration_no_weight = _dual_tail_shrinkage_weight(p_no_for_no)
-                calibrated_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                calibrated_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry, asset=asset)
                 p_no_for_no = p_no_for_no + tail_calibration_no_weight * (
                     calibrated_no - p_no_for_no
                 )
@@ -2035,7 +2035,7 @@ def compute_trade_decision(
                 )
             else:
                 tail_cap_no_reason = "real_curve"
-                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry)
+                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry, asset=asset)
                 if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
                     tail_calibration_no_applied = True
     p_no_for_no = max(0.05, min(0.95, p_no_for_no))
@@ -2139,17 +2139,20 @@ def compute_trade_decision(
         _ev_floor_yes = yes_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
         _ev_floor_no = no_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
         yes_evidence_ok = yes_entry <= 0 or (
-            tail_calibrator.p_yes(yes_entry) >= _ev_floor_yes
+            tail_calibrator.p_yes(yes_entry, asset=asset) >= _ev_floor_yes
         )
         no_evidence_ok = no_entry <= 0 or (
             tail_calibrator.no_curve_is_dual
-            or tail_calibrator.p_no(no_entry) >= _ev_floor_no
+            or tail_calibrator.p_no(no_entry, asset=asset) >= _ev_floor_no
         )
         indicators.update({
             "calibration_evidence_floor_yes": _ev_floor_yes,
             "calibration_evidence_floor_no": _ev_floor_no,
-            "calibration_evidence_obs_yes": tail_calibrator.p_yes(yes_entry),
-            "calibration_evidence_obs_no": tail_calibrator.p_no(no_entry),
+            "calibration_evidence_obs_yes": tail_calibrator.p_yes(yes_entry, asset=asset),
+            "calibration_evidence_obs_no": tail_calibrator.p_no(no_entry, asset=asset),
+            "calibration_evidence_scope": (
+                "asset" if tail_calibrator.has_asset_curve(asset) else "pooled"
+            ),
             "calibration_evidence_yes": yes_evidence_ok,
             "calibration_evidence_no": no_evidence_ok,
         })

@@ -815,7 +815,75 @@ class KalshiSettlementPoller:
                 f"(total cached: {len(self._settlement_cache)}, "
                 f"ungraded backlog: {len(self._ungraded_backlog)})"
             )
-    
+
+        # Sweep decision outcomes for markets we evaluated but never entered.
+        await self._sweep_orphaned_decision_outcomes()
+
+    async def _sweep_orphaned_decision_outcomes(self) -> None:
+        """Settle pending decision outcomes on markets the account never held.
+
+        ``/portfolio/settlements`` is account-scoped: it only reports markets
+        we held a position in, so a market evaluated-but-not-entered never
+        produces a settlement event and its strategy_decision_outcomes rows
+        stay PENDING forever — silently biasing calibration evidence toward
+        entered markets only.  This sweeps those tickers via direct
+        ``/markets/{ticker}`` lookups and joins the definitive exchange result
+        into both the audit ledger and the durable settlement-outcome log.
+        """
+        if os.getenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1") != "1":
+            return
+        try:
+            from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+            ledger = get_decision_audit_ledger()
+            pending = ledger.pending_unsettled_tickers(
+                grace_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_GRACE_S", "180")),
+                lookback_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_LOOKBACK_S", str(12 * 3600))),
+                limit=int(os.getenv("MERID_SETTLEMENT_SWEEP_LIMIT", "40")),
+            )
+        except Exception as exc:
+            logger.debug("[SETTLEMENT-POLLER] orphan sweep query failed: %s", exc)
+            return
+        if not pending:
+            return
+
+        from merid.analysis.settlement_outcome_exporter import (
+            DEFAULT_OUT_PATH,
+            normalize_market_record,
+            record_outcome,
+        )
+
+        swept = 0
+        for ticker, close_ts in pending:
+            try:
+                resp = await self._api_call_with_retry(
+                    method="GET",
+                    endpoint=f"/markets/{ticker}",
+                    params=None,
+                )
+                market = resp.get("market", resp) if isinstance(resp, dict) else {}
+                event = normalize_market_record(market)
+                if event is None:
+                    continue  # still open, voided, or ambiguous — try next poll
+                settled_yes = event.outcome == "yes"
+                ledger.record_settlement(
+                    ticker=ticker,
+                    close_ts=close_ts,
+                    settled_yes=settled_yes,
+                    settlement_value_cents=100 if settled_yes else 0,
+                )
+                record_outcome(event, out_path=DEFAULT_OUT_PATH)
+                swept += 1
+            except Exception as exc:
+                logger.debug(
+                    "[SETTLEMENT-POLLER] orphan sweep failed for %s: %s", ticker, exc
+                )
+        if swept:
+            logger.info(
+                "[SETTLEMENT-POLLER] swept %d orphaned decision outcomes "
+                "(markets evaluated but never entered)",
+                swept,
+            )
+
     async def _fetch_settlements(
         self,
         start_time: str,
