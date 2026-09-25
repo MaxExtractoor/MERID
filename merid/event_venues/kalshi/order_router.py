@@ -2437,6 +2437,10 @@ _KALSHI_15M_CRYPTO_AGENTS: set = {
     "DOGE_15M",
     "position_monitor",  # CRITICAL FIX (2026-07-17): Allow position_monitor to route exit orders
     "position_cache_bracket",  # CRITICAL FIX (2026-08-01): Allow bracket orders for TP/SL protection
+    "stop_candidate",  # 2026-09-25: reduce-only protective exits from the
+    # stop-candidate path carry agent_id="stop_candidate" and are already in
+    # allowed_sources; without this they died at the entry whitelist (255
+    # observed rejections = exits silently refused).
 }
 
 
@@ -4419,7 +4423,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 and not _is_exit_order(intent)
             )
             if _buy_taker and not (ws_marketable and rest_marketable):
-                _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
+                # REST is the exchange truth here (freshness <=500ms enforced
+                # by rest_usable above).  max(ws,rest) let a phantom-HIGH WS
+                # ask (locked/corrupted top during fast moves) veto a reprice
+                # that would fill at the real REST ask inside the edge budget.
+                _fresh_ask = rest_book_side["ask_cents"]
                 _epc = _max_edge_preserving_buy_price(intent)
                 # Chase bound (2026-09-24): the edge budget alone let a stale
                 # decision chase the ask ~23c past its selected price.  The
@@ -4593,7 +4601,9 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             and not _is_exit_order(intent)
         )
         if _buy_taker:
-            _fresh_ask = max(ws_book["ask_cents"], rest_book_side["ask_cents"])
+            # Same as the coherent path: REST (just fetched, <=500ms) is the
+            # executable truth; a divergent WS top must not veto the reprice.
+            _fresh_ask = rest_book_side["ask_cents"]
             _epc = _max_edge_preserving_buy_price(intent)
             # Chase bound (2026-09-24): same rule as the coherent path — the
             # reprice is capped at the decision's selected price plus
