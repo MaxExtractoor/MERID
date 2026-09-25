@@ -119,6 +119,27 @@ MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION = float(
     os.environ.get("MERID_TAIL_CALIBRATION_NO_DUAL_TRANSITION", "0.05")
 )
 
+# 2026-09-25: Full-range calibration cap.  The realized bucket join (324
+# settled entries, 2026-08-25..2026-09-25) showed the model's unverified edge
+# is the loss source at EVERY price, not just the cheap tail: NO 30-39c won
+# 30.9% (-343c) and YES 50-59c won 42.9% (-253c).  The PAVA artifact covers
+# 5-99c on both sides, so apply the observed win-rate cap at any held price,
+# not only below the tail floor.  Disable with MERID_CALIBRATION_CAP_FULL_RANGE=0
+# to revert to tail-only caps.
+MERID_CALIBRATION_CAP_FULL_RANGE = os.environ.get(
+    "MERID_CALIBRATION_CAP_FULL_RANGE", "1"
+).strip().lower() in ("1", "true", "yes")
+
+# 2026-09-25: Evidence floor.  A price cell is only tradeable when the
+# historically observed win rate at that held-side price clears the entry
+# cost by an explicit margin.  This is a static, model-independent
+# eligibility check: the model's own probability still has to clear its own
+# EV/min-edge gates, but no amount of model confidence can open a cell whose
+# observed bucket rate does not cover price + fee + margin.
+MERID_CALIBRATION_EVIDENCE_MARGIN = float(
+    os.environ.get("MERID_CALIBRATION_EVIDENCE_MARGIN", "0.01")
+)
+
 # Fail-closed gate for externally supplied hybrid p_yes.  Bachelier-only is the
 # live baseline; a hybrid probability is only accepted when this flag is
 # explicitly enabled, and still subject to tail calibration / π* / floor gates.
@@ -1947,7 +1968,10 @@ def compute_trade_decision(
         "p_yes_post_anchor": p_yes_for_yes,
     })
 
-    # YES-held curve: calibrate p_yes if YES is in the cheap tail.
+    # YES-held curve: calibrate p_yes when the artifact has support at the held
+    # price.  2026-09-25: extended from tail-only (<35c) to the full fitted
+    # range — the model may never claim more than observed_win_rate + buffer
+    # at any price.
     p_yes_for_yes_pre_cap = p_yes_for_yes
     tail_cap_yes_reason = "none"
     tail_calibration_yes_configured = False
@@ -1955,7 +1979,10 @@ def compute_trade_decision(
     tail_calibrator = None
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
-        if tail_calibrator is not None and yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+        if tail_calibrator is not None and (
+            MERID_CALIBRATION_CAP_FULL_RANGE
+            or yes_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+        ):
             tail_calibration_yes_configured = True
             tail_cap_yes_reason = "real_curve"
             p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry)
@@ -1980,7 +2007,16 @@ def compute_trade_decision(
     tail_calibration_no_weight = 0.0
     if MERID_TAIL_CALIBRATION_ENABLED:
         tail_calibrator = load_tail_calibrator()
-        if tail_calibrator is not None and no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR:
+        # 2026-09-25: the real NO curve (non-dual) applies at any held price;
+        # a dual NO curve remains a tail-only stop-gap.
+        _no_cap_in_scope = tail_calibrator is not None and (
+            no_entry < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+            or (
+                MERID_CALIBRATION_CAP_FULL_RANGE
+                and not tail_calibrator.no_curve_is_dual
+            )
+        )
+        if _no_cap_in_scope:
             tail_calibration_no_configured = True
             if tail_calibrator.no_curve_is_dual:
                 tail_calibration_no_weight = _dual_tail_shrinkage_weight(p_no_for_no)
@@ -2005,10 +2041,14 @@ def compute_trade_decision(
     p_no_for_no = max(0.05, min(0.95, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
 
-    # Deviation guard: fail-closed.  A large move from the raw model probability
-    # on a non-tail held side is a calibration-inflation red flag.  Allow large
-    # moves only when the held-side price is below the tail floor (data-backed
-    # tail adjustment).  The threshold is configurable; default 0.15.
+    # Deviation guard: fail-closed on probability INFLATION only, outside the
+    # cheap tail.  A large upward move from the raw model probability on a
+    # non-tail held side is a calibration-inflation red flag (model-market
+    # divergence the anchor must not silently override).  Downward moves are
+    # data-driven (market anchor and the observed-rate cap, now applied at all
+    # prices) and are legitimate.  In the tail the observed-rate cap already
+    # bounds the final value, so large moves remain exempt as before.
+    # The threshold is configurable; default 0.15.
     tail_calibration_deviation_guard = float(
         os.environ.get("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "0.15")
     )
@@ -2019,21 +2059,29 @@ def compute_trade_decision(
 
     tail_guard_violation_yes = False
     tail_guard_violation_no = False
-    if yes_entry > 0 and yes_deviation > tail_calibration_deviation_guard and not yes_in_tail:
+    if (
+        yes_entry > 0
+        and (p_yes_for_yes - p_yes_raw) > tail_calibration_deviation_guard
+        and not yes_in_tail
+    ):
         tail_guard_violation_yes = True
         logger.warning(
             "[TAIL-CALIBRATION-GUARD] asset=%s ticker=%s YES held_price=%.2f not in tail; "
-            "p_yes deviation %.3f exceeds guard %.3f (raw_p_yes=%.3f, final_p_yes=%.3f)",
-            asset, ticker, yes_entry, yes_deviation, tail_calibration_deviation_guard,
-            p_yes_raw, p_yes_for_yes,
+            "p_yes inflated %.3f beyond guard %.3f (raw_p_yes=%.3f, final_p_yes=%.3f)",
+            asset, ticker, yes_entry, p_yes_for_yes - p_yes_raw,
+            tail_calibration_deviation_guard, p_yes_raw, p_yes_for_yes,
         )
-    if no_entry > 0 and no_deviation > tail_calibration_deviation_guard and not no_in_tail:
+    if (
+        no_entry > 0
+        and (p_no_for_no - p_no_raw) > tail_calibration_deviation_guard
+        and not no_in_tail
+    ):
         tail_guard_violation_no = True
         logger.warning(
             "[TAIL-CALIBRATION-GUARD] asset=%s ticker=%s NO held_price=%.2f not in tail; "
-            "p_no deviation %.3f exceeds guard %.3f (raw_p_no=%.3f, final_p_no=%.3f)",
-            asset, ticker, no_entry, no_deviation, tail_calibration_deviation_guard,
-            p_no_raw, p_no_for_no,
+            "p_no inflated %.3f beyond guard %.3f (raw_p_no=%.3f, final_p_no=%.3f)",
+            asset, ticker, no_entry, p_no_for_no - p_no_raw,
+            tail_calibration_deviation_guard, p_no_raw, p_no_for_no,
         )
 
     indicators.update({
@@ -2078,6 +2126,34 @@ def compute_trade_decision(
     })
 
     fee = fee_per_contract_cents / 100.0
+
+    # 2026-09-25: Calibration evidence floor.  A held-side price cell is only
+    # tradeable when the observed win rate at that price clears
+    # price + entry_fee + margin.  This gate depends only on the artifact and
+    # the executable quote — no model inputs — so cell eligibility is static
+    # between refits.  A dual NO curve carries no independent evidence and
+    # does not gate.
+    yes_evidence_ok = True
+    no_evidence_ok = True
+    if tail_calibrator is not None and MERID_CALIBRATION_CAP_FULL_RANGE:
+        _ev_floor_yes = yes_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
+        _ev_floor_no = no_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
+        yes_evidence_ok = yes_entry <= 0 or (
+            tail_calibrator.p_yes(yes_entry) >= _ev_floor_yes
+        )
+        no_evidence_ok = no_entry <= 0 or (
+            tail_calibrator.no_curve_is_dual
+            or tail_calibrator.p_no(no_entry) >= _ev_floor_no
+        )
+        indicators.update({
+            "calibration_evidence_floor_yes": _ev_floor_yes,
+            "calibration_evidence_floor_no": _ev_floor_no,
+            "calibration_evidence_obs_yes": tail_calibrator.p_yes(yes_entry),
+            "calibration_evidence_obs_no": tail_calibrator.p_no(no_entry),
+            "calibration_evidence_yes": yes_evidence_ok,
+            "calibration_evidence_no": no_evidence_ok,
+        })
+
     # 2026-09-23: settlement-convergence entries hold to settlement — there is
     # no exit order and no exit fee inside the final minute, so the reserve is
     # zero rather than a phantom taker exit.  (Dataset: hold-to-settlement
@@ -2186,11 +2262,13 @@ def compute_trade_decision(
         yes_breakdown.net_edge >= yes_min_edge
         and yes_breakdown.p_selected > yes_min_p
         and not tail_guard_violation_yes
+        and yes_evidence_ok
     )
     no_qualifies = (
         no_breakdown.net_edge >= no_min_edge
         and no_breakdown.p_selected > no_min_p
         and not tail_guard_violation_no
+        and no_evidence_ok
     )
 
     if yes_qualifies and no_qualifies:
@@ -2214,7 +2292,14 @@ def compute_trade_decision(
         else:
             best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
             best_min_p = yes_min_p if best_side == "yes" else no_min_p
-            if best_net_edge < best_threshold:
+            best_evidence_ok = yes_evidence_ok if best_side == "yes" else no_evidence_ok
+            if not best_evidence_ok:
+                # The observed win-rate curve at this held-side price does not
+                # clear price + fee + margin: the cell is historically
+                # unprofitable for our signal population regardless of what
+                # the model claims.
+                no_trade_reason = f"calibration_evidence_{best_side}"
+            elif best_net_edge < best_threshold:
                 if best_side == "yes":
                     no_trade_reason = "yes_edge_below_threshold"
                 else:

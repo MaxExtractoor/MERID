@@ -38,6 +38,11 @@ def _disable_market_anchor(monkeypatch):
     """
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
+    # 2026-09-25: keep tail-only calibration scope here — these tests exercise
+    # selection/gate mechanics in price cells the full-range evidence floor
+    # now legitimately blocks.  Full-range coverage lives in
+    # tests/test_calibration_full_range.py.
+    monkeypatch.setattr(_td, "MERID_CALIBRATION_CAP_FULL_RANGE", False)
 
 
 def _make_decision(

@@ -219,6 +219,12 @@ class TestSettlementDistributionTradeDecisionIntegration:
     def test_trade_decision_uses_settlement_distribution(self, monkeypatch):
         monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", False)
         monkeypatch.setenv("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "1.0")
+        # 2026-09-25: this test verifies distribution plumbing, not calibration
+        # economics — keep the legacy tail-only scope so the 80c scenario is
+        # not evidence-gated (covered in tests/test_calibration_full_range.py).
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_CALIBRATION_CAP_FULL_RANGE", False
+        )
         dist = SettlementDistribution(
             mean=105.0,
             std=2.0,
@@ -264,6 +270,11 @@ class TestSettlementDistributionTradeDecisionIntegration:
     def test_trade_decision_ignores_distribution_when_p_yes_model_supplied(self, monkeypatch):
         monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
         monkeypatch.setenv("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "1.0")
+        # 2026-09-25: hybrid-vs-distribution plumbing test — legacy tail-only
+        # calibration scope so the 40c scenario is not evidence-gated.
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_CALIBRATION_CAP_FULL_RANGE", False
+        )
         # Distribution says NO (mean just below strike, p_yes ~0.40).
         dist = SettlementDistribution(
             mean=99.5,
