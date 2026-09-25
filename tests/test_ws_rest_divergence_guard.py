@@ -88,6 +88,90 @@ def _make_intent(side="no", action="buy", price_cents=25, execution_mode=None):
 
 
 @pytest.mark.asyncio
+async def test_favorable_drift_blocks_thesis_stale_fill():
+    """A locked WS top diverging from a crashed REST book must not hand us a
+    'favorable' fill: BUY_YES decided at 62c while REST sits at 43/44 is the
+    market repricing against the thesis (adverse selection), not improvement.
+
+    Reproduces KXBTC15M-26SEP251115-15 (2026-09-25): WS book locked at 62/62
+    on a dying socket while the exchange traded 43/44; the IOC filled at 43c
+    and the contract settled NO for -45c.
+    """
+    state = _make_ws_state(best_bid_cents=62, best_ask_cents=62)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=43, rest_yes_ask=44)
+
+    intent = _make_intent(side="yes", action="buy", price_cents=64)
+    intent.selected_outcome_price_cents = 62
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert result.reason.startswith("market_repriced:favorable_drift:")
+
+
+@pytest.mark.asyncio
+async def test_favorable_drift_within_cap_allows():
+    """Small price improvement (<= cap) is normal and must still fill."""
+    state = _make_ws_state(best_bid_cents=62, best_ask_cents=62)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=57, rest_yes_ask=58)
+
+    intent = _make_intent(side="yes", action="buy", price_cents=64)
+    intent.selected_outcome_price_cents = 62  # drift = 62-58 = 4c <= 8c cap
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_favorable_drift_never_blocks_exit():
+    """Reduce-only exits bypass the drift guard entirely."""
+    state = _make_ws_state(best_bid_cents=62, best_ask_cents=62)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=43, rest_yes_ask=44)
+
+    intent = _make_intent(side="yes", action="sell", price_cents=57)
+    intent.source = "position_monitor_exit"
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_favorable_drift_blocks_no_side_crash():
+    """NO-side symmetric case: BUY_NO decided at 45c while fresh ask is 33c —
+    the tape repriced toward YES; the NO thesis is stale."""
+    state = _make_ws_state(best_bid_cents=55, best_ask_cents=55)  # no ask = 45
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=66, rest_yes_ask=67)  # no ask = 33
+
+    intent = _make_intent(side="no", action="buy", price_cents=47)
+    intent.selected_outcome_price_cents = 45  # drift = 45-33 = 12c > 8c cap
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "favorable_drift" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_ws_authoritative_allows_marketable_divergence():
     """If WS is authoritative and the order is marketable against WS, allow."""
     state = _make_ws_state()
@@ -95,9 +179,13 @@ async def test_ws_authoritative_allows_marketable_divergence():
     port = _make_port()
 
     # BUY_NO at 30c is marketable against both WS (ask 21c) and REST (ask 30c).
+    # Decision priced the edge at no-ask 23c: drift to the live 21c WS ask is
+    # 2c, inside the favorable-drift cap, so the allow path is exercised.
+    intent = _make_intent(price_cents=30)
+    intent.selected_outcome_price_cents = 23
     with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
         result = await _ws_rest_divergence_guard(
-            _make_intent(price_cents=30),
+            intent,
             port,
             TradingMode.LIVE,
             time.monotonic(),

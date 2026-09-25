@@ -4113,6 +4113,60 @@ def _book_internal_consistent(market_state_store: Any, book: Dict[str, Any], tic
         return False
 
 
+def _favorable_drift_rejection(
+    intent: OrderIntent,
+    trusted_ask_cents: Optional[int],
+    feed_tag: str,
+    mode: Any,
+    t0: float,
+) -> Optional[OrderResult]:
+    """Reject an entry buy whose executable price drifted *below* the decision
+    quote by more than ``MERID_ENTRY_MAX_IMPROVEMENT_CENTS`` (default 8).
+
+    A fill priced materially better than the book the edge was computed on is
+    not free price improvement — it is the market repricing against the thesis
+    between decision and submit (adverse selection / winner's curse).  The
+    standard execution guard is to diff the live book against the decision
+    snapshot and refuse orders whose drift exceeds a tolerance, because the
+    model never evaluated a fill at that price.  Chase in the losing direction
+    (ask running away) is already bounded by ``MERID_ENTRY_MAX_CHASE_CENTS``;
+    this is the missing symmetric bound.
+
+    Never applies to exits: reduce-only orders are limit-bounded and must not
+    be vetoed by feed drift.
+    """
+    try:
+        if _is_exit_order(intent):
+            return None
+        if (getattr(intent, "action", "") or "").lower() != "buy":
+            return None
+        decision_px = getattr(intent, "selected_outcome_price_cents", None) or getattr(
+            intent, "price_cents", None
+        )
+        if not decision_px or trusted_ask_cents is None:
+            return None
+        max_improvement = int(os.environ.get("MERID_ENTRY_MAX_IMPROVEMENT_CENTS", "8"))
+        drift = int(decision_px) - int(trusted_ask_cents)
+        if drift <= max_improvement:
+            return None
+        logger.warning(
+            "EXECUTION-QUOTE-MODE ticker=%s mode=THESIS_STALE decision=BLOCKED "
+            "reason=market_repriced_favorable decision_px=%dc fresh_ask=%dc "
+            "drift=%dc cap=%dc feed=%s — book repriced against the thesis "
+            "between decision and submit; refusing an unevaluated fill",
+            intent.ticker, int(decision_px), int(trusted_ask_cents),
+            drift, max_improvement, feed_tag,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"market_repriced:favorable_drift:{drift}c",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+    except Exception:
+        return None
+
+
 async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
     """Source-aware WS/REST divergence guard.
 
@@ -4231,6 +4285,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     getattr(intent, "price_cents", None),
                     getattr(intent, "action", ""),
                 )
+                _drift_rej = _favorable_drift_rejection(
+                    intent, ws_book["ask_cents"], "ws_only", mode, t0
+                )
+                if _drift_rej is not None:
+                    return _drift_rej
                 return None
             # CRITICAL FIX (2026-09-24): reduce-only exits are limit-price bounded
             # and can only shrink exposure — never block them on feed freshness.
@@ -4402,6 +4461,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 ws_book["bid_cents"], ws_book["ask_cents"],
                 rest_book_side["bid_cents"], rest_book_side["ask_cents"],
             )
+            _drift_rej = _favorable_drift_rejection(
+                intent, ws_book["ask_cents"], "coherent", mode, t0
+            )
+            if _drift_rej is not None:
+                return _drift_rej
             return None
 
         # ---- classify divergence and decide -----------------------------------
@@ -4452,6 +4516,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     getattr(intent, "action", ""),
                     ws_locked,
                 )
+                _drift_rej = _favorable_drift_rejection(
+                    intent, rest_book_side["ask_cents"], "rest", mode, t0
+                )
+                if _drift_rej is not None:
+                    return _drift_rej
                 # A locked WS top that diverged this far is out of sync with
                 # the exchange; re-anchor it so the next order sees a real book.
                 if ws_locked and market_state_store is not None:
@@ -4505,6 +4574,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 getattr(intent, "price_cents", None),
                 getattr(intent, "action", ""),
             )
+            _drift_rej = _favorable_drift_rejection(
+                intent, ws_book["ask_cents"], "ws", mode, t0
+            )
+            if _drift_rej is not None:
+                return _drift_rej
             return None
 
         # 5) Cannot ignore divergence: the order is not marketable against the

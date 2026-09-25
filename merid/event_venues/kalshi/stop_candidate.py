@@ -572,40 +572,102 @@ def _get_market_state(ticker: str) -> Tuple[Optional[Any], Optional[Any]]:
 def _get_executable_exit_cents(
     state: Any, held_contract: Literal["yes", "no"]
 ) -> Optional[int]:
-    """Return the best bid for the held contract from market state."""
+    """Return the best bid for the held contract from market state.
+
+    Divergence-aware: when the WS top-of-book is internally locked
+    (bid >= ask) and a fresh REST quote diverges materially, the WS bid is a
+    phantom — an exit limit priced off it can never fill (the order asks for
+    bids that no longer exist).  A locked top that disagrees with a
+    just-fetched REST book is a split-tape artifact, so the fresh REST side
+    becomes the executable reference for the held contract's bid.
+    """
     if state is None:
         return None
 
     book = getattr(state, "book", None)
 
+    bid: Optional[int] = None
     if held_contract == "yes":
         # Prefer KalshiMarketState.best_bid_cents (YES bid) or OrderbookSnapshot.
         bid = getattr(state, "best_bid_cents", None)
         if bid is not None:
-            return _safe_int_cents(bid)
-        if book is not None:
+            bid = _safe_int_cents(bid)
+        elif book is not None:
             if hasattr(book, "best_yes_bid"):
-                return _safe_int_cents(getattr(book, "best_yes_bid"))
-            if getattr(book, "yes_bids", None):
-                return _safe_int_cents(book.yes_bids[0].price_cents)
+                bid = _safe_int_cents(getattr(book, "best_yes_bid"))
+            elif getattr(book, "yes_bids", None):
+                bid = _safe_int_cents(book.yes_bids[0].price_cents)
     else:
         # Prefer explicit NO bid; otherwise derive from opposing YES ask.
         no_bid = getattr(state, "no_bid_cents", None)
         if no_bid is not None:
-            return _safe_int_cents(no_bid)
-        if book is not None:
+            bid = _safe_int_cents(no_bid)
+        elif book is not None:
             if getattr(book, "no_bids", None):
-                return _safe_int_cents(book.no_bids[0].price_cents)
-            if hasattr(book, "best_no_bid"):
-                return _safe_int_cents(getattr(book, "best_no_bid"))
-        yes_ask = getattr(state, "best_ask_cents", None) or (
-            getattr(book, "best_yes_ask", None)
-            if book
-            else None
+                bid = _safe_int_cents(book.no_bids[0].price_cents)
+            elif hasattr(book, "best_no_bid"):
+                bid = _safe_int_cents(getattr(book, "best_no_bid"))
+        if bid is None:
+            yes_ask = getattr(state, "best_ask_cents", None) or (
+                getattr(book, "best_yes_ask", None)
+                if book
+                else None
+            )
+            if yes_ask is not None:
+                bid = _safe_int_cents(100 - int(yes_ask))
+
+    corrected = _locked_ws_divergent_rest_bid(state, held_contract)
+    if corrected is not None and bid is not None and corrected != bid:
+        logger.warning(
+            "[EXIT-QUOTE-DIVERGENT] held=%s ws_bid=%sc rest_bid=%sc — "
+            "locked WS top diverges from fresh REST; pricing exit off REST",
+            held_contract, bid, corrected,
         )
-        if yes_ask is not None:
-            return _safe_int_cents(100 - int(yes_ask))
-    return None
+        return corrected
+    if corrected is not None and bid is None:
+        return corrected
+    return bid
+
+
+def _locked_ws_divergent_rest_bid(
+    state: Any, held_contract: Literal["yes", "no"]
+) -> Optional[int]:
+    """Return the fresh REST-derived bid for the held contract when the WS
+    top-of-book is locked AND diverges from a fresh REST quote beyond
+    ``MERID_EXIT_QUOTE_DIVERGENCE_CENTS`` (default 3c); else ``None``.
+
+    A locked WS top (bid >= ask) that disagrees with a just-fetched REST book
+    means the local ladder lost a repricing burst — the same corruption class
+    the entry router treats as a split-tape artifact.  For exits the failure
+    is asymmetric: pricing a reduce-only sell off a phantom bid produces an
+    IOC that asks for prices no longer on the exchange and can never fill.
+    """
+    try:
+        ws_bid = getattr(state, "last_ws_bid_cents", None)
+        ws_ask = getattr(state, "last_ws_ask_cents", None)
+        if ws_bid is None or ws_ask is None or int(ws_bid) < int(ws_ask):
+            return None  # unlocked or absent WS top — not the locked-book case
+
+        rest_bid = getattr(state, "last_rest_bid_cents", None)
+        rest_ask = getattr(state, "last_rest_ask_cents", None)
+        rest_ts = float(getattr(state, "last_rest_quote_update_ts", 0.0) or 0.0)
+        max_rest_age_s = float(os.environ.get("MERID_EXIT_QUOTE_REST_MAX_AGE_S", "5.0"))
+        if (
+            rest_bid is None
+            or rest_ask is None
+            or rest_ts <= 0
+            or (time.monotonic() - rest_ts) > max_rest_age_s
+        ):
+            return None
+
+        ws_held_bid = int(ws_bid) if held_contract == "yes" else 100 - int(ws_ask)
+        rest_held_bid = int(rest_bid) if held_contract == "yes" else 100 - int(rest_ask)
+        div_cap = int(os.environ.get("MERID_EXIT_QUOTE_DIVERGENCE_CENTS", "3"))
+        if abs(ws_held_bid - rest_held_bid) <= div_cap:
+            return None
+        return rest_held_bid
+    except Exception:
+        return None
 
 
 def _model_fair_value_max_age_s() -> float:

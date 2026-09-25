@@ -353,3 +353,54 @@ class TestStopCandidateSubmissionIntent:
         assert intent.reduce_only is True
         assert intent.time_in_force == "ioc"
         assert intent.entry_or_exit == "exit"
+
+
+class TestLockedWsDivergentExitQuote:
+    """A locked WS top diverging from fresh REST is a phantom bid — exits must
+    price off REST or the IOC asks for prices that no longer exist.
+
+    Reproduces KXBTC15M-26SEP251115-15 (2026-09-25): WS book frozen at 62-64
+    while the exchange traded 43/44; the trail exit priced SELL_YES@57c, could
+    never fill, and the position rode to settlement for -45c.
+    """
+
+    def _state(self, ws_bid, ws_ask, rest_bid, rest_ask, rest_age_s=0.2):
+        import time as _t
+        return SimpleNamespace(
+            best_bid_cents=ws_bid,
+            best_ask_cents=ws_ask,
+            no_bid_cents=None,
+            book=None,
+            last_ws_bid_cents=ws_bid,
+            last_ws_ask_cents=ws_ask,
+            last_rest_bid_cents=rest_bid,
+            last_rest_ask_cents=rest_ask,
+            last_rest_quote_update_ts=_t.monotonic() - rest_age_s,
+        )
+
+    def test_locked_ws_divergent_rest_uses_rest_bid_yes(self):
+        from merid.event_venues.kalshi.stop_candidate import _get_executable_exit_cents
+        st = self._state(ws_bid=62, ws_ask=62, rest_bid=43, rest_ask=44)
+        assert _get_executable_exit_cents(st, "yes") == 43
+
+    def test_locked_ws_divergent_rest_uses_rest_bid_no(self):
+        from merid.event_venues.kalshi.stop_candidate import _get_executable_exit_cents
+        # held no: REST-derived no-bid = 100 - rest_yes_ask
+        st = self._state(ws_bid=55, ws_ask=55, rest_bid=66, rest_ask=67)
+        # ws no-bid = 100-55 = 45; rest no-bid = 100-67 = 33; divergence 12 > 3
+        assert _get_executable_exit_cents(st, "no") == 33
+
+    def test_unlocked_ws_keeps_ws_bid(self):
+        from merid.event_venues.kalshi.stop_candidate import _get_executable_exit_cents
+        st = self._state(ws_bid=62, ws_ask=63, rest_bid=43, rest_ask=44)
+        assert _get_executable_exit_cents(st, "yes") == 62
+
+    def test_locked_ws_stale_rest_keeps_ws_bid(self):
+        from merid.event_venues.kalshi.stop_candidate import _get_executable_exit_cents
+        st = self._state(ws_bid=62, ws_ask=62, rest_bid=43, rest_ask=44, rest_age_s=30.0)
+        assert _get_executable_exit_cents(st, "yes") == 62
+
+    def test_locked_ws_coherent_rest_keeps_ws_bid(self):
+        from merid.event_venues.kalshi.stop_candidate import _get_executable_exit_cents
+        st = self._state(ws_bid=62, ws_ask=62, rest_bid=61, rest_ask=63)
+        assert _get_executable_exit_cents(st, "yes") == 62
