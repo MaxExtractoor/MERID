@@ -813,6 +813,38 @@ def markets_expected_now() -> bool:
     return not is_within_kalshi_maintenance()
 
 
+async def _refresh_catalog_until_markets_listed(
+    catalog: Any,
+    allowed_assets: List[str],
+    window_suffix: str,
+    max_attempts: int = 12,
+    interval_s: float = 4.0,
+) -> None:
+    # Kalshi lists the new strip a few seconds to ~1-2 min after the boundary;
+    # a single boundary refresh races the listing and leaves the window blind.
+    # Poll with short backoff until every allowed asset resolves a current
+    # market, or bail if the window moved on underneath us.
+    for _ in range(max_attempts):
+        try:
+            from merid.event_venues.kalshi.kalshi_15m_time import get_kalshi_15m_window
+            if get_kalshi_15m_window().suffix != window_suffix:
+                return
+            missing = [a for a in allowed_assets if catalog.get_current_15m_market(a) is None]
+            if not missing:
+                return
+            await asyncio.sleep(interval_s)
+            await asyncio.wait_for(catalog.refresh(force=True), timeout=15.0)
+        except Exception as e:
+            logger.warning("[15m-LOOP] WINDOW-CHANGE catalog retry refresh failed: %s", e)
+            await asyncio.sleep(interval_s)
+    missing = [a for a in allowed_assets if catalog.get_current_15m_market(a) is None]
+    if missing:
+        logger.warning(
+            "[15m-LOOP] WINDOW-CHANGE: markets still unlisted after %d retries (window=%s assets=%s)",
+            max_attempts, window_suffix, missing,
+        )
+
+
 def compute_loop_state(
     infra_ready: bool,
     markets_expected: bool,
@@ -5026,8 +5058,27 @@ async def _run_loop(self) -> None:
                         # Add timeout to prevent indefinite blocking if catalog refresh hangs
                         await asyncio.wait_for(catalog.refresh(force=True), timeout=30.0)
                         logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
+                        missing = [
+                            a for a in self._allowed_assets
+                            if catalog.get_current_15m_market(a) is None
+                        ]
+                        if missing:
+                            logger.info(
+                                "[15m-LOOP] WINDOW-CHANGE: new-window markets not yet listed for %s - scheduling refresh retries",
+                                missing,
+                            )
+                            asyncio.create_task(
+                                _refresh_catalog_until_markets_listed(
+                                    catalog, self._allowed_assets, current_window.suffix,
+                                )
+                            )
                     except asyncio.TimeoutError:
                         logger.error("[15m-LOOP] WINDOW-CHANGE: Catalog refresh timed out after 30s - will retry on next periodic refresh")
+                        asyncio.create_task(
+                            _refresh_catalog_until_markets_listed(
+                                catalog, self._allowed_assets, current_window.suffix,
+                            )
+                        )
                     except Exception as e:
                         logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                     

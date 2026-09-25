@@ -2327,3 +2327,70 @@ def test_execute_candidate_returns_false_on_exception():
     
     assert found_return_false, \
         "_execute_candidate should return False when exception occurs"
+
+
+class TestCatalogBoundaryRefreshRetry:
+    """Window-boundary catalog retry: Kalshi lists the new strip seconds late;
+    _refresh_catalog_until_markets_listed must poll until present, bail on
+    window change, and cap retries when markets never list."""
+
+    class _FakeCatalog:
+        def __init__(self, listed_after_refreshes=0):
+            self.refresh_calls = 0
+            self._listed_after = listed_after_refreshes
+
+        def get_current_15m_market(self, asset):
+            return object() if self.refresh_calls >= self._listed_after else None
+
+        async def refresh(self, force=False):
+            self.refresh_calls += 1
+
+    class _Win:
+        def __init__(self, suffix):
+            self.suffix = suffix
+
+    def _patch_window(self, suffix):
+        return patch(
+            "merid.event_venues.kalshi.kalshi_15m_time.get_kalshi_15m_window",
+            return_value=self._Win(suffix),
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_markets_already_listed(self):
+        from merid.loop_15m import _refresh_catalog_until_markets_listed
+        catalog = self._FakeCatalog(listed_after_refreshes=0)
+        with self._patch_window("2130"):
+            await _refresh_catalog_until_markets_listed(
+                catalog, ["BTC", "ETH"], "2130", interval_s=0.001,
+            )
+        assert catalog.refresh_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_retries_until_markets_listed(self):
+        from merid.loop_15m import _refresh_catalog_until_markets_listed
+        catalog = self._FakeCatalog(listed_after_refreshes=3)
+        with self._patch_window("2130"):
+            await _refresh_catalog_until_markets_listed(
+                catalog, ["BTC"], "2130", interval_s=0.001,
+            )
+        assert catalog.refresh_calls == 3
+
+    @pytest.mark.asyncio
+    async def test_caps_retries_when_never_listed(self):
+        from merid.loop_15m import _refresh_catalog_until_markets_listed
+        catalog = self._FakeCatalog(listed_after_refreshes=999)
+        with self._patch_window("2130"):
+            await _refresh_catalog_until_markets_listed(
+                catalog, ["BTC"], "2130", max_attempts=4, interval_s=0.001,
+            )
+        assert catalog.refresh_calls == 4
+
+    @pytest.mark.asyncio
+    async def test_bails_when_window_changes(self):
+        from merid.loop_15m import _refresh_catalog_until_markets_listed
+        catalog = self._FakeCatalog(listed_after_refreshes=999)
+        with self._patch_window("2145"):  # different from captured suffix
+            await _refresh_catalog_until_markets_listed(
+                catalog, ["BTC"], "2130", interval_s=0.001,
+            )
+        assert catalog.refresh_calls == 0
