@@ -2872,6 +2872,41 @@ def _run_exit_price_guard(
     return True, limit_cents, record, decision_id
 
 
+def _resolve_exit_order_id(result, durable_exit_attempt, position, intent, position_monitor=None) -> Optional[str]:
+    """Resolve the authoritative exchange order_id for a confirmed exit.
+
+    ``result.order_id`` is None when execution was proven via fills/snapshot
+    rather than a fresh submit response (e.g. SUBMISSION_UNKNOWN reconciled
+    later).  Fall back through the durable exit-attempt record, the position
+    monitor's exit-order registry, and the fills ledger so the audit trail
+    keeps the real order identity instead of logging ``order_id=None``.
+    """
+    order_id = getattr(result, "order_id", None)
+    if order_id:
+        return order_id
+    if durable_exit_attempt is not None:
+        order_id = getattr(durable_exit_attempt, "exchange_order_id", None)
+        if order_id:
+            return order_id
+    if position_monitor is not None:
+        try:
+            reg = position_monitor._get_exit_orders_for_position(position.position_id) or []
+            if reg:
+                return reg[-1]
+        except Exception:
+            pass
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+
+        client_order_id = getattr(intent, "client_order_id", None)
+        for fill in get_fills_ledger().get_fills_by_market(position.market_id):
+            if client_order_id and getattr(fill, "client_order_id", None) == client_order_id:
+                return getattr(fill, "order_id", None)
+    except Exception:
+        pass
+    return None
+
+
 async def _execute_exit_order(
     self,
     position,
@@ -4035,9 +4070,12 @@ async def _execute_exit_order(
                 )
 
         if can_finalize:
+            resolved_order_id = _resolve_exit_order_id(
+                result, durable_exit_attempt, position, intent, self._position_monitor
+            )
             logger.info(
                 "[EXIT-ORDER] Position flat confirmed: order_id=%s status=%s reason=%s",
-                result.order_id, result.status, finalizer_reason
+                resolved_order_id, result.status, finalizer_reason
             )
 
             # CRITICAL FIX (2026-07-29): Wire hedge auto-exit to alpha exit events
@@ -4082,6 +4120,8 @@ async def _execute_exit_order(
             # Pass the exit quantity for quantity-aware coverage invariant
             if result and result.order_id:
                 self._position_monitor._register_exit_order(position.position_id, result.order_id, _count)
+            elif resolved_order_id:
+                self._position_monitor._register_exit_order(position.position_id, resolved_order_id, _count)
 
             # 2026-08-22 CRITICAL FIX: the position is only terminal after the
             # canonical portfolio snapshot proves it is flat.
@@ -4106,7 +4146,7 @@ async def _execute_exit_order(
                         terminal_state,
                         "loop_15m",
                         reason=finalizer_reason,
-                        exchange_order_id=getattr(result, "order_id", None),
+                        exchange_order_id=resolved_order_id,
                     )
                 except Exception:
                     pass
@@ -4116,7 +4156,7 @@ async def _execute_exit_order(
                 position.position_id[:8],
                 position.market_id,
                 getattr(result, "status", "no_result"),
-                getattr(result, "order_id", None),
+                resolved_order_id,
             )
         elif result and result.has_execution:
             # The order executed but the finalizer is not satisfied (partial fill,

@@ -165,6 +165,51 @@ def _is_expired_market(ticker: str) -> bool:
         return False
 
 
+def _is_settlement_pending_market(ticker: str) -> bool:
+    """Market is past close and awaiting settlement — quarantine from the
+    authority diff immediately.
+
+    Kalshi drops positions from the positions endpoint at market close while
+    the local ledger/cache still legitimately carries the exposure until the
+    settlement credit posts.  ``_is_expired_ticker`` deliberately waits for a
+    long grace (default 900s) before calling such positions expired, so without
+    this check every window boundary produced a transient
+    ``exchange=0 vs cache>0`` MISMATCH_PERSISTENT that halted all entries for
+    ~2-4 minutes until the stale-position sweeper cleaned up.  The position is
+    still tracked for settlement — it is only excluded from the active-ticker
+    authority comparison, which it can no longer influence (the market cannot
+    trade and the exchange exposure is in settlement escrow).
+    """
+    if not ticker:
+        return False
+    try:
+        from merid.event_venues.kalshi.expiry_fallback import (
+            parse_kalshi_15m_ticker_expiry,
+        )
+
+        expiry_dt, _ = parse_kalshi_15m_ticker_expiry(ticker)
+        if expiry_dt is not None:
+            return expiry_dt < datetime.now(timezone.utc)
+    except Exception:
+        pass
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+        catalog = get_market_catalog()
+        market = catalog.get_market(ticker) if catalog else None
+        if market is None:
+            return False
+        status = str(getattr(market, "status", "") or "").lower()
+        if status in ("closed", "settled", "finalized"):
+            return True
+        close_time = getattr(market, "close_time", None)
+        if isinstance(close_time, datetime):
+            return close_time < datetime.now(timezone.utc)
+    except Exception:
+        return False
+    return False
+
+
 class CanonicalPortfolioReconciler:
     """Build and publish canonical portfolio snapshots."""
 
@@ -335,6 +380,13 @@ class CanonicalPortfolioReconciler:
             if _is_expired_market(market_id):
                 logger.warning(
                     "[CANONICAL-RECONCILER] Quarantining expired %s position: %s",
+                    source,
+                    market_id,
+                )
+                continue
+            if _is_settlement_pending_market(market_id):
+                logger.info(
+                    "[CANONICAL-RECONCILER] Quarantining settlement-pending %s position: %s",
                     source,
                     market_id,
                 )
