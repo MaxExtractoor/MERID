@@ -4082,10 +4082,15 @@ def _ws_age_ms(state: KalshiMarketState) -> float:
     ``last_ws_update_ts`` and ``last_book_update_ts`` are set from
     ``time.monotonic()`` in the market-state store, so we must compare them
     against ``time.monotonic()``, not wall-clock ``replay_time()``.
+
+    Prefer ``last_book_update_ts``: ticker-channel quotes refresh
+    ``last_ws_update_ts`` even when the orderbook channel has stopped
+    delivering deltas, which would mask a dead ladder as "fresh WS" and
+    misclassify the stale-WS/REST-fallback path as WS-authoritative.
     """
     if state is None:
         return float("inf")
-    ws_ts = getattr(state, "last_ws_update_ts", 0.0) or getattr(state, "last_book_update_ts", 0.0)
+    ws_ts = getattr(state, "last_book_update_ts", 0.0) or getattr(state, "last_ws_update_ts", 0.0)
     if ws_ts <= 0:
         return float("inf")
     return max(0.0, (_time.monotonic() - ws_ts) * 1000.0)
@@ -4528,6 +4533,35 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             rest_book_side["bid_cents"], rest_book_side["ask_cents"],
             ws_age_ms, rest_age_ms, ws_authoritative, ws_marketable, rest_marketable,
         )
+        # 2026-09-24: a fresh REST book diverging from the local WS book beyond
+        # tolerance means the local ladder is out of sync with the exchange
+        # (missed deltas / drift).  Quarantine it the same way snapshot-timeout
+        # does: INVALID + FULL_SNAPSHOT recovery requirement means deltas
+        # cannot re-arm ``executable`` — only a real snapshot repairs it — and
+        # the throttled recovery trigger requests both a WS snapshot and a
+        # REST invariant sync.  Without this, the divergent book kept feeding
+        # phantom-edge candidates every cycle.
+        if market_state_store is not None:
+            try:
+                _st = market_state_store.get(intent.ticker)
+                if _st is not None:
+                    _st.data_quality = "INVALID"
+                    _st.executable = False
+                    _st.book_initialized = False
+                    _st.transition = "RESYNC_REQUIRED"
+                    _st.invalidation_cause = "DIVERGENCE_NOT_MARKETABLE"
+                    _st.recovery_required_source = "FULL_SNAPSHOT"
+                market_state_store._set_snapshot_complete(
+                    intent.ticker, False, "divergence_not_marketable"
+                )
+                market_state_store._set_book_health(
+                    intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_not_marketable"
+                )
+                market_state_store._maybe_trigger_book_recovery(
+                    intent.ticker, "divergence_not_marketable"
+                )
+            except Exception as _rs_err:
+                logger.debug("book resync mark failed for %s: %s", intent.ticker, _rs_err)
         return OrderResult(
             status="rejected",
             mode=mode,
