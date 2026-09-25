@@ -17976,6 +17976,17 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             submission_attempted=True,
             submission_certainty="unknown",
         )
+        # A hung request usually means a dead pooled keep-alive socket (peer
+        # FIN/RST is invisible to httpx until read, esp. Windows proactor).
+        # Drop the pool so the reconcile/resubmit attempt lands on a fresh
+        # connection instead of re-hanging on the same dead sockets.
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            await get_kalshi_client().reset_http_client()
+        except Exception as _pool_reset_err:
+            logger.debug(
+                "[ROUTER-TIMEOUT] HTTP pool reset failed: %s", _pool_reset_err
+            )
         _post_route_canonical_idempotency_cleanup(intent, result)
     except asyncio.CancelledError:
         latency_ms = (_time.monotonic() - t0) * 1000

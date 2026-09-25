@@ -822,3 +822,69 @@ class TestSingleton:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPoolResetOnTimeout:
+    """2026-09-25 wedge: POSTs reused dead keep-alive sockets (Kalshi LB
+    half-closes idle conns; httpx can't detect CLOSE_WAIT until read on
+    Windows proactor) and hung until route_timeout. A timed-out/errored
+    request must drop the pool before retrying."""
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_resets_pool_before_retry(self, client, monkeypatch):
+        import httpx
+        import merid.event_venues.kalshi.client as client_mod
+
+        monkeypatch.setattr(client_mod, "KALSHI_MAX_RETRIES", 1)
+        monkeypatch.setattr(client_mod, "KALSHI_BACKOFF_BASE", 0.001)
+
+        reset_calls = []
+        async def _spy_reset():
+            reset_calls.append(1)
+            # Re-inject the mock so the retry stays hermetic.
+            client._http_client = mock_http
+            client._client_loop_id = None
+
+        monkeypatch.setattr(client, "_reset_http_client_after_loop_error", _spy_reset)
+
+        mock_http = AsyncMock()
+        mock_http.is_closed = False
+        mock_http.request = AsyncMock(side_effect=httpx.TimeoutException("read hung"))
+        client._http_client = mock_http
+
+        result = await client._request_with_resilience(
+            "GET", "/portfolio/balance", operation_name="probe",
+        )
+
+        assert not result.success
+        assert len(reset_calls) == 1  # reset between attempt 0 and attempt 1
+        assert mock_http.request.await_count == 2  # both attempts ran
+
+    @pytest.mark.asyncio
+    async def test_connect_error_resets_pool_before_retry(self, client, monkeypatch):
+        import httpx
+        import merid.event_venues.kalshi.client as client_mod
+
+        monkeypatch.setattr(client_mod, "KALSHI_MAX_RETRIES", 1)
+        monkeypatch.setattr(client_mod, "KALSHI_BACKOFF_BASE", 0.001)
+
+        reset_calls = []
+        async def _spy_reset():
+            reset_calls.append(1)
+            client._http_client = mock_http
+            client._client_loop_id = None
+
+        monkeypatch.setattr(client, "_reset_http_client_after_loop_error", _spy_reset)
+
+        mock_http = AsyncMock()
+        mock_http.is_closed = False
+        mock_http.request = AsyncMock(side_effect=httpx.ConnectError("dead socket"))
+        client._http_client = mock_http
+
+        result = await client._request_with_resilience(
+            "GET", "/portfolio/balance", operation_name="probe",
+        )
+
+        assert not result.success
+        assert len(reset_calls) == 1
+        assert mock_http.request.await_count == 2
