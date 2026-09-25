@@ -56,7 +56,7 @@ def test_environment_override_lowers_min_held_price_is_rejected(monkeypatch):
     """A lower held-side price floor is unsafe and is ignored."""
     monkeypatch.setenv("MERID_MIN_HELD_PRICE_CENTS", "20")
     resolved = resolve_live_config()
-    assert resolved.min_held_price_cents == Decimal("35")
+    assert resolved.min_held_price_cents == Decimal("25")
     assert any(
         "Held-side price floor override rejected" in c for c in resolved.conflicts_caught
     )

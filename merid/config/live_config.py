@@ -119,7 +119,7 @@ class ResolvedLiveConfig:
     max_book_staleness_ms: int = 30000
 
     # Edge / confidence economics
-    min_held_price_cents: Decimal = Decimal("35")  # cents
+    min_held_price_cents: Decimal = Decimal("25")  # cents
     min_required_edge: Decimal = Decimal("0.02")
     min_p_selected: Decimal = Decimal("0.50")
 
@@ -1065,7 +1065,12 @@ class LiveConfigResolver:
             f"env={env_min_p if env_min_p is not None else 'none'}; resolved={resolved_min_p}"
         )
 
-        held_floor_default = Decimal("35")  # cents
+        # 2026-09-25: default lowered 35c -> 25c on the settled rejection
+        # counterfactual (logs/rejected_candidates.jsonl joined to outcomes):
+        # 25-29c +18.5c/trade (47% win, n=224) and 30-34c +10.3c/trade (44%,
+        # n=310) were being rejected profitably; 20-24c and below stayed
+        # net-negative.  Env overrides below the default are still rejected.
+        held_floor_default = Decimal("25")  # cents
         env_held_floor = env.get("MERID_MIN_HELD_PRICE_CENTS")
         if env_held_floor is not None:
             if env_held_floor < held_floor_default:

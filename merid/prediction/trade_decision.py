@@ -43,18 +43,24 @@ TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P
 # Minimum net edge (as a fraction of notional) for a side to be selected.
 # 2026-08-30: Lowered to 0.02 (2%) as the hard global floor.  The actual
 # threshold used at decision time is computed by ``_compute_dynamic_min_required_edge``,
-# which adds an asset-tier base, a price-convexity term, and a half-spread
-# reserve.  The resolved live config may raise this floor further, but never
-# below the hard 0.02 floor.
+# which adds an asset-tier base, a price-convexity term (halved on >=50c held
+# prices), and the FLB longshot premium below 50c.  The bid/ask spread is not
+# added again here: the taker-ask entry price and the pi* cost stack already
+# charge it once each.  The resolved live config may raise this floor further,
+# but never below the hard 0.02 floor.
 TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.02"))
 
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
 # the 0-19c tail.  Override with MERID_MIN_HELD_PRICE_CENTS to raise/lower.
-# 2026-08-28: raised to 35c to match the cheap-tail filter.  Trades below this
-# floor are only allowed when the model probability is exceptionally high (see
-# MERID_CHEAP_TAIL_P_EXCEPTION).
-MERID_MIN_HELD_PRICE_CENTS = max(0.0, float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "35")))
+# 2026-08-28: raised to 35c to match the cheap-tail filter.
+# 2026-09-25: lowered to 25c on the settled rejection counterfactual (390k
+# classified candidates): rejected 25-29c entries netted +18.5c/trade (47% win)
+# and 30-34c +10.3c/trade (44% win) after fees, while 15-19c (-2.4c/trade) and
+# 20-24c (-3.4c/trade) stayed net-negative.  25c is the empirical boundary.
+# Trades below this floor are only allowed when the model probability is
+# exceptionally high (see MERID_CHEAP_TAIL_P_EXCEPTION).
+MERID_MIN_HELD_PRICE_CENTS = max(0.0, float(os.environ.get("MERID_MIN_HELD_PRICE_CENTS", "25")))
 
 # Low-price policy is shadow-only by default. It records the proposed policy
 # without changing live admission until replay and calibration evidence support
@@ -576,7 +582,7 @@ def _compute_dynamic_min_required_edge(
     no_ask_cents: float,
     floor_min_required_edge: float,
 ) -> float:
-    """Compute a fee-aware, asset-tiered, spread-aware edge threshold.
+    """Compute a fee-aware, asset-tiered edge threshold.
 
     The threshold is applied to ``net_edge`` (after Kalshi fees, exit-cost
     reserve, and model-risk reserve).  It therefore represents the required
@@ -586,8 +592,18 @@ def _compute_dynamic_min_required_edge(
       - Asset-tier base floor (BTC most liquid, DOGE/XRP least).
       - Convex price-risk term: ``K * p * (1-p)`` peaks at 50c where taker
         fee and adverse-selection risk are largest and shrinks in the tails.
-      - Half-spread reserve for the selected side, using live book data when
-        available and conservative per-asset defaults otherwise.
+        Halved for held prices >=50c: the taker fee is already deducted inside
+        net_edge and the counterfactual rejection join (390k settled
+        candidates, 2026-09) showed the marginal 0-2c-below-gate band on
+        favorites was net profitable (+9.7c/trade, 75% win rate) -- the full
+        convexity term was over-rejecting favorites.
+      - FLB longshot premium for held prices below 50c (sub-50c counterfactuals
+        are net-negative without it).
+
+    The bid/ask spread is deliberately NOT added here: ``executable_entry_price``
+    is the taker ask, so the full spread is already charged inside gross_edge,
+    and the pi* cost stack charges ``spread_slippage_prob`` again.  Adding a
+    third half-spread term was double-charging the same cost.
 
     The final value is clamped to the global floor and a 15% sanity ceiling.
     """
@@ -608,24 +624,8 @@ def _compute_dynamic_min_required_edge(
     # At 10c/90c, p*(1-p) = 0.09 -> 0.0036 (0.36 points).
     p = float(price_cents) / 100.0
     p = max(0.01, min(0.99, p))
-    price_adj = 0.04 * p * (1.0 - p)
-
-    # Half-spread term for the selected side.
-    spread_cents: float = 0.0
-    if side == "yes" and yes_bid_cents > 0 and yes_ask_cents > yes_bid_cents:
-        spread_cents = yes_ask_cents - yes_bid_cents
-    elif side == "no" and no_bid_cents > 0 and no_ask_cents > no_bid_cents:
-        spread_cents = no_ask_cents - no_bid_cents
-    if spread_cents <= 0:
-        # Conservative per-asset defaults when the book is unavailable.
-        spread_cents = {
-            "BTC": 1.0,
-            "ETH": 1.5,
-            "SOL": 2.0,
-            "XRP": 2.5,
-            "DOGE": 3.0,
-        }.get(asset.upper(), 2.0)
-    spread_adj = 0.5 * spread_cents / 100.0
+    convexity_k = 0.04 if p < 0.5 else 0.02
+    price_adj = convexity_k * p * (1.0 - p)
 
     # Favorite-longshot bias reserve.  Kalshi transaction-level studies (Burgi
     # et al. 2025, CEPR DP20631) show sub-50c contracts systematically win less
@@ -634,7 +634,7 @@ def _compute_dynamic_min_required_edge(
     # at 35c it adds ~2.25c of required net edge, at 10c ~6c, at 50c+ zero.
     flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.5 - p)
 
-    dynamic = base + price_adj + spread_adj + flb_adj
+    dynamic = base + price_adj + flb_adj
     return max(0.02, min(dynamic, 0.15))
 
 

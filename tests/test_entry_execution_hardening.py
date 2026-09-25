@@ -223,6 +223,37 @@ def test_flb_longshot_reserve_raises_edge_floor_for_cheap_contracts(monkeypatch)
     assert math.isclose(cheap - fav, 0.15 * (0.5 - 0.30), abs_tol=0.02)
 
 
+def test_spread_not_double_charged_in_edge_threshold(monkeypatch):
+    """The taker ask already embeds the full spread in gross_edge and pi*
+    charges spread_slippage again; the threshold must not add it a third time.
+    2026-09-25 counterfactual: marginal-band favorites were net profitable."""
+    wide = _compute_dynamic_min_required_edge(
+        asset="BTC", price_cents=60, side="yes",
+        yes_bid_cents=56.0, yes_ask_cents=64.0,   # 8c spread
+        no_bid_cents=36.0, no_ask_cents=44.0,
+        floor_min_required_edge=0.03,
+    )
+    tight = _compute_dynamic_min_required_edge(
+        asset="BTC", price_cents=60, side="yes",
+        yes_bid_cents=59.0, yes_ask_cents=61.0,   # 2c spread
+        no_bid_cents=39.0, no_ask_cents=41.0,
+        floor_min_required_edge=0.03,
+    )
+    assert math.isclose(wide, tight, abs_tol=1e-9)
+
+
+def test_convexity_halved_on_favorites(monkeypatch):
+    """Held >=50c uses half the p*(1-p) adverse-selection reserve."""
+    fav = _compute_dynamic_min_required_edge(
+        asset="BTC", price_cents=60, side="yes",
+        yes_bid_cents=59.0, yes_ask_cents=61.0,
+        no_bid_cents=39.0, no_ask_cents=41.0,
+        floor_min_required_edge=0.03,
+    )
+    # base 3% + 0.02 * 0.6 * 0.4 = 0.0048 -> 0.0348
+    assert math.isclose(fav, 0.03 + 0.02 * 0.6 * 0.4, abs_tol=1e-9)
+
+
 # --------------------------------------------------------------------------
 # Minimum time-to-expiry entry gate
 # --------------------------------------------------------------------------
