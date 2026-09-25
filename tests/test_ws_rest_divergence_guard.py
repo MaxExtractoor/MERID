@@ -130,6 +130,69 @@ async def test_ws_authoritative_blocks_not_marketable():
 
 
 @pytest.mark.asyncio
+async def test_not_marketable_marks_book_for_resync():
+    """2026-09-24: WS books diverging from fresh REST kept feeding phantom-edge
+    signals because the ``not_marketable`` rejection never invalidated the book.
+    The guard must quarantine the ticker (INVALID + FULL_SNAPSHOT recovery
+    requirement + RESYNC_REQUESTED) so deltas cannot re-arm execution, and
+    trigger the throttled WS+REST snapshot recovery."""
+    state = _make_ws_state()
+    state.executable = True
+    store = _make_market_state_store(state)
+    # Fresh REST 20c away from WS on the NO-ask side -> not_marketable.
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    intent = _make_intent(price_cents=10)  # below WS NO ask (21c)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent,
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "not_marketable" in result.reason
+    store._set_snapshot_complete.assert_called_once_with(
+        intent.ticker, False, "divergence_not_marketable"
+    )
+    store._set_book_health.assert_called_once_with(
+        intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_not_marketable"
+    )
+    # Quarantine contract: deltas alone must not re-arm a divergent book.
+    assert state.data_quality == "INVALID"
+    assert state.executable is False
+    assert state.book_initialized is False
+    assert state.recovery_required_source == "FULL_SNAPSHOT"
+    store._maybe_trigger_book_recovery.assert_called_once_with(
+        intent.ticker, "divergence_not_marketable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_marketable_rejection_does_not_resync():
+    """An order blocked only because it is not marketable against the *WS* book
+    while feeds agree (coherent path) must not invalidate the book."""
+    state = _make_ws_state()
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=79, rest_yes_ask=80)  # coherent with WS 79/80
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(price_cents=25),  # BUY_NO 25 >= NO ask 21 -> marketable
+            port,
+            TradingMode.LIVE,
+            time.monotonic(),
+        )
+
+    assert result is None
+    store._set_snapshot_complete.assert_not_called()
+    store._set_book_health.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_stale_ws_allows_rest_marketable():
     """If WS is stale but REST is fresh and marketable, allow via REST."""
     state = _make_ws_state(last_ws_update_ts=time.monotonic() - 60.0)
