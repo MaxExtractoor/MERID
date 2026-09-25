@@ -21,7 +21,7 @@ import time as _time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional, Callable, Set
+from typing import Any, Dict, List, Optional, Callable, Set, Tuple
 from enum import Enum
 
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_FREQS
@@ -547,6 +547,43 @@ class PollerConfig:
     max_pages: int = 50                 # Safety limit for pagination (was 10, increased for high volume)
 
 
+def _settlement_result_fields(settlement: "KalshiSettlement") -> Tuple[str, str, str, str]:
+    """Return (market_outcome, held_side, position_result, realized) for logging.
+
+    ``market_outcome`` is the contract's resolution — ``"yes"`` when the YES
+    outcome paid 100c, ``"no"`` when it paid 0c — and is deliberately NOT a
+    WIN/LOSS label: a YES settlement while holding NO is a loss.  The
+    position's result is derived from the held side (``yes_count`` /
+    ``no_count``); when no residual position exists (exited before
+    settlement), the authoritative signed PnL decides.  ``realized`` reports
+    the signed-PnL bucket for dashboards.
+    """
+    market_outcome = (
+        "yes" if settlement.settlement_price_cents == 100
+        else "no" if settlement.settlement_price_cents == 0
+        else "unknown"
+    )
+    if settlement.yes_count > 0:
+        held_side = "yes"
+    elif settlement.no_count > 0:
+        held_side = "no"
+    else:
+        held_side = "none"
+    pnl = settlement.realized_pnl_cents
+    if held_side != "none" and market_outcome != "unknown":
+        position_result = "WIN" if held_side == market_outcome else "LOSS"
+    elif pnl is not None:
+        position_result = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
+    else:
+        position_result = "UNKNOWN"
+    realized = (
+        "profit" if pnl is not None and pnl > 0
+        else "loss" if pnl is not None and pnl < 0
+        else "flat" if pnl is not None else "unknown"
+    )
+    return market_outcome, held_side, position_result, realized
+
+
 class KalshiSettlementPoller:
     """
     Background poller for Kalshi settlement data.
@@ -739,20 +776,19 @@ class KalshiSettlementPoller:
             new_count += 1
             new_settlements.append(settlement)  # Collect for event bus
 
-            # Log settlement with key information.  ``outcome`` is the held
-            # side's settlement result; for positions exited before settlement
-            # it can contradict realized PnL (e.g. sold at a profit, residual
-            # settled 0), so report ``realized`` from the signed PnL too.
-            outcome = "WIN" if settlement.settlement_price_cents == 100 else "LOSE" if settlement.settlement_price_cents == 0 else "UNKNOWN"
+            # Log settlement with key information.  ``market_outcome`` is the
+            # contract's resolution (yes won / no won) — NOT the position's
+            # result.  A YES settlement while holding NO is a loss, so the
+            # position result is derived from the held side, and ``realized``
+            # reports the signed PnL (authoritative for positions exited
+            # before settlement where residual counts are zero).
+            market_outcome, held_side, position_result, realized = _settlement_result_fields(settlement)
             _pnl_c = settlement.realized_pnl_cents
-            realized = (
-                "profit" if _pnl_c is not None and _pnl_c > 0
-                else "loss" if _pnl_c is not None and _pnl_c < 0
-                else "flat" if _pnl_c is not None else "unknown"
-            )
             logger.info(
-                "[SETTLEMENT] contract=%s ticker=%s outcome=%s realized=%s pnl_cents=%d bankroll_update=N/A",
-                settlement.market_id, settlement.ticker, outcome, realized,
+                "[SETTLEMENT] contract=%s ticker=%s market_outcome=%s held_side=%s "
+                "position_result=%s realized=%s pnl_cents=%d bankroll_update=N/A",
+                settlement.market_id, settlement.ticker, market_outcome, held_side,
+                position_result, realized,
                 int(_pnl_c) if _pnl_c else 0
             )
 
