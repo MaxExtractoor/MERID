@@ -8263,12 +8263,79 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 return []
 
             logger.info("[15M-LOOP] About to call agent_grid.run_cycle tick=%d", tick)
-            candidates = await self.agent_grid.run_cycle(
-                tick,
-                allow_new_entries=allow_new_entries,
-                coinbase_velocity=coinbase_velocity,
-                feature_snapshot=feature_snapshot,
+
+            # 2026-09-25: A wedged run_cycle (degraded REST burst / congested
+            # catalog thread) once froze this loop for 5.5 minutes, starving the
+            # canonical portfolio reconciler until the portfolio-stale gate shut
+            # down all entries.  Bound the cycle with asyncio.wait +
+            # FIRST_COMPLETED: unlike wait_for/asyncio.timeout, this returns on
+            # the deadline without depending on the inner task honouring
+            # cancellation - the documented wait_for failure mode, and the reason
+            # earlier wait_for attempts were backed out on the Windows
+            # ProactorEventLoop.  The orphaned task is cancelled and tracked so
+            # it cannot silently mutate state forever.
+            cycle_timeout_s = float(
+                os.getenv("MERID_GRID_CYCLE_TIMEOUT_S", "75.0") or 75.0
             )
+            hang_dump_s = float(
+                os.getenv("MERID_GRID_CYCLE_HANG_DUMP_S", "150.0") or 150.0
+            )
+            import faulthandler
+
+            cycle_task = asyncio.create_task(
+                self.agent_grid.run_cycle(
+                    tick,
+                    allow_new_entries=allow_new_entries,
+                    coinbase_velocity=coinbase_velocity,
+                    feature_snapshot=feature_snapshot,
+                ),
+                name=f"agent_grid_run_cycle_{tick}",
+            )
+            if hang_dump_s > 0:
+                faulthandler.dump_traceback_later(
+                    hang_dump_s, exit=False, file=sys.stderr
+                )
+            orphans = getattr(self, "_grid_orphan_tasks", None)
+            if orphans is None:
+                orphans = self._grid_orphan_tasks = set()
+            orphans.add(cycle_task)
+
+            def _cycle_done(t: "asyncio.Task") -> None:
+                orphans.discard(t)
+                if t.cancelled():
+                    logger.warning(
+                        "[15M-LOOP] orphaned run_cycle task for tick=%d was cancelled",
+                        tick,
+                    )
+                elif t.exception() is not None:
+                    logger.error(
+                        "[15M-LOOP] orphaned run_cycle task for tick=%d raised: %s",
+                        tick, t.exception(),
+                    )
+                else:
+                    logger.warning(
+                        "[15M-LOOP] orphaned run_cycle task for tick=%d eventually completed",
+                        tick,
+                    )
+
+            cycle_task.add_done_callback(_cycle_done)
+            try:
+                done_set, _pending = await asyncio.wait(
+                    {cycle_task}, timeout=cycle_timeout_s
+                )
+            finally:
+                faulthandler.cancel_dump_traceback_later()
+
+            if cycle_task not in done_set:
+                logger.critical(
+                    "[GRID-CYCLE-TIMEOUT] tick=%d exceeded %.1fs bound; abandoning "
+                    "cycle task (fail-closed, returning no candidates)",
+                    tick, cycle_timeout_s,
+                )
+                cycle_task.cancel()
+                return []
+            orphans.discard(cycle_task)
+            candidates = cycle_task.result()
             logger.info("[15M-LOOP] Generated %d candidates in cycle %d", len(candidates), tick)
             
             # CRITICAL: Return candidates to caller for processing
