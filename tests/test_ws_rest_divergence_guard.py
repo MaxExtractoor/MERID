@@ -637,3 +637,65 @@ async def test_reduce_only_exit_bypasses_inconsistent_ws_book():
         )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_phantom_high_ws_ask_repriced_against_rest():
+    """2026-09-25 audit: the single largest entry blocker was
+    ``ws_rest_divergence:not_marketable`` (1,339 rejects).  One recurring mode:
+    a fresh-but-corrupted WS top sitting ABOVE a just-fetched REST book
+    (phantom ask left by dropped deltas during a fast move).  For a buy, the
+    exchange only ever fills at the real ask — the fresh REST ask — so the
+    reprice check must compare against REST, not max(ws, rest)."""
+    state = _make_ws_state(best_bid_cents=61, best_ask_cents=62)  # phantom-high
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=44, rest_yes_ask=45)  # real book 44/45
+
+    # BUY_YES priced at the real ask (45c).  WS says 62c -> not marketable on
+    # WS, marketable on REST.  Divergence 17c: above tolerance, below hard
+    # limit, and the WS top is not locked (61 < 62) -> divergent reprice path.
+    intent = _make_intent(side="yes", action="buy", price_cents=45)
+    intent.selected_outcome_price_cents = 45
+    intent.ev_net_cents = 10.0  # edge budget -> epc > 45
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is None  # allowed via REST-bounded reprice
+    assert intent.price_cents >= 45
+
+
+@pytest.mark.asyncio
+async def test_rest_ask_beyond_edge_budget_still_rejects():
+    """The REST-ask reprice must not soften the edge bound: when the real ask
+    moved past the edge-preserving budget, the entry still rejects."""
+    state = _make_ws_state(best_bid_cents=61, best_ask_cents=62)
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=78, rest_yes_ask=79)  # real move UP to 79c
+
+    intent = _make_intent(side="yes", action="buy", price_cents=45)
+    intent.selected_outcome_price_cents = 45
+    intent.ev_net_cents = 10.0  # epc ~54 << 79
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "not_marketable" in result.reason
+
+
+def test_stop_candidate_exits_pass_agent_whitelist():
+    """Reduce-only stop-candidate exits carry agent_id='stop_candidate' and are
+    already in allowed_sources; they must not die at the entry agent whitelist
+    (255 protective exits were rejected as unauthorized_agent:stop_candidate)."""
+    from merid.event_venues.kalshi.order_router import _is_kalshi_15m_crypto_agent
+
+    assert _is_kalshi_15m_crypto_agent("stop_candidate") is True
+    # Entries from unrecognized agents must still be refused.
+    assert _is_kalshi_15m_crypto_agent("rogue_agent_x") is False
+    assert _is_kalshi_15m_crypto_agent("") is False
