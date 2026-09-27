@@ -42,6 +42,10 @@ def _calibrated(monkeypatch):
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
     monkeypatch.setattr(_td, "load_tail_calibrator", lambda *a, **k: _calibrator())
     monkeypatch.setattr(_td, "MERID_CALIBRATION_CAP_FULL_RANGE", True)
+    # Deterministic vol path: no market-implied anchoring, no realized tracker
+    # — the caller-supplied annualized_vol is what the model uses.
+    monkeypatch.setattr(_td, "MERID_ANCHOR_VOL_TO_MARKET", False)
+    monkeypatch.setattr(_td, "MERID_USE_REALIZED_VOL", False)
 
 
 _ids = itertools.count()
@@ -192,3 +196,56 @@ class TestDeviationGuardInflationOnly:
         )
         # Market anchor pulls p_yes toward ~0.79 -> +0.26 inflation vs raw.
         assert d.indicators.get("tail_guard_violation_yes") is True
+
+
+class TestMarketLeanFadeGate:
+    """2026-09-27: entries against a meaningful market lean are blocked for
+    assets whose historical fade cohort is toxic (BTC/XRP/DOGE), allowed for
+    ETH/SOL whose fade cohort is net-positive, and untouched for thin leans."""
+
+    def _fade_decision(self, monkeypatch, asset: str, lean_yes_cents: float = 26.0):
+        """Market: YES mid = 50c + lean; the calibrated model sees a weaker
+        same-direction lean (p_no caps at 0.37) so the EV diff picks the
+        OPPOSITE, cheap side — the toxic fade anatomy from live fills."""
+        mid = 50.0 + lean_yes_cents
+        ya = mid + 1.0
+        yb = mid - 1.0
+        na = 100.0 - yb
+        nb = 100.0 - ya
+        return _decision(
+            spot=100.081, strike=100.0, seconds_to_expiry=900.0,
+            yes_bid=yb, yes_ask=ya, no_bid=nb, no_ask=na,
+            fee_cents=1.0, vol=0.60,
+        )
+
+    def test_btc_fade_into_strong_lean_blocked(self, monkeypatch):
+        monkeypatch.setattr(_td, "MERID_FADE_ALLOWED_ASSETS", {"ETH", "SOL"})
+        d = self._fade_decision(monkeypatch, "BTC", lean_yes_cents=26.0)
+        assert d.selected_outcome is None, (
+            f"fade into +21c market lean must be blocked, got {d.selected_outcome}"
+        )
+        assert d.no_trade_reason == "market_fade_blocked_no", d.no_trade_reason
+
+    def test_eth_fade_allowed_by_cohort(self, monkeypatch):
+        monkeypatch.setattr(_td, "MERID_FADE_ALLOWED_ASSETS", {"ETH", "SOL"})
+        import merid.prediction.trade_decision as td2
+        d = td2.compute_trade_decision(
+            run_id="fade_test_eth", decision_id="fade_test_eth",
+            ticker="KXETH15M-26SEP271200-00", asset="ETH",
+            spot_price=100.081, strike_price=100.0, seconds_to_expiry=900.0,
+            yes_bid_cents=75.0, yes_ask_cents=77.0,
+            no_bid_cents=23.0, no_ask_cents=25.0,
+            yes_depth_cc=200.0, no_depth_cc=200.0,
+            fee_per_contract_cents=1.0, annualized_vol=0.60,
+            model_uncertainty=0.0, data_quality="live", regime="normal",
+            min_required_edge=0.02, settlement_reference="cfb_rti_live",
+        )
+        assert d.selected_outcome == "no", (
+            f"ETH fade cohort is profitable; entry should survive, got {d.no_trade_reason}"
+        )
+
+    def test_thin_lean_not_gated(self, monkeypatch):
+        """Below the lean threshold the gate must not fire."""
+        monkeypatch.setattr(_td, "MERID_FADE_ALLOWED_ASSETS", {"ETH", "SOL"})
+        d = self._fade_decision(monkeypatch, "BTC", lean_yes_cents=8.0)
+        assert d.no_trade_reason != "market_fade_blocked_no", d.no_trade_reason
