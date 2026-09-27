@@ -168,6 +168,15 @@ MERID_ENTRY_MIN_SECONDS_TO_EXPIRY = float(
     os.environ.get("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180")
 )
 
+# 2026-09-27: Operator kill switch — when the automatic exit policy is
+# disabled, every entry necessarily holds to settlement.  Kalshi charges no
+# fee on settlement, so charging an exit-cost reserve inside net_edge is a
+# phantom cost that understates true hold-to-settlement EV.  The flag is
+# module-level like the other env knobs; flag changes take effect on restart.
+MERID_DISABLE_EXIT_POLICY = os.environ.get(
+    "MERID_DISABLE_EXIT_POLICY", "0"
+).strip().lower() in ("1", "true", "yes")
+
 # 2026-09-23: Market-anchor shrinkage.  Kalshi short-dated crypto binaries are
 # arbitraged tick-for-tick against spot and are essentially perfectly
 # calibrated inside the last minutes (prediction-market-efficiency audits show
@@ -2162,8 +2171,12 @@ def compute_trade_decision(
     # zero rather than a phantom taker exit.  (Dataset: hold-to-settlement
     # beats any timed exit on this product; charging an exit that cannot
     # happen suppresses real edge.)
-    expected_exit_cost_yes = 0.0 if settlement_lane else fee
-    expected_exit_cost_no = 0.0 if settlement_lane else fee
+    # 2026-09-27: identical reasoning when the operator disabled the exit
+    # policy outright — every entry holds to settlement, so no exit fee can
+    # ever be incurred.  Charging it understates net edge by ~1.6c/contract.
+    _holds_to_settlement = settlement_lane or MERID_DISABLE_EXIT_POLICY
+    expected_exit_cost_yes = 0.0 if _holds_to_settlement else fee
+    expected_exit_cost_no = 0.0 if _holds_to_settlement else fee
 
     model_risk_reserve = _compute_model_risk_reserve(
         model_uncertainty, data_quality, regime, seconds_to_expiry,

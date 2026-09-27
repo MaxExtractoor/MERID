@@ -196,3 +196,148 @@ def test_loss_cap_still_blocks_when_flag_absent(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Hold-to-settlement economics: no exit leg exists while the exit policy is
+# disabled, so entry EV must be single-leg (entry fee only) in both the
+# decision-layer edge math and the router's round-trip cost gate.
+# ---------------------------------------------------------------------------
+
+def _make_net_cost_intent(price_cents: int, gross_edge_cents: float, count: float = 1.0):
+    """Entry intent whose modeled edge is exactly ``gross_edge_cents`` total."""
+    intent = MagicMock(name="intent")
+    intent.ticker = "KXTEST-1"
+    intent.price_cents = price_cents
+    intent.count = count
+    intent.count_fp = None
+    intent.edge_pct = 1.0  # truthy; superseded by p_selected path below
+    intent.p_selected = price_cents / 100.0 + gross_edge_cents / (100.0 * count)
+    intent.aggressiveness = 0.0
+    intent.reduce_only = False
+    intent.side = "buy"
+    intent.intent_id = "test-intent"
+    intent.client_order_id = "test-coid"
+    return intent
+
+
+def _patch_market_state(monkeypatch, bid_cents: int, ask_cents: int):
+    """Feed the gate a fresh, initialized book."""
+    import merid.event_venues.kalshi.market_state as ms
+
+    state = MagicMock(name="state")
+    state.best_bid_cents = bid_cents
+    state.best_ask_cents = ask_cents
+    state.book_initialized = True
+    state.seconds_to_expiry = 600.0
+    from merid.data.ingress_replay import replay_time
+    state.last_book_update_wall_ts = replay_time()
+
+    store = MagicMock(name="store")
+    store.get = lambda ticker: state
+    monkeypatch.setattr(ms, "get_kalshi_market_state_store", lambda: store)
+
+
+def _is_exit_order_passthrough(monkeypatch):
+    import merid.event_venues.kalshi.order_router as orouter
+    monkeypatch.setattr(orouter, "_is_exit_order", lambda intent: False)
+
+
+def test_round_trip_gate_single_leg_when_exits_disabled(monkeypatch):
+    """With exits disabled the gate must charge entry-side costs only."""
+    import merid.event_venues.kalshi.order_router as orouter
+    from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+
+    _flag_on(monkeypatch, "MERID_DISABLE_EXIT_POLICY")
+    _is_exit_order_passthrough(monkeypatch)
+    _patch_market_state(monkeypatch, bid_cents=29, ask_cents=31)
+
+    # Pick a gross edge in the gap band: positive under single-leg maker
+    # economics, negative under the old 2*maker round-trip assumption.
+    maker_fee = float(kalshi_fee_cents_exact(0.30, 1.0, "maker"))
+    gross_edge = maker_fee * 1.5  # single-leg net +0.5*fee, round-trip net -0.5*fee
+    intent = _make_net_cost_intent(30, gross_edge)
+
+    result = orouter._round_trip_net_of_cost_gate(intent)
+    assert result is None, f"single-leg economics must pass; got {result}"
+    assert intent.policy_mode == "NEUTRAL_MM"
+
+
+def test_round_trip_gate_still_charges_exit_leg_when_flag_off(monkeypatch):
+    """Flag absent -> old round-trip economics unchanged."""
+    import merid.event_venues.kalshi.order_router as orouter
+    from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+
+    _flag_off(monkeypatch, "MERID_DISABLE_EXIT_POLICY")
+    _is_exit_order_passthrough(monkeypatch)
+    _patch_market_state(monkeypatch, bid_cents=29, ask_cents=31)
+
+    maker_fee = float(kalshi_fee_cents_exact(0.30, 1.0, "maker"))
+    gross_edge = maker_fee * 1.5
+    intent = _make_net_cost_intent(30, gross_edge)
+
+    result = orouter._round_trip_net_of_cost_gate(intent)
+    assert result is not None and result.startswith("net_of_cost:"), (
+        f"round-trip economics must still reject; got {result}"
+    )
+
+
+def _td_calibrator():
+    from merid.risk.probability.tail_calibrator import TailProbabilityCalibrator
+    return TailProbabilityCalibrator(
+        yes_held_prices=[0.10, 0.30, 0.40, 0.50, 0.55, 0.60, 0.75, 0.90],
+        yes_actual_probs=[0.10, 0.28, 0.40, 0.53, 0.59, 0.63, 0.77, 0.90],
+        no_held_prices=[0.10, 0.30, 0.40, 0.50, 0.55, 0.60, 0.75, 0.90],
+        no_actual_probs=[0.12, 0.32, 0.43, 0.52, 0.61, 0.67, 0.83, 0.92],
+        buffer=0.05,
+    )
+
+
+def _td_decision(monkeypatch, exits_disabled: bool):
+    import merid.prediction.trade_decision as td
+
+    monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
+    monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
+    monkeypatch.setattr(td, "load_tail_calibrator", lambda *a, **k: _td_calibrator())
+    monkeypatch.setattr(td, "MERID_CALIBRATION_CAP_FULL_RANGE", True)
+    monkeypatch.setattr(td, "MERID_DISABLE_EXIT_POLICY", exits_disabled)
+
+    return td.compute_trade_decision(
+        run_id="exit_reserve_test",
+        decision_id="exit_reserve_test",
+        ticker="KXBTC15M-26SEP271200-00",
+        asset="BTC",
+        spot_price=100.0,
+        strike_price=100.0,
+        seconds_to_expiry=900.0,
+        yes_bid_cents=58.0,
+        yes_ask_cents=60.0,
+        no_bid_cents=38.0,
+        no_ask_cents=40.0,
+        yes_depth_cc=200.0,
+        no_depth_cc=200.0,
+        fee_per_contract_cents=1.0,
+        annualized_vol=0.60,
+        model_uncertainty=0.0,
+        data_quality="live",
+        regime="normal",
+        min_required_edge=0.02,
+        settlement_reference="cfb_rti_live",
+    )
+
+
+def test_exit_cost_reserve_zeroed_when_exits_disabled(monkeypatch):
+    """Hold-to-settlement EV carries entry fee only — no phantom exit leg."""
+    d = _td_decision(monkeypatch, exits_disabled=True)
+    assert float(d.exit_cost_reserve_yes) == 0.0, (
+        f"exit reserve must be 0 with exits disabled, got {d.exit_cost_reserve_yes}"
+    )
+    assert float(d.exit_cost_reserve_no) == 0.0
+
+
+def test_exit_cost_reserve_charged_when_exits_enabled(monkeypatch):
+    """Flag absent -> exit reserve still charged (behavior unchanged)."""
+    d = _td_decision(monkeypatch, exits_disabled=False)
+    # fee_per_contract_cents=1.0 -> fee=0.01 charged as the exit reserve.
+    assert float(d.exit_cost_reserve_yes) == pytest.approx(0.01)
+    assert float(d.exit_cost_reserve_no) == pytest.approx(0.01)
