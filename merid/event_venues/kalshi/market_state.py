@@ -1264,6 +1264,24 @@ class KalshiMarketStateStore:
 
         This method assumes the ticker lock is already held.
         """
+        # FULL-SNAPSHOT-PENDING (2026-09-27): while a book is INVALID awaiting an
+        # attested FULL_SNAPSHOT (REST orderbook or clean WS snapshot), a live
+        # delta can never satisfy the recovery contract — yet it was still being
+        # applied, mutating the book with stale levels and re-asserting
+        # INVALID/book_initialized=False at the attestation gate.  That churn
+        # kept the executable BBO pegged to a ~90s-lagged delta backlog between
+        # REST-poll recoveries.  Drop the delta and wait for the snapshot.
+        _prior_state = self._states.get(ticker)
+        if (
+            _prior_state is not None
+            and getattr(_prior_state, "recovery_required_source", "") == "FULL_SNAPSHOT"
+            and (
+                _prior_state.data_quality == "INVALID"
+                or _prior_state.transition == "CIRCUIT_BREAKER"
+            )
+        ):
+            return
+
         ob = self._ob.get_book(ticker)
         if not ob or not ob.initialized:
             # Queue delta if book not yet initialized (legacy path)
@@ -2177,9 +2195,15 @@ class KalshiMarketStateStore:
             # Single fresh feed: no cross-feed divergence to assert.
             return True, None
 
-        # Both feeds have fresh quotes.  Validate cross-feed divergence.
-        bid_div = abs(state.last_ws_bid_cents - state.last_rest_bid_cents)
-        ask_div = abs(state.last_ws_ask_cents - state.last_rest_ask_cents)
+        # Both feeds have fresh quotes.  Validate cross-feed divergence against
+        # the *effective* BBO (``best_*``): when the REST-preferred-BBO path has
+        # substituted a fresh REST quote for a lagged delta-derived book, the
+        # executable quote is the REST quote and comparing raw ``last_ws_*``
+        # would veto every entry on a feed we no longer price from.
+        eff_bid = state.best_bid_cents if state.best_bid_cents is not None else state.last_ws_bid_cents
+        eff_ask = state.best_ask_cents if state.best_ask_cents is not None else state.last_ws_ask_cents
+        bid_div = abs(eff_bid - state.last_rest_bid_cents)
+        ask_div = abs(eff_ask - state.last_rest_ask_cents)
         max_div = max(bid_div, ask_div)
 
         if max_div > max_divergence_cents:
@@ -5685,9 +5709,72 @@ class KalshiMarketStateStore:
             state.last_ws_ask_cents = state.best_ask_cents
             state.last_ws_update_ts = now
             state.quote_owner = "WS"
+
+            # REST-PREFERRED-BBO (2026-09-27): The Kalshi orderbook_delta stream is
+            # buffered through a ~65k-deep bridge pipeline; during fast markets and
+            # window rollovers it continuously delivers deltas that are tens of
+            # seconds behind the venue. Those lagged deltas keep mutating the
+            # LocalOrderbook and re-asserting stale ``best_*`` within milliseconds
+            # of each fresh REST-poll snapshot, so the decision layer priced
+            # phantom edge and every order died at the ws_rest_divergence guard.
+            # When a recent REST BBO exists, prefer it over a divergent
+            # delta-derived BBO; the router still fetches REST at submit, so REST
+            # remains the ground truth either way.
+            rest_pref_max_age_s = float(
+                os.getenv("MERID_REST_BBO_MAX_AGE_S", "3.0")
+            )
+            rest_pref_min_div_c = int(
+                os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3")
+            )
+            rest_age_s = (
+                now - state.last_rest_quote_update_ts
+                if state.last_rest_quote_update_ts > 0
+                else float("inf")
+            )
+            ws_two_sided = (
+                state.best_bid_cents is not None
+                and state.best_ask_cents is not None
+                and state.best_bid_cents < state.best_ask_cents
+            )
+            ws_divergent = (
+                ws_two_sided
+                and max(
+                    abs(state.best_bid_cents - state.last_rest_bid_cents),
+                    abs(state.best_ask_cents - state.last_rest_ask_cents),
+                )
+                > rest_pref_min_div_c
+            )
+            if (
+                rest_age_s <= rest_pref_max_age_s
+                and state.last_rest_bid_cents is not None
+                and state.last_rest_ask_cents is not None
+                and (ws_divergent or not ws_two_sided)
+            ):
+                logger.warning(
+                    "[REST-PREFERRED-BBO] ticker=%s ws_bbo=%s/%s rest_bbo=%s/%s "
+                    "rest_age_s=%.2f - delta-derived book diverges from fresh REST; "
+                    "preferring REST top-of-book",
+                    ticker,
+                    state.best_bid_cents,
+                    state.best_ask_cents,
+                    state.last_rest_bid_cents,
+                    state.last_rest_ask_cents,
+                    rest_age_s,
+                )
+                state.best_bid_cents = state.last_rest_bid_cents
+                state.best_ask_cents = state.last_rest_ask_cents
+                if state.last_rest_yes_bids is not None:
+                    state.yes_bids = list(state.last_rest_yes_bids)
+                if state.last_rest_no_bids is not None:
+                    state.no_bids = list(state.last_rest_no_bids)
+                state.quote_owner = "REST_PREFERRED"
         elif via.startswith("rest") or via == "ws_fallback" or via == "subscribe_fallback" or via == "rest_polling" or via == "ws_subscribe_bootstrap":
             state.last_rest_bid_cents = state.best_bid_cents
             state.last_rest_ask_cents = state.best_ask_cents
+            # Stash the REST top-N ladders so the REST-preferred-BBO path can
+            # restore a consistent book (BBO + depth) when the delta stream lags.
+            state.last_rest_yes_bids = list(yes_bids) if yes_bids else None
+            state.last_rest_no_bids = list(no_bids) if no_bids else None
             # Quote freshness is tracked separately from general REST metadata so
             # that catalog/apply_rest_market cannot overwrite the quote clock.
             state.last_rest_quote_update_ts = now

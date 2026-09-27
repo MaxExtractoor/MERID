@@ -836,3 +836,127 @@ class TestIsQuoteCoherent:
         ok, reason = store.is_quote_coherent("KXBTC15M-T")
         assert ok is False
         assert reason == "NO_STATE"
+
+class TestRestPreferredBBO:
+    """REST-preferred-BBO: a fresh REST quote must win over a divergent
+    delta-derived WS book (the WS stream demonstrably lags by tens of seconds
+    during fast markets/rollovers)."""
+
+    def _rest_snapshot(self, store, ticker, yes, no):
+        return store.apply_orderbook_message(
+            _snapshot_msg_15m(ticker, yes, no), via="rest_polling"
+        )
+
+    def test_divergent_ws_snapshot_yields_to_fresh_rest(self):
+        """WS book 20c+ behind REST -> effective BBO follows REST."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        # REST: yes_bid=60, no_bid=40 -> BBO 60/60
+        self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        # WS snapshot: yes_bid=40, no_bid=40 -> BBO 40/60 (bid 20c stale)
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        )
+        assert state is not None
+        assert state.best_bid_cents == 60
+        assert state.best_ask_cents == 60
+        assert state.quote_owner == "REST_PREFERRED"
+        # The true (lagged) WS values are still tracked for diagnostics.
+        assert state.last_ws_bid_cents == 40
+
+    def test_small_divergence_keeps_ws_book(self):
+        """A <=3c WS/REST gap is normal jitter; WS stays primary."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        # WS: yes_bid=58 -> BBO 58/60, only 2c divergent on the bid
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue"
+        )
+        assert state.best_bid_cents == 58
+        assert state.quote_owner == "WS"
+
+    def test_stale_rest_does_not_override_ws(self):
+        """An aged-out REST quote must not displace the live WS book."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        state = self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        # Backdate the REST quote clock beyond the 3s preference window.
+        state.last_rest_quote_update_ts = time.monotonic() - 30.0
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        )
+        assert state.best_bid_cents == 40
+        assert state.quote_owner == "WS"
+
+    def test_rest_preferred_restores_rest_ladders(self):
+        """Depth ladders follow the REST book, not the lagged delta ladders."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
+        )
+        assert state.quote_owner == "REST_PREFERRED"
+        yes_prices = [lvl[0] for lvl in state.yes_bids]
+        assert max(yes_prices) in (60, 0.60)
+
+    def test_coherence_uses_effective_bbo(self):
+        """is_quote_coherent compares the effective BBO to REST, so a
+        REST-preferred book is coherent even while raw last_ws_* diverges."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        )
+        ok, reason = store.is_quote_coherent(t, max_divergence_cents=10)
+        assert ok is True, reason
+
+
+class TestFullSnapshotPendingDeltaDrop:
+    """While INVALID + FULL_SNAPSHOT-required, live deltas must be dropped
+    rather than applied-then-rejected (the apply polluted best_* and
+    re-asserted INVALID/book_initialized=False between snapshot recoveries)."""
+
+    def test_delta_dropped_while_full_snapshot_required(self):
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
+        )
+        assert state is not None
+        # Force the INVALID + FULL_SNAPSHOT recovery state.
+        state.data_quality = "INVALID"
+        state.transition = "RESYNC_REQUIRED"
+        state.recovery_required_source = "FULL_SNAPSHOT"
+        state.executable = False
+
+        store._apply_delta_internal(
+            t, {"side": "yes", "price_dollars": 0.30, "delta_fp": 5, "seq": 7}
+        )
+        ob = store._ob.get_book(t)
+        # The 30c delta level must not exist in the book.
+        assert 30 not in ob.yes_levels
+        # INVALID state preserved untouched.
+        assert state.data_quality == "INVALID"
+        assert state.recovery_required_source == "FULL_SNAPSHOT"
+
+    def test_delta_applies_when_live_delta_recovery_required(self):
+        """INVALID states requiring a LIVE_DELTA recovery must still apply
+        deltas (they are the only source that can attest recovery)."""
+        store = KalshiMarketStateStore()
+        t = "KXBTC15M-T"
+        state = store.apply_orderbook_message(
+            _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
+        )
+        state.data_quality = "INVALID"
+        state.transition = "INVALID_INVERTED"
+        state.recovery_required_source = ""  # -> LIVE_DELTA via transition map
+        state.executable = False
+
+        store._apply_delta_internal(
+            t, {"side": "yes", "price_dollars": 0.30, "delta_fp": 5, "seq": 7}
+        )
+        ob = store._ob.get_book(t)
+        assert ob.yes_levels.get(30) == 5
