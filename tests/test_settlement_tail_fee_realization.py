@@ -32,7 +32,9 @@ class TestTailFeeRealization:
             "merid.event_venues.kalshi.fills_ledger.get_fills_ledger"
         ) as mock_get_ledger:
             ledger = MagicMock()
+            # Hydrate consults the signed-proceeds round-trip record first.
             # 1 contract held NO at 49c, 2c entry fee, market resolves YES -> lose 51c.
+            ledger.get_market_round_trip_pnl_dollars.return_value = Decimal("-0.51")
             ledger.get_settlement_pnl_dollars.return_value = Decimal("-0.51")
             mock_get_ledger.return_value = ledger
 
@@ -48,7 +50,7 @@ class TestTailFeeRealization:
 
             corrected = poller._hydrate_pnl_from_ledger(settlement)
             assert corrected.realized_pnl_cents == -51.0
-            ledger.get_settlement_pnl_dollars.assert_called_once_with(
+            ledger.get_market_round_trip_pnl_dollars.assert_called_once_with(
                 "KXBTC15M-TEST-00", "yes"
             )
 
@@ -58,6 +60,7 @@ class TestTailFeeRealization:
             "merid.event_venues.kalshi.fills_ledger.get_fills_ledger"
         ) as mock_get_ledger:
             ledger = MagicMock()
+            ledger.get_market_round_trip_pnl_dollars.return_value = None
             ledger.get_settlement_pnl_dollars.return_value = None
             mock_get_ledger.return_value = ledger
 
