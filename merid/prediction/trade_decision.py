@@ -160,6 +160,29 @@ MERID_PI_STAR_TIERS_CENTS = os.environ.get("MERID_PI_STAR_TIERS_CENTS", "0:40,20
 # linearly as the held price falls below 0.50: slope * (0.5 - price).
 MERID_FLB_LONGSHOT_SLOPE = float(os.environ.get("MERID_FLB_LONGSHOT_SLOPE", "0.15"))
 
+# 2026-09-27: Market-lean fade gate.  Settled-fill cohort analysis
+# (scripts/_fade_vs_aligned_analysis.py, 75 filled entries) showed entries
+# that trade AGAINST a meaningful market lean are toxic for some assets and
+# profitable for others:
+#   BTC fades: n=14, 36% WR, -5.7c/trade   (blocked)
+#   XRP fades: n=5,  40% WR, -13.8c/trade  (blocked)
+#   DOGE fades:n=2,  0% WR,  -42c/trade    (blocked)
+#   ETH fades: n=5,  100% WR, +45c/trade   (allowed)
+#   SOL fades: n=5,  80% WR, +35.4c/trade  (allowed)
+# The toxic anatomy is always the same: market leans +12..24c, the model's
+# lean agrees in DIRECTION but is weaker in magnitude, so the relative-price
+# EV diff selects the opposite side and we systematically sell into the
+# prevailing move.  Fading leans below ~10c was net-positive (+19c/trade),
+# so only meaningful leans are gated.
+MERID_FADE_BLOCK_MIN_LEAN_CENTS = float(
+    os.environ.get("MERID_FADE_BLOCK_MIN_LEAN_CENTS", "10.0")
+)
+MERID_FADE_ALLOWED_ASSETS = {
+    s.strip().upper()
+    for s in os.environ.get("MERID_FADE_ALLOWED_ASSETS", "ETH,SOL").split(",")
+    if s.strip()
+}
+
 # 2026-09-23: Minimum time-to-expiry for new entries.  Late-window fills were
 # empirically the most adversely selected (momentum dominates the last minutes
 # of a 15m window and the market is most efficient there).  New entries must
@@ -2363,6 +2386,49 @@ def compute_trade_decision(
                 strike_price=float(strike_price),
                 fee_cents=float(fee) * 100.0,
             )
+
+    # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
+    # meaningful market lean on assets whose historical fade cohort is
+    # toxic.  See the cohort table next to MERID_FADE_BLOCK_MIN_LEAN_CENTS.
+    if selected_outcome is not None:
+        _mkt_mid = (float(yes_bid_cents) + float(yes_ask_cents)) / 200.0
+        _mkt_lean_c = (_mkt_mid - 0.5) * 100.0
+        indicators["market_lean_cents"] = _mkt_lean_c
+        _fade = (
+            (selected_outcome == "yes" and _mkt_lean_c < -MERID_FADE_BLOCK_MIN_LEAN_CENTS)
+            or (selected_outcome == "no" and _mkt_lean_c > MERID_FADE_BLOCK_MIN_LEAN_CENTS)
+        )
+        if _fade:
+            indicators["fade_gate_evaluated"] = True
+            if asset.upper() in MERID_FADE_ALLOWED_ASSETS:
+                indicators["fade_gate_outcome"] = "allowed_by_cohort"
+            else:
+                logger.info(
+                    "[TRADE-DECISION] asset=%s ticker=%s FADE GATE blocked %s entry: "
+                    "market lean %.1fc opposes trade side (historical fade cohort toxic)",
+                    asset, ticker, selected_outcome.upper(), _mkt_lean_c,
+                )
+                no_trade_reason = f"market_fade_blocked_{selected_outcome}"
+                log_rejected_candidate(
+                    reason=no_trade_reason,
+                    run_id=run_id,
+                    decision_id=decision_id,
+                    asset=asset,
+                    ticker=ticker,
+                    side=selected_outcome,
+                    model_p_selected=float(edge_breakdown.p_selected),
+                    held_price_cents=float(edge_breakdown.executable_entry_price) * 100.0,
+                    gross_edge=float(edge_breakdown.gross_edge),
+                    net_edge=float(edge_breakdown.net_edge),
+                    edge_threshold=float(yes_min_edge if selected_outcome == "yes" else no_min_edge),
+                    min_p_selected=float(yes_min_p if selected_outcome == "yes" else no_min_p),
+                    tte_seconds=float(seconds_to_expiry),
+                    spot_price=float(spot_price),
+                    strike_price=float(strike_price),
+                    fee_cents=float(fee) * 100.0,
+                )
+                selected_outcome = None
+                edge_breakdown = None
 
     if selected_outcome is not None:
         selected_action = "buy"
