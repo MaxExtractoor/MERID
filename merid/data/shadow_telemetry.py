@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -22,6 +24,67 @@ def _is_enabled() -> bool:
         "false",
         "off",
     )
+
+
+# ── Async writer (2026-09-27 loop-lag fix) ──────────────────────────────────
+# write_shadow_record() ran mkdir + json.dumps + write_text synchronously on
+# the event loop for every candidate decision (several per second across 5
+# assets) into a flat directory holding ~670k files. Records are now queued
+# and serialized by a single daemon thread; the queue is bounded so telemetry
+# can never apply backpressure to the trading path — overflow drops the new
+# record and increments a counter.
+_SHADOW_QUEUE_MAX = int(os.environ.get("MERID_SHADOW_QUEUE_MAX", "50000"))
+_shadow_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=_SHADOW_QUEUE_MAX)
+_shadow_dropped = 0
+_shadow_writer_started = False
+_shadow_writer_lock = threading.Lock()
+
+
+def _shadow_writer_loop() -> None:
+    global _shadow_dropped
+    while True:
+        record = _shadow_queue.get()
+        try:
+            record = _json_safe(record)
+            out_dir = _shadow_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_id = record.get("run_id", "unknown")
+            ticker = record.get("ticker", record.get("market_ticker", "unknown"))
+            record_type = record.get("record_type", "unknown")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            out_path = out_dir / f"{record_type}_{run_id}_{ticker}_{ts}.json"
+            out_path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+        except Exception:
+            # Telemetry must never break the trading path.
+            pass
+        finally:
+            _shadow_queue.task_done()
+
+
+def _ensure_shadow_writer() -> None:
+    global _shadow_writer_started
+    if _shadow_writer_started:
+        return
+    with _shadow_writer_lock:
+        if _shadow_writer_started:
+            return
+        t = threading.Thread(
+            target=_shadow_writer_loop,
+            name="shadow-telemetry-writer",
+            daemon=True,
+        )
+        t.start()
+        _shadow_writer_started = True
+
+
+def get_shadow_queue_depth() -> int:
+    """Observability: pending shadow records awaiting write."""
+    return _shadow_queue.qsize()
+
+
+def get_shadow_dropped_count() -> int:
+    """Observability: records dropped because the queue was full."""
+    return _shadow_dropped
 
 
 def _shadow_dir() -> Path:
@@ -45,22 +108,19 @@ def _json_safe(value: Any) -> Any:
 
 
 def write_shadow_record(record: Dict[str, Any]) -> None:
-    """Write a single shadow record to disk. No-op if disabled."""
+    """Queue a single shadow record for disk write. No-op if disabled."""
     if not _is_enabled():
         return
+    global _shadow_dropped
     try:
         record = dict(record)
         record.setdefault("schema_version", 1)
         record.setdefault("recorded_at_utc", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
-        record = _json_safe(record)
-        out_dir = _shadow_dir()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        run_id = record.get("run_id", "unknown")
-        ticker = record.get("ticker", record.get("market_ticker", "unknown"))
-        record_type = record.get("record_type", "unknown")
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"{record_type}_{run_id}_{ticker}_{ts}.json"
-        out_path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+        _ensure_shadow_writer()
+        try:
+            _shadow_queue.put_nowait(record)
+        except queue.Full:
+            _shadow_dropped += 1
     except Exception:
         # Telemetry must never break the trading path.
         pass

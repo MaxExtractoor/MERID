@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import contextvars
 import glob
 import json
@@ -9,7 +10,8 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+import queue as _queue_mod
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -281,10 +283,51 @@ _production_handler: Optional[SafeRotatingFileHandler] = None
 _stream_handler: Optional[logging.StreamHandler] = None
 _handlers_initialized: bool = False
 
+# ── Async logging fan-out (2026-09-27 loop-lag fix) ─────────────────────────
+# Every log record used to flow through two RotatingFileHandlers + a stream
+# handler synchronously on the calling thread. Each RotatingFileHandler emit
+# runs shouldRollover -> os.stat on an ~80MB file plus a write+flush, which a
+# py-spy profile showed was ~60% of remaining main-loop CPU (and ~25% of the
+# CF-RTI ingest thread). Records are now enqueued via a single non-blocking
+# QueueHandler; one QueueListener thread drives the same three real handlers,
+# so formats, filters, levels, and file names are unchanged while emit cost on
+# the caller becomes a put_nowait.
+_LOG_QUEUE_MAX = int(os.getenv("MERID_LOG_QUEUE_MAX", "200000"))
+_log_queue: "_queue_mod.Queue" = _queue_mod.Queue(maxsize=_LOG_QUEUE_MAX)
+_queue_handler: Optional[QueueHandler] = None
+_queue_listener: Optional[QueueListener] = None
+_log_dropped = 0
+
+
+class _NonBlockingQueueHandler(QueueHandler):
+    """QueueHandler that drops instead of blocking the calling thread."""
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        global _log_dropped
+        try:
+            self.queue.put_nowait(record)
+        except _queue_mod.Full:
+            _log_dropped += 1
+
+
+def get_log_dropped_count() -> int:
+    """Observability: log records dropped because the async queue was full."""
+    return _log_dropped
+
+
+def _stop_log_listener() -> None:
+    """atexit: drain pending records before interpreter teardown."""
+    try:
+        if _queue_listener is not None:
+            _queue_listener.stop()
+    except Exception:
+        pass
+
 
 def _ensure_handlers() -> None:
     """Create the shared file + console handlers (idempotent) with configuration-based settings."""
     global _file_handler, _production_handler, _stream_handler, _handlers_initialized
+    global _queue_handler, _queue_listener
     if _handlers_initialized:
         return
 
@@ -325,6 +368,18 @@ def _ensure_handlers() -> None:
     _stream_handler = logging.StreamHandler()
     _stream_handler.setFormatter(text_formatter)
     _stream_handler.addFilter(sensitive_filter)
+
+    _queue_handler = _NonBlockingQueueHandler(_log_queue)
+    _queue_listener = QueueListener(
+        _log_queue,
+        _file_handler,
+        _production_handler,
+        _stream_handler,
+        respect_handler_level=True,
+    )
+    _queue_listener.daemon = True
+    _queue_listener.start()
+    atexit.register(_stop_log_listener)
 
     _handlers_initialized = True
 
@@ -659,12 +714,8 @@ def get_logger(name: str) -> logging.Logger:
 
     _ensure_handlers()
 
-    if _file_handler not in logger.handlers:
-        logger.addHandler(_file_handler)
-    if _production_handler not in logger.handlers:
-        logger.addHandler(_production_handler)
-    if _stream_handler not in logger.handlers:
-        logger.addHandler(_stream_handler)
+    if _queue_handler is not None and _queue_handler not in logger.handlers:
+        logger.addHandler(_queue_handler)
 
     _LOGGER_CACHE[name] = logger
     return logger
