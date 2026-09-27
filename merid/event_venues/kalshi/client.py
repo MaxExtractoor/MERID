@@ -1052,6 +1052,9 @@ class KalshiVenueClient(EventVenueClient):
         start_time = replay_time()
         last_error: Optional[Exception] = None
         total_retry_start_time = replay_time()  # Track total retry duration
+        # Hoisted out of the loop: exception handlers below need it even when an
+        # early failure skipped the per-attempt computation.
+        is_write = method.upper() in ("POST", "PUT", "DELETE", "PATCH")
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
@@ -1084,7 +1087,6 @@ class KalshiVenueClient(EventVenueClient):
                 self._ensure_async_network_resources()
                 
                 # Token bucket: self-limit before hitting 429s
-                is_write = method.upper() in ("POST", "PUT", "DELETE", "PATCH")
                 if self._rate_limiter is None or self._request_semaphore is None:
                     raise RuntimeError("Rate limiter or request semaphore not initialized")
                 await self._rate_limiter.acquire(is_write=is_write)
@@ -1401,6 +1403,21 @@ class KalshiVenueClient(EventVenueClient):
                 
             except httpx.TimeoutException as e:
                 last_error = e
+                if is_write:
+                    # A timed-out write may have been accepted server-side —
+                    # ambiguous outcome. Surface it for client_order_id
+                    # reconciliation instead of blind-retrying.
+                    latency_ms = (replay_time() - start_time) * 1000
+                    logger.warning(
+                        f"[kalshi] {operation_name} ambiguous write timeout "
+                        f"({type(e).__name__}) — NOT retrying; outcome must be reconciled"
+                    )
+                    return OperationResult.fail(
+                        e,
+                        latency_ms=latency_ms,
+                        retries=attempt,
+                        operation=operation_name,
+                    )
                 if attempt < KALSHI_MAX_RETRIES:
                     # A timed-out request on a reused keep-alive connection is
                     # the dead-socket signature (peer FIN/RST invisible to httpx
@@ -1419,7 +1436,9 @@ class KalshiVenueClient(EventVenueClient):
                     await asyncio.sleep(wait_time)
                     continue
 
-            except (httpx.ConnectError, httpx.ReadError) as e:
+            except httpx.ConnectError as e:
+                # Connection could not be established: the request provably never
+                # reached Kalshi, so retrying is safe for reads AND writes.
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
                     try:
@@ -1427,6 +1446,40 @@ class KalshiVenueClient(EventVenueClient):
                     except Exception:
                         pass
                     # Jittered exponential backoff
+                    wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
+                    logger.warning(
+                        f"[kalshi] {operation_name} connection error, HTTP pool reset, retrying in {wait_time:.2f}s "
+                        f"(attempt {attempt + 1}): {e}"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
+            except (httpx.ReadError, httpx.RemoteProtocolError) as e:
+                # RemoteProtocolError/ReadError is the dead-keep-alive signature:
+                # the peer dropped the socket without sending a response.  For
+                # READS the pool reset forces the retry onto a fresh connection.
+                # For WRITES the submission outcome is ambiguous — the order may
+                # have been accepted before the drop — so we must NOT blind-retry;
+                # surface the failure and let the router reconcile by
+                # client_order_id / exchange order lookup instead.
+                last_error = e
+                if is_write:
+                    latency_ms = (replay_time() - start_time) * 1000
+                    logger.warning(
+                        f"[kalshi] {operation_name} ambiguous write transport error "
+                        f"({type(e).__name__}) — NOT retrying; outcome must be reconciled"
+                    )
+                    return OperationResult.fail(
+                        e,
+                        latency_ms=latency_ms,
+                        retries=attempt,
+                        operation=operation_name,
+                    )
+                if attempt < KALSHI_MAX_RETRIES:
+                    try:
+                        await self._reset_http_client_after_loop_error()
+                    except Exception:
+                        pass
                     wait_time = (KALSHI_BACKOFF_BASE ** attempt) * (1.0 + replay_random())
                     logger.warning(
                         f"[kalshi] {operation_name} connection error, HTTP pool reset, retrying in {wait_time:.2f}s "
