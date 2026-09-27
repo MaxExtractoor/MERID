@@ -1096,41 +1096,55 @@ def compute_order_size(
     # FAIL CLOSED: if the risk manager itself is unavailable, current risk state
     # cannot be established — new entries must size to zero rather than assume
     # the full (unthrottled) scale.
+    # 2026-09-27: Operator kill switch.  MERID_DISABLE_LOSS_CAP=1 bypasses the
+    # daily/weekly loss throttle entirely (the profile already sets
+    # guardrails.daily_loss_enabled=false; this flag aligns the sizing layer).
+    loss_cap_disabled = os.getenv(
+        "MERID_DISABLE_LOSS_CAP", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
     risk_manager_failed = False
-    try:
-        from merid.risk.unified_risk_manager import get_unified_risk_manager
-        loss_size_scale = get_unified_risk_manager().get_loss_adjusted_size_scale()
-    except Exception as _rm_exc:
-        logger.critical(
-            "[UNIFIED-SIZING] RISK_MANAGER_UNAVAILABLE: cannot establish loss-throttle "
-            "state for asset=%s (%s) — fail-closed: new entry size forced to zero",
-            asset, _rm_exc, exc_info=True,
+    loss_size_scale = 1.0
+    if loss_cap_disabled:
+        logger.info(
+            "[UNIFIED-SIZING] Daily/weekly loss cap disabled via "
+            "MERID_DISABLE_LOSS_CAP; sizing asset=%s on cash/exposure only",
+            asset,
         )
-        risk_manager_failed = True
-        loss_size_scale = 0.0
-        # Operator-visible alert + tamper-evident audit record (same convention
-        # as strategy.py bankroll-unavailable handling).
+    else:
         try:
-            from core.event_bus import get_event_bus
-            get_event_bus().emit("risk.risk_manager_unavailable", {
-                "asset": asset,
-                "reason": "risk_manager_exception",
-                "error": str(_rm_exc),
-                "action": "reject_sizing",
-            })
-        except Exception:
-            pass
-        try:
-            from core.risk_audit_chain import get_risk_audit_chain
-            get_risk_audit_chain().log_event("risk.risk_manager_unavailable", {
-                "asset": asset,
-                "reason": "risk_manager_exception",
-                "error": str(_rm_exc)[:200],
-                "action": "reject_sizing",
-            })
-        except Exception as _audit_exc:
-            logger.debug("Audit log failed (non-critical): %s", _audit_exc)
-    if loss_size_scale <= 0.0:
+            from merid.risk.unified_risk_manager import get_unified_risk_manager
+            loss_size_scale = get_unified_risk_manager().get_loss_adjusted_size_scale()
+        except Exception as _rm_exc:
+            logger.critical(
+                "[UNIFIED-SIZING] RISK_MANAGER_UNAVAILABLE: cannot establish loss-throttle "
+                "state for asset=%s (%s) — fail-closed: new entry size forced to zero",
+                asset, _rm_exc, exc_info=True,
+            )
+            risk_manager_failed = True
+            loss_size_scale = 0.0
+            # Operator-visible alert + tamper-evident audit record (same convention
+            # as strategy.py bankroll-unavailable handling).
+            try:
+                from core.event_bus import get_event_bus
+                get_event_bus().emit("risk.risk_manager_unavailable", {
+                    "asset": asset,
+                    "reason": "risk_manager_exception",
+                    "error": str(_rm_exc),
+                    "action": "reject_sizing",
+                })
+            except Exception:
+                pass
+            try:
+                from core.risk_audit_chain import get_risk_audit_chain
+                get_risk_audit_chain().log_event("risk.risk_manager_unavailable", {
+                    "asset": asset,
+                    "reason": "risk_manager_exception",
+                    "error": str(_rm_exc)[:200],
+                    "action": "reject_sizing",
+                })
+            except Exception as _audit_exc:
+                logger.debug("Audit log failed (non-critical): %s", _audit_exc)
+    if not loss_cap_disabled and loss_size_scale <= 0.0:
         logger.warning(
             "[UNIFIED-SIZING] Daily/weekly loss cap hit; rejecting size for asset=%s",
             asset,

@@ -592,6 +592,38 @@ MIN_EXIT_HOLD_SECONDS = float(os.getenv("MERID_MIN_EXIT_HOLD_SECONDS", "2.0"))  
 MIN_STOP_ARM_SECONDS = float(os.getenv("MERID_MIN_STOP_ARM_SECONDS", "5.0"))
 EXIT_PRICE_MAX_AGE_MS = float(os.getenv("MERID_EXIT_PRICE_MAX_AGE_MS", "10000.0"))  # 10s default
 
+
+# 2026-09-27 operator kill switch: MERID_DISABLE_EXIT_POLICY=1 suppresses every
+# automatic exit intent (take-profit, stop-loss, trailing, time-stop, edge and
+# policy-layer exits).  Positions are held to settlement resolution.  The
+# router's reduce-only exit capability and protective/manual paths are
+# unaffected — this flag only stops the policy layer from emitting intents.
+def _exit_policy_disabled() -> bool:
+    return os.getenv("MERID_DISABLE_EXIT_POLICY", "0").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+# Rate-limit suppression logs: position_id:reason -> last monotonic timestamp.
+_EXIT_POLICY_DISABLED_LOG: Dict[str, float] = {}
+
+
+def _log_exit_policy_suppressed(position: "Position", exit_reason, exit_price_cents, contracts_to_close=None) -> None:
+    key = f"{getattr(position, 'position_id', '?')}:{getattr(exit_reason, 'value', exit_reason)}"
+    now = time.monotonic()
+    if now - _EXIT_POLICY_DISABLED_LOG.get(key, -1e9) > 60.0:
+        _EXIT_POLICY_DISABLED_LOG[key] = now
+        logger.warning(
+            "[EXIT-POLICY-DISABLED] suppressed auto-exit: position=%s market=%s "
+            "reason=%s price=%sc contracts=%s - holding to settlement "
+            "(MERID_DISABLE_EXIT_POLICY=1)",
+            (getattr(position, "position_id", "") or "")[:8],
+            getattr(position, "market_id", None),
+            getattr(exit_reason, "value", exit_reason),
+            exit_price_cents,
+            contracts_to_close or "ALL",
+        )
+
 # CRITICAL FIX (2026-08-11): Observable counters for spread-stop protection.
 # These are reset on process start and logged prominently so the deterministic
 # loss factory can be proven absent in canary / production.
@@ -5204,6 +5236,9 @@ class PositionMonitor:
             bypass_in_flight_check: If True, skip the in-flight check (for expired markets)
             snapshot: Optional ExitPriceSnapshot used for the trigger
         """
+        if _exit_policy_disabled():
+            _log_exit_policy_suppressed(position, exit_reason, exit_price_cents, contracts_to_close)
+            return
         # CRITICAL FIX (2026-08-30): Use the executable bid for sell-side exits.
         # The monitor's current_price_cents is often the mid or ask; a SELL IOC
         # must be placed at the own-side bid to be marketable.  Repricing here
@@ -5674,6 +5709,9 @@ class PositionMonitor:
             contracts_to_close: Number of contracts to close
             exit_price_cents: Exit price in cents
         """
+        if _exit_policy_disabled():
+            _log_exit_policy_suppressed(position, ExitReason.SCALE_OUT, exit_price_cents, contracts_to_close)
+            return
         # Call callback if registered with scale-out flag
         if self._exit_intent_callback:
             try:
