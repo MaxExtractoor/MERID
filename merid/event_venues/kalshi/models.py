@@ -452,6 +452,12 @@ class KalshiMarketState:
     last_rest_bid_cents: Optional[int] = None
     last_rest_ask_cents: Optional[int] = None
     last_rest_quote_update_ts: float = 0.0
+    # Top-N ladders captured from the last authoritative REST orderbook apply.
+    # Used by the REST-preferred-BBO path to keep depth/yes_bids/no_bids
+    # consistent with the REST top-of-book while a lagged WS delta stream would
+    # otherwise re-pollute them between polls.
+    last_rest_yes_bids: Optional[list] = None
+    last_rest_no_bids: Optional[list] = None
     quote_owner: str = "UNKNOWN"
 
     # P0-2 UPSTREAM: Data quality tracking (GOOD, BAD_DUALITY, INCOMPLETE, UNKNOWN)
