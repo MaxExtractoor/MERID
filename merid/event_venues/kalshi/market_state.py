@@ -688,6 +688,7 @@ class KalshiMarketStateStore:
         # so a single stuck ticker cannot flood the log handlers and starve the event
         # loop (observed on 2026-09-01 after restart, ~150% CPU from log calls).
         self._last_recovery_reject_log_ts: Dict[str, float] = {}
+        self._last_rest_pref_log_ts: Dict[str, float] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -994,9 +995,13 @@ class KalshiMarketStateStore:
             # confirmed for new-entry gating prevents the strategy from being
             # permanently blocked when the market is quiet and only snapshots flow.
             state.live_sequence_confirmed = True
-        else:
+        elif prior_quality == "INVALID" or prior_transition == "CIRCUIT_BREAKER":
             # REST and other non-live snapshots still require a subsequent
-            # contiguous WS delta before new capital can be committed.
+            # contiguous WS delta before new capital can be committed.  This
+            # only applies when the attestation actually recovered a broken
+            # book: a routine REST-poll refresh of an already-GOOD book does
+            # not break delta-sequence history and must not revoke the flag
+            # (the poll loop would otherwise flicker it False every ~2s).
             state.live_sequence_confirmed = False
         return True
 
@@ -5750,17 +5755,22 @@ class KalshiMarketStateStore:
                 and state.last_rest_ask_cents is not None
                 and (ws_divergent or not ws_two_sided)
             ):
-                logger.warning(
-                    "[REST-PREFERRED-BBO] ticker=%s ws_bbo=%s/%s rest_bbo=%s/%s "
-                    "rest_age_s=%.2f - delta-derived book diverges from fresh REST; "
-                    "preferring REST top-of-book",
-                    ticker,
-                    state.best_bid_cents,
-                    state.best_ask_cents,
-                    state.last_rest_bid_cents,
-                    state.last_rest_ask_cents,
-                    rest_age_s,
-                )
+                # Rate-limit: this fires on every lagged delta during a fast
+                # market (hundreds/sec); one line per ticker per 10s is enough.
+                last_pref_log = self._last_rest_pref_log_ts.get(ticker, 0.0)
+                if now - last_pref_log >= 10.0:
+                    self._last_rest_pref_log_ts[ticker] = now
+                    logger.warning(
+                        "[REST-PREFERRED-BBO] ticker=%s ws_bbo=%s/%s rest_bbo=%s/%s "
+                        "rest_age_s=%.2f - delta-derived book diverges from fresh REST; "
+                        "preferring REST top-of-book",
+                        ticker,
+                        state.best_bid_cents,
+                        state.best_ask_cents,
+                        state.last_rest_bid_cents,
+                        state.last_rest_ask_cents,
+                        rest_age_s,
+                    )
                 state.best_bid_cents = state.last_rest_bid_cents
                 state.best_ask_cents = state.last_rest_ask_cents
                 if state.last_rest_yes_bids is not None:
@@ -6073,24 +6083,56 @@ class KalshiMarketStateStore:
         # bootstrap for a newly opened contract, but it is not yet usable.  Keep it
         # SUSPECT and non-executable until a contiguous delta populates at least one
         # side.  Quote fallbacks must not make an empty book appear executable.
+        # REST-PREFERRED-BBO: a lagged delta stream can drain the local ladder to
+        # empty even while the venue book is healthy; when a fresh REST quote is
+        # available the effective book is the REST book, so do not wipe BBO,
+        # quality, or live-sequence confirmation for the empty local ladder.
         if ob.initialized and not ob.yes_levels and not ob.no_levels:
-            state.executable = False
-            state.live_sequence_confirmed = False
-            if state.data_quality != "INVALID":
-                state.data_quality = "SUSPECT"
-                state.book_consistency = "SUSPECT"
-                state.transition = "BOOTSTRAP_EMPTY"
-            state.best_bid_cents = None
-            state.best_ask_cents = None
-            state.best_no_bid_cents = None
-            state.best_no_ask_cents = None
-            state.mid_cents = None
-            state.spread_cents = None
-            state.has_bid = False
-            state.has_ask = False
-            state.has_no_bid = False
-            state.has_no_ask = False
-            state.liquidity_status = LiquidityStatus.MISSING
+            rest_fresh_s = float(os.getenv("MERID_REST_BBO_MAX_AGE_S", "3.0"))
+            rest_quote_age = (
+                now - state.last_rest_quote_update_ts
+                if state.last_rest_quote_update_ts > 0
+                else float("inf")
+            )
+            if (
+                rest_quote_age <= rest_fresh_s
+                and state.last_rest_bid_cents is not None
+                and state.last_rest_ask_cents is not None
+            ):
+                state.best_bid_cents = state.last_rest_bid_cents
+                state.best_ask_cents = state.last_rest_ask_cents
+                state.best_no_bid_cents = 100 - state.last_rest_ask_cents
+                state.best_no_ask_cents = 100 - state.last_rest_bid_cents
+                if state.last_rest_yes_bids is not None:
+                    state.yes_bids = list(state.last_rest_yes_bids)
+                if state.last_rest_no_bids is not None:
+                    state.no_bids = list(state.last_rest_no_bids)
+                state.mid_cents = int(round((state.best_bid_cents + state.best_ask_cents) / 2.0))
+                state.spread_cents = state.best_ask_cents - state.best_bid_cents
+                state.has_bid = True
+                state.has_ask = True
+                state.has_no_bid = True
+                state.has_no_ask = True
+                state.executable = True
+                state.quote_owner = "REST_PREFERRED"
+            else:
+                state.executable = False
+                state.live_sequence_confirmed = False
+                if state.data_quality != "INVALID":
+                    state.data_quality = "SUSPECT"
+                    state.book_consistency = "SUSPECT"
+                    state.transition = "BOOTSTRAP_EMPTY"
+                state.best_bid_cents = None
+                state.best_ask_cents = None
+                state.best_no_bid_cents = None
+                state.best_no_ask_cents = None
+                state.mid_cents = None
+                state.spread_cents = None
+                state.has_bid = False
+                state.has_ask = False
+                state.has_no_bid = False
+                state.has_no_ask = False
+                state.liquidity_status = LiquidityStatus.MISSING
 
         # AUDIT: Update per-ticker snapshot counters
         self._snapshots_applied_total[ticker] = self._snapshots_applied_total.get(ticker, 0) + 1
