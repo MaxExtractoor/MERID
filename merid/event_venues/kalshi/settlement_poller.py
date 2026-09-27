@@ -619,6 +619,14 @@ class KalshiSettlementPoller:
         self._last_cursor: Optional[str] = None
         self._cursor_history: List[str] = []
         self._load_cursor_state()  # Load persisted cursor on init
+
+        # Durable graded-settlement watermark.  Without it every restart
+        # re-grades the entire REST lookback on the event loop (thousands of
+        # settlements x fills-ledger scans + callbacks), starving WS book
+        # updates and order routing for minutes — the measured cause of the
+        # p90 ~900ms loop lag that made WS quotes trail REST by 4-30c.
+        self._graded_keys_dirty: List[str] = []
+        self._load_graded_keys()
         
         # Callbacks: settlement -> None
         self._callbacks: List[Callable[[KalshiSettlement], None]] = []
@@ -643,6 +651,93 @@ class KalshiSettlementPoller:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    _GRADED_KEYS_RETENTION_FLOOR_S = 48 * 3600.0
+
+    def _graded_keys_path(self) -> str:
+        return os.getenv(
+            "MERID_SETTLEMENT_GRADED_PATH", "data/settlement_graded_keys.jsonl"
+        )
+
+    def _graded_keys_retention_s(self) -> float:
+        try:
+            override = float(os.getenv("MERID_SETTLEMENT_GRADED_RETENTION_S", "0"))
+        except (TypeError, ValueError):
+            override = 0.0
+        if override > 0:
+            return override
+        try:
+            lookback_s = float(self.config.lookback_hours) * 3600.0
+        except (TypeError, ValueError, AttributeError):
+            lookback_s = 0.0
+        return max(2.0 * lookback_s, self._GRADED_KEYS_RETENTION_FLOOR_S)
+
+    def _load_graded_keys(self) -> None:
+        """Load durable graded dedupe keys so restarts do not re-grade the
+        whole settlement lookback on the event loop.
+
+        File format: one ``<dedupe_key>|<persisted_epoch_s>`` per line.  Keys
+        older than the retention horizon are dropped and the file is compacted
+        once at load.  Retention defaults to max(2x lookback, 48h) — always
+        longer than the REST fetch window, so no fetched row can be wrongly
+        suppressed.
+        """
+        path = self._graded_keys_path()
+        try:
+            if not os.path.exists(path):
+                return
+            cutoff = _time.time() - self._graded_keys_retention_s()
+            kept: List[str] = []
+            total = 0
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    total += 1
+                    key, _, ts_s = line.partition("|")
+                    try:
+                        ts = float(ts_s)
+                    except (TypeError, ValueError):
+                        continue
+                    if key and ts >= cutoff:
+                        kept.append(line)
+                        self._graded_settlements.add(key)
+            if kept != [] and len(kept) < total:
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(kept) + "\n")
+                os.replace(tmp, path)
+            if self._graded_settlements:
+                logger.info(
+                    "[SETTLEMENT-POLLER] loaded %d durable graded keys (path=%s)",
+                    len(self._graded_settlements), path,
+                )
+        except Exception as exc:
+            logger.warning("[SETTLEMENT-POLLER] graded-keys load failed: %s", exc)
+
+    def _flush_graded_keys(self) -> None:
+        """Append newly-graded dedupe keys to the durable watermark file.
+
+        Keys are appended only after their callbacks completed (callers add to
+        ``_graded_keys_dirty`` post-callback), so a crash mid-poll replays just
+        the unfinished tail — and every downstream side effect is idempotent.
+        """
+        if not self._graded_keys_dirty:
+            return
+        path = self._graded_keys_path()
+        now_s = f"{_time.time():.3f}"
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                for key in self._graded_keys_dirty:
+                    fh.write(f"{key}|{now_s}\n")
+        except Exception as exc:
+            logger.warning("[SETTLEMENT-POLLER] graded-keys persist failed: %s", exc)
+        finally:
+            self._graded_keys_dirty.clear()
     
     # Canonical identity for settlement tracking (asset, timeframe, ticker, market_id)
     _VALID_ASSETS: Set[str] = frozenset(ACTIVE_CRYPTO_ASSETS)
@@ -756,17 +851,15 @@ class KalshiSettlementPoller:
             # Normalize ticker per Contract §1.2
             settlement = self._normalize_settlement(settlement)
 
-            # CRITICAL FIX (2026-08-29): Tail fee realization.  The API's
-            # `fee_cost` is the settlement fee (zero for binary markets), not the
-            # entry fee.  Use the fills ledger cost-basis + fee record so cheap-
-            # tail PnL reflects the full cost stack.
-            settlement = self._hydrate_pnl_from_ledger(settlement)
-
-            # Deduplicate via dedupe_key: (venue, market_id, settled_time)
+            # Deduplicate via dedupe_key: (venue, market_id, settled_time).
+            # Checked BEFORE hydration: ``_hydrate_pnl_from_ledger`` scans the
+            # fills ledger per row, and ~99% of every lookback page is already
+            # graded — hydrating it anyway was the dominant per-poll event-loop
+            # stall (O(settlements x fills) every 60s).
             dedupe_key = settlement.dedupe_key
             if dedupe_key in self._graded_settlements:
                 continue
-            
+
             # Check if gradable per Contract §2.2
             if not settlement.is_gradable():
                 # Track voided markets but don't grade them
@@ -774,7 +867,13 @@ class KalshiSettlementPoller:
                     voided_count += 1
                     logger.debug(f"Voided market skipped: {settlement.market_id}")
                 continue
-            
+
+            # CRITICAL FIX (2026-08-29): Tail fee realization.  The API's
+            # `fee_cost` is the settlement fee (zero for binary markets), not the
+            # entry fee.  Use the fills ledger cost-basis + fee record so cheap-
+            # tail PnL reflects the full cost stack.
+            settlement = self._hydrate_pnl_from_ledger(settlement)
+
             # Mark as seen to prevent replay
             self._graded_settlements.add(dedupe_key)
             self._settlement_cache[settlement.market_id] = settlement
@@ -810,6 +909,17 @@ class KalshiSettlementPoller:
                         callback(settlement)
                 except Exception as exc:
                     logger.error(f"Settlement callback error: {exc}")
+
+            # Persist the dedupe key only after this settlement's callbacks
+            # ran, so a mid-batch crash replays just the unfinished tail.
+            self._graded_keys_dirty.append(dedupe_key)
+
+            # Cooperative yield: a large grading batch must not monopolize the
+            # loop — WS orderbook deltas and order routing share this thread.
+            if new_count % 25 == 0:
+                await asyncio.sleep(0)
+
+        self._flush_graded_keys()
         
         # Publish batch to event bus for downstream consumers (opinion pipeline, UI)
         if new_settlements:
@@ -838,7 +948,10 @@ class KalshiSettlementPoller:
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
             ledger = get_decision_audit_ledger()
-            pending = ledger.pending_unsettled_tickers(
+            # Synchronous sqlite3 JOIN over ~200k decision rows — run off the
+            # event loop so the query cannot stall WS deltas or order routing.
+            pending = await asyncio.to_thread(
+                ledger.pending_unsettled_tickers,
                 grace_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_GRACE_S", "180")),
                 lookback_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_LOOKBACK_S", str(12 * 3600))),
                 limit=int(os.getenv("MERID_SETTLEMENT_SWEEP_LIMIT", "40")),
@@ -868,13 +981,14 @@ class KalshiSettlementPoller:
                 if event is None:
                     continue  # still open, voided, or ambiguous — try next poll
                 settled_yes = event.outcome == "yes"
-                ledger.record_settlement(
+                await asyncio.to_thread(
+                    ledger.record_settlement,
                     ticker=ticker,
                     close_ts=close_ts,
                     settled_yes=settled_yes,
                     settlement_value_cents=100 if settled_yes else 0,
                 )
-                record_outcome(event, out_path=DEFAULT_OUT_PATH)
+                await asyncio.to_thread(record_outcome, event, out_path=DEFAULT_OUT_PATH)
                 swept += 1
             except Exception as exc:
                 logger.debug(
@@ -1355,7 +1469,9 @@ class KalshiSettlementPoller:
                 audit_ledger = get_decision_audit_ledger()
                 close_ts = _kalshi_settlement_close_ts(settlement)
                 if close_ts is not None:
-                    audit_ledger.record_settlement(
+                    # Sync sqlite3 write — off the event loop.
+                    await asyncio.to_thread(
+                        audit_ledger.record_settlement,
                         ticker=settlement.market_id,
                         close_ts=close_ts,
                         settled_yes=settlement.settlement_price_cents == 100,
