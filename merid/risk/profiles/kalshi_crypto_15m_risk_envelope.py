@@ -56,6 +56,40 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
 # FIX 10: Persistent risk envelope state file path
 _WINDOW_STATE_FILE = os.getenv("MERID_WINDOW_STATE_FILE", "data/window_exposure_state.json")
 
+# ── Profile YAML parse cache (2026-09-27 loop-lag fix) ─────────────────────
+# compute_kalshi_crypto_15m_risk_envelope() runs per candidate per cycle, and
+# its yaml.safe_load of the profile dominated the main event loop (~38% of
+# samples in a py-spy profile of the live process). The parsed config is only
+# ever read via .get()/iteration (never mutated), so it is safe to reuse while
+# the file on disk is unchanged. (mtime_ns, size) is the invalidation key so
+# profile edits still take effect on the very next call.
+_PROFILE_YAML_LOCK = threading.Lock()
+_PROFILE_YAML_CACHE: Dict[str, Any] = {"key": None, "config": None}
+_DRAWDOWN_HALT_DISABLED_LOGGED = False
+
+
+def _load_profile_config_cached(profile_path) -> Dict[str, Any]:
+    """Load the risk profile YAML, cached by (path, mtime_ns, size)."""
+    import yaml
+    st = os.stat(profile_path)
+    key = (str(profile_path), st.st_mtime_ns, st.st_size)
+    with _PROFILE_YAML_LOCK:
+        if _PROFILE_YAML_CACHE["key"] == key:
+            return _PROFILE_YAML_CACHE["config"]
+    with open(profile_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    with _PROFILE_YAML_LOCK:
+        _PROFILE_YAML_CACHE["key"] = key
+        _PROFILE_YAML_CACHE["config"] = config
+    return config
+
+
+def _reset_profile_yaml_cache_for_testing() -> None:
+    """Testing-only: clear the cached profile parse."""
+    with _PROFILE_YAML_LOCK:
+        _PROFILE_YAML_CACHE["key"] = None
+        _PROFILE_YAML_CACHE["config"] = None
+
 
 def _reset_shared_window_state_for_testing() -> None:
     """
@@ -1141,8 +1175,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         profile_path = repo_root / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
     
     try:
-        with open(profile_path, 'r', encoding='utf-8') as f:
-            profile_config = yaml.safe_load(f)
+        profile_config = _load_profile_config_cached(profile_path)
     except Exception as e:
         logger.error(
             f"[RISK-ENVELOPE] Failed to load profile from {profile_path}: {e} - "
@@ -1162,7 +1195,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # Window-based risk limits REMOVED (2026-07-08: Fixed $2 exposure cap)
     # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
-    logger.info(
+    logger.debug(
         "[RISK-ENVELOPE] Window-based limits: REMOVED (using fixed $2 exposure model via global_slot_allocator)"
     )
 
@@ -1223,15 +1256,15 @@ def compute_kalshi_crypto_15m_risk_envelope(
     effective_capital = profile_capital if (profile_capital > 0 and is_validation) else live_bankroll_usd
     
     if is_validation and profile_capital > 0:
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Effective capital: ${effective_capital:.2f} (using profile capital for validation mode)"
         )
     else:
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Effective capital: ${effective_capital:.2f} (using live Kalshi bankroll)"
         )
         if profile_capital > 0:
-            logger.info(
+            logger.debug(
                 f"[RISK-ENVELOPE] Profile capital ${profile_capital:.2f} is unused in production mode (live bankroll takes precedence)"
             )
     
@@ -1249,7 +1282,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # CRITICAL FIX (2026-07-17): Removed max_concurrent_trades - $2 exposure cap is the limit
     
     # 2026-07-08: DISABLED percentage-based venue caps - using fixed $2 exposure model
-    logger.info(
+    logger.debug(
         f"[RISK-ENVELOPE] Venue caps: "
         f"max_single_order=${max_single_order_notional_usd:.2f}, "
         f"max_total=${max_total_notional_usd:.2f}"
@@ -1275,7 +1308,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         # 2026-07-08: DISABLED percentage-based floor logic - using fixed $2 exposure model
         
         # 2026-07-08: DISABLED percentage-based asset caps - using fixed $2 exposure model
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
             f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f} "
             f"(NOTE: This is an upper bound. Global slot allocator enforces ${fixed_exposure_cap_usd:.2f} TOTAL across all 5 assets)"
@@ -1288,7 +1321,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
             'min_depth_yes': min_depth_yes,
             'min_depth_no': min_depth_no
         }
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: depth thresholds (yes={min_depth_yes}, no={min_depth_no})"
         )
     
@@ -1301,7 +1334,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     agent_max_no_position = agent_defaults.get('max_no_position', 1)  # FIXED: Default 1 to match YAML (2026-07-14 fix)
     
     # 2026-07-08: DISABLED percentage-based agent defaults - using fixed $2 exposure model
-    logger.info(
+    logger.debug(
         f"[RISK-ENVELOPE] Agent defaults: "
         f"max_notional=${agent_max_notional_usd:.2f}, "
         f"max_orders_per_window={agent_max_orders_per_window}, "
@@ -1339,10 +1372,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # tracked but never latches the envelope halt.
     drawdown_halt_enabled = bool(guardrails.get('drawdown_halt_enabled', True))
     if not drawdown_halt_enabled:
-        logger.warning(
-            "[RISK-ENVELOPE] drawdown_halt_enabled=False: drawdown is tracked "
-            "and logged but will NOT halt entries (operator data-collection mode)"
-        )
+        # Static profile flag — warn once per process, not once per candidate.
+        global _DRAWDOWN_HALT_DISABLED_LOGGED
+        if not _DRAWDOWN_HALT_DISABLED_LOGGED:
+            _DRAWDOWN_HALT_DISABLED_LOGGED = True
+            logger.warning(
+                "[RISK-ENVELOPE] drawdown_halt_enabled=False: drawdown is tracked "
+                "and logged but will NOT halt entries (operator data-collection mode)"
+            )
 
     # Extract kelly fraction (CRITICAL FIX: 0.02 - aligned with profile (was 0.05))
     kelly_fraction = kelly_config.get('kelly_fraction', kelly_config.get('kelly_hard_cap', 0.02))
@@ -1382,7 +1419,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
                 max_daily_loss_pct = max_daily_loss_pct_raw
 
             # Log operation mode and limit
-            logger.info(
+            logger.debug(
                 f"[RISK-ENVELOPE] Operation mode: {operation_mode}, "
                 f"Daily loss limit: ${effective_capital * max_daily_loss_pct:.2f}"
             )
@@ -1394,7 +1431,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
             max_daily_loss_usd = float('inf')  # Effectively disabled
     
     # 2026-07-08: DISABLED percentage-based guardrails - using fixed $2 exposure model
-    logger.info(
+    logger.debug(
         f"[RISK-ENVELOPE] Guardrails: "
         f"per_trade_risk=DISABLED, "
         f"drawdown_halt={drawdown_halt_pct*100:.1f}%, "
@@ -1403,11 +1440,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
         f"kelly_fraction={kelly_fraction:.2f}"
     )
     if daily_loss_enabled:
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Daily loss: ${max_daily_loss_usd:.2f}"
         )
     else:
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Daily loss: DISABLED (drawdown is primary guardrail)"
         )
     
@@ -1445,11 +1482,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     correlation_multiplier = 1.0  # Default: no reduction
     
     if correlation_tracking_enabled:
-        logger.info(
+        logger.debug(
             f"[RISK-ENVELOPE] Correlation tracking enabled: threshold={correlation_threshold:.2f}"
         )
     else:
-        logger.info("[RISK-ENVELOPE] Correlation tracking disabled")
+        logger.debug("[RISK-ENVELOPE] Correlation tracking disabled")
     
     # ── Validation ────────────────────────────────────────────────────────────
     # 2026-07-09: DISABLED per-asset cap rescaling - global allocator handles edge-based allocation
@@ -1485,7 +1522,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     #             f"rescaled cap=${asset_max_notional_usd[asset_symbol]:.2f}"
     #         )
     
-    logger.info(
+    logger.debug(
         "[RISK-ENVELOPE] Per-asset cap rescaling DISABLED - global allocator handles edge-based allocation under venue cap"
     )
     
@@ -1606,7 +1643,7 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
         try:
             from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
             live_bankroll_usd = get_equity_for_risk_calc_sync()
-            logger.info(f"[RISK-ENVELOPE] Retrieved live bankroll: ${live_bankroll_usd}")
+            logger.debug(f"[RISK-ENVELOPE] Retrieved live bankroll: ${live_bankroll_usd}")
         except Exception as e:
             logger.error(
                 f"[RISK-ENVELOPE] Failed to get live bankroll: {e} - "
@@ -1620,7 +1657,7 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
             raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
     
     envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
-    logger.info(f"[RISK-ENVELOPE] Computed envelope successfully: global_limit={envelope.per_agent_window_limit_usd:.2f} total_venue_limit={envelope.total_venue_window_limit_usd:.2f}")
+    logger.debug(f"[RISK-ENVELOPE] Computed envelope successfully: global_limit={envelope.per_agent_window_limit_usd:.2f} total_venue_limit={envelope.total_venue_window_limit_usd:.2f}")
     return envelope
 
 
