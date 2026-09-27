@@ -9041,8 +9041,20 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
     # Conservative round-trip cost assumptions:
     # - Maker path: pay maker fee to enter, pay taker fee to exit worst-case.
     # - Taker path: pay taker fee to enter, pay taker fee to exit, plus the spread.
-    maker_round_trip_cents = 2 * maker_fee
-    taker_round_trip_cents = 2 * taker_fee + spread_cents
+    # 2026-09-27: when the exit policy is disabled (MERID_DISABLE_EXIT_POLICY=1)
+    # every entry holds to settlement — there is no exit order and Kalshi
+    # charges no settlement fee, so the exit leg is a phantom cost.  Gate on
+    # single-leg economics instead: maker pays its entry fee only; taker pays
+    # entry fee plus the spread it actually crosses.
+    _exits_disabled = os.environ.get(
+        "MERID_DISABLE_EXIT_POLICY", "0"
+    ).strip().lower() in ("1", "true", "yes")
+    if _exits_disabled:
+        maker_round_trip_cents = maker_fee
+        taker_round_trip_cents = taker_fee + spread_cents
+    else:
+        maker_round_trip_cents = 2 * maker_fee
+        taker_round_trip_cents = 2 * taker_fee + spread_cents
 
     maker_net = gross_edge_cents - maker_round_trip_cents
     taker_net = gross_edge_cents - taker_round_trip_cents
