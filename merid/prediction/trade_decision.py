@@ -236,14 +236,28 @@ MERID_ORDER_DECISION_LEDGER_ENABLED = os.environ.get("MERID_ORDER_DECISION_LEDGE
 # economically implausible for 15m crypto.  Env vars override the band per asset
 # or globally; MERID_ANNUALIZED_VOL_{ASSET} is still the primary requested value
 # when set, but it is clamped to this band unless an explicit override is given.
+# 2026-09-27: floors re-fit against 25,412 deduped settled decisions whose
+# vol_source was 'realized_clamped' (scripts/_vol_floor_analysis.py).
+# Brier-loss minimizers on that population were BTC 0.175, ETH 0.20,
+# SOL 0.25, XRP 0.30, DOGE 0.30 — the old floors over-clamped every asset
+# by 1.4-1.7x, pushing p toward 0.5 and shrinking model edge ~2x exactly
+# when the tape is quiet (the moments the floor was most often binding).
+# Counterfactual join at exact taker fees + production edge thresholds:
+# entries unlocked by lower floors were net-positive at every grid level
+# (peak +4.4c/trade at a 0.15 floor vs +5.2c/trade on 60% fewer trades at
+# 0.30).  The calibration-evidence gate remains the empirical backstop for
+# cells whose observed win rate never cleared cost; the vol floor only
+# guards against genuinely pathological estimator readings.
 _ANNUALIZED_VOL_BANDS = {
-    "BTC": (0.30, 0.90),
-    "ETH": (0.35, 1.00),
-    "SOL": (0.40, 1.10),
-    "XRP": (0.40, 1.10),
-    "DOGE": (0.45, 1.20),
+    "BTC": (0.18, 0.90),
+    "ETH": (0.20, 1.00),
+    "SOL": (0.25, 1.10),
+    "XRP": (0.30, 1.10),
+    "DOGE": (0.30, 1.20),
 }
-_ANNUALIZED_VOL_GLOBAL_MIN = float(os.environ.get("MERID_MIN_ANNUALIZED_VOL", "0.25"))
+# Global min must sit below the lowest asset floor or it re-binds them
+# (applied as max(asset_floor, GLOBAL_MIN)).
+_ANNUALIZED_VOL_GLOBAL_MIN = float(os.environ.get("MERID_MIN_ANNUALIZED_VOL", "0.15"))
 _ANNUALIZED_VOL_GLOBAL_MAX = float(os.environ.get("MERID_MAX_ANNUALIZED_VOL", "1.20"))
 
 # Optional vol sources (off by default).  Realized vol is preferred when fresh;
