@@ -11354,7 +11354,7 @@ class LeanAgent15m:
 
 
 
-            logger.info(
+            logger.debug(
 
                 "[DEPTH-THRESHOLD] asset=%s min_depth_yes=%d min_depth_no=%d (from profile)",
 
@@ -16057,13 +16057,17 @@ class LeanAgent15m:
 
                             try:
 
-                                # Load raw YAML to access min_decision_minute section
-
-                                import yaml
+                                # Load raw YAML to access min_decision_minute section.
+                                # Uses the shared mtime-keyed cache — re-parsing the profile
+                                # per candidate was dominating the event loop (py-spy ~33%).
 
                                 from pathlib import Path
 
                                 import os
+
+                                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+                                    _load_profile_config_cached,
+                                )
 
                                 profile_name = os.getenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
 
@@ -16077,9 +16081,7 @@ class LeanAgent15m:
 
 
 
-                                with open(profile_path, 'r', encoding='utf-8') as f:
-
-                                    profile_yaml = yaml.safe_load(f)
+                                profile_yaml = _load_profile_config_cached(profile_path)
 
 
 
@@ -16091,7 +16093,7 @@ class LeanAgent15m:
 
                                 min_decision_minute = min_decision_minute_config.get(asset_symbol, 0)
 
-                                logger.info(
+                                logger.debug(
 
                                     "[MIN-DECISION-MINUTE] asset=%s min_decision_minute=%d (from profile YAML)",
 
