@@ -225,6 +225,7 @@ class KalshiWebSocket(EventVenueStream):
         # BUG-FIX (2026-05-07): Increased to 32768 to handle high message volume (observed 63.6% queue pressure)
         # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
         self._msg_queue: Optional[asyncio.Queue] = None
+        self._msg_queue_guard = threading.Lock()
         self._processor_task: Optional[asyncio.Task] = None
 
         # ── Orderbook snapshot cache ───────────────────────────────────
@@ -364,24 +365,83 @@ class KalshiWebSocket(EventVenueStream):
 
     def _ensure_msg_queue(self) -> asyncio.Queue:
         """Lazy-initialize the message queue in the current event loop.
-        
+
         PERFORMANCE FIX: Increased queue size and added pressure monitoring
         to prevent overflow and sequence gaps.
+
+        2026-09-27 FIX: asyncio.Queue binds to the event loop of its first
+        blocking call and never re-binds.  When the dedicated WS I/O thread
+        restarts it creates a NEW event loop, so a queue bound to the dead
+        loop raises "bound to a different event loop" on every get() — the
+        processor wedges in an error loop (~73k warnings/hour) and no WS
+        event is ever delivered.  Detect the stale binding and rebuild the
+        queue on the current loop, migrating any pending items.
         """
-        if self._msg_queue is None:
-            # Increased from 65536 to 131072 to handle burst traffic from 15m five-ticker rollover windows
-            self._msg_queue = asyncio.Queue(maxsize=131072)
-            logger.info("[WS-QUEUE] Initialized message queue with maxsize=131072")
-        return self._msg_queue
+        guard = getattr(self, "_msg_queue_guard", None)
+        if guard is None:
+            guard = self._msg_queue_guard = threading.Lock()
+        with guard:
+            if self._msg_queue is None:
+                # Increased from 65536 to 131072 to handle burst traffic from 15m five-ticker rollover windows
+                self._msg_queue = asyncio.Queue(maxsize=131072)
+                logger.info("[WS-QUEUE] Initialized message queue with maxsize=131072")
+            else:
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                if running_loop is not None:
+                    bound_loop = getattr(self._msg_queue, "_loop", None)
+                    if bound_loop is not None and bound_loop is not running_loop:
+                        old_q = self._msg_queue
+                        new_q = asyncio.Queue(maxsize=old_q.maxsize)
+                        migrated = 0
+                        while True:
+                            try:
+                                new_q.put_nowait(old_q.get_nowait())
+                                migrated += 1
+                            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                                break
+                        self._msg_queue = new_q
+                        logger.warning(
+                            "[WS-QUEUE] Message queue was bound to a stale event loop "
+                            "(old_loop_closed=%s); recreated on the current loop, migrated=%d items",
+                            bound_loop.is_closed(), migrated,
+                        )
+            return self._msg_queue
+
+    @staticmethod
+    def _stale_bound_loop(obj: Any) -> bool:
+        """True if an asyncio primitive was bound to a different event loop.
+
+        asyncio.Queue/Lock/Event lazily capture the running loop on first
+        use (_LoopBoundMixin._loop) and raise RuntimeError("bound to a
+        different event loop") forever afterward if the owning loop changes —
+        e.g. when the dedicated WS I/O thread is restarted with a fresh loop.
+        """
+        bound = getattr(obj, "_loop", None)
+        if bound is None:
+            return False
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return bound is not running
 
     def _ensure_reconnect_lock(self) -> asyncio.Lock:
         """Lazy-initialize the reconnect lock in the current event loop."""
+        if self._reconnect_lock is not None and self._stale_bound_loop(self._reconnect_lock):
+            logger.warning("[WS-RECONNECT-LOCK] Lock bound to stale event loop - recreating")
+            self._reconnect_lock = None
         if self._reconnect_lock is None:
             self._reconnect_lock = asyncio.Lock()
         return self._reconnect_lock
 
     def _ensure_ws_recv_lock(self) -> asyncio.Lock:
         """Lazy-initialize the WS recv lock in the current event loop."""
+        if getattr(self, '_ws_recv_lock', None) is not None and self._stale_bound_loop(self._ws_recv_lock):
+            logger.warning("[WS-RECV-LOCK] Lock bound to stale event loop - recreating")
+            self._ws_recv_lock = None
         if not hasattr(self, '_ws_recv_lock') or self._ws_recv_lock is None:
             self._ws_recv_lock = asyncio.Lock()
         return self._ws_recv_lock
@@ -1836,9 +1896,13 @@ class KalshiWebSocket(EventVenueStream):
                     logger.debug("[WS-PROCESSOR] Before queue_util: queue_size=%d maxsize=%d", 
                                self._ensure_msg_queue().qsize(), self._ensure_msg_queue().maxsize)
                 
+                # Capture the queue for this batch so get()/task_done() stay
+                # paired even if _ensure_msg_queue rebinds to a new loop later.
+                batch_queue = self._ensure_msg_queue()
+
                 # Calculate current queue pressure for adaptive batch sizing
-                queue_size = self._ensure_msg_queue().qsize()
-                queue_util = queue_size / self._ensure_msg_queue().maxsize
+                queue_size = batch_queue.qsize()
+                queue_util = queue_size / batch_queue.maxsize
                 batch_size = _BATCH_SIZE_HIGH_PRESSURE if queue_util > _PRESSURE_THRESHOLD else _BATCH_SIZE_LOW_PRESSURE
                 
                 # PERFORMANCE FIX: Log queue pressure warnings and trigger backpressure
@@ -1863,12 +1927,12 @@ class KalshiWebSocket(EventVenueStream):
                         # must not sleep or we lose throughput under a fast producer.
                         if i == 0:
                             try:
-                                item = await asyncio.wait_for(self._ensure_msg_queue().get(), timeout=1.0)
+                                item = await asyncio.wait_for(batch_queue.get(), timeout=1.0)
                             except asyncio.TimeoutError:
                                 break
                         else:
                             try:
-                                item = self._ensure_msg_queue().get_nowait()
+                                item = batch_queue.get_nowait()
                             except asyncio.QueueEmpty:
                                 break
                     except asyncio.TimeoutError:
@@ -1883,7 +1947,7 @@ class KalshiWebSocket(EventVenueStream):
                     # PERFORMANCE FIX (2026-08-23): Build a task for each message and gather
                     # them as a bounded batch. This keeps the queue from growing while still
                     # limiting the number of in-flight coroutines to a single batch.
-                    task = self._process_single_message(callback, data)
+                    task = self._process_single_message(callback, data, source_queue=batch_queue)
                     if task is not None:
                         tasks.append(task)
                     messages_processed += 1
@@ -1904,7 +1968,21 @@ class KalshiWebSocket(EventVenueStream):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"WS queue processor error: {e}")
+                # 2026-09-27: rate-limit this warning — a persistent fault (the
+                # queue bound to a stale event loop after a WS-thread restart)
+                # previously emitted ~73k warnings/hour and drowned real errors.
+                now = _time.monotonic()
+                last = getattr(self, "_qproc_err_last_ts", 0.0)
+                self._qproc_err_suppressed = getattr(self, "_qproc_err_suppressed", 0) + 1
+                if now - last >= 5.0:
+                    logger.warning(
+                        "WS queue processor error: %s (suppressed=%d in last %.1fs)",
+                        e, self._qproc_err_suppressed, now - last if last else 0.0,
+                    )
+                    self._qproc_err_last_ts = now
+                    self._qproc_err_suppressed = 0
+                # A stale-loop binding self-heals on the next iteration via
+                # _ensure_msg_queue(); other faults keep the brief backoff.
                 await asyncio.sleep(0.001)  # Brief pause on error
                 
     async def _run_callback(self, data: Dict[str, Any]) -> None:
@@ -1955,11 +2033,15 @@ class KalshiWebSocket(EventVenueStream):
         except Exception as e:
             logger.warning(f"WS callback execution failed: {e}")
 
-    def _process_single_message(self, callback: Optional[Callable[[Any], None]], data: Dict[str, Any]) -> Optional[asyncio.Task]:
+    def _process_single_message(self, callback: Optional[Callable[[Any], None]], data: Dict[str, Any], source_queue: Optional[asyncio.Queue] = None) -> Optional[asyncio.Task]:
         """Process a single WS message and return the async task for the caller to await.
 
         The caller (``_process_queue``) is responsible for awaiting the task so that
         only a small, predictable number of callbacks are in flight at once.
+
+        ``source_queue`` is the queue the item was get() from; task_done() must
+        be called on that same queue object — _ensure_msg_queue() may have
+        rebound the attribute to a new queue after a stale-loop rebuild.
         """
         # CRITICAL DIAGNOSTIC: Log first few callbacks to confirm callback chain is working
         if not hasattr(self, '_callback_count'):
@@ -2042,7 +2124,7 @@ class KalshiWebSocket(EventVenueStream):
                 exc_info=True
             )
         finally:
-            self._ensure_msg_queue().task_done()
+            (source_queue if source_queue is not None else self._ensure_msg_queue()).task_done()
             elapsed = _time.monotonic() - t0
             self._process_time_sum += elapsed
             self._process_time_count += 1

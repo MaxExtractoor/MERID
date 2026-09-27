@@ -504,6 +504,41 @@ async def lifespan(app: FastAPI):
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
     logger.info("=" * 80)
 
+    # CRITICAL FIX (2026-09-27): Single-instance guard — the FIRST startup
+    # check, before any side effects.  FastAPI runs the lifespan before
+    # uvicorn binds its port, so a second uvicorn previously completed the
+    # entire live startup (WS, reconciliation, live entry loop) for ~60s
+    # before the bind failed — two concurrent live loops.  Acquire an OS
+    # mutex + probe the port; a duplicate dies here before touching Kalshi.
+    try:
+        from merid.single_instance import (
+            acquire_live_instance_guard,
+            DuplicateInstanceError,
+        )
+        try:
+            # port=None → resolve from MERID_HTTP_PORT env / uvicorn --port argv
+            resolved_guard_port = acquire_live_instance_guard(port=None)
+            logger.info(
+                "[LIFESPAN] Step 0: single-instance guard acquired (port=%s free)",
+                resolved_guard_port,
+            )
+        except DuplicateInstanceError as dup_err:
+            logger.critical(
+                "[LIFESPAN-SECURITY] DUPLICATE INSTANCE REFUSED: %s",
+                dup_err,
+            )
+            raise SystemExit(3)
+    except SystemExit:
+        raise
+    except Exception as guard_err:
+        # Fail closed: if we cannot prove single ownership, do not risk a
+        # second live trading loop.
+        logger.critical(
+            "[LIFESPAN-SECURITY] Single-instance guard could not be acquired: %s",
+            guard_err,
+        )
+        raise SystemExit(3)
+
     # CRITICAL FIX (2026-08-11): Fail-hard startup guard.  Single-user operator
     # bypass must never be combined with live trading latches.
     live_latches = [
