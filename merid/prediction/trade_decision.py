@@ -664,8 +664,7 @@ def _compute_dynamic_min_required_edge(
         candidates, 2026-09) showed the marginal 0-2c-below-gate band on
         favorites was net profitable (+9.7c/trade, 75% win rate) -- the full
         convexity term was over-rejecting favorites.
-      - FLB longshot premium for held prices below 50c (sub-50c counterfactuals
-        are net-negative without it).
+      - FLB longshot premium for held prices below 35c.
 
     The bid/ask spread is deliberately NOT added here: ``executable_entry_price``
     is the taker ask, so the full spread is already charged inside gross_edge,
@@ -673,17 +672,27 @@ def _compute_dynamic_min_required_edge(
     third half-spread term was double-charging the same cost.
 
     The final value is clamped to the global floor and a 15% sanity ceiling.
+
+    2026-09-27 threshold refit (scripts/_gate_cost_analysis.py): 20,744
+    settled candidates the model scored net-positive but the edge gate
+    rejected realized this at expiry, net of fees at the decision-time ask:
+
+        <25c:  -0.41c   25-34c: -0.93c   (FLB premium remains justified)
+        35-44c:+2.51c   45-49c: +7.00c   50-64c: +10.04c (all 5 assets
+        +8.5c..+13.7c)  65-74c: +8.01c   75+c: +4.66c
+
+    The old floors (BTC 3c / ETH,SOL 4c / XRP,DOGE 5c) + FLB premium from
+    50c rejected ~700 model-liked candidates/day in the 35c+ band that
+    realized +2.5c..+10c per trade.  Floors halved; FLB premium now starts
+    below 35c where the realized data actually turns toxic.
     """
-    # Asset-tier base floor.  These are the research-backed net-of-fee floors:
-    # BTC ~3%, ETH/SOL ~4%, XRP/DOGE ~5%.  They are intentionally conservative
-    # enough to keep the Kelly / half-Kelly sizing positive-EV.
     asset_base = {
-        "BTC": 0.03,
-        "ETH": 0.04,
-        "SOL": 0.04,
-        "XRP": 0.05,
-        "DOGE": 0.05,
-    }.get(asset.upper(), 0.05)
+        "BTC": 0.015,
+        "ETH": 0.02,
+        "SOL": 0.02,
+        "XRP": 0.025,
+        "DOGE": 0.025,
+    }.get(asset.upper(), 0.025)
 
     base = max(float(floor_min_required_edge), asset_base)
 
@@ -694,12 +703,13 @@ def _compute_dynamic_min_required_edge(
     convexity_k = 0.04 if p < 0.5 else 0.02
     price_adj = convexity_k * p * (1.0 - p)
 
-    # Favorite-longshot bias reserve.  Kalshi transaction-level studies (Burgi
-    # et al. 2025, CEPR DP20631) show sub-50c contracts systematically win less
-    # than their price implies (contracts <10c lose >60%).  A linear premium
-    # that grows as the held price falls below 50c compensates for that bias:
-    # at 35c it adds ~2.25c of required net edge, at 10c ~6c, at 50c+ zero.
-    flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.5 - p)
+    # Favorite-longshot bias reserve.  Our own settled-candidate join
+    # (2026-09-27, n=20,744 model-liked rejects) shows the realized turn only
+    # below 35c: 25-34c nets -0.93c, sub-25c -0.41c, while 35-44c is +2.51c
+    # and 45-49c +7.0c.  The premium therefore starts below 35c, not 50c
+    # (Burgi-style sub-50c research holds for unconditional base rates, but
+    # our model-conditioned 35-50c cells clear fees).
+    flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.35 - p)
 
     dynamic = base + price_adj + flb_adj
     return max(0.02, min(dynamic, 0.15))
