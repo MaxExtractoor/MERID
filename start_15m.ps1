@@ -192,6 +192,14 @@ Write-Host "[start_15m] MERID_SINGLE_USER_OPERATOR=$($env:MERID_SINGLE_USER_OPER
 $env:MERID_KALSHI_WS_CLIENT = "ws"
 Write-Host "[start_15m] MERID_KALSHI_WS_CLIENT=$($env:MERID_KALSHI_WS_CLIENT)" -ForegroundColor Cyan
 
+# 1.4 Operator directive (2026-09-27): disable the automatic exit policy
+# (take-profit/stop/trailing/time/edge exits — positions hold to settlement;
+# reduce-only capability is unaffected) and the unified-sizing daily/weekly
+# loss cap (profile already sets guardrails.daily_loss_enabled=false).
+$env:MERID_DISABLE_EXIT_POLICY = "1"
+$env:MERID_DISABLE_LOSS_CAP = "1"
+Write-Host "[start_15m] MERID_DISABLE_EXIT_POLICY=$($env:MERID_DISABLE_EXIT_POLICY) MERID_DISABLE_LOSS_CAP=$($env:MERID_DISABLE_LOSS_CAP)" -ForegroundColor Yellow
+
 # 2. ENABLE live trading.  ALL FOUR latches are required for live; any missing
 #    latch demotes to PAPER (orders simulated, not sent).
 $env:TRADING_ENABLED = "true"
