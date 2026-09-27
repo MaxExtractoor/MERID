@@ -241,7 +241,22 @@ class KalshiClientV2:
                         verify=get_shared_ssl_context(),
                     )
         return self._client
-    
+
+    async def _drop_http_client(self) -> None:
+        """Discard the pooled client after a transport fault.
+
+        A keep-alive connection dropped by the peer looks alive to httpx until
+        the next request hangs on it (the 69s get_balance stall).  Clearing the
+        client forces the retry onto a fresh connection instead of re-hanging
+        on the dead socket.
+        """
+        client, self._client = self._client, None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
     def _load_private_key(self) -> bool:
         """Load RSA private key for request signing."""
         _this_cache_key = self._private_key_path or ("pem" if self._private_key_pem else "")
@@ -495,6 +510,32 @@ class KalshiClientV2:
                     logger.error(f"[KalshiClientV2] Max retries exceeded for connect error")
                     raise
                     
+            except httpx.TransportError as e:
+                # Transient transport fault: peer dropped a half-open
+                # keep-alive socket, TLS reset, or disconnect before response
+                # (RemoteProtocolError, ReadError, WriteError, NetworkError).
+                # Safe to retry READS on a fresh connection — re-signing at the
+                # top of the loop keeps the timestamp fresh.  WRITES re-raise:
+                # the request may have been processed before the drop, so the
+                # outcome is ambiguous and must be reconciled via
+                # client_order_id/order lookup rather than blind-retried.
+                last_error = f"Transport error: {e}"
+                if not allow_retry or is_write:
+                    raise
+                if attempt < KALSHI_MAX_RETRIES:
+                    backoff = KALSHI_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        f"[KalshiClientV2] Transport error on {endpoint} "
+                        f"({type(e).__name__}: {e}), attempt {attempt + 1}/{KALSHI_MAX_RETRIES + 1} — "
+                        f"HTTP pool dropped, retrying in {backoff:.1f}s"
+                    )
+                    await self._drop_http_client()
+                    client = await self._get_client()
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.error(f"[KalshiClientV2] Max retries exceeded for transport error: {e}")
+                    raise
+
             except Exception as e:
                 # Non-retryable error - raise immediately
                 logger.error(f"[KalshiClientV2] Non-retryable error: {type(e).__name__}: {e}")

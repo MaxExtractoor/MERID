@@ -245,3 +245,116 @@ async def test_v1_request_retries_timestamp_expired_without_reauthenticate(monke
         "timestamp_expired must not trigger _authenticate — signature was stale, not creds"
     )
     assert sends[0]["KALSHI-ACCESS-TIMESTAMP"] != sends[1]["KALSHI-ACCESS-TIMESTAMP"]
+
+
+# ---------------------------------------------------------------------------
+# client_v2._request — transient transport errors (RemoteProtocolError et al.)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_v2_request_retries_remote_protocol_error_on_reads():
+    """Server dropping a half-open keep-alive conn is transient for reads —
+    retry on a fresh connection with a fresh signature."""
+    from merid.event_venues.kalshi import client_v2 as cv2
+
+    client = _v2_client()
+    client._client = None
+    drops = []
+
+    orig_drop = client._drop_http_client
+    async def _drop():
+        drops.append(1)
+    client._drop_http_client = _drop
+
+    calls: List[dict] = []
+
+    class _FakeHTTP:
+        async def request(self, method, path, headers=None, **kw):
+            calls.append(dict(headers or {}))
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError(
+                    "Server disconnected without sending a response."
+                )
+            return _resp(200, '{"balance": 100}')
+
+    async def _get_client():
+        return _FakeHTTP()
+
+    client._get_client = _get_client
+
+    import asyncio as _a
+    orig_sleep = _a.sleep
+    async def _fast_sleep(_):
+        await orig_sleep(0)
+    cv2.asyncio.sleep = _fast_sleep
+    try:
+        resp = await client._request(
+            "GET", "/portfolio/positions", skip_rate_limiter=True
+        )
+    finally:
+        cv2.asyncio.sleep = orig_sleep
+
+    assert resp.status_code == 200
+    assert len(calls) == 2, f"expected retry, got {len(calls)} sends"
+    assert drops, "pool must be dropped so the retry uses a fresh connection"
+    assert calls[0]["KALSHI-ACCESS-TIMESTAMP"] != calls[1]["KALSHI-ACCESS-TIMESTAMP"]
+
+
+@pytest.mark.asyncio
+async def test_v2_request_remote_protocol_error_on_writes_raises():
+    """On a WRITE the outcome is ambiguous (request may have been processed
+    before the drop) — must surface for reconciliation, never blind-retry."""
+    from merid.event_venues.kalshi import client_v2 as cv2
+
+    client = _v2_client()
+    client._client = None
+    calls = 0
+
+    class _FakeHTTP:
+        async def request(self, method, path, headers=None, **kw):
+            nonlocal calls
+            calls += 1
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            )
+
+    async def _get_client():
+        return _FakeHTTP()
+
+    client._get_client = _get_client
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        await client._request(
+            "POST", "/portfolio/orders", is_write=True, skip_rate_limiter=True
+        )
+    assert calls == 1, f"write must not be retried, got {calls} sends"
+
+
+@pytest.mark.asyncio
+async def test_v2_request_transport_error_honors_allow_retry_false():
+    """allow_retry=False callers (get_balance) classify the result themselves."""
+    from merid.event_venues.kalshi import client_v2 as cv2
+
+    client = _v2_client()
+    client._client = None
+    calls = 0
+
+    class _FakeHTTP:
+        async def request(self, method, path, headers=None, **kw):
+            nonlocal calls
+            calls += 1
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            )
+
+    async def _get_client():
+        return _FakeHTTP()
+
+    client._get_client = _get_client
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        await client._request(
+            "GET", "/portfolio/balance",
+            skip_rate_limiter=True, allow_retry=False,
+        )
+    assert calls == 1
