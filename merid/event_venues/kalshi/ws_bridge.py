@@ -3316,6 +3316,109 @@ class KalshiWebSocketBridge:
         store.apply_orderbook_message(msg, via)
         return True
 
+    async def _poll_ticker_once(self, client, store, ticker: str) -> None:
+        """Fetch one ticker orderbook via REST and apply it to the state store.
+
+        Called concurrently per ticker by _rest_polling_loop (previously a
+        serial loop that left each book 2-4s behind live REST).
+        """
+        try:
+            fetched_at = _utc_now()
+            logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s starting", ticker)
+            orderbook = await self._fetch_rest_orderbook(client, ticker)
+            logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s result=%s", ticker, type(orderbook).__name__ if orderbook else "None")
+
+            # SNAPSHOT-FETCH-TRACKING: Log fetch details for polling loop
+            if orderbook:
+                yes_levels = len(orderbook.bids) if orderbook.bids else 0
+                no_levels = len(orderbook.asks) if orderbook.asks else 0
+                logger.info(
+                    "[SNAPSHOT-FETCH] ticker=%s status_code=200 yes_levels=%d no_levels=%d fetched_at=%s source=REST_POLL",
+                    ticker,
+                    yes_levels,
+                    no_levels,
+                    fetched_at.isoformat()
+                )
+            else:
+                logger.warning(
+                    "[SNAPSHOT-FETCH-FAIL] ticker=%s success=False status_code=unknown fetched_at=%s source=REST_POLL",
+                    ticker,
+                    fetched_at.isoformat()
+                )
+
+            if orderbook:
+                # Log orderbook shape
+                logger.info("[WS-FALLBACK] REST-ORDERBOOK-SHAPE ticker=%s bids_type=%s asks_type=%s bids_count=%d asks_count=%d",
+                           ticker,
+                           type(orderbook.bids).__name__ if orderbook.bids else "None",
+                           type(orderbook.asks).__name__ if orderbook.asks else "None",
+                           len(orderbook.bids) if orderbook.bids else 0,
+                           len(orderbook.asks) if orderbook.asks else 0)
+
+                # Convert REST orderbook to WS message format
+                # REST API returns tuples (price, size), not objects with attributes
+                yes_levels = []
+                no_levels = []
+
+                # Handle bids (yes side)
+                if orderbook.bids:
+                    for bid in orderbook.bids:
+                        if isinstance(bid, tuple) and len(bid) == 2:
+                            # Tuple format: (price, size)
+                            logger.debug("[WS-FALLBACK] BID tuple: %s", bid)
+                            yes_levels.append([float(bid[0]), float(bid[1])])
+                        elif hasattr(bid, 'price') and hasattr(bid, 'size') and not isinstance(bid, tuple):
+                            # Object format with price/size attributes
+                            logger.debug("[WS-FALLBACK] BID object: price=%s size=%s", bid.price, bid.size)
+                            yes_levels.append([float(bid.price), float(bid.size)])
+
+                # CRITICAL FIX (2026-08-03): Use REAL NO bids from the REST
+                # response. client._to_venue_orderbook puts Kalshi's no_dollars
+                # (NO bids, NO-space dollars) into orderbook.asks. The WS
+                # orderbook_snapshot "no" array must be NO bids in NO space.
+                # The previous code derived [[1 - yes_bid, size]] which is the
+                # implied NO *ask*, not the NO bid - it replaced the entire real
+                # NO bid book with a different side's quantity, skewing all
+                # downstream NO-side depth/OFI/microstructure gates.
+                if orderbook.asks:
+                    for ask in orderbook.asks:
+                        if isinstance(ask, tuple) and len(ask) == 2:
+                            no_levels.append([float(ask[0]), float(ask[1])])
+                        elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
+                            no_levels.append([float(ask.price), float(ask.size)])
+                if not no_levels:
+                    logger.warning(
+                        "[WS-FALLBACK] REST-ORDERBOOK-NO-SIDE-EMPTY ticker=%s - no real NO bids available; "
+                        "NO-side depth will be empty (not derived from YES bids)",
+                        ticker
+                    )
+
+                # Check if orderbook is empty
+                if not yes_levels and not no_levels:
+                    logger.warning("[WS-FALLBACK] REST-ORDERBOOK-EMPTY ticker=%s - no usable bid/ask data", ticker)
+                    return
+
+                msg = {
+                    "type": "orderbook_snapshot",
+                    "ticker": ticker,
+                    "sequence": 0,
+                    "yes": yes_levels,
+                    "no": no_levels,
+                    "timestamp": _utc_now().isoformat(),
+                }
+                logger.info("[WS-FALLBACK] STATESTORE-UPDATE ticker=%s yes_levels=%d no_levels=%d", ticker, len(yes_levels), len(no_levels))
+                # P0 DEBUG: Log REST polling update
+                logger.info("[REST-POLLING] ticker=%s source=rest_polling_loop", ticker)
+                # P0 FIX: Use explicit via parameter for provenance tracking
+                # Update market state store with REST data
+                store.apply_orderbook_message(msg, "rest_polling")
+                logger.info("[WS-FALLBACK] STATESTORE-UPDATE-COMPLETE ticker=%s", ticker)
+            else:
+                logger.warning("[WS-FALLBACK] REST-ORDERBOOK-NONE ticker=%s - orderbook is None", ticker)
+        except Exception as e:
+            import traceback
+            logger.error("[WS-FALLBACK] REST-ORDERBOOK-ERROR ticker=%s error=%s\nTRACEBACK:\n%s", ticker, e, traceback.format_exc())
+
     async def _rest_polling_loop(self, tickers: List[str]) -> None:
         """Periodically fetch orderbooks via REST API to keep data fresh in fallback mode."""
         iteration_count = 0
@@ -3449,108 +3552,16 @@ class KalshiWebSocketBridge:
                         import traceback
                         logger.warning("[WS-FALLBACK] Catalog check traceback: %s", traceback.format_exc())
                 
-                # Fetch orderbooks for all tickers
+                # Fetch orderbooks for all tickers concurrently.  Serial
+                # polling (~200-400ms per ticker x 5 + sleep) kept the hybrid
+                # store book 2-4s behind live REST, which fed phantom-edge
+                # candidates that then died at the ws_rest_divergence guard.
                 logger.info("[MD-SCOPE] poll_tickers=%d tickers=%s source=REST", len(tickers), tickers)
                 logger.info("[WS-FALLBACK] REST-POLL-SCOPE: polling %d tickers: %s", len(tickers), tickers)
-                for ticker in tickers:
-                    try:
-                        from datetime import datetime, timezone
-                        fetched_at = _utc_now()
-                        logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s starting", ticker)
-                        orderbook = await self._fetch_rest_orderbook(client, ticker)
-                        logger.info("[WS-FALLBACK] REST-ORDERBOOK-FETCH ticker=%s result=%s", ticker, type(orderbook).__name__ if orderbook else "None")
+                await asyncio.gather(
+                    *(self._poll_ticker_once(client, store, ticker) for ticker in tickers)
+                )
 
-                        # SNAPSHOT-FETCH-TRACKING: Log fetch details for polling loop
-                        if orderbook:
-                            yes_levels = len(orderbook.bids) if orderbook.bids else 0
-                            no_levels = len(orderbook.asks) if orderbook.asks else 0
-                            logger.info(
-                                "[SNAPSHOT-FETCH] ticker=%s status_code=200 yes_levels=%d no_levels=%d fetched_at=%s source=REST_POLL",
-                                ticker,
-                                yes_levels,
-                                no_levels,
-                                fetched_at.isoformat()
-                            )
-                        else:
-                            logger.warning(
-                                "[SNAPSHOT-FETCH-FAIL] ticker=%s success=False status_code=unknown fetched_at=%s source=REST_POLL",
-                                ticker,
-                                fetched_at.isoformat()
-                            )
-                        
-                        if orderbook:
-                            # Log orderbook shape
-                            logger.info("[WS-FALLBACK] REST-ORDERBOOK-SHAPE ticker=%s bids_type=%s asks_type=%s bids_count=%d asks_count=%d", 
-                                       ticker, 
-                                       type(orderbook.bids).__name__ if orderbook.bids else "None",
-                                       type(orderbook.asks).__name__ if orderbook.asks else "None",
-                                       len(orderbook.bids) if orderbook.bids else 0,
-                                       len(orderbook.asks) if orderbook.asks else 0)
-                            
-                            # Convert REST orderbook to WS message format
-                            # REST API returns tuples (price, size), not objects with attributes
-                            yes_levels = []
-                            no_levels = []
-                            
-                            # Handle bids (yes side)
-                            if orderbook.bids:
-                                for bid in orderbook.bids:
-                                    if isinstance(bid, tuple) and len(bid) == 2:
-                                        # Tuple format: (price, size)
-                                        logger.debug("[WS-FALLBACK] BID tuple: %s", bid)
-                                        yes_levels.append([float(bid[0]), float(bid[1])])
-                                    elif hasattr(bid, 'price') and hasattr(bid, 'size') and not isinstance(bid, tuple):
-                                        # Object format with price/size attributes
-                                        logger.debug("[WS-FALLBACK] BID object: price=%s size=%s", bid.price, bid.size)
-                                        yes_levels.append([float(bid.price), float(bid.size)])
-                            
-                            # CRITICAL FIX (2026-08-03): Use REAL NO bids from the REST
-                            # response. client._to_venue_orderbook puts Kalshi's no_dollars
-                            # (NO bids, NO-space dollars) into orderbook.asks. The WS
-                            # orderbook_snapshot "no" array must be NO bids in NO space.
-                            # The previous code derived [[1 - yes_bid, size]] which is the
-                            # implied NO *ask*, not the NO bid - it replaced the entire real
-                            # NO bid book with a different side's quantity, skewing all
-                            # downstream NO-side depth/OFI/microstructure gates.
-                            if orderbook.asks:
-                                for ask in orderbook.asks:
-                                    if isinstance(ask, tuple) and len(ask) == 2:
-                                        no_levels.append([float(ask[0]), float(ask[1])])
-                                    elif hasattr(ask, 'price') and hasattr(ask, 'size') and not isinstance(ask, tuple):
-                                        no_levels.append([float(ask.price), float(ask.size)])
-                            if not no_levels:
-                                logger.warning(
-                                    "[WS-FALLBACK] REST-ORDERBOOK-NO-SIDE-EMPTY ticker=%s - no real NO bids available; "
-                                    "NO-side depth will be empty (not derived from YES bids)",
-                                    ticker
-                                )
-                            
-                            # Check if orderbook is empty
-                            if not yes_levels and not no_levels:
-                                logger.warning("[WS-FALLBACK] REST-ORDERBOOK-EMPTY ticker=%s - no usable bid/ask data", ticker)
-                                continue
-                            
-                            msg = {
-                                "type": "orderbook_snapshot",
-                                "ticker": ticker,
-                                "sequence": 0,
-                                "yes": yes_levels,
-                                "no": no_levels,
-                                "timestamp": _utc_now().isoformat(),
-                            }
-                            logger.info("[WS-FALLBACK] STATESTORE-UPDATE ticker=%s yes_levels=%d no_levels=%d", ticker, len(yes_levels), len(no_levels))
-                            # P0 DEBUG: Log REST polling update
-                            logger.info("[REST-POLLING] ticker=%s source=rest_polling_loop", ticker)
-                            # P0 FIX: Use explicit via parameter for provenance tracking
-                            # Update market state store with REST data
-                            store.apply_orderbook_message(msg, "rest_polling")
-                            logger.info("[WS-FALLBACK] STATESTORE-UPDATE-COMPLETE ticker=%s", ticker)
-                        else:
-                            logger.warning("[WS-FALLBACK] REST-ORDERBOOK-NONE ticker=%s - orderbook is None", ticker)
-                    except Exception as e:
-                        import traceback
-                        logger.error("[WS-FALLBACK] REST-ORDERBOOK-ERROR ticker=%s error=%s\nTRACEBACK:\n%s", ticker, e, traceback.format_exc())
-                
                 # Mark as active after first successful iteration
                 if iteration_count == 1:
                     self._rest_polling_active = True
