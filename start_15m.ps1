@@ -21,6 +21,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# 0.0a Duplicate-instance pre-check (2026-09-27).  A second uvicorn previously
+# ran the entire live trading lifespan for ~60s before its port bind failed
+# (the FastAPI lifespan runs before the bind).  Fail fast here so a duplicate
+# launch never loads credentials or touches Kalshi.  The authoritative guard
+# is the OS mutex inside web/main_15m_lean.py; this check just exits earlier.
+$existingOwner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($existingOwner) {
+    $ownerPid = $existingOwner.OwningProcess
+    $ownerName = (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue).ProcessName
+    Write-Host "[start_15m] REFUSED: port $Port is already bound by PID $ownerPid ($ownerName). Another MERID server instance is running - aborting duplicate launch." -ForegroundColor Red
+    exit 3
+}
+
+# 0.0b Export the resolved port so the in-process single-instance guard probes
+# the same port uvicorn will bind (uvicorn's --port is not visible to the app).
+$env:MERID_HTTP_PORT = "$Port"
+
 # 0.1 Load .env file so the observe-only guard and all other settings are
 # resolved from the operator's persistent configuration before the process
 # environment is defaulted.

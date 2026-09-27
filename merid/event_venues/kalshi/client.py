@@ -1223,6 +1223,24 @@ class KalshiVenueClient(EventVenueClient):
                     # Auth errors — log details and attempt re-auth once
                     if response.status_code in (401, 403):
                         body_text = response.text[:200] if response.text else ""
+                        # 2026-09-27: header_timestamp_expired means the signed
+                        # request aged out while queued in the HTTP pool / in
+                        # flight before reaching Kalshi's auth layer.  The
+                        # credentials are fine — no _authenticate() needed; the
+                        # loop re-signs with a fresh timestamp on the next
+                        # attempt before the request is sent.
+                        if (
+                            response.status_code == 401
+                            and "timestamp_expired" in body_text
+                            and attempt < KALSHI_MAX_RETRIES
+                        ):
+                            logger.warning(
+                                f"[kalshi] {operation_name} header_timestamp_expired — "
+                                f"re-signing with fresh timestamp and retrying "
+                                f"(attempt {attempt + 1}/{KALSHI_MAX_RETRIES + 1})"
+                            )
+                            await asyncio.sleep(0.5)
+                            continue
                         if not getattr(self, '_auth_warned', False):
                             logger.warning(
                                 f"[kalshi] {operation_name} auth error "

@@ -65,6 +65,12 @@ KALSHI_RATE_TIERS = {
 KALSHI_MAX_RETRIES = 3
 KALSHI_BACKOFF_BASE = 2.0
 KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
+# 2026-09-27: extra re-sign retries allowed when Kalshi rejects a request with
+# 401 header_timestamp_expired (the signature aged out while queued in the
+# httpx pool / in flight).  Auth-layer rejection means the request was never
+# processed, so re-signing and resending is safe; the cap prevents a loop on
+# a persistently congested host.
+_KALSHI_TS_EXPIRED_MAX_RETRIES = 2
 
 
 class KalshiClientV2:
@@ -361,6 +367,7 @@ class KalshiClientV2:
         # or retry backoff does not make the KALSHI-ACCESS-TIMESTAMP expire before the
         # request is actually sent. Kalshi rejects requests with stale timestamps.
         last_error = None
+        ts_expired_retries = 0
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             self._requests_total += 1
             if full_api_path:
@@ -428,7 +435,37 @@ class KalshiClientV2:
                     else:
                         logger.error(f"[KalshiClientV2] Max retries exceeded for {response.status_code}")
                         return response
-                
+
+                # 2026-09-27: header_timestamp_expired means the signed request
+                # sat queued in the httpx pool / in flight past Kalshi's
+                # timestamp window (~30s).  The signature is stale — the
+                # credentials are fine.  Kalshi rejected it at the auth layer
+                # before processing, so re-signing (done at the top of this
+                # loop) and retrying is safe even for writes.  Bounded by the
+                # attempt counter AND a dedicated cap so a persistently
+                # congested host cannot loop forever.
+                if response.status_code == 401:
+                    body_hint = ""
+                    try:
+                        body_hint = response.text[:300] if response.text else ""
+                    except Exception:
+                        body_hint = ""
+                    if "timestamp_expired" in body_hint:
+                        if ts_expired_retries < _KALSHI_TS_EXPIRED_MAX_RETRIES and attempt < KALSHI_MAX_RETRIES:
+                            ts_expired_retries += 1
+                            logger.warning(
+                                f"[KalshiClientV2] 401 header_timestamp_expired on {endpoint} "
+                                f"(signature aged out before reaching Kalshi) — re-signing "
+                                f"and retrying ({ts_expired_retries}/{_KALSHI_TS_EXPIRED_MAX_RETRIES})"
+                            )
+                            await asyncio.sleep(0.5)
+                            continue
+                        logger.error(
+                            f"[KalshiClientV2] header_timestamp_expired persisted after "
+                            f"{ts_expired_retries} re-sign retries on {endpoint}"
+                        )
+                        return response
+
                 # Successful response - notify rate limiter (unless skipped)
                 if not skip_rate_limiter:
                     get_rate_limiter().handle_success(endpoint)
@@ -561,9 +598,28 @@ class KalshiClientV2:
                 )
 
             if response.status_code == 401:
-                # Auth error - permanent
                 error_body = response.text[:500] if response.text else "No response body"
                 credential_ref = _credential_ref(self._api_key_id)
+                # 2026-09-27: header_timestamp_expired is NOT a credential
+                # failure — the signed request aged out while queued in the
+                # HTTP pool / in flight (e.g. 37s during exchange-side
+                # congestion at a market boundary).  _request already re-signed
+                # and retried; if it still expired, the host is congested, so
+                # classify as temporary and let the bankroll loop retry with a
+                # fresh signature instead of halting on a bogus "permanent"
+                # auth error.
+                if "timestamp_expired" in error_body:
+                    logger.warning(
+                        f"[{operation}] Kalshi header_timestamp_expired persists after "
+                        f"re-sign retries — treating as transient congestion, not auth failure"
+                    )
+                    return BalanceTemporaryError(
+                        reason="Kalshi timestamp expired (request aged out in transit - congestion)",
+                        details={"status_code": 401, "response": error_body},
+                        last_known=None,
+                        retry_after_seconds=20,
+                    )
+                # Auth error - permanent
                 logger.error(
                     f"[{operation}] Authentication failed: status={response.status_code}, "
                     f"credential_ref={credential_ref}"
