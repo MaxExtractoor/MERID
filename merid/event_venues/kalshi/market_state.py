@@ -329,9 +329,9 @@ _RECOVERY_TRIGGER_MIN_INTERVAL_S = float(os.getenv("KALSHI_RECOVERY_TRIGGER_MIN_
 # dequeue of the per-ticker delta pipeline; a breach invalidates the book and
 # schedules a fresh snapshot recovery (stale queued deltas are NEVER
 # partially replayed).
-_BOOK_MAX_EVENT_AGE_MS = float(os.getenv("KALSHI_BOOK_MAX_EVENT_AGE_MS", "750"))
+_BOOK_MAX_EVENT_AGE_MS = float(os.getenv("KALSHI_BOOK_MAX_EVENT_AGE_MS", "4000"))
 _BOOK_MAX_QUEUE_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_QUEUE_WAIT_MS", "250"))
-_BOOK_MAX_UPSTREAM_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_UPSTREAM_WAIT_MS", "500"))
+_BOOK_MAX_UPSTREAM_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_UPSTREAM_WAIT_MS", "1500"))
 # Raw WS-vs-REST parity tolerance (ticks/cents).  Measured on the raw
 # delta-derived BBO, never on a REST-substituted effective quote.
 _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
@@ -760,6 +760,7 @@ class KalshiMarketStateStore:
         # loop (observed on 2026-09-01 after restart, ~150% CPU from log calls).
         self._last_recovery_reject_log_ts: Dict[str, float] = {}
         self._last_rest_pref_log_ts: Dict[str, float] = {}
+        self._last_seq_gap_log_ts: Dict[str, float] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -1059,6 +1060,17 @@ class KalshiMarketStateStore:
         state.recovery_ts = time.monotonic()
         state.recovery_required_source = ""
         state.invalidation_cause = ""
+        if prior_quality == "INVALID" or prior_transition == "CIRCUIT_BREAKER":
+            # A promoted book is no longer awaiting resync: surface RECOVERED so
+            # book_health stops reporting RESYNC_REQUESTED after the REST/WS
+            # snapshot rebuild attested.  (WS delta applies may subsequently
+            # promote it to LIVE.)
+            try:
+                self._set_book_health(
+                    state.ticker, BookHealth.RECOVERED, f"attested:{source}"
+                )
+            except Exception:
+                pass
         if source in ("WS_ORDERBOOK_DELTA_LIVE", "WS_CLEAN_SNAPSHOT"):
             # A contiguous WS delta is the strongest confirmation, but Kalshi's
             # live bridge also sends full clean snapshots that reset the book to
@@ -1325,6 +1337,69 @@ class KalshiMarketStateStore:
                 upstream_wait_ms = None
         return event_age_ms, upstream_wait_ms
 
+    def _rest_owned_book_preserved(self, ticker: str, state: "KalshiMarketState", reason: str, **diag) -> bool:
+        """REST-owned effective book preservation gate.
+
+        When the effective quote is a fresh, attested ``REST_VERIFIED_DEGRADED``
+        book, a stale/lagged/gapped WS event invalidates only the WS *leg* —
+        it must not clear the effective book's executable / quality /
+        snapshot_complete fields, or the system oscillates (REST recovers,
+        next lagged delta re-invalidates, repeat forever).
+
+        In the preserve path we still:
+          - mark the WS leg unverified (``live_sequence_confirmed=False``),
+          - mark the book leg health RESYNC_REQUESTED so the WS stream's
+            degraded state stays observable,
+          - drain the stale queued WS deltas (never partially replayed),
+          - schedule throttled WS+REST snapshot recovery so the WS leg can
+            heal and eventually reclaim ownership.
+
+        Returns True when the REST-preserve path handled the event.
+        """
+        rest_age_s = (
+            time.monotonic() - state.last_rest_quote_update_ts
+            if state.last_rest_quote_update_ts > 0
+            else float("inf")
+        )
+        rest_ttl_s = float(os.getenv("MERID_REST_ENTRY_TTL_MS", "3000")) / 1000.0
+        if not (
+            getattr(state, "quote_owner", "") == "REST_VERIFIED_DEGRADED"
+            and state.data_quality == "GOOD"
+            and rest_age_s <= rest_ttl_s
+        ):
+            return False
+
+        was_ws_trusted = bool(getattr(state, "live_sequence_confirmed", False))
+        state.live_sequence_confirmed = False
+        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, reason)
+
+        dropped = 0
+        with self._ticker_locks_lock:
+            queue = self._delta_queues.get(ticker)
+            queue_lock = self._delta_queue_locks.get(ticker)
+        if queue is not None:
+            if queue_lock is not None:
+                with queue_lock:
+                    dropped = len(queue)
+                    queue.clear()
+            else:
+                dropped = len(queue)
+                queue.clear()
+        if was_ws_trusted or dropped:
+            logger.error(
+                "[BOOK-UNTRUSTED] ticker=%s reason=%s dropped_queued=%d diag=%s "
+                "(rest-owned effective book preserved)",
+                ticker, reason, dropped, diag,
+            )
+        _inc_book_invalidation(ticker, reason)
+        try:
+            self._maybe_trigger_book_recovery(ticker, reason)
+        except Exception as e:
+            logger.error(
+                "[BOOK-UNTRUSTED] recovery trigger failed for %s: %s", ticker, e
+            )
+        return True
+
     def _mark_book_untrusted_and_resync(self, ticker: str, reason: str, **diag) -> None:
         """Atomically invalidate a book, drain its stale delta backlog, and
         schedule throttled snapshot recovery.
@@ -1335,6 +1410,8 @@ class KalshiMarketStateStore:
         Stale queued deltas are discarded — never partially replayed.
         """
         state = self._get_or_create(ticker)
+        if self._rest_owned_book_preserved(ticker, state, reason, **diag):
+            return
         was_trusted = (
             state.data_quality != "INVALID"
             and state.transition != "RESYNC_REQUIRED"
@@ -1353,8 +1430,12 @@ class KalshiMarketStateStore:
         with self._ticker_locks_lock:
             queue = self._delta_queues.get(ticker)
             queue_lock = self._delta_queue_locks.get(ticker)
-        if queue is not None and queue_lock is not None:
-            with queue_lock:
+        if queue is not None:
+            if queue_lock is not None:
+                with queue_lock:
+                    dropped = len(queue)
+                    queue.clear()
+            else:
                 dropped = len(queue)
                 queue.clear()
         if was_trusted or dropped:
@@ -1420,8 +1501,12 @@ class KalshiMarketStateStore:
             queue = self._delta_queues[ticker]
             queue_lock = self._delta_queue_locks[ticker]
 
+        overflowed = False
+        overflow_queue_len = 0
         with queue_lock:
             if len(queue) >= self._MAX_PER_TICKER_QUEUE:
+                overflowed = True
+                overflow_queue_len = len(queue)
                 # Extract asset from ticker for selective staleness detection
                 asset = None
                 if ticker.startswith("KXBTC"):
@@ -1450,38 +1535,23 @@ class KalshiMarketStateStore:
                 # requiring an attested FULL_SNAPSHOT lets the throttled REST/WS
                 # snapshot rebuild heal the book.
                 logger.error(
-                    f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={len(queue)} "
+                    f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={overflow_queue_len} "
                     f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
                     f"dropping_stale_deltas_and_triggering_throttled_snapshot_recovery"
                 )
                 queue.clear()
+            else:
+                queue.append(msg)
+                self._batch_worker_event.set()
 
-                state = self._states.get(ticker)
-                if state:
-                    state.book_consistency = "SUSPECT"
-                    state.data_quality = "INVALID"
-                    state.transition = "RESYNC_REQUIRED"
-                    state.executable = False
-                    # A full authoritative snapshot (REST orderbook or clean WS
-                    # snapshot) is sufficient to rebuild after overflow; live
-                    # deltas then re-confirm sequence for new-entry gating.
-                    state.recovery_required_source = "FULL_SNAPSHOT"
-                    self._set_snapshot_complete(ticker, False, "delta_queue_overflow")
-                    self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow_enqueue")
-                    self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow_enqueue")
-
-                # Trigger throttled snapshot recovery (WS + REST), at most once
-                # per _RECOVERY_TRIGGER_MIN_INTERVAL_S per ticker.
-                try:
-                    self._maybe_trigger_book_recovery(ticker, "queue_overflow_enqueue")
-                except Exception as e:
-                    logger.error(f"[BOOK-OVERFLOW] Failed to trigger snapshot recovery for {ticker}: {e}")
-
-                return False
-
-            queue.append(msg)
-            self._batch_worker_event.set()
-            return True
+        if overflowed:
+            # Invalidate + schedule throttled recovery outside the queue lock:
+            # the invalidation path re-acquires it to drain stale deltas.
+            self._mark_book_untrusted_and_resync(
+                ticker, "delta_queue_overflow", queue_len=overflow_queue_len
+            )
+            return False
+        return True
 
     def _derive_ws_quote_owner(self, state: "KalshiMarketState") -> str:
         """Canonical WS-side effective-quote owner verdict.
@@ -1652,6 +1722,19 @@ class KalshiMarketStateStore:
         is_valid, expected, msg_seq = self._validate_delta_sequence(ticker, msg, ob)
         if not is_valid:
             state = self._get_or_create(ticker)
+            if self._rest_owned_book_preserved(
+                ticker, state, "ws_sequence_gap",
+                expected_seq=expected, got_seq=msg_seq,
+            ):
+                _now_gap = time.monotonic()
+                if _now_gap - self._last_seq_gap_log_ts.get(ticker, 0.0) >= 1.0:
+                    self._last_seq_gap_log_ts[ticker] = _now_gap
+                    logger.warning(
+                        "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%d - "
+                        "ws leg invalid under rest-owned effective book; resync scheduled",
+                        ticker, expected, msg_seq
+                    )
+                return
             state.data_quality = "INVALID"
             state.book_consistency = "SUSPECT"
             state.transition = "INVALID_SEQUENCE_GAP"
@@ -2555,13 +2638,21 @@ class KalshiMarketStateStore:
         )
         ws_ttl_ms = float(os.getenv("MERID_WS_ENTRY_MAX_AGE_MS", "1500"))
         rest_ttl_ms = float(os.getenv("MERID_REST_ENTRY_TTL_MS", "3000"))
+        # Entry-time event-age budget: the last applied WS delta's venue age
+        # must be recent at decision time.  This is deliberately tighter than
+        # the apply-side invalidation cap (_BOOK_MAX_EVENT_AGE_MS): mildly
+        # lagged deltas may rebuild the book, but only fresh ones may price a
+        # new entry.
+        ws_entry_event_age_ms = float(
+            os.getenv("MERID_WS_ENTRY_EVENT_AGE_MS", "2000")
+        )
 
         owner = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
         ws_event_age = getattr(state, "ws_last_event_age_ms", None)
         ws_fresh = bool(
             ws_age_ms is not None
             and ws_age_ms <= ws_ttl_ms
-            and (ws_event_age is None or ws_event_age <= _BOOK_MAX_EVENT_AGE_MS)
+            and (ws_event_age is None or ws_event_age <= ws_entry_event_age_ms)
         )
         rest_fresh = bool(rest_age_ms is not None and rest_age_ms <= rest_ttl_ms)
         if owner == "WS_FRESH_VERIFIED":
@@ -3121,7 +3212,9 @@ class KalshiMarketStateStore:
                 state = self._states.get(ticker)
                 if state:
                     logger.warning(
-                        "[BOOK-CONSISTENCY] ticker=%s marked as SUSPECT due to queue overflow - throttled recovery handled by enqueue path",
+                        "[BOOK-CONSISTENCY] ticker=%s delta rejected by enqueue gate "
+                        "(freshness/overflow) - invalidation + throttled recovery "
+                        "handled by enqueue path",
                         ticker
                     )
             else:

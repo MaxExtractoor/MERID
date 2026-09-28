@@ -263,6 +263,101 @@ class TestQuoteOwnership:
         assert gate["effective_fresh"] is False
 
 
+# ── REST-owned effective book preservation ────────────────────────────────
+
+
+class TestRestOwnedPreservation:
+    """A fresh, attested REST_VERIFIED_DEGRADED book must not be destroyed by
+    stale/lagged/gapped WS events — the WS *leg* is invalidated, not the
+    effective quote (previously oscillated RESYNC_REQUESTED forever)."""
+
+    def _rest_owned_state(self, store):
+        state = _book(store)
+        state.last_rest_bid_cents = 60
+        state.last_rest_ask_cents = 62
+        state.last_rest_quote_update_ts = time.monotonic()
+        state.last_ws_bid_cents = 40
+        state.last_ws_ask_cents = 44
+        state.last_ws_update_ts = time.monotonic() - 30.0
+        state.quote_owner = "REST_VERIFIED_DEGRADED"
+        state.degraded_mode = True
+        state.best_bid_cents = 60
+        state.best_ask_cents = 62
+        return state
+
+    def test_stale_ws_delta_preserves_rest_owned_book(self):
+        store = _store()
+        state = self._rest_owned_state(store)
+        store._mark_book_untrusted_and_resync(TICKER, "BOOK_EVENT_TOO_OLD", event_age_ms=5000.0)
+        state = store.get(TICKER)
+        assert state.data_quality == "GOOD"
+        assert state.executable is True
+        assert state.snapshot_complete is True
+        assert state.quote_owner == "REST_VERIFIED_DEGRADED"
+        # The WS leg is explicitly unverified.
+        assert state.live_sequence_confirmed is False
+        assert state.book_health == BookHealth.RESYNC_REQUESTED.value
+
+    def test_preserve_drains_stale_queued_deltas(self):
+        store = _store()
+        self._rest_owned_state(store)
+        store._delta_queues[TICKER] = deque({"seq": i} for i in range(5))
+        store._mark_book_untrusted_and_resync(TICKER, "BOOK_UPSTREAM_LAG", upstream_wait_ms=9000.0)
+        assert len(store._delta_queues[TICKER]) == 0
+        assert store.get(TICKER).data_quality == "GOOD"
+
+    def test_seq_gap_preserves_rest_owned_book(self):
+        store = _store()
+        self._rest_owned_state(store)
+        with patch.object(store, "_notify_subscribers"):
+            store._apply_delta_internal(TICKER, _delta(150))  # gap vs seq=100
+        state = store.get(TICKER)
+        assert state.data_quality == "GOOD"
+        assert state.executable is True
+        assert state.live_sequence_confirmed is False
+        assert state.quote_owner == "REST_VERIFIED_DEGRADED"
+
+    def test_stale_rest_book_full_invalidation(self):
+        """REST-owned but REST leg itself stale -> full invalidation."""
+        store = _store()
+        state = self._rest_owned_state(store)
+        state.last_rest_quote_update_ts = time.monotonic() - 60.0
+        store._mark_book_untrusted_and_resync(TICKER, "BOOK_EVENT_TOO_OLD")
+        state = store.get(TICKER)
+        assert state.data_quality == "INVALID"
+        assert state.executable is False
+        assert state.recovery_required_source == "FULL_SNAPSHOT"
+
+    def test_ws_owned_book_full_invalidation_unchanged(self):
+        """Without a REST-owned book the invalidation path is unchanged."""
+        store = _store()
+        _book(store)
+        store._mark_book_untrusted_and_resync(TICKER, "BOOK_EVENT_TOO_OLD")
+        state = store.get(TICKER)
+        assert state.data_quality == "INVALID"
+        assert state.executable is False
+
+    def test_ws_entry_event_age_budget(self):
+        """ws_fresh must use the entry-time event-age budget, not the
+        apply-side invalidation cap."""
+        import os
+        store = _store()
+        state = _book(store)
+        state.quote_owner = "WS_FRESH_VERIFIED"
+        state.last_ws_update_ts = time.monotonic()
+        budget_ms = float(os.getenv("MERID_WS_ENTRY_EVENT_AGE_MS", "2000"))
+        # Last applied delta venue-age just over the entry budget -> not
+        # entry-fresh even though it was still fresh enough to apply.
+        state.ws_last_event_age_ms = budget_ms + 500.0
+        gate = store.get_quote_gate_state(TICKER)
+        assert gate["ws_fresh"] is False
+        assert gate["effective_fresh"] is False
+        state.ws_last_event_age_ms = budget_ms - 500.0
+        gate = store.get_quote_gate_state(TICKER)
+        assert gate["ws_fresh"] is True
+        assert gate["effective_fresh"] is True
+
+
 # ── Allocator canonical price band + degraded reserve ─────────────────────
 
 
