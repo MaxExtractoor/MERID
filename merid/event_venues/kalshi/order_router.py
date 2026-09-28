@@ -42,7 +42,7 @@ assert os is not None, "os module failed to import at module level"
 from dataclasses import dataclass, field, replace as _dc_replace
 from enum import Enum
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING
+from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -3409,10 +3409,11 @@ def _canonical_yes_book_from_port(ob_result: Any) -> Optional[Dict[str, Any]]:
 
 def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Dict[str, int]:
     """Return (bid, ask) in the outcome space of the requested side."""
-    side_upper = (side or "").upper()
-    is_no_side = "NO" in side_upper
+    normalized_side = (side or "").strip().lower()
+    if normalized_side not in ("yes", "no"):
+        normalized_side = extract_outcome_side(normalized_side)
 
-    if is_no_side:
+    if normalized_side == "no":
         return {
             "bid_cents": book["no_bid_cents"],
             "ask_cents": book["no_ask_cents"],
@@ -4029,9 +4030,9 @@ def _is_marketable_against_book(intent: OrderIntent, book_side: Dict[str, Any]) 
 
     if is_maker:
         if action == "buy":
-            return order_price <= bid_cents
+            return order_price < ask_cents
         else:
-            return order_price >= ask_cents
+            return order_price > bid_cents
     else:
         if action == "buy":
             return order_price >= ask_cents
@@ -4263,9 +4264,11 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 port.get_orderbook(intent.ticker),
                 timeout=3.0,
             )
-        except asyncio.TimeoutError:
+        except Exception as rest_err:
+            logger.warning("[WS-REST-DIVERGENCE] REST unavailable for %s: %s", intent.ticker, rest_err)
             ob_result = None
 
+        ws_age_ms = _ws_age_ms(ws_snapshot)
         if ob_result and getattr(ob_result, "success", False):
             rest_book = _canonical_yes_book_from_port(ob_result)
             if rest_book:
@@ -4275,6 +4278,12 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         rest_usable = rest_book is not None and rest_age_ms <= max_rest_age_ms
         _is_exit = _is_exit_order(intent)
+        if not ws_authoritative and not _is_exit:
+            return OrderResult(
+                status="rejected", mode=mode,
+                reason="ws_rest_divergence:ws_not_authoritative",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
 
         # If REST is unusable, WS is primary by default.  Allow only when the
         # WS book is fresh enough and the order is marketable.
@@ -4410,6 +4419,13 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
+        if max_divergence_cents <= hard_limit_cents:
+            _drift_rej = _favorable_drift_rejection(
+                intent, rest_book_side["ask_cents"], "rest", mode, t0
+            )
+            if _drift_rej is not None:
+                return _drift_rej
+
         # ---- coherent: within tolerance ---------------------------------------
         if max_divergence_cents <= tolerance_cents:
             # 2026-09-24: feeds agree, but they may have moved together past
@@ -4440,7 +4456,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     _chase = int(_sel_px) + int(
                         os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
                     )
-                    _epc = min(_epc, _chase) if _epc is not None else _chase
+                    _epc = min(_epc, _chase) if _epc is not None else None
                 if _epc is not None and _fresh_ask <= _epc:
                     old_px = getattr(intent, "price_cents", None)
                     intent.price_cents = min(99, _epc)
@@ -4514,6 +4530,23 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         #    marketable there, otherwise quarantine and resync as before.
         ws_locked = ws_book["bid_cents"] >= ws_book["ask_cents"]
         if ws_age_ms > max_ws_age_ms or ws_locked:
+            if (
+                ws_authoritative and ws_age_ms <= max_ws_age_ms and ws_locked
+                and not rest_marketable and not _is_exit
+                and (getattr(intent, "action", "") or "").lower() == "buy"
+                and _resolve_execution_mode(intent) not in ("maker", "passive_quote")
+            ):
+                _epc = _max_edge_preserving_buy_price(intent)
+                _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+                if _epc is not None and _sel_px is not None and int(_sel_px) > 0:
+                    _epc = min(_epc, int(_sel_px) + int(os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")))
+                    if rest_book_side["ask_cents"] <= _epc:
+                        intent.price_cents = min(99, _epc)
+                        rest_marketable = True
+                        logger.info(
+                            "[WS-REST-DIVERGENCE] bounded_reprice_locked ticker=%s price=%dc",
+                            intent.ticker, intent.price_cents,
+                        )
             if rest_age_ms <= max_rest_age_ms and rest_marketable:
                 logger.warning(
                     "EXECUTION-QUOTE-MODE ticker=%s mode=REST_AUTHORITATIVE decision=ALLOW "
@@ -4614,7 +4647,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 _chase = int(_sel_px) + int(
                     os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
                 )
-                _epc = min(_epc, _chase) if _epc is not None else _chase
+                _epc = min(_epc, _chase) if _epc is not None else None
             if _epc is not None and _fresh_ask <= _epc:
                 old_px = getattr(intent, "price_cents", None)
                 intent.price_cents = min(99, _epc)
@@ -4681,31 +4714,33 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         )
 
     except Exception as divergence_err:
+        is_exit = _is_exit_order(intent)
         logger.warning(
-            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_REST_ERROR decision=ALLOW "
+            "EXECUTION-QUOTE-MODE ticker=%s mode=GUARD_ERROR decision=%s "
             "reason=divergence_check_exception error=%s ws_snapshot_complete=%s",
-            intent.ticker, divergence_err,
+            intent.ticker, "ALLOW_EXIT" if is_exit else "BLOCKED", divergence_err,
             getattr(ws_snapshot, "snapshot_complete", False) if ws_snapshot else False,
         )
-        return None
+        if is_exit:
+            return None
+        return OrderResult(
+            status="rejected", mode=mode,
+            reason="ws_rest_divergence:guard_error",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
 
 
 def _canonical_signed_yes_delta(intent: OrderIntent) -> Decimal:
     """Return the canonical signed-YES delta for this intent (sign only)."""
     try:
         from merid.event_venues.kalshi.binary_price_space import yes_delta
-        raw_side = (intent.side or "").lower()
+        raw_side = (intent.side or "").strip().lower()
         # Normalize Kalshi-format sides (BUY_YES/SELL_NO/etc.) to canonical yes/no.
-        if "no" in raw_side:
-            side = "no"
-        elif "yes" in raw_side:
-            side = "yes"
-        else:
-            side = raw_side
-        action = (intent.action or "").lower()
+        side = raw_side if raw_side in ("yes", "no") else extract_outcome_side(raw_side)
+        action = (intent.action or "").strip().lower()
         delta = yes_delta(action, side, 1)
-    except Exception:
-        delta = 1 if (intent.action or "").lower() == "buy" else -1
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Cannot derive signed exposure from invalid side/action") from exc
     return Decimal(delta)
 
 
@@ -4717,13 +4752,13 @@ def _intent_price_side(intent: OrderIntent) -> Optional[str]:
     named side's price space too.  The canonical `yes_delta` is used only when
     the side string is ambiguous.
     """
-    side = (intent.side or "").lower()
-    has_yes = "yes" in side
-    has_no = "no" in side
-    if has_yes and not has_no:
-        return "yes"
-    if has_no and not has_yes:
-        return "no"
+    side = (intent.side or "").strip().lower()
+    if side in ("yes", "no"):
+        return side
+    try:
+        return extract_outcome_side(side)
+    except ValueError:
+        pass
     # Ambiguous or legacy form: there is no honest default price space.
     # Deriving it from action alone fabricates a direction (the previous
     # `action or "buy"` + `except: return "yes"` path did exactly that), so
@@ -8149,23 +8184,37 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
     if min_required_edge is None or float(min_required_edge) <= 0:
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         min_required_edge = TRADE_DECISION_MIN_REQUIRED_EDGE
-    threshold_cents = float(min_required_edge) * 100.0
+    threshold_cents = Decimal(str(min_required_edge)) * 100
+    basis = Decimal(str(basis))
+    ev_net = Decimal(str(ev_net))
+    quantity = Decimal(str(intent.count_fp if intent.count_fp is not None else intent.count))
+    if not quantity.is_finite() or quantity <= 0:
+        return None
+    from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
 
+    role = "maker" if _resolve_execution_mode(intent) in ("maker", "passive_quote") else "taker"
     fee_basis = getattr(intent, "fee_cents", None)
-    if fee_basis is None or float(fee_basis) <= 0:
-        fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+    if fee_basis is None or Decimal(str(fee_basis)) <= 0:
+        fee_basis = kalshi_fee_cents_exact(basis / 100, quantity, role) / quantity
     else:
-        fee_basis = float(fee_basis)
+        fee_basis = Decimal(str(fee_basis))
+    if not all(value.is_finite() for value in (basis, ev_net, threshold_cents, fee_basis)):
+        return None
 
     # Start from the linear (fee-ignored) cap and walk down until the fee-aware
     # net-edge condition holds.  The walk is at most a few cents because the fee
     # difference between adjacent prices is bounded by the Kalshi per-contract fee.
-    start_cap = int(math.floor(float(basis) + float(ev_net) - threshold_cents))
+    start_cap = int((basis + ev_net + fee_basis - threshold_cents).to_integral_value(rounding=ROUND_FLOOR))
     # Never price above the model's fair value minus 1c; buying at or above fair
     # value has negative gross edge regardless of reserves.
     p_selected = getattr(intent, "p_selected", None)
     if p_selected is not None:
-        theoretical_max = max(1, int(round(float(p_selected) * 100.0)) - 1)
+        p_selected = Decimal(str(p_selected))
+        if not p_selected.is_finite() or not 0 < p_selected <= 1:
+            return None
+        theoretical_max = int((p_selected * 100 - 1).to_integral_value(rounding=ROUND_FLOOR))
+        if theoretical_max < 1:
+            return None
         start_cap = min(start_cap, theoretical_max)
     start_cap = max(1, min(99, start_cap))
 
@@ -8178,9 +8227,9 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
     # highest price that preserves the required net edge, even when that price is
     # below the original selected price.
     for fill_price in range(start_cap, 0, -1):
-        fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=fill_price))
-        new_net = float(ev_net) - (fill_price - float(basis)) - (fee_fill - fee_basis)
-        if new_net >= threshold_cents - 1e-9:
+        fee_fill = kalshi_fee_cents_exact(Decimal(fill_price) / 100, quantity, role) / quantity
+        new_net = ev_net - (Decimal(fill_price) - basis) - (fee_fill - fee_basis)
+        if new_net >= threshold_cents:
             return fill_price
     return None
 

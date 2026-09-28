@@ -167,3 +167,45 @@ def test_schema_rejects_unknown_safety_env_var(monkeypatch):
     with pytest.raises(LiveConfigInvariantError) as exc:
         resolve_live_config()
     assert "Declare it in the live-config schema" in str(exc.value)
+
+
+@pytest.mark.parametrize("name, first, second", [
+    ("MERID_ENTRY_MAX_CHASE_CENTS", "5", "4"),
+    ("MERID_ENTRY_MAX_IMPROVEMENT_CENTS", "8", "7"),
+    ("MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS", "2", "1"),
+    ("MERID_WS_REST_DIVERGENCE_HARD_LIMIT_CENTS", "25", "24"),
+    ("MERID_WS_REST_DIVERGENCE_WS_FRESH_MS", "5000", "4000"),
+    ("MERID_WS_REST_MAX_REST_AGE_MS", "500", "400"),
+    ("MERID_CALIBRATION_EVIDENCE_MARGIN", "0.01", "0.02"),
+    ("MERID_CALIBRATION_CAP_FULL_RANGE", "1", "0"),
+    ("MERID_ENTRY_MAKER_ENABLED", "0", "1"),
+    ("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180", "200"),
+    ("MERID_SETTLEMENT_LANE_MIN_P", "0.84", "0.85"),
+    ("MERID_DISABLE_EXIT_POLICY", "0", "1"),
+])
+def test_execution_policy_overrides_are_hashed(name, first, second, monkeypatch):
+    monkeypatch.setenv(name, first)
+    before = resolve_live_config()
+    assert name in before.source_overrides
+    monkeypatch.setenv(name, second)
+    reset_resolved_live_config()
+    after = resolve_live_config()
+    assert after.config_hash != before.config_hash
+    assert not any(name + "=" in conflict for conflict in after.conflicts_caught)
+
+
+@pytest.mark.parametrize("name, value", [
+    ("MERID_ENTRY_MAX_CHASE_CENTS", "-1"),
+    ("MERID_ENTRY_MAX_IMPROVEMENT_CENTS", "100"),
+    ("MERID_WS_REST_MAX_REST_AGE_MS", "nan"),
+    ("MERID_WS_REST_DIVERGENCE_WS_FRESH_MS", "inf"),
+    ("MERID_CALIBRATION_EVIDENCE_MARGIN", "NaN"),
+    ("MERID_MARKET_ANCHOR_MIN_W", "-0.1"),
+    ("MERID_SETTLEMENT_LANE_MIN_P", "1.1"),
+    ("MERID_SETTLEMENT_LANE_MIN_OBSERVED", "61"),
+    ("MERID_ENTRY_MAKER_ENABLED", "typo"),
+])
+def test_execution_policy_rejects_invalid_override(name, value, monkeypatch):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(LiveConfigInvariantError, match=name):
+        resolve_live_config()

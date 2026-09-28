@@ -322,6 +322,48 @@ def test_router_respects_maker_entry_when_enabled(monkeypatch):
     assert tif.upper() == "GTC"
 
 
+@pytest.mark.parametrize("role", ["maker", "taker"])
+@pytest.mark.parametrize("side", ["BUY_YES", "BUY_NO"])
+def test_both_enabled_roles_reach_correct_wire_request(role, side, monkeypatch):
+    from types import SimpleNamespace
+    import time
+    from merid.event_venues.kalshi.order_router import (
+        OrderIntent, _apply_execution_mode, _resolve_tif, _build_create_order_request,
+    )
+
+    monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
+    state = SimpleNamespace(seconds_to_expiry=600)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
+        lambda: SimpleNamespace(get=lambda ticker: state),
+    )
+    maker = role == "maker"
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST", side=side, action="buy", count=1, price_cents=50,
+        execution_mode=role, liquidity_role=role, post_only=maker,
+        aggressiveness=0.0 if maker else 1.0, time_in_force="gtc" if maker else "ioc",
+        max_rest_seconds=10, p_selected=0.65, client_order_id=f"test-{role}-{side}",
+        entry_or_exit="entry",
+    )
+    post_only, aggressiveness, order_type, tif = _apply_execution_mode(intent)
+    resolved = _resolve_tif(intent)
+    request = _build_create_order_request(
+        intent, ticker=intent.ticker, exchange_index=2, final_price_cents=50,
+        effective_order_type=order_type, effective_tif=tif,
+        expiration_ts=resolved.expiration_time, post_only=post_only,
+    )
+    assert intent.execution_mode == role
+    assert request.post_only is maker
+    assert request.side == "buy"
+    assert request.outcome == ("yes" if side == "BUY_YES" else "no")
+    assert request.time_in_force == ("GTC" if maker else "IOC")
+    assert aggressiveness == (0.0 if maker else 1.0)
+    if maker:
+        assert int(time.time()) < request.expiration_ts <= int(time.time()) + 10
+    else:
+        assert request.expiration_ts is None
+
+
 def execution_mode_is_taker(intent) -> bool:
     return getattr(intent, "execution_mode", None) == "taker"
 

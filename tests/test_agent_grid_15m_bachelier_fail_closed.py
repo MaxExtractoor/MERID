@@ -210,3 +210,73 @@ def test_settlement_v2_off_skips_distribution(monkeypatch):
 
     assert calls == []
     assert all(r[0] != "settlement_distribution_unavailable" for r in rejections)
+
+
+@pytest.mark.parametrize("tte, gross_edge, taker_allowed, maker_allowed, expected_role", [
+    (600, "0.04", True, True, "maker"),
+    (600, "0.08", True, True, "taker"),
+    (120, "0.04", True, True, "taker"),
+    (60, "0.04", False, True, None),
+    (120, "0.04", False, True, None),
+    (600, "0.04", False, True, "maker"),
+    (600, "0.04", True, False, "taker"),
+    (600, "0.04", False, False, None),
+])
+def test_enabled_maker_taker_signal_selection(
+    tte, gross_edge, taker_allowed, maker_allowed, expected_role, monkeypatch,
+):
+    import merid.prediction.agent_grid_15m as ag
+    from merid.prediction.trade_decision import TradeDecision
+
+    agent, rejections = _make_agent()
+    agent._compute_hybrid_p_yes = lambda **kwargs: None
+    agent._last_velocity_value = 0.0
+    market = _make_market()
+    market.seconds_to_expiry = tte
+    _patch_strike_and_rti(monkeypatch, ag, _obs(value=65000.25))
+    monkeypatch.setattr(ag, "MERID_SETTLEMENT_DISTRIBUTION_V2", False)
+    monkeypatch.setattr(ag, "MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS", 120.0)
+    monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
+    monkeypatch.setenv("MERID_TAKER_EDGE_THRESHOLD_BTC", "0.07")
+    monkeypatch.setenv("MERID_SHADOW_BACHELIER_ONLY", "0")
+    for name in ("_record_decision_audit", "_write_shadow_telemetry",
+                 "write_shadow_side_record", "write_model_decomposition_record"):
+        monkeypatch.setattr(ag, name, lambda *args, **kwargs: None)
+    calls = []
+
+    def decision_for_role(**kwargs):
+        role = "maker" if kwargs["fee_per_contract_cents"] < 1 else "taker"
+        calls.append(role)
+        allowed = maker_allowed if role == "maker" else taker_allowed
+        return TradeDecision(
+            run_id="test", decision_id=f"test-{role}", ticker="KXBTC15M-TEST", asset="BTC",
+            timestamp_utc=datetime.now(timezone.utc),
+            p_yes_raw=Decimal("0.60"), p_yes_calibrated=Decimal("0.60"),
+            p_no_calibrated=Decimal("0.40"), p_yes_uncertainty=Decimal("0.01"),
+            p_selected=Decimal("0.60"), data_state="healthy", regime_label="normal",
+            yes_depth_cc=Decimal("500"), no_depth_cc=Decimal("500"),
+            selected_outcome="yes" if allowed else None,
+            selected_action="buy" if allowed else None,
+            selected_outcome_price=Decimal("0.52") if allowed else None,
+            best_side="yes" if allowed else None,
+            gross_edge=Decimal(gross_edge), net_edge=Decimal("0.03"),
+            approved_size_cc=Decimal("100"), confidence=Decimal("0.80"),
+            confidence_valid=True, confidence_source="test", min_required_edge=Decimal("0.02"),
+            no_trade_reason=None if allowed else "test_no_edge",
+        )
+
+    monkeypatch.setattr(ag, "compute_trade_decision", decision_for_role)
+    result = ag.LeanAgent15m._generate_trade_decision_signal(
+        agent, "BTC", 65000.0, market, tte / 60.0, tick=0,
+    )
+    if expected_role is None:
+        assert result is None
+        assert rejections[-1][0] == "test_no_edge"
+    else:
+        assert result is not None
+        assert result["execution_mode"] == expected_role
+        assert result["liquidity_role"] == expected_role
+        assert result["post_only"] is (expected_role == "maker")
+        assert result["time_in_force"] == ("gtc" if expected_role == "maker" else "ioc")
+    if tte <= 120:
+        assert calls == ["taker"]

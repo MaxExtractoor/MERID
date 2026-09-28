@@ -699,3 +699,131 @@ def test_stop_candidate_exits_pass_agent_whitelist():
     # Entries from unrecognized agents must still be refused.
     assert _is_kalshi_15m_crypto_agent("rogue_agent_x") is False
     assert _is_kalshi_15m_crypto_agent("") is False
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+@pytest.mark.parametrize("action", ["buy", "sell"])
+def test_maker_quote_inside_spread_is_valid(side, action):
+    from merid.event_venues.kalshi.order_router import _is_marketable_against_book
+
+    intent = _make_intent(side, action, 50, execution_mode="maker")
+    intent.aggressiveness = 0.0
+    intent.post_only = True
+    book = {"bid_cents": 40, "ask_cents": 60}
+    assert _is_marketable_against_book(intent, book)
+    intent.price_cents = 60 if action == "buy" else 40
+    assert not _is_marketable_against_book(intent, book)
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+@pytest.mark.parametrize("quantity, expected_cap", [("1", 47), ("0.01", 46)])
+def test_edge_budget_uses_exact_order_fee(side, quantity, expected_cap):
+    from merid.event_venues.kalshi.order_router import _max_edge_preserving_buy_price
+
+    intent = _make_intent(side=side, price_cents=47)
+    intent.count_fp = Decimal(quantity)
+    intent.selected_outcome_price_cents = 47
+    intent.ev_net_cents = Decimal("2.10")
+    intent.fee_cents = Decimal("1.75")
+    intent.min_required_edge = Decimal("0.02")
+    assert _max_edge_preserving_buy_price(intent) == expected_cap
+
+
+@pytest.mark.asyncio
+async def test_reprice_requires_economic_budget(monkeypatch):
+    monkeypatch.setenv("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+    store = _make_market_state_store(_make_ws_state(53, 54))
+    intent = _make_intent(side="yes", price_cents=50)
+    intent.selected_outcome_price_cents = 50
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, _make_port(53, 54), TradingMode.LIVE, time.monotonic()
+        )
+    assert result is not None
+    assert result.status == "rejected"
+    assert intent.price_cents == 50
+
+
+@pytest.mark.asyncio
+async def test_divergent_reprice_cannot_bypass_favorable_drift(monkeypatch):
+    monkeypatch.setenv("MERID_ENTRY_MAX_IMPROVEMENT_CENTS", "8")
+    store = _make_market_state_store(_make_ws_state(61, 62))
+    intent = _make_intent(side="yes", price_cents=60)
+    intent.selected_outcome_price_cents = 60
+    intent.ev_net_cents = 10
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, _make_port(44, 45), TradingMode.LIVE, time.monotonic()
+        )
+    assert result is not None
+    assert "favorable_drift" in result.reason
+    assert intent.price_cents == 60
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_ws", [False, True])
+async def test_rest_error_requires_valid_fresh_ws(fresh_ws):
+    state = _make_ws_state(last_ws_update_ts=time.monotonic() - (0 if fresh_ws else 60))
+    store = _make_market_state_store(state)
+    port = AsyncMock()
+    port.get_orderbook.side_effect = RuntimeError("offline REST failure")
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(), port, TradingMode.LIVE, time.monotonic()
+        )
+    if fresh_ws:
+        assert result is None
+    else:
+        assert result is not None
+        assert result.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_ws_age_rechecked_after_rest_wait():
+    store = _make_market_state_store(_make_ws_state())
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store), patch(
+        "merid.event_venues.kalshi.order_router._ws_age_ms", side_effect=[0.0, 6000.0]
+    ):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(), _make_port(success=False), TradingMode.LIVE, time.monotonic()
+        )
+    assert result is not None
+    assert result.reason == "ws_rest_divergence:no_fresh_feed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["yes", "no"])
+@pytest.mark.parametrize("ask, ws_age_s, allowed", [(54, 0, True), (56, 0, False), (54, 60, False)])
+async def test_locked_fresh_ws_reprices_within_both_caps(side, ask, ws_age_s, allowed, monkeypatch):
+    monkeypatch.setenv("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+    store = _make_market_state_store(_make_ws_state(50, 50, last_ws_update_ts=time.monotonic() - ws_age_s))
+    port = _make_port(ask - 1, ask) if side == "yes" else _make_port(100 - ask, 101 - ask)
+    intent = _make_intent(side=side, price_cents=50)
+    intent.selected_outcome_price_cents = 50
+    intent.ev_net_cents = 10
+    intent.min_required_edge = Decimal("0.02")
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(intent, port, TradingMode.LIVE, time.monotonic())
+    if allowed:
+        assert result is None
+        assert ask <= intent.price_cents <= 55
+    else:
+        assert result is not None
+        assert result.status == "rejected"
+        assert intent.price_cents == 50
+    store._maybe_trigger_book_recovery.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_ws_cannot_authorize_reprice():
+    store = _make_market_state_store(_make_ws_state(53, 54, live_sequence_confirmed=False))
+    intent = _make_intent(side="yes", price_cents=50)
+    intent.selected_outcome_price_cents = 50
+    intent.ev_net_cents = 10
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, _make_port(53, 54), TradingMode.LIVE, time.monotonic()
+        )
+    assert result is not None
+    assert result.status == "rejected"
+    assert intent.price_cents == 50
