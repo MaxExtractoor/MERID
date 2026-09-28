@@ -2559,7 +2559,7 @@ class KalshiMarketStateStore:
             if (
                 state.best_bid_cents is not None
                 and state.best_ask_cents is not None
-                and state.best_bid_cents >= state.best_ask_cents
+                and state.best_bid_cents > state.best_ask_cents
             ):
                 return False, "REST_CROSSED"
             return True, None
