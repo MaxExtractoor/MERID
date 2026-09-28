@@ -749,6 +749,26 @@ def _get_resolved_min_p_selected(default: float) -> float:
     return max(float(default), resolved_p)
 
 
+def _probability_source_allowed(source: str) -> bool:
+    """Fail-closed allowlist for probability sources admitted into the decision.
+
+    When an immutable live config has been resolved, only sources in
+    ``resolved.allowed_probability_sources`` may contribute to the live
+    decision probability; the legacy module flag alone cannot admit a source.
+    Before resolution (dev/test), the legacy ``MERID_TRADE_DECISION_ALLOW_HYBRID_P``
+    flag is the fallback so existing non-prod behavior is preserved.
+    """
+    resolved = _get_resolved_live_config()
+    if resolved is not None:
+        allowed = getattr(resolved, "allowed_probability_sources", None)
+        if not allowed:
+            allowed = ("settlement_rti_bachelier_v2",)
+        return source in allowed
+    if source == "hybrid_bachelier_deltas":
+        return bool(MERID_TRADE_DECISION_ALLOW_HYBRID_P)
+    return True
+
+
 def _min_p_for_side(breakdown: EdgeBreakdown, floor: float) -> float:
     """Return the side-aware minimum p_selected for a positive-EV trade.
 
@@ -1747,6 +1767,30 @@ def _clear_live_evidence_cache() -> None:
     _live_evidence_cache["data"] = None
 
 
+def _wilson_lower_bound(wr: float, n: int, z: float) -> float:
+    """One-sided Wilson score lower bound for a binomial proportion.
+
+    A raw win rate ``k/n`` is a point estimate; on sparse cohorts it materially
+    overstates confidence.  The Wilson LCB is the conservative statistic the
+    evidence gate compares against the cost floor: a cohort is only trusted to
+    cover its cost basis when the *lower* credible bound on its true win rate
+    still clears it.
+    """
+    if n <= 0:
+        return 0.0
+    phat = max(0.0, min(1.0, wr))
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = phat + z2 / (2.0 * n)
+    margin = z * math.sqrt((phat * (1.0 - phat) + z2 / (4.0 * n)) / n)
+    return max(0.0, (center - margin) / denom)
+
+
+MERID_LIVE_EVIDENCE_Z = float(
+    os.environ.get("MERID_LIVE_EVIDENCE_Z", "1.645")  # one-sided ~95%
+)
+
+
 def _live_evidence_allows(
     evidence: Dict[str, Any],
     asset: str,
@@ -1760,6 +1804,9 @@ def _live_evidence_allows(
       mean entry price + fee + margin (regime break across the whole cohort);
     - cell level: trailing WR in this 10c held-price bucket no longer covers
       entry price + fee + margin.
+
+    The comparison uses the Wilson score lower bound of the win rate, not the
+    point estimate, so a cohort must clear its cost floor *conservatively*.
     Missing/under-sampled cohorts defer to the caller (static floor still applies).
     """
     rec = ((evidence.get("assets") or {}).get(str(asset).upper()) or {}).get(side)
@@ -1768,27 +1815,32 @@ def _live_evidence_allows(
     n = int(rec.get("n") or 0)
     if n >= MERID_LIVE_EVIDENCE_MIN_ASSET_SAMPLES:
         wr = float(rec.get("wr") or 0.0)
+        wr_lcb = _wilson_lower_bound(wr, n, MERID_LIVE_EVIDENCE_Z)
         avg_entry_cents = float(rec.get("avg_entry_cents") or 0.0)
         floor = avg_entry_cents / 100.0 + fee_frac + MERID_LIVE_EVIDENCE_MARGIN
-        if wr < floor:
+        if wr_lcb < floor:
             return False, {
                 "level": "asset",
                 "n": n,
                 "wr": wr,
+                "wr_lcb": wr_lcb,
                 "avg_entry_cents": avg_entry_cents,
                 "floor": floor,
             }
     bucket = str(min(int(entry_price_cents) // 10 * 10, 90))
     b = (rec.get("buckets") or {}).get(bucket)
     if isinstance(b, dict) and int(b.get("n") or 0) >= MERID_LIVE_EVIDENCE_MIN_CELL_SAMPLES:
+        n_cell = int(b["n"])
         wr = float(b.get("wr") or 0.0)
+        wr_lcb = _wilson_lower_bound(wr, n_cell, MERID_LIVE_EVIDENCE_Z)
         floor = entry_price_cents / 100.0 + fee_frac + MERID_LIVE_EVIDENCE_MARGIN
-        if wr < floor:
+        if wr_lcb < floor:
             return False, {
                 "level": "cell",
                 "bucket": bucket,
-                "n": int(b["n"]),
+                "n": n_cell,
                 "wr": wr,
+                "wr_lcb": wr_lcb,
                 "floor": floor,
             }
     return True, None
@@ -2084,9 +2136,12 @@ def compute_trade_decision(
 
     # 2026-08-28: accept externally supplied p_yes_model only when hybrid
     # probabilities are explicitly enabled.  Bachelier-only is the live default.
+    # 2026-11: admission now consults the resolved probability-source allowlist —
+    # MERID_TRADE_DECISION_ALLOW_HYBRID_P alone can no longer admit a source that
+    # the resolved config has not granted (see live_config.py allowlist).
     p_yes_for_yes = float(p_yes_raw)
     p_no_for_no = float(p_no_raw)
-    if MERID_TRADE_DECISION_ALLOW_HYBRID_P and p_yes_model is not None and math.isfinite(p_yes_model):
+    if _probability_source_allowed("hybrid_bachelier_deltas") and p_yes_model is not None and math.isfinite(p_yes_model):
         p_yes_for_yes = max(0.0, min(1.0, p_yes_model))
         p_no_for_no = 1.0 - p_yes_for_yes
 

@@ -1309,6 +1309,31 @@ def _reset_cfb_rti_env(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _unresolved_live_config_for_decision_tests(monkeypatch):
+    """Keep the probability-source admission on the env-flag fallback path.
+
+    The resolved live config now owns the probability-source allowlist; when it
+    is unresolved, ``compute_trade_decision`` falls back to the module flag.
+    Older tests were written when the flag defaulted to ``1`` in ``.env`` and
+    therefore exercise hybrid-probability admission without patching it.  This
+    fixture resets the resolved singleton (so leaked resolution cannot change
+    behavior between tests) and restores the flag default those tests assumed.
+    Tests that want denial patch the flag to ``False`` or resolve a config
+    explicitly.
+    """
+    from merid.config.live_config import reset_resolved_live_config
+
+    reset_resolved_live_config()
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P",
+        True,
+        raising=False,
+    )
+    yield
+    reset_resolved_live_config()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _init_trading_guard_singleton():
     """Initialize the global TradingGuard singleton once for tests.

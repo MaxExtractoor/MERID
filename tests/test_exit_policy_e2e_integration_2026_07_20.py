@@ -82,17 +82,26 @@ class TestExitClassificationInvariant:
     def test_exit_invariant_code_exists(self):
         """Test that exit invariant code exists in order_router."""
         import inspect
-        from merid.event_venues.kalshi.order_router import route_order_async
-        
-        source = inspect.getsource(route_order_async)
-        
+        from merid.event_venues.kalshi.order_router import (
+            _check_exit_delta_invariant,
+            _route_order_async_impl,
+        )
+
+        # 2026-08-01 refactor: the check lives in _check_exit_delta_invariant,
+        # invoked from _route_order_async_impl (route_order_async delegates);
+        # rejection reason is "exit_invariant_violation:*".
+        invariant_src = inspect.getsource(_check_exit_delta_invariant)
+        router_src = inspect.getsource(_route_order_async_impl)
+
         # Check for exit invariant check
-        assert "EXIT-INVARIANT" in source, \
+        assert "EXIT-INVARIANT" in invariant_src, \
             "EXIT-INVARIANT log should exist"
-        assert "exit_invariant_breach" in source, \
-            "exit_invariant_breach reason should exist"
-        assert "_is_exit_order" in source, \
+        assert "exit_invariant_violation" in invariant_src, \
+            "exit_invariant_violation reason should exist"
+        assert "_is_exit_order" in invariant_src, \
             "_is_exit_order check should exist in invariant"
+        assert "_check_exit_delta_invariant" in router_src, \
+            "_route_order_async_impl should call _check_exit_delta_invariant"
 
 
 class TestExitBypassLogic:

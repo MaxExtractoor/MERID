@@ -7757,6 +7757,76 @@ class LeanAgent15m:
         if market_state is None:
             market_state = market
 
+        # 2026-11-18: Per-contract settlement-rule + fee-schedule validation
+        # (fail closed).  The settlement-TWAP model prices exactly one payoff —
+        # the arithmetic mean of 1s CF-RTI prints over the final 60s — and the
+        # fee math assumes the quadratic schedule with multiplier 1.0.  A market
+        # whose declared rules or fee metadata don't match that contract must
+        # not be traded on assumed parameters.
+        try:
+            from merid.event_venues.kalshi.contract_spec import (
+                evaluate_market_contract,
+                extract_market_contract_fields,
+            )
+
+            _contract_fields = extract_market_contract_fields(
+                getattr(market, "market", None), market, market_state
+            )
+            _maker_requested = os.environ.get(
+                "MERID_ENTRY_MAKER_ENABLED", ""
+            ).strip().lower() in ("1", "true", "yes")
+            contract_spec = evaluate_market_contract(
+                _contract_fields,
+                ticker=ticker,
+                maker_entries_enabled=_maker_requested,
+            )
+        except Exception as _spec_exc:
+            # Fail closed: an inability to validate the contract is itself a
+            # rejection, never a bypass.
+            logger.error(
+                "[CONTRACT-SPEC] asset=%s ticker=%s evaluation failed: %s",
+                asset, ticker, _spec_exc, exc_info=True,
+            )
+            self._record_signal_rejection(
+                "contract_spec_eval_error",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                    extra={"error": str(_spec_exc)},
+                )
+            )
+            return None
+
+        if not contract_spec.compatible:
+            logger.warning(
+                "[CONTRACT-SPEC] asset=%s ticker=%s INCOMPATIBLE CONTRACT: %s "
+                "(aggregation=%s reference=%s fee_type=%s fee_multiplier=%s rules_sha=%s)",
+                asset, ticker, contract_spec.reasons, contract_spec.aggregation,
+                contract_spec.reference, contract_spec.fee_type,
+                contract_spec.fee_multiplier,
+                (contract_spec.rules_sha256 or "")[:12],
+            )
+            self._record_signal_rejection(
+                "contract_spec_invalid",
+                **self._build_trade_decision_rejection_context(
+                    asset,
+                    spot_price,
+                    None,
+                    None,
+                    (minutes_to_expiry * 60.0) if minutes_to_expiry else 0.0,
+                    extra={
+                        "contract_spec_reasons": list(contract_spec.reasons),
+                        "aggregation": contract_spec.aggregation,
+                        "reference": contract_spec.reference,
+                        "rules_sha256": contract_spec.rules_sha256,
+                    },
+                )
+            )
+            return None
+
         strike, strike_source, strike_diag = _resolve_trade_decision_strike(
             asset, market_state, market, spot_price
         )
@@ -8158,6 +8228,12 @@ class LeanAgent15m:
                 indicators["ws_rest_bid_diff_ticks"] = getattr(market_state, "ws_rest_bid_diff_ticks", None)
                 indicators["ws_rest_ask_diff_ticks"] = getattr(market_state, "ws_rest_ask_diff_ticks", None)
                 indicators["ws_parity_healthy"] = getattr(market_state, "ws_parity_healthy", None)
+            # Contract-spec provenance frozen into the decision audit record.
+            indicators["contract_spec_recognized"] = contract_spec.recognized
+            indicators["contract_aggregation"] = contract_spec.aggregation
+            indicators["contract_rules_sha256"] = contract_spec.rules_sha256
+            indicators["contract_fee_type"] = contract_spec.fee_type
+            indicators["contract_fee_multiplier"] = contract_spec.fee_multiplier
             decision = compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
@@ -8214,9 +8290,17 @@ class LeanAgent15m:
         # decision-time price or not at all.  A signal that only clears EV
         # with maker economics is too marginal to trade.
         # Re-enable with MERID_ENTRY_MAKER_ENABLED=1.
-        maker_entries_enabled = os.environ.get(
-            "MERID_ENTRY_MAKER_ENABLED", ""
-        ).strip().lower() in ("1", "true", "yes")
+        # 2026-11-18: the maker lane additionally requires the market's
+        # fee_type to confirm maker pricing applies.  A resting order on a
+        # series whose fee schedule doesn't include maker fees would be priced
+        # on an assumed (cheaper) schedule — force taker instead.
+        maker_entries_enabled = _maker_requested and contract_spec.maker_fee_verified
+        if _maker_requested and not contract_spec.maker_fee_verified:
+            logger.warning(
+                "[CONTRACT-SPEC] asset=%s ticker=%s maker fee unverified "
+                "(fee_type=%s) — maker lane disabled this cycle, taker only",
+                asset, ticker, contract_spec.fee_type,
+            )
 
         decision_taker = _call_trade_decision(taker_fee_cents, p_yes_model)
 

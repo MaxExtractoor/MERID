@@ -1642,7 +1642,13 @@ class ExitPolicyResolution:
     # Edge context at resolution time (observability/audit; sourced from edge_result)
     edge_confidence: Optional[float] = None  # Model confidence of the entry edge (0-1)
     net_edge_cents_at_entry: Optional[float] = None  # Net edge after fees (cents) at entry
-    
+
+    # Exit semantics.  "ACTIVE_MANAGEMENT" = TP/SL/trailing policy is live;
+    # "HOLD_TO_SETTLEMENT" = the position is held to settlement by design
+    # (MERID_DISABLE_EXIT_POLICY=1).  Emergency reduce-only/flatten capability
+    # is unaffected — those paths do not consume TP/SL targets.
+    mode: str = "ACTIVE_MANAGEMENT"
+
     # Metadata
     created_at: float = field(default_factory=_time.time)
     version: str = "v1"
@@ -1695,6 +1701,7 @@ def exit_policy_to_dict(policy: Any) -> Dict[str, Any]:
         "min_edge_after_fees_cents": getattr(policy, "min_edge_after_fees_cents", 2.0),
         "edge_confidence": getattr(policy, "edge_confidence", None),
         "net_edge_cents_at_entry": getattr(policy, "net_edge_cents_at_entry", None),
+        "mode": getattr(policy, "mode", "ACTIVE_MANAGEMENT") or "ACTIVE_MANAGEMENT",
         "version": getattr(policy, "version", "v1"),
     }
 
@@ -1778,7 +1785,52 @@ def resolve_exit_policy(
         except Exception:
             edge_confidence = None
             net_edge_cents_at_entry = None
-    
+
+    # Settlement-hold mode (2026-09-27 operator flag, made explicit 2026-11):
+    # when MERID_DISABLE_EXIT_POLICY=1 the position is held to settlement
+    # resolution by design.  Return an honest policy object with no TP/SL/
+    # trailing/scale-out targets instead of fabricating discretionary targets
+    # that the position monitor will ignore.  Emergency reduce-only, cancel,
+    # and flatten capability are independent of this policy and unaffected.
+    if os.environ.get("MERID_DISABLE_EXIT_POLICY", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        _hold_max_seconds = 900
+        try:
+            _tte = strip_context.get("seconds_to_expiry")
+            if _tte is not None and float(_tte) > 0:
+                _hold_max_seconds = int(float(_tte))
+        except Exception:
+            pass
+        return ExitPolicyResolution(
+            policy_id=policy_id,
+            asset=asset,
+            regime=regime,
+            tp_mode=TakeProfitMode.TIME_BASED,
+            tp_r_multiple=0.0,
+            tp_min_cents=0,
+            tp_price_cents=None,
+            take_profit_enabled=False,
+            tp_time_based_r={},
+            sl_mode=StopLossMode.FIXED_CENTS,
+            sl_cents=0,
+            sl_r_multiple=None,
+            stop_loss_enabled=False,
+            trailing_enabled=False,
+            trailing_activation_r=0.0,
+            trailing_giveback_cents=0,
+            scale_out_enabled=False,
+            scale_out_trigger_r=0.0,
+            scale_out_fraction=0.0,
+            max_hold_seconds=max(1, _hold_max_seconds),
+            max_round_trips=0,
+            min_price_move_for_reentry=0,
+            min_edge_after_fees_cents=0.0,
+            edge_confidence=edge_confidence,
+            net_edge_cents_at_entry=net_edge_cents_at_entry,
+            mode="HOLD_TO_SETTLEMENT",
+        )
+
     # CRITICAL FIX: Load TP/SL from YAML exit_policy.risk_reward config (2026-07-15)
     # Previously hardcoded to 0.75/1.0/1.2 - now uses upstream configuration
     # 2026-08-12: TP is now edge-based (75% of model edge, min 5c gross profit)

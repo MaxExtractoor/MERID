@@ -8874,7 +8874,23 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 assert exit_policy.tp_r_multiple >= 0, f"Exit policy TP R-multiple must be non-negative for ticker={ticker}, got {exit_policy.tp_r_multiple}"
                 assert exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
                 assert exit_policy.max_hold_seconds > 0, f"Exit policy max_hold_seconds must be positive for ticker={ticker}, got {exit_policy.max_hold_seconds}"
-                if not exit_policy.take_profit_enabled and not exit_policy.stop_loss_enabled:
+                # 2026-11: explicit exit-mode semantics.  HOLD_TO_SETTLEMENT is a
+                # valid strategy mode (no discretionary TP/SL by design); any
+                # unrecognized mode fails closed.  ACTIVE_MANAGEMENT still
+                # requires at least one live exit target.
+                _exit_mode = getattr(exit_policy, "mode", "ACTIVE_MANAGEMENT") or "ACTIVE_MANAGEMENT"
+                if _exit_mode not in ("ACTIVE_MANAGEMENT", "HOLD_TO_SETTLEMENT"):
+                    self._rejection_counters["exit_policy_failed"] += 1
+                    logger.error(
+                        "[15M-LOOP] Unrecognized exit policy mode=%s for %s - rejecting order",
+                        _exit_mode, ticker,
+                    )
+                    return False
+                if (
+                    _exit_mode == "ACTIVE_MANAGEMENT"
+                    and not exit_policy.take_profit_enabled
+                    and not exit_policy.stop_loss_enabled
+                ):
                     self._rejection_counters["exit_policy_no_targets"] = self._rejection_counters.get("exit_policy_no_targets", 0) + 1
                     logger.warning("[15M-LOOP] No executable TP/SL for %s (no trusted edge) - rejecting order", ticker)
                     return False

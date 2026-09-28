@@ -125,6 +125,18 @@ def _patch_economics_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_EV_GATE_AUTHORITATIVE", False
     )
+    # Economics isolation: these tests exercise the π* cost-stack math, not the
+    # market-lean gates.  Disable the fade gate and market-anchor shrinkage so
+    # the synthetic books' leans don't veto or shrink the model probability.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_FADE_BLOCK_MIN_LEAN_CENTS", 99.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MIN_W", 0.0
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MAX_W", 0.0
+    )
 
 
 @pytest.mark.parametrize(
