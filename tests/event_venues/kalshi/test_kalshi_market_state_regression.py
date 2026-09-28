@@ -430,3 +430,201 @@ class TestUniverseConsistency:
         assert result["valid"] is False
         assert manager.violation_count == 1, "Asset coverage violation must still increment count"
         assert len(alerts_sent) == 1, "Asset coverage violation must still send CRITICAL alert"
+
+
+# ── REST-BBO divergence guard regression (2026-09-28) ────────────────────────
+
+
+class TestRestBboDivergenceGuard:
+    """Regression tests for the _sync_book_fields crash at the REST-preferred-BBO
+    block.
+
+    Production failure (2026-09-28): ``ws_divergent`` computed
+    ``abs(state.best_bid_cents - state.last_rest_bid_cents)`` unconditionally
+    whenever the WS book was two-sided.  On fresh window tickers (or after a
+    one-sided REST poll), ``last_rest_bid_cents`` / ``last_rest_ask_cents`` are
+    ``None`` -> ``TypeError: int - None`` inside the batch worker.  The
+    exception aborted the remainder of every delta's state sync (recovery
+    attestation, live_sequence_confirmed, unified-book sync), so the delta
+    book could never become WS-authoritative and orders died at the
+    ws_rest_divergence router guard.
+    """
+
+    TICKER = "KXBTC15M-T"
+
+    def setup_method(self):
+        self._stores = []
+
+    def teardown_method(self):
+        # The store's batch-worker thread is non-daemon; stop it or pytest
+        # cannot exit.
+        for store in self._stores:
+            try:
+                store._stop_batch_worker()
+            except Exception:
+                pass
+
+    def _new_store(self):
+        store = KalshiMarketStateStore()
+        self._stores.append(store)
+        return store
+
+    def _store_with_book(self, yes=[[0.48, 5]], no=[[0.50, 4]], seq=100):
+        """Store whose LocalOrderbook holds a two-sided book: bid=48c ask=50c."""
+        store = self._new_store()
+        store._ob.apply_snapshot(
+            self.TICKER,
+            {"ticker": self.TICKER, "yes": yes, "no": no, "seq": seq},
+        )
+        return store
+
+    def _sync(self, store, via="bridge_queue"):
+        """Drive _sync_book_fields for the ticker's current book."""
+        state = store._get_or_create(self.TICKER)
+        ob = store._ob.get_book(self.TICKER)
+        store._sync_book_fields(state, ob, self.TICKER, via)
+        return state
+
+    def _ws_delta(self, seq=101):
+        # Adds YES size at 49c -> post-delta WS BBO becomes 49/50.
+        return {"side": "yes", "price": 49, "size_delta": 3, "seq": seq}
+
+    def test_ws_snapshot_no_rest_bbo_completes_sync(self):
+        """Fresh ticker, no REST quote yet: WS snapshot sync must not raise."""
+        store = self._new_store()
+        with patch.object(store, '_notify_subscribers'):
+            state = store.apply_orderbook_message(
+                {
+                    "type": "orderbook_snapshot",
+                    "ticker": self.TICKER,
+                    "yes": [[0.48, 5]],
+                    "no": [[0.50, 4]],
+                    "seq": 100,
+                },
+                via="bridge_queue",
+            )
+        assert state is not None
+        assert state.book_initialized is True
+        assert state.best_bid_cents == 48
+        assert state.best_ask_cents == 50
+        assert state.quote_owner == "WS"
+
+    def test_ws_delta_no_rest_bbo_does_not_crash(self):
+        """Delta on a two-sided book with last_rest_* unset must complete."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        state.last_rest_bid_cents = None
+        state.last_rest_ask_cents = None
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        # Post-sync statements run only when _sync_book_fields did not raise.
+        assert state.data_source == "WS_ORDERBOOK_DELTA_LIVE"
+        assert state.best_bid_cents is not None
+
+    def test_ws_delta_rest_bid_only_no_crash(self):
+        """REST bid present, REST ask None: divergence is not comparable."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        state.last_rest_bid_cents = 36
+        state.last_rest_ask_cents = None
+        state.last_rest_quote_update_ts = time.monotonic()
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        assert state.data_source == "WS_ORDERBOOK_DELTA_LIVE"
+        # No valid REST BBO -> WS book must remain authoritative, not overwritten.
+        assert state.best_bid_cents == 49  # delta added a higher bid at 49
+
+    def test_ws_delta_rest_ask_only_no_crash(self):
+        """REST ask present, REST bid None: divergence is not comparable."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        state.last_rest_bid_cents = None
+        state.last_rest_ask_cents = 37
+        state.last_rest_quote_update_ts = time.monotonic()
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        assert state.data_source == "WS_ORDERBOOK_DELTA_LIVE"
+        assert state.best_bid_cents == 49
+
+    def test_ws_delta_divergent_fresh_rest_bbo_prefers_rest(self):
+        """Fresh divergent REST BBO overrides the lagging delta-derived book."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        state.last_rest_bid_cents = 36
+        state.last_rest_ask_cents = 37
+        state.last_rest_quote_update_ts = time.monotonic()
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        # WS BBO 49/50 vs REST 36/37 -> max divergence 13c > 3c -> REST wins.
+        assert state.best_bid_cents == 36
+        assert state.best_ask_cents == 37
+        assert state.quote_owner == "REST_PREFERRED"
+
+    def test_ws_delta_coherent_rest_bbo_keeps_ws(self):
+        """REST BBO within the divergence threshold leaves the WS book alone."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        # After delta, WS BBO is 49/50; REST 47/49 -> max divergence 2c <= 3c.
+        state.last_rest_bid_cents = 47
+        state.last_rest_ask_cents = 49
+        state.last_rest_quote_update_ts = time.monotonic()
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        assert state.best_bid_cents == 49
+        assert state.best_ask_cents == 50
+        assert state.quote_owner == "WS"
+
+    def test_ws_delta_stale_rest_bbo_keeps_ws(self):
+        """A REST BBO older than MERID_REST_BBO_MAX_AGE_S must not override WS."""
+        store = self._store_with_book()
+        state = store._get_or_create(self.TICKER)
+        state.last_rest_bid_cents = 36
+        state.last_rest_ask_cents = 37
+        state.last_rest_quote_update_ts = time.monotonic() - 30.0
+        with patch.object(store, '_notify_subscribers'):
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        assert state.best_bid_cents == 49
+        assert state.best_ask_cents == 50
+        assert state.quote_owner == "WS"
+
+    def test_rest_one_sided_snapshot_then_delta_no_crash(self):
+        """REST poll returning an empty NO side (observed near window close)
+        sets last_rest_ask_cents=None; the next WS delta must not crash."""
+        store = self._new_store()
+        # REST-poll snapshot with an empty NO ladder (half-empty book).
+        with patch.object(store, '_notify_subscribers'):
+            store.apply_orderbook_message(
+                {
+                    "type": "orderbook_snapshot",
+                    "ticker": self.TICKER,
+                    "yes": [[0.48, 5]],
+                    "no": [],
+                    "seq": 0,
+                },
+                via="rest_polling",
+            )
+        state = store.get(self.TICKER)
+        assert state.last_rest_bid_cents == 48
+        assert state.last_rest_ask_cents is None
+        # WS snapshot rebuilds a two-sided book; the delta that follows must
+        # complete state sync instead of raising TypeError.
+        with patch.object(store, '_notify_subscribers'):
+            store.apply_orderbook_message(
+                {
+                    "type": "orderbook_snapshot",
+                    "ticker": self.TICKER,
+                    "yes": [[0.48, 5]],
+                    "no": [[0.50, 4]],
+                    "seq": 100,
+                },
+                via="bridge_queue",
+            )
+            store._apply_delta_internal(self.TICKER, self._ws_delta())
+        state = store.get(self.TICKER)
+        assert state.data_source == "WS_ORDERBOOK_DELTA_LIVE"
