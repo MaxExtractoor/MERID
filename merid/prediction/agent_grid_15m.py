@@ -577,7 +577,21 @@ def validate_trade_snapshot(
         if not getattr(market_state, "book_initialized", False):
             failures.append("ORDERBOOK_NOT_INITIALIZED")
         if not getattr(market_state, "live_sequence_confirmed", False):
-            failures.append("ORDERBOOK_SEQUENCE_NOT_CONFIRMED")
+            # Degraded-execution policy: a fresh, attested REST-owned
+            # effective quote is an acceptable decision snapshot while the WS
+            # leg re-verifies.  Downstream gates (entry readiness, allocator
+            # degraded reserve, router REST pull) still bound the order.
+            _owner = getattr(market_state, "quote_owner", "") or ""
+            _rest_ts = getattr(market_state, "last_rest_quote_update_ts", 0.0) or 0.0
+            _rest_age_s = time.monotonic() - _rest_ts if _rest_ts > 0 else float("inf")
+            _rest_ttl_s = float(os.getenv("MERID_REST_ENTRY_TTL_MS", "3000")) / 1000.0
+            _rest_ok = (
+                _owner == "REST_VERIFIED_DEGRADED"
+                and os.getenv("MERID_REST_DEGRADED_ENTRY_ENABLED", "1").lower() in ("1", "true", "yes")
+                and _rest_age_s <= _rest_ttl_s
+            )
+            if not _rest_ok:
+                failures.append("ORDERBOOK_SEQUENCE_NOT_CONFIRMED")
 
     return failures
 
