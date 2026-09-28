@@ -290,6 +290,12 @@ def test_held_side_entry_price_floor_blocks_cheap_yes(monkeypatch):
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 20.0
     )
+    # The 9/10c YES quotes put the market mid at ~9.5c (lean -40.5c), which the
+    # 2026-09-27 market-lean fade gate would block before the price floor runs.
+    # Neutralize it here so this test isolates the held-price floor.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_FADE_BLOCK_MIN_LEAN_CENTS", 1000.0
+    )
     # Use a tight bid/ask spread so confidence is valid and the floor is the
     # only rejection reason.
     d = _make_decision(
@@ -311,6 +317,11 @@ def test_held_side_entry_price_floor_blocks_cheap_no(monkeypatch):
     )
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_MIN_HELD_PRICE_CENTS", 20.0
+    )
+    # Same fade-gate interference as the YES case above: 90c YES mid implies a
+    # +40c lean that would trigger market_fade_blocked_no first.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_FADE_BLOCK_MIN_LEAN_CENTS", 1000.0
     )
     d = _make_decision(
         spot=99.5,

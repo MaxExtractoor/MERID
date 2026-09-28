@@ -140,6 +140,31 @@ MERID_CALIBRATION_EVIDENCE_MARGIN = float(
     os.environ.get("MERID_CALIBRATION_EVIDENCE_MARGIN", "0.01")
 )
 
+# 2026-09-28: Live rolling entry-evidence gate.  The static calibration
+# artifact above is only refit offline, so a regime break keeps passing the
+# frozen evidence floor for days — BTC NO-side entries decayed 77% -> 45%
+# win rate over 2026-09-26..28 (~300 settled entries) while the static floor
+# kept admitting the same cells.  The decision audit ledger rebuilds
+# data/live_entry_evidence.json on every settlement with trailing-window
+# win rates per (asset, side) and per (asset, side, 10c price bucket).  A
+# cell fails closed when its *recent* observed win rate no longer clears
+# entry price + fee + margin, and an asset+side fails entirely when the
+# cohort's trailing win rate no longer covers its mean entry price.
+# Fail-open when the artifact is absent or a cohort has too few samples —
+# the static floor still applies.  Disable with MERID_LIVE_EVIDENCE_GATE=0.
+MERID_LIVE_EVIDENCE_GATE = os.environ.get(
+    "MERID_LIVE_EVIDENCE_GATE", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_LIVE_EVIDENCE_MARGIN = float(
+    os.environ.get("MERID_LIVE_EVIDENCE_MARGIN", "0.03")
+)
+MERID_LIVE_EVIDENCE_MIN_ASSET_SAMPLES = int(
+    os.environ.get("MERID_LIVE_EVIDENCE_MIN_ASSET_SAMPLES", "30")
+)
+MERID_LIVE_EVIDENCE_MIN_CELL_SAMPLES = int(
+    os.environ.get("MERID_LIVE_EVIDENCE_MIN_CELL_SAMPLES", "15")
+)
+
 # Fail-closed gate for externally supplied hybrid p_yes.  Bachelier-only is the
 # live baseline; a hybrid probability is only accepted when this flag is
 # explicitly enabled, and still subject to tail calibration / π* / floor gates.
@@ -1683,6 +1708,92 @@ def _compute_confidence(
     )
 
 
+# mtime-cached view of data/live_entry_evidence.json, rebuilt on each
+# settlement by the decision audit ledger.  See MERID_LIVE_EVIDENCE_GATE.
+_live_evidence_cache: Dict[str, Any] = {"mtime": None, "data": None}
+
+
+def _load_live_evidence() -> Optional[Dict[str, Any]]:
+    """Load the rolling entry-evidence artifact, re-reading only on mtime change.
+
+    Hermetic-test guard: under pytest the machine-local default artifact is
+    ignored so a stale local file can never change unrelated test outcomes;
+    tests opt in by setting MERID_LIVE_EVIDENCE_PATH explicitly.
+    """
+    if "MERID_LIVE_EVIDENCE_PATH" not in os.environ and (
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("MERID_ENV", "").strip().lower() in ("test", "ci")
+    ):
+        return None
+    path = os.environ.get("MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    if _live_evidence_cache["mtime"] == mtime and _live_evidence_cache["data"] is not None:
+        return _live_evidence_cache["data"]
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    _live_evidence_cache["mtime"] = mtime
+    _live_evidence_cache["data"] = data
+    return data
+
+
+def _clear_live_evidence_cache() -> None:
+    _live_evidence_cache["mtime"] = None
+    _live_evidence_cache["data"] = None
+
+
+def _live_evidence_allows(
+    evidence: Dict[str, Any],
+    asset: str,
+    side: str,
+    entry_price_cents: int,
+    fee_frac: float,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Return (allowed, detail).  Fails closed only on positive live evidence:
+
+    - asset level: trailing settled WR for this asset+side no longer covers
+      mean entry price + fee + margin (regime break across the whole cohort);
+    - cell level: trailing WR in this 10c held-price bucket no longer covers
+      entry price + fee + margin.
+    Missing/under-sampled cohorts defer to the caller (static floor still applies).
+    """
+    rec = ((evidence.get("assets") or {}).get(str(asset).upper()) or {}).get(side)
+    if not isinstance(rec, dict):
+        return True, None
+    n = int(rec.get("n") or 0)
+    if n >= MERID_LIVE_EVIDENCE_MIN_ASSET_SAMPLES:
+        wr = float(rec.get("wr") or 0.0)
+        avg_entry_cents = float(rec.get("avg_entry_cents") or 0.0)
+        floor = avg_entry_cents / 100.0 + fee_frac + MERID_LIVE_EVIDENCE_MARGIN
+        if wr < floor:
+            return False, {
+                "level": "asset",
+                "n": n,
+                "wr": wr,
+                "avg_entry_cents": avg_entry_cents,
+                "floor": floor,
+            }
+    bucket = str(min(int(entry_price_cents) // 10 * 10, 90))
+    b = (rec.get("buckets") or {}).get(bucket)
+    if isinstance(b, dict) and int(b.get("n") or 0) >= MERID_LIVE_EVIDENCE_MIN_CELL_SAMPLES:
+        wr = float(b.get("wr") or 0.0)
+        floor = entry_price_cents / 100.0 + fee_frac + MERID_LIVE_EVIDENCE_MARGIN
+        if wr < floor:
+            return False, {
+                "level": "cell",
+                "bucket": bucket,
+                "n": int(b["n"]),
+                "wr": wr,
+                "floor": floor,
+            }
+    return True, None
+
+
 def _select_best_side(
     yes_breakdown: EdgeBreakdown,
     no_breakdown: EdgeBreakdown,
@@ -2191,6 +2302,8 @@ def compute_trade_decision(
     # does not gate.
     yes_evidence_ok = True
     no_evidence_ok = True
+    yes_evidence_reason: Optional[str] = None
+    no_evidence_reason: Optional[str] = None
     if tail_calibrator is not None and MERID_CALIBRATION_CAP_FULL_RANGE:
         _ev_floor_yes = yes_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
         _ev_floor_no = no_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
@@ -2212,6 +2325,10 @@ def compute_trade_decision(
             "calibration_evidence_yes": yes_evidence_ok,
             "calibration_evidence_no": no_evidence_ok,
         })
+        if not yes_evidence_ok:
+            yes_evidence_reason = "calibration_evidence_yes"
+        if not no_evidence_ok:
+            no_evidence_reason = "calibration_evidence_no"
 
     # 2026-09-23: settlement-convergence entries hold to settlement — there is
     # no exit order and no exit fee inside the final minute, so the reserve is
@@ -2274,6 +2391,29 @@ def compute_trade_decision(
     )
     indicators["yes_min_edge"] = yes_min_edge
     indicators["no_min_edge"] = no_min_edge
+
+    # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
+    # notes at module level — applies the evidence-floor semantics to the
+    # trailing settled-outcome window the audit ledger rebuilds per settlement.
+    # Fail-open on absent/under-sampled cohorts (static floor above still applies).
+    if MERID_LIVE_EVIDENCE_GATE:
+        _live_ev = _load_live_evidence()
+        if _live_ev is not None:
+            indicators["live_evidence_evaluated"] = True
+            _yes_live_ok, _yes_live_det = _live_evidence_allows(
+                _live_ev, asset, "yes", yes_price_cents, fee
+            )
+            _no_live_ok, _no_live_det = _live_evidence_allows(
+                _live_ev, asset, "no", no_price_cents, fee
+            )
+            if not _yes_live_ok and yes_evidence_ok:
+                yes_evidence_ok = False
+                yes_evidence_reason = f"live_evidence_{_yes_live_det['level']}_yes"
+                indicators[yes_evidence_reason] = _yes_live_det
+            if not _no_live_ok and no_evidence_ok:
+                no_evidence_ok = False
+                no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
+                indicators[no_evidence_reason] = _no_live_det
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
     if selected_side_pre_edge is None and best_side is not None:
@@ -2357,11 +2497,13 @@ def compute_trade_decision(
             best_min_p = yes_min_p if best_side == "yes" else no_min_p
             best_evidence_ok = yes_evidence_ok if best_side == "yes" else no_evidence_ok
             if not best_evidence_ok:
-                # The observed win-rate curve at this held-side price does not
-                # clear price + fee + margin: the cell is historically
-                # unprofitable for our signal population regardless of what
-                # the model claims.
-                no_trade_reason = f"calibration_evidence_{best_side}"
+                # The observed win-rate evidence at this held-side price does
+                # not clear price + fee + margin: the cell is unprofitable for
+                # our signal population regardless of what the model claims.
+                # Prefer the specific reason (live-rolling vs static-artifact).
+                no_trade_reason = (
+                    yes_evidence_reason if best_side == "yes" else no_evidence_reason
+                ) or f"calibration_evidence_{best_side}"
             elif best_net_edge < best_threshold:
                 if best_side == "yes":
                     no_trade_reason = "yes_edge_below_threshold"
