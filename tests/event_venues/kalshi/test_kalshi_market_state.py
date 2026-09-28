@@ -809,7 +809,7 @@ class TestIsQuoteCoherent:
 
         ok, reason = store.is_quote_coherent("KXBTC15M-T", max_divergence_cents=10)
         assert ok is False
-        assert "DIVERGENCE" in reason
+        assert "WS_REST_DIVERGED" in reason
 
     def test_rest_only_fresh_is_coherent(self):
         store = KalshiMarketStateStore()
@@ -860,7 +860,7 @@ class TestRestPreferredBBO:
         assert state is not None
         assert state.best_bid_cents == 60
         assert state.best_ask_cents == 60
-        assert state.quote_owner == "REST_PREFERRED"
+        assert state.quote_owner == "REST_VERIFIED_DEGRADED"
         # The true (lagged) WS values are still tracked for diagnostics.
         assert state.last_ws_bid_cents == 40
 
@@ -874,7 +874,7 @@ class TestRestPreferredBBO:
             _snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.best_bid_cents == 58
-        assert state.quote_owner == "WS"
+        assert state.quote_owner == "WS_FRESH_VERIFIED"
 
     def test_stale_rest_does_not_override_ws(self):
         """An aged-out REST quote must not displace the live WS book."""
@@ -887,7 +887,7 @@ class TestRestPreferredBBO:
             _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.best_bid_cents == 40
-        assert state.quote_owner == "WS"
+        assert state.quote_owner == "WS_FRESH_VERIFIED"
 
     def test_rest_preferred_restores_rest_ladders(self):
         """Depth ladders follow the REST book, not the lagged delta ladders."""
@@ -897,16 +897,16 @@ class TestRestPreferredBBO:
         state = store.apply_orderbook_message(
             _snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
         )
-        assert state.quote_owner == "REST_PREFERRED"
+        assert state.quote_owner == "REST_VERIFIED_DEGRADED"
         yes_prices = [lvl[0] for lvl in state.yes_bids]
         assert max(yes_prices) in (60, 0.60)
 
     def test_coherence_uses_effective_bbo(self):
-        """is_quote_coherent compares the effective BBO to REST, so a
-        REST-preferred book is coherent even while raw last_ws_* diverges."""
+        """A REST-owned effective book stays coherent when the REST quote
+        itself is fresh and non-crossed, even while raw last_ws_* diverges."""
         store = KalshiMarketStateStore()
         t = "KXBTC15M-T"
-        self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
+        self._rest_snapshot(store, t, [[0.58, 5]], [[0.40, 8]])
         store.apply_orderbook_message(
             _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )

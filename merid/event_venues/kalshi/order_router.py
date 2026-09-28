@@ -2856,6 +2856,12 @@ class OrderIntent:
     # None uses the configured system default (settings.KALSHI_CANCEL_ORDER_ON_PAUSE).
     cancel_order_on_pause: Optional[bool] = None
 
+    # QUOTE-FEED PROVENANCE: which feed owned the executable quote when the
+    # candidate was admitted (WS_FRESH_VERIFIED / REST_VERIFIED_DEGRADED /
+    # NONE_UNTRUSTED) and whether the entry ran in degraded REST mode.
+    quote_owner: Optional[str] = None
+    degraded_mode: bool = False
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):

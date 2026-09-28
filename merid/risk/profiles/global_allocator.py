@@ -19,6 +19,7 @@ This ensures:
 - Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.5% (industry standard)
 """
 
+import os
 import time
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Tuple
@@ -65,6 +66,11 @@ class OrderCandidate:
     model_prob: float
     agent_name: str
     candidate_id: str = ""
+    # Effective-quote ownership at candidate creation.  A REST-owned quote is
+    # degraded execution (WS book unhealthy) and pays an extra edge reserve;
+    # an untrusted owner must never reach the allocator.
+    quote_owner: str = "UNKNOWN"
+    degraded_mode: bool = False
 
     @property
     def notional_usd(self) -> float:
@@ -165,7 +171,10 @@ _ALLOCATION_STAGES = (
 # Concrete terminal reason codes used in AllocationDecision.constraint_reasons.
 REASON_EXPECTED_VALUE_BELOW_MINIMUM = "EXPECTED_VALUE_BELOW_MINIMUM"
 REASON_CONFIDENCE_BELOW_MINIMUM = "CONFIDENCE_BELOW_MINIMUM"
-REASON_PRICE_OUT_OF_RANGE = "PRICE_OUT_OF_RANGE"
+# Canonical rejection-code casing matches risk_parameters.ERR_PRICE_OUT_OF_RANGE
+# and the loop rejection counters; the previous uppercase variant produced two
+# counters for the same rejection class.
+REASON_PRICE_OUT_OF_RANGE = "price_out_of_range"
 REASON_DUPLICATE_EXPOSURE = "DUPLICATE_EXPOSURE"
 REASON_EXISTING_POSITION = "EXISTING_POSITION"
 REASON_PENDING_ORDER = "PENDING_ORDER"
@@ -441,15 +450,29 @@ class GlobalAllocator:
             asset_min_edge = self.per_asset_min_edge_pct.get(c.asset, self.min_edge_pct)
             candidate_edge_frac = _to_edge_fraction(c.edge_pct)
             asset_min_edge_frac = _to_edge_fraction(asset_min_edge)
-            if candidate_edge_frac >= asset_min_edge_frac:
+            # Degraded-mode reserve: a REST-owned effective quote carries
+            # latency/uncertainty the raw edge cannot see.  It must clear the
+            # base bar plus an explicit reserve — degraded quotes are allowed
+            # to trade, never eased.
+            _degraded = bool(getattr(c, "degraded_mode", False)) or (
+                getattr(c, "quote_owner", "") == "REST_VERIFIED_DEGRADED"
+            )
+            _required_edge_frac = asset_min_edge_frac + (
+                float(os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01"))
+                if _degraded else 0.0
+            )
+            if candidate_edge_frac >= _required_edge_frac:
                 d.stage_results["EDGE"] = "PASS"
                 edge_passed.append((c, d))
             else:
                 d.stage_results["EDGE"] = "FAIL"
                 _mark_terminal(d, "EDGE", REASON_EXPECTED_VALUE_BELOW_MINIMUM)
                 logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < per_asset_min_edge=%.3f%%",
-                    c.asset, _to_edge_percent(c.edge_pct), _to_edge_percent(asset_min_edge)
+                    "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < required=%.3f%% "
+                    "(min=%.3f%% degraded=%s)",
+                    c.asset, _to_edge_percent(c.edge_pct),
+                    _to_edge_percent(_required_edge_frac),
+                    _to_edge_percent(asset_min_edge), _degraded,
                 )
 
         # STAGE: CONFIDENCE
@@ -466,18 +489,31 @@ class GlobalAllocator:
                     c.asset, c.confidence * 100, self.min_confidence * 100
                 )
 
-        # STAGE: PRICE
+        # STAGE: PRICE — canonical side-aware band.  The stale symmetric
+        # [min,max] band rejected canonical-valid candidates (e.g. NO at 77c
+        # dies under [10,75] while the canonical NO range is [25,95]); the
+        # binary_price_space module is the single price-band authority.
         price_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
         for c, d in conf_passed:
-            if self.min_price_cents <= c.price_cents <= self.max_price_cents:
+            _pmin = _pmax = None
+            try:
+                from merid.event_venues.kalshi.binary_price_space import (
+                    get_canonical_price_range,
+                )
+                _pmin, _pmax = get_canonical_price_range(c.side)
+            except Exception:
+                _pmin, _pmax = None, None
+            if _pmin is not None and _pmin <= c.price_cents <= _pmax:
                 d.stage_results["PRICE"] = "PASS"
                 price_passed.append((c, d))
             else:
                 d.stage_results["PRICE"] = "FAIL"
                 _mark_terminal(d, "PRICE", REASON_PRICE_OUT_OF_RANGE)
                 logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: price=%dc outside range [%dc-%dc]",
-                    c.asset, c.price_cents, self.min_price_cents, self.max_price_cents
+                    "[GLOBAL-ALLOCATOR] SKIP %s: price=%dc outside canonical %s "
+                    "range %s",
+                    c.asset, c.price_cents, c.side,
+                    f"[{_pmin}c-{_pmax}c]" if _pmin is not None else "[unparseable]",
                 )
 
         # STAGE: COUNT
