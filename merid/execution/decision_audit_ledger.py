@@ -325,49 +325,60 @@ class DecisionAuditLedger:
             "ON strategy_decision_side_ev(decision_id, side)"
         )
 
-        # Backfill new side-EV columns from the existing eligibility/edge fields.
-        conn.execute(
-            "UPDATE strategy_decision_side_ev "
-            "SET model_evaluated = eligible_for_model "
-            "WHERE model_evaluated = 0 AND eligible_for_model = 1"
-        )
-        conn.execute(
-            "UPDATE strategy_decision_side_ev "
-            "SET policy_eligible = eligible_for_policy "
-            "WHERE policy_eligible = 0 AND eligible_for_policy = 1"
-        )
-        conn.execute(
-            "UPDATE strategy_decision_side_ev "
-            "SET passed_net_ev = passed_edge_gate "
-            "WHERE passed_net_ev = 0 AND passed_edge_gate = 1"
-        )
-        conn.execute(
-            "UPDATE strategy_decision_side_ev "
-            "SET executable = 1 "
-            "WHERE executable = 0 "
-            "  AND executable_entry_price_cents IS NOT NULL "
-            "  AND executable_entry_depth_fp > 0"
-        )
-        conn.execute(
-            "UPDATE strategy_decision_side_ev "
-            "SET selected = 1 "
-            "WHERE rowid IN ("
-            "    SELECT ev.rowid "
-            "    FROM strategy_decision_side_ev ev "
-            "    JOIN strategy_decisions d ON d.decision_id = ev.decision_id "
-            "    WHERE d.decision = 'ENTER' AND d.selected_side = ev.side"
-            ")"
-        )
+        # One-time data backfills for rows written before the columns above
+        # existed.  On the production DB (hundreds of MB) the selected=1
+        # UPDATE/JOIN below scans the full side-EV table and runs for minutes
+        # while _ensure_db() holds self._lock, serialising every decision
+        # thread behind it (faulthandler: all threads parked at
+        # ``with self._lock`` in log_cycle_heartbeat, run_cycle exceeding the
+        # 150s hang threshold, and repeated interpreter crashes during the
+        # wedge).  New rows populate these columns at insert time, so the
+        # backfills are only needed once - gate them on PRAGMA user_version
+        # instead of re-running the full-table writes on every process start.
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            conn.execute(
+                "UPDATE strategy_decision_side_ev "
+                "SET model_evaluated = eligible_for_model "
+                "WHERE model_evaluated = 0 AND eligible_for_model = 1"
+            )
+            conn.execute(
+                "UPDATE strategy_decision_side_ev "
+                "SET policy_eligible = eligible_for_policy "
+                "WHERE policy_eligible = 0 AND eligible_for_policy = 1"
+            )
+            conn.execute(
+                "UPDATE strategy_decision_side_ev "
+                "SET passed_net_ev = passed_edge_gate "
+                "WHERE passed_net_ev = 0 AND passed_edge_gate = 1"
+            )
+            conn.execute(
+                "UPDATE strategy_decision_side_ev "
+                "SET executable = 1 "
+                "WHERE executable = 0 "
+                "  AND executable_entry_price_cents IS NOT NULL "
+                "  AND executable_entry_depth_fp > 0"
+            )
+            conn.execute(
+                "UPDATE strategy_decision_side_ev "
+                "SET selected = 1 "
+                "WHERE selected = 0 AND rowid IN ("
+                "    SELECT ev.rowid "
+                "    FROM strategy_decision_side_ev ev "
+                "    JOIN strategy_decisions d ON d.decision_id = ev.decision_id "
+                "    WHERE d.decision = 'ENTER' AND d.selected_side = ev.side"
+                ")"
+            )
 
-        # Quarantine the known pre-production test fixture leak.
-        conn.execute(
-            "UPDATE strategy_decisions "
-            "SET record_environment = 'test', "
-            "    record_source = 'test_fixture_leak', "
-            "    is_eligible_for_research = 0, "
-            "    exclusion_reason = 'pre-production default-db test artifact' "
-            "WHERE decision_id = 'run_no_edge_below_threshold'"
-        )
+            # Quarantine the known pre-production test fixture leak.
+            conn.execute(
+                "UPDATE strategy_decisions "
+                "SET record_environment = 'test', "
+                "    record_source = 'test_fixture_leak', "
+                "    is_eligible_for_research = 0, "
+                "    exclusion_reason = 'pre-production default-db test artifact' "
+                "WHERE decision_id = 'run_no_edge_below_threshold'"
+            )
+            conn.execute("PRAGMA user_version = 1")
 
     def _register_known_gaps(self, conn: sqlite3.Connection) -> None:
         """Record known, verified collection discontinuities.
