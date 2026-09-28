@@ -761,6 +761,13 @@ class KalshiMarketStateStore:
         self._last_recovery_reject_log_ts: Dict[str, float] = {}
         self._last_rest_pref_log_ts: Dict[str, float] = {}
         self._last_seq_gap_log_ts: Dict[str, float] = {}
+        self._last_untrusted_log_ts: Dict[str, float] = {}
+        self._untrusted_log_suppressed: Dict[str, int] = {}
+        self._last_enqueue_reject_log_ts: Dict[str, float] = {}
+        self._enqueue_reject_suppressed: Dict[str, int] = {}
+        self._last_overflow_log_ts: Dict[str, float] = {}
+        self._overflow_log_suppressed: Dict[str, int] = {}
+        self._last_pending_full_log_ts: Dict[str, float] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -1165,11 +1172,20 @@ class KalshiMarketStateStore:
                             # comparison is unreachable).
                             if len(queue) >= self._MAX_PER_TICKER_QUEUE:
                                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
-                                logger.error(
-                                    f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
-                                    f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
-                                    f"marking SUSPECT"
-                                )
+                                _now_ovl = time.monotonic()
+                                if _now_ovl - self._last_overflow_log_ts.get(ticker, 0.0) >= 1.0:
+                                    suppressed = self._overflow_log_suppressed.get(ticker, 0)
+                                    self._last_overflow_log_ts[ticker] = _now_ovl
+                                    self._overflow_log_suppressed[ticker] = 0
+                                    logger.error(
+                                        f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
+                                        f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
+                                        f"marking SUSPECT suppressed={suppressed}"
+                                    )
+                                else:
+                                    self._overflow_log_suppressed[ticker] = (
+                                        self._overflow_log_suppressed.get(ticker, 0) + 1
+                                    )
                                 # Mark as SUSPECT and trigger REST bootstrap
                                 state = self._states.get(ticker)
                                 if state:
@@ -1439,10 +1455,23 @@ class KalshiMarketStateStore:
                 dropped = len(queue)
                 queue.clear()
         if was_trusted or dropped:
-            logger.error(
-                "[BOOK-UNTRUSTED] ticker=%s reason=%s dropped_queued=%d diag=%s",
-                ticker, reason, dropped, diag,
-            )
+            # Rate-limit: during a sustained stale-burst the same book is
+            # re-invalidated per incoming delta (hundreds/sec).  Emitting an
+            # ERROR per event holds the process-wide logging handler lock and
+            # starves order-path coroutines on the main loop.
+            _now_log = time.monotonic()
+            if _now_log - self._last_untrusted_log_ts.get(ticker, 0.0) >= 1.0:
+                suppressed = self._untrusted_log_suppressed.get(ticker, 0)
+                self._last_untrusted_log_ts[ticker] = _now_log
+                self._untrusted_log_suppressed[ticker] = 0
+                logger.error(
+                    "[BOOK-UNTRUSTED] ticker=%s reason=%s dropped_queued=%d diag=%s suppressed=%d",
+                    ticker, reason, dropped, diag, suppressed,
+                )
+            else:
+                self._untrusted_log_suppressed[ticker] = (
+                    self._untrusted_log_suppressed.get(ticker, 0) + 1
+                )
         _inc_book_invalidation(ticker, reason)
         try:
             self._maybe_trigger_book_recovery(ticker, reason)
@@ -1534,17 +1563,32 @@ class KalshiMarketStateStore:
                 # hours) and flooding the event loop.  Clearing the queue and
                 # requiring an attested FULL_SNAPSHOT lets the throttled REST/WS
                 # snapshot rebuild heal the book.
-                logger.error(
-                    f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={overflow_queue_len} "
-                    f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
-                    f"dropping_stale_deltas_and_triggering_throttled_snapshot_recovery"
-                )
+                # NOTE: the overflow log is emitted below, OUTSIDE this queue
+                # lock — file I/O under the lock stalls every producer.
                 queue.clear()
             else:
                 queue.append(msg)
                 self._batch_worker_event.set()
 
         if overflowed:
+            # Rate-limit: a sustained burst re-overflows continuously; one line
+            # per ticker per second keeps the audit trail without serializing
+            # the process on the logging handler lock.
+            _now_log = time.monotonic()
+            if _now_log - self._last_overflow_log_ts.get(ticker, 0.0) >= 1.0:
+                suppressed = self._overflow_log_suppressed.get(ticker, 0)
+                self._last_overflow_log_ts[ticker] = _now_log
+                self._overflow_log_suppressed[ticker] = 0
+                logger.error(
+                    f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={overflow_queue_len} "
+                    f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
+                    f"dropping_stale_deltas_and_triggering_throttled_snapshot_recovery "
+                    f"suppressed={suppressed}"
+                )
+            else:
+                self._overflow_log_suppressed[ticker] = (
+                    self._overflow_log_suppressed.get(ticker, 0) + 1
+                )
             # Invalidate + schedule throttled recovery outside the queue lock:
             # the invalidation path re-acquires it to drain stale deltas.
             self._mark_book_untrusted_and_resync(
@@ -1600,10 +1644,13 @@ class KalshiMarketStateStore:
             # CRITICAL FIX: Check pending deltas queue size to prevent unbounded growth
             pending = self._pending_deltas.get(ticker, [])
             if len(pending) >= self._MAX_PENDING_DELTAS:
-                logger.warning(
-                    "[DELTA-QUEUE-FULL] ticker=%s pending_deltas=%d >= max=%d - dropping delta",
-                    ticker, len(pending), self._MAX_PENDING_DELTAS
-                )
+                _now_pfl = time.monotonic()
+                if _now_pfl - self._last_pending_full_log_ts.get(ticker, 0.0) >= 1.0:
+                    self._last_pending_full_log_ts[ticker] = _now_pfl
+                    logger.warning(
+                        "[DELTA-QUEUE-FULL] ticker=%s pending_deltas=%d >= max=%d - dropping delta",
+                        ticker, len(pending), self._MAX_PENDING_DELTAS
+                    )
                 return
             self._pending_deltas.setdefault(ticker, []).append(msg)
 
@@ -3211,12 +3258,25 @@ class KalshiMarketStateStore:
                 # do not schedule another unthrottled REST sync here.
                 state = self._states.get(ticker)
                 if state:
-                    logger.warning(
-                        "[BOOK-CONSISTENCY] ticker=%s delta rejected by enqueue gate "
-                        "(freshness/overflow) - invalidation + throttled recovery "
-                        "handled by enqueue path",
-                        ticker
-                    )
+                    # Rate-limit: under a stale/overflow burst this fires per
+                    # rejected delta (hundreds+/sec); a single per-ticker line
+                    # per second preserves the audit trail without flooding the
+                    # process-wide logging handler lock.
+                    _now_log = time.monotonic()
+                    if _now_log - self._last_enqueue_reject_log_ts.get(ticker, 0.0) >= 1.0:
+                        suppressed = self._enqueue_reject_suppressed.get(ticker, 0)
+                        self._last_enqueue_reject_log_ts[ticker] = _now_log
+                        self._enqueue_reject_suppressed[ticker] = 0
+                        logger.warning(
+                            "[BOOK-CONSISTENCY] ticker=%s delta rejected by enqueue gate "
+                            "(freshness/overflow) - invalidation + throttled recovery "
+                            "handled by enqueue path suppressed=%d",
+                            ticker, suppressed,
+                        )
+                    else:
+                        self._enqueue_reject_suppressed[ticker] = (
+                            self._enqueue_reject_suppressed.get(ticker, 0) + 1
+                        )
             else:
                 # DIAGNOSTIC: Log successful enqueue
                 queue = self._delta_queues.get(ticker)
