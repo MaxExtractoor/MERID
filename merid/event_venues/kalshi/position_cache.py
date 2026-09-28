@@ -1002,7 +1002,11 @@ class CachedPosition:
                 # This is the only robust method for cross-leg / counterparty-equivalent
                 # fills where the execution-side price and the position-side price can
                 # be different expressions of the same trade.
-                if proceeds_dollars is not None and pre_quantity_cc > 0:
+                # CRITICAL FIX (2026-09-28): require a non-zero recorded basis.
+                # Positions built before the basis was populated (or by paths
+                # that never set it) would otherwise book only the gross exit
+                # proceeds with _cost_basis=0, inverting PnL.
+                if proceeds_dollars is not None and pre_quantity_cc > 0 and self.entry_cash_proceeds_usd != 0:
                     _closed_fraction = Decimal(closed_quantity_cc) / Decimal(pre_quantity_cc)
                     _cost_basis = self.entry_cash_proceeds_usd * _closed_fraction
                     _realized_delta = proceeds_dollars + _cost_basis
@@ -3011,6 +3015,28 @@ class KalshiPositionCache:
                     except Exception as ep_lookup_err:
                         logger.debug("[POSITION-CACHE] Provenance snapshot lookup failed: %s", ep_lookup_err)
 
+                # CRITICAL FIX (2026-09-28): Seed entry_cash_proceeds_usd so the
+                # proceeds-based realized-PnL path in apply_fill can subtract the
+                # released cost basis.  Without it the basis stays 0 and every
+                # exit books only the gross exit-leg proceeds, reporting losses
+                # as small profits (e.g. NO@41 -> NO@5 exit showed +0.05 instead
+                # of -0.36).
+                if _fill_proceeds_dollars is not None:
+                    _entry_cash_proceeds = _fill_proceeds_dollars
+                elif position_side_price is not None and position_side_price > 0:
+                    # Every entry economically buys the held leg at the
+                    # position-side price (mint-and-keep for sell-form fills).
+                    _entry_cash_proceeds = _derive_proceeds_dollars(
+                        "buy", quantity_cc, position_side_price, fee_cents
+                    )
+                else:
+                    _entry_cash_proceeds = Decimal("0")
+                    logger.warning(
+                        "[POSITION-CACHE-ENTRY-BASIS-UNKNOWN] market=%s fill_id=%s - "
+                        "cannot derive entry cash basis; exits fall back to price-diff PnL",
+                        market_id, fill_id,
+                    )
+
                 new_position = CachedPosition(
                     market_id=market_id,
                     agent_id=position_agent_id,  # Composite key component
@@ -3018,6 +3044,7 @@ class KalshiPositionCache:
                     contracts=contracts,
                     quantity_cc=quantity_cc,
                     side=thesis_side_from_intent,
+                    entry_cash_proceeds_usd=_entry_cash_proceeds,
                     thesis_side=thesis_side_from_intent,  # Immutable strategy thesis
                     outcome_side=thesis_side_from_intent,
                     book_side="ask",
@@ -4219,6 +4246,7 @@ class KalshiPositionCache:
         yes_exposure = 0
         avg_price_cents = None
         realized_pnl_usd = Decimal("0")
+        entry_cash_proceeds_usd = Decimal("0")
         thesis_side = None
         entry_intent_id = None
         fill_source = "alpha"
@@ -4284,13 +4312,49 @@ class KalshiPositionCache:
                     continue
                 fill_price_cents = converted
 
-            # Weighted average price update for the new exposure.
-            if yes_exposure == 0:
-                avg_price_cents = fill_price_cents
+            pre_yes_exposure = yes_exposure
+            is_increase = pre_yes_exposure == 0 or pre_yes_exposure * fill_yes > 0
+
+            # Signed cash proceeds for this fill.  ``proceeds_dollars`` is
+            # authoritative; derive it from the canonical action and the
+            # position-side price only as a fallback.
+            fill_proceeds = getattr(fill, 'proceeds_dollars', None)
+            if fill_proceeds is None:
+                try:
+                    fill_proceeds = _derive_proceeds_dollars(
+                        fill_action.lower(), fill_quantity_cc, fill_price_cents,
+                        getattr(fill, 'fee_cost_cents', 0) or 0,
+                    )
+                except Exception:
+                    fill_proceeds = Decimal("0")
+
+            if is_increase:
+                # Weighted average price update for the new exposure.  Only
+                # exposure-increasing fills move the basis; a partial exit must
+                # not drag avg_price_cents toward its own execution price.
+                if pre_yes_exposure == 0:
+                    avg_price_cents = fill_price_cents
+                else:
+                    pre_contracts = abs(pre_yes_exposure)
+                    total_cost = pre_contracts * (avg_price_cents or 0) + fill_quantity_cc * fill_price_cents
+                    avg_price_cents = total_cost // (pre_contracts + fill_quantity_cc)
+                entry_cash_proceeds_usd += fill_proceeds
             else:
-                pre_contracts = abs(yes_exposure)
-                total_cost = pre_contracts * avg_price_cents + fill_quantity_cc * fill_price_cents
-                avg_price_cents = total_cost // (pre_contracts + fill_quantity_cc)
+                # Reduce/close: release the proportional entry basis into
+                # realized PnL (same model as CachedPosition.apply_fill).
+                closed_cc = min(abs(fill_yes), abs(pre_yes_exposure))
+                closed_fraction = Decimal(closed_cc) / Decimal(abs(pre_yes_exposure))
+                released_basis = entry_cash_proceeds_usd * closed_fraction
+                if abs(fill_yes) > abs(pre_yes_exposure):
+                    # Over-close (flip): attribute cash pro-rata; the remainder
+                    # seeds the basis of the reversed residual.
+                    closed_cash = fill_proceeds * (Decimal(closed_cc) / Decimal(abs(fill_yes)))
+                    remainder_cash = fill_proceeds - closed_cash
+                else:
+                    closed_cash = fill_proceeds
+                    remainder_cash = Decimal("0")
+                realized_pnl_usd += closed_cash + released_basis
+                entry_cash_proceeds_usd = entry_cash_proceeds_usd - released_basis + remainder_cash
 
             yes_exposure += fill_yes
 
@@ -4363,6 +4427,7 @@ class KalshiPositionCache:
             book_side="ask",
             avg_price_cents=avg_price_cents,
             realized_pnl_usd=realized_pnl_usd,
+            entry_cash_proceeds_usd=entry_cash_proceeds_usd,
             unrealized_pnl_usd=Decimal("0"),  # Would need current market price
             last_updated=datetime.now(timezone.utc),
             entry_intent_id=entry_intent_id or tp_targets.get("entry_signal_id") or client_order_id,

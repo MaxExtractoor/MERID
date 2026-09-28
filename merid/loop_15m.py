@@ -9000,7 +9000,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
         # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
         # SELL actions are ONLY for exit trades
-        if action_raw == "SELL":
+        if isinstance(action_raw, str) and action_raw.strip().lower() == "sell":
             # Check if this is an entry order using entry_or_exit field if available
             is_exit_order = False
             if "entry_or_exit" in candidate:

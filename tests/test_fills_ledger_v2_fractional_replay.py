@@ -446,3 +446,139 @@ class TestXRPReplayEndToEnd:
         # Ledger-derived position must be flat after the exit.
         ledger_pos = ledger.compute_position_from_fills("KXXRP15M-TEST")
         assert ledger_pos is None
+
+
+class TestPartialExitCostBasis:
+    """Regression: realized PnL must release proportional entry cost basis.
+
+    2026-09-28 fix: CachedPosition was constructed without
+    ``entry_cash_proceeds_usd``, so exits booked only the gross exit-leg
+    proceeds (NO@41 -> NO@5 reported +0.05 instead of -0.36).  The replay
+    path additionally dragged ``avg_price_cents`` toward the exit price on
+    partial closes, corrupting the residual basis.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_exit_releases_proportional_basis(self, ledger, cache):
+        cache._fills_ledger = ledger
+
+        entry_intent = OrderIntent(
+            intent_id="coid-pe-entry",
+            client_order_id="coid-pe-entry",
+            ticker="KXETH15M-TEST",
+            side="BUY_NO",
+            action="buy",
+            count=2,
+            price_cents=41,
+            entry_or_exit="entry",
+        )
+        ledger.record_intent(entry_intent)
+
+        raw_entry = _make_fill_dict(
+            "pe-entry-1", "coid-pe-entry", "no", "buy", "2",
+            yes_price_dollars="0.5900", no_price_dollars="0.4100",
+        )
+        fill_entry = ledger._parse_fill(raw_entry, "http_poller")
+        ledger._fills[fill_entry.fill_id] = fill_entry
+        ledger._index_fill(fill_entry)
+
+        await cache.on_fill(
+            market_id="KXETH15M-TEST", contracts=2, quantity_cc=200,
+            price_cents=fill_entry.price_cents, fee_cents=0,
+            side="no", action="buy", fill_id=fill_entry.fill_id,
+            canonicalization_state="TRUSTED_LIVE_V1",
+        )
+        pos = cache.get_position("KXETH15M-TEST")
+        assert pos.quantity_cc == 200
+        # 2 contracts x NO@41 = -0.82 signed entry cash.
+        assert pos.entry_cash_proceeds_usd == Decimal("-0.82")
+
+        exit_intent = OrderIntent(
+            intent_id="coid-pe-exit",
+            client_order_id="coid-pe-exit",
+            ticker="KXETH15M-TEST",
+            side="SELL_NO",
+            action="sell",
+            count=1,
+            price_cents=5,
+            entry_or_exit="exit",
+            reduce_only=True,
+        )
+        ledger.record_intent(exit_intent)
+
+        raw_exit = _make_fill_dict(
+            "pe-exit-1", "coid-pe-exit", "no", "sell", "1",
+            yes_price_dollars="0.9500", no_price_dollars="0.0500",
+        )
+        fill_exit = ledger._parse_fill(raw_exit, "http_poller")
+        ledger._fills[fill_exit.fill_id] = fill_exit
+        ledger._index_fill(fill_exit)
+
+        await cache.on_fill(
+            market_id="KXETH15M-TEST", contracts=1, quantity_cc=100,
+            price_cents=fill_exit.price_cents, fee_cents=0,
+            side="no", action="sell", fill_id=fill_exit.fill_id,
+            is_exit=True, canonicalization_state="TRUSTED_LIVE_V1",
+        )
+
+        # Half the position closed: realized = exit proceeds 0.05 - released
+        # basis 0.41 = -0.36.  Residual keeps the original NO@41 basis.
+        assert pos.quantity_cc == 100
+        assert pos.realized_pnl_usd == Decimal("-0.36")
+        assert pos.avg_price_cents == 41
+        assert pos.entry_cash_proceeds_usd == Decimal("-0.41")
+
+    @pytest.mark.asyncio
+    async def test_recompute_preserves_basis_and_realized(self, ledger, cache):
+        """Ledger replay must carry signed cash basis + accrued realized PnL."""
+        cache._fills_ledger = ledger
+
+        entry_intent = OrderIntent(
+            intent_id="coid-rc-entry",
+            client_order_id="coid-rc-entry",
+            ticker="KXETH15M-TEST",
+            side="BUY_NO",
+            action="buy",
+            count=2,
+            price_cents=41,
+            entry_or_exit="entry",
+        )
+        ledger.record_intent(entry_intent)
+        raw_entry = _make_fill_dict(
+            "rc-entry-1", "coid-rc-entry", "no", "buy", "2",
+            yes_price_dollars="0.5900", no_price_dollars="0.4100",
+        )
+        fill_entry = ledger._parse_fill(raw_entry, "http_poller")
+        ledger._fills[fill_entry.fill_id] = fill_entry
+        ledger._index_fill(fill_entry)
+
+        exit_intent = OrderIntent(
+            intent_id="coid-rc-exit",
+            client_order_id="coid-rc-exit",
+            ticker="KXETH15M-TEST",
+            side="SELL_NO",
+            action="sell",
+            count=1,
+            price_cents=5,
+            entry_or_exit="exit",
+            reduce_only=True,
+        )
+        ledger.record_intent(exit_intent)
+        raw_exit = _make_fill_dict(
+            "rc-exit-1", "coid-rc-exit", "no", "sell", "1",
+            yes_price_dollars="0.9500", no_price_dollars="0.0500",
+        )
+        fill_exit = ledger._parse_fill(raw_exit, "http_poller")
+        ledger._fills[fill_exit.fill_id] = fill_exit
+        ledger._index_fill(fill_exit)
+
+        reconstructed = await cache.recompute_position_from_ledger(
+            "KXETH15M-TEST", None,
+        )
+        assert reconstructed is not None
+        assert reconstructed.quantity_cc == 100
+        assert reconstructed.side == "no"
+        # The partial exit must NOT drag the basis toward its 5c print.
+        assert reconstructed.avg_price_cents == 41
+        assert reconstructed.realized_pnl_usd == Decimal("-0.36")
+        assert reconstructed.entry_cash_proceeds_usd == Decimal("-0.41")
