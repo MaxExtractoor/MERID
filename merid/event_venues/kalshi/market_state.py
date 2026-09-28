@@ -5741,8 +5741,14 @@ class KalshiMarketStateStore:
                 and state.best_ask_cents is not None
                 and state.best_bid_cents < state.best_ask_cents
             )
+            # Divergence is only measurable when a REST BBO exists on both
+            # sides.  A missing REST bid or ask means "not comparable" - never
+            # subtract against None (crashed the batch worker) and never treat
+            # the absent reference as divergent.
             ws_divergent = (
                 ws_two_sided
+                and state.last_rest_bid_cents is not None
+                and state.last_rest_ask_cents is not None
                 and max(
                     abs(state.best_bid_cents - state.last_rest_bid_cents),
                     abs(state.best_ask_cents - state.last_rest_ask_cents),
