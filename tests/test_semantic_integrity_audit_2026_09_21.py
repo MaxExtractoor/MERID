@@ -343,6 +343,27 @@ class TestOrderRouterPriceSpaceGuard:
         assert _intent_price_side(self._intent("bogus")) is None
         assert _intent_price_side(self._intent(None)) is None
 
+    @pytest.mark.parametrize("side", ["unknown", "not_yes", "BUY_YES_NO", "", None])
+    def test_invalid_side_cannot_select_a_book_or_exposure(self, side):
+        from merid.event_venues.kalshi.order_router import (
+            _intent_price_side, _side_aware_book_for_intent, _canonical_signed_yes_delta,
+        )
+        intent = self._intent(side)
+        assert _intent_price_side(intent) is None
+        with pytest.raises(ValueError):
+            _side_aware_book_for_intent({}, side)
+        with pytest.raises(ValueError):
+            _canonical_signed_yes_delta(intent)
+
+    @pytest.mark.parametrize("side, action, expected", [
+        ("BUY_YES", "buy", 1), ("SELL_NO", "sell", 1),
+        ("BUY_NO", "buy", -1), ("SELL_YES", "sell", -1),
+        (" yes ", "buy", 1), (" NO ", "buy", -1),
+    ])
+    def test_signed_exposure_matrix(self, side, action, expected):
+        from merid.event_venues.kalshi.order_router import _canonical_signed_yes_delta
+        assert _canonical_signed_yes_delta(self._intent(side, action)) == expected
+
     def test_explicit_sides_still_resolve(self):
         from merid.event_venues.kalshi.order_router import _intent_price_side
         assert _intent_price_side(self._intent("BUY_YES")) == "yes"

@@ -242,7 +242,10 @@ def compute_net_executable_edge(
     else:
         executable_price_prob = Decimal(executable_price_cents) / Decimal("100")
     
-    gross_edge = fair_prob - executable_price_prob
+    gross_edge = (
+        executable_price_prob - fair_prob
+        if side.lower() == "no" else fair_prob - executable_price_prob
+    )
     gross_edge_cents = gross_edge * Decimal("100")
     
     net_edge_cents = (

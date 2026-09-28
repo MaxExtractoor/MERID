@@ -156,6 +156,8 @@ class _EnvOverride:
     allowed_values: Optional[List[str]] = None
     default: Any = None
     description: str = ""
+    minimum: Optional[Decimal] = None
+    maximum: Optional[Decimal] = None
 
 
 # Typed schema for environment overrides.  Only keys in this list may influence
@@ -394,6 +396,41 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
     ),
 }
 
+_ENV_OVERRIDES.update({
+    name: _EnvOverride(name=name, type="bool", allowed_values=["1", "0", "true", "false", "yes", "no"])
+    for name in (
+        "MERID_ENTRY_MAKER_ENABLED", "MERID_CALIBRATION_CAP_FULL_RANGE",
+        "MERID_DISABLE_EXIT_POLICY", "MERID_DISABLE_LOSS_CAP",
+        "MERID_ANCHOR_VOL_TO_MARKET", "MERID_USE_REALIZED_VOL",
+        "MERID_SETTLEMENT_DISTRIBUTION_V2", "MERID_SETTLEMENT_LANE_ENABLED",
+        "MERID_SETTLEMENT_ANCHOR_RELEASE",
+    )
+})
+_ENV_OVERRIDES.update({
+    name: _EnvOverride(name=name, type=kind, minimum=Decimal(str(lower)),
+                       maximum=Decimal(str(upper)) if upper is not None else None)
+    for name, kind, lower, upper in (
+        ("MERID_ENTRY_MAX_CHASE_CENTS", "int", 0, 99),
+        ("MERID_ENTRY_MAX_IMPROVEMENT_CENTS", "int", 0, 99),
+        ("MERID_WS_REST_DIVERGENCE_TOLERANCE_CENTS", "int", 0, 99),
+        ("MERID_WS_REST_DIVERGENCE_HARD_LIMIT_CENTS", "int", 0, 99),
+        ("MERID_WS_REST_DIVERGENCE_WS_FRESH_MS", "float", 1, None),
+        ("MERID_WS_REST_MAX_REST_AGE_MS", "float", 1, None),
+        ("MERID_CALIBRATION_EVIDENCE_MARGIN", "decimal", 0, 1),
+        ("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "float", 0, None),
+        ("MERID_HARD_MIN_ENTRY_TTE_S", "int", 0, None),
+        ("MERID_FLB_LONGSHOT_SLOPE", "decimal", 0, None),
+        ("MERID_MARKET_ANCHOR_MIN_W", "decimal", 0, 1),
+        ("MERID_MARKET_ANCHOR_MAX_W", "decimal", 0, 1),
+        ("MERID_MARKET_ANCHOR_WINDOW_S", "float", 1, None),
+        ("MERID_SETTLEMENT_LANE_MIN_P", "decimal", 0, 1),
+        ("MERID_SETTLEMENT_LANE_MIN_OBSERVED", "int", 0, 60),
+        ("MERID_SETTLEMENT_LANE_MIN_TTE_S", "float", 0, None),
+        ("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "decimal", 1, 99),
+        ("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "int", 0, 60),
+    )
+})
+
 # Environment variables that are explicitly not safety-critical and may be
 # present without being in the typed schema.  Any other MERID_* variable that
 # looks like a cap/floor/enable/allow override is treated as unknown and
@@ -583,12 +620,17 @@ def _apply_schema(name: str, override: _EnvOverride) -> Any:
 
     if override.type == "bool":
         return _parse_bool(raw)
-    if override.type == "int":
-        return _parse_int(raw, name)
-    if override.type == "float":
-        return _parse_float(raw, name)
-    if override.type == "decimal":
-        return _parse_decimal(raw, name)
+    if override.type in ("int", "float", "decimal"):
+        parser = {"int": _parse_int, "float": _parse_float, "decimal": _parse_decimal}[override.type]
+        value = parser(raw, name)
+        numeric = Decimal(str(value))
+        if not numeric.is_finite():
+            raise LiveConfigInvariantError(f"Environment variable {name} must be finite")
+        if override.minimum is not None and numeric < override.minimum:
+            raise LiveConfigInvariantError(f"Environment variable {name} must be >= {override.minimum}")
+        if override.maximum is not None and numeric > override.maximum:
+            raise LiveConfigInvariantError(f"Environment variable {name} must be <= {override.maximum}")
+        return value
     if override.type == "str":
         return raw
     raise LiveConfigInvariantError(f"Unknown schema type {override.type!r} for {name}")

@@ -78,3 +78,14 @@ def test_decimal_and_cent_rounding():
     all_in = compute_all_in_cost_cents(price, fee_cents=fee)
     ev = float(q * 100) - all_in
     assert round(ev, 4) == pytest.approx(63.0 - all_in)
+
+
+@pytest.mark.parametrize("probability", ["0.30", "0.50", "0.70"])
+def test_regime_edge_uses_held_side_probability(probability):
+    from merid.event_venues.kalshi.market_regime import compute_net_executable_edge
+
+    expected = Decimal(probability) * 100 - Decimal("50") - Decimal("2.75")
+    for side in ("yes", "no", "NO"):
+        assert compute_net_executable_edge(
+            Decimal(probability), 50, Decimal("1.75"), side=side
+        ) == expected

@@ -8200,7 +8200,7 @@ class LeanAgent15m:
             or os.environ.get("MERID_TAKER_EDGE_THRESHOLD")
             or 0.07
         ) or 0.07
-        is_late = seconds_to_expiry < MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS
+        is_late = seconds_to_expiry <= MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS
         is_high_edge = (
             decision_taker.gross_edge is not None
             and float(decision_taker.gross_edge) >= taker_edge_threshold
@@ -8225,7 +8225,7 @@ class LeanAgent15m:
             time_in_force = "ioc"
             execution_mode = "taker"
             fee_cents = taker_fee_cents
-        elif maker_entries_enabled:
+        elif maker_entries_enabled and not is_late:
             decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model)
             if decision_maker.selected_outcome is not None:
                 decision = decision_maker

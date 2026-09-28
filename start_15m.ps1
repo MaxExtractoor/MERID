@@ -200,6 +200,9 @@ $env:MERID_DISABLE_EXIT_POLICY = "1"
 $env:MERID_DISABLE_LOSS_CAP = "1"
 Write-Host "[start_15m] MERID_DISABLE_EXIT_POLICY=$($env:MERID_DISABLE_EXIT_POLICY) MERID_DISABLE_LOSS_CAP=$($env:MERID_DISABLE_LOSS_CAP)" -ForegroundColor Yellow
 
+$env:MERID_ENTRY_MAKER_ENABLED = "1"
+Write-Host "[start_15m] MERID_ENTRY_MAKER_ENABLED=$($env:MERID_ENTRY_MAKER_ENABLED) execution_roles=maker+taker (selected by fee-aware strategy)" -ForegroundColor Cyan
+
 # 2. ENABLE live trading.  ALL FOUR latches are required for live; any missing
 #    latch demotes to PAPER (orders simulated, not sent).
 $env:TRADING_ENABLED = "true"

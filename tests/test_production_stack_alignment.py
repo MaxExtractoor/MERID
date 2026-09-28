@@ -30,6 +30,14 @@ class TestProductionStackAlignment:
         assert "main_15m_lean" in content, "Startup script must reference main_15m_lean"
         assert "web.main:app" not in content, "Startup script must not use legacy web.main:app"
 
+    def test_production_launcher_enables_maker_and_taker_selection(self):
+        startup_script = Path(__file__).parent.parent / "start_15m.ps1"
+        content = startup_script.read_text(encoding="utf-8")
+        setting = '$env:MERID_ENTRY_MAKER_ENABLED = "1"'
+        assert setting in content
+        assert content.index(setting) > content.index("$EnvFile loaded successfully")
+        assert "maker+taker" in content
+
     def test_legacy_main_is_wrapper(self):
         """Legacy main.py.legacy must be a wrapper that imports from main_15m_lean."""
         legacy_main = Path(__file__).parent.parent / "web" / "main.py.legacy"
