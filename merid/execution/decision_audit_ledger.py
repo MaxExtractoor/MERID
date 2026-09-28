@@ -140,7 +140,16 @@ CREATE TABLE IF NOT EXISTS strategy_decision_snapshots (
     velocity_source TEXT,
     velocity_age_ms INTEGER,
     confidence REAL,
-    confidence_reasons TEXT NOT NULL DEFAULT '[]'
+    confidence_reasons TEXT NOT NULL DEFAULT '[]',
+    quote_owner TEXT,
+    degraded_mode INTEGER NOT NULL DEFAULT 0,
+    ws_last_seq INTEGER,
+    ws_last_event_age_ms REAL,
+    ws_last_queue_wait_ms REAL,
+    ws_rest_bid_diff_ticks INTEGER,
+    ws_rest_ask_diff_ticks INTEGER,
+    ws_parity_healthy INTEGER,
+    rest_age_ms INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS strategy_decision_side_ev (
@@ -324,6 +333,18 @@ class DecisionAuditLedger:
             "CREATE UNIQUE INDEX IF NOT EXISTS strategy_decision_side_once "
             "ON strategy_decision_side_ev(decision_id, side)"
         )
+
+        # Quote provenance: which feed owned the executable quote at decision
+        # time plus the raw WS/REST divergence and per-hop latency evidence.
+        _add_column(conn, "strategy_decision_snapshots", "quote_owner", "TEXT")
+        _add_column(conn, "strategy_decision_snapshots", "degraded_mode", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "strategy_decision_snapshots", "ws_last_seq", "INTEGER")
+        _add_column(conn, "strategy_decision_snapshots", "ws_last_event_age_ms", "REAL")
+        _add_column(conn, "strategy_decision_snapshots", "ws_last_queue_wait_ms", "REAL")
+        _add_column(conn, "strategy_decision_snapshots", "ws_rest_bid_diff_ticks", "INTEGER")
+        _add_column(conn, "strategy_decision_snapshots", "ws_rest_ask_diff_ticks", "INTEGER")
+        _add_column(conn, "strategy_decision_snapshots", "ws_parity_healthy", "INTEGER")
+        _add_column(conn, "strategy_decision_snapshots", "rest_age_ms", "INTEGER")
 
         # One-time data backfills for rows written before the columns above
         # existed.  On the production DB (hundreds of MB) the selected=1
@@ -623,8 +644,12 @@ class DecisionAuditLedger:
                         settlement_reference_price, settlement_reference_source,
                         settlement_reference_ts, settlement_reference_age_ms,
                         yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents,
-                        book_age_ms, yes_depth, no_depth
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        book_age_ms, yes_depth, no_depth,
+                        quote_owner, degraded_mode, ws_last_seq,
+                        ws_last_event_age_ms, ws_last_queue_wait_ms,
+                        ws_rest_bid_diff_ticks, ws_rest_ask_diff_ticks,
+                        ws_parity_healthy, rest_age_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -643,6 +668,19 @@ class DecisionAuditLedger:
                         extra.get("quote_age_ms") if extra else None,
                         "[]",
                         "[]",
+                        extra.get("quote_owner") if extra else None,
+                        1 if (extra or {}).get("degraded_mode") else 0,
+                        _to_int((extra or {}).get("ws_last_seq")),
+                        _to_float((extra or {}).get("ws_last_event_age_ms")),
+                        _to_float((extra or {}).get("ws_last_queue_wait_ms")),
+                        _to_int((extra or {}).get("ws_rest_bid_diff_ticks")),
+                        _to_int((extra or {}).get("ws_rest_ask_diff_ticks")),
+                        (
+                            None
+                            if (extra or {}).get("ws_parity_healthy") is None
+                            else (1 if (extra or {}).get("ws_parity_healthy") else 0)
+                        ),
+                        _to_int((extra or {}).get("rest_age_ms")),
                     ),
                 )
                 conn.execute(
@@ -1131,6 +1169,51 @@ class DecisionAuditLedger:
         book_sequence = _safe_attr(market_state, "book_sequence")
         book_snapshot_id = _safe_attr(market_state, "book_snapshot_id")
 
+        # Quote provenance: which feed owned the effective executable quote and
+        # the raw feed health/divergence observed at decision time.  Prefer the
+        # values frozen into decision.indicators at decision creation; fall
+        # back to the live market_state object for decisions that predate the
+        # indicator stamping.
+        quote_owner = (
+            str(indicators.get("quote_owner"))
+            if indicators.get("quote_owner") is not None
+            else _safe_attr(market_state, "quote_owner")
+        )
+        _degraded_ind = indicators.get("quote_degraded_mode")
+        degraded_mode = (
+            bool(_degraded_ind)
+            if _degraded_ind is not None
+            else (bool(getattr(market_state, "degraded_mode", False)) if market_state is not None else False)
+        )
+        ws_last_seq = _to_int(getattr(market_state, "ws_last_seq", None))
+        ws_last_event_age_ms = _to_float(
+            indicators.get("ws_last_event_age_ms")
+            if indicators.get("ws_last_event_age_ms") is not None
+            else getattr(market_state, "ws_last_event_age_ms", None)
+        )
+        ws_last_queue_wait_ms = _to_float(
+            indicators.get("ws_last_queue_wait_ms")
+            if indicators.get("ws_last_queue_wait_ms") is not None
+            else getattr(market_state, "ws_last_queue_wait_ms", None)
+        )
+        ws_rest_bid_diff_ticks = _to_int(
+            indicators.get("ws_rest_bid_diff_ticks")
+            if indicators.get("ws_rest_bid_diff_ticks") is not None
+            else getattr(market_state, "ws_rest_bid_diff_ticks", None)
+        )
+        ws_rest_ask_diff_ticks = _to_int(
+            indicators.get("ws_rest_ask_diff_ticks")
+            if indicators.get("ws_rest_ask_diff_ticks") is not None
+            else getattr(market_state, "ws_rest_ask_diff_ticks", None)
+        )
+        _ws_parity = (
+            indicators.get("ws_parity_healthy")
+            if indicators.get("ws_parity_healthy") is not None
+            else getattr(market_state, "ws_parity_healthy", None)
+        )
+        ws_parity_healthy = None if _ws_parity is None else (1 if _ws_parity else 0)
+        rest_age_ms = _rest_age_ms(market_state, decision_ts)
+
         # Executable reference provenance.
         if settlement_reference_source is None:
             settlement_reference_source = str(getattr(decision, "settlement_reference", "unknown"))
@@ -1241,8 +1324,11 @@ class DecisionAuditLedger:
                     vol_forecast, vol_source, vol_age_ms, realized_vol_1s,
                     realized_vol_5s, realized_vol_1m, realized_vol_5m, zscore,
                     distance_to_strike, log_moneyness, velocity, velocity_source,
-                    velocity_age_ms, confidence, confidence_reasons
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    velocity_age_ms, confidence, confidence_reasons,
+                    quote_owner, degraded_mode, ws_last_seq, ws_last_event_age_ms,
+                    ws_last_queue_wait_ms, ws_rest_bid_diff_ticks,
+                    ws_rest_ask_diff_ticks, ws_parity_healthy, rest_age_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1285,6 +1371,15 @@ class DecisionAuditLedger:
                     velocity_age_ms,
                     confidence,
                     json.dumps(confidence_reasons),
+                    quote_owner,
+                    1 if degraded_mode else 0,
+                    ws_last_seq,
+                    ws_last_event_age_ms,
+                    ws_last_queue_wait_ms,
+                    ws_rest_bid_diff_ticks,
+                    ws_rest_ask_diff_ticks,
+                    ws_parity_healthy,
+                    rest_age_ms,
                 ),
             )
 
@@ -1690,16 +1785,52 @@ def _depth_levels(market_state: Optional[Any]) -> Tuple[List[Dict[str, Any]], Li
 
 
 def _book_age_ms(market_state: Optional[Any], decision_ts: float) -> Optional[int]:
-    """Estimate book age in milliseconds from market state's last update."""
+    """Estimate book age in milliseconds from market state's last update.
+
+    ``last_book_update_wall_ts`` is wall-clock (comparable to ``decision_ts``);
+    ``last_book_update_ts`` is monotonic and must only be compared to
+    ``time.monotonic()``.  Prefer the wall sibling; fall back to the monotonic
+    field so states without the wall marker still report an age.
+    """
     if market_state is None:
         return None
+    wall_update = getattr(market_state, "last_book_update_wall_ts", None)
+    if wall_update:
+        try:
+            age_s = decision_ts - float(wall_update)
+            if age_s < 0:
+                return 0
+            return int(age_s * 1000.0)
+        except Exception:
+            pass
     last_update = getattr(market_state, "last_book_update_ts", None)
-    if last_update is None:
-        last_update = getattr(market_state, "last_book_update_wall_ts", None)
     if last_update is None:
         return None
     try:
-        age_s = decision_ts - float(last_update)
+        age_s = time.monotonic() - float(last_update)
+        if age_s < 0:
+            return 0
+        return int(age_s * 1000.0)
+    except Exception:
+        return None
+
+
+def _rest_age_ms(market_state: Optional[Any], decision_ts: float) -> Optional[int]:
+    """Estimate REST quote age in milliseconds from market state's last REST update.
+
+    ``last_rest_quote_update_ts`` / ``last_rest_update_ts`` are monotonic
+    clocks, so they are compared against ``time.monotonic()``, not
+    ``decision_ts`` (wall-clock).
+    """
+    if market_state is None:
+        return None
+    last_update = getattr(market_state, "last_rest_quote_update_ts", None)
+    if not last_update:
+        last_update = getattr(market_state, "last_rest_update_ts", None)
+    if not last_update:
+        return None
+    try:
+        age_s = time.monotonic() - float(last_update)
         if age_s < 0:
             return 0
         return int(age_s * 1000.0)

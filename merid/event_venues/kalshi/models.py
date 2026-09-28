@@ -458,7 +458,33 @@ class KalshiMarketState:
     # otherwise re-pollute them between polls.
     last_rest_yes_bids: Optional[list] = None
     last_rest_no_bids: Optional[list] = None
+    # Canonical quote ownership vocabulary:
+    #   "WS_FRESH_VERIFIED"      - WS-derived book: snapshot complete, sequence
+    #                            contiguous, event age and queue wait inside
+    #                            the latency budget.
+    #   "REST_VERIFIED_DEGRADED" - effective quote owned by a fresh REST
+    #                            snapshot while the WS path is unhealthy.
+    #   "NONE_UNTRUSTED"         - no quote from a trusted owner is available.
+    #   "WS_QUOTE"               - ticker-channel quote fallback (legacy path).
+    #   "UNKNOWN"                - not yet determined.
     quote_owner: str = "UNKNOWN"
+
+    # ── Bridge-lag instrumentation and raw-vs-effective quote separation ──
+    # ``last_ws_*`` always holds the raw delta-derived WS BBO (never the
+    # substituted REST values); ``best_*`` is the executable BBO owned by
+    # ``quote_owner``.  These fields let decision code distinguish a stale
+    # but sequence-contiguous WS book from a genuinely verified one.
+    ws_last_seq: Optional[int] = None          # last applied orderbook_delta seq
+    ws_last_event_age_ms: Optional[float] = None  # venue ts (or bridge recv) -> apply
+    ws_last_queue_wait_ms: Optional[float] = None # bridge/deque enqueue -> dequeue
+    ws_last_apply_mono_ns: int = 0             # monotonic_ns of last successful apply
+    ws_queue_depth: int = 0                    # per-ticker delta-queue depth at last dequeue
+    ws_rest_bid_diff_ticks: Optional[int] = None  # |raw WS bid - REST bid|, ticks
+    ws_rest_ask_diff_ticks: Optional[int] = None  # |raw WS ask - REST ask|, ticks
+    ws_parity_healthy: Optional[bool] = None   # raw WS/REST divergence within tolerance
+    degraded_mode: bool = False                # effective quote owned by REST fallback
+    book_gap_total: int = 0                    # sequence gaps detected on this book
+    book_resync_total: int = 0                 # resyncs triggered for this book
 
     # P0-2 UPSTREAM: Data quality tracking (GOOD, BAD_DUALITY, INCOMPLETE, UNKNOWN)
     data_quality: str = "UNKNOWN"

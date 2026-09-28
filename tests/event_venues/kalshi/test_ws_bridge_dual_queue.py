@@ -84,7 +84,7 @@ class TestDualQueueBridgePattern:
             
             while not drain_running.is_set():
                 try:
-                    event = await loop.run_in_executor(None, thread_queue.get, 0.1)
+                    event = await loop.run_in_executor(None, thread_queue.get, True, 0.1)
                     try:
                         await asyncio.wait_for(async_queue.put(event), timeout=0.1)
                     except asyncio.TimeoutError:
@@ -128,7 +128,7 @@ class TestDualQueueBridgePattern:
             
             while not shutdown_event.is_set():
                 try:
-                    event = await loop.run_in_executor(None, thread_queue.get, 0.1)
+                    event = await loop.run_in_executor(None, thread_queue.get, True, 0.1)
                     await async_queue.put(event)
                 except queue.Empty:
                     await asyncio.sleep(0.01)
@@ -169,7 +169,7 @@ class TestDualQueueBridgePattern:
             
             while not drain_running.is_set():
                 try:
-                    event = await loop.run_in_executor(None, thread_queue.get, 0.1)
+                    event = await loop.run_in_executor(None, thread_queue.get, True, 0.1)
                     await async_queue.put(event)
                 except queue.Empty:
                     await asyncio.sleep(0.01)

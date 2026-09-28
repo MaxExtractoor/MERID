@@ -196,13 +196,16 @@ ws_queue_depth = None
 kalshi_ws_mode = None
 kalshi_rest_orderbook_errors_total = None
 kalshi_orderbook_completeness = None
+ws_book_bridge_wait_ms = None
+ws_book_events_total = None
 
 def _init_ws_metrics():
     """Initialize Prometheus metrics with singleton guard to prevent duplicate registration."""
     global _ws_metrics_initialized, ws_events_dropped_total, ws_fills_dropped_total
     global ws_events_coalesced_total, ws_max_queue_size, ws_forwarder_throughput
     global ws_queue_depth, kalshi_ws_mode, kalshi_rest_orderbook_errors_total
-    global kalshi_orderbook_completeness
+    global kalshi_orderbook_completeness, ws_book_bridge_wait_ms
+    global ws_book_events_total
     
     if _ws_metrics_initialized:
         return
@@ -261,7 +264,21 @@ def _init_ws_metrics():
             'Orderbook completeness (1=OK, 0=MISSING/UNAVAILABLE)',
             ['symbol']
         )
-        
+
+        # Bridge-lag instrumentation: queue residence time for orderbook
+        # events between bridge ingress and forwarder dequeue.
+        ws_book_bridge_wait_ms = Gauge(
+            'merid_ws_book_bridge_wait_ms',
+            'Orderbook event wait ms between bridge enqueue and publish apply',
+            ['ticker']
+        )
+
+        ws_book_events_total = Counter(
+            'merid_ws_book_events_total',
+            'Orderbook events dropped/invalidated by reason',
+            ['reason']
+        )
+
         _ws_metrics_initialized = True
     except ImportError:
         # Prometheus client not available - metrics will be no-ops
@@ -390,8 +407,12 @@ def _validate_fill_keys(agent_id: Optional[str], market_id: Optional[str]) -> tu
     return True, ""
 
 
-# Max events buffered before we start dropping
-_BRIDGE_QUEUE_SIZE = 65536  # Increased from 32768 to 65536 - 15m five-ticker stream can burst >30k messages during rollovers
+# Max events buffered before we start dropping.  A real-time book pipeline
+# must never retain tens of thousands of stale events: 8192 keeps rollover
+# bursts flowing while bounding worst-case queue residence to ~seconds, and
+# orderbook events are additionally age-gated downstream (events older than
+# the freshness budget invalidate + resync rather than being replayed).
+_BRIDGE_QUEUE_SIZE = int(os.getenv("MERID_BRIDGE_QUEUE_SIZE", "8192"))
 
 # UI coalescing interval (seconds) — don't push every tick to React
 _UI_COALESCE_INTERVAL = 0.100  # 100ms
@@ -597,7 +618,9 @@ class KalshiWebSocketBridge:
         self._forward_task: Optional[asyncio.Task] = None  # DEPRECATED: Now uses dedicated thread
         self._forward_thread: Optional[threading.Thread] = None  # New: Dedicated thread for forward loop
         self._drain_executor: Optional[ThreadPoolExecutor] = None  # Dedicated drain worker pool
-        self._orderbook_executor: Optional[ThreadPoolExecutor] = None  # Dedicated executor for orderbook apply
+        # HOT-PATH FIX: the former 32-worker orderbook ThreadPoolExecutor was
+        # removed — orderbook apply now runs synchronously on the single
+        # forwarder loop to preserve per-ticker venue order.
 
         # 2026-08-23: WebSocket I/O now runs in a dedicated OS thread with its own
         # asyncio event loop. The bridge communicates via run_coroutine_threadsafe()
@@ -938,9 +961,13 @@ class KalshiWebSocketBridge:
         Critical events (fills, portfolio updates) are never coalesced.
         Coalescable events (orderbook, ticker) keep only the latest per ticker.
         """
-        # Critical event types that must never be coalesced
-        NON_COALESCABLE_KINDS = {"fill", "order_group_update", "order_group_updates", 
-                                 "portfolio", "balance", "account"}
+        # Critical event types that must never be coalesced.  Orderbook
+        # events are sequenced state transitions: collapsing intermediate
+        # deltas destroys sequence contiguity and manufactures a gap that
+        # invalidates the book downstream.
+        NON_COALESCABLE_KINDS = {"fill", "order_group_update", "order_group_updates",
+                                 "portfolio", "balance", "account",
+                                 "orderbook_snapshot", "orderbook_delta"}
         
         tmp = {}
         dropped = 0
@@ -1086,11 +1113,15 @@ class KalshiWebSocketBridge:
                     break
             
             if not batch:
-                # No events, wait for one
+                # No events — sleep and retry.  A blocking ``queue.Queue.get()``
+                # inside this coroutine would freeze the whole event loop; the
+                # forwarder loop is the sole live consumer and this path is
+                # currently inert, but the trap must not remain live code.
                 try:
-                    event = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+                    event = self._queue.get_nowait()
                     batch.append(event)
-                except asyncio.TimeoutError:
+                except queue.Empty:
+                    await asyncio.sleep(0.05)
                     continue
             
             # Process batch
@@ -2389,16 +2420,12 @@ class KalshiWebSocketBridge:
                         self._forward_loop_ref = loop
                         logger.info("[WS-FORWARD-THREAD] Event loop created and bound to thread")
 
-                        # P0 FIX: Dedicated ThreadPoolExecutor for orderbook apply.  This
-                        # avoids loop.run_in_executor's default executor which can become
-                        # permanently unavailable with "cannot schedule new futures after
-                        # shutdown" on Windows/ProactorEventLoop under reload/shutdown edge
-                        # conditions.  We submit directly to this executor and manage its
-                        # lifecycle ourselves.
-                        from concurrent.futures import ThreadPoolExecutor
-                        self._orderbook_executor = ThreadPoolExecutor(
-                            max_workers=32, thread_name_prefix="kalshi-ob-apply"
-                        )
+                        # REMOVED: the dedicated 32-worker orderbook executor.
+                        # Its unbounded internal work queue was invisible to
+                        # every depth metric and reordered same-ticker deltas,
+                        # manufacturing sequence gaps -> INVALID -> resync
+                        # storms.  Orderbook messages now apply synchronously
+                        # on this forwarder loop (single writer, venue order).
 
                         # CRITICAL FIX: Create asyncio.Queue in this thread's event loop
                         # This is the async-side queue for the dual-queue bridge pattern
@@ -2421,13 +2448,6 @@ class KalshiWebSocketBridge:
                                 logger.info("[WS-FORWARD-THREAD] Drain executor shut down")
                         except Exception as e:
                             logger.error(f"[WS-FORWARD-THREAD] Error shutting down drain executor: {e}")
-                        try:
-                            if getattr(self, '_orderbook_executor', None):
-                                self._orderbook_executor.shutdown(wait=False)
-                                self._orderbook_executor = None
-                                logger.info("[WS-FORWARD-THREAD] Orderbook executor shut down")
-                        except Exception as e:
-                            logger.error(f"[WS-FORWARD-THREAD] Error shutting down orderbook executor: {e}")
                         try:
                             loop.close()
                             logger.info("[WS-FORWARD-THREAD] Event loop closed")
@@ -3842,6 +3862,23 @@ class KalshiWebSocketBridge:
         # Track events received from WS
         self._events_seen += 1
 
+        # Hop instrumentation: stamp bridge ingress immediately so every
+        # downstream hop can measure queue-residence and event age.  The
+        # venue timestamp (if the payload carries ``ts``/``ts_ms``) is left
+        # untouched and read by the market-state freshness gate.  The stamps
+        # are also written into the nested ``msg`` payload: the state store
+        # enqueues the payload (not the outer event) for orderbook messages,
+        # so the freshness gate would otherwise never see them.
+        if isinstance(event, dict):
+            _now_ns = _time.monotonic_ns()
+            _now_wall_ms = _time.time() * 1000.0
+            event["_t_bridge_recv_ns"] = _now_ns
+            event["_t_bridge_recv_wall_ms"] = _now_wall_ms
+            _payload = event.get("msg")
+            if isinstance(_payload, dict):
+                _payload["_t_bridge_recv_ns"] = _now_ns
+                _payload["_t_bridge_recv_wall_ms"] = _now_wall_ms
+
         # Minimal tracking for sequence gaps and fill metrics
         if isinstance(event, dict):
             event_type = event.get("type", "unknown")
@@ -3956,6 +3993,7 @@ class KalshiWebSocketBridge:
                 if event_type != "fill":
                     self._events_dropped += 1
                     _inc_ws_events_dropped(event_type)
+                    self._mark_orderbook_drop_untrusted(oldest, "BRIDGE_QUEUE_DROP_OLDEST")
                     logger.debug("[WS-BACKPRESSURE] Dropped oldest non-fill event (type=%s)", event_type)
                 else:
                     # Oldest was a fill, put it back and drop current instead
@@ -3988,6 +4026,7 @@ class KalshiWebSocketBridge:
                 self._events_dropped += 1
                 # P2 Task 7: Update Prometheus metrics
                 _inc_ws_events_dropped(event_type)
+                self._mark_orderbook_drop_untrusted(event, "BRIDGE_QUEUE_DROP_PRESSURE")
                 # Log aggressive drops sparingly (rate-limited to avoid log I/O in hot path)
                 now = _time.monotonic()
                 if now - getattr(self, '_last_backpressure_warn_ts', 0) > 5.0:
@@ -4028,6 +4067,7 @@ class KalshiWebSocketBridge:
             # Drop oldest to make room
             try:
                 dropped = self._thread_queue.get_nowait()
+                self._mark_orderbook_drop_untrusted(dropped, "BRIDGE_QUEUE_FULL")
                 # Track if we dropped a fill
                 if isinstance(dropped, dict) and dropped.get("type") == "fill":
                     self._fills_dropped += 1
@@ -4039,7 +4079,13 @@ class KalshiWebSocketBridge:
             # DUAL-QUEUE BRIDGE PATTERN: Always use the thread-safe _thread_queue;
             # the legacy _queue alias is the same object, but referencing it here
             # is a foot-gun if it is ever reassigned to an asyncio.Queue.
-            self._thread_queue.put_nowait(event)
+            try:
+                self._thread_queue.put_nowait(event)
+            except queue.Full:
+                # A racing producer refilled the freed slot — drop the event
+                # rather than letting QueueFull escape into the WS callback.
+                # Only now is THIS event's ticker the one that lost a delta.
+                self._mark_orderbook_drop_untrusted(event, "BRIDGE_QUEUE_FULL_RETRY")
             self._events_dropped += 1
             # Log every 100 drops so operators see the problem
             if self._events_dropped % 100 == 1:
@@ -4052,6 +4098,44 @@ class KalshiWebSocketBridge:
                     self._fills_dropped,
                     current_qsize,
                 )
+
+    def _mark_orderbook_drop_untrusted(self, event: Any, reason: str) -> None:
+        """Invalidate a ticker's book when its orderbook event is dropped.
+
+        A dropped orderbook delta is a guaranteed sequence gap.  Rather than
+        letting downstream sequence validation discover it tens of seconds
+        later, fail closed immediately: mark the book untrusted and schedule
+        snapshot recovery (throttled per ticker inside the store).
+        """
+        if not isinstance(event, dict):
+            return
+        etype = event.get("type") or event.get("channel") or ""
+        if etype not in ("orderbook_snapshot", "orderbook_delta"):
+            return
+        payload = event.get("msg") if isinstance(event.get("msg"), dict) else event
+        ticker = (
+            payload.get("market_ticker")
+            or payload.get("ticker")
+            or event.get("ticker")
+            or event.get("market_ticker")
+            or ""
+        )
+        if not ticker:
+            return
+        try:
+            if ws_book_events_total is not None:
+                ws_book_events_total.labels(reason=reason).inc()
+        except Exception:
+            pass
+        try:
+            store = getattr(self, "_market_state_store", None)
+            if store is None:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                store = get_kalshi_market_state_store()
+                self._market_state_store = store
+            store.mark_book_untrusted_for_bridge(ticker, reason, event_type=etype)
+        except Exception as e:
+            logger.debug("[WS-BOOK-DROP] failed to mark %s untrusted (%s): %s", ticker, reason, e)
 
     # ── Forward loop (drains queue → event bus) ──────────────────────────
 
@@ -4312,6 +4396,7 @@ class KalshiWebSocketBridge:
             self._async_queue.put_nowait(event)
         except asyncio.QueueFull:
             self._events_dropped += 1
+            self._mark_orderbook_drop_untrusted(event, "ASYNC_QUEUE_FULL")
             now = _time.monotonic()
             if now - getattr(self, '_last_drain_drop_warn_ts', 0) > 5.0:
                 self._last_drain_drop_warn_ts = now
@@ -4850,6 +4935,9 @@ class KalshiWebSocketBridge:
         except asyncio.TimeoutError:
             logger.debug("[WS-FORWARD] Dropped event after 5s timeout")
             self._events_dropped += 1
+            # A timed-out orderbook event is a lost sequence element — the
+            # book cannot be trusted until snapshot recovery.
+            self._mark_orderbook_drop_untrusted(event, "FORWARD_TIMEOUT")
         except Exception as e:
             logger.debug("[WS-FORWARD] Event publish error (background): %s", e)
             self._forward_errors += 1
@@ -5031,27 +5119,23 @@ class KalshiWebSocketBridge:
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     store = get_kalshi_market_state_store()
-                    # P0 FIX: Offload market-state apply to a dedicated bridge-owned
-                    # ThreadPoolExecutor and do NOT await. This keeps the forwarder
-                    # event loop fully unblocked and avoids loop.run_in_executor's
-                    # default executor which can enter a shutdown-only state on
-                    # Windows/ProactorEventLoop.
-                    executor = getattr(self, "_orderbook_executor", None)
-                    if executor is not None:
+                    # HOT-PATH FIX: apply directly on the forwarder loop instead
+                    # of the 32-worker fire-and-forget ThreadPoolExecutor.  The
+                    # executor had an unbounded internal queue (invisible to
+                    # every depth metric) and reordered same-ticker deltas —
+                    # manufacturing sequence gaps that invalidated the book and
+                    # triggered resync storms.  The forwarder consumes events
+                    # serially, so a synchronous apply preserves venue order.
+                    # Delta apply is a cheap deque append; lag breaches are
+                    # gated downstream by the market-state freshness checks.
+                    _recv_ns = event.get("_t_bridge_recv_ns")
+                    if _recv_ns and ws_book_bridge_wait_ms is not None:
                         try:
-                            fut = executor.submit(store.apply_orderbook_message, event, "bridge_queue")
-                            fut.add_done_callback(
-                                lambda f, et=event_type, tk=ticker: (
-                                    logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", et, tk, f.exception())
-                                    if not f.cancelled() and f.exception() else None
-                                )
-                            )
-                        except RuntimeError:
-                            # Executor is shutting down; fall through to direct apply
-                            store.apply_orderbook_message(event, "bridge_queue")
-                    else:
-                        # No executor yet / already gone; apply directly to avoid dropping
-                        store.apply_orderbook_message(event, "bridge_queue")
+                            _wait_ms = (_time.monotonic_ns() - float(_recv_ns)) / 1e6
+                            ws_book_bridge_wait_ms.labels(ticker=str(ticker)).set(_wait_ms)
+                        except Exception:
+                            pass
+                    store.apply_orderbook_message(event, "bridge_queue")
                 except Exception as apply_exc:
                     logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
 

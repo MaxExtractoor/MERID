@@ -8133,6 +8133,17 @@ class LeanAgent15m:
                 indicators["p_yes_model"] = p_yes
             if shadow_bachelier_only:
                 indicators["shadow_bachelier_only"] = True
+            # Quote-feed provenance frozen at decision time so the audit record
+            # binds the owner/parity values the gates consumed even if the live
+            # market_state object is updated by a concurrent delta apply.
+            if market_state is not None:
+                indicators["quote_owner"] = getattr(market_state, "quote_owner", None)
+                indicators["quote_degraded_mode"] = bool(getattr(market_state, "degraded_mode", False))
+                indicators["ws_last_event_age_ms"] = getattr(market_state, "ws_last_event_age_ms", None)
+                indicators["ws_last_queue_wait_ms"] = getattr(market_state, "ws_last_queue_wait_ms", None)
+                indicators["ws_rest_bid_diff_ticks"] = getattr(market_state, "ws_rest_bid_diff_ticks", None)
+                indicators["ws_rest_ask_diff_ticks"] = getattr(market_state, "ws_rest_ask_diff_ticks", None)
+                indicators["ws_parity_healthy"] = getattr(market_state, "ws_parity_healthy", None)
             decision = compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
@@ -12762,13 +12773,47 @@ class LeanAgent15m:
 
         else:
 
-            logger.info(
+            # adx == 0.0: no DX data yet.  Bounded warmup only — after the
+            # SEV-1 warmup window expires the trend gate cannot certify
+            # trending-vs-chop, so the candidate fails closed (same
+            # convention as VOLUME-CONFIRMATION / MTF-ALIGNMENT).
+            if is_warmup(len(self._adx_history[asset])):
 
-                "[ADX-FILTER] asset=%s ADX=%.2f (no data/warmup) -> PROCEED (warmup bypass)",
+                logger.info(
 
-                asset, adx
+                    "[ADX-FILTER] asset=%s ADX=%.2f (warmup window) -> PROCEED (bounded warmup)",
 
-            )
+                    asset, adx
+
+                )
+
+            else:
+
+                logger.warning(
+
+                    "[ADX-FILTER] asset=%s ADX=%.2f (no data, warmup expired) -> SKIP TRADE (fail-closed)",
+
+                    asset, adx
+
+                )
+
+                self._record_signal_rejection(
+
+                    "final_adx_warmup_expired",
+
+                    market_id=getattr(market, 'market_id', None) or getattr(market, 'market', None),
+
+                    asset=asset,
+
+                    adx=adx,
+
+                    adx_history_len=len(self._adx_history[asset]),
+
+                    feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()}",
+
+                )
+
+                return None
 
 
 
@@ -18297,6 +18342,21 @@ class LeanAgentGrid15m:
                             _pre_count = 1.0
                     candidate['count'] = _pre_count
 
+                    # Effective-quote ownership for degraded-mode accounting:
+                    # a REST-owned effective quote pays the allocator's
+                    # degraded edge reserve.  NONE_UNTRUSTED candidates should
+                    # already have been stopped at entry readiness, but the
+                    # tag must travel with the order regardless.
+                    _quote_owner = "UNKNOWN"
+                    _degraded_mode = False
+                    try:
+                        if self.market_state_store is not None and ticker:
+                            _qgate = self.market_state_store.get_quote_gate_state(ticker)
+                            _quote_owner = str(_qgate.get("quote_owner", "NONE_UNTRUSTED"))
+                            _degraded_mode = bool(_qgate.get("degraded_mode"))
+                    except Exception:
+                        _quote_owner, _degraded_mode = "UNKNOWN", False
+
                     order_candidate = OrderCandidate(
 
                         asset=asset,
@@ -18320,6 +18380,10 @@ class LeanAgentGrid15m:
                         agent_name=candidate.get('agent_id', asset),
 
                         candidate_id=str(candidate.get('candidate_id', '') or ''),
+
+                        quote_owner=_quote_owner,
+
+                        degraded_mode=_degraded_mode,
 
                     )
 
@@ -18444,10 +18508,15 @@ class LeanAgentGrid15m:
                         # overriding the policy and causing premature exits.
                         # Propagate any allocator-scaled fractional count back to the candidate.
                         original_candidate['count'] = float(order.count)
+                        # Propagate effective-quote provenance so the execution
+                        # path and audit ledger record who owned the price.
+                        original_candidate['quote_owner'] = getattr(order, 'quote_owner', 'UNKNOWN')
+                        original_candidate['degraded_mode'] = bool(getattr(order, 'degraded_mode', False))
                         candidates.append(original_candidate)
                         logger.info(
-                            "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%s edge=%.1f%%",
-                            order.asset, order.ticker, order.side, order.price_cents, order.count, order.edge_pct
+                            "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%s edge=%.1f%% owner=%s",
+                            order.asset, order.ticker, order.side, order.price_cents, order.count, order.edge_pct,
+                            original_candidate['quote_owner'],
                         )
                     else:
                         logger.warning(

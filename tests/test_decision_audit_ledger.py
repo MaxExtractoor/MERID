@@ -335,3 +335,88 @@ def test_ledger_disabled(tmp_db: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         assert not tables
+
+
+def test_snapshot_records_quote_provenance(tmp_db: Path) -> None:
+    """Quote-owner/freshness/divergence provenance must land on the snapshot row."""
+    import time
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.indicators["quote_owner"] = "REST_VERIFIED_DEGRADED"
+    dec.indicators["quote_degraded_mode"] = True
+    dec.indicators["ws_last_event_age_ms"] = 640.0
+    dec.indicators["ws_last_queue_wait_ms"] = 12.5
+    dec.indicators["ws_rest_bid_diff_ticks"] = 7
+    dec.indicators["ws_rest_ask_diff_ticks"] = 9
+    dec.indicators["ws_parity_healthy"] = False
+
+    @dataclass
+    class _MS:
+        quote_owner: str = "REST_VERIFIED_DEGRADED"
+        degraded_mode: bool = True
+        ws_last_seq: int = 441
+        ws_last_event_age_ms: float = 640.0
+        ws_last_queue_wait_ms: float = 12.5
+        ws_rest_bid_diff_ticks: int = 7
+        ws_rest_ask_diff_ticks: int = 9
+        ws_parity_healthy: bool = False
+        last_rest_quote_update_ts: float = field(
+            default_factory=lambda: time.monotonic() - 0.25
+        )
+        last_book_update_wall_ts: float = field(
+            default_factory=lambda: time.time() - 0.1
+        )
+        book_initialized: bool = True
+        data_quality: str = "GOOD"
+
+    ledger.record_trade_decision(dec, market_state=_MS())
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        snap = conn.execute(
+            "SELECT quote_owner, degraded_mode, ws_last_seq, ws_last_event_age_ms, "
+            "ws_last_queue_wait_ms, ws_rest_bid_diff_ticks, ws_rest_ask_diff_ticks, "
+            "ws_parity_healthy, rest_age_ms, book_age_ms "
+            "FROM strategy_decision_snapshots WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert snap["quote_owner"] == "REST_VERIFIED_DEGRADED"
+        assert snap["degraded_mode"] == 1
+        assert snap["ws_last_seq"] == 441
+        assert snap["ws_last_event_age_ms"] == pytest.approx(640.0)
+        assert snap["ws_last_queue_wait_ms"] == pytest.approx(12.5)
+        assert snap["ws_rest_bid_diff_ticks"] == 7
+        assert snap["ws_rest_ask_diff_ticks"] == 9
+        assert snap["ws_parity_healthy"] == 0
+        assert snap["rest_age_ms"] is not None and snap["rest_age_ms"] >= 200
+        assert snap["book_age_ms"] is not None and snap["book_age_ms"] < 5000
+
+
+def test_snapshot_book_age_uses_wall_clock(tmp_db: Path) -> None:
+    """book_age_ms must compare the wall-clock sibling, not the monotonic field."""
+    import time
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+
+    @dataclass
+    class _MS:
+        last_book_update_ts: float = field(default_factory=time.monotonic)
+        last_book_update_wall_ts: float = field(
+            default_factory=lambda: time.time() - 0.2
+        )
+        book_initialized: bool = True
+        data_quality: str = "GOOD"
+
+    ledger.record_trade_decision(dec, market_state=_MS())
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        snap = conn.execute(
+            "SELECT book_age_ms FROM strategy_decision_snapshots WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        # ~200ms, not the multi-second garbage produced by mixing clocks.
+        assert snap[0] is not None and 0 <= snap[0] < 5000

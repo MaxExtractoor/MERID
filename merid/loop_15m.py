@@ -436,8 +436,15 @@ class EntryReadiness:
     queue_lock_wait_ms: float
     queue_batch_duration_ms: float
     queue_lock_contention_count: int
-    entries_allowed: bool
-    blocker: Optional[str]
+    quote_owner: str = "UNKNOWN"
+    quote_owner_trusted: bool = False
+    degraded_mode: bool = False
+    ws_parity_healthy: Optional[bool] = None
+    ws_rest_div_c: Optional[int] = None
+    ws_age_ms: Optional[float] = None
+    rest_age_ms: Optional[float] = None
+    entries_allowed: bool = False
+    blocker: Optional[str] = None
 
     def to_log_message(self) -> str:
         return (
@@ -449,6 +456,12 @@ class EntryReadiness:
             f"ws_snapshot_complete={self.ws_snapshot_complete} "
             f"quote_fresh={self.quote_fresh} "
             f"quote_coherent={self.quote_coherent} "
+            f"quote_owner={self.quote_owner} "
+            f"degraded={self.degraded_mode} "
+            f"ws_parity_healthy={self.ws_parity_healthy} "
+            f"ws_rest_div_c={self.ws_rest_div_c} "
+            f"ws_age_ms={self.ws_age_ms if self.ws_age_ms is not None else 'n/a'} "
+            f"rest_age_ms={self.rest_age_ms if self.rest_age_ms is not None else 'n/a'} "
             f"market_state_applied={self.market_state_applied} "
             f"portfolio_authoritative={self.portfolio_authoritative} "
             f"reconciliation_halted={self.reconciliation_halted} "
@@ -3380,6 +3393,7 @@ async def _execute_exit_order(
         current_bid_cents = 0
         current_ask_cents = 0
         current_spread_cents = -1
+        market_state = None
 
         try:
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
@@ -3597,6 +3611,12 @@ async def _execute_exit_order(
             parent_entry_signal_id=_entry_signal_id,
             parentage_status=_parentage_status,
         )
+
+        # Bind quote-feed provenance onto the exit intent for the audit record
+        # when the live market state was resolved during the spread check above.
+        if market_state is not None:
+            intent.quote_owner = getattr(market_state, "quote_owner", None)
+            intent.degraded_mode = bool(getattr(market_state, "degraded_mode", False))
 
         # CRITICAL FIX (2026-08-24): Finalize the durable order identity before the
         # order is marked in-flight and before route_order_async.  Each exit attempt
@@ -4745,12 +4765,44 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             if self.market_state_store is not None:
                 quote_coherent, quote_coherence_reason = self.market_state_store.is_quote_coherent(ticker)
                 qm = self.market_state_store.get_queue_lock_metrics(ticker)
+                try:
+                    qgate = self.market_state_store.get_quote_gate_state(ticker)
+                except Exception:
+                    qgate = {"quote_owner": "NONE_UNTRUSTED", "degraded_mode": False,
+                             "ws_parity_healthy": None, "ws_rest_bid_diff_ticks": None,
+                             "ws_rest_ask_diff_ticks": None, "ws_age_ms": None,
+                             "rest_age_ms": None, "ws_fresh": False, "rest_fresh": False,
+                             "effective_fresh": False, "degraded_entry_enabled": False}
             else:
                 quote_coherent = quote_fresh and "divergence" not in md_reason
                 quote_coherence_reason = None
                 qm = {"lock_contention_count": 0, "total_lock_wait_ms": 0.0, "last_batch_duration_ms": 0.0, "queue_depth": 0}
+                qgate = {"quote_owner": "NONE_UNTRUSTED", "degraded_mode": False,
+                         "ws_parity_healthy": None, "ws_rest_bid_diff_ticks": None,
+                         "ws_rest_ask_diff_ticks": None, "ws_age_ms": None,
+                         "rest_age_ms": None, "ws_fresh": False, "rest_fresh": False,
+                         "effective_fresh": False, "degraded_entry_enabled": False}
             market_state_applied = state is not None
             intent_state_clean = not ticker_has_stale_pending_entry_intent(ticker)
+
+            # Effective-quote ownership gate: a REST-owned quote may only
+            # carry entries under the explicit degraded-execution policy with
+            # a fresh REST source; a WS-owned quote must itself be fresh.
+            # NONE_UNTRUSTED (or any other owner) never permits entries.
+            _q_owner = qgate.get("quote_owner", "NONE_UNTRUSTED")
+            if _q_owner == "WS_FRESH_VERIFIED":
+                quote_owner_trusted = bool(qgate.get("ws_fresh"))
+            elif _q_owner == "REST_VERIFIED_DEGRADED":
+                quote_owner_trusted = bool(
+                    qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
+                )
+            else:
+                quote_owner_trusted = False
+            _ws_rest_div_c = None
+            _bdiv = qgate.get("ws_rest_bid_diff_ticks")
+            _adiv = qgate.get("ws_rest_ask_diff_ticks")
+            if _bdiv is not None or _adiv is not None:
+                _ws_rest_div_c = max(_bdiv or 0, _adiv or 0)
 
             # 2026-08-24: incorporate per-ticker queue/lock metrics into queue health.
             queue_lock_wait_ms = qm.get("total_lock_wait_ms", 0.0)
@@ -4786,6 +4838,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 ("ws_snapshot_complete", ws_snapshot_complete),
                 ("quote_fresh", quote_fresh),
                 ("quote_coherent", quote_coherent),
+                ("quote_owner_trusted", quote_owner_trusted),
                 ("market_state_applied", market_state_applied),
                 ("portfolio_authoritative", ticker_portfolio_authoritative),
                 ("reconciliation_halted", not reconciliation_halted),
@@ -4795,6 +4848,8 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             blocker_name = next((name for name, ok in checks if not ok), None)
             if blocker_name == "quote_coherent" and quote_coherence_reason:
                 blocker = f"{blocker_name}:{quote_coherence_reason}"
+            elif blocker_name == "quote_owner_trusted":
+                blocker = f"quote_owner_untrusted:{_q_owner}"
             elif blocker_name == "reconciliation_halted" and reconciliation_halted:
                 blocker = "reconciliation_halted"
             else:
@@ -4815,6 +4870,13 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 "ws_snapshot_complete": ws_snapshot_complete,
                 "quote_fresh": quote_fresh,
                 "quote_coherent": quote_coherent,
+                "quote_owner": _q_owner,
+                "quote_owner_trusted": quote_owner_trusted,
+                "degraded_mode": bool(qgate.get("degraded_mode")),
+                "ws_parity_healthy": qgate.get("ws_parity_healthy"),
+                "ws_rest_div_c": _ws_rest_div_c,
+                "ws_age_ms": qgate.get("ws_age_ms"),
+                "rest_age_ms": qgate.get("rest_age_ms"),
                 "market_state_applied": market_state_applied,
                 "portfolio_authoritative": ticker_portfolio_authoritative,
                 "reconciliation_halted": reconciliation_halted,
@@ -4878,6 +4940,13 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 queue_lock_wait_ms=rec["queue_lock_wait_ms"],
                 queue_batch_duration_ms=rec["queue_batch_duration_ms"],
                 queue_lock_contention_count=rec["queue_lock_contention_count"],
+                quote_owner=rec["quote_owner"],
+                quote_owner_trusted=rec["quote_owner_trusted"],
+                degraded_mode=rec["degraded_mode"],
+                ws_parity_healthy=rec["ws_parity_healthy"],
+                ws_rest_div_c=rec["ws_rest_div_c"],
+                ws_age_ms=rec["ws_age_ms"],
+                rest_age_ms=rec["rest_age_ms"],
                 entries_allowed=ticker_entries_allowed,
                 blocker=rec["blocker"],
             )
@@ -8313,10 +8382,25 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                         tick, t.exception(),
                     )
                 else:
-                    logger.warning(
-                        "[15M-LOOP] orphaned run_cycle task for tick=%d eventually completed",
-                        tick,
-                    )
+                    # A late completion on a poisoned tick means the abandoned
+                    # task outlived its cancellation budget and may have mutated
+                    # shared agent-grid state — flag it loudly.
+                    poisoned = getattr(self, "_poisoned_ticks", None) or set()
+                    if tick in poisoned:
+                        self._poisoned_tick_completions = getattr(
+                            self, "_poisoned_tick_completions", 0
+                        ) + 1
+                        logger.critical(
+                            "[GRID-CYCLE-POISONED-COMPLETION] tick=%d orphan task "
+                            "completed after abandonment; any shared-state "
+                            "mutation is suspect poisoned_tick_completions=%d",
+                            tick, self._poisoned_tick_completions,
+                        )
+                    else:
+                        logger.warning(
+                            "[15M-LOOP] orphaned run_cycle task for tick=%d eventually completed",
+                            tick,
+                        )
 
             cycle_task.add_done_callback(_cycle_done)
             try:
@@ -8327,12 +8411,38 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 faulthandler.cancel_dump_traceback_later()
 
             if cycle_task not in done_set:
+                self._cycle_timeout_total = getattr(self, "_cycle_timeout_total", 0) + 1
                 logger.critical(
-                    "[GRID-CYCLE-TIMEOUT] tick=%d exceeded %.1fs bound; abandoning "
-                    "cycle task (fail-closed, returning no candidates)",
-                    tick, cycle_timeout_s,
+                    "[GRID-CYCLE-TIMEOUT] tick=%d exceeded %.1fs bound; cancelling "
+                    "cycle task (fail-closed, returning no candidates) "
+                    "cycle_timeout_total=%d",
+                    tick, cycle_timeout_s, self._cycle_timeout_total,
                 )
                 cycle_task.cancel()
+                # Confirm cancellation within a bounded grace period.  A task
+                # that ignores cancel() could otherwise keep mutating shared
+                # agent-grid state after the cycle was abandoned.
+                _orphan_grace_s = float(
+                    os.getenv("MERID_ORPHAN_CONFIRM_S", "2.0") or 2.0
+                )
+                try:
+                    _done2, _pending2 = await asyncio.wait(
+                        {cycle_task}, timeout=_orphan_grace_s
+                    )
+                except Exception:
+                    _pending2 = {cycle_task}
+                if cycle_task in _pending2:
+                    self._orphan_task_total = getattr(self, "_orphan_task_total", 0) + 1
+                    _poisoned = getattr(self, "_poisoned_ticks", None)
+                    if _poisoned is None:
+                        _poisoned = self._poisoned_ticks = set()
+                    _poisoned.add(tick)
+                    logger.critical(
+                        "[GRID-CYCLE-ORPHAN] tick=%d task still pending %.1fs after "
+                        "cancel(); marked poisoned — late completion must not "
+                        "commit state orphan_task_total=%d",
+                        tick, _orphan_grace_s, self._orphan_task_total,
+                    )
                 return []
             orphans.discard(cycle_task)
             candidates = cycle_task.result()
@@ -9611,6 +9721,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # CRITICAL FIX (2026-08-19): carry the decision edge threshold for
             # fill-adjusted edge gating.
             min_required_edge=candidate.get("min_required_edge"),
+            # Quote-feed provenance bound to the admitted candidate so the
+            # router/order/audit records carry which feed owned the entry quote.
+            quote_owner=candidate.get("quote_owner"),
+            degraded_mode=bool(candidate.get("degraded_mode", False)),
         )
 
         # CRITICAL FIX 2026-08-20: order identity contract requires process_id and reason.

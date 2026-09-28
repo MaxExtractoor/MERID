@@ -476,6 +476,14 @@ class TestRestBboDivergenceGuard:
             self.TICKER,
             {"ticker": self.TICKER, "yes": yes, "no": no, "seq": seq},
         )
+        # Mirror the canonical snapshot-complete flag the real apply path
+        # sets; effective-quote ownership keys off it.
+        state = store._get_or_create(self.TICKER)
+        state.snapshot_complete = True
+        state.data_quality = "GOOD"
+        state.book_consistency = "GOOD"
+        state.transition = "VALID"
+        state.executable = True
         return store
 
     def _sync(self, store, via="bridge_queue"):
@@ -507,7 +515,7 @@ class TestRestBboDivergenceGuard:
         assert state.book_initialized is True
         assert state.best_bid_cents == 48
         assert state.best_ask_cents == 50
-        assert state.quote_owner == "WS"
+        assert state.quote_owner == "WS_FRESH_VERIFIED"
 
     def test_ws_delta_no_rest_bbo_does_not_crash(self):
         """Delta on a two-sided book with last_rest_* unset must complete."""
@@ -562,7 +570,7 @@ class TestRestBboDivergenceGuard:
         # WS BBO 49/50 vs REST 36/37 -> max divergence 13c > 3c -> REST wins.
         assert state.best_bid_cents == 36
         assert state.best_ask_cents == 37
-        assert state.quote_owner == "REST_PREFERRED"
+        assert state.quote_owner == "REST_VERIFIED_DEGRADED"
 
     def test_ws_delta_coherent_rest_bbo_keeps_ws(self):
         """REST BBO within the divergence threshold leaves the WS book alone."""
@@ -577,7 +585,7 @@ class TestRestBboDivergenceGuard:
         state = store.get(self.TICKER)
         assert state.best_bid_cents == 49
         assert state.best_ask_cents == 50
-        assert state.quote_owner == "WS"
+        assert state.quote_owner == "WS_FRESH_VERIFIED"
 
     def test_ws_delta_stale_rest_bbo_keeps_ws(self):
         """A REST BBO older than MERID_REST_BBO_MAX_AGE_S must not override WS."""
@@ -591,7 +599,7 @@ class TestRestBboDivergenceGuard:
         state = store.get(self.TICKER)
         assert state.best_bid_cents == 49
         assert state.best_ask_cents == 50
-        assert state.quote_owner == "WS"
+        assert state.quote_owner == "WS_FRESH_VERIFIED"
 
     def test_rest_one_sided_snapshot_then_delta_no_crash(self):
         """REST poll returning an empty NO side (observed near window close)

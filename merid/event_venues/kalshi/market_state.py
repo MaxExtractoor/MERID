@@ -323,6 +323,77 @@ _SNAPSHOT_TIMEOUT_SECONDS = float(os.getenv("MERID_KALSHI_SNAPSHOT_TIMEOUT_SECON
 # RTI) - observed in production on 2026-08-31.
 _RECOVERY_TRIGGER_MIN_INTERVAL_S = float(os.getenv("KALSHI_RECOVERY_TRIGGER_MIN_INTERVAL_S", "15.0"))
 
+# ── Bridge-lag freshness budgets ────────────────────────────────────────────
+# A sequence-contiguous delta stream can still be execution-useless when
+# events sat in an internal queue.  These bounds are enforced at enqueue and
+# dequeue of the per-ticker delta pipeline; a breach invalidates the book and
+# schedules a fresh snapshot recovery (stale queued deltas are NEVER
+# partially replayed).
+_BOOK_MAX_EVENT_AGE_MS = float(os.getenv("KALSHI_BOOK_MAX_EVENT_AGE_MS", "750"))
+_BOOK_MAX_QUEUE_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_QUEUE_WAIT_MS", "250"))
+_BOOK_MAX_UPSTREAM_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_UPSTREAM_WAIT_MS", "500"))
+# Raw WS-vs-REST parity tolerance (ticks/cents).  Measured on the raw
+# delta-derived BBO, never on a REST-substituted effective quote.
+_WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
+
+# Guarded Prometheus metrics for the book pipeline.  All updates are wrapped
+# in try/except — metrics must never block or crash the book hot path.
+try:
+    from prometheus_client import Counter as _PromCounter, Gauge as _PromGauge
+
+    _book_invalidations_total = _PromCounter(
+        "merid_book_invalidations_total",
+        "Orderbook invalidations by ticker and reason",
+        ["ticker", "reason"],
+    )
+    _ws_rest_divergence_ticks = _PromGauge(
+        "kalshi_ws_rest_divergence_ticks",
+        "Raw WS-vs-REST BBO divergence in ticks (never post-substitution)",
+        ["ticker", "leg"],
+    )
+    _book_event_age_ms = _PromGauge(
+        "merid_book_event_age_ms",
+        "Orderbook event age at apply (venue ts or bridge recv -> apply)",
+        ["ticker"],
+    )
+    _book_queue_wait_ms = _PromGauge(
+        "merid_book_queue_wait_ms",
+        "Orderbook delta-queue residence time at dequeue",
+        ["ticker"],
+    )
+except Exception:  # pragma: no cover - prometheus optional
+    _book_invalidations_total = None
+    _ws_rest_divergence_ticks = None
+    _book_event_age_ms = None
+    _book_queue_wait_ms = None
+
+
+def _inc_book_invalidation(ticker: str, reason: str) -> None:
+    if _book_invalidations_total is None:
+        return
+    try:
+        _book_invalidations_total.labels(ticker=str(ticker), reason=str(reason)).inc()
+    except Exception:
+        pass
+
+
+def _set_book_metric(gauge, ticker: str, value: float) -> None:
+    if gauge is None:
+        return
+    try:
+        gauge.labels(ticker=str(ticker)).set(float(value))
+    except Exception:
+        pass
+
+
+def _set_divergence_ticks(ticker: str, leg: str, ticks: float) -> None:
+    if _ws_rest_divergence_ticks is None:
+        return
+    try:
+        _ws_rest_divergence_ticks.labels(ticker=str(ticker), leg=str(leg)).set(float(ticks))
+    except Exception:
+        pass
+
 # ── Regime-Aware Staleness Thresholds ───────────────────────────────────────
 # Based on time-to-expiry and market conditions
 _STALENESS_REGIME_RELAXED_SECONDS = float(os.getenv("KALSHI_STALENESS_REGIME_RELAXED_SECONDS", "120.0"))  # 120s far from expiry
@@ -679,7 +750,7 @@ class KalshiMarketStateStore:
         # sequenced channel is drop-all + snapshot re-bootstrap (never silently
         # drop individual deltas - that breaks sequence contiguity and livelocks
         # the book in RESYNC_REQUIRED, which only a live delta can clear).
-        self._MAX_PER_TICKER_QUEUE = int(os.getenv("KALSHI_MAX_PER_TICKER_QUEUE", "10000"))
+        self._MAX_PER_TICKER_QUEUE = int(os.getenv("KALSHI_MAX_PER_TICKER_QUEUE", "1024"))
         # Per-ticker throttle for snapshot-recovery triggers so a sustained delta
         # burst cannot schedule thousands of REST/WS recovery coroutines per second
         # and starve the event loop / HTTP connection pool.
@@ -1116,6 +1187,28 @@ class KalshiMarketStateStore:
                         if not batch:
                             continue
 
+                        # Queue-residence freshness gate: the oldest message in
+                        # the batch gives the worst-case wait.  A breach means
+                        # the stream is execution-useless even though it is
+                        # sequence-contiguous — invalidate, drain, and resync
+                        # rather than applying historical deltas.
+                        _oldest_enq = batch[0].get("_t_delta_enq_ns") if isinstance(batch[0], dict) else None
+                        if _oldest_enq:
+                            _wait_ms = (time.monotonic_ns() - float(_oldest_enq)) / 1e6
+                            _qstate = self._states.get(ticker)
+                            if _qstate is not None:
+                                _qstate.ws_last_queue_wait_ms = _wait_ms
+                                _qstate.ws_queue_depth = len(batch)
+                            _set_book_metric(_book_queue_wait_ms, ticker, _wait_ms)
+                            if _wait_ms > _BOOK_MAX_QUEUE_WAIT_MS:
+                                self._mark_book_untrusted_and_resync(
+                                    ticker,
+                                    "BOOK_DELTA_QUEUE_LAG",
+                                    queue_wait_ms=round(_wait_ms, 1),
+                                    depth=len(batch),
+                                )
+                                continue
+
                         # Apply the batch under the orderbook ticker lock.
                         ticker_lock = self._get_ticker_lock(ticker)
                         lock_start = time.monotonic()
@@ -1182,16 +1275,142 @@ class KalshiMarketStateStore:
             self._batch_worker_thread.join(timeout=2.0)
             logger.info("[BATCH-WORKER] Batch worker thread stopped")
 
+    def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        """Return ``(event_age_ms, upstream_wait_ms)`` for a book event.
+
+        ``event_age_ms`` is venue-timestamp age when Kalshi supplies
+        ``ts``/``ts_ms``/``timestamp``; otherwise it falls back to the
+        bridge socket-receive wall time stamped on the event
+        (``_t_bridge_recv_wall_ms``).  ``upstream_wait_ms`` is monotonic
+        residence time upstream of the per-ticker delta queue, measured
+        from the bridge recv/enqueue stamp (``_t_bridge_recv_ns``).
+        """
+        now_wall_ms = time.time() * 1000.0
+        now_mono_ns = time.monotonic_ns()
+
+        venue_ts = msg.get("ts") or msg.get("ts_ms") or msg.get("timestamp")
+        payload = msg.get("msg") if isinstance(msg.get("msg"), dict) else msg
+        if venue_ts is None and isinstance(payload, dict):
+            venue_ts = payload.get("ts") or payload.get("ts_ms") or payload.get("timestamp")
+
+        event_age_ms: Optional[float] = None
+        if venue_ts is not None:
+            try:
+                if isinstance(venue_ts, str):
+                    from datetime import datetime
+                    venue_ms = datetime.fromisoformat(
+                        venue_ts.replace("Z", "+00:00")
+                    ).timestamp() * 1000.0
+                else:
+                    venue_num = float(venue_ts)
+                    venue_ms = venue_num if venue_num > 1e12 else venue_num * 1000.0
+                if 0 < venue_ms <= now_wall_ms + 1000.0:
+                    event_age_ms = now_wall_ms - venue_ms
+            except Exception:
+                event_age_ms = None
+        if event_age_ms is None:
+            recv_wall = msg.get("_t_bridge_recv_wall_ms")
+            if recv_wall:
+                try:
+                    event_age_ms = now_wall_ms - float(recv_wall)
+                except Exception:
+                    event_age_ms = None
+
+        upstream_wait_ms: Optional[float] = None
+        recv_ns = msg.get("_t_bridge_recv_ns") or msg.get("_t_enqueue_ns")
+        if recv_ns:
+            try:
+                upstream_wait_ms = (now_mono_ns - float(recv_ns)) / 1e6
+            except Exception:
+                upstream_wait_ms = None
+        return event_age_ms, upstream_wait_ms
+
+    def _mark_book_untrusted_and_resync(self, ticker: str, reason: str, **diag) -> None:
+        """Atomically invalidate a book, drain its stale delta backlog, and
+        schedule throttled snapshot recovery.
+
+        Idempotent per ticker: repeated stale/lagged events for the same
+        already-invalid book do not re-log or re-schedule; the recovery
+        trigger itself is throttled by ``_RECOVERY_TRIGGER_MIN_INTERVAL_S``.
+        Stale queued deltas are discarded — never partially replayed.
+        """
+        state = self._get_or_create(ticker)
+        was_trusted = (
+            state.data_quality != "INVALID"
+            and state.transition != "RESYNC_REQUIRED"
+        )
+        state.data_quality = "INVALID"
+        state.book_consistency = "SUSPECT"
+        state.transition = "RESYNC_REQUIRED"
+        state.invalidation_cause = reason
+        state.executable = False
+        state.recovery_required_source = "FULL_SNAPSHOT"
+        self._set_snapshot_complete(ticker, False, reason)
+        self._set_book_health(ticker, BookHealth.INVALID, reason)
+        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, reason)
+
+        dropped = 0
+        with self._ticker_locks_lock:
+            queue = self._delta_queues.get(ticker)
+            queue_lock = self._delta_queue_locks.get(ticker)
+        if queue is not None and queue_lock is not None:
+            with queue_lock:
+                dropped = len(queue)
+                queue.clear()
+        if was_trusted or dropped:
+            logger.error(
+                "[BOOK-UNTRUSTED] ticker=%s reason=%s dropped_queued=%d diag=%s",
+                ticker, reason, dropped, diag,
+            )
+        _inc_book_invalidation(ticker, reason)
+        try:
+            self._maybe_trigger_book_recovery(ticker, reason)
+        except Exception as e:
+            logger.error(
+                "[BOOK-UNTRUSTED] recovery trigger failed for %s: %s", ticker, e
+            )
+
+    def mark_book_untrusted_for_bridge(self, ticker: str, reason: str, **diag) -> None:
+        """Public entry point for the WS bridge when an orderbook event cannot
+        be queued/applied promptly (queue overflow or lag breach)."""
+        try:
+            self._mark_book_untrusted_and_resync(ticker, reason, **diag)
+        except Exception as e:
+            logger.error("[BOOK-UNTRUSTED] failed for %s (%s): %s", ticker, reason, e)
+
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
         """Enqueue a delta message for batch processing.
 
-        Returns True if enqueued successfully, False if queue overflow.
+        Returns True if enqueued successfully, False if queue overflow or
+        the event breached the freshness budgets.
 
         On overflow, triggers immediate snapshot recovery to prevent selective staleness.
 
         LOCK CONTENTION FIX: Uses a per-ticker queue lock so concurrent enqueues
         for different tickers no longer serialize on the global _ticker_locks_lock.
         """
+        # Bridge-lag freshness gate: sequence contiguity does not establish
+        # freshness.  An event that waited too long upstream of this queue,
+        # or whose venue/bridge-receive timestamp is too old, invalidates the
+        # book — drain the stale backlog and resync from a fresh snapshot
+        # instead of partially replaying historical deltas.
+        event_age_ms, upstream_wait_ms = self._book_event_timing(msg)
+        if upstream_wait_ms is not None and upstream_wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS:
+            self._mark_book_untrusted_and_resync(
+                ticker,
+                "BOOK_UPSTREAM_LAG",
+                upstream_wait_ms=round(upstream_wait_ms, 1),
+            )
+            return False
+        if event_age_ms is not None and event_age_ms > _BOOK_MAX_EVENT_AGE_MS:
+            self._mark_book_untrusted_and_resync(
+                ticker,
+                "BOOK_EVENT_TOO_OLD",
+                event_age_ms=round(event_age_ms, 1),
+            )
+            return False
+        msg["_t_delta_enq_ns"] = time.monotonic_ns()
+
         # Ensure the queue and its lock exist under the global dict lock.
         with self._ticker_locks_lock:
             if ticker not in self._delta_queues:
@@ -1263,6 +1482,22 @@ class KalshiMarketStateStore:
             queue.append(msg)
             self._batch_worker_event.set()
             return True
+
+    def _derive_ws_quote_owner(self, state: "KalshiMarketState") -> str:
+        """Canonical WS-side effective-quote owner verdict.
+
+        ``WS_FRESH_VERIFIED`` only when the WS book has a snapshot-complete
+        baseline, a confirmed contiguous delta sequence, and clean quality;
+        otherwise ``NONE_UNTRUSTED``.  REST ownership is decided by the
+        caller — this helper never returns a REST value.
+        """
+        if (
+            state.snapshot_complete
+            and getattr(state, "live_sequence_confirmed", False)
+            and state.data_quality not in ("SUSPECT", "INVALID")
+        ):
+            return "WS_FRESH_VERIFIED"
+        return "NONE_UNTRUSTED"
 
     def _apply_delta_internal(self, ticker: str, msg: Dict[str, Any]) -> None:
         """Internal method to apply a delta message (called by batch worker).
@@ -1421,6 +1656,7 @@ class KalshiMarketStateStore:
             state.book_consistency = "SUSPECT"
             state.transition = "INVALID_SEQUENCE_GAP"
             state.invalidation_cause = "INVALID_SEQUENCE_GAP"
+            state.book_gap_total = getattr(state, "book_gap_total", 0) + 1
             state.recovery_required_source = "FULL_SNAPSHOT"
             state.executable = False
             self._set_snapshot_complete(ticker, False, "ws_sequence_gap")
@@ -1456,6 +1692,23 @@ class KalshiMarketStateStore:
         prior_quality = state.data_quality
         prior_transition = state.transition
 
+        # Bridge-lag instrumentation: record per-event freshness/provenance on
+        # the state object so entry gating and telemetry can distinguish a
+        # sequence-contiguous-but-stale book from a verified live one.
+        _apply_now_ns = time.monotonic_ns()
+        state.ws_last_apply_mono_ns = _apply_now_ns
+        state.ws_last_seq = getattr(ob, "last_seq", None)
+        _enq_ns = msg.get("_t_delta_enq_ns")
+        if _enq_ns:
+            try:
+                state.ws_last_queue_wait_ms = (_apply_now_ns - float(_enq_ns)) / 1e6
+            except Exception:
+                pass
+        _ev_age_ms, _ = self._book_event_timing(msg)
+        if _ev_age_ms is not None:
+            state.ws_last_event_age_ms = _ev_age_ms
+            _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
+
         self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via="bridge_queue")
         self._sync_unified_book(ticker, state)
 
@@ -1481,6 +1734,14 @@ class KalshiMarketStateStore:
             # 2026-08-24: A delta that invalidates the book means the last trusted
             # snapshot no longer represents the current book; require a fresh one.
             self._set_snapshot_complete(ticker, False, f"delta_invalidated_book data_quality={state.data_quality}")
+
+        # Re-derive effective-quote ownership now that attestation has had the
+        # chance to confirm the live sequence — the verdict inside
+        # _sync_book_fields ran before live_sequence_confirmed/snapshot_complete
+        # were settled for this delta.  A REST-owned effective quote (set by the
+        # REST-preferred block on divergence) is preserved.
+        if state.quote_owner != "REST_VERIFIED_DEGRADED":
+            state.quote_owner = self._derive_ws_quote_owner(state)
 
         # Log raw book after delta (rate-limited to avoid spam)
         book = self._ob.get_book(ticker)
@@ -1663,6 +1924,9 @@ class KalshiMarketStateStore:
         if now - self._last_recovery_trigger_ts.get(ticker, 0.0) < _RECOVERY_TRIGGER_MIN_INTERVAL_S:
             return False
         self._last_recovery_trigger_ts[ticker] = now
+        _rs = self._states.get(ticker)
+        if _rs is not None:
+            _rs.book_resync_total = getattr(_rs, "book_resync_total", 0) + 1
         import asyncio
         loop = self._main_event_loop
         if not (loop and loop.is_running() and not loop.is_closed()):
@@ -2177,10 +2441,48 @@ class KalshiMarketStateStore:
         has_rest = state.last_rest_bid_cents is not None and state.last_rest_ask_cents is not None
         rest_usable = has_rest and rest_age_s <= max_rest_age_s
 
+        # Raw cross-feed parity: always measured on the raw feeds.
+        # ``last_ws_*`` is never overwritten by REST substitution, so a
+        # divergent WS stream stays observable even when REST owns the
+        # effective quote.
+        if has_ws and has_rest:
+            state.ws_rest_bid_diff_ticks = abs(
+                state.last_ws_bid_cents - state.last_rest_bid_cents
+            )
+            state.ws_rest_ask_diff_ticks = abs(
+                state.last_ws_ask_cents - state.last_rest_ask_cents
+            )
+            state.ws_parity_healthy = max(
+                state.ws_rest_bid_diff_ticks, state.ws_rest_ask_diff_ticks
+            ) <= max_divergence_cents
+        else:
+            state.ws_rest_bid_diff_ticks = None
+            state.ws_rest_ask_diff_ticks = None
+            state.ws_parity_healthy = None
+
         if not has_ws and not has_rest:
             return False, "NO_QUOTES"
 
-        # WS is mandatory.  A stale primary quote is a hard failure regardless of REST.
+        owner = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
+
+        if owner == "REST_VERIFIED_DEGRADED":
+            # The effective quote is REST-owned: coherence means the REST
+            # quote itself is fresh and internally sane.  Raw parity remains
+            # separately observable on ``state.ws_parity_healthy`` — it is
+            # EXPECTED to be unhealthy here (that is why REST owns the quote)
+            # and must not be claimed as WS health.
+            if not rest_usable:
+                return False, f"REST_STALE age_s={rest_age_s:.1f}"
+            if (
+                state.best_bid_cents is not None
+                and state.best_ask_cents is not None
+                and state.best_bid_cents >= state.best_ask_cents
+            ):
+                return False, "REST_CROSSED"
+            return True, None
+
+        # WS-owned or undetermined owner: a stale primary quote is a hard
+        # failure regardless of REST.
         if has_ws and ws_age_s > max_ws_age_s:
             return False, f"WS_STALE age_s={ws_age_s:.1f}"
 
@@ -2200,25 +2502,88 @@ class KalshiMarketStateStore:
             # Single fresh feed: no cross-feed divergence to assert.
             return True, None
 
-        # Both feeds have fresh quotes.  Validate cross-feed divergence against
-        # the *effective* BBO (``best_*``): when the REST-preferred-BBO path has
-        # substituted a fresh REST quote for a lagged delta-derived book, the
-        # executable quote is the REST quote and comparing raw ``last_ws_*``
-        # would veto every entry on a feed we no longer price from.
-        eff_bid = state.best_bid_cents if state.best_bid_cents is not None else state.last_ws_bid_cents
-        eff_ask = state.best_ask_cents if state.best_ask_cents is not None else state.last_ws_ask_cents
-        bid_div = abs(eff_bid - state.last_rest_bid_cents)
-        ask_div = abs(eff_ask - state.last_rest_ask_cents)
-        max_div = max(bid_div, ask_div)
-
-        if max_div > max_divergence_cents:
+        # Both feeds fresh.  Parity is evaluated on the RAW WS BBO so a
+        # REST-substituted effective quote can never mask a divergent stream.
+        if state.ws_parity_healthy is False:
+            max_div = max(
+                state.ws_rest_bid_diff_ticks or 0,
+                state.ws_rest_ask_diff_ticks or 0,
+            )
             return False, (
-                f"DIVERGENCE {max_div}c > {max_divergence_cents}c "
+                f"WS_REST_DIVERGED {max_div}c > {max_divergence_cents}c "
                 f"WS={state.last_ws_bid_cents}/{state.last_ws_ask_cents} "
                 f"REST={state.last_rest_bid_cents}/{state.last_rest_ask_cents}"
             )
 
         return True, None
+
+    def get_quote_gate_state(self, ticker: str) -> Dict[str, Any]:
+        """Snapshot of effective-quote ownership and freshness for entry gating.
+
+        Separates raw WS health (parity, event age) from effective-quote
+        freshness so a REST-owned quote can never masquerade as WS-verified.
+        """
+        state = self.get(ticker)
+        base = {
+            "quote_owner": "NONE_UNTRUSTED",
+            "degraded_mode": False,
+            "ws_parity_healthy": None,
+            "ws_rest_bid_diff_ticks": None,
+            "ws_rest_ask_diff_ticks": None,
+            "ws_age_ms": None,
+            "rest_age_ms": None,
+            "ws_fresh": False,
+            "rest_fresh": False,
+            "effective_fresh": False,
+            "degraded_entry_enabled": os.getenv(
+                "MERID_REST_DEGRADED_ENTRY_ENABLED", "1"
+            ).lower() in ("1", "true", "yes"),
+        }
+        if state is None:
+            return base
+
+        now = time.monotonic()
+        ws_age_ms = (
+            (now - state.last_ws_update_ts) * 1000.0
+            if state.last_ws_update_ts > 0
+            else None
+        )
+        rest_age_ms = (
+            (now - state.last_rest_quote_update_ts) * 1000.0
+            if state.last_rest_quote_update_ts > 0
+            else None
+        )
+        ws_ttl_ms = float(os.getenv("MERID_WS_ENTRY_MAX_AGE_MS", "1500"))
+        rest_ttl_ms = float(os.getenv("MERID_REST_ENTRY_TTL_MS", "3000"))
+
+        owner = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
+        ws_event_age = getattr(state, "ws_last_event_age_ms", None)
+        ws_fresh = bool(
+            ws_age_ms is not None
+            and ws_age_ms <= ws_ttl_ms
+            and (ws_event_age is None or ws_event_age <= _BOOK_MAX_EVENT_AGE_MS)
+        )
+        rest_fresh = bool(rest_age_ms is not None and rest_age_ms <= rest_ttl_ms)
+        if owner == "WS_FRESH_VERIFIED":
+            effective_fresh = ws_fresh
+        elif owner == "REST_VERIFIED_DEGRADED":
+            effective_fresh = rest_fresh
+        else:
+            effective_fresh = False
+
+        base.update({
+            "quote_owner": owner,
+            "degraded_mode": bool(getattr(state, "degraded_mode", False)),
+            "ws_parity_healthy": getattr(state, "ws_parity_healthy", None),
+            "ws_rest_bid_diff_ticks": getattr(state, "ws_rest_bid_diff_ticks", None),
+            "ws_rest_ask_diff_ticks": getattr(state, "ws_rest_ask_diff_ticks", None),
+            "ws_age_ms": ws_age_ms,
+            "rest_age_ms": rest_age_ms,
+            "ws_fresh": ws_fresh,
+            "rest_fresh": rest_fresh,
+            "effective_fresh": effective_fresh,
+        })
+        return base
 
     def get_queue_lock_metrics(self, ticker: str) -> Dict[str, Any]:
         """Return per-ticker queue/lock instrumentation for boundary diagnosis.
@@ -2885,6 +3250,15 @@ class KalshiMarketStateStore:
                         ticker, True, f"ws_orderbook_snapshot_applied source={source}"
                     )
 
+                # Re-derive effective-quote ownership after attestation and the
+                # snapshot_complete flag settle — _sync_book_fields evaluated the
+                # owner before those were final.  REST ownership is preserved.
+                if (
+                    via == "bridge_queue"
+                    and state.quote_owner != "REST_VERIFIED_DEGRADED"
+                ):
+                    state.quote_owner = self._derive_ws_quote_owner(state)
+
                 # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
                 # This aligns with the data_source being WS-based
                 if via == "bridge_queue":
@@ -3216,7 +3590,10 @@ class KalshiMarketStateStore:
             state.quote_received_ts = now
             state.last_ws_update_ts = now
             if not state.book_initialized:
-                state.quote_owner = "WS_QUOTE"
+                # A ticker-channel quote is a diagnostic fallback, not a
+                # verified executable book — it must not claim ownership of
+                # the effective quote.
+                state.quote_owner = "NONE_UNTRUSTED"
 
             # Capture pre-update quality/transition for the recovery attestation gate.
             prior_quality = state.data_quality
@@ -5713,7 +6090,39 @@ class KalshiMarketStateStore:
             state.last_ws_bid_cents = state.best_bid_cents
             state.last_ws_ask_cents = state.best_ask_cents
             state.last_ws_update_ts = now
-            state.quote_owner = "WS"
+            state.degraded_mode = False
+            # Canonical owner vocabulary: WS_FRESH_VERIFIED only when the WS
+            # book is snapshot-complete, live-sequence-confirmed, and clean;
+            # anything else means the effective quote is not yet trusted.
+            # NOTE: live_sequence_confirmed/snapshot_complete may be re-set by
+            # the attestation that runs AFTER this sync — callers re-derive
+            # ownership at the end of the apply path.
+            state.quote_owner = self._derive_ws_quote_owner(state)
+
+            # Raw WS-vs-REST parity, measured on the delta-derived BBO BEFORE
+            # any REST substitution so divergence is never masked by the
+            # effective quote.
+            if (
+                state.last_rest_bid_cents is not None
+                and state.last_rest_ask_cents is not None
+            ):
+                if state.last_ws_bid_cents is not None:
+                    state.ws_rest_bid_diff_ticks = abs(
+                        state.last_ws_bid_cents - state.last_rest_bid_cents
+                    )
+                if state.last_ws_ask_cents is not None:
+                    state.ws_rest_ask_diff_ticks = abs(
+                        state.last_ws_ask_cents - state.last_rest_ask_cents
+                    )
+                if (
+                    state.ws_rest_bid_diff_ticks is not None
+                    and state.ws_rest_ask_diff_ticks is not None
+                ):
+                    state.ws_parity_healthy = max(
+                        state.ws_rest_bid_diff_ticks, state.ws_rest_ask_diff_ticks
+                    ) <= _WS_REST_PARITY_CENTS
+                    _set_divergence_ticks(ticker, "bid", state.ws_rest_bid_diff_ticks)
+                    _set_divergence_ticks(ticker, "ask", state.ws_rest_ask_diff_ticks)
 
             # REST-PREFERRED-BBO (2026-09-27): The Kalshi orderbook_delta stream is
             # buffered through a ~65k-deep bridge pipeline; during fast markets and
@@ -5783,7 +6192,14 @@ class KalshiMarketStateStore:
                     state.yes_bids = list(state.last_rest_yes_bids)
                 if state.last_rest_no_bids is not None:
                     state.no_bids = list(state.last_rest_no_bids)
-                state.quote_owner = "REST_PREFERRED"
+                # Explicit degraded-mode ownership: the effective quote is
+                # REST, not the (lagged/divergent) WS book.  Entry gating must
+                # apply the degraded-execution policy to this owner.
+                state.quote_owner = "REST_VERIFIED_DEGRADED"
+                state.degraded_mode = True
+            elif state.best_bid_cents is None or state.best_ask_cents is None:
+                # No usable effective quote from any trusted owner.
+                state.quote_owner = "NONE_UNTRUSTED"
         elif via.startswith("rest") or via == "ws_fallback" or via == "subscribe_fallback" or via == "rest_polling" or via == "ws_subscribe_bootstrap":
             state.last_rest_bid_cents = state.best_bid_cents
             state.last_rest_ask_cents = state.best_ask_cents
@@ -5796,7 +6212,9 @@ class KalshiMarketStateStore:
             state.last_rest_quote_update_ts = now
             # Keep the legacy REST freshness marker for transport/health consumers.
             state.last_rest_update_ts = now
-            state.quote_owner = "REST"
+            # REST owns the effective quote → degraded operating mode.
+            state.quote_owner = "REST_VERIFIED_DEGRADED"
+            state.degraded_mode = True
 
         # Ticker quote fallback: the orderbook_delta stream is one-sided, so the
         # local ladder can become crossed or one-sided if the opposite tape lags.
@@ -6120,7 +6538,9 @@ class KalshiMarketStateStore:
                 state.has_no_bid = True
                 state.has_no_ask = True
                 state.executable = True
-                state.quote_owner = "REST_PREFERRED"
+                # REST owns the effective quote while the WS ladder is empty:
+                # explicit degraded ownership, not normal WS health.
+                state.quote_owner = "REST_VERIFIED_DEGRADED"
             else:
                 state.executable = False
                 state.live_sequence_confirmed = False

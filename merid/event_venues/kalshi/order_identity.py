@@ -152,6 +152,10 @@ def _build_record(
     now = time.time()
     payload = extra_payload or {}
     payload["fingerprint_source"] = "finalize_order_identity"
+    # Quote-feed provenance bound to the durable attempt record so an order can
+    # be audited back to the feed that owned its entry quote.
+    payload["quote_owner"] = getattr(intent, "quote_owner", None)
+    payload["degraded_mode"] = bool(getattr(intent, "degraded_mode", False))
     return OrderAttemptRecord(
         order_attempt_id=order_attempt_id,
         client_order_id=client_order_id,
