@@ -3625,7 +3625,9 @@ class KalshiWebSocketBridge:
                 return "yes"
             if book == "ask":
                 return "no"
-            return "yes"
+            # Fail closed: no usable V2 fields — return "" so the caller's
+            # rejection path runs instead of fabricating a YES position.
+            return ""
         
         if client_order_id:
             try:
@@ -3634,9 +3636,10 @@ class KalshiWebSocketBridge:
                 intent = ledger.get_intent(client_order_id) if hasattr(ledger, 'get_intent') else None
                 if intent and intent.side:
                     # Extract side from Kalshi-formatted intent.side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
-                    if "YES" in intent.side:
+                    _side_upper = intent.side.upper()
+                    if "YES" in _side_upper:
                         derived_side = "yes"
-                    elif "NO" in intent.side:
+                    elif "NO" in _side_upper:
                         derived_side = "no"
                     else:
                         # Fallback to intent.side if not in Kalshi format
@@ -3678,7 +3681,13 @@ class KalshiWebSocketBridge:
         # This addresses high-leverage bug #4 (WebSocket fill side derivation)
         if SIDE_MAPPING_VALIDATOR_AVAILABLE and intent and intent.side:
             try:
-                intent_side = "yes" if "YES" in intent.side else "no"
+                _intent_side_upper = intent.side.upper()
+                if "YES" in _intent_side_upper:
+                    intent_side = "yes"
+                elif "NO" in _intent_side_upper:
+                    intent_side = "no"
+                else:
+                    intent_side = intent.side.lower()
                 is_valid, validation_error = validate_fill_side_consistency(
                     derived_side, intent_side, str(fill_id), client_order_id or "unknown"
                 )

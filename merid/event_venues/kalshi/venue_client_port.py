@@ -549,11 +549,15 @@ def _venue_trade_to_fill(trade: Any) -> Fill:
         # but not the user's action.  Best-effort: price in the known side.
         side = (trade.side or "").lower()
         if side in ("buy", "sell"):
-            action, outcome = side, "yes"
+            # Action known, outcome unknown — leave outcome empty rather than
+            # assume YES (a buy/sell VenueTrade could be either leg).
+            action, outcome = side, ""
         elif side in ("yes", "no"):
             action, outcome = "buy", side
         else:
-            action, outcome = "buy", "yes"
+            # Fail closed: leave direction empty rather than fabricate
+            # buy/yes — a missing VenueTrade side must not invent a position.
+            action, outcome = "", ""
         price_cents = (
             int(round(trade.price * Decimal("100")))
             if trade.price is not None else 0
@@ -622,11 +626,15 @@ def _venue_trade_to_fill(trade: Any) -> Fill:
             trade.get("outcome_id") or trade.get("outcome") or trade.get("side") or ""
         ).lower()
         if outcome in ("buy", "sell") and not action:
-            action, outcome = outcome, "yes"
+            # The outcome field carried an action, not a leg — keep the
+            # outcome empty rather than assume YES.
+            action, outcome = outcome, ""
+        # Fail closed: leave missing direction empty rather than fabricate
+        # yes/buy — the raw execution record must not invent a position side.
         if outcome not in ("yes", "no"):
-            outcome = "yes"
+            outcome = ""
         if action not in ("buy", "sell"):
-            action = "buy"
+            action = ""
         legacy_price = trade.get("price", 0)
         if legacy_price not in (None, ""):
             p = float(legacy_price)

@@ -4878,10 +4878,20 @@ class KalshiFillsLedger:
         counts — it is the only record of that pending exposure.
         """
         total = 0
+        # Tie-break identical created_time values by ledger insertion order:
+        # fills inserted before the evaluated fill count as prior, fills at or
+        # after its position do not.  ``exclude_seen`` flips when iteration
+        # reaches the evaluated fill; when it is absent (initial parse) every
+        # same-timestamp fill was necessarily inserted earlier and counts.
+        # The previous strict ``ct >= before_time`` exclusion dropped same-
+        # timestamp priors, so a closing fill saw zero exposure and booked the
+        # pair-mint leg instead of the netting credit — a $1/contract inversion.
+        exclude_seen = False
         for f in self._fills.values():
             if f.market_ticker != market_ticker:
                 continue
             if exclude_fill_id and f.fill_id == exclude_fill_id:
+                exclude_seen = True
                 continue
             if exclude_order_id and f.order_id == exclude_order_id:
                 continue
@@ -4892,8 +4902,9 @@ class KalshiFillsLedger:
             if before_time is not None:
                 try:
                     ct = getattr(f, "created_time", None)
-                    if ct is not None and ct >= before_time:
-                        continue
+                    if ct is not None:
+                        if ct > before_time or (ct == before_time and exclude_seen):
+                            continue
                 except Exception:
                     pass
             delta = self._fill_signed_yes_delta_cc(f)
@@ -5023,30 +5034,6 @@ class KalshiFillsLedger:
             self._open_positions.pop(market_ticker, None)
         return position
 
-    def _pair_lock_value_for_fill(self, fill: KalshiFill, prior_signed_cc: int) -> Decimal:
-        """Dollar residual locked in YES+NO pairs created by this fill.
-
-        A fill that acquires the leg opposite to the held exposure leaves the
-        account holding a YES+NO pair that settles at $1 per contract —
-        e.g. a ``yes/buy`` fill while holding NO, or a sell-NO intent that
-        Kalshi books as a complement ``yes/buy``.  The fill's cash proceeds
-        alone understate the economics; the locked pair must be counted too.
-        """
-        if not prior_signed_cc:
-            return Decimal("0")
-        delta_cc = self._fill_signed_yes_delta_cc(fill) or 0
-        if not delta_cc or (delta_cc > 0) != (prior_signed_cc < 0):
-            return Decimal("0")
-        can_action = (getattr(fill, "canonical_position_action", None) or getattr(fill, "action", "") or "").lower()
-        can_side = (getattr(fill, "canonical_position_side", None) or getattr(fill, "side", "") or "").lower()
-        # Complement-acquire forms create pairs: a buy-form fill covering the
-        # held side, or a sell-form fill on the held NO leg (Kalshi books a
-        # SELL_NO as a YES buy).  A ``yes/sell`` on a held YES book is a
-        # direct disposal and locks nothing.
-        if can_action == "buy" or can_side == "no":
-            return Decimal(min(abs(delta_cc), abs(prior_signed_cc))) / Decimal(100)
-        return Decimal("0")
-
     def _create_new_position(self, fill: KalshiFill) -> Dict[str, Any]:
         """Create new position state from fill.
 
@@ -5156,25 +5143,22 @@ class KalshiFillsLedger:
         """Compute realized PnL from closed position.
 
         Replays the position's fills in order: ``proceeds_dollars`` is the
-        signed cash the exchange booked per fill (fee-inclusive), and a fill
-        that acquires the leg opposite to the held exposure locks a YES+NO
-        pair which settles at $1 per contract.  Both terms are required —
-        using leg prices or wire-form action alone produced the ~$1/contract
-        inversion on complement-form fills.
+        signed cash the exchange booked per fill (fee-inclusive).  Kalshi
+        nets complement holdings at fill time, so the pair redemption on a
+        complement-covering fill is already inside ``proceeds_dollars`` (the
+        covered portion credits the opposite leg).  Counting an additional
+        $1/contract pair term here double-counted that redemption on every
+        complement-form exit (2026-09-23 model, verified against live
+        balance deltas).
         """
-        signed_cc = 0
         cash = Decimal("0")
-        pairs = Decimal("0")
         for fill_id in position["fills"]:
             fill = self._fills.get(fill_id)
             if not fill:
                 continue
             if fill.proceeds_dollars is not None:
                 cash += fill.proceeds_dollars
-            pairs += self._pair_lock_value_for_fill(fill, signed_cc)
-            signed_cc += self._fill_signed_yes_delta_cc(fill) or 0
-        # Each locked YES+NO pair redeems at $1.00 regardless of outcome.
-        return cash + pairs
+        return cash
 
     def _replay_market_lifecycle_pnl(self, market_ticker: str) -> Tuple[Decimal, Decimal]:
         """Replay a market's fills and return (closed-segment PnL, open-segment cash).
@@ -5197,24 +5181,21 @@ class KalshiFillsLedger:
         fills.sort(key=_fill_order_key)
         signed_cc = 0
         seg_cash = Decimal("0")
-        seg_pairs = Decimal("0")
         realized = Decimal("0")
         for f in fills:
             if f.proceeds_dollars is not None:
                 seg_cash += f.proceeds_dollars
-            seg_pairs += self._pair_lock_value_for_fill(f, signed_cc)
             signed_cc += self._fill_signed_yes_delta_cc(f) or 0
             if signed_cc == 0:
-                realized += seg_cash + seg_pairs
+                realized += seg_cash
                 seg_cash = Decimal("0")
-                seg_pairs = Decimal("0")
-        return realized, seg_cash + seg_pairs
+        return realized, seg_cash
 
     def _closing_segment_pnl(self, market_ticker: str) -> Decimal:
         """PnL of the segment that just closed on this market.
 
-        Replays the market's effective fills in order and returns the cash +
-        pair-lock value accumulated since the last time signed YES exposure
+        Replays the market's effective fills in order and returns the cash
+        accumulated since the last time signed YES exposure
         crossed zero — i.e. exactly the fills of the segment closed by the
         most recent fill.  Unlike ``_compute_realized_pnl(position)`` this
         sees the closing fill itself and is robust to stale position records.
@@ -5237,7 +5218,6 @@ class KalshiFillsLedger:
         for f in fills:
             if f.proceeds_dollars is not None:
                 seg_value += f.proceeds_dollars
-            seg_value += self._pair_lock_value_for_fill(f, signed_cc)
             signed_cc += self._fill_signed_yes_delta_cc(f) or 0
             if signed_cc == 0:
                 last_closed = seg_value
@@ -6527,8 +6507,9 @@ class KalshiFillsLedger:
 
         ``proceeds_dollars`` is the signed cash the exchange booked for this
         fill (fee-inclusive).  A complement-acquire exit (SELL_NO booked as a
-        YES buy) additionally locks a YES+NO pair worth $1/contract — counted
-        via ``_pair_lock_value_for_fill``.  The released cost basis is the
+        YES buy) nets against the held leg at fill time — the pair redemption
+        is already inside ``proceeds_dollars`` via the credited opposite leg,
+        so no separate pair term is added.  The released cost basis is the
         position's running held-side average for the exited contracts.
 
         Args:
@@ -6538,20 +6519,18 @@ class KalshiFillsLedger:
             prior_signed_cc: Signed YES exposure before this fill
         """
         cash = fill.proceeds_dollars if fill.proceeds_dollars is not None else Decimal("0")
-        pair_value = self._pair_lock_value_for_fill(fill, prior_signed_cc)
 
-        # Attribute cash and pair value proportionally if the fill exceeded
+        # Attribute cash proportionally if the fill exceeded
         # the exited amount (oversell edge case).
         fill_qty_fp = Decimal(str(fill.count_fp or 0))
         exited_fp = Decimal(str(exited_contracts))
         if fill_qty_fp > 0 and exited_fp < fill_qty_fp:
             ratio = exited_fp / fill_qty_fp
             cash = cash * ratio
-            pair_value = pair_value * ratio
 
         avg_entry_price = Decimal(str(position_before.get("avg_price_cents") or 0)) / Decimal("100")
         released_basis = avg_entry_price * exited_fp
-        return cash + pair_value - released_basis
+        return cash - released_basis
 
     def _recompute_unrealized_pnl(self) -> Decimal:
         """Recompute unrealized PnL from all open positions.
