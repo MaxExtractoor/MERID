@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS strategy_decision_outcomes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outcomes_status ON strategy_decision_outcomes(outcome_status);
+CREATE INDEX IF NOT EXISTS idx_outcomes_settled_at ON strategy_decision_outcomes(settled_at);
 
 CREATE TABLE IF NOT EXISTS decision_audit_gaps (
     gap_id TEXT PRIMARY KEY,
@@ -263,6 +264,7 @@ class DecisionAuditLedger:
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
+        self._last_evidence_refresh = 0.0
 
     def _ensure_db(self) -> None:
         """Create parent directory, schema, and run migrations on first use."""
@@ -855,6 +857,116 @@ class DecisionAuditLedger:
                 "[DECISION-AUDIT-LEDGER] record_settlement failed for %s: %s",
                 ticker,
                 exc,
+            )
+        try:
+            self._maybe_refresh_live_entry_evidence()
+        except Exception as exc:
+            logger.debug("[DECISION-AUDIT-LEDGER] live evidence refresh failed: %s", exc)
+
+    def _maybe_refresh_live_entry_evidence(self) -> None:
+        """Rebuild the trailing-window live entry-evidence artifact.
+
+        The static tail-calibration artifact is only refit offline, so when a
+        regime breaks — an asset+side cohort whose realized win rate collapses
+        below its entry prices — the frozen evidence floor keeps passing the
+        cell for days.  On every settlement (throttled by
+        ``MERID_LIVE_EVIDENCE_REFRESH_S``) this recomputes per (asset, side)
+        and per (asset, side, 10c price bucket) settled win rates over
+        ``MERID_LIVE_EVIDENCE_WINDOW_HOURS`` and atomically rewrites
+        ``MERID_LIVE_EVIDENCE_PATH`` so ``compute_trade_decision`` can gate on
+        live evidence between refits.  Fail-open per the ledger contract:
+        errors are logged and swallowed.
+        """
+        if os.environ.get("MERID_LIVE_EVIDENCE_EXPORT", "1").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
+        now = time.time()
+        refresh_s = float(os.environ.get("MERID_LIVE_EVIDENCE_REFRESH_S", "120"))
+        if now - self._last_evidence_refresh < refresh_s:
+            return
+        self._last_evidence_refresh = now
+        window_hours = float(os.environ.get("MERID_LIVE_EVIDENCE_WINDOW_HOURS", "48"))
+        try:
+            with self._lock, self._conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT d.asset AS asset,
+                           d.selected_side AS side,
+                           COALESCE(o.actual_fill_price_cents,
+                                    se.executable_entry_price_cents) AS entry_cents,
+                           o.settled_yes AS settled_yes
+                    FROM strategy_decision_outcomes o
+                    JOIN strategy_decisions d ON d.decision_id = o.decision_id
+                    LEFT JOIN strategy_decision_side_ev se
+                      ON se.decision_id = o.decision_id
+                     AND se.side = d.selected_side
+                    WHERE o.outcome_status = 'SETTLED'
+                      AND o.settled_at >= ?
+                      AND d.decision = 'ENTER'
+                      AND d.selected_side IN ('yes', 'no')
+                    """,
+                    (now - window_hours * 3600.0,),
+                ).fetchall()
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
+            )
+            return
+
+        assets: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            entry_cents = row["entry_cents"]
+            if entry_cents is None or not (0 < int(entry_cents) <= 100):
+                continue
+            asset = (str(row["asset"] or "").upper()) or "UNKNOWN"
+            side = str(row["side"]).lower()
+            won = 1 if ((side == "yes") == bool(row["settled_yes"])) else 0
+            rec = assets.setdefault(asset, {}).setdefault(
+                side, {"n": 0, "wins": 0, "entry_cents_sum": 0.0, "buckets": {}}
+            )
+            rec["n"] += 1
+            rec["wins"] += won
+            rec["entry_cents_sum"] += float(entry_cents)
+            bucket = min(int(entry_cents) // 10 * 10, 90)
+            b = rec["buckets"].setdefault(str(bucket), {"n": 0, "wins": 0})
+            b["n"] += 1
+            b["wins"] += won
+
+        out: Dict[str, Any] = {
+            "version": 1,
+            "generated_at": now,
+            "window_hours": window_hours,
+            "assets": {},
+        }
+        for asset, sides in assets.items():
+            asset_rec: Dict[str, Any] = {}
+            for side, rec in sides.items():
+                n = rec["n"]
+                asset_rec[side] = {
+                    "n": n,
+                    "wr": rec["wins"] / n if n else 0.0,
+                    "avg_entry_cents": rec["entry_cents_sum"] / n if n else 0.0,
+                    "buckets": {
+                        k: {"n": b["n"], "wr": (b["wins"] / b["n"] if b["n"] else 0.0)}
+                        for k, b in rec["buckets"].items()
+                    },
+                }
+            out["assets"][asset] = asset_rec
+
+        path = Path(
+            os.environ.get("MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json")
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(out))
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] live evidence write failed: %s", exc
             )
 
     def pending_unsettled_tickers(
