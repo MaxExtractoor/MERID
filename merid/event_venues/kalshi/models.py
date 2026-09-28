@@ -48,6 +48,12 @@ class KalshiMarket:
     rules_primary: Optional[str] = None
     rules_secondary: Optional[str] = None
     resolution_source: Optional[str] = None
+    # Venue-declared fee identity for this market's series.  The applied fee
+    # schedule must match these values exactly — a market whose fee model the
+    # venue reports differently must not be traded on assumed parameters.
+    fee_type: Optional[str] = None  # e.g. "quadratic", "quadratic_with_maker_fees"
+    fee_multiplier: Optional[float] = None  # series multiplier on the base fee formula
+    fee_waiver_expiration_time_ms: Optional[int] = None
     tags: List[str] = field(default_factory=list)
     can_close_position: bool = True
     created_at: Optional[datetime] = None

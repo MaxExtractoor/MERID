@@ -107,7 +107,10 @@ class TestApplyExecutionMode:
         assert order_type == "limit"
         assert tif == "IOC"
 
-    def test_infers_maker_from_post_only(self):
+    def test_infers_maker_from_post_only(self, monkeypatch):
+        # Maker entry lane is opt-in since 2026-09-23; enable it to exercise
+        # the passive-quote path this test covers.
+        monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
         from merid.event_venues.kalshi.order_router import _apply_execution_mode, OrderIntent
         intent = OrderIntent(
             ticker="KXETH15M-T",
@@ -334,7 +337,10 @@ class TestModeAwareRepriceAndValidation:
         assert intent.time_in_force == "IOC"
         assert _validate_price_against_orderbook(intent, state) is None
 
-    def test_maker_buy_capped_below_ask(self):
+    def test_maker_buy_capped_below_ask(self, monkeypatch):
+        # Maker entry lane is opt-in since 2026-09-23; enable it so the
+        # passive intent keeps maker/GTC instead of being coerced to taker/IOC.
+        monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
         from merid.event_venues.kalshi.order_router import (
             _adjust_order_price_for_fill_rate,
             _validate_price_against_orderbook,

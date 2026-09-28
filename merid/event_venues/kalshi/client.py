@@ -5286,6 +5286,13 @@ class KalshiVenueClient(EventVenueClient):
                 rules_primary=data.get("rules_primary"),
                 rules_secondary=data.get("rules_secondary"),
                 resolution_source=data.get("resolution_source"),
+                fee_type=data.get("fee_type"),
+                fee_multiplier=_to_float(data.get("fee_multiplier")),
+                fee_waiver_expiration_time_ms=(
+                    int(data["fee_waiver_expiration_time_ms"])
+                    if data.get("fee_waiver_expiration_time_ms") not in (None, "")
+                    else None
+                ),
                 tags=data.get("tags", []),
                 can_close_position=data.get("can_close_position", True),
                 created_at=self._parse_datetime(data.get("created_at")),
@@ -5369,6 +5376,12 @@ class KalshiVenueClient(EventVenueClient):
                 "floor_strike": market.floor_strike,
                 "cap_strike": market.cap_strike,
                 "custom_strike": market.custom_strike,
+                "rules_primary": market.rules_primary,
+                "rules_secondary": market.rules_secondary,
+                "resolution_source": market.resolution_source,
+                "fee_type": market.fee_type,
+                "fee_multiplier": market.fee_multiplier,
+                "fee_waiver_expiration_time_ms": market.fee_waiver_expiration_time_ms,
                 "yes_bid_dollars": (
                     float(market.outcomes[0].best_bid) / 100
                     if market.outcomes and market.outcomes[0].best_bid is not None

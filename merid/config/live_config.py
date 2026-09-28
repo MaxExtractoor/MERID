@@ -123,6 +123,13 @@ class ResolvedLiveConfig:
     min_required_edge: Decimal = Decimal("0.02")
     min_p_selected: Decimal = Decimal("0.50")
 
+    # Probability-source allowlist.  The only probability sources that may be
+    # admitted into the live trade decision.  ``settlement_rti_bachelier_v2``
+    # is the production baseline; ``hybrid_bachelier_deltas`` is admitted only
+    # when it is both allowlisted AND the hybrid delta stack is enabled —
+    # MERID_TRADE_DECISION_ALLOW_HYBRID_P=1 alone can never re-open it.
+    allowed_probability_sources: Tuple[str, ...] = ("settlement_rti_bachelier_v2",)
+
     # Operational freshness thresholds and execution authorization
     auto_execution_mode: bool = False
     book_execution_max_age_ms: int = 1000
@@ -296,6 +303,25 @@ _ENV_OVERRIDES: Dict[str, _EnvOverride] = {
         safety_kind="floor",
         description="Minimum selected probability; env may only raise this floor.",
     ),
+    # Probability-source admission (2026-11): fail-closed allowlist.  An
+    # external hybrid p_yes may only influence the live decision when the
+    # source is explicitly allowlisted AND the hybrid delta stack is enabled;
+    # the ALLOW_HYBRID_P flag alone is a request, not a grant.
+    "MERID_TRADE_DECISION_ALLOW_HYBRID_P": _EnvOverride(
+        name="MERID_TRADE_DECISION_ALLOW_HYBRID_P",
+        type="bool",
+        is_safety_limit=True,
+        safety_kind="bool_safe",
+        allowed_values=["1", "0", "true", "false", "yes", "no"],
+        description="Requests admission of an external hybrid p_yes_model; granted only when 'hybrid_bachelier_deltas' is in the resolved probability-source allowlist.",
+    ),
+    "MERID_ALLOWED_PROBABILITY_SOURCES": _EnvOverride(
+        name="MERID_ALLOWED_PROBABILITY_SOURCES",
+        type="str",
+        is_safety_limit=True,
+        safety_kind="enum",
+        description="Comma-separated allowlist of probability sources admissible into the live decision; unknown names are dropped with a recorded conflict and an empty result fails closed.",
+    ),
     "MERID_MAX_SLIPPAGE_CENTS": _EnvOverride(
         name="MERID_MAX_SLIPPAGE_CENTS",
         type="int",
@@ -430,6 +456,15 @@ _ENV_OVERRIDES.update({
         ("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "int", 0, 60),
     )
 })
+
+# Probability sources implemented by the decision engine.  The live default
+# is the RTI-settlement Bachelier model; the hybrid delta stack is admitted
+# only via explicit allowlist + enabled deltas + the ALLOW_HYBRID_P request.
+IMPLEMENTED_PROBABILITY_SOURCES: Tuple[str, ...] = (
+    "settlement_rti_bachelier_v2",
+    "hybrid_bachelier_deltas",
+)
+DEFAULT_ALLOWED_PROBABILITY_SOURCES: Tuple[str, ...] = ("settlement_rti_bachelier_v2",)
 
 # Environment variables that are explicitly not safety-critical and may be
 # present without being in the typed schema.  Any other MERID_* variable that
@@ -1152,6 +1187,65 @@ class LiveConfigResolver:
                 min_confidence=None,
             )
 
+        # ── Probability-source allowlist ──────────────────────────────────────
+        # Fail-closed: only sources in the resolved allowlist may contribute to
+        # the live decision probability.  The hybrid delta stack additionally
+        # requires its own enable flags; a bare MERID_TRADE_DECISION_ALLOW_HYBRID_P=1
+        # can never admit it by itself.
+        _truthy = ("1", "true", "yes", "on")
+        hybrid_deltas_enabled = (
+            (_safe_env("MERID_HYBRID_ENABLE_DELTAS") or "").lower() in _truthy
+            and (_safe_env("MERID_HYBRID_BACHELIER_ONLY") or "").lower() not in _truthy
+            and (_safe_env("MERID_HYBRID_DISABLE_ALL_DELTAS") or "").lower() not in _truthy
+        )
+        env_allowed_sources = env.get("MERID_ALLOWED_PROBABILITY_SOURCES")
+        if env_allowed_sources:
+            requested = tuple(
+                s.strip() for s in str(env_allowed_sources).split(",") if s.strip()
+            )
+            unknown = [s for s in requested if s not in IMPLEMENTED_PROBABILITY_SOURCES]
+            for s in unknown:
+                self._conflicts.append(
+                    f"Unimplemented probability source {s!r} dropped from "
+                    "MERID_ALLOWED_PROBABILITY_SOURCES"
+                )
+            allowed_sources = tuple(
+                s for s in requested if s in IMPLEMENTED_PROBABILITY_SOURCES
+            )
+            if not allowed_sources:
+                raise LiveConfigInvariantError(
+                    "MERID_ALLOWED_PROBABILITY_SOURCES resolved to an empty allowlist: "
+                    f"requested={requested}, implemented={IMPLEMENTED_PROBABILITY_SOURCES}"
+                )
+        else:
+            allowed_sources = DEFAULT_ALLOWED_PROBABILITY_SOURCES
+
+        if "hybrid_bachelier_deltas" in allowed_sources and not hybrid_deltas_enabled:
+            self._conflicts.append(
+                "hybrid_bachelier_deltas removed from probability-source allowlist: "
+                "the hybrid delta stack is disabled (MERID_HYBRID_ENABLE_DELTAS unset or "
+                "MERID_HYBRID_BACHELIER_ONLY/MERID_HYBRID_DISABLE_ALL_DELTAS set)"
+            )
+            allowed_sources = tuple(
+                s for s in allowed_sources if s != "hybrid_bachelier_deltas"
+            )
+        if not allowed_sources:
+            raise LiveConfigInvariantError(
+                "Probability-source allowlist is empty after delta-stack containment"
+            )
+
+        env_allow_hybrid_p = bool(env.get("MERID_TRADE_DECISION_ALLOW_HYBRID_P"))
+        if env_allow_hybrid_p and "hybrid_bachelier_deltas" not in allowed_sources:
+            self._conflicts.append(
+                "MERID_TRADE_DECISION_ALLOW_HYBRID_P=1 denied: 'hybrid_bachelier_deltas' "
+                "is not in the resolved probability-source allowlist"
+            )
+        self._invariants_checked.append(
+            f"Probability sources: allowed={list(allowed_sources)}; "
+            f"hybrid_deltas_enabled={hybrid_deltas_enabled}; "
+            f"allow_hybrid_p_request={env_allow_hybrid_p}"
+        )
+
         return ResolvedLiveConfig(
             resolved=True,
             profile_name=profile.profile_name,
@@ -1187,6 +1281,7 @@ class LiveConfigResolver:
             min_held_price_cents=min_held_price,
             min_required_edge=min_required_edge,
             min_p_selected=resolved_min_p,
+            allowed_probability_sources=allowed_sources,
             auto_execution_mode=auto_execution_mode,
             book_execution_max_age_ms=book_execution_max_age_ms,
             rti_book_skew_ms=rti_book_skew_ms,

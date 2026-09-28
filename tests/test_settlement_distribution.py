@@ -275,6 +275,17 @@ class TestSettlementDistributionTradeDecisionIntegration:
         monkeypatch.setattr(
             "merid.prediction.trade_decision.MERID_CALIBRATION_CAP_FULL_RANGE", False
         )
+        # This test exercises distribution-vs-hybrid plumbing, not the
+        # market-lean fade gate — the synthetic book leans against the YES pick.
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_FADE_BLOCK_MIN_LEAN_CENTS", 99.0
+        )
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MIN_W", 0.0
+        )
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MAX_W", 0.0
+        )
         # Distribution says NO (mean just below strike, p_yes ~0.40).
         dist = SettlementDistribution(
             mean=99.5,

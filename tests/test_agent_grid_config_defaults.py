@@ -41,11 +41,13 @@ def test_profile_per_trade_risk_pct_disabled_or_3_percent():
                 pytest.fail(f"Line {i + 1} has stale 0.02 per_trade_risk_pct in profile: {line}")
 
 
-async def test_build_agent_grid_refuses_0_05_min_required_edge(monkeypatch):
-    """Fail closed when the resolved live config edge floor is only the 0.05 default.
+async def test_build_agent_grid_refuses_degenerate_min_required_edge(monkeypatch):
+    """Fail closed when the resolved live config edge floor is below sanity.
 
-    A resolved 0.05 means the 0.07 profile floor was lost and the code default
-    won; the grid build must raise before any agent is instantiated.
+    The profile's nominal floor is 0.02 (per-asset thresholds are computed
+    dynamically); a resolved floor below 0.01 means the config is corrupt or
+    the profile floor was lost.  The grid build must raise before any agent is
+    instantiated.
     """
     from decimal import Decimal
 
@@ -60,13 +62,13 @@ async def test_build_agent_grid_refuses_0_05_min_required_edge(monkeypatch):
         return ResolvedLiveConfig(
             resolved=True,
             profile_name="kalshi_crypto_15m_v2",
-            min_required_edge=Decimal("0.05"),
+            min_required_edge=Decimal("0.005"),
         )
 
     monkeypatch.setattr(LiveConfigResolver, "resolve", _fake_resolve)
     reset_resolved_live_config()
 
-    with pytest.raises(RuntimeError, match="0.07 profile floor"):
+    with pytest.raises(RuntimeError, match="0.01 sanity floor"):
         await build_15m_agent_grid(
             catalog=None,
             bankroll=None,

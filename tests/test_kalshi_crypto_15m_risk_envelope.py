@@ -40,6 +40,7 @@ class TestKalshiCrypto15mRiskEnvelope:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.025,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=50.0,
             current_equity_usd=50.0,
             current_drawdown_pct=0.0,
@@ -89,6 +90,7 @@ class TestKalshiCrypto15mRiskEnvelope:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.025,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=50.0,
             current_equity_usd=50.0,
             current_drawdown_pct=0.0,
@@ -146,6 +148,7 @@ class TestKalshiCrypto15mRiskEnvelope:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.025,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=500.0,
             current_equity_usd=500.0,
             current_drawdown_pct=0.0,
@@ -188,6 +191,7 @@ class TestKalshiCrypto15mRiskEnvelope:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.025,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=5000.0,
             current_equity_usd=5000.0,
             current_drawdown_pct=0.0,
@@ -315,6 +319,13 @@ class TestKalshiCrypto15mRiskEnvelope:
 
             # Use a stable $1.00 fixed cap and clear any cached resolved config.
             reset_resolved_live_config()
+            # The profile YAML is parsed through a mtime-keyed cache
+            # (_load_profile_config_cached); clear it so the patched safe_load
+            # below is actually consulted.
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+                _reset_profile_yaml_cache_for_testing,
+            )
+            _reset_profile_yaml_cache_for_testing()
             with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'true', 'MERID_FIXED_EXPOSURE_CAP_USD': '1.00'}, clear=False):
                 with patch('yaml.safe_load', return_value=profile_config):
                     envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=34.01)
@@ -329,6 +340,7 @@ class TestKalshiCrypto15mRiskEnvelope:
         finally:
             # Restore original capital_usd
             profile_config['capital_usd'] = original_capital
+            _reset_profile_yaml_cache_for_testing()
 
 
 class TestCapabilitiesUsesCanonicalEnvelope:
@@ -603,6 +615,7 @@ class TestWindowBasedRiskLimitEnforcement:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.03,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=100.0,
             current_equity_usd=100.0,
             current_drawdown_pct=0.0,
@@ -659,6 +672,7 @@ class TestWindowBasedRiskLimitEnforcement:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.03,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=100.0,
             current_equity_usd=100.0,
             current_drawdown_pct=0.0,
@@ -714,6 +728,7 @@ class TestWindowBasedRiskLimitEnforcement:
             agent_max_no_position=3,
             max_cycle_risk_pct=0.03,
             daily_loss_enabled=True,
+            drawdown_halt_enabled=True,
             peak_equity_usd=100.0,
             current_equity_usd=100.0,
             current_drawdown_pct=0.0,
