@@ -1,7 +1,10 @@
-"""Regression tests for "no trade without exit" invariant.
+"""Regression tests for the position lifecycle invariant.
 
-Tests that enforce the invariant: all entry orders on 15m crypto contracts
-must have exit targets (TP and/or SL) before routing.
+Contract (profit_only_v1): all entry orders on 15m crypto contracts must carry
+a valid PositionLifecyclePlan.  A plan is a lifecycle contract, not an armed
+exit order - HOLD_TO_SETTLEMENT is a complete legal plan, loss-triggered exits
+are disabled by policy, and profit exits (resting TP / profit-lock trail) are
+optional components that never gate entry.
 
 Invariant scope:
 - Entry orders: action="buy" on 15m crypto (KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M)
@@ -215,20 +218,191 @@ class TestInvariantEnforcement:
 
     @pytest.mark.asyncio
     async def test_entry_order_without_exit_rejected(self):
-        """Entry order without exit targets should be rejected."""
+        """Bare entry order derives a HOLD_TO_SETTLEMENT plan and passes.
+
+        Under profit_only_v1, an entry with no armed TP/SL is a valid
+        HOLD_TO_SETTLEMENT lifecycle plan - settlement is the exit.  It must
+        NOT be rejected by the lifecycle invariant (this is the
+        no_trade_without_exit defect fix: the ETH BUY_NO@35c +4.4% entry was
+        wrongly rejected).
+        """
+        import time as _time
         intent = OrderIntent(
             ticker="KXBTC15M-26APR191645-45",
             side="yes",
             action="buy",
             price_cents=50,
             count=1,
-            # No exit targets
+            # No exit targets -> valid HOLD_TO_SETTLEMENT plan
             mode=TradingMode.MOCK,
         )
-        result = await route_order_async(intent)
-        # Should be rejected for invariant violation
-        assert result.status == "rejected"
-        assert "invariant_violation:no_trade_without_exit" in result.reason
+        result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
+        # Invariant passes - a valid plan was derived and attached
+        assert result is None
+        assert intent.lifecycle_plan is not None
+        assert intent.lifecycle_plan["exit_mode"] == "HOLD_TO_SETTLEMENT"
+        assert intent.lifecycle_plan["stop_loss_enabled"] is False
+        assert intent.lifecycle_plan["hold_to_settlement_enabled"] is True
+
+    def test_explicit_hold_to_settlement_plan_passes(self):
+        """An explicit HOLD_TO_SETTLEMENT lifecycle plan is valid."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXETH15M-26SEP291215-15",
+            side="no",
+            action="buy",
+            price_cents=35,
+            count=1,
+            lifecycle_plan={
+                "policy_id": "profit_only_v1",
+                "exit_mode": "HOLD_TO_SETTLEMENT",
+                "stop_loss_enabled": False,
+                "hold_to_settlement_enabled": True,
+            },
+            mode=TradingMode.MOCK,
+        )
+        assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
+
+    def test_explicit_tp_plus_trail_plan_passes(self):
+        """An explicit TAKE_PROFIT_PLUS_PROFIT_TRAIL plan is valid (the ETH 35c example)."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXETH15M-26SEP291215-15",
+            side="no",
+            action="buy",
+            price_cents=35,
+            count=1,
+            lifecycle_plan={
+                "policy_id": "profit_only_v1",
+                "exit_mode": "TAKE_PROFIT_PLUS_PROFIT_TRAIL",
+                "stop_loss_enabled": False,
+                "hold_to_settlement_enabled": True,
+                "take_profit_enabled": True,
+                "take_profit_price_cents": 43,
+                "profit_trail_enabled": True,
+                "trail_activation_price_cents": 40,
+                "trail_floor_price_cents": 37,
+                "trail_distance_cents": 2,
+            },
+            mode=TradingMode.MOCK,
+        )
+        assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
+        assert intent.lifecycle_plan["exit_mode"] == "TAKE_PROFIT_PLUS_PROFIT_TRAIL"
+
+    def test_explicit_plan_with_stop_loss_rejected(self):
+        """An explicit lifecycle plan claiming an enabled stop-loss is a
+        contract violation under profit_only_v1 and must be rejected."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXBTC15M-26APR191645-45",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            lifecycle_plan={
+                "policy_id": "profit_only_v1",
+                "exit_mode": "TAKE_PROFIT_ONLY",
+                "stop_loss_enabled": True,  # VIOLATION: loss exits disabled by policy
+                "take_profit_enabled": True,
+                "take_profit_price_cents": 60,
+            },
+            mode=TradingMode.MOCK,
+        )
+        result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
+        assert result is not None and result.status == "rejected"
+        assert "invariant_violation:invalid_lifecycle_plan:stop_loss_enabled" in result.reason
+
+    def test_explicit_plan_bad_mode_rejected(self):
+        """An explicit plan with an unrecognized exit_mode is rejected."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXBTC15M-26APR191645-45",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            lifecycle_plan={
+                "exit_mode": "STOP_LOSS_TRAILING",
+                "stop_loss_enabled": False,
+            },
+            mode=TradingMode.MOCK,
+        )
+        result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
+        assert result is not None and result.status == "rejected"
+        assert "invariant_violation:invalid_lifecycle_plan:invalid_exit_mode" in result.reason
+
+    def test_upstream_armed_stop_loss_stripped_not_blocked(self):
+        """An entry arriving with an armed upstream SL is normalized, not blocked.
+
+        profit_only_v1 keeps loss exits disabled: the router strips the armed
+        SL fields, attaches a valid derived plan, and the entry proceeds.
+        """
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXBTC15M-26APR191645-45",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            take_profit_price_cents=60,
+            stop_loss_price_cents=45,
+            stop_loss_enabled=True,
+            mode=TradingMode.MOCK,
+        )
+        result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
+        # Not rejected by the lifecycle invariant
+        assert result is None
+        # Armed SL fields are stripped; plan records SL disabled
+        assert intent.stop_loss_price_cents is None
+        assert intent.stop_loss_enabled is False
+        assert intent.lifecycle_plan is not None
+        assert intent.lifecycle_plan["stop_loss_enabled"] is False
+        assert intent.lifecycle_plan["exit_mode"] == "TAKE_PROFIT_ONLY"
+
+    def test_hold_to_settlement_policy_mode_passes(self):
+        """exit_policy dict mode=HOLD_TO_SETTLEMENT yields a valid plan even
+        if stray exit fields are present."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXETH15M-26SEP291215-15",
+            side="no",
+            action="buy",
+            price_cents=35,
+            count=1,
+            exit_policy={"mode": "HOLD_TO_SETTLEMENT", "stop_loss_enabled": False},
+            mode=TradingMode.MOCK,
+        )
+        assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
+        assert intent.lifecycle_plan["exit_mode"] == "HOLD_TO_SETTLEMENT"
+
+    def test_derived_trail_params_use_asset_defaults(self):
+        """A policy with trailing_enabled derives PROFIT_TRAIL params with a
+        fee-aware floor above entry (profit-lock, never a loss exit)."""
+        import time as _time
+        intent = OrderIntent(
+            ticker="KXETH15M-26SEP291215-15",
+            side="no",
+            action="buy",
+            price_cents=35,
+            count=1,
+            exit_policy={
+                "mode": "ACTIVE_MANAGEMENT",
+                "stop_loss_enabled": False,
+                "take_profit_enabled": False,
+                "trailing_enabled": True,
+            },
+            mode=TradingMode.MOCK,
+        )
+        assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
+        plan = intent.lifecycle_plan
+        assert plan["exit_mode"] == "PROFIT_TRAIL_ONLY"
+        assert plan["profit_trail_enabled"] is True
+        # ETH: activation +4c over entry
+        assert plan["trail_activation_price_cents"] == 39
+        # floor >= entry + min locked profit (fee-aware)
+        assert plan["trail_floor_price_cents"] is not None
+        assert plan["trail_floor_price_cents"] > 35
+        assert plan["trail_distance_cents"] == 2
 
     @pytest.mark.asyncio
     async def test_exit_order_without_exit_allowed(self):
@@ -370,9 +544,9 @@ class TestBypassPathCoverage:
 class TestMetrics:
     """Test that metrics are emitted correctly."""
 
-    @pytest.mark.asyncio
-    async def test_compliance_metric_emitted(self):
-        """Compliance metric should be emitted when order has exit targets."""
+    def test_compliance_metric_emitted(self):
+        """Compliance metric should be emitted when the plan is valid."""
+        import time as _time
         from unittest.mock import patch
         
         intent = OrderIntent(
@@ -386,15 +560,16 @@ class TestMetrics:
         )
         
         # Mock the metric at its import location (merid.metrics.kalshi_metrics)
-        with patch('merid.metrics.kalshi_metrics.kalshi_exit_invariant_compliant_total') as mock_metric:
+        with patch('merid.metrics.kalshi_metrics.kalshi_exit_invariant_compliant_total',
+                   create=True) as mock_metric:
             mock_metric.labels.return_value.inc.return_value = None
-            await route_order_async(intent)
+            _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
             # Verify metric was called
             assert mock_metric.labels.called
 
-    @pytest.mark.asyncio
-    async def test_violation_metric_emitted(self):
-        """Violation metric should be emitted when order lacks exit targets."""
+    def test_violation_metric_emitted(self):
+        """Violation metric should be emitted for an invalid lifecycle plan."""
+        import time as _time
         from unittest.mock import patch
         
         intent = OrderIntent(
@@ -403,14 +578,17 @@ class TestMetrics:
             action="buy",
             price_cents=50,
             count=1,
-            # No exit targets
+            # Explicit plan claiming an enabled stop-loss -> contract violation
+            lifecycle_plan={"exit_mode": "TAKE_PROFIT_ONLY", "stop_loss_enabled": True,
+                            "take_profit_enabled": True, "take_profit_price_cents": 60},
             mode=TradingMode.MOCK,
         )
         
         # Mock the metric at its import location (merid.metrics.kalshi_metrics)
-        with patch('merid.metrics.kalshi_metrics.kalshi_exit_invariant_violations') as mock_metric:
+        with patch('merid.metrics.kalshi_metrics.kalshi_exit_invariant_violations',
+                   create=True) as mock_metric:
             mock_metric.labels.return_value.inc.return_value = None
-            await route_order_async(intent)
+            _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
             # Verify metric was called
             assert mock_metric.labels.called
 

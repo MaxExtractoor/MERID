@@ -8872,7 +8872,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 assert exit_policy is not None, f"Exit policy resolution returned None for ticker={ticker}"
                 assert exit_policy.policy_id is not None, f"Exit policy missing policy_id for ticker={ticker}"
                 assert exit_policy.tp_r_multiple >= 0, f"Exit policy TP R-multiple must be non-negative for ticker={ticker}, got {exit_policy.tp_r_multiple}"
-                assert exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
+                # profit_only_v1: sl_cents may be None (loss stops disabled).
+                assert exit_policy.sl_cents is None or exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
                 assert exit_policy.max_hold_seconds > 0, f"Exit policy max_hold_seconds must be positive for ticker={ticker}, got {exit_policy.max_hold_seconds}"
                 # 2026-11: explicit exit-mode semantics.  HOLD_TO_SETTLEMENT is a
                 # valid strategy mode (no discretionary TP/SL by design); any
@@ -8886,14 +8887,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         _exit_mode, ticker,
                     )
                     return False
+                # profit_only_v1: an ACTIVE_MANAGEMENT policy with no armed
+                # TP/SL is NOT a rejection - it derives a HOLD_TO_SETTLEMENT
+                # lifecycle plan at the router (settlement is the exit).  Only
+                # log it for observability; entry gating is not affected.
                 if (
                     _exit_mode == "ACTIVE_MANAGEMENT"
                     and not exit_policy.take_profit_enabled
                     and not exit_policy.stop_loss_enabled
                 ):
-                    self._rejection_counters["exit_policy_no_targets"] = self._rejection_counters.get("exit_policy_no_targets", 0) + 1
-                    logger.warning("[15M-LOOP] No executable TP/SL for %s (no trusted edge) - rejecting order", ticker)
-                    return False
+                    logger.info(
+                        "[15M-LOOP] No armed TP/SL for %s - lifecycle plan = HOLD_TO_SETTLEMENT",
+                        ticker,
+                    )
             else:
                 self._rejection_counters["exit_policy_failed"] += 1
                 logger.error("[15M-LOOP] exit_policy is None after resolution! asset=%s regime=%s", asset, regime)
@@ -9091,9 +9097,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # The order router checks if agent_id is in _KALSHI_15M_CRYPTO_AGENTS whitelist
         agent_id = candidate.get("agent_id", "merid.prediction.agent_grid_15m")
         
-        # CRITICAL FIX: Add exit targets from resolved exit policy to satisfy invariant
-        # The order router rejects orders without TP/SL targets (invariant_violation:no_trade_without_exit)
-        # Use resolved exit_policy to populate exit target fields
+        # Attach optional profit exits (TP / trail) from the resolved exit policy.
+        # The router enforces the lifecycle-plan invariant (profit_only_v1):
+        # HOLD_TO_SETTLEMENT is a valid plan, armed loss stops are disabled.
         # Note: OrderIntent uses take_profit_r_multiple and stop_loss_price_cents (not stop_loss_r_multiple)
         # Convert side+action to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
         # CRITICAL FIX: Reject trades with missing side/action to prevent systematic YES bias
@@ -9746,6 +9752,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # CRITICAL FIX 2026-08-20: order identity contract requires process_id and reason.
         intent.process_id = str(os.getpid())
         intent.reason = candidate.get("rationale") or "candidate_entry"
+
+        # PROFIT_ONLY LIFECYCLE CONTRACT: attach the canonical lifecycle plan at
+        # intent creation so the audit/ledger record carries it even before
+        # routing.  The router re-validates (or derives if absent) pre-submit.
+        try:
+            from merid.event_venues.kalshi.order_router import (
+                derive_lifecycle_plan,
+                lifecycle_plan_to_dict,
+            )
+            _lifecycle_plan = derive_lifecycle_plan(intent)
+            intent.lifecycle_plan = lifecycle_plan_to_dict(_lifecycle_plan)
+        except Exception as _lp_err:
+            logger.warning("[15M-LOOP] lifecycle plan derivation failed for %s: %s", ticker, _lp_err)
 
         logger.info(
             "[ORDER-INTENT-CREATED] trace_id=%s candidate_id=%s ticker=%s side=%s action=%s "
