@@ -4230,6 +4230,103 @@ def _favorable_drift_rejection(
         return None
 
 
+# ── Aligned WS↔REST divergence tracker (2026-09-29) ─────────────────────────
+# Per-ticker state for the time-aligned divergence test.  A REST-vs-WS
+# disagreement only counts as evidence when it is *comparable* — the WS BBO
+# did not move across the REST round-trip.  Comparable mismatches must persist
+# across N aligned observations, or survive a forced WS snapshot rebuild
+# (tracked via the orderbook's snapshot-applied monotonic timestamp), before
+# they may veto an order.  This replaces the previous any-mismatch quarantine
+# that treated normal asynchronous REST lag as book corruption.
+_ALIGNED_DIV_PERSIST_N = int(os.environ.get("MERID_WS_REST_ALIGNED_PERSIST_N", "3"))
+# Soft bound: 15m tickers are never reused after rollover, so tracker entries
+# for dead tickers are inert.  Evict the oldest quiescent entries first so a
+# long-lived process cannot grow this map without bound.  Entries holding an
+# in-flight verification are never evicted.
+_ALIGNED_DIV_MAX_TICKERS = int(os.environ.get("MERID_WS_REST_ALIGNED_MAX_TICKERS", "256"))
+_aligned_div_lock = threading.Lock()
+_aligned_div: Dict[str, Dict[str, Any]] = {}
+
+
+def _aligned_divergence_verdict(
+    ticker: str,
+    divergent: bool,
+    hard: bool,
+    snapshot_ts: float,
+) -> str:
+    """Advance the per-ticker aligned-divergence tracker.
+
+    ``snapshot_ts`` must be a marker that advances ONLY when a real orderbook
+    snapshot is applied (``LocalOrderbook._snapshot_ts``, a ``time.monotonic``
+    stamp) — never on delta application.  The store's
+    ``_snapshots_applied_total`` is unsuitable: it counts every book-field
+    sync, including ordinary deltas, so a still-in-flight resnapshot would be
+    mistaken for a landed rebuild.
+
+    Returns:
+      ``"clear"``      — feeds agreed inside a comparable window; reset state.
+      ``"pending"``    — comparable mismatch counted, under persistence bound.
+      ``"verify"``     — persistence reached (or a hard-limit mismatch): pause
+                         this order and force a WS snapshot rebuild.
+      ``"persistent"`` — a snapshot rebuild already landed since the verifying
+                         observation and the feeds still disagree: genuine
+                         semantic/integrity defect → hard block + quarantine.
+    """
+    with _aligned_div_lock:
+        if len(_aligned_div) > _ALIGNED_DIV_MAX_TICKERS:
+            for _t in list(_aligned_div):
+                if len(_aligned_div) <= _ALIGNED_DIV_MAX_TICKERS:
+                    break
+                _v = _aligned_div[_t]
+                if _v["verify_ts"] is None and _v["n"] == 0:
+                    del _aligned_div[_t]
+            if len(_aligned_div) > _ALIGNED_DIV_MAX_TICKERS:
+                for _t in list(_aligned_div):
+                    if len(_aligned_div) <= _ALIGNED_DIV_MAX_TICKERS:
+                        break
+                    if _aligned_div[_t]["verify_ts"] is None:
+                        del _aligned_div[_t]
+        tr = _aligned_div.setdefault(
+            ticker, {"n": 0, "verify_ts": None}
+        )
+        if not divergent:
+            tr["n"] = 0
+            tr["verify_ts"] = None
+            return "clear"
+        if tr["verify_ts"] is not None:
+            if snapshot_ts > tr["verify_ts"]:
+                return "persistent"
+            # Resnapshot requested but not yet applied — stay in verify state.
+            return "verify"
+        tr["n"] += 1
+        if hard or tr["n"] >= _ALIGNED_DIV_PERSIST_N:
+            tr["verify_ts"] = snapshot_ts
+            return "verify"
+        return "pending"
+
+
+def _ws_snapshot_marker(market_state_store: Any, ticker: str) -> float:
+    """Read the monotonic timestamp of the last applied WS orderbook snapshot.
+
+    ``LocalOrderbook._snapshot_ts`` is stamped by ``apply_snapshot`` only, so
+    it cannot be advanced by ordinary delta flow.  Returns ``0.0`` when the
+    store/book/snapshot is unavailable — safe: ``0.0`` can never satisfy the
+    ``snapshot_ts > verify_ts`` persistence check unless a real snapshot has
+    landed since verification began.
+    """
+    try:
+        ob = getattr(market_state_store, "_ob", None)
+        if ob is None:
+            return 0.0
+        book = ob._books.get(ticker)
+        if book is None:
+            return 0.0
+        ts = getattr(book, "_snapshot_ts", None)
+        return float(ts) if ts else 0.0
+    except Exception:
+        return 0.0
+
+
 async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t0: float) -> Optional[OrderResult]:
     """Source-aware WS/REST divergence guard.
 
@@ -4350,7 +4447,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if not _rest_owned_intent:
                 return OrderResult(
                     status="rejected", mode=mode,
-                    reason="ws_rest_divergence:ws_not_authoritative",
+                    reason="ws_resyncing:ws_not_authoritative",
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
             logger.warning(
@@ -4413,7 +4510,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason="ws_rest_divergence:no_fresh_feed",
+                reason="untrusted:no_fresh_feed",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
@@ -4423,6 +4520,33 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         bid_divergence_cents = abs(ws_book["bid_cents"] - rest_book_side["bid_cents"])
         ask_divergence_cents = abs(ws_book["ask_cents"] - rest_book_side["ask_cents"])
         max_divergence_cents = max(bid_divergence_cents, ask_divergence_cents)
+
+        # 2026-09-29: time-alignment bracket.  The REST fetch spans
+        # [ws_snapshot → now]; if the authoritative WS BBO did not move across
+        # the REST round-trip the REST response observed the same market state
+        # and disagreement is *comparable* evidence.  A moved book makes the
+        # REST response non-contemporaneous by construction — telemetry only.
+        ws_bbo_post: Optional[tuple] = None
+        try:
+            _ws2 = market_state_store.get(intent.ticker) if market_state_store else None
+            if (
+                _ws2 is not None
+                and getattr(_ws2, "best_bid_cents", None) is not None
+                and getattr(_ws2, "best_ask_cents", None) is not None
+            ):
+                ws_bbo_post = (
+                    int(round(_ws2.best_bid_cents)),
+                    int(round(_ws2.best_ask_cents)),
+                )
+        except Exception:
+            ws_bbo_post = None
+
+        rest_comparable = (
+            rest_usable
+            and ws_bbo_post is not None
+            and ws_bbo_post == (ws_bid, ws_ask)
+            and ws_book["bid_cents"] <= ws_book["ask_cents"]
+        )
 
         logger.info(
             "[WS-REST-DIVERGENCE-CANONICAL] ticker=%s intent_id=%s side=%s "
@@ -4470,7 +4594,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason="ws_rest_divergence:ws_book_inconsistent",
+                reason="book_invariant_violation:ws_book_inconsistent",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
@@ -4491,11 +4615,13 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason="ws_rest_divergence:rest_book_inconsistent",
+                reason="book_invariant_violation:rest_book_inconsistent",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
-        if max_divergence_cents <= hard_limit_cents:
+        if max_divergence_cents <= hard_limit_cents and rest_comparable:
+            # Comparable-window drift check against the REST leg: a crash
+            # visible on either feed is evidence the decision basis is stale.
             _drift_rej = _favorable_drift_rejection(
                 intent, rest_book_side["ask_cents"], "rest", mode, t0
             )
@@ -4504,6 +4630,13 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         # ---- coherent: within tolerance ---------------------------------------
         if max_divergence_cents <= tolerance_cents:
+            # Aligned agreement is a healthy confirmation — clear any pending
+            # verification state so a resolved mismatch cannot hold the ticker
+            # in WS_VERIFYING forever.
+            if rest_comparable:
+                _aligned_divergence_verdict(
+                    intent.ticker, divergent=False, hard=False, snapshot_ts=0.0
+                )
             # 2026-09-24: feeds agree, but they may have moved together past
             # the order's limit since the decision snapshot.  A taker buy
             # priced below the fresh ask can never fill — instead of letting
@@ -4550,7 +4683,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason=f"ws_rest_divergence:not_marketable:{max_divergence_cents}c",
+                    reason=f"edge_lost_at_submit:not_marketable_coherent:{max_divergence_cents}c",
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
             logger.info(
@@ -4568,42 +4701,14 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 return _drift_rej
             return None
 
-        # ---- classify divergence and decide -----------------------------------
-        # 1) Hard limit / rollover / corruption.
-        if max_divergence_cents > hard_limit_cents:
-            logger.critical(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=HARD_DIVERGENCE decision=BLOCKED "
-                "reason=integrity_failure max_divergence=%dc hard_limit=%dc "
-                "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d",
-                intent.ticker, max_divergence_cents, hard_limit_cents,
-                ws_book["bid_cents"], ws_book["ask_cents"],
-                rest_book_side["bid_cents"], rest_book_side["ask_cents"],
-            )
-            if market_state_store is not None:
-                market_state_store._set_snapshot_complete(intent.ticker, False, "divergence_hard_limit")
-                market_state_store._set_book_health(intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_hard_limit")
-            if _is_exit:
-                logger.warning(
-                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
-                    "reason=reduce_only_exit_bypass integrity_failure max_divergence=%dc — "
-                    "limit-bounded reduce-only exit proceeds despite feed divergence",
-                    intent.ticker, max_divergence_cents,
-                )
-                return None
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"ws_rest_divergence:integrity_failure:{max_divergence_cents}c",
-                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-            )
+        # ---- divergent: time-aligned, source-aware classification -------------
+        # 2026-09-29: see the alignment-bracket note above.  Comparable
+        # mismatches persist in a per-ticker tracker and must reach
+        # MERID_WS_REST_ALIGNED_PERSIST_N — or survive a forced WS snapshot
+        # rebuild — before they can veto.
 
-        # 2) WebSocket is stale, or its top-of-book is internally locked
-        #    (bid == ask) while diverging from a fresh REST pull.  The delta
-        #    stream is one-sided per message, so mid-move the ladder can sit
-        #    momentarily locked while one side awaits its delta; a locked WS
-        #    top that disagrees with a just-fetched REST book is a split-tape
-        #    artifact, not an executable quote — trust REST when the order is
-        #    marketable there, otherwise quarantine and resync as before.
+        # 1) WS integrity first — a stale or top-locked ladder is a real data
+        #    problem and makes the REST comparison meaningless anyway.
         ws_locked = ws_book["bid_cents"] >= ws_book["ask_cents"]
         if ws_age_ms > max_ws_age_ms or ws_locked:
             if (
@@ -4675,117 +4780,239 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason="ws_rest_divergence:stale_ws",
+                reason="ws_event_age_exceeded:stale_ws",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
-        # 3) Both feeds are fresh; the market may have moved between snapshots.
-        #    Allow only if the order is marketable against both fresh feeds so an
-        #    IOC taker limit can be filled against the exchange's actual book.
-        if ws_authoritative and ws_marketable and rest_marketable:
-            logger.info(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=WS_AUTHORITATIVE decision=ALLOW "
-                "reason=natural_move ws_age_ms=%.0f rest_age_ms=%.0f max_divergence=%dc "
-                "order_price=%dc action=%s",
+        # 2) Comparable-window mismatch: genuine aligned disagreement.
+        if rest_comparable:
+            _verdict = _aligned_divergence_verdict(
+                intent.ticker,
+                divergent=True,
+                hard=(max_divergence_cents > hard_limit_cents),
+                snapshot_ts=_ws_snapshot_marker(market_state_store, intent.ticker),
+            )
+            if _verdict == "persistent":
+                logger.critical(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_VERIFYING decision=BLOCKED "
+                    "reason=divergence_persistent_after_resnapshot max_divergence=%dc "
+                    "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d",
+                    intent.ticker, max_divergence_cents,
+                    ws_book["bid_cents"], ws_book["ask_cents"],
+                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+                )
+                if market_state_store is not None:
+                    try:
+                        _st = market_state_store.get(intent.ticker)
+                        if _st is not None:
+                            _st.data_quality = "INVALID"
+                            _st.executable = False
+                            _st.book_initialized = False
+                            _st.transition = "RESYNC_REQUIRED"
+                            _st.invalidation_cause = "DIVERGENCE_PERSISTENT"
+                            _st.recovery_required_source = "FULL_SNAPSHOT"
+                        market_state_store._set_snapshot_complete(
+                            intent.ticker, False, "divergence_persistent"
+                        )
+                        market_state_store._set_book_health(
+                            intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_persistent"
+                        )
+                        market_state_store._maybe_trigger_book_recovery(
+                            intent.ticker, "divergence_persistent"
+                        )
+                    except Exception as _rs_err:
+                        logger.debug("book resync mark failed for %s: %s", intent.ticker, _rs_err)
+                if _is_exit:
+                    logger.warning(
+                        "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                        "reason=reduce_only_exit_bypass divergence_persistent — "
+                        "limit-bounded reduce-only exit proceeds despite persistent divergence",
+                        intent.ticker,
+                    )
+                    return None
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"divergence_persistent_after_resnapshot:{max_divergence_cents}c",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            if _verdict == "verify":
+                # Ticker-local pause while a forced WS snapshot rebuild runs.
+                if market_state_store is not None:
+                    try:
+                        market_state_store._maybe_trigger_book_recovery(
+                            intent.ticker, "aligned_divergence"
+                        )
+                    except Exception as _vr_err:
+                        logger.debug("aligned-divergence resync trigger failed for %s: %s", intent.ticker, _vr_err)
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_VERIFYING decision=BLOCKED "
+                    "reason=divergence_pending_resnapshot max_divergence=%dc hard=%s "
+                    "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d",
+                    intent.ticker, max_divergence_cents,
+                    max_divergence_cents > hard_limit_cents,
+                    ws_book["bid_cents"], ws_book["ask_cents"],
+                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+                )
+                if _is_exit:
+                    return None
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"divergence_pending_resnapshot:{max_divergence_cents}c",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            # 'pending' — comparable mismatch under persistence bound.  Fall
+            # through to the WS-authoritative path; telemetry distinguishes it.
+            _align_class = "aligned_divergence_pending"
+        else:
+            _align_class = (
+                "rest_stale_vs_ws" if not rest_usable else "expected_temporal_divergence"
+            )
+
+        # 3) WS-authoritative decision.  REST disagreement is already classified
+        #    above; execution eligibility is judged against the WS book alone.
+        #    A *comparable* REST leg may only extend the limit's coverage inside
+        #    the validated edge budget — the REST quote is never substituted
+        #    into the decision book.
+        if ws_authoritative and ws_age_ms <= max_ws_age_ms:
+            _buy_taker = (
+                (getattr(intent, "action", "") or "").lower() == "buy"
+                and _resolve_execution_mode(intent) not in ("maker", "passive_quote")
+                and not _is_exit_order(intent)
+            )
+            _epc = None
+            if _buy_taker:
+                _epc = _max_edge_preserving_buy_price(intent)
+                _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+                if _sel_px is not None and int(_sel_px) > 0:
+                    _chase = int(_sel_px) + int(
+                        os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+                    )
+                    _epc = min(_epc, _chase) if _epc is not None else None
+            if ws_marketable:
+                # Drift check against the authoritative WS ask: a crash visible
+                # on the trusted feed means the decision basis is stale.
+                _drift_rej = _favorable_drift_rejection(
+                    intent, ws_book["ask_cents"], "ws_aligned", mode, t0
+                )
+                if _drift_rej is not None:
+                    return _drift_rej
+                # Comparable REST disagreement on fillability: lifting the
+                # ceiling to the capped edge budget costs nothing when WS is
+                # right (limit orders fill at best ask) and rescues the fill
+                # when the REST observation was the real book.
+                if (
+                    _buy_taker and rest_comparable and not rest_marketable
+                    and _epc is not None
+                    and _epc >= rest_book_side["ask_cents"]
+                    and _epc > int(getattr(intent, "price_cents", 0) or 0)
+                ):
+                    old_px = getattr(intent, "price_cents", None)
+                    intent.price_cents = min(99, _epc)
+                    logger.info(
+                        "EXECUTION-QUOTE-MODE ticker=%s mode=REPRICED_WITHIN_EDGE decision=ALLOW "
+                        "reason=bounded_reprice_cover_rest price=%dc->%dc rest_ask=%dc "
+                        "edge_budget=%dc align_class=%s",
+                        intent.ticker, old_px, intent.price_cents,
+                        rest_book_side["ask_cents"], _epc, _align_class,
+                    )
+                logger.info(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=WS_TRUSTED_REST_DIFFERENT decision=ALLOW "
+                    "reason=%s max_divergence=%dc ws_age_ms=%.0f rest_age_ms=%.0f "
+                    "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d order_price=%dc",
+                    intent.ticker, _align_class, max_divergence_cents,
+                    ws_age_ms, rest_age_ms,
+                    ws_book["bid_cents"], ws_book["ask_cents"],
+                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+                    getattr(intent, "price_cents", None) or 0,
+                )
+                return None
+            # Not marketable on the authoritative book: one bounded reprice to
+            # the edge-preserving budget.  The ceiling must reach the cheapest
+            # ask a trusted hypothesis reports — the WS ask, or the comparable
+            # REST ask (the phantom-high-WS rescue from 2026-09-25) — and never
+            # exceeds the edge/chase cap.
+            if _buy_taker:
+                _cover_ask = (
+                    min(ws_book["ask_cents"], rest_book_side["ask_cents"])
+                    if rest_comparable else ws_book["ask_cents"]
+                )
+                if _epc is not None and _cover_ask <= _epc:
+                    if _epc > int(getattr(intent, "price_cents", 0) or 0):
+                        old_px = getattr(intent, "price_cents", None)
+                        intent.price_cents = min(99, _epc)
+                        logger.info(
+                            "EXECUTION-QUOTE-MODE ticker=%s mode=REPRICED_WITHIN_EDGE decision=ALLOW "
+                            "reason=bounded_reprice_ws price=%dc->%dc cover_ask=%dc edge_budget=%dc "
+                            "align_class=%s max_divergence=%dc",
+                            intent.ticker, old_px, intent.price_cents, _cover_ask, _epc,
+                            _align_class, max_divergence_cents,
+                        )
+                    else:
+                        logger.info(
+                            "EXECUTION-QUOTE-MODE ticker=%s mode=WS_TRUSTED_REST_DIFFERENT "
+                            "decision=ALLOW reason=cover_satisfied price=%dc cover_ask=%dc "
+                            "edge_budget=%dc align_class=%s",
+                            intent.ticker, int(getattr(intent, "price_cents", 0) or 0),
+                            _cover_ask, _epc, _align_class,
+                        )
+                    return None
+            if _is_exit:
+                logger.warning(
+                    "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
+                    "reason=reduce_only_exit_bypass not_marketable max_divergence=%dc — "
+                    "limit-bounded reduce-only exit proceeds despite divergence",
+                    intent.ticker, max_divergence_cents,
+                )
+                return None
+            logger.warning(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=EDGE_LOST decision=BLOCKED "
+                "reason=edge_lost_at_submit align_class=%s max_divergence=%dc "
+                "ws_ask=%d order_price=%s",
+                intent.ticker, _align_class, max_divergence_cents,
+                ws_book["ask_cents"], getattr(intent, "price_cents", None),
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"edge_lost_at_submit:not_marketable_ws:{max_divergence_cents}c",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
+        # 4) WS not authoritative (e.g. rest-owned degraded intent): judge on
+        #    the fresh REST pull — the only available executable reference.
+        if rest_age_ms <= max_rest_age_ms and rest_marketable:
+            logger.warning(
+                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_AUTHORITATIVE decision=ALLOW "
+                "reason=rest_owned_divergent ws_age_ms=%.0f rest_age_ms=%.0f "
+                "max_divergence=%dc order_price=%dc action=%s",
                 intent.ticker, ws_age_ms, rest_age_ms, max_divergence_cents,
                 getattr(intent, "price_cents", None),
                 getattr(intent, "action", ""),
             )
             _drift_rej = _favorable_drift_rejection(
-                intent, ws_book["ask_cents"], "ws", mode, t0
+                intent, rest_book_side["ask_cents"], "rest", mode, t0
             )
             if _drift_rej is not None:
                 return _drift_rej
             return None
-
-        # 5) Cannot ignore divergence: the order is not marketable against the
-        #    best fresh source or there is no live WS.  Before rejecting, a
-        #    taker buy gets one bounded reprice: if the freshest ask still fits
-        #    inside the signal's edge-preserving budget, lift the limit to the
-        #    budget — the budget already enforces net edge >= min_required at
-        #    the fill price, so this never pays beyond the model's risk bounds.
-        _buy_taker = (
-            (getattr(intent, "action", "") or "").lower() == "buy"
-            and _resolve_execution_mode(intent) not in ("maker", "passive_quote")
-            and not _is_exit_order(intent)
-        )
-        if _buy_taker:
-            # Same as the coherent path: REST (just fetched, <=500ms) is the
-            # executable truth; a divergent WS top must not veto the reprice.
-            _fresh_ask = rest_book_side["ask_cents"]
-            _epc = _max_edge_preserving_buy_price(intent)
-            # Chase bound (2026-09-24): same rule as the coherent path — the
-            # reprice is capped at the decision's selected price plus
-            # MERID_ENTRY_MAX_CHASE_CENTS so a stale signal cannot chase the
-            # ask beyond the model's tolerance for chase.
-            _sel_px = getattr(intent, "selected_outcome_price_cents", None)
-            if _sel_px is not None and int(_sel_px) > 0:
-                _chase = int(_sel_px) + int(
-                    os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
-                )
-                _epc = min(_epc, _chase) if _epc is not None else None
-            if _epc is not None and _fresh_ask <= _epc:
-                old_px = getattr(intent, "price_cents", None)
-                intent.price_cents = min(99, _epc)
-                logger.info(
-                    "EXECUTION-QUOTE-MODE ticker=%s mode=REPRICED_WITHIN_EDGE decision=ALLOW "
-                    "reason=bounded_reprice_divergent price=%dc->%dc fresh_ask=%dc edge_budget=%dc "
-                    "max_divergence=%dc",
-                    intent.ticker, old_px, intent.price_cents, _fresh_ask, _epc,
-                    max_divergence_cents,
-                )
-                return None
         if _is_exit:
-            logger.warning(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=EXIT_STALE_FEED decision=ALLOW "
-                "reason=reduce_only_exit_bypass not_marketable max_divergence=%dc — "
-                "limit-bounded reduce-only exit proceeds despite divergence",
-                intent.ticker, max_divergence_cents,
-            )
             return None
         logger.error(
             "EXECUTION-QUOTE-MODE ticker=%s mode=WS_REST_DIVERGENT decision=BLOCKED "
-            "reason=not_marketable max_divergence=%dc tolerance=%dc "
+            "reason=edge_lost_at_submit align_class=%s max_divergence=%dc "
             "ws_bid=%d ws_ask=%d rest_bid=%d rest_ask=%d "
             "ws_age_ms=%.0f rest_age_ms=%.0f ws_authoritative=%s ws_marketable=%s rest_marketable=%s",
-            intent.ticker, max_divergence_cents, tolerance_cents,
+            intent.ticker, _align_class, max_divergence_cents,
             ws_book["bid_cents"], ws_book["ask_cents"],
             rest_book_side["bid_cents"], rest_book_side["ask_cents"],
             ws_age_ms, rest_age_ms, ws_authoritative, ws_marketable, rest_marketable,
         )
-        # 2026-09-24: a fresh REST book diverging from the local WS book beyond
-        # tolerance means the local ladder is out of sync with the exchange
-        # (missed deltas / drift).  Quarantine it the same way snapshot-timeout
-        # does: INVALID + FULL_SNAPSHOT recovery requirement means deltas
-        # cannot re-arm ``executable`` — only a real snapshot repairs it — and
-        # the throttled recovery trigger requests both a WS snapshot and a
-        # REST invariant sync.  Without this, the divergent book kept feeding
-        # phantom-edge candidates every cycle.
-        if market_state_store is not None:
-            try:
-                _st = market_state_store.get(intent.ticker)
-                if _st is not None:
-                    _st.data_quality = "INVALID"
-                    _st.executable = False
-                    _st.book_initialized = False
-                    _st.transition = "RESYNC_REQUIRED"
-                    _st.invalidation_cause = "DIVERGENCE_NOT_MARKETABLE"
-                    _st.recovery_required_source = "FULL_SNAPSHOT"
-                market_state_store._set_snapshot_complete(
-                    intent.ticker, False, "divergence_not_marketable"
-                )
-                market_state_store._set_book_health(
-                    intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_not_marketable"
-                )
-                market_state_store._maybe_trigger_book_recovery(
-                    intent.ticker, "divergence_not_marketable"
-                )
-            except Exception as _rs_err:
-                logger.debug("book resync mark failed for %s: %s", intent.ticker, _rs_err)
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"ws_rest_divergence:not_marketable:{max_divergence_cents}c",
+            reason=f"edge_lost_at_submit:not_marketable:{max_divergence_cents}c",
             latency_ms=round((_time.monotonic() - t0) * 1000, 2),
         )
 
@@ -4801,7 +5028,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             return None
         return OrderResult(
             status="rejected", mode=mode,
-            reason="ws_rest_divergence:guard_error",
+            reason="untrusted:guard_error",
             latency_ms=round((_time.monotonic() - t0) * 1000, 2),
         )
 
@@ -11820,7 +12047,7 @@ def _prepare_order_for_gate(
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"staleness_slo:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+            reason=f"ws_event_age_exceeded:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
             latency_ms=round(latency, 2),
         ), None
 
@@ -12170,7 +12397,7 @@ async def _route_live(
                 return OrderResult(
                     status="rejected",
                     mode=mode,
-                    reason=f"staleness_slo:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
+                    reason=f"ws_event_age_exceeded:book_age_{book_age_ms:.0f}ms_exceeds_slo_{STALENESS_SLO_MS}ms",
                     latency_ms=round(latency, 2),
                 )
 

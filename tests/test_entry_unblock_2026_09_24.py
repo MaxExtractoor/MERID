@@ -203,18 +203,19 @@ def _patch_store(monkeypatch, state):
 @pytest.mark.asyncio
 async def test_divergence_guard_reprices_within_edge_budget(monkeypatch):
     """Ask raced above the limit but stays inside the edge budget -> reprice+allow."""
-    # WS book moved: 60/85.  REST book moved the same way (divergence=0 -> coherent).
-    _patch_store(monkeypatch, _ws_state(60, 85))
+    # WS book moved: 73/74.  REST book moved the same way (divergence=0 -> coherent).
+    _patch_store(monkeypatch, _ws_state(73, 74))
     intent = _taker_buy_intent(
         price_cents=70, basis=70, ev_net=20.0, min_edge=0.05, p_selected=0.90
     )
-    # edge cap ~85-89 (floor(70+20-5)=85, theoretical 89); fresh ask 85 must fit.
+    # edge cap ~85-89 (floor(70+20-5)=85, theoretical 89); chase cap sel+5=75
+    # binds tighter — the fresh ask 74 fits inside it and the lift stops there.
     assert _max_edge_preserving_buy_price(intent) >= 85
 
-    port = _StubPort(60, 85)
+    port = _StubPort(73, 74)
     result = await _ws_rest_divergence_guard(intent, port, mode=None, t0=time.monotonic())
     assert result is None  # allowed
-    assert intent.price_cents >= 85  # lifted inside the edge budget
+    assert intent.price_cents == 75  # lifted to the chase bound, not the raw edge cap
 
 
 @pytest.mark.asyncio

@@ -805,6 +805,21 @@ def _reset_merid_profile_for_non_15m_tests(request, monkeypatch):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_aligned_divergence_tracker():
+    """Clear the order router's per-ticker aligned-divergence tracker between
+    tests.  It is module-level state; without a reset, mismatches observed by
+    one test leak into the next test's persistence count.  The import is lazy
+    via sys.modules so tests that never load the router pay nothing."""
+    import sys
+    mod = sys.modules.get("merid.event_venues.kalshi.order_router")
+    if mod is not None:
+        mod._aligned_div.clear()
+    yield
+    if mod is not None:
+        mod._aligned_div.clear()
+
+
 @pytest.fixture
 def mock_httpx_client():
     """Fixture providing a mock httpx.AsyncClient for tests."""
