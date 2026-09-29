@@ -243,14 +243,53 @@ def test_contract_spec_absent_fee_metadata_unverified_not_rejected():
     assert "fee_metadata_unverified" in spec.reasons
 
 
-def test_contract_spec_maker_unverified_demotes_not_rejects():
+def test_contract_spec_maker_verified_on_declared_quadratic():
+    """fee_type="quadratic" = Kalshi's taker-only schedule: resting orders pay
+    zero maker fee, so the modeled 0.0175*P*(1-P) maker rate is a conservative
+    upper bound.  The lane may run."""
     fields = dict(_RTI_MEAN_RULES)
-    fields["fee_type"] = "quadratic"  # no maker-fees clause
+    fields["fee_type"] = "quadratic"
     spec = evaluate_market_contract(
         fields, ticker="KXBTC15M-T8", maker_entries_enabled=True
     )
-    assert spec.compatible is True          # taker lane still valid
-    assert spec.maker_fee_verified is False  # maker lane must be disabled
+    assert spec.compatible is True
+    assert spec.maker_fee_verified is True
+
+
+def test_contract_spec_maker_verified_on_declared_maker_fees():
+    """quadratic_with_maker_fees = makers pay the modeled 0.0175 rate exactly."""
+    fields = dict(_RTI_MEAN_RULES)
+    fields["fee_type"] = "quadratic_with_maker_fees"
+    spec = evaluate_market_contract(
+        fields, ticker="KXBTC15M-T8b", maker_entries_enabled=True
+    )
+    assert spec.compatible is True
+    assert spec.maker_fee_verified is True
+
+
+def test_contract_spec_maker_unverified_when_fee_type_absent():
+    """Absent fee identity cannot prove the applied schedule: the maker lane
+    stays off (taker-only demotion) while the market itself remains tradable."""
+    fields = dict(_RTI_MEAN_RULES)
+    del fields["fee_type"]
+    del fields["fee_multiplier"]
+    spec = evaluate_market_contract(
+        fields, ticker="KXBTC15M-T8c", maker_entries_enabled=True
+    )
+    assert spec.compatible is True
+    assert spec.maker_fee_verified is False
+    assert any(r.startswith("maker_fees_unverified") for r in spec.reasons)
+
+
+def test_contract_spec_maker_unverified_when_fee_type_unsupported():
+    """A declared-but-unknown schedule can never bound the maker model."""
+    fields = dict(_RTI_MEAN_RULES)
+    fields["fee_type"] = "flat_per_contract"
+    spec = evaluate_market_contract(
+        fields, ticker="KXBTC15M-T8d", maker_entries_enabled=True
+    )
+    assert spec.compatible is False
+    assert spec.maker_fee_verified is False
 
 
 def test_contract_spec_hash_is_stable_and_sensitive():

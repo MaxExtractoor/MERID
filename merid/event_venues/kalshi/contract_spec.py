@@ -237,9 +237,15 @@ def evaluate_market_contract(
         else:
             fee_verified = True
 
+    # Maker-lane verification asks whether the declared schedule bounds maker
+    # cost at/below the modeled 0.0175*P*(1-P) rate — not whether makers pay.
+    #   quadratic                    -> makers pay 0        (model is an upper bound)
+    #   quadratic_with_maker_fees    -> makers pay 0.0175   (model is exact)
+    # A declared fee_type is required either way: absent metadata cannot prove
+    # the schedule, and an unsupported type has already failed `compatible`.
     maker_fee_verified = True
     if maker_entries_enabled:
-        maker_fee_verified = str(fee_type or "").lower() == "quadratic_with_maker_fees"
+        maker_fee_verified = str(fee_type or "").lower() in _SUPPORTED_FEE_TYPES
         if not maker_fee_verified:
             reasons.append(f"maker_fees_unverified:{fee_type}")
 
