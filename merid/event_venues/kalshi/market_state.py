@@ -1303,7 +1303,7 @@ class KalshiMarketStateStore:
             self._batch_worker_thread.join(timeout=2.0)
             logger.info("[BATCH-WORKER] Batch worker thread stopped")
 
-    def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Dict[str, float]]:
         """Return ``(event_age_ms, upstream_wait_ms)`` for a book event.
 
         ``event_age_ms`` is venue-timestamp age when Kalshi supplies
@@ -1351,7 +1351,38 @@ class KalshiMarketStateStore:
                 upstream_wait_ms = (now_mono_ns - float(recv_ns)) / 1e6
             except Exception:
                 upstream_wait_ms = None
-        return event_age_ms, upstream_wait_ms
+
+        # Hop breakdown for rejection forensics:
+        #   wire_ms      = venue_ts → socket recv-return (venue publish + network
+        #                  + our recv scheduling; also absorbs local clock skew)
+        #   pq_wait_ms   = socket recv → _process_queue dequeue (_msg_queue
+        #                  residence on the WS-IO thread loop)
+        #   bridge_in_ms = socket recv → bridge _enqueue_event stamp (pq_wait +
+        #                  callback scheduling)
+        hops: Dict[str, float] = {}
+        ws_recv_ns = msg.get("_t_ws_recv_ns")
+        ws_recv_wall_ms = msg.get("_t_ws_recv_wall_ms")
+        pq_deq_ns = msg.get("_t_pq_dequeue_ns")
+        try:
+            if venue_ts is not None and ws_recv_wall_ms is not None:
+                _v = float(venue_ts)
+                if isinstance(venue_ts, str):
+                    from datetime import datetime
+                    _v_ms = datetime.fromisoformat(
+                        venue_ts.replace("Z", "+00:00")
+                    ).timestamp() * 1000.0
+                else:
+                    _v_ms = _v if _v > 1e12 else _v * 1000.0
+                hops["wire_ms"] = round(float(ws_recv_wall_ms) - _v_ms, 1)
+            if ws_recv_ns is not None:
+                hops["recv_to_now_ms"] = round((now_mono_ns - float(ws_recv_ns)) / 1e6, 1)
+            if ws_recv_ns is not None and pq_deq_ns is not None:
+                hops["pq_wait_ms"] = round((float(pq_deq_ns) - float(ws_recv_ns)) / 1e6, 1)
+            if ws_recv_ns is not None and recv_ns:
+                hops["bridge_in_ms"] = round((float(recv_ns) - float(ws_recv_ns)) / 1e6, 1)
+        except Exception:
+            pass
+        return event_age_ms, upstream_wait_ms, hops
 
     def _rest_owned_book_preserved(self, ticker: str, state: "KalshiMarketState", reason: str, **diag) -> bool:
         """REST-owned effective book preservation gate.
@@ -1504,12 +1535,13 @@ class KalshiMarketStateStore:
         # or whose venue/bridge-receive timestamp is too old, invalidates the
         # book — drain the stale backlog and resync from a fresh snapshot
         # instead of partially replaying historical deltas.
-        event_age_ms, upstream_wait_ms = self._book_event_timing(msg)
+        event_age_ms, upstream_wait_ms, hop_diag = self._book_event_timing(msg)
         if upstream_wait_ms is not None and upstream_wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS:
             self._mark_book_untrusted_and_resync(
                 ticker,
                 "BOOK_UPSTREAM_LAG",
                 upstream_wait_ms=round(upstream_wait_ms, 1),
+                **hop_diag,
             )
             return False
         if event_age_ms is not None and event_age_ms > _BOOK_MAX_EVENT_AGE_MS:
@@ -1517,6 +1549,7 @@ class KalshiMarketStateStore:
                 ticker,
                 "BOOK_EVENT_TOO_OLD",
                 event_age_ms=round(event_age_ms, 1),
+                **hop_diag,
             )
             return False
         msg["_t_delta_enq_ns"] = time.monotonic_ns()
@@ -1834,7 +1867,7 @@ class KalshiMarketStateStore:
                 state.ws_last_queue_wait_ms = (_apply_now_ns - float(_enq_ns)) / 1e6
             except Exception:
                 pass
-        _ev_age_ms, _ = self._book_event_timing(msg)
+        _ev_age_ms, _uw_ms, _hops = self._book_event_timing(msg)
         if _ev_age_ms is not None:
             state.ws_last_event_age_ms = _ev_age_ms
             _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)

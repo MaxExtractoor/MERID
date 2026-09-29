@@ -1565,6 +1565,12 @@ class KalshiWebSocket(EventVenueStream):
                 self._last_message_ts = _time.monotonic()
                 self._messages_received += 1
 
+                # Hop instrumentation: stamp the socket-read boundary BEFORE any
+                # parsing/queueing so downstream hops can attribute event age to
+                # venue→socket (wire) vs _msg_queue residence vs bridge/state hops.
+                _recv_ns = _time.monotonic_ns()
+                _recv_wall_ms = _time.time() * 1000.0
+
                 # websockets library returns str (text) or bytes directly
                 if isinstance(msg, str):
                     raw = msg
@@ -1648,6 +1654,15 @@ class KalshiWebSocket(EventVenueStream):
                             type(data).__name__, raw[:200]
                         )
                         continue
+
+                    # Attach recv-boundary stamps so the bridge/market-state can
+                    # decompose event age into wire vs queue-residence segments.
+                    data["_t_ws_recv_ns"] = _recv_ns
+                    data["_t_ws_recv_wall_ms"] = _recv_wall_ms
+                    _nested = data.get("msg")
+                    if isinstance(_nested, dict):
+                        _nested["_t_ws_recv_ns"] = _recv_ns
+                        _nested["_t_ws_recv_wall_ms"] = _recv_wall_ms
 
                     # CRITICAL DIAGNOSTIC: Channel-classified counter for orderbook messages
                     msg_type = data.get("type", "unknown")
@@ -1943,6 +1958,16 @@ class KalshiWebSocket(EventVenueStream):
                         _, data = item
                     else:
                         data = item  # Fallback for non-priority items
+
+                    # Hop instrumentation: queue-residence boundary.  The delta
+                    # between this stamp and _t_ws_recv_ns isolates _msg_queue
+                    # residence (producer/consumer imbalance on this loop).
+                    _pq_deq_ns = _time.monotonic_ns()
+                    if isinstance(data, dict):
+                        data["_t_pq_dequeue_ns"] = _pq_deq_ns
+                        _nested_d = data.get("msg")
+                        if isinstance(_nested_d, dict):
+                            _nested_d["_t_pq_dequeue_ns"] = _pq_deq_ns
 
                     # PERFORMANCE FIX (2026-08-23): Build a task for each message and gather
                     # them as a bounded batch. This keeps the queue from growing while still
