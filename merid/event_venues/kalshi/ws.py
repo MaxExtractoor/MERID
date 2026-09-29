@@ -1604,24 +1604,14 @@ class KalshiWebSocket(EventVenueStream):
                     if hasattr(bridge, '_ws_raw_messages_seen'):
                         bridge._ws_raw_messages_seen += 1
 
-                # P0-1 WS UPSTREAM: Add WS-RAW-DELIVERY log for every ws.recv() message
+                # THROUGHPUT FIX: the old preview json.loads(raw[:200]) ran a
+                # second (usually failing) parse per message at ~1100/s.  The
+                # raw payload is still recorded before enqueue — metadata now
+                # comes from the single full parse below.
                 msg_type = "unknown"
-                try:
-                    data_preview = json.loads(raw[:200]) if len(raw) > 50 else {}
-                    msg_type = data_preview.get("type", "unknown")
-                    ticker = data_preview.get("ticker", data_preview.get("market_ticker", "unknown"))
-                    logger.debug("[WS-RAW-DELIVERY] event_type=%s ticker=%s size=%d", msg_type, ticker, len(raw))
-                except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
-                    # Truncated JSON is expected - don't log as error, just mark as unknown.
-                    # AttributeError/TypeError guard the case where the (possibly truncated)
-                    # preview parses to a non-dict (e.g. a JSON array), so .get() would fail.
-                    # This is diagnostic-only; never let it drop the real message below.
-                    msg_type = "unknown"
-                    ticker = "unknown"
-                    logger.debug("[WS-RAW-DELIVERY] non_dict_or_truncated_preview size=%d", len(raw))
+                ticker = "unknown"
 
                 # Capture raw bytes at the boundary before any downstream parsing.
-                # The preview-derived msg_type/ticker are best-effort metadata only.
                 record_ingress(
                     SOURCE_KALSHI_WS,
                     raw,
@@ -1946,8 +1936,13 @@ class KalshiWebSocket(EventVenueStream):
         # PERFORMANCE FIX: Process messages in small batches and await each callback
         # to avoid hundreds of concurrent background tasks starving keepalive pings
         # (1011 timeouts) while still draining the queue fast enough under load.
-        _BATCH_SIZE_LOW_PRESSURE = 5
-        _BATCH_SIZE_HIGH_PRESSURE = 100
+        # THROUGHPUT FIX: orderbook_delta runs ~1100+/s on this socket; a
+        # 5-message low-pressure batch made each loop iteration carry ~5 msgs
+        # of gather/task overhead — the queue could never catch up during
+        # sustained flow.  50 amortizes the scheduling cost while staying
+        # bounded; high-pressure unchanged.
+        _BATCH_SIZE_LOW_PRESSURE = 50
+        _BATCH_SIZE_HIGH_PRESSURE = 200
         _PRESSURE_THRESHOLD = 0.50
         _COOPERATIVE_YIELD_EVERY = 25
         
@@ -2797,25 +2792,32 @@ class KalshiWebSocket(EventVenueStream):
             if channel in ("subscribed", "unsubscribed", None):
                 return None
 
-            # Phase 3: Extract timestamp information for data freshness
-            ts_info = self._timestamp_manager.extract_timestamp_info(data, "websocket")
-            
-            # Validate timestamp and log if stale
-            if not ts_info.is_timestamp_valid:
-                logger.warning(
-                    f"[WS-TIMESTAMP] Invalid timestamp detected: {ts_info.to_dict()}"
-                )
-            
-            if not ts_info.is_fresh(self._timestamp_manager._max_age_seconds):
-                logger.warning(
-                    f"[WS-TIMESTAMP] Stale data detected: age={ts_info.get_age_seconds():.1f}s, "
-                    f"type={channel}, source={ts_info.source}"
-                )
-            
-            # Add timestamp info to message for downstream processing
-            data["_timestamp_info"] = ts_info.to_dict()
-            data["_age_seconds"] = ts_info.get_age_seconds()
-            data["_is_fresh"] = ts_info.is_fresh()
+            # Phase 3: Extract timestamp information for data freshness.
+            # THROUGHPUT FIX: orderbook_delta/snapshot arrive ~1100+/s and have
+            # their own venue-ts freshness + sequence enforcement in
+            # market_state — the generic timestamp-manager round trip per
+            # message is pure overhead on the flood path.
+            if channel in ("orderbook_snapshot", "orderbook_delta"):
+                data["_is_fresh"] = True
+            else:
+                ts_info = self._timestamp_manager.extract_timestamp_info(data, "websocket")
+
+                # Validate timestamp and log if stale
+                if not ts_info.is_timestamp_valid:
+                    logger.warning(
+                        f"[WS-TIMESTAMP] Invalid timestamp detected: {ts_info.to_dict()}"
+                    )
+
+                if not ts_info.is_fresh(self._timestamp_manager._max_age_seconds):
+                    logger.warning(
+                        f"[WS-TIMESTAMP] Stale data detected: age={ts_info.get_age_seconds():.1f}s, "
+                        f"type={channel}, source={ts_info.source}"
+                    )
+
+                # Add timestamp info to message for downstream processing
+                data["_timestamp_info"] = ts_info.to_dict()
+                data["_age_seconds"] = ts_info.get_age_seconds()
+                data["_is_fresh"] = ts_info.is_fresh()
 
             if channel == "ticker":
                 return QuoteEvent(
