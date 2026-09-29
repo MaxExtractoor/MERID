@@ -401,10 +401,11 @@ class TestFreshnessSLAEnforcement:
             result = await route_order_async(intent)
 
             assert result.status == "rejected"
-            # Canonical freshness rejection is the staleness_slo gate (5s SLO in
-            # _prepare_order_for_gate); the older 60s `stale_market_data` check
-            # in _route_live is now unreachable for entries.
-            assert "staleness_slo" in result.reason or "stale_market_data" in result.reason
+            # Canonical freshness rejection is the ws_event_age_exceeded gate
+            # (5s SLO in _prepare_order_for_gate); the older 60s
+            # `stale_market_data` check in _route_live is unreachable for
+            # entries.
+            assert "ws_event_age_exceeded" in result.reason or "stale_market_data" in result.reason
             
     @pytest.mark.asyncio
     async def test_order_accepted_when_fresh(self):

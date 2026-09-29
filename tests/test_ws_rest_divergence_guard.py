@@ -46,10 +46,15 @@ def _make_ws_state(
     )
 
 
-def _make_market_state_store(state):
+def _make_market_state_store(state, snapshot_ts=1000.0):
     store = MagicMock()
     store.get.return_value = state
     store._validate_yes_no_invariants.return_value = True
+    # Real snapshot marker so the aligned-divergence tracker reads a float, not
+    # a MagicMock.  Tests bump the book's _snapshot_ts to simulate a landed
+    # WS resnapshot; deltas never touch it.
+    book = SimpleNamespace(_snapshot_ts=snapshot_ts)
+    store._ob = SimpleNamespace(_books={state.ticker: book} if state else {})
     return store
 
 
@@ -85,6 +90,9 @@ def _make_intent(side="no", action="buy", price_cents=25, execution_mode=None):
         aggressiveness=1.0,
         execution_mode=execution_mode,
     )
+
+
+
 
 
 @pytest.mark.asyncio
@@ -218,16 +226,16 @@ async def test_ws_authoritative_blocks_not_marketable():
 
 
 @pytest.mark.asyncio
-async def test_not_marketable_marks_book_for_resync():
-    """2026-09-24: WS books diverging from fresh REST kept feeding phantom-edge
-    signals because the ``not_marketable`` rejection never invalidated the book.
-    The guard must quarantine the ticker (INVALID + FULL_SNAPSHOT recovery
-    requirement + RESYNC_REQUESTED) so deltas cannot re-arm execution, and
-    trigger the throttled WS+REST snapshot recovery."""
+async def test_pending_divergence_does_not_quarantine_fresh_ws():
+    """2026-09-29 source-aware contract: a *single* comparable WS/REST mismatch
+    is pending evidence, not corruption.  The fresh, contiguous WS book keeps
+    its authority — the order is judged on WS alone (edge_lost_at_submit when
+    not marketable) and the book is NOT quarantined.  Quarantine is reserved
+    for divergence that survives a forced WS snapshot rebuild."""
     state = _make_ws_state()
     state.executable = True
     store = _make_market_state_store(state)
-    # Fresh REST 20c away from WS on the NO-ask side -> not_marketable.
+    # Fresh REST 9c away from WS on the NO-ask side -> comparable divergence.
     port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
 
     intent = _make_intent(price_cents=10)  # below WS NO ask (21c)
@@ -243,20 +251,99 @@ async def test_not_marketable_marks_book_for_resync():
     assert result is not None
     assert result.status == "rejected"
     assert "not_marketable" in result.reason
-    store._set_snapshot_complete.assert_called_once_with(
-        intent.ticker, False, "divergence_not_marketable"
+    # Pending divergence must not invalidate a fresh authoritative WS book.
+    store._set_snapshot_complete.assert_not_called()
+    store._set_book_health.assert_not_called()
+    store._maybe_trigger_book_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persistent_divergence_after_resnapshot_quarantines():
+    """The hard-integrity path: a comparable mismatch that persists after a
+    forced WS snapshot rebuild is a genuine semantic defect — the book is
+    quarantined (INVALID + FULL_SNAPSHOT + RESYNC_REQUESTED) and the order is
+    blocked with ``divergence_persistent_after_resnapshot``."""
+    state = _make_ws_state()
+    state.executable = True
+    store = _make_market_state_store(state)
+    # 39c divergence on the NO side exceeds the 25c hard limit -> the first
+    # comparable observation already escalates to the verify state.
+    port = _make_port(rest_yes_bid=40, rest_yes_ask=41)
+
+    intent = _make_intent(price_cents=10)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        # Observation 1: comparable + hard -> WS_VERIFYING, resnapshot forced.
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+        assert result is not None
+        assert result.status == "rejected"
+        assert "divergence_pending_resnapshot" in result.reason
+        store._maybe_trigger_book_recovery.assert_called_once_with(
+            intent.ticker, "aligned_divergence"
+        )
+        store._set_snapshot_complete.assert_not_called()  # not quarantined yet
+
+        # A forced WS snapshot rebuild lands (apply_snapshot re-stamps the
+        # book's _snapshot_ts); the feeds still disagree on the next aligned
+        # check -> persistent semantic defect -> quarantine.
+        store._ob._books[intent.ticker]._snapshot_ts += 1.0
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "divergence_persistent_after_resnapshot" in result.reason
+    store._set_snapshot_complete.assert_called_with(
+        intent.ticker, False, "divergence_persistent"
     )
-    store._set_book_health.assert_called_once_with(
-        intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_not_marketable"
+    store._set_book_health.assert_called_with(
+        intent.ticker, BookHealth.RESYNC_REQUESTED, "divergence_persistent"
     )
-    # Quarantine contract: deltas alone must not re-arm a divergent book.
     assert state.data_quality == "INVALID"
     assert state.executable is False
     assert state.book_initialized is False
     assert state.recovery_required_source == "FULL_SNAPSHOT"
-    store._maybe_trigger_book_recovery.assert_called_once_with(
-        intent.ticker, "divergence_not_marketable"
-    )
+
+
+@pytest.mark.asyncio
+async def test_comparable_agreement_clears_verify_state():
+    """A comparable agreement must reset the persistence tracker — a resolved
+    mismatch cannot hold the ticker in WS_VERIFYING forever."""
+    from merid.event_venues.kalshi import order_router as _or
+
+    state = _make_ws_state()
+    store = _make_market_state_store(state)
+    divergent_port = _make_port(rest_yes_bid=40, rest_yes_ask=41)   # hard div
+    coherent_port = _make_port(rest_yes_bid=79, rest_yes_ask=80)    # agrees
+
+    intent = _make_intent(price_cents=25)  # marketable on WS NO ask 21; drift-safe
+    intent.selected_outcome_price_cents = 25
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        # Hard comparable divergence -> verify (this order pauses).
+        r1 = await _ws_rest_divergence_guard(
+            intent, divergent_port, TradingMode.LIVE, time.monotonic()
+        )
+        assert r1 is not None and "divergence_pending_resnapshot" in r1.reason
+        assert _or._aligned_div[intent.ticker]["verify_ts"] == 1000.0
+
+        # Comparable agreement clears the tracker before a snapshot lands.
+        r2 = await _ws_rest_divergence_guard(
+            intent, coherent_port, TradingMode.LIVE, time.monotonic()
+        )
+        assert r2 is None
+        assert _or._aligned_div[intent.ticker]["verify_ts"] is None
+        assert _or._aligned_div[intent.ticker]["n"] == 0
+
+        # The next divergence starts a fresh persistence count (pending, allow).
+        r3 = await _ws_rest_divergence_guard(
+            intent, divergent_port, TradingMode.LIVE, time.monotonic()
+        )
+        assert r3 is not None  # hard divergence -> verify again
+        assert "divergence_pending_resnapshot" in r3.reason
 
 
 @pytest.mark.asyncio
@@ -370,10 +457,13 @@ async def test_crossed_book_rejected_and_resync():
 
 @pytest.mark.asyncio
 async def test_hard_divergence_rejected():
-    """Divergence beyond the hard limit is treated as a rollover/corruption."""
+    """A comparable divergence beyond the hard limit escalates straight to
+    WS_VERIFYING on the first observation: the order pauses and a forced WS
+    snapshot rebuild is triggered.  It is not yet a quarantine — that requires
+    the disagreement to survive the rebuild."""
     state = _make_ws_state()
     store = _make_market_state_store(state)
-    # REST is 40c away on the NO ask side: YES bid 40 -> NO ask 60, WS NO ask 21.
+    # REST is ~39c away on the NO ask side: YES bid 40 -> NO ask 60, WS NO ask 21.
     port = _make_port(rest_yes_bid=40, rest_yes_ask=41)
 
     with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
@@ -386,7 +476,10 @@ async def test_hard_divergence_rejected():
 
     assert result is not None
     assert result.status == "rejected"
-    assert "integrity_failure" in result.reason
+    assert "divergence_pending_resnapshot" in result.reason
+    store._maybe_trigger_book_recovery.assert_called_once_with(
+        "KXSOL15M-26AUG301500-00", "aligned_divergence"
+    )
 
 
 @pytest.mark.asyncio
@@ -788,7 +881,7 @@ async def test_ws_age_rechecked_after_rest_wait():
             _make_intent(), _make_port(success=False), TradingMode.LIVE, time.monotonic()
         )
     assert result is not None
-    assert result.reason == "ws_rest_divergence:no_fresh_feed"
+    assert result.reason == "untrusted:no_fresh_feed"
 
 
 @pytest.mark.asyncio

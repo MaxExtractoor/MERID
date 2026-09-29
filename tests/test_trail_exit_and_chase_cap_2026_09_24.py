@@ -116,6 +116,12 @@ def _make_trail_position(**kwargs):
 def _run_guard(position, exit_reason, exit_price_cents, count=1, state=None):
     from merid.loop_15m import _run_exit_price_guard
 
+    # The loop_15m import above can take tens of seconds on a cold test
+    # process; refresh the mock timestamp so the intended age_ms (default 1s)
+    # is what the exit guard actually measures, not the import latency.
+    if state is not None:
+        state.book_updated_ts = time.monotonic() - 1.0
+
     def _get_market_state(_ticker):
         return (state, None)
 
@@ -629,17 +635,20 @@ def _make_chase_intent(price_cents=38, sel=38):
 
 @pytest.mark.asyncio
 async def test_edge_reprice_cannot_chase_past_selected_price(monkeypatch):
-    """Incident replay: decision NO@38, book walked to ~45; the edge budget
-    (~58c) must NOT lift the limit past sel+chase (43c).  Reject instead."""
+    """WS-authoritative contract: a comparable REST ask beyond sel+chase is
+    never covered — the limit stays put and the order proceeds only on the
+    WS-verified price (it simply won't fill if the REST view was the real
+    book).  The ceiling may not be lifted toward the edge budget."""
     monkeypatch.setenv("MERID_ENTRY_MAX_CHASE_CENTS", "5")
     from merid.event_venues.kalshi.order_router import _ws_rest_divergence_guard
     from merid.prediction.trading_mode import TradingMode
 
-    # WS NO ask = 100-80 = 20; REST NO ask = 100-56 = 44 (24c divergence < 25 hard).
+    # WS NO ask = 100-80 = 20; REST NO ask = 100-56 = 44 (> chase cap 29).
+    # sel=24 keeps the WS-leg drift at 4c so only the chase bound is exercised.
     state = _make_ws_state(80, 81)
     store = _make_store(state)
     port = _make_port(rest_yes_bid=56, rest_yes_ask=57)
-    intent = _make_chase_intent(price_cents=38, sel=38)
+    intent = _make_chase_intent(price_cents=24, sel=24)
 
     with patch(
         "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
@@ -649,21 +658,50 @@ async def test_edge_reprice_cannot_chase_past_selected_price(monkeypatch):
             intent, port, TradingMode.LIVE, time.monotonic()
         )
 
-    assert result is not None
-    assert result.status == "rejected"
-    assert "not_marketable" in result.reason
-    # The limit was never lifted toward the edge budget.
-    assert intent.price_cents == 38
+    assert result is None  # marketable on authoritative WS (24 >= NO ask 20)
+    # The limit was never lifted toward the REST ask or the edge budget.
+    assert intent.price_cents == 24
 
 
 @pytest.mark.asyncio
 async def test_edge_reprice_allows_bounded_chase(monkeypatch):
-    """A fresh ask inside sel+chase reprices to the capped budget, not _epc."""
+    """Comparable REST disagreement on fillability: when the REST-seen ask fits
+    inside sel+chase, the ceiling lifts to the capped budget — it costs nothing
+    when WS is right (fills at best ask) and rescues the fill when REST was."""
     monkeypatch.setenv("MERID_ENTRY_MAX_CHASE_CENTS", "5")
     from merid.event_venues.kalshi.order_router import _ws_rest_divergence_guard
     from merid.prediction.trading_mode import TradingMode
 
-    # REST NO ask = 100-61 = 39; WS NO ask = 20 -> fresh_ask 39 <= chase 43.
+    # WS NO ask = 20 (marketable at 24); REST NO ask = 100-73 = 27 (> 24 so the
+    # REST leg disagrees on fillability, but 27 <= chase cap 29 -> cover it).
+    state = _make_ws_state(80, 81)
+    store = _make_store(state)
+    port = _make_port(rest_yes_bid=73, rest_yes_ask=74)
+    intent = _make_chase_intent(price_cents=24, sel=24)
+
+    with patch(
+        "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
+        return_value=store,
+    ):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is None
+    # Lifted to the chase bound (29), never to the raw edge budget (~54).
+    assert intent.price_cents == 29
+
+
+@pytest.mark.asyncio
+async def test_divergent_ws_crash_signal_rejects_via_drift(monkeypatch):
+    """A WS leg reporting the ask 18c below the decision basis is a crash
+    signal on the authoritative feed — the drift guard rejects even though a
+    comparable REST leg disagrees.  No lift rescues a stale-thesis fill."""
+    monkeypatch.setenv("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+    from merid.event_venues.kalshi.order_router import _ws_rest_divergence_guard
+    from merid.prediction.trading_mode import TradingMode
+
+    # WS NO ask = 20 vs decision NO@38 -> 18c favorable drift > 8c cap.
     state = _make_ws_state(80, 81)
     store = _make_store(state)
     port = _make_port(rest_yes_bid=61, rest_yes_ask=62)
@@ -677,9 +715,10 @@ async def test_edge_reprice_allows_bounded_chase(monkeypatch):
             intent, port, TradingMode.LIVE, time.monotonic()
         )
 
-    assert result is None
-    # Lifted to the chase bound (43), never to the raw edge budget (~58).
-    assert intent.price_cents == 43
+    assert result is not None
+    assert result.status == "rejected"
+    assert "favorable_drift" in result.reason
+    assert intent.price_cents == 38
 
 
 @pytest.mark.asyncio
