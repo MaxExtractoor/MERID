@@ -200,7 +200,13 @@ def test_toxic_cell_needs_minimum_samples(monkeypatch):
               tte_seconds=200.0)
     assert d.code != "MATCHING_TOXIC_CELL"
     assert not d.allowed  # LCB EV still fails -> soft deny, not a free pass
-    assert d.code == "CELL_EVIDENCE_INSUFFICIENT"
+    # 2026-09-29: adaptive states split the old flat insufficiency into
+    # SOFT_PENALTY / CHALLENGE denies; still a deny without enough edge.
+    assert d.code in (
+        "CELL_EVIDENCE_INSUFFICIENT",
+        "SOFT_PENALTY_INSUFFICIENT",
+        "CHALLENGE_INSUFFICIENT",
+    )
 
 
 def test_recent_improvement_downgrades_hard_block():
@@ -350,3 +356,86 @@ def test_ticker_normalized_cell_counts():
     assert d.code.startswith("SPARSE_MATCHED")
     assert d.cell_n_eff == pytest.approx(1.0)
     assert d.sparse_uplift_cents == pytest.approx(ep.sparse_uplift_max_c())
+
+
+# --------------------------------------------------------------------------
+# Adaptive states (2026-09-29): CHALLENGE_ELIGIBLE / SOFT_PENALTY replace the
+# flat permanent block for matched-but-insufficient cells.
+# --------------------------------------------------------------------------
+
+def test_challenge_eligible_on_recent_contradiction():
+    # Dense matched cell is historically poor (25% wr vs 77c entry) but the
+    # recent-window sub-aggregate has flipped above break-even -> the stale
+    # prior gets a bounded challenge instead of a permanent block.
+    cells = {
+        "SOL|no|50-74|mid": _cell(w=10, l=30, n_eff=40, entry=65,
+                                  recent_w=6, recent_l=1),
+    }
+    d = _eval(cells, entry_price_cents=65.0, tte_seconds=450.0,
+              net_edge_cents=5.0)
+    assert d.code == "CHALLENGE_ELIGIBLE"
+    assert d.allowed
+    assert d.escape_required  # bounded lane: post-only, 1 contract, daily cap
+
+
+def test_challenge_insufficient_when_model_edge_thin():
+    cells = {
+        "SOL|no|50-74|mid": _cell(w=10, l=30, n_eff=40, entry=65,
+                                  recent_w=6, recent_l=1),
+    }
+    # req_margin ~= 3.0 + small uplift; 1.0c model edge cannot clear it.
+    d = _eval(cells, entry_price_cents=65.0, tte_seconds=450.0,
+              net_edge_cents=1.0)
+    assert d.code == "CHALLENGE_INSUFFICIENT"
+    assert not d.allowed
+
+
+def test_soft_penalty_pass_requires_elevated_edge():
+    # Same insufficient matched cell but recent outcomes do NOT contradict
+    # the prior (recent wr stays below the 65c break-even).  Admission needs
+    # margin + uplift + soft_penalty_extra on the model edge.
+    cells = {
+        "SOL|no|50-74|mid": _cell(w=10, l=30, n_eff=40, entry=65,
+                                  recent_w=1, recent_l=6),
+    }
+    d = _eval(cells, entry_price_cents=65.0, tte_seconds=450.0,
+              net_edge_cents=9.0)
+    assert d.code == "SOFT_PENALTY_PASS"
+    assert d.allowed and d.escape_required
+    assert d.required_margin_cents > 3.0  # elevated above plain margin+uplift
+
+
+def test_soft_penalty_insufficient_below_elevated_edge():
+    cells = {
+        "SOL|no|50-74|mid": _cell(w=10, l=30, n_eff=40, entry=65,
+                                  recent_w=1, recent_l=6),
+    }
+    d = _eval(cells, entry_price_cents=65.0, tte_seconds=450.0,
+              net_edge_cents=5.0)
+    assert d.code == "SOFT_PENALTY_INSUFFICIENT"
+    assert not d.allowed
+
+
+def test_adaptive_states_kill_switch_restores_flat_block(monkeypatch):
+    monkeypatch.setenv("MERID_EVIDENCE_ADAPTIVE_STATES", "0")
+    cells = {
+        "SOL|no|50-74|mid": _cell(w=10, l=30, n_eff=40, entry=65,
+                                  recent_w=6, recent_l=1),
+    }
+    d = _eval(cells, entry_price_cents=65.0, tte_seconds=450.0,
+              net_edge_cents=9.0)
+    assert d.code == "CELL_EVIDENCE_INSUFFICIENT"
+    assert not d.allowed
+
+
+def test_toxic_cell_still_hard_blocks_despite_adaptive():
+    # n_eff >= 50, deeply negative LCB EV, recent outcomes agree with the
+    # toxic prior -> permanent hard block; no challenge path.
+    cells = {
+        "SOL|no|75-89|late": _cell(w=10, l=70, n_eff=80, entry=80,
+                                   recent_w=1, recent_l=9),
+    }
+    d = _eval(cells, entry_price_cents=80.0, tte_seconds=200.0,
+              net_edge_cents=9.0)
+    assert d.code == "MATCHING_TOXIC_CELL"
+    assert not d.allowed

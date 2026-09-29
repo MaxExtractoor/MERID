@@ -19,6 +19,7 @@ This ensures:
 - Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.5% (industry standard)
 """
 
+import json
 import os
 import time
 from collections import defaultdict
@@ -66,6 +67,10 @@ class OrderCandidate:
     model_prob: float
     agent_name: str
     candidate_id: str = ""
+    # Reserve decomposition (cents/contract) carried from the TradeDecision
+    # for the ALLOCATION-EV-FLOOR audit record.  All keys optional; reserves
+    # already deducted from edge_pct are informational, never re-applied.
+    cost_breakdown_cents: Optional[Dict[str, Any]] = None
     # Effective-quote ownership at candidate creation.  A REST-owned quote is
     # degraded execution (WS book unhealthy) and pays an extra edge reserve;
     # an untrusted owner must never reach the allocator.
@@ -473,6 +478,39 @@ class GlobalAllocator:
                     c.asset, _to_edge_percent(c.edge_pct),
                     _to_edge_percent(_required_edge_frac),
                     _to_edge_percent(asset_min_edge), _degraded,
+                )
+                # 2026-09-29: decomposed EV-floor record so a reject shows the
+                # exact reserve stack it failed against.  Reserves already
+                # deducted inside edge_pct are emitted for context only.
+                _cb = c.cost_breakdown_cents or {}
+                logger.info(
+                    "[ALLOCATION-EV-FLOOR] %s",
+                    json.dumps({
+                        "event": "allocation_ev_floor",
+                        "candidate_id": c.candidate_id,
+                        "asset": c.asset,
+                        "side": c.side,
+                        "ticker": c.ticker,
+                        "price_cents": c.price_cents,
+                        "raw_net_ev_cents": round(candidate_edge_frac * 100.0, 3),
+                        "base_floor_cents": round(asset_min_edge_frac * 100.0, 3),
+                        "degraded_quote_reserve_cents": round(
+                            (_required_edge_frac - asset_min_edge_frac) * 100.0, 3
+                        ),
+                        "total_required_ev_cents": round(_required_edge_frac * 100.0, 3),
+                        "already_deducted_from_ev": {
+                            "entry_fee_cents": _cb.get("entry_fee_cents"),
+                            "exit_reserve_cents": _cb.get("exit_reserve_cents"),
+                            "fill_or_slippage_cents": _cb.get("fill_reserve_cents"),
+                            "adverse_selection_reserve_cents": _cb.get("adverse_selection_reserve_cents"),
+                            "model_uncertainty_reserve_cents": _cb.get("model_uncertainty_reserve_cents"),
+                            "evidence_uncertainty_reserve_cents": _cb.get("evidence_uncertainty_reserve_cents"),
+                        },
+                        "evidence_lcb_net_ev_cents": _cb.get("lcb_net_ev_cents"),
+                        "quote_owner": getattr(c, "quote_owner", None),
+                        "degraded_mode": _degraded,
+                        "decision": "REJECTED",
+                    }, default=str),
                 )
 
         # STAGE: CONFIDENCE
