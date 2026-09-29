@@ -46,6 +46,7 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "held_entry_price_below_floor",
     "calibration_evidence_",
     "live_evidence_",
+    "evidence_",
     "market_fade_blocked_",
 )
 

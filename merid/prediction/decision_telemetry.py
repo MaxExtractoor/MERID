@@ -178,7 +178,7 @@ def _terminal_code(
         if (decision or {}).get("regime_reject_cause") == "tte_floor":
             return "MARKET_UNAVAILABLE"
         return "PRICE_BAND_REJECT"
-    if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("market_fade_blocked"):
+    if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("evidence_") or rl.startswith("market_fade_blocked"):
         return "CALIBRATION_QUARANTINE"
     if "insufficient_depth" in rl or rl.startswith("fill_or_depth"):
         return "FILL_OR_DEPTH_REJECT"
@@ -482,6 +482,17 @@ def build_asset_record(
         "regime_reject_cause": _first_str(
             _resolve(candidate, decision, ["regime_reject_cause"], ["regime_reject_cause"])
         ),
+        # Cell-aware evidence policy (cell_aware_v1): per-side evidence
+        # decision detail — cell key, hierarchy level used, decayed effective
+        # n, posterior mean/LCB, LCB net EV, sparse uplift, hard-block flag.
+        "evidence_policy_version": _first_str(
+            _resolve(candidate, decision, ["evidence_policy_version"], ["evidence_policy_version"])
+        ),
+        "decision_lane": _first_str(
+            _resolve(candidate, decision, ["decision_lane"], ["decision_lane"])
+        ),
+        "evidence_yes": _resolve(candidate, decision, ["evidence_yes"], ["evidence_yes"]),
+        "evidence_no": _resolve(candidate, decision, ["evidence_no"], ["evidence_no"]),
         # Model vs market
         "selected_side": _side,
         "model_p_yes": _p_yes,

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
+from merid.prediction import evidence_policy
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
@@ -2561,24 +2562,72 @@ def compute_trade_decision(
     # notes at module level — applies the evidence-floor semantics to the
     # trailing settled-outcome window the audit ledger rebuilds per settlement.
     # Fail-open on absent/under-sampled cohorts (static floor above still applies).
+    # 2026-09-29: cell-aware policy (evidence_policy.py / artifact v2) replaces
+    # the price-blind asset-side veto: hierarchical Beta-binomial posterior at
+    # asset x side x price-bucket x TTE-bucket with partial pooling to the
+    # nearest adequately-sampled ancestor, scored as an LCB net-EV check at the
+    # candidate's own executable price.  Only a dense, matched, non-contradicted
+    # toxic cell hard-blocks; sparse cells raise the required margin via an
+    # uncertainty uplift and route through the bounded escape lane.
     if MERID_LIVE_EVIDENCE_GATE:
         _live_ev = _load_live_evidence()
         if _live_ev is not None:
             indicators["live_evidence_evaluated"] = True
-            _yes_live_ok, _yes_live_det = _live_evidence_allows(
-                _live_ev, asset, "yes", yes_price_cents, fee
-            )
-            _no_live_ok, _no_live_det = _live_evidence_allows(
-                _live_ev, asset, "no", no_price_cents, fee
-            )
-            if not _yes_live_ok and yes_evidence_ok:
-                yes_evidence_ok = False
-                yes_evidence_reason = f"live_evidence_{_yes_live_det['level']}_yes"
-                indicators[yes_evidence_reason] = _yes_live_det
-            if not _no_live_ok and no_evidence_ok:
-                no_evidence_ok = False
-                no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
-                indicators[no_evidence_reason] = _no_live_det
+            if evidence_policy.enabled() and isinstance(
+                (_live_ev or {}).get("cells"), dict
+            ) and (_live_ev or {}).get("cells"):
+                indicators["evidence_policy_version"] = (
+                    evidence_policy.EVIDENCE_POLICY_VERSION
+                )
+                for _side, _px, _ne_c in (
+                    ("yes", yes_price_cents, float(yes_breakdown.net_edge) * 100.0),
+                    ("no", no_price_cents, float(no_breakdown.net_edge) * 100.0),
+                ):
+                    _ed = evidence_policy.evaluate(
+                        _live_ev,
+                        asset,
+                        _side,
+                        _px,
+                        seconds_to_expiry,
+                        fee,
+                        MERID_LIVE_EVIDENCE_MARGIN,
+                        _ne_c,
+                    )
+                    indicators[f"evidence_{_side}"] = _ed.detail()
+                    if _ed.escape_required:
+                        indicators[f"evidence_escape_{_side}"] = True
+                    if not _ed.allowed:
+                        _reason_stem = {
+                            "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
+                            "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
+                            "MATCHING_TOXIC_CELL": "evidence_toxic_cell",
+                            "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
+                            "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
+                            "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
+                        }.get(_ed.code, f"evidence_{_ed.code.lower()}")
+                        if _side == "yes" and yes_evidence_ok:
+                            yes_evidence_ok = False
+                            yes_evidence_reason = f"{_reason_stem}_yes"
+                            indicators[yes_evidence_reason] = _ed.detail()
+                        elif _side == "no" and no_evidence_ok:
+                            no_evidence_ok = False
+                            no_evidence_reason = f"{_reason_stem}_no"
+                            indicators[no_evidence_reason] = _ed.detail()
+            else:
+                _yes_live_ok, _yes_live_det = _live_evidence_allows(
+                    _live_ev, asset, "yes", yes_price_cents, fee
+                )
+                _no_live_ok, _no_live_det = _live_evidence_allows(
+                    _live_ev, asset, "no", no_price_cents, fee
+                )
+                if not _yes_live_ok and yes_evidence_ok:
+                    yes_evidence_ok = False
+                    yes_evidence_reason = f"live_evidence_{_yes_live_det['level']}_yes"
+                    indicators[yes_evidence_reason] = _yes_live_det
+                if not _no_live_ok and no_evidence_ok:
+                    no_evidence_ok = False
+                    no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
+                    indicators[no_evidence_reason] = _no_live_det
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
     if selected_side_pre_edge is None and best_side is not None:
@@ -3111,6 +3160,20 @@ def compute_trade_decision(
     else:
         p_yes_calibrated = max(0.05, min(0.95, float(p_yes_raw)))
         p_no_calibrated = 1.0 - p_yes_calibrated
+
+    # Cell-aware evidence escape lane: a pass resting on sparse/pooled cell
+    # evidence is admissible only as a bounded post-only canary entry.  The
+    # lane marker is consumed by the order-style forcing block in
+    # agent_grid_15m (maker post-only, one contract, daily cap).
+    if selected_outcome is not None:
+        _sel_ev = indicators.get(f"evidence_{selected_outcome}") or {}
+        if (
+            isinstance(_sel_ev, dict)
+            and _sel_ev.get("allowed")
+            and _sel_ev.get("escape_required")
+            and not indicators.get("decision_lane")
+        ):
+            indicators["decision_lane"] = "evidence_cell_escape"
 
     decision = TradeDecision(
         run_id=run_id,

@@ -8435,16 +8435,21 @@ class LeanAgent15m:
         # Cheap-tail canary lane must be post-only/maker, one contract, short TTL.
         # This is enforced regardless of the ordinary taker/maker selection because
         # the canary is an exploration lane with explicit no-chase rules.
+        # The evidence-cell escape lane gets the same bounded treatment: its
+        # pass rests on sparse/pooled cell evidence, so it enters only as a
+        # one-contract post-only order, capped per day.
+        _decision_lane = decision.indicators.get("decision_lane")
         if (
             decision.selected_outcome is not None
-            and decision.indicators.get("decision_lane") == "cheap_tail_canary"
+            and _decision_lane in ("cheap_tail_canary", "evidence_cell_escape")
         ):
             logger.info(
-                "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s "
+                "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s lane=%s "
                 "liquidity_role=%s -> maker post_only=%s tif=%s fee_cents=%.3f",
                 asset,
                 decision.selected_outcome,
                 int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else None,
+                _decision_lane,
                 liquidity_role,
                 True,
                 "gtc",
@@ -8456,6 +8461,18 @@ class LeanAgent15m:
             time_in_force = "gtc"
             aggressiveness = 0.0
             fee_cents = maker_fee_cents
+            if _decision_lane == "evidence_cell_escape":
+                try:
+                    from merid.prediction import evidence_policy as _ep
+                    _n = _ep.record_escape_submission()
+                    logger.info(
+                        "[EVIDENCE-ESCAPE] asset=%s side=%s lane submissions today=%d",
+                        asset, decision.selected_outcome, _n,
+                    )
+                except Exception:
+                    pass
+                if int(decision.approved_size_cc) > 100:
+                    decision = replace(decision, approved_size_cc=Decimal("100"))
 
         # Production-safe containment: compute a Bachelier-only shadow decision so
         # we can compare the live hybrid side against the baseline side on the same
@@ -9985,6 +10002,10 @@ class LeanAgent15m:
                 "no_block": _ind.get("no_block"),
                 "evidence_ok_yes": _ind.get("calibration_evidence_yes"),
                 "evidence_ok_no": _ind.get("calibration_evidence_no"),
+                "evidence_policy_version": _ind.get("evidence_policy_version"),
+                "evidence_yes": _ind.get("evidence_yes"),
+                "evidence_no": _ind.get("evidence_no"),
+                "decision_lane": _ind.get("decision_lane"),
                 "walkforward_cal_applied": _ind.get("walkforward_cal_applied"),
                 "market_anchor_weight": _ind.get("market_anchor_weight"),
                 "ws_age_ms": _ind.get("ws_last_event_age_ms") or _ind.get("quote_age_ms"),
@@ -18312,6 +18333,40 @@ class LeanAgentGrid15m:
                         _n_sel,
                         " ".join(_hb_parts),
                         json.dumps(_rc, sort_keys=True),
+                    )
+                except Exception:
+                    pass
+
+                # Evidence-policy heartbeat: per-asset evidence gate posture.
+                # allowed = sides passing the cell-aware gate;
+                # soft_penalty = sides carrying a sparse-evidence uplift or a
+                # non-hard-block denial; hard_blocks = matching toxic cells.
+                try:
+                    _ev_parts = []
+                    for _r in records:
+                        _asset_name = _r.get("asset", "?")
+                        _allowed = 0
+                        _soft = 0
+                        _hard = 0
+                        for _s in ("yes", "no"):
+                            _ev = _r.get(f"evidence_{_s}") or {}
+                            if not isinstance(_ev, dict) or not _ev.get("code"):
+                                continue
+                            if _ev.get("code") == "MATCHING_TOXIC_CELL":
+                                _hard += 1
+                            elif _ev.get("allowed"):
+                                _allowed += 1
+                                if float(_ev.get("sparse_uplift_cents") or 0.0) > 0:
+                                    _soft += 1
+                            else:
+                                _soft += 1
+                        _ev_parts.append(
+                            f"{_asset_name} allowed={_allowed} "
+                            f"soft_penalty={_soft} hard_blocks={_hard}"
+                        )
+                    logger.info(
+                        "[EVIDENCE-POLICY-HEARTBEAT] cycle=%d %s",
+                        tick, " | ".join(_ev_parts),
                     )
                 except Exception:
                     pass
