@@ -360,6 +360,16 @@ class KalshiWebSocket(EventVenueStream):
         self._last_raw_delivery_ts: float = 0.0
         self._ws_idle_threshold: float = float(os.getenv("KALSHI_WS_IDLE_THRESHOLD", "15.0"))  # 15s default
 
+        # Wire-lag telemetry: per-channel distribution of venue_ts→recv-return
+        # latency plus inter-recv gaps.  wire_ms attributes delay to upstream
+        # (venue publish + network + our socket-drain); recv_gap_ms measures
+        # how long our loop went without a recv() returning — together they
+        # discriminate venue-side latency from local socket starvation.
+        self._wire_lag_stats: Dict[str, Dict[str, float]] = {}
+        self._last_recv_return_ns: int = 0
+        self._recv_gap_max_ms: float = 0.0
+        self._wire_lag_last_log_ts: float = 0.0
+
         # B3: register graceful-shutdown snapshot handler
         self.register_sigterm_snapshot()
 
@@ -1666,6 +1676,60 @@ class KalshiWebSocket(EventVenueStream):
 
                     # CRITICAL DIAGNOSTIC: Channel-classified counter for orderbook messages
                     msg_type = data.get("type", "unknown")
+
+                    # Wire-lag accounting: venue_ts→recv latency per channel +
+                    # inter-recv gap.  Cheap dict math on the hot path; the
+                    # distribution is flushed to the log every 30s.
+                    try:
+                        _gap_ms = (
+                            (_recv_ns - self._last_recv_return_ns) / 1e6
+                            if self._last_recv_return_ns else 0.0
+                        )
+                        self._last_recv_return_ns = _recv_ns
+                        if _gap_ms > self._recv_gap_max_ms:
+                            self._recv_gap_max_ms = _gap_ms
+                        _vts = data.get("ts_ms") or data.get("ts")
+                        if _vts is None and isinstance(_nested, dict):
+                            _vts = _nested.get("ts_ms") or _nested.get("ts")
+                        _wire_ms = None
+                        if _vts is not None:
+                            if isinstance(_vts, str):
+                                from datetime import datetime as _dt
+                                _vms = _dt.fromisoformat(_vts.replace("Z", "+00:00")).timestamp() * 1000.0
+                            else:
+                                _v = float(_vts)
+                                _vms = _v if _v > 1e12 else _v * 1000.0
+                            _wire_ms = _recv_wall_ms - _vms
+                        st = self._wire_lag_stats.setdefault(
+                            msg_type, {"n": 0, "wire_sum": 0.0, "wire_max": 0.0, "gap_max": 0.0}
+                        )
+                        st["n"] += 1
+                        if _wire_ms is not None:
+                            st["wire_sum"] += _wire_ms
+                            if _wire_ms > st["wire_max"]:
+                                st["wire_max"] = _wire_ms
+                        if _gap_ms > st["gap_max"]:
+                            st["gap_max"] = _gap_ms
+                        _now_mono = _time.monotonic()
+                        if _now_mono - self._wire_lag_last_log_ts >= 30.0:
+                            self._wire_lag_last_log_ts = _now_mono
+                            _parts = []
+                            for _ch, _s in sorted(self._wire_lag_stats.items()):
+                                _wm = (
+                                    f"wire_avg={_s['wire_sum']/_s['n']:.0f}ms wire_max={_s['wire_max']:.0f}ms"
+                                    if _s["wire_sum"]
+                                    else "wire=n/a"
+                                )
+                                _parts.append(f"{_ch}[n={_s['n']:.0f} {_wm} gap_max={_s['gap_max']:.0f}ms]")
+                            logger.info(
+                                "[WS-WIRE-LAG] %s | recv_gap_max=%.0fms",
+                                " ".join(_parts), self._recv_gap_max_ms,
+                            )
+                            self._wire_lag_stats = {}
+                            self._recv_gap_max_ms = 0.0
+                    except Exception:
+                        pass
+
                     if msg_type in ("orderbook_snapshot", "orderbook_delta"):
                         if not hasattr(self, '_orderbook_msgs_seen'):
                             self._orderbook_msgs_seen = 0
