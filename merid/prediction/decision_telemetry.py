@@ -148,6 +148,7 @@ def _terminal_code(
     allocator_selected: bool,
     rejection_reason: str,
     best_ev_cents: Optional[float],
+    decision: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Map a cycle outcome to the canonical terminal code."""
     if allocator_selected:
@@ -172,6 +173,10 @@ def _terminal_code(
     if "lifecycle" in rl or "no_trade_without_exit" in rl:
         return "ENTRY_LIFECYCLE_INVALID"
     if "both_sides_disabled_regime" in rl or "price_band" in rl or "final_price_out_of_range" in rl:
+        # The regime gate fires on price band OR on the per-regime TTE floor;
+        # a side still in-band without the time bound means the window closed.
+        if (decision or {}).get("regime_reject_cause") == "tte_floor":
+            return "MARKET_UNAVAILABLE"
         return "PRICE_BAND_REJECT"
     if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("market_fade_blocked"):
         return "CALIBRATION_QUARANTINE"
@@ -418,7 +423,7 @@ def build_asset_record(
         "terminal_stage": _terminal_stage(waterfall, candidate, allocator_selected, allocator_note),
         "terminal_code": _terminal_code(
             waterfall, candidate, allocator_selected,
-            str(rejection_reason or ""), _best_ev_c,
+            str(rejection_reason or ""), _best_ev_c, decision,
         ),
         "rejection_chain": _rejection_chain(waterfall),
         "minutes_to_expiry": _minutes_to_expiry,
@@ -473,6 +478,9 @@ def build_asset_record(
         ),
         "walkforward_cal_applied": _first_bool(
             _resolve(candidate, decision, ["walkforward_cal_applied"], ["walkforward_cal_applied"])
+        ),
+        "regime_reject_cause": _first_str(
+            _resolve(candidate, decision, ["regime_reject_cause"], ["regime_reject_cause"])
         ),
         # Model vs market
         "selected_side": _side,
