@@ -3485,6 +3485,22 @@ class KalshiWebSocketBridge:
         try:
             catalog_snapshot = catalog.snapshot()
             catalog_tickers = set(m.market.market_id for m in catalog_snapshot.markets)
+            # 2026-09-29: pre-warm next-window markets — the catalog fetches
+            # ~30m ahead, so the upcoming 15m market is listed while the
+            # current window is live.  Only joins the poll set inside the
+            # pre-warm window so REST load stays flat mid-window.
+            _prewarm_min = float(os.getenv("MERID_15M_PREWARM_MINUTES", "6"))
+            for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                try:
+                    _cur = catalog.get_current_15m_market(_a)
+                    _cur_mte = getattr(_cur, "minutes_to_expiry", None) if _cur else None
+                    if _cur_mte is not None and _cur_mte > _prewarm_min:
+                        continue
+                    _nxt = catalog.get_next_15m_market(_a)
+                    if _nxt is not None and getattr(_nxt.market, "market_id", None):
+                        catalog_tickers.add(_nxt.market.market_id)
+                except Exception:
+                    pass
             current_tickers = set(tickers)
             
             logger.info("[WS-FALLBACK] Initial catalog sync: current=%d tickers, catalog=%d tickers", len(current_tickers), len(catalog_tickers))
@@ -3537,6 +3553,22 @@ class KalshiWebSocketBridge:
                         catalog_snapshot = catalog.snapshot()
                         # Extract market_id from CatalogMarket objects (which wrap EventMarket)
                         catalog_tickers = set(m.market.market_id for m in catalog_snapshot.markets)
+                        # 2026-09-29: pre-warm next-window markets so book
+                        # state exists in the store before the window opens.
+                        # Gated to the last MERID_15M_PREWARM_MINUTES of the
+                        # current window to keep REST load flat mid-window.
+                        _prewarm_min = float(os.getenv("MERID_15M_PREWARM_MINUTES", "6"))
+                        for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            try:
+                                _cur = catalog.get_current_15m_market(_a)
+                                _cur_mte = getattr(_cur, "minutes_to_expiry", None) if _cur else None
+                                if _cur_mte is not None and _cur_mte > _prewarm_min:
+                                    continue
+                                _nxt = catalog.get_next_15m_market(_a)
+                                if _nxt is not None and getattr(_nxt.market, "market_id", None):
+                                    catalog_tickers.add(_nxt.market.market_id)
+                            except Exception:
+                                pass
                         current_tickers = set(tickers)
                         
                         logger.info("[WS-FALLBACK] Catalog check: current=%d tickers, catalog=%d tickers", len(current_tickers), len(catalog_tickers))
