@@ -44,6 +44,9 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "cost_basis_override_",
     "p_selected_below_pi_star",
     "held_entry_price_below_floor",
+    "calibration_evidence_",
+    "live_evidence_",
+    "market_fade_blocked_",
 )
 
 
