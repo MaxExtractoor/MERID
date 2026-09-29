@@ -9962,6 +9962,33 @@ class LeanAgent15m:
             edge_threshold = float(decision.edge_threshold) if decision.edge_threshold is not None else None
             _ind = decision.indicators or {}
             context.update({
+                "ticker": getattr(decision, "ticker", None),
+                "decision_id": getattr(decision, "decision_id", None),
+                "spot_price": spot_price,
+                "minutes_to_expiry": (seconds_to_expiry / 60.0) if seconds_to_expiry is not None else None,
+                "model_p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
+                "model_p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
+                "p_yes_raw": _ind.get("p_yes_raw"),
+                "yes_bid_cents": _ind.get("yes_bid_cents"),
+                "yes_ask_cents": _ind.get("yes_ask_cents"),
+                "no_bid_cents": _ind.get("no_bid_cents"),
+                "no_ask_cents": _ind.get("no_ask_cents"),
+                "yes_entry_price_cents": _ind.get("yes_entry_price_cents"),
+                "no_entry_price_cents": _ind.get("no_entry_price_cents"),
+                "yes_ev_net_cents": _ind.get("yes_ev_net_cents"),
+                "no_ev_net_cents": _ind.get("no_ev_net_cents"),
+                "required_edge_yes_cents": (float(_ind["yes_min_edge"]) * 100.0) if _ind.get("yes_min_edge") is not None else None,
+                "required_edge_no_cents": (float(_ind["no_min_edge"]) * 100.0) if _ind.get("no_min_edge") is not None else None,
+                "yes_eligible": _ind.get("yes_qualifies"),
+                "no_eligible": _ind.get("no_qualifies"),
+                "yes_block": _ind.get("yes_block"),
+                "no_block": _ind.get("no_block"),
+                "evidence_ok_yes": _ind.get("calibration_evidence_yes"),
+                "evidence_ok_no": _ind.get("calibration_evidence_no"),
+                "walkforward_cal_applied": _ind.get("walkforward_cal_applied"),
+                "market_anchor_weight": _ind.get("market_anchor_weight"),
+                "ws_age_ms": _ind.get("ws_last_event_age_ms") or _ind.get("quote_age_ms"),
+                "rti_age_ms": _ind.get("rti_age_ms"),
                 "p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
                 "p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
                 "yes_edge": float(decision.yes_net_edge) if decision.yes_net_edge is not None else None,
@@ -12258,8 +12285,15 @@ class LeanAgent15m:
             self._record_signal_rejection(
                 "both_sides_disabled_regime",
                 market_id=getattr(market, 'market_id', None),
+                ticker=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
+                minutes_to_expiry=(seconds_to_expiry / 60.0) if seconds_to_expiry is not None else None,
                 reference_price=spot_price,
+                spot_price=spot_price,
+                yes_entry_price_cents=yes_price_cents,
+                no_entry_price_cents=no_price_cents,
+                yes_ask_cents=yes_price_cents,
+                no_ask_cents=no_price_cents,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
             )
             return None
@@ -16621,6 +16655,34 @@ class LeanAgent15m:
 
             self._record_waterfall("market_open", True)
 
+            # Stamp market/quote context once per cycle so every downstream
+            # rejection (regime, edge, evidence, depth) carries the executable
+            # prices, ticker, and freshness in decision telemetry.
+            try:
+                _ticker_now = (
+                    getattr(market, 'market_id', None)
+                    or getattr(getattr(market, 'market', None), 'market_id', None)
+                )
+                _ms_now = (
+                    self.market_state_store.get(_ticker_now)
+                    if (self.market_state_store and _ticker_now) else None
+                )
+                _yb = getattr(_ms_now, 'best_bid_cents', None)
+                _ya = getattr(_ms_now, 'best_ask_cents', None)
+                self._telemetry_update(
+                    ticker=_ticker_now,
+                    spot_price=spot_price,
+                    minutes_to_expiry=minutes_to_expiry,
+                    yes_bid_cents=_yb,
+                    yes_ask_cents=_ya,
+                    no_bid_cents=(100 - _ya) if isinstance(_ya, (int, float)) and _ya else None,
+                    no_ask_cents=(100 - _yb) if isinstance(_yb, (int, float)) and _yb else None,
+                    ws_age_ms=getattr(_ms_now, 'ws_last_event_age_ms', None),
+                    market_state_age_ms=getattr(_ms_now, 'age_ms', None),
+                )
+            except Exception:
+                pass
+
             signal = self._generate_signal(spot_price, market, minutes_to_expiry, tick)
 
             if not signal:
@@ -18077,8 +18139,9 @@ class LeanAgentGrid15m:
             telemetry_state["emitted"] = True
             try:
                 from merid.prediction import decision_telemetry as _dt
-                if not _dt.telemetry_enabled():
-                    return
+                # Build records and emit the console heartbeat unconditionally;
+                # the flag gates only the JSONL/scorecard sink writes.
+                _telemetry_write_enabled = _dt.telemetry_enabled()
                 ranked = sorted(
                     telemetry_candidates_by_asset.values(),
                     key=lambda c: float(c.get('edge_pct') or 0.0),
@@ -18217,6 +18280,33 @@ class LeanAgentGrid15m:
                         ctr["signal_rejected"] += 1
                         ctr["total_rejections"] += 1
                         ctr["constraint_reasons"][_reason] = ctr["constraint_reasons"].get(_reason, 0) + 1
+
+                # Compact per-cycle heartbeat: one line answers "what happened
+                # to every asset this cycle" without opening the JSONL sink.
+                # Emitted even when MERID_DECISION_TELEMETRY=0 (console-only).
+                try:
+                    _hb_parts = []
+                    _rc: Dict[str, int] = {}
+                    for _r in records:
+                        _tc = _r.get("terminal_code") or "UNCLASSIFIED"
+                        _hb_parts.append(f"{_r.get('asset','?')}={_tc}")
+                        _rc[_tc] = _rc.get(_tc, 0) + 1
+                    _n_sel = sum(1 for _r in records if _r.get("allocator_selected"))
+                    logger.info(
+                        "[15M-DECISION-HEARTBEAT] cycle=%d assets=%d/%d candidates=%d selected=%d %s reasons=%s",
+                        tick,
+                        len(records),
+                        len(self._agents),
+                        len(candidates),
+                        _n_sel,
+                        " ".join(_hb_parts),
+                        json.dumps(_rc, sort_keys=True),
+                    )
+                except Exception:
+                    pass
+
+                if not _telemetry_write_enabled:
+                    return
 
                 counter_list = list(counters.values())
                 if counter_list:

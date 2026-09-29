@@ -2032,6 +2032,18 @@ def compute_trade_decision(
     # z-score are attached below after the quote and vol resolution.
     indicators = dict(indicators) if indicators else {}
     indicators.setdefault("annualized_vol_requested", float(annualized_vol))
+    # Executable quotes are stamped up-front so every downstream no-trade
+    # (including Layer-1/2 gates) carries the prices that were evaluated.
+    _yes_entry_c = yes_ask_cents if yes_ask_cents > 0 else (100.0 - no_bid_cents)
+    _no_entry_c = no_ask_cents if no_ask_cents > 0 else (100.0 - yes_bid_cents)
+    indicators.update({
+        "yes_bid_cents": yes_bid_cents,
+        "yes_ask_cents": yes_ask_cents,
+        "no_bid_cents": no_bid_cents,
+        "no_ask_cents": no_ask_cents,
+        "yes_entry_price_cents": int(round(_yes_entry_c)),
+        "no_entry_price_cents": int(round(_no_entry_c)),
+    })
 
     def _no_trade(reason: str) -> TradeDecision:
         decision = TradeDecision(
@@ -2626,6 +2638,57 @@ def compute_trade_decision(
         and not tail_guard_violation_no
         and no_evidence_ok
     )
+
+    # Candidate-surface export: per-side executable economics and the first
+    # failing condition per side, so a rejected evaluation is auditable from
+    # telemetry alone (no side's state is lost when the other side wins or
+    # when both fail).
+    def _side_block_reason(
+        side: str,
+        bd: EdgeBreakdown,
+        min_edge_s: float,
+        min_p_s: float,
+        evidence_ok_s: bool,
+        tail_violation_s: bool,
+    ) -> Optional[str]:
+        if tail_violation_s:
+            return f"tail_guard_{side}"
+        if not evidence_ok_s:
+            return (
+                yes_evidence_reason if side == "yes" else no_evidence_reason
+            ) or f"evidence_{side}"
+        if bd.net_edge < min_edge_s:
+            return f"edge_below_threshold_{side}"
+        if bd.p_selected <= min_p_s:
+            return f"cost_basis_{side}"
+        return None
+
+    indicators.update({
+        "yes_bid_cents": yes_bid_cents,
+        "yes_ask_cents": yes_ask_cents,
+        "no_bid_cents": no_bid_cents,
+        "no_ask_cents": no_ask_cents,
+        "yes_entry_price_cents": yes_price_cents,
+        "no_entry_price_cents": no_price_cents,
+        "yes_ev_net_cents": float(yes_breakdown.net_edge) * 100.0,
+        "no_ev_net_cents": float(no_breakdown.net_edge) * 100.0,
+        "yes_gross_edge_cents": float(yes_breakdown.gross_edge) * 100.0,
+        "no_gross_edge_cents": float(no_breakdown.gross_edge) * 100.0,
+        "yes_p_selected": float(yes_breakdown.p_selected),
+        "no_p_selected": float(no_breakdown.p_selected),
+        "yes_min_p_selected": float(yes_min_p),
+        "no_min_p_selected": float(no_min_p),
+        "yes_qualifies": bool(yes_qualifies),
+        "no_qualifies": bool(no_qualifies),
+        "yes_block": _side_block_reason(
+            "yes", yes_breakdown, yes_min_edge, yes_min_p,
+            yes_evidence_ok, tail_guard_violation_yes,
+        ),
+        "no_block": _side_block_reason(
+            "no", no_breakdown, no_min_edge, no_min_p,
+            no_evidence_ok, tail_guard_violation_no,
+        ),
+    })
 
     if yes_qualifies and no_qualifies:
         # This should not happen because of duality, but handle explicitly.
