@@ -226,13 +226,21 @@ def test_contract_spec_rejects_unsupported_fee_type():
     assert any(r.startswith("fee_type_unsupported") for r in spec.reasons)
 
 
-def test_contract_spec_rejects_absent_fee_metadata():
+def test_contract_spec_absent_fee_metadata_unverified_not_rejected():
+    """Kalshi does not publish fee_type/fee_multiplier on every market record.
+
+    Absent fee metadata is *unverified*, not a declared mismatch: the
+    configured schedule stays active and the per-fill fee audit remains the
+    drift detector.  Declared-but-wrong metadata stays fatal (covered by the
+    multiplier/type rejection tests above).
+    """
     fields = dict(_RTI_MEAN_RULES)
     del fields["fee_type"]
     del fields["fee_multiplier"]
     spec = evaluate_market_contract(fields, ticker="KXBTC15M-T7")
-    assert spec.compatible is False
-    assert "fee_metadata_absent" in spec.reasons
+    assert spec.compatible is True
+    assert spec.fee_verified is False
+    assert "fee_metadata_unverified" in spec.reasons
 
 
 def test_contract_spec_maker_unverified_demotes_not_rejects():
@@ -253,6 +261,46 @@ def test_contract_spec_hash_is_stable_and_sensitive():
     fields["rules_primary"] += " "
     c = evaluate_market_contract(fields, ticker="KXBTC15M-T9")
     assert c.rules_sha256 != a.rules_sha256
+
+
+def test_contract_spec_accepts_live_kalshi_rule_wording():
+    """The verbatim live Kalshi 15m rule text must validate.
+
+    Regression: the live payload spells the window out ("sixty seconds" /
+    "the last minute") and declares "60 RTI prices are collected" rather
+    than a literal "60 seconds" / "per second" — a parser that only accepts
+    digits rejects every real contract.
+    """
+    fields = {
+        "rules_primary": (
+            "If the simple average of the sixty seconds of CF Benchmarks' "
+            "BRTI before 8:45 PM EDT on Sep 28, 2026 is at least the simple "
+            "average of the sixty seconds of CF Benchmarks' BRTI before "
+            "8:30 PM EDT on September 28, 2026, then the market resolves "
+            "to Yes."
+        ),
+        "rules_secondary": (
+            "Not all cryptocurrency price data is the same. While checking "
+            "a source like Google or Coinbase may help guide your decision, "
+            "the price used to determine this market is based on CF "
+            "Benchmarks' corresponding Real Time Index (RTI). At the last "
+            "minute before expiration, 60 RTI prices are collected. The "
+            "official and final value is the average of these prices, "
+            "rounded to the nearest 2 decimal places."
+        ),
+        # fee_type / fee_multiplier / resolution_source deliberately absent:
+        # the live market payload does not carry them.
+    }
+    spec = evaluate_market_contract(fields, ticker="KXBTC15M-26SEP282045-45")
+    assert spec.recognized is True
+    assert spec.aggregation == IMPLEMENTED_AGGREGATION
+    assert spec.reference == "cf_benchmarks_rti"
+    assert spec.window_seconds == 60
+    assert spec.sample_interval_seconds == 1
+    assert spec.expected_sample_count == 60
+    assert spec.compatible is True
+    assert spec.fee_verified is False
+    assert "fee_metadata_unverified" in spec.reasons
 
 
 def test_extract_fields_from_event_market_raw_data():
