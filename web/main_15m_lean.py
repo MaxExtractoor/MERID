@@ -2939,6 +2939,34 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
         from merid.event_venues.kalshi.ws_bridge import get_ws_subscription_tickers
         active_tickers = set(get_ws_subscription_tickers(list(active_tickers)))
         logger.info(f"[WS-REFRESH] Expanded tickers with open positions: {list(active_tickers)}")
+
+        # 2026-09-29: pre-warm next-window books.  The catalog fetches ~30m
+        # ahead so the upcoming 15m market is listed while the current window
+        # is live.  During the last MERID_15M_PREWARM_MINUTES of the window,
+        # add the next market per asset to the subscription + REST-poll set so
+        # its book is already snapshotted at rollover instead of
+        # bootstrapping for 2-4 minutes after open.  Expired tickers leave
+        # the set automatically when the snapshot stops listing them.
+        try:
+            import os as _os
+            _prewarm_min = float(_os.getenv("MERID_15M_PREWARM_MINUTES", "6"))
+            for _asset in allowed_assets:
+                _cur = catalog.get_current_15m_market(_asset)
+                _cur_mte = getattr(_cur, "minutes_to_expiry", None) if _cur else None
+                if _cur_mte is not None and _cur_mte > _prewarm_min:
+                    continue
+                _nxt = catalog.get_next_15m_market(_asset)
+                if _nxt is not None and getattr(_nxt.market, "market_id", None):
+                    _nxt_id = _nxt.market.market_id
+                    if _nxt_id not in active_tickers:
+                        active_tickers.add(_nxt_id)
+                        logger.info(
+                            "[WS-PREWARM] asset=%s next=%s current_mte=%.1f",
+                            _asset, _nxt_id,
+                            _cur_mte if _cur_mte is not None else -1.0,
+                        )
+        except Exception as _pw_err:
+            logger.debug("[WS-PREWARM] next-market union failed: %s", _pw_err)
     except Exception as e:
         logger.error(
             f"[WS-REFRESH] Error getting active markets: {e} - "
