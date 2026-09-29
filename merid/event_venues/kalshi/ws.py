@@ -2421,13 +2421,24 @@ class KalshiWebSocket(EventVenueStream):
         if seq is None:
             return True  # not all channels have seq
 
-        market_id = data.get("ticker") or data.get("market_ticker") or "global"
+        # Kalshi WS seq is a connection-global counter shared by all channels,
+        # so sequence *tracking* stays keyed to a single connection bucket.
+        # The market ticker (nested under ``msg`` for orderbook frames) is only
+        # needed to target snapshot/state recovery at the right book — using
+        # "global" there would discard nothing real and request a snapshot for
+        # a bogus ticker.
+        market_id = "conn"
+        nested = data.get("msg")
+        recovery_ticker = (
+            (nested.get("market_ticker") or nested.get("ticker"))
+            if isinstance(nested, dict) else None
+        ) or data.get("ticker") or data.get("market_ticker") or market_id
         last = self._last_seq.get(market_id)
 
         if last is not None and seq <= last:
             # Out-of-order / duplicate — drop
             logger.debug(
-                f"WS seq duplicate/OOO: market={market_id} got={seq} last={last}"
+                f"WS seq duplicate/OOO: market={recovery_ticker} got={seq} last={last}"
             )
             return False
 
@@ -2435,12 +2446,12 @@ class KalshiWebSocket(EventVenueStream):
             gap = seq - last - 1
             self._seq_gaps += gap
             logger.warning(
-                f"WS seq gap: market={market_id} expected={last+1} got={seq} "
+                f"WS seq gap: market={recovery_ticker} expected={last+1} got={seq} "
                 f"gap={gap} total_gaps={self._seq_gaps}"
             )
             # Invalidate cached orderbook — need a fresh snapshot (clear stale book too)
-            self._ob_initialised.discard(market_id)
-            self._ob_snapshots.pop(market_id, None)
+            self._ob_initialised.discard(recovery_ticker)
+            self._ob_snapshots.pop(recovery_ticker, None)
             
             # SEV-0 FIX: Trigger REST sync recovery to fill the gap
             # SHUTDOWN FIX: Check if loop is closing before creating sync task
@@ -2452,7 +2463,7 @@ class KalshiWebSocket(EventVenueStream):
                 # Windows fallback: assume loop is not closing
                 is_closing = False
             if not is_closing:
-                self._spawn_tracked(self._sync_sequence_gap_with_rest(market_id, last + 1, seq), name="kalshi-ws-seq-gap-sync")
+                self._spawn_tracked(self._sync_sequence_gap_with_rest(recovery_ticker, last + 1, seq), name="kalshi-ws-seq-gap-sync")
             else:
                 logger.debug(f"[WS-SYNC] Skipping sequence gap sync - loop is closing")
 

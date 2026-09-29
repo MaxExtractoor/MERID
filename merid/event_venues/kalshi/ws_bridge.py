@@ -4270,6 +4270,20 @@ class KalshiWebSocketBridge:
                 logger.warning("[WS-DRAIN-THREAD] Event loop closed, exiting")
                 break
 
+            # DRAIN-APPLY FAST PATH (2026-09-28): orderbook events are applied
+            # directly on this drain thread and never enter ``_async_queue``.
+            # This thread is the sole FIFO consumer of ``_thread_queue``, so
+            # inline apply preserves venue order exactly like the previous
+            # serial forwarder apply — but removes the
+            # call_soon_threadsafe → _async_queue → wait_for → _publish_event
+            # hops that saturated the forwarder loop at ~1.4k deltas/s and
+            # produced ~1.5s of upstream queue residence (BOOK_UPSTREAM_LAG).
+            if isinstance(event, dict) and event.get("type") in (
+                "orderbook_snapshot", "orderbook_delta",
+            ):
+                self._apply_orderbook_on_drain(event)
+                continue
+
             batch.append(event)
             if len(batch) >= _DRAIN_BATCH_SIZE:
                 try:
@@ -4286,6 +4300,75 @@ class KalshiWebSocketBridge:
                 logger.error("[WS-DRAIN-THREAD] call_soon_threadsafe error: %s", e)
 
         logger.warning("[WS-DRAIN-THREAD] Drain thread exiting")
+
+    def _apply_orderbook_on_drain(self, event: Any) -> None:
+        """Apply an orderbook event to the state store directly on the drain thread.
+
+        Mirrors the orderbook branch of ``_publish_event`` plus the forwarder
+        loop's bookkeeping so health/throughput telemetry keeps working after
+        the drain-apply bypass.  ``apply_orderbook_message`` is thread-safe
+        (per-ticker locks + delta queues; it is already invoked from REST
+        executor threads), and the drain thread is the single writer for this
+        stream so same-ticker order is preserved.
+        """
+        global _ws_forward_first_event_ts, _ws_forward_last_event_ts
+
+        event_type = event.get("type") or ""
+        ticker = "unknown"
+        nested = event.get("msg")
+        if isinstance(nested, dict):
+            ticker = (
+                nested.get("market_ticker")
+                or nested.get("ticker")
+                or nested.get("series_ticker")
+                or "unknown"
+            )
+        if ticker == "unknown":
+            ticker = (
+                event.get("ticker")
+                or event.get("market_ticker")
+                or event.get("series_ticker")
+                or "unknown"
+            )
+
+        now_mono = _time.monotonic()
+        with self._total_events_processed_lock:
+            self._total_events_processed += 1
+            self._events_forwarded += 1
+            self._type_counts[event_type] += 1
+            if _ws_forward_first_event_ts == 0.0:
+                _ws_forward_first_event_ts = now_mono
+            _ws_forward_last_event_ts = now_mono
+            self._last_message_at = replay_time()
+            if ticker not in self._first_orderbook_seen:
+                self._first_orderbook_seen[ticker] = replay_time()
+                if len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
+                    for _ in range(len(self._first_orderbook_seen) // 2):
+                        self._first_orderbook_seen.popitem(last=False)
+                logger.info(
+                    "[WS-FIRST-ORDERBOOK] ticker=%s event_type=%s",
+                    ticker, event_type
+                )
+
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            _recv_ns = event.get("_t_bridge_recv_ns")
+            if _recv_ns and ws_book_bridge_wait_ms is not None:
+                try:
+                    _wait_ms = (_time.monotonic_ns() - float(_recv_ns)) / 1e6
+                    ws_book_bridge_wait_ms.labels(ticker=str(ticker)).set(_wait_ms)
+                except Exception:
+                    pass
+            store.apply_orderbook_message(event, "bridge_queue")
+        except Exception as apply_exc:
+            now = _time.monotonic()
+            if now - getattr(self, "_last_drain_apply_err_ts", 0.0) > 5.0:
+                self._last_drain_apply_err_ts = now
+                logger.error(
+                    "[WS-DRAIN-APPLY-ERROR] event_type=%s ticker=%s error=%s",
+                    event_type, ticker, apply_exc
+                )
 
     # ── Deterministic sequence reorder helpers (single-writer drain) ──────
 
@@ -4762,11 +4845,13 @@ class KalshiWebSocketBridge:
                         break
 
                     # Try to get event from async_queue (non-blocking, yields if empty)
+                    # PERF (2026-09-28): get_nowait instead of per-event
+                    # asyncio.wait_for — no future/timeout allocation per message.
                     try:
-                        event = await asyncio.wait_for(self._async_queue.get(), timeout=1.0)
+                        event = self._async_queue.get_nowait()
                         if event_counter < 20:
                             print(f"[WS-FORWARDER-LOOP] got event #{event_counter} type={event.get('type') if isinstance(event, dict) else type(event).__name__}", flush=True)
-                    except asyncio.TimeoutError:
+                    except asyncio.QueueEmpty:
                         break  # No more events, yield
                     
                     event_counter += 1
