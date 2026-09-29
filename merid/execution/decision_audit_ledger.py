@@ -874,7 +874,12 @@ class DecisionAuditLedger:
         and per (asset, side, 10c price bucket) settled win rates over
         ``MERID_LIVE_EVIDENCE_WINDOW_HOURS`` and atomically rewrites
         ``MERID_LIVE_EVIDENCE_PATH`` so ``compute_trade_decision`` can gate on
-        live evidence between refits.  Fail-open per the ledger contract:
+        live evidence between refits.  The v2 artifact additionally stores
+        time-decayed, per-ticker-normalized aggregates at
+        asset x side x price-bucket x TTE-bucket granularity (``cells``,
+        keyed by configured half-life) consumed by the cell-aware evidence
+        policy in ``merid/prediction/evidence_policy.py``.
+        Fail-open per the ledger contract:
         errors are logged and swallowed.
         """
         if os.environ.get("MERID_LIVE_EVIDENCE_EXPORT", "1").strip().lower() not in (
@@ -895,9 +900,13 @@ class DecisionAuditLedger:
                     """
                     SELECT d.asset AS asset,
                            d.selected_side AS side,
+                           d.ticker AS ticker,
+                           d.decision_id AS decision_id,
+                           d.seconds_to_close AS seconds_to_close,
                            COALESCE(o.actual_fill_price_cents,
                                     se.executable_entry_price_cents) AS entry_cents,
-                           o.settled_yes AS settled_yes
+                           o.settled_yes AS settled_yes,
+                           o.settled_at AS settled_at
                     FROM strategy_decision_outcomes o
                     JOIN strategy_decisions d ON d.decision_id = o.decision_id
                     LEFT JOIN strategy_decision_side_ev se
@@ -935,11 +944,34 @@ class DecisionAuditLedger:
             b["n"] += 1
             b["wins"] += won
 
+        # Cell-aware v2 aggregates: decayed, per-ticker-normalized win/loss
+        # sums keyed "ASSET|side|price_bucket|tte_bucket".  Per-ticker
+        # normalization caps one market's total contribution at its newest
+        # observation's decay weight, so a ticker sampled 50 times is ~1
+        # effective market, not 50 samples.
+        try:
+            from merid.prediction import evidence_policy as _ep
+        except Exception:
+            _ep = None
+        cells_by_halflife: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        h1 = float(os.environ.get("MERID_EVIDENCE_HALFLIFE_DAYS", "7"))
+        h2 = float(os.environ.get("MERID_EVIDENCE_HALFLIFE_DAYS_ALT", "21"))
+        recent_days = float(os.environ.get("MERID_EVIDENCE_RECENT_DAYS", "14"))
+        if _ep is not None:
+            dict_rows = [{k: r[k] for k in r.keys()} for r in rows]
+            for h in (h1, h2):
+                cells_by_halflife[f"{h:g}"] = _ep.build_cells(
+                    dict_rows, h, now=now, recent_days=recent_days
+                )
+
         out: Dict[str, Any] = {
-            "version": 1,
+            "version": 2,
             "generated_at": now,
             "window_hours": window_hours,
+            "halflife_days_primary": h1,
+            "halflife_days_alt": h2,
             "assets": {},
+            "cells": cells_by_halflife,
         }
         for asset, sides in assets.items():
             asset_rec: Dict[str, Any] = {}
