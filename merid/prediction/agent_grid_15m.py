@@ -7768,9 +7768,27 @@ class LeanAgent15m:
                 evaluate_market_contract,
                 extract_market_contract_fields,
             )
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+            # The MinimalMarket/MarketState objects used for quoting never
+            # carry contract rules — the authoritative venue record lives on
+            # the catalog's EventMarket.raw_data.  Ticker-match it so a
+            # mid-rollover catalog object cannot validate the wrong contract.
+            _catalog_market = None
+            try:
+                _cat = get_market_catalog()
+                if _cat:
+                    _catalog_market = _cat.get_current_15m_market(asset)
+            except Exception:
+                _catalog_market = None
+            _catalog_em = getattr(_catalog_market, "market", None)
+            if _catalog_em is not None and getattr(_catalog_em, "market_id", None) != ticker:
+                _catalog_em = None
+                _catalog_market = None
 
             _contract_fields = extract_market_contract_fields(
-                getattr(market, "market", None), market, market_state
+                _catalog_em, _catalog_market,
+                getattr(market, "market", None), market, market_state,
             )
             _maker_requested = os.environ.get(
                 "MERID_ENTRY_MAKER_ENABLED", ""
@@ -8234,6 +8252,7 @@ class LeanAgent15m:
             indicators["contract_rules_sha256"] = contract_spec.rules_sha256
             indicators["contract_fee_type"] = contract_spec.fee_type
             indicators["contract_fee_multiplier"] = contract_spec.fee_multiplier
+            indicators["contract_fee_verified"] = contract_spec.fee_verified
             decision = compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",

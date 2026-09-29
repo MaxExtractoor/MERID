@@ -9,8 +9,14 @@ false edge.  The same applies to fees: the decision and router math assume the
 quadratic fee schedule with multiplier 1.0, so a series that reports a
 different fee model must not be traded on the assumed parameters.
 
-This module is fail-closed: absent or unrecognized contract metadata is a
-rejection, not a warning.
+This module is fail-closed on settlement semantics: absent or unrecognized
+rules text, an unimplemented aggregation, or a non-RTI reference is a
+rejection, not a warning.  Fee identity is fail-closed on *declared*
+mismatches only: Kalshi does not publish ``fee_type``/``fee_multiplier``
+on every market record, so absent fee metadata marks the schedule
+*unverified* (``fee_verified=False``) rather than incompatible — the
+per-fill fee audit comparing reported vs modeled fees remains the drift
+detector in that posture.
 """
 
 from __future__ import annotations
@@ -84,6 +90,7 @@ class ContractSpecEvaluation:
     rules_sha256: Optional[str]
     fee_type: Optional[str]
     fee_multiplier: Optional[float]
+    fee_verified: bool
     maker_fee_verified: bool
     reasons: Tuple[str, ...]
 
@@ -144,6 +151,13 @@ def _parse_rules(
         reasons.append("aggregation_unrecognized")
 
     interval_s: Optional[int] = 1 if _INTERVAL_MARKER.search(lowered) else None
+    if interval_s is None and window_s == 60 and re.search(
+        r"\b60\s+(?:rti\s+)?(?:prices?|samples?|observations?)\b", lowered
+    ):
+        # "At the last minute before expiration, 60 RTI prices are collected"
+        # — 60 samples over a 60s window implies the 1s cadence the model
+        # banks even though the text never says "per second".
+        interval_s = 1
     if aggregation == IMPLEMENTED_AGGREGATION and interval_s is None:
         reasons.append("sample_interval_not_stated")
 
@@ -200,9 +214,15 @@ def evaluate_market_contract(
         reasons.append("fee_multiplier_unparseable")
         fee_multiplier = None
 
+    fee_verified = False
     if fee_type is None and fee_multiplier is None:
-        compatible = False
-        reasons.append("fee_metadata_absent")
+        # Kalshi does not publish fee identity on the market record for these
+        # series, so absence is *unverified*, not a declared mismatch: the
+        # configured quadratic/multiplier-1.0 schedule stays active and the
+        # per-fill fee audit (reported vs modeled) remains the drift
+        # detector.  A fee_type/fee_multiplier that IS declared and
+        # mismatches stays fatal below.
+        reasons.append("fee_metadata_unverified")
     else:
         if fee_type is not None and str(fee_type).lower() not in _SUPPORTED_FEE_TYPES:
             compatible = False
@@ -214,6 +234,8 @@ def evaluate_market_contract(
             # Partial metadata cannot prove the applied schedule.
             compatible = False
             reasons.append("fee_metadata_incomplete")
+        else:
+            fee_verified = True
 
     maker_fee_verified = True
     if maker_entries_enabled:
@@ -233,6 +255,7 @@ def evaluate_market_contract(
         rules_sha256=rules_sha256,
         fee_type=str(fee_type) if fee_type is not None else None,
         fee_multiplier=fee_multiplier,
+        fee_verified=fee_verified,
         maker_fee_verified=maker_fee_verified,
         reasons=tuple(reasons),
     )
