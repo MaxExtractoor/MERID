@@ -1706,6 +1706,228 @@ def exit_policy_to_dict(policy: Any) -> Dict[str, Any]:
     }
 
 
+# ── Position lifecycle contract (profit_only_v1) ─────────────────────────────
+# Every 15m crypto entry must carry a valid lifecycle plan.  A plan is NOT an
+# active exit order: HOLD_TO_SETTLEMENT is a complete, legal plan — binary
+# contracts settle at expiry and settlement IS the exit.  Loss-triggered exits
+# are disabled by policy (observed premature cash-outs); profit exits (resting
+# take-profit, profit-lock trail) are optional components and never gate entry.
+LIFECYCLE_MODE_HOLD_TO_SETTLEMENT = "HOLD_TO_SETTLEMENT"
+LIFECYCLE_MODE_TAKE_PROFIT_ONLY = "TAKE_PROFIT_ONLY"
+LIFECYCLE_MODE_PROFIT_TRAIL_ONLY = "PROFIT_TRAIL_ONLY"
+LIFECYCLE_MODE_TP_PLUS_TRAIL = "TAKE_PROFIT_PLUS_PROFIT_TRAIL"
+VALID_LIFECYCLE_EXIT_MODES = frozenset({
+    LIFECYCLE_MODE_HOLD_TO_SETTLEMENT,
+    LIFECYCLE_MODE_TAKE_PROFIT_ONLY,
+    LIFECYCLE_MODE_PROFIT_TRAIL_ONLY,
+    LIFECYCLE_MODE_TP_PLUS_TRAIL,
+})
+
+# Per-asset profit-trail research defaults (contract-price cents, own-side
+# price space).  Activation = offset above entry; floor never below
+# entry + expected_exit_fee + min_locked_profit.
+_PROFIT_TRAIL_DEFAULTS: Dict[str, Dict[str, int]] = {
+    "BTC": {"activation_offset_cents": 4, "trail_distance_cents": 2},
+    "ETH": {"activation_offset_cents": 4, "trail_distance_cents": 2},
+    "SOL": {"activation_offset_cents": 5, "trail_distance_cents": 3},
+    "XRP": {"activation_offset_cents": 5, "trail_distance_cents": 3},
+    "DOGE": {"activation_offset_cents": 6, "trail_distance_cents": 4},
+}
+_DEFAULT_TRAIL_PARAMS = {"activation_offset_cents": 5, "trail_distance_cents": 3}
+MIN_LOCKED_PROFIT_CENTS = 1
+
+
+@dataclass
+class PositionLifecyclePlan:
+    """Canonical position lifecycle contract for a 15m crypto entry.
+
+    Replaces the old "must have an armed TP/SL" requirement.  The router
+    invariant asserts: plan is present, stop_loss_enabled is False, and
+    exit_mode is one of VALID_LIFECYCLE_EXIT_MODES.  Settlement is always the
+    fallback — profit exits are optional overlays.
+    """
+    policy_id: str = "profit_only_v1"
+    exit_mode: str = LIFECYCLE_MODE_HOLD_TO_SETTLEMENT
+    stop_loss_enabled: bool = False
+    stop_loss_disabled_reason: str = "disabled_by_policy"
+    hold_to_settlement_enabled: bool = True
+    take_profit_enabled: bool = False
+    take_profit_price_cents: Optional[int] = None
+    profit_trail_enabled: bool = False
+    trail_activation_price_cents: Optional[int] = None
+    trail_floor_price_cents: Optional[int] = None
+    trail_distance_cents: Optional[int] = None
+    min_locked_profit_cents: int = MIN_LOCKED_PROFIT_CENTS
+    exit_order_ttl_seconds: Optional[int] = None
+    version: str = "v1"
+
+
+def lifecycle_plan_to_dict(plan: Any) -> Dict[str, Any]:
+    """Serialize a PositionLifecyclePlan (or plan-like object) to a JSON-safe dict."""
+    return {
+        "policy_id": getattr(plan, "policy_id", "profit_only_v1"),
+        "exit_mode": getattr(plan, "exit_mode", LIFECYCLE_MODE_HOLD_TO_SETTLEMENT),
+        "stop_loss_enabled": bool(getattr(plan, "stop_loss_enabled", False)),
+        "stop_loss_disabled_reason": getattr(plan, "stop_loss_disabled_reason", "disabled_by_policy"),
+        "hold_to_settlement_enabled": bool(getattr(plan, "hold_to_settlement_enabled", True)),
+        "take_profit_enabled": bool(getattr(plan, "take_profit_enabled", False)),
+        "take_profit_price_cents": getattr(plan, "take_profit_price_cents", None),
+        "profit_trail_enabled": bool(getattr(plan, "profit_trail_enabled", False)),
+        "trail_activation_price_cents": getattr(plan, "trail_activation_price_cents", None),
+        "trail_floor_price_cents": getattr(plan, "trail_floor_price_cents", None),
+        "trail_distance_cents": getattr(plan, "trail_distance_cents", None),
+        "min_locked_profit_cents": getattr(plan, "min_locked_profit_cents", MIN_LOCKED_PROFIT_CENTS),
+        "exit_order_ttl_seconds": getattr(plan, "exit_order_ttl_seconds", None),
+        "version": getattr(plan, "version", "v1"),
+    }
+
+
+def _coerce_lifecycle_plan(raw: Any) -> Optional[PositionLifecyclePlan]:
+    """Coerce an intent.lifecycle_plan value into a PositionLifecyclePlan.
+
+    Accepts a PositionLifecyclePlan or a dict of its fields.  Returns None for
+    unrecognized shapes (malformed plans are contract violations).
+    """
+    if isinstance(raw, PositionLifecyclePlan):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            known = {
+                "policy_id", "exit_mode", "stop_loss_enabled", "stop_loss_disabled_reason",
+                "hold_to_settlement_enabled", "take_profit_enabled", "take_profit_price_cents",
+                "profit_trail_enabled", "trail_activation_price_cents", "trail_floor_price_cents",
+                "trail_distance_cents", "min_locked_profit_cents", "exit_order_ttl_seconds",
+                "version",
+            }
+            kwargs = {k: v for k, v in raw.items() if k in known}
+            return PositionLifecyclePlan(**kwargs)
+        except Exception:
+            return None
+    return None
+
+
+def _crypto_15m_asset(ticker: str) -> Optional[str]:
+    """Extract asset symbol from a KX{ASSET}15M-* ticker (KXBTC15M->BTC, KXXRP15M->XRP)."""
+    t = ticker or ""
+    if t.startswith("KX") and "15M" in t:
+        asset = t[2:].split("15M", 1)[0]
+        return asset or None
+    return None
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _profit_trail_params(asset: Optional[str], entry_price_cents: Optional[int]) -> Dict[str, Optional[int]]:
+    """Resolve profit-lock trail params: activation price, initial floor, distance.
+
+    floor = entry + expected_exit_fee + min_locked_profit (never below).
+    """
+    params = _PROFIT_TRAIL_DEFAULTS.get(asset or "", _DEFAULT_TRAIL_PARAMS)
+    activation_price = None
+    floor_price = None
+    if entry_price_cents is not None and 0 < int(entry_price_cents) < 100:
+        entry = int(entry_price_cents)
+        activation_price = min(99, entry + int(params["activation_offset_cents"]))
+        est_exit_fee = 0
+        try:
+            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+            est_exit_fee = int(calculate_kalshi_fee_cents(1, activation_price))
+        except Exception:
+            est_exit_fee = 0
+        floor_price = min(99, entry + est_exit_fee + MIN_LOCKED_PROFIT_CENTS)
+    return {
+        "activation_price_cents": activation_price,
+        "floor_price_cents": floor_price,
+        "distance_cents": int(params["trail_distance_cents"]),
+    }
+
+
+def derive_lifecycle_plan(intent: "OrderIntent") -> PositionLifecyclePlan:
+    """Derive the canonical lifecycle plan for an entry intent.
+
+    Sources, in order: the serialized exit_policy dict on the intent (mode and
+    armed flags are authoritative), then armed TP/trailing fields on the intent
+    itself.  A policy whose mode is HOLD_TO_SETTLEMENT always yields
+    HOLD_TO_SETTLEMENT even if stray TP/SL fields are present.  With no armed
+    profit components the plan is HOLD_TO_SETTLEMENT — settlement is the exit.
+    Stop-loss is never armed by this contract (disabled_by_policy).
+    """
+    policy = intent.exit_policy if isinstance(getattr(intent, "exit_policy", None), dict) else {}
+    asset = _crypto_15m_asset(getattr(intent, "ticker", ""))
+    entry_price = getattr(intent, "price_cents", None)
+
+    if policy.get("mode") == LIFECYCLE_MODE_HOLD_TO_SETTLEMENT:
+        return PositionLifecyclePlan(
+            exit_mode=LIFECYCLE_MODE_HOLD_TO_SETTLEMENT,
+            exit_order_ttl_seconds=policy.get("max_hold_seconds"),
+        )
+
+    tp_price = getattr(intent, "take_profit_price_cents", None)
+    if tp_price is None:
+        tp_price = policy.get("tp_price_cents")
+    tp_enabled = _truthy_flag(policy.get("take_profit_enabled", True)) and (
+        tp_price is not None or getattr(intent, "take_profit_r_multiple", None) is not None
+    )
+
+    trail_enabled = _truthy_flag(policy.get("trailing_enabled")) or _truthy_flag(
+        getattr(intent, "trailing_enabled", None)
+    )
+
+    plan = PositionLifecyclePlan(
+        take_profit_enabled=bool(tp_enabled),
+        take_profit_price_cents=int(tp_price) if (tp_enabled and tp_price is not None) else None,
+        profit_trail_enabled=bool(trail_enabled),
+        exit_order_ttl_seconds=policy.get("max_hold_seconds"),
+    )
+    if trail_enabled:
+        params = _profit_trail_params(asset, entry_price)
+        plan.trail_activation_price_cents = params["activation_price_cents"]
+        plan.trail_floor_price_cents = params["floor_price_cents"]
+        plan.trail_distance_cents = params["distance_cents"]
+
+    if tp_enabled and trail_enabled:
+        plan.exit_mode = LIFECYCLE_MODE_TP_PLUS_TRAIL
+    elif tp_enabled:
+        plan.exit_mode = LIFECYCLE_MODE_TAKE_PROFIT_ONLY
+    elif trail_enabled:
+        plan.exit_mode = LIFECYCLE_MODE_PROFIT_TRAIL_ONLY
+    else:
+        plan.exit_mode = LIFECYCLE_MODE_HOLD_TO_SETTLEMENT
+    return plan
+
+
+def _validate_lifecycle_plan(plan: Optional[PositionLifecyclePlan]) -> Optional[str]:
+    """Validate a lifecycle plan against the profit_only_v1 contract.
+
+    Returns a rejection reason string, or None when the plan is valid:
+      plan is not None, stop_loss is NOT enabled, exit_mode is legal, and every
+    armed component carries its required parameters.
+    """
+    if plan is None:
+        return "no_lifecycle_plan"
+    if plan.exit_mode not in VALID_LIFECYCLE_EXIT_MODES:
+        return f"invalid_exit_mode:{plan.exit_mode}"
+    if plan.stop_loss_enabled:
+        return "stop_loss_enabled"
+    if not plan.hold_to_settlement_enabled:
+        return "no_settlement_fallback"
+    if plan.exit_mode in (LIFECYCLE_MODE_TAKE_PROFIT_ONLY, LIFECYCLE_MODE_TP_PLUS_TRAIL):
+        if not plan.take_profit_enabled:
+            return "take_profit_mode_without_take_profit"
+    if plan.exit_mode in (LIFECYCLE_MODE_PROFIT_TRAIL_ONLY, LIFECYCLE_MODE_TP_PLUS_TRAIL):
+        if not plan.profit_trail_enabled:
+            return "profit_trail_mode_without_profit_trail"
+        if plan.trail_distance_cents is None or plan.trail_activation_price_cents is None:
+            return "profit_trail_missing_params"
+    return None
+
+
 @dataclass
 class WindowResolution:
     """Entry window resolution for a trade.
@@ -1768,6 +1990,16 @@ def resolve_exit_policy(
     # when the model does not support a reachable target.
     take_profit_enabled = True
     tp_price_cents = None
+
+    # profit_only_v1 (operator directive): loss-triggered exits are disabled
+    # for this strategy - observed behavior was premature cash-out of valid
+    # 15m positions.  Entries carry optional profit exits (resting TP /
+    # profit-lock trail) plus settlement as the fallback; the router's
+    # lifecycle-plan invariant asserts no armed stop-loss.  Emergency
+    # reduce-only / flatten capability is independent and unaffected.
+    _profit_only_exits = os.environ.get("MERID_PROFIT_ONLY_EXITS", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
     # Extract edge context (duck-typed: accepts an EdgeResult object, a dict, or None).
     # Recorded on the resolution for observability/audit so exit decisions are traceable
@@ -2058,6 +2290,10 @@ def resolve_exit_policy(
         except Exception as e:
             logger.warning("[ORDER-ROUTER] Failed to load SL config from profile: %s", e)
             sl_cents_offset = 8
+    if _profit_only_exits:
+        # profit_only_v1: never carry a loss-triggered stop price on the policy.
+        sl_cents_offset = None
+        stop_loss_enabled = False
     
     # CRITICAL FIX: Load trailing_giveback_cents from profile config (2026-07-13)
     # Previously hardcoded to 5 - now uses profile configuration
@@ -2148,7 +2384,7 @@ def resolve_exit_policy(
         tp_time_based_r=tp_time_based_r,
         sl_mode=StopLossMode.FIXED_CENTS,  # CRITICAL FIX: Use fixed cent SL for binary options
         sl_cents=sl_cents_offset,  # CRITICAL FIX: Load from profile config instead of hardcoded 5
-        sl_r_multiple=0.5,  # Fallback R-multiple for legacy compatibility
+        sl_r_multiple=None if _profit_only_exits else 0.5,  # Fallback R-multiple for legacy compatibility
         stop_loss_enabled=stop_loss_enabled,  # CRITICAL FIX (2026-08-10): upstream/midstream/downstream SL kill switch
         trailing_enabled=True,
         trailing_activation_r=0.8,
@@ -2861,6 +3097,10 @@ class OrderIntent:
     trailing_enabled: Optional[str] = None  # Whether trailing stop is enabled
     max_hold_seconds: Optional[int] = None  # Max hold time from ExitPolicyResolution
     exit_policy: Optional[Dict[str, Any]] = None  # Resolved ExitPolicyResolution as JSON-safe dict
+    # PROFIT_ONLY LIFECYCLE CONTRACT: canonical position lifecycle plan
+    # (PositionLifecyclePlan as JSON-safe dict).  Derived by the router
+    # invariant when absent; HOLD_TO_SETTLEMENT is a valid plan.
+    lifecycle_plan: Optional[Dict[str, Any]] = None
     max_rest_seconds: Optional[int] = 180  # Max time a maker/passive order may rest on the book before expiration
     
     # ENTRY/EXIT DIRECTION CONTRACT: Formal direction and exit reason tracking
@@ -5812,36 +6052,119 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
 
 
 def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMode) -> Optional[OrderResult]:
-    """Enforce the "no trade without exit" invariant for 15m crypto entry orders.
-    
-    This guard rejects any entry order on 15m crypto contracts that lacks exit targets.
-    It runs before any side effects (no API calls, no state mutations).
-    
+    """Enforce the position lifecycle invariant for 15m crypto entry orders.
+
+    Contract (profit_only_v1): every 15m crypto entry must carry a valid
+    PositionLifecyclePlan.  A plan is a *lifecycle contract*, not an armed exit
+    order — HOLD_TO_SETTLEMENT is a complete legal plan.  Validation requires:
+      - plan resolves (explicit intent.lifecycle_plan, or derived from the
+        serialized exit_policy + TP/trailing fields),
+      - plan.stop_loss_enabled is False (loss exits are disabled by policy),
+      - plan.exit_mode in VALID_LIFECYCLE_EXIT_MODES.
+
+    When no explicit plan is attached, the router derives one from the intent's
+    exit fields and attaches it for downstream provenance.  An upstream-armed
+    stop-loss found during derivation is normalized off (never blocks entry);
+    an *explicit* plan claiming an enabled stop-loss is a contract violation
+    and is rejected.  Runs before any side effects.
+
     Feature flag: KALSHI_ENFORCE_EXIT_INVARIANT (default True)
-    
+
     Returns OrderResult with status="rejected" if invariant is violated, else None.
     """
     # Check feature flag (default True for safety)
     enforce = os.getenv("KALSHI_ENFORCE_EXIT_INVARIANT", "true").lower() in ("1", "true", "yes")
     if not enforce:
         return None
-    
+
     # Only check 15m crypto entry orders
     if not _is_15m_crypto_entry_order(intent):
         return None
-    
-    # Check if exit targets are present
-    if _has_exit_target(intent):
-        # Invariant satisfied - log for audit and emit metric
+
+    explicit_plan_raw = getattr(intent, "lifecycle_plan", None)
+    violation: Optional[str] = None
+
+    # profit_only_v1: loss-triggered exits are disabled for 15m crypto entries.
+    # An upstream-armed stop-loss (intent fields or serialized policy) is
+    # normalized off here - the entry itself is never blocked for carrying one.
+    _profit_only = os.getenv("MERID_PROFIT_ONLY_EXITS", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    policy_dict = intent.exit_policy if isinstance(intent.exit_policy, dict) else {}
+    had_armed_sl = bool(
+        (getattr(intent, "stop_loss_enabled", False) and intent.stop_loss_price_cents is not None)
+        or (
+            policy_dict.get("stop_loss_enabled")
+            and (policy_dict.get("sl_cents") or policy_dict.get("sl_r_multiple"))
+        )
+    )
+    if had_armed_sl and _profit_only:
+        logger.warning(
+            "[LIFECYCLE-PLAN] ticker=%s stop-loss armed upstream (sl=%sc) - "
+            "disabling per profit_only_v1 policy; entry proceeds",
+            intent.ticker, intent.stop_loss_price_cents,
+        )
+        intent.stop_loss_price_cents = None
+        intent.stop_loss_enabled = False
+        if policy_dict:
+            policy_dict["stop_loss_enabled"] = False
+            policy_dict["sl_cents"] = None
+            policy_dict["sl_r_multiple"] = None
+        try:
+            from merid.position_management.position_monitor import _bump_stop_counter
+            _bump_stop_counter(
+                "lifecycle_plan_stop_loss_stripped",
+                f"ticker={intent.ticker} action={intent.action}",
+            )
+        except Exception:
+            pass
+    if _profit_only and getattr(intent, "stop_loss_enabled", False):
+        # OrderIntent.stop_loss_enabled defaults True; under profit_only_v1 no
+        # stop-loss is ever armed on a 15m crypto entry - normalize the flag.
+        intent.stop_loss_enabled = False
+
+    if explicit_plan_raw is not None:
+        # Caller attached an explicit lifecycle plan - it is authoritative and
+        # must satisfy the contract exactly (including SL disabled).
+        plan = _coerce_lifecycle_plan(explicit_plan_raw)
+        if plan is None:
+            violation = "malformed_lifecycle_plan"
+        else:
+            violation = _validate_lifecycle_plan(plan)
+            if violation is None:
+                # Normalize to a dict so downstream consumers see one shape.
+                intent.lifecycle_plan = lifecycle_plan_to_dict(plan)
+                if isinstance(intent.exit_policy, dict):
+                    intent.exit_policy["lifecycle_plan"] = intent.lifecycle_plan
+    else:
+        # No explicit plan: derive one from the serialized exit policy and the
+        # armed TP/trailing fields.  HOLD_TO_SETTLEMENT is always derivable,
+        # so an entry is never blocked merely for lacking exit orders.
+        plan = derive_lifecycle_plan(intent)
+        intent.lifecycle_plan = lifecycle_plan_to_dict(plan)
+        # Mirror onto the serialized exit policy so the position record carries
+        # the lifecycle plan for the exit engine / audit trail.
+        if isinstance(intent.exit_policy, dict):
+            intent.exit_policy["lifecycle_plan"] = intent.lifecycle_plan
+        violation = _validate_lifecycle_plan(plan)
+
+    if violation is None:
+        # Invariant satisfied - log the resolved plan for audit and emit metric
         logger.info(
-            "[INVARIANT] exit_target_check | ticker=%s | action=%s | has_tp=%s | has_sl=%s | source=%s | status=PASS",
+            "[INVARIANT] lifecycle_plan_check | ticker=%s | action=%s | "
+            "exit_mode=%s | tp=%sc | trail=%s(arm=%sc,floor=%sc,dist=%sc) | "
+            "sl=disabled | hold_to_settlement=%s | source=%s | status=PASS",
             intent.ticker,
             intent.action,
-            intent.take_profit_price_cents is not None or intent.take_profit_r_multiple is not None,
-            intent.stop_loss_price_cents is not None,
+            plan.exit_mode,
+            plan.take_profit_price_cents,
+            plan.profit_trail_enabled,
+            plan.trail_activation_price_cents,
+            plan.trail_floor_price_cents,
+            plan.trail_distance_cents,
+            plan.hold_to_settlement_enabled,
             intent.source or "unknown",
         )
-        # Emit compliance metric
         try:
             from merid.metrics.kalshi_metrics import kalshi_exit_invariant_compliant_total
             kalshi_exit_invariant_compliant_total.labels(
@@ -5850,22 +6173,23 @@ def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMo
         except Exception as metric_exc:
             logger.debug("[INVARIANT] Failed to emit compliance metric: %s", metric_exc)
         return None
-    
+
     # Invariant violated - reject order
     latency_ms = (_time.monotonic() - t0) * 1000
     logger.error(
-        "[INVARIANT_VIOLATION] Entry order without exit target rejected: "
+        "[INVARIANT_VIOLATION] Entry order with invalid lifecycle plan rejected: "
         "ticker=%s action=%s source=%s client_tag=%s | "
-        "has_tp=%s has_sl=%s | "
-        "reason=invariant_violation:no_trade_without_exit",
+        "exit_mode=%s sl_enabled=%s | "
+        "reason=invariant_violation:invalid_lifecycle_plan:%s",
         intent.ticker,
         intent.action,
         intent.source or "unknown",
         intent.client_tag or "none",
-        intent.take_profit_price_cents is not None or intent.take_profit_r_multiple is not None,
-        intent.stop_loss_price_cents is not None,
+        getattr(plan, "exit_mode", None),
+        getattr(plan, "stop_loss_enabled", None),
+        violation,
     )
-    
+
     # Emit metric for invariant violation
     try:
         from merid.metrics.kalshi_metrics import kalshi_exit_invariant_violations
@@ -5875,11 +6199,11 @@ def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMo
         ).inc()
     except Exception as metric_exc:
         logger.debug("[INVARIANT] Failed to emit violation metric: %s", metric_exc)
-    
+
     return OrderResult(
         status="rejected",
         mode=mode,
-        reason="invariant_violation:no_trade_without_exit",
+        reason=f"invariant_violation:invalid_lifecycle_plan:{violation}",
         latency_ms=round(latency_ms, 2),
     )
 

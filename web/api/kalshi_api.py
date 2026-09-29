@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -3247,13 +3248,27 @@ async def place_order(
             logger.warning("Risk check failed (non-live, proceeding): %s", exc)
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
-    # This ensures the "no trade without exit" invariant is satisfied
+    # Lifecycle contract (profit_only_v1): an entry needs a valid lifecycle
+    # plan, not an armed stop-loss - HOLD_TO_SETTLEMENT is a complete plan and
+    # loss exits are disabled by policy.  Under MERID_PROFIT_ONLY_EXITS=1 an
+    # explicit stop_loss_price_cents is a contract violation and is rejected.
     # NOTE: Kalshi API uses base series tickers (KXBTC, KXETH, etc.) without timeframe suffix
     if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXXRP", "KXDOGE")):
-        # CRITICAL FIX: Reject orders without stop_loss_price_cents (2026-07-06)
-        # Previously used hardcoded fallback of price_cents - 5
-        # Now requires explicit SL to enforce "no trade without exit" invariant
-        if stop_loss_price_cents is None:
+        _profit_only_exits = os.getenv("MERID_PROFIT_ONLY_EXITS", "1").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _profit_only_exits:
+            if stop_loss_price_cents is not None:
+                logger.error(
+                    "[KALSHI-API] stop_loss_price_cents provided for %s under profit_only_v1 - "
+                    "loss exits are disabled by policy",
+                    ticker
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop_loss_price_cents is not permitted under profit_only_v1 - loss exits are disabled by policy. Omit the field (HOLD_TO_SETTLEMENT applies) or provide take-profit parameters."
+                )
+        elif stop_loss_price_cents is None:
             logger.error(
                 "[KALSHI-API] Missing stop_loss_price_cents for order %s - "
                 "cannot proceed without exit policy (invariant violation)",
@@ -3298,7 +3313,8 @@ async def place_order(
                 
                 tp_plan = engine.compute_tp(
                     entry_price=price_cents / 100.0,  # Convert to decimal
-                    stop_price=stop_loss_price_cents / 100.0,
+                    # profit_only_v1: no armed SL - use entry as the R reference.
+                    stop_price=(stop_loss_price_cents if stop_loss_price_cents is not None else max(1, price_cents - 5)) / 100.0,
                     direction="LONG" if side == "yes" else "SHORT",
                     confidence=confidence,
                     ratchet_enabled=ratchet_enabled,
@@ -3318,7 +3334,7 @@ async def place_order(
                 logger.warning("[API-TP] Failed to compute default TP: %s", tp_exc)
                 # If TP computation fails, set a conservative default
                 take_profit_r_multiple = 1.0  # 1R as fallback
-                if stop_loss_price_cents is None:
+                if stop_loss_price_cents is None and not _profit_only_exits:
                     # CRITICAL FIX (2026-07-31): Side-aware SL calculation for binary options
                     # YES contracts: SL below entry (loss when price goes down)
                     # NO contracts: SL above entry (loss when price goes up)

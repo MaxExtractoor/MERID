@@ -13,10 +13,13 @@ from merid.event_venues.kalshi.order_router import resolve_exit_policy as router
 class TestOrderRouterExitPolicy:
     """Tests for order_router.resolve_exit_policy (FIXED_CENTS mode)."""
     
-    def test_fixed_cents_mode_for_binary_options(self):
-        """Verify resolve_exit_policy uses FIXED_CENTS mode for binary options.
-        
-        INVARIANT: SL cents must be loaded from profile config, not hardcoded.
+    def test_fixed_cents_mode_for_binary_options(self, monkeypatch):
+        """Verify resolve_exit_policy SL handling under the exit-mode flag.
+
+        profit_only_v1 (default): loss stops are disabled by policy - sl_cents
+        and sl_r_multiple are None and stop_loss_enabled is False; the router
+        lifecycle invariant accepts HOLD_TO_SETTLEMENT / profit-only plans.
+        With the flag off (research), the legacy profile-based SL is retained.
         """
         # Load expected SL cents from profile
         try:
@@ -26,18 +29,22 @@ class TestOrderRouterExitPolicy:
         except Exception:
             # Fallback if profile unavailable
             expected_sl_cents = 8  # Updated default from profile
-        
-        # Test with different regimes
+
+        # profit_only_v1 default: no armed loss stop on the resolved policy.
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "1")
         for regime in ["conservative", "normal", "aggressive"]:
             result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime=regime)
-            
-            # Verify FIXED_CENTS mode is used
             assert result.sl_mode == StopLossMode.FIXED_CENTS, f"Expected FIXED_CENTS mode for regime={regime}, got {result.sl_mode}"
-            
-            # Verify sl_cents is loaded from profile (not hardcoded 5)
+            assert result.stop_loss_enabled is False
+            assert result.sl_cents is None
+            assert result.sl_r_multiple is None
+
+        # Flag off (research): legacy profile-based SL behavior is retained.
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "0")
+        for regime in ["conservative", "normal", "aggressive"]:
+            result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime=regime)
+            assert result.sl_mode == StopLossMode.FIXED_CENTS
             assert result.sl_cents == expected_sl_cents, f"Expected sl_cents={expected_sl_cents} (from profile) for regime={regime}, got {result.sl_cents}"
-            
-            # Verify sl_r_multiple is still set for legacy compatibility
             assert result.sl_r_multiple == 0.5, f"Expected sl_r_multiple=0.5 for regime={regime}, got {result.sl_r_multiple}"
     
     def test_trailing_enabled_with_correct_params(self):
@@ -79,7 +86,7 @@ class TestOrderRouterExitPolicy:
         # Regime ordering: conservative is tightest, aggressive is widest.
         assert conservative.tp_r_multiple < normal.tp_r_multiple < aggressive.tp_r_multiple
     
-    def test_resolve_exit_policy_no_profile_does_not_raise(self):
+    def test_resolve_exit_policy_no_profile_does_not_raise(self, monkeypatch):
         """Regression: no active profile must not leave mean_reversion_config unbound.
 
         Previously the mean-reversion TP block referenced `mean_reversion_config`
@@ -89,11 +96,17 @@ class TestOrderRouterExitPolicy:
         result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
         assert result is not None
         assert result.sl_mode == StopLossMode.FIXED_CENTS
-        assert result.stop_loss_enabled is True
-        # SL fallback should be the canonical normal-vol offset, not a stale 5c.
-        assert result.sl_cents >= 8
+        # profit_only_v1 default: loss stop is disabled on the policy.
+        assert result.stop_loss_enabled is False
+        assert result.sl_cents is None
         # Without an edge, fixed TP is disabled; no exception is raised.
         assert result.take_profit_enabled is False
+
+        # Flag off retains the legacy armed SL fallback.
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "0")
+        legacy = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
+        assert legacy.stop_loss_enabled is True
+        assert legacy.sl_cents >= 8
 
     def test_asset_specific_adjustments(self):
         """Verify tier 2 assets (SOL, XRP, DOGE) have wider TP thresholds."""

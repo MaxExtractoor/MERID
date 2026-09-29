@@ -40,10 +40,12 @@ class TestExitPolicyCompliance:
         assert 'CRITICAL FIX: Exit policy validation for crypto 15m markets' in content, \
             "Exit policy validation comment not found"
     
-    def test_order_router_uses_profile_sl_cents(self):
-        """Test that order_router.resolve_exit_policy loads SL cents from profile config.
-        
-        INVARIANT: SL cents must be loaded from profile config, not hardcoded.
+    def test_order_router_uses_profile_sl_cents(self, monkeypatch):
+        """Test SL handling in order_router.resolve_exit_policy.
+
+        profit_only_v1 (default): SL is disabled on the resolved policy
+        (sl_cents=None, stop_loss_enabled=False).  With the flag off, the
+        legacy profile-based SL cents are still loaded.
         """
         from merid.event_venues.kalshi.order_router import resolve_exit_policy, StopLossMode
         
@@ -56,15 +58,25 @@ class TestExitPolicyCompliance:
             # Fallback if profile unavailable
             expected_sl_cents = 8  # Updated default from profile
         
+        # profit_only_v1 default: no armed loss stop.
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "1")
         result = resolve_exit_policy(
             edge_result=None,
             asset="BTC",
             regime="normal"
         )
-        
-        # Verify SL cents from profile
-        assert result.sl_cents == expected_sl_cents, f"Expected sl_cents={expected_sl_cents} from profile, got {result.sl_cents}"
+        assert result.sl_cents is None
+        assert result.stop_loss_enabled is False
         assert result.sl_mode == StopLossMode.FIXED_CENTS
+
+        # Flag off: profile-based SL cents still loaded.
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "0")
+        legacy = resolve_exit_policy(
+            edge_result=None,
+            asset="BTC",
+            regime="normal"
+        )
+        assert legacy.sl_cents == expected_sl_cents, f"Expected sl_cents={expected_sl_cents} from profile, got {legacy.sl_cents}"
     
     def test_dynamic_risk_uses_profile_sl_cents(self):
         """Test that dynamic_risk.py loads SL cents from profile config.
