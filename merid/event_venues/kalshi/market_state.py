@@ -1363,17 +1363,20 @@ class KalshiMarketStateStore:
         ws_recv_ns = msg.get("_t_ws_recv_ns")
         ws_recv_wall_ms = msg.get("_t_ws_recv_wall_ms")
         pq_deq_ns = msg.get("_t_pq_dequeue_ns")
-        try:
-            if venue_ts is not None and ws_recv_wall_ms is not None:
-                _v = float(venue_ts)
+        if venue_ts is not None and ws_recv_wall_ms is not None:
+            try:
                 if isinstance(venue_ts, str):
                     from datetime import datetime
                     _v_ms = datetime.fromisoformat(
                         venue_ts.replace("Z", "+00:00")
                     ).timestamp() * 1000.0
                 else:
+                    _v = float(venue_ts)
                     _v_ms = _v if _v > 1e12 else _v * 1000.0
                 hops["wire_ms"] = round(float(ws_recv_wall_ms) - _v_ms, 1)
+            except Exception:
+                pass
+        try:
             if ws_recv_ns is not None:
                 hops["recv_to_now_ms"] = round((now_mono_ns - float(ws_recv_ns)) / 1e6, 1)
             if ws_recv_ns is not None and pq_deq_ns is not None:
