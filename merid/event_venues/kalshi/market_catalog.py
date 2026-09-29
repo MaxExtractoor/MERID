@@ -677,6 +677,18 @@ class KalshiMarketCatalog:
         # Series health tracking (Kalshi alignment: Invariant 5)
         self._series_health: Dict[str, str] = {}  # series_ticker -> "healthy", "lagging", "no_active_tickers", "unknown"
 
+        # Series-level fee identity cache.  The market record does not carry
+        # fee_type/fee_multiplier — they live on GET /series/{ticker}.  The
+        # contract-spec gate (and the maker lane behind it) fails closed on
+        # absent fee metadata, so we resolve it once per TTL here and inject
+        # it into each market's raw_data.  The per-fill fee audit remains the
+        # drift detector between refreshes.
+        self._series_fee_meta: Dict[str, Dict[str, Any]] = {}
+        self._series_fee_meta_ts: Dict[str, float] = {}
+        self._series_fee_ttl_s: float = float(
+            os.getenv("MERID_SERIES_FEE_META_TTL_S", "900")
+        )
+
         # 15m market metadata backfill config (Kalshi creates markets before floor_strike is populated)
         self._metadata_backfill_enabled = os.getenv(
             "MERID_KALSHI_15M_METADATA_BACKFILL_ENABLED", "true"
@@ -961,6 +973,46 @@ class KalshiMarketCatalog:
 
     # ── Core refresh ─────────────────────────────────────────────────────
 
+    async def _refresh_series_fee_meta(self, series_tickers) -> None:
+        """Populate the series-level fee identity cache.
+
+        The market record does not carry ``fee_type``/``fee_multiplier`` —
+        they are declared on ``GET /series/{ticker}``.  A failed fetch keeps
+        the previous cached value; a never-fetched series simply stays absent
+        (contract-spec then fails closed on unverified fee identity).
+        """
+        now = time.monotonic()
+        for series in series_tickers or []:
+            try:
+                if now - self._series_fee_meta_ts.get(series, 0.0) < self._series_fee_ttl_s:
+                    continue
+                result = await self._client.get_series(series)
+                if result.success and isinstance(result.data, dict):
+                    self._series_fee_meta[series] = {
+                        "fee_type": result.data.get("fee_type"),
+                        "fee_multiplier": result.data.get("fee_multiplier"),
+                        "fee_waiver_expiration_time_ms": result.data.get(
+                            "fee_waiver_expiration_time_ms"
+                        ),
+                    }
+                    self._series_fee_meta_ts[series] = now
+                    logger.info(
+                        "[CATALOG-FEE-META] series=%s fee_type=%s fee_multiplier=%s",
+                        series,
+                        result.data.get("fee_type"),
+                        result.data.get("fee_multiplier"),
+                    )
+                else:
+                    logger.warning(
+                        "[CATALOG-FEE-META] series=%s fetch failed: %s",
+                        series,
+                        getattr(result, "error", "no data"),
+                    )
+            except Exception as _e:
+                logger.warning(
+                    "[CATALOG-FEE-META] series=%s fetch error: %s", series, _e
+                )
+
     async def refresh(self, force: bool = False) -> int:
         """Refresh the catalog from the Kalshi API.
 
@@ -1088,6 +1140,9 @@ class KalshiMarketCatalog:
                                 return series, None
                 return series, None
 
+            # Resolve series-level fee identity once per TTL (stable per series).
+            await self._refresh_series_fee_meta(_PRIORITY_SERIES)
+
             # Stagger fetches to avoid 429 rate limit errors
             # CRITICAL FIX: Increase stagger to 1 second to avoid Kalshi API rate limits
             # 200ms was insufficient - still getting 429 errors
@@ -1112,6 +1167,18 @@ class KalshiMarketCatalog:
                 markets_list = []
                 for raw_m in raw_markets_list:
                     try:
+                        # Inject authoritative series fee identity into the raw
+                        # record so contract-spec validation sees the declared
+                        # schedule rather than absent market-level metadata.
+                        _fee_meta = self._series_fee_meta.get(series)
+                        if _fee_meta:
+                            for _fk in (
+                                "fee_type",
+                                "fee_multiplier",
+                                "fee_waiver_expiration_time_ms",
+                            ):
+                                if raw_m.get(_fk) is None and _fee_meta.get(_fk) is not None:
+                                    raw_m[_fk] = _fee_meta[_fk]
                         # CRITICAL DIAGNOSTIC: Log raw market data before conversion
                         logger.info("[CATALOG-RAW-MARKET] market_id=%s raw_data=%s", raw_m.get('market_id', 'unknown'), raw_m)
                         
