@@ -3551,6 +3551,46 @@ class KalshiMarketCatalog:
         self._prime_state_store_metadata(selected)
         return selected
 
+    def get_next_15m_market(self, asset: str) -> Optional["CatalogMarket"]:
+        """Return the *next* (post-rollover) 15m market for an asset, if listed.
+
+        The catalog fetch horizon covers ~30 minutes ahead, so the upcoming
+        window's market is usually present in ``_markets`` while the current
+        window is still live.  The 15m loop subscribes to it early so the WS
+        book is already snapshotted and contiguous when the new window opens,
+        instead of bootstrapping for 2-4 minutes after rollover.
+
+        Selection: non-settled market for ``asset`` whose expiry is strictly
+        more than one window (15m) away; smallest such expiry wins.
+        """
+        from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
+
+        try:
+            allowed_assets = _get_trading_allowed_assets()
+            if asset not in allowed_assets:
+                return None
+            now_utc = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
+            best: Optional[CatalogMarket] = None
+            best_mte = float("inf")
+            for m in self._markets:
+                if m.asset != asset or not m.expires_at:
+                    continue
+                raw_data = m.market.raw_data or {}
+                if raw_data.get("status", "").lower() in ("settled", "finalized"):
+                    continue
+                mte = compute_minutes_to_expiry(m.expires_at, now_utc)
+                # Strictly beyond the current window's end (15m) but inside the
+                # fetch horizon.  A market with mte<=15 belongs to the live window.
+                if 15.0 < mte <= 30.0 and mte < best_mte:
+                    best = m
+                    best_mte = mte
+            if best is not None:
+                self._prime_state_store_metadata(best)
+            return best
+        except Exception as exc:
+            logger.debug("[GET-NEXT-15M] asset=%s failed: %s", asset, exc)
+            return None
+
     def _prime_state_store_metadata(self, cm: "CatalogMarket") -> None:
         """Push known strike/expiry metadata for a selected market into the
         state store immediately.

@@ -165,19 +165,30 @@ def _terminal_code(
         r = str(mo.get("reason") or "").lower()
         if "warmup" in r or "price_history" in r:
             return "FEATURE_INVALID"
+        if "time_to_expiry" in r:
+            return "TTE_ENTRY_CUTOFF"
         if "stale" in r or "illiquid" in r or "validation" in r or "not ready" in r:
             return "BOOK_NOT_TRUSTED"
-        # expired / outside the entry TTE window / settled
+        # expired / settled / no contract in the entry window
         return "MARKET_UNAVAILABLE"
     rl = (rejection_reason or "").strip().lower()
     if "lifecycle" in rl or "no_trade_without_exit" in rl:
         return "ENTRY_LIFECYCLE_INVALID"
-    if "both_sides_disabled_regime" in rl or "price_band" in rl or "final_price_out_of_range" in rl:
-        # The regime gate fires on price band OR on the per-regime TTE floor;
-        # a side still in-band without the time bound means the window closed.
-        if (decision or {}).get("regime_reject_cause") == "tte_floor":
-            return "MARKET_UNAVAILABLE"
+    # 2026-09-29: split the conflated regime rejection into a TTE cutoff
+    # (intentional no-entry state) vs a genuine both-sides price-band reject.
+    if "tte_entry_cutoff" in rl:
+        return "TTE_ENTRY_CUTOFF"
+    if "price_band_both_sides_disabled" in rl:
         return "PRICE_BAND_REJECT"
+    if "both_sides_disabled_regime" in rl or "price_band" in rl or "final_price_out_of_range" in rl:
+        # Legacy reason strings (pre-split): the regime gate fires on price
+        # band OR on the per-regime TTE floor; a side still in-band without
+        # the time bound means the window closed.
+        if (decision or {}).get("regime_reject_cause") == "tte_floor":
+            return "TTE_ENTRY_CUTOFF"
+        return "PRICE_BAND_REJECT"
+    if "evidence_toxic_cell" in rl:
+        return "TOXIC_CELL_BLOCK"
     if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("evidence_") or rl.startswith("market_fade_blocked"):
         return "CALIBRATION_QUARANTINE"
     if "insufficient_depth" in rl or rl.startswith("fill_or_depth"):
@@ -190,8 +201,8 @@ def _terminal_code(
         if best_ev_cents is not None and best_ev_cents <= 0.0:
             return "NO_POSITIVE_EXECUTABLE_EDGE"
         return "EDGE_BELOW_THRESHOLD"
-    if rl.startswith("min_tte") or "time_to_expiry" in rl:
-        return "MARKET_UNAVAILABLE"
+    if rl.startswith("min_tte") or rl.startswith("final_minute") or "time_to_expiry" in rl:
+        return "TTE_ENTRY_CUTOFF"
     if rl.startswith("exception") or "model_unavailable" in rl:
         return "MODEL_UNAVAILABLE"
     if candidate is not None or (

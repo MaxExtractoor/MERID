@@ -2604,6 +2604,11 @@ def compute_trade_decision(
                             "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
                             "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
                             "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
+                            "CHALLENGE_INSUFFICIENT": "evidence_challenge_insufficient",
+                            "CHALLENGE_LANE_DISABLED": "evidence_escape_disabled",
+                            "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
+                            "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
+                            "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
                         }.get(_ed.code, f"evidence_{_ed.code.lower()}")
                         if _side == "yes" and yes_evidence_ok:
                             yes_evidence_ok = False

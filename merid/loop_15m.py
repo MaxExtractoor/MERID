@@ -1317,6 +1317,16 @@ class Kalshi15mLoop:
         self._catalog_roll_ts = 0.0  # Timestamp of last catalog roll (markets changed)
         self._catalog_warmup_seconds = 10.0  # Grace period after catalog roll for WS to deliver snapshots
         self._last_catalog_market_ids = set()  # Track market IDs to detect catalog rolls
+        # 2026-09-29: desired WS subscription set = current 15m markets UNION
+        # prewarmed next-window markets (dual-subscribe before rollover so the
+        # new book is already contiguous at open).  Diffed per cycle.
+        self._last_ws_desired_tickers: set = set()
+        # (asset, window_start_epoch) dedup for the ROLLOVER-READINESS audit
+        # emitted once per asset in the first seconds of each 15m window.
+        self._rollover_readiness_emitted: set = set()
+        self._rollover_readiness_window_s = float(
+            os.getenv("MERID_ROLLOVER_READINESS_WINDOW_S", "45")
+        )
 
         # Spot service startup guard - prevents false negatives before warmup completes
         self._spot_ready_logged = False
@@ -4461,6 +4471,35 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             exc_info=True,
         )
 
+def _emit_rollover_readiness(self, asset: str, ticker: Optional[str], missing: List[str]) -> None:
+    """Emit one ``[ROLLOVER-READINESS]`` record per asset per 15m window.
+
+    Fires only during the first ``MERID_ROLLOVER_READINESS_WINDOW_S`` seconds
+    after a window boundary (default 45s, covers the spec's open+10s target).
+    Distinguishes true no-edge windows from operational blindness: NOT_READY
+    carries the exact missing component (catalog_ticker, market_state_store,
+    md:<reason>, spot_fresh, book_depth).
+    """
+    try:
+        window_age_s = time.time() % 900.0
+        if window_age_s > self._rollover_readiness_window_s:
+            return
+        key = (asset, int(time.time() // 900))
+        if key in self._rollover_readiness_emitted:
+            return
+        self._rollover_readiness_emitted.add(key)
+        if len(self._rollover_readiness_emitted) > 1000:
+            self._rollover_readiness_emitted.clear()
+        logger.info(
+            "[ROLLOVER-READINESS] asset=%s ticker=%s window_age_s=%.0f state=%s missing=%s",
+            asset, ticker or "none", window_age_s,
+            "READY" if not missing else "NOT_READY",
+            ",".join(missing) if missing else "none",
+        )
+    except Exception:
+        pass
+
+
 def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     """Compute whether new entries are allowed for the current loop tick.
 
@@ -4500,6 +4539,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         for asset in self._allowed_assets:
             current_market = catalog.get_current_15m_market(asset)
             if current_market is None:
+                self._emit_rollover_readiness(asset, None, ["catalog_ticker"])
                 continue
             markets_present = True
             market_id = (
@@ -4509,6 +4549,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             )
             state = self.market_state_store.get(market_id) if self.market_state_store else None
             if state is None:
+                self._emit_rollover_readiness(asset, market_id, ["market_state_store"])
                 continue
 
             # CRITICAL FIX (2026-08-22): Use the authoritative *entry* readiness gate
@@ -4558,10 +4599,16 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 max_slippage_cents = 3
 
             liquidity_result = can_fill_order_safely(state, target_qty, max_slippage_cents, side="yes")
-            if (
-                asset_md_fresh
-                and liquidity_result.decision in (LiquidityDecision.FULL, LiquidityDecision.REDUCED)
-            ):
+            _depth_ok = liquidity_result.decision in (LiquidityDecision.FULL, LiquidityDecision.REDUCED)
+            _rr_missing: List[str] = []
+            if not asset_md_fresh:
+                _rr_missing.append(f"md:{md_reason}")
+            if not asset_spot_fresh:
+                _rr_missing.append("spot_fresh")
+            if not _depth_ok:
+                _rr_missing.append("book_depth")
+            self._emit_rollover_readiness(asset, market_id, _rr_missing)
+            if asset_md_fresh and _depth_ok:
                 ready_assets_count += 1
 
             per_ticker_readiness.append({
@@ -6598,6 +6645,31 @@ async def _run_one_cycle(self, tick: int) -> None:
                                 "[CATALOG-ROLL] Requested WS resubscribe for %d tickers via ws_bridge.set_markets()",
                                 len(current_tickers)
                             )
+
+                # 2026-09-29: pre-warm next-window subscriptions.  The catalog
+                # fetches ~30m ahead, so the upcoming market is listed while the
+                # current window is live.  Desired set = current ∪ next; the
+                # bridge subscribes the moment the next ticker exists, so its
+                # book is snapshotted/contiguous at rollover instead of
+                # bootstrapping for 2-4 minutes after open.
+                if self._ws_bridge and catalog_snapshot:
+                    try:
+                        desired_ws = set(current_market_ids)
+                        for asset in self._allowed_assets:
+                            nxt = self._catalog.get_next_15m_market(asset)
+                            if nxt is not None and getattr(nxt.market, "market_id", None):
+                                desired_ws.add(nxt.market.market_id)
+                        if desired_ws and desired_ws != self._last_ws_desired_tickers:
+                            added = sorted(desired_ws - self._last_ws_desired_tickers)
+                            removed = sorted(self._last_ws_desired_tickers - desired_ws)
+                            self._last_ws_desired_tickers = set(desired_ws)
+                            self._ws_bridge.set_markets(sorted(desired_ws))
+                            logger.info(
+                                "[WS-PREWARM] desired_ws_tickers=%d added=%s removed=%s",
+                                len(desired_ws), added, removed,
+                            )
+                    except Exception as _pw_exc:
+                        logger.debug("[WS-PREWARM] desired-set update failed: %s", _pw_exc)
             
             # Apply WS warmup grace period after catalog roll
             # Allow N seconds for WS to deliver initial snapshots before flagging staleness
@@ -10397,6 +10469,7 @@ def summary(self) -> Dict[str, Any]:
 Kalshi15mLoop._execute_exit_order = _execute_exit_order
 Kalshi15mLoop._rearm_position_after_failed_exit = _rearm_position_after_failed_exit
 Kalshi15mLoop._compute_allow_new_entries = _compute_allow_new_entries
+Kalshi15mLoop._emit_rollover_readiness = _emit_rollover_readiness
 Kalshi15mLoop._run_loop = _run_loop
 Kalshi15mLoop.stop = stop
 Kalshi15mLoop._run_one_cycle = _run_one_cycle

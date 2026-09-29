@@ -8974,6 +8974,22 @@ class LeanAgent15m:
             ) if bd else (model_prob * 100.0) - float(price_cents) - fee_cents,
             "fee_cents": fee_cents,
             "slippage_cents": 0.0,
+            # 2026-09-29: full reserve decomposition for the allocator's
+            # EV-floor audit record (ALLOCATION-EV-FLOOR).  Every component
+            # is in cents/contract; reserves already deducted from net_edge
+            # are informational context, not re-applied downstream.
+            "cost_breakdown_cents": {
+                "entry_fee_cents": float(bd.entry_fee) * 100.0 if bd else fee_cents,
+                "exit_reserve_cents": float(bd.exit_cost_reserve) * 100.0 if bd else fee_cents,
+                "model_uncertainty_reserve_cents": float(bd.model_risk_reserve) * 100.0 if bd else 0.0,
+                "adverse_selection_reserve_cents": float(getattr(decision, "adverse_selection_reserve", 0.0) or 0.0) * 100.0,
+                "evidence_uncertainty_reserve_cents": float(
+                    ((decision.indicators or {}).get(f"evidence_{side}") or {}).get("sparse_uplift_cents") or 0.0
+                ),
+                "lcb_net_ev_cents": float(
+                    ((decision.indicators or {}).get(f"evidence_{side}") or {}).get("lcb_net_ev_cents") or 0.0
+                ) if (decision.indicators or {}).get(f"evidence_{side}") else None,
+            },
             "time_to_expiry_seconds": seconds_to_expiry,
             "selected_outcome_price": int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else price_cents,
             "settlement_input_price": float(settlement_input_price) if settlement_input_price is not None else float(strike),
@@ -9834,6 +9850,52 @@ class LeanAgent15m:
             "context": context,
         }
         self._telemetry_update(rejection_reason=reason, **context)
+
+        # 2026-09-29: late-window shadow scorer (research only, no live effect).
+        # TTE-floor rejections inside the 30-90s band emit an observable-state
+        # record so a dedicated late-window regime can be scored offline.
+        try:
+            from merid.prediction import late_window_shadow as _lws
+            if _lws.enabled() and reason in _lws.LATE_TTE_REASONS:
+                _ticker = context.get("ticker") or context.get("market_id")
+                _tte = context.get("market_time_remaining_s")
+                if _tte is None:
+                    _mte = context.get("minutes_to_expiry")
+                    _tte = float(_mte) * 60.0 if _mte is not None else None
+                _band = _lws.tte_band_10s(_tte)
+                _dedup_key = (_ticker, _band, reason)
+                if _band is not None and _lws.in_band(_tte):
+                    if not hasattr(self, "_late_window_shadow_keys"):
+                        self._late_window_shadow_keys = set()
+                    if _dedup_key not in self._late_window_shadow_keys:
+                        self._late_window_shadow_keys.add(_dedup_key)
+                        if len(self._late_window_shadow_keys) > 2000:
+                            self._late_window_shadow_keys.clear()
+                        _rec = _lws.build_record(
+                            reason,
+                            ticker=_ticker,
+                            asset=context.get("asset"),
+                            spot_price=context.get("spot_price") or context.get("reference_price"),
+                            strike=context.get("strike"),
+                            seconds_to_expiry=_tte,
+                            yes_ask_cents=context.get("yes_entry_price_cents") or context.get("yes_ask_cents"),
+                            no_ask_cents=context.get("no_entry_price_cents") or context.get("no_ask_cents"),
+                            yes_bid_cents=context.get("yes_bid_cents"),
+                            no_bid_cents=context.get("no_bid_cents"),
+                            annualized_vol=context.get("annualized_vol"),
+                            annualized_vol_source=context.get("annualized_vol_source"),
+                            run_id=context.get("run_id"),
+                            decision_id=context.get("decision_id"),
+                            extra={
+                                "yes_regime_no_tte": context.get("yes_regime_no_tte"),
+                                "no_regime_no_tte": context.get("no_regime_no_tte"),
+                                "regime_reject_cause": context.get("regime_reject_cause"),
+                            },
+                        )
+                        if _rec is not None:
+                            _lws.write_record(_rec)
+        except Exception as _lws_err:
+            logger.debug("[LATE-WINDOW-SHADOW] emit failed (non-fatal): %s", _lws_err)
 
     def _log_tail_band_shadow(
         self,
@@ -12308,8 +12370,15 @@ class LeanAgent15m:
             # to a regime was rejected on time, not on price band.
             _yes_regime_no_tte = classify_market_regime(yes_price_cents, None)
             _no_regime_no_tte = classify_market_regime(no_price_cents, None)
+            _regime_reject_cause = (
+                "tte_floor" if (_yes_regime_no_tte or _no_regime_no_tte)
+                else "price_band"
+            )
             self._record_signal_rejection(
-                "both_sides_disabled_regime",
+                (
+                    "tte_entry_cutoff" if _regime_reject_cause == "tte_floor"
+                    else "price_band_both_sides_disabled"
+                ),
                 market_id=getattr(market, 'market_id', None),
                 ticker=getattr(market, 'market_id', None),
                 market_time_remaining_s=seconds_to_expiry,
@@ -12322,10 +12391,7 @@ class LeanAgent15m:
                 no_ask_cents=no_price_cents,
                 yes_regime_no_tte=(_yes_regime_no_tte.name if _yes_regime_no_tte else "none"),
                 no_regime_no_tte=(_no_regime_no_tte.name if _no_regime_no_tte else "none"),
-                regime_reject_cause=(
-                    "tte_floor" if (_yes_regime_no_tte or _no_regime_no_tte)
-                    else "price_band"
-                ),
+                regime_reject_cause=_regime_reject_cause,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
             )
             return None
@@ -16884,6 +16950,7 @@ class LeanAgent15m:
                 "ev_net_cents": signal.get("ev_net_cents"),
                 "fee_cents": signal.get("fee_cents"),
                 "slippage_cents": signal.get("slippage_cents"),
+                "cost_breakdown_cents": signal.get("cost_breakdown_cents"),
                 "time_to_expiry_seconds": signal.get("time_to_expiry_seconds"),
                 "thesis_side": signal.get("thesis_side"),
                 "strategy_intent": signal.get("strategy_intent"),
@@ -18695,6 +18762,8 @@ class LeanAgentGrid15m:
                         agent_name=candidate.get('agent_id', asset),
 
                         candidate_id=str(candidate.get('candidate_id', '') or ''),
+
+                        cost_breakdown_cents=candidate.get('cost_breakdown_cents'),
 
                         quote_owner=_quote_owner,
 

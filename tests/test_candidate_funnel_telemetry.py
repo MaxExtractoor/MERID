@@ -56,12 +56,17 @@ def test_terminal_code_waterfall_stages():
             market_open={"status": False, "reason": "time_to_expiry=18.4s < min=30.0s"},
         ),
         None, False, "", None,
-    ) == "MARKET_UNAVAILABLE"
+    ) == "TTE_ENTRY_CUTOFF"
 
 
 def test_terminal_code_reason_mapping():
     cases = [
         ("both_sides_disabled_regime", "PRICE_BAND_REJECT"),
+        ("price_band_both_sides_disabled", "PRICE_BAND_REJECT"),
+        ("tte_entry_cutoff", "TTE_ENTRY_CUTOFF"),
+        ("min_tte_entry_disabled", "TTE_ENTRY_CUTOFF"),
+        ("final_minute_entry_disabled", "TTE_ENTRY_CUTOFF"),
+        ("evidence_toxic_cell_no", "TOXIC_CELL_BLOCK"),
         ("calibration_evidence_yes", "CALIBRATION_QUARANTINE"),
         ("calibration_evidence_no", "CALIBRATION_QUARANTINE"),
         ("live_evidence_asset_no", "CALIBRATION_QUARANTINE"),
@@ -72,7 +77,6 @@ def test_terminal_code_reason_mapping():
         ("cost_basis_override_no", "NO_POSITIVE_EXECUTABLE_EDGE"),
         ("directional_tie", "NO_POSITIVE_EXECUTABLE_EDGE"),
         ("no_trade_without_exit", "ENTRY_LIFECYCLE_INVALID"),
-        ("min_tte_entry_disabled", "MARKET_UNAVAILABLE"),
         ("cooldown: x", "RISK_OR_ALLOCATION_REJECT"),
         ("KNAPSACK_CAP", "RISK_OR_ALLOCATION_REJECT"),
         ("exception: boom", "MODEL_UNAVAILABLE"),
@@ -88,7 +92,7 @@ def test_terminal_code_regime_tte_floor_is_market_unavailable():
     assert dt._terminal_code(
         {}, None, False, "both_sides_disabled_regime", None,
         decision={"regime_reject_cause": "tte_floor"},
-    ) == "MARKET_UNAVAILABLE"
+    ) == "TTE_ENTRY_CUTOFF"
     assert dt._terminal_code(
         {}, None, False, "both_sides_disabled_regime", None,
         decision={"regime_reject_cause": "price_band"},

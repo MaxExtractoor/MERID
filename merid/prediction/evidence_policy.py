@@ -130,6 +130,28 @@ def escape_state_path() -> str:
     )
 
 
+def adaptive_states_enabled() -> bool:
+    """Intermediate states between hard reject and free pass.
+
+    When on, a matched-but-insufficient cell no longer permanently blocks:
+    recent matched outcomes that contradict the stale posterior admit a
+    bounded ``CHALLENGE_ELIGIBLE`` trial; absent contradiction the candidate
+    must clear an elevated ``SOFT_PENALTY`` model-edge reserve.  Toxic dense
+    cells (MATCHING_TOXIC_CELL) remain a hard block either way.
+    """
+    return _env_flag("MERID_EVIDENCE_ADAPTIVE_STATES", True)
+
+
+def challenge_min_recent_n() -> int:
+    """Min recent matched observations for a 'prior is stale' challenge."""
+    return _env_int("MERID_EVIDENCE_CHALLENGE_MIN_RECENT_N", 3)
+
+
+def soft_penalty_extra_c() -> float:
+    """Extra model-edge margin (cents) for SOFT_PENALTY admission."""
+    return _env_float("MERID_EVIDENCE_SOFT_PENALTY_C", 4.0)
+
+
 # ---------------------------------------------------------------------------
 # Cell dimensions
 # ---------------------------------------------------------------------------
@@ -374,10 +396,29 @@ class EvidenceDecision:
     hard_block_level: Optional[str] = None
     hard_block_ev_cents: Optional[float] = None
 
+    @property
+    def admission_state(self) -> str:
+        """Spec vocabulary: HARD_BLOCK / SOFT_PENALTY / CHALLENGE_ELIGIBLE /
+        NORMAL_ADMISSIBLE / REJECTED — the coarse lane this decision landed in."""
+        c = self.code
+        if c == "MATCHING_TOXIC_CELL":
+            return "HARD_BLOCK"
+        if c.startswith("SOFT_PENALTY"):
+            return "SOFT_PENALTY"
+        if c.startswith("CHALLENGE"):
+            return "CHALLENGE_ELIGIBLE"
+        if self.allowed and self.escape_required:
+            # Bounded post-only trial (sparse/empty evidence or challenge).
+            return "CHALLENGE_ELIGIBLE"
+        if self.allowed:
+            return "NORMAL_ADMISSIBLE"
+        return "REJECTED"
+
     def detail(self) -> Dict[str, Any]:
         return {
             "evidence_policy_version": EVIDENCE_POLICY_VERSION,
             "code": self.code,
+            "admission_state": self.admission_state,
             "allowed": self.allowed,
             "cell_key": self.cell_key,
             "evidence_level_used": self.evidence_level_used,
@@ -654,33 +695,136 @@ def evaluate(
 
     escape = exact_cell.n_eff < sparse_full_neff()
     ok = lcb_ev >= req_margin
-    if ok and escape:
-        # A pass that rests on pooled/sparse cell evidence is only admissible
-        # through the bounded escape lane: post-only, one contract, capped per
-        # day.  Disabled lane or exhausted cap fails closed.
+
+    def _escape_gate(ok_pass: bool, code_off: str, code_cap: str,
+                     fb_off: str, fb_cap: str) -> Optional[EvidenceDecision]:
+        """Shared bounded-lane gate for sparse/challenge/soft-penalty passes."""
+        if not ok_pass:
+            return None
         if not escape_lane_enabled():
             return _base(
-                allowed=False, code="ESCAPE_LANE_DISABLED",
+                allowed=False, code=code_off,
                 level=used_name, parent_level=parent_name,
                 n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
                 n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
                 lcb_ev=lcb_ev, req_margin=req_margin, uplift=uplift,
-                escape=True,
-                fallback="sparse cell requires escape lane; lane disabled",
+                escape=True, fallback=fb_off,
             )
         if escape_cap_remaining() <= 0:
             return _base(
-                allowed=False, code="ESCAPE_CAP_EXHAUSTED",
+                allowed=False, code=code_cap,
+                level=used_name, parent_level=parent_name,
+                n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
+                n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
+                lcb_ev=lcb_ev, req_margin=req_margin, uplift=uplift,
+                escape=True, fallback=fb_cap,
+            )
+        return None
+
+    if ok:
+        if escape:
+            gated = _escape_gate(
+                True, "ESCAPE_LANE_DISABLED", "ESCAPE_CAP_EXHAUSTED",
+                "sparse cell requires escape lane; lane disabled",
+                "daily escape-lane submission cap reached",
+            )
+            if gated is not None:
+                return gated
+        return _base(
+            allowed=True, code="CELL_EVIDENCE_PASS",
+            level=used_name, parent_level=parent_name,
+            n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
+            n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
+            lcb_ev=lcb_ev, req_margin=req_margin, uplift=uplift,
+            escape=escape,
+            fallback=(
+                None if used_idx == 0
+                else f"exact cell sparse (n_eff={exact_cell.n_eff:.1f}); "
+                     f"fell back to {used_name}"
+            ),
+        )
+
+    # -- Adaptive states ----------------------------------------------------
+    # The matched-cell posterior LCB cannot clear the required margin at the
+    # current price.  Instead of an unconditional permanent block:
+    #   CHALLENGE_ELIGIBLE - recent *matched* outcomes already contradict the
+    #       stale-looking prior (recent win rate >= this entry's break-even).
+    #       Admits a bounded trial: model net edge must clear the sparse
+    #       uncertainty uplift; execution is escape-lane (post-only, 1
+    #       contract, shared daily cap).
+    #   SOFT_PENALTY - no contradiction, evidence merely insufficient.  Admits
+    #       only when the model's own net edge clears an elevated reserve
+    #       (margin + uplift + soft_penalty_extra), again through the lane.
+    #   otherwise CELL_EVIDENCE_INSUFFICIENT - reject as before.
+    if adaptive_states_enabled() and not stale:
+        breakeven_wr = float(entry_price_cents) / 100.0 + float(fee_frac)
+        rec_n, rec_wr = used_agg.recent_n, used_agg.recent_wr
+        if (
+            (rec_wr is None or rec_n < challenge_min_recent_n())
+            and exact_cell.recent_n >= challenge_min_recent_n()
+        ):
+            rec_n, rec_wr = exact_cell.recent_n, exact_cell.recent_wr
+        contradicts = (
+            rec_wr is not None
+            and rec_n >= challenge_min_recent_n()
+            and rec_wr >= breakeven_wr
+        )
+        if contradicts:
+            # The stale posterior disagrees, so the model must still clear the
+            # ordinary all-in margin (base margin + uncertainty uplift) on its
+            # own edge — the challenge is bounded, not free.
+            ch_ok = (
+                net_edge_cents is not None
+                and float(net_edge_cents) >= req_margin
+            )
+            gated = _escape_gate(
+                ch_ok, "CHALLENGE_LANE_DISABLED", "CHALLENGE_CAP_EXHAUSTED",
+                "challenge lane requires escape lane; lane disabled",
+                "daily escape-lane submission cap reached (challenge)",
+            )
+            if gated is not None:
+                return gated
+            return _base(
+                allowed=bool(ch_ok),
+                code="CHALLENGE_ELIGIBLE" if ch_ok else "CHALLENGE_INSUFFICIENT",
                 level=used_name, parent_level=parent_name,
                 n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
                 n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
                 lcb_ev=lcb_ev, req_margin=req_margin, uplift=uplift,
                 escape=True,
-                fallback="daily escape-lane submission cap reached",
+                fallback=(
+                    f"recent matched outcomes contradict prior "
+                    f"(recent_wr={rec_wr:.2f} on n={rec_n} >= "
+                    f"breakeven={breakeven_wr:.2f}); bounded challenge"
+                ),
             )
+        soft_req = margin_frac * 100.0 + uplift + soft_penalty_extra_c()
+        soft_ok = (
+            net_edge_cents is not None and float(net_edge_cents) >= soft_req
+        )
+        gated = _escape_gate(
+            soft_ok, "SOFT_PENALTY_LANE_DISABLED", "ESCAPE_CAP_EXHAUSTED",
+            "soft-penalty pass requires escape lane; lane disabled",
+            "daily escape-lane submission cap reached",
+        )
+        if gated is not None:
+            return gated
+        return _base(
+            allowed=bool(soft_ok),
+            code="SOFT_PENALTY_PASS" if soft_ok else "SOFT_PENALTY_INSUFFICIENT",
+            level=used_name, parent_level=parent_name,
+            n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
+            n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
+            lcb_ev=lcb_ev, req_margin=soft_req, uplift=uplift,
+            escape=True,
+            fallback=(
+                "matched cell LCB insufficient; model edge tested against "
+                "elevated soft-penalty reserve"
+            ),
+        )
+
     return _base(
-        allowed=bool(ok),
-        code="CELL_EVIDENCE_PASS" if ok else "CELL_EVIDENCE_INSUFFICIENT",
+        allowed=False, code="CELL_EVIDENCE_INSUFFICIENT",
         level=used_name, parent_level=parent_name,
         n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
         n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
