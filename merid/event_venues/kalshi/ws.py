@@ -1562,10 +1562,12 @@ class KalshiWebSocket(EventVenueStream):
                     # CRITICAL FIX (2026-08-02): Increased timeout to 90s for more tolerant detection
                     # Previous 60s was still causing premature reconnections during quiet market periods
                     # Research shows 90-120s is standard for production WebSocket recv timeout
-                    if is_replay_active():
-                        msg = await self._ws.recv()
-                    else:
-                        msg = await asyncio.wait_for(self._ws.recv(), timeout=90.0)
+                    # THROUGHPUT FIX: asyncio.wait_for wraps recv() in a fresh
+                    # Task + timeout handle per message — measurable allocation
+                    # and scheduling cost at ~1200 msgs/s.  The dedicated health
+                    # monitor already detects a stalled socket (idle threshold)
+                    # and forces reconnect, so the per-call timeout is redundant.
+                    msg = await self._ws.recv()
 
                     # Track message count for metrics
                     raw_message_count += 1
@@ -1993,7 +1995,16 @@ class KalshiWebSocket(EventVenueStream):
                 
                 # Batch drain: process multiple messages per iteration under pressure
                 messages_processed = 0
-                tasks: List[asyncio.Task] = []
+
+                # THROUGHPUT FIX: sequential awaits instead of per-message
+                # create_task+gather.  Task allocation+scheduling cost per
+                # message (~50-100us) was a hard ceiling near ~1200/s; the
+                # bounded sequential batch preserves strict venue order (a
+                # task batch could interleave same-ticker callbacks) and is
+                # dramatically cheaper at flood rates.
+                safe_callback = callback or self._noop_async_callback
+                if not callable(safe_callback):
+                    safe_callback = self._noop_async_callback
 
                 for i in range(batch_size):
                     try:
@@ -2028,18 +2039,31 @@ class KalshiWebSocket(EventVenueStream):
                         if isinstance(_nested_d, dict):
                             _nested_d["_t_pq_dequeue_ns"] = _pq_deq_ns
 
-                    # PERFORMANCE FIX (2026-08-23): Build a task for each message and gather
-                    # them as a bounded batch. This keeps the queue from growing while still
-                    # limiting the number of in-flight coroutines to a single batch.
-                    task = self._process_single_message(callback, data, source_queue=batch_queue)
-                    if task is not None:
-                        tasks.append(task)
+                    try:
+                        event = self._parse_message(data)
+                        if event:
+                            await self._handle_event_async(safe_callback, event, data)
+                    except (ValueError, TypeError, RuntimeError) as e:
+                        logger.warning(
+                            f"Error parsing Kalshi WS message: {e} | "
+                            f"type={data.get('type')} market={data.get('ticker', '?')}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"CRITICAL: Unexpected error processing WS message: {e} | "
+                            f"type={data.get('type')} market={data.get('ticker', '?')}",
+                            exc_info=True,
+                        )
+                        try:
+                            self._record_callback_failure(str(e))
+                        except Exception:
+                            pass
+                    finally:
+                        try:
+                            batch_queue.task_done()
+                        except Exception:
+                            pass
                     messages_processed += 1
-
-                if tasks:
-                    # return_exceptions=True keeps a single failed callback from cancelling
-                    # the rest of the batch and allows us to continue draining.
-                    await asyncio.gather(*tasks, return_exceptions=True)
 
                 # Yield control briefly if we did not fill the first slot of a batch.
                 if messages_processed == 0:
