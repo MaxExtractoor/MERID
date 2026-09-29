@@ -140,6 +140,64 @@ def _classify_rejection(waterfall: Dict[str, Any], rejection_reason: str) -> str
 _FUNNEL_STAGES = ("market_discovered", "spot_price", "market_open",
                   "signal_generated", "candidate_generated")
 
+# Exhaustive terminal disposition per asset per cycle.  Exactly one code is
+# emitted per record; the raw rejection_reason is always retained alongside.
+def _terminal_code(
+    waterfall: Dict[str, Any],
+    candidate: Optional[Dict[str, Any]],
+    allocator_selected: bool,
+    rejection_reason: str,
+    best_ev_cents: Optional[float],
+) -> str:
+    """Map a cycle outcome to the canonical terminal code."""
+    if allocator_selected:
+        return "CANDIDATE_EMITTED"
+    stages = waterfall.get("stages", {}) if waterfall else {}
+    md = stages.get("market_discovered")
+    if md is not None and not md.get("status"):
+        return "MARKET_UNAVAILABLE"
+    sp = stages.get("spot_price")
+    if sp is not None and not sp.get("status"):
+        return "SPOT_NOT_TRUSTED"
+    mo = stages.get("market_open")
+    if mo is not None and not mo.get("status"):
+        r = str(mo.get("reason") or "").lower()
+        if "warmup" in r or "price_history" in r:
+            return "FEATURE_INVALID"
+        if "stale" in r or "illiquid" in r or "validation" in r or "not ready" in r:
+            return "BOOK_NOT_TRUSTED"
+        # expired / outside the entry TTE window / settled
+        return "MARKET_UNAVAILABLE"
+    rl = (rejection_reason or "").strip().lower()
+    if "lifecycle" in rl or "no_trade_without_exit" in rl:
+        return "ENTRY_LIFECYCLE_INVALID"
+    if "both_sides_disabled_regime" in rl or "price_band" in rl or "final_price_out_of_range" in rl:
+        return "PRICE_BAND_REJECT"
+    if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("market_fade_blocked"):
+        return "CALIBRATION_QUARANTINE"
+    if "insufficient_depth" in rl or rl.startswith("fill_or_depth"):
+        return "FILL_OR_DEPTH_REJECT"
+    if rl == "skip_market_not_ready":
+        return "BOOK_NOT_TRUSTED"
+    if rl.startswith("cost_basis_override") or rl == "directional_tie" or rl == "ev_gate_non_positive":
+        return "NO_POSITIVE_EXECUTABLE_EDGE"
+    if "edge_below_threshold" in rl or rl in ("insufficient_edge", "ev_extreme_price", "kelly_filter"):
+        if best_ev_cents is not None and best_ev_cents <= 0.0:
+            return "NO_POSITIVE_EXECUTABLE_EDGE"
+        return "EDGE_BELOW_THRESHOLD"
+    if rl.startswith("min_tte") or "time_to_expiry" in rl:
+        return "MARKET_UNAVAILABLE"
+    if rl.startswith("exception") or "model_unavailable" in rl:
+        return "MODEL_UNAVAILABLE"
+    if candidate is not None or (
+        rl.startswith("cooldown") or "session" in rl or "consecutive" in rl
+        or "knapsack" in rl or rl.startswith("allocator") or "risk" in rl
+    ):
+        return "RISK_OR_ALLOCATION_REJECT"
+    if not rl:
+        return "MODEL_UNAVAILABLE"
+    return "UNCLASSIFIED"
+
 
 def _terminal_stage(waterfall: Dict[str, Any], candidate: Optional[Dict[str, Any]],
                     allocator_selected: bool, allocator_note: str) -> str:
@@ -333,6 +391,18 @@ def build_asset_record(
         _resolve(candidate, decision, ["spot_price", "settlement_input_price"], ["spot_price"]),
     )
 
+    # Per-side net executable EV (cents), used for terminal-code resolution.
+    _yes_ev_c = _first_float(
+        _resolve(candidate, decision, ["yes_ev_net_cents"], ["yes_ev_net_cents"])
+    )
+    _no_ev_c = _first_float(
+        _resolve(candidate, decision, ["no_ev_net_cents"], ["no_ev_net_cents"])
+    )
+    _best_ev_c = max(
+        (v for v in (_yes_ev_c, _no_ev_c) if v is not None),
+        default=None,
+    )
+
     record = {
         "type": "decision_record",
         "schema_version": DECISION_TELEMETRY_SCHEMA_VERSION,
@@ -346,6 +416,10 @@ def build_asset_record(
         "decision_id": _did,
         "candidate_id": _cid,
         "terminal_stage": _terminal_stage(waterfall, candidate, allocator_selected, allocator_note),
+        "terminal_code": _terminal_code(
+            waterfall, candidate, allocator_selected,
+            str(rejection_reason or ""), _best_ev_c,
+        ),
         "rejection_chain": _rejection_chain(waterfall),
         "minutes_to_expiry": _minutes_to_expiry,
         "market_available": bool((waterfall.get("stages", {}).get("market_discovered") or {}).get("status", False)),
@@ -360,6 +434,46 @@ def build_asset_record(
         "no_ask_cents": _resolve(candidate, decision, ["no_ask_cents"], ["no_ask_cents"]),
         "yes_depth": _resolve(candidate, decision, ["yes_depth"], ["yes_depth"]),
         "no_depth": _resolve(candidate, decision, ["no_depth"], ["no_depth"]),
+        # Candidate surface: per-side executable economics and eligibility,
+        # populated even on rejection so the funnel record answers
+        # "which side, at what price, with what EV, blocked by what".
+        "p_yes_raw": _first_float(
+            _resolve(candidate, decision, ["p_yes_raw"], ["p_yes_raw"])
+        ),
+        "p_yes_calibrated": _p_yes,
+        "p_no_calibrated": _p_no,
+        "yes_entry_price_cents": _first_float(
+            _resolve(candidate, decision, ["yes_entry_price_cents"], ["yes_entry_price_cents"])
+        ),
+        "no_entry_price_cents": _first_float(
+            _resolve(candidate, decision, ["no_entry_price_cents"], ["no_entry_price_cents"])
+        ),
+        "yes_ev_net_cents": _yes_ev_c,
+        "no_ev_net_cents": _no_ev_c,
+        "required_edge_yes_cents": _first_float(
+            _resolve(candidate, decision, ["required_edge_yes_cents"], ["required_edge_yes_cents"])
+        ),
+        "required_edge_no_cents": _first_float(
+            _resolve(candidate, decision, ["required_edge_no_cents"], ["required_edge_no_cents"])
+        ),
+        "yes_eligible": _first_bool(
+            _resolve(candidate, decision, ["yes_eligible", "yes_qualifies"], ["yes_eligible", "yes_qualifies"])
+        ),
+        "no_eligible": _first_bool(
+            _resolve(candidate, decision, ["no_eligible", "no_qualifies"], ["no_eligible", "no_qualifies"])
+        ),
+        "yes_block": _first_str(
+            _resolve(candidate, decision, ["yes_block"], ["yes_block"])
+        ),
+        "no_block": _first_str(
+            _resolve(candidate, decision, ["no_block"], ["no_block"])
+        ),
+        "market_anchor_weight": _first_float(
+            _resolve(candidate, decision, ["market_anchor_weight"], ["market_anchor_weight"])
+        ),
+        "walkforward_cal_applied": _first_bool(
+            _resolve(candidate, decision, ["walkforward_cal_applied"], ["walkforward_cal_applied"])
+        ),
         # Model vs market
         "selected_side": _side,
         "model_p_yes": _p_yes,
