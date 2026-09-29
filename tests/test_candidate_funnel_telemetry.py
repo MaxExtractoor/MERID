@@ -82,6 +82,21 @@ def test_terminal_code_reason_mapping():
         assert dt._terminal_code({}, None, False, reason, None) == expected, reason
 
 
+def test_terminal_code_regime_tte_floor_is_market_unavailable():
+    """Both-sides regime disablement inside the TTE floor is an expired entry
+    window, not a toxic price band — distinguishable on the record."""
+    assert dt._terminal_code(
+        {}, None, False, "both_sides_disabled_regime", None,
+        decision={"regime_reject_cause": "tte_floor"},
+    ) == "MARKET_UNAVAILABLE"
+    assert dt._terminal_code(
+        {}, None, False, "both_sides_disabled_regime", None,
+        decision={"regime_reject_cause": "price_band"},
+    ) == "PRICE_BAND_REJECT"
+    # Missing discriminator keeps the conservative PRICE_BAND_REJECT mapping.
+    assert dt._terminal_code({}, None, False, "both_sides_disabled_regime", None) == "PRICE_BAND_REJECT"
+
+
 def test_terminal_code_edge_sign_disambiguation():
     # Positive-but-insufficient edge -> EDGE_BELOW_THRESHOLD.
     assert dt._terminal_code({}, None, False, "yes_edge_below_threshold", 1.5) == "EDGE_BELOW_THRESHOLD"

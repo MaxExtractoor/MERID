@@ -12282,6 +12282,11 @@ class LeanAgent15m:
                     reason="both sides in disabled regime",
                     market_id=getattr(market, 'market_id', None),
                 )
+            # Distinguish tail-price exclusion from the regime TTE floor:
+            # reclassify without the time bound — a side that still resolves
+            # to a regime was rejected on time, not on price band.
+            _yes_regime_no_tte = classify_market_regime(yes_price_cents, None)
+            _no_regime_no_tte = classify_market_regime(no_price_cents, None)
             self._record_signal_rejection(
                 "both_sides_disabled_regime",
                 market_id=getattr(market, 'market_id', None),
@@ -12294,6 +12299,12 @@ class LeanAgent15m:
                 no_entry_price_cents=no_price_cents,
                 yes_ask_cents=yes_price_cents,
                 no_ask_cents=no_price_cents,
+                yes_regime_no_tte=(_yes_regime_no_tte.name if _yes_regime_no_tte else "none"),
+                no_regime_no_tte=(_no_regime_no_tte.name if _no_regime_no_tte else "none"),
+                regime_reject_cause=(
+                    "tte_floor" if (_yes_regime_no_tte or _no_regime_no_tte)
+                    else "price_band"
+                ),
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
             )
             return None
