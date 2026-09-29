@@ -208,6 +208,91 @@ MERID_FADE_ALLOWED_ASSETS = {
     if s.strip()
 }
 
+# 2026-09-29: Walk-forward asset x TTE canonical-probability calibration.
+# scripts/build_walkforward_calibrator.py fits C_{asset,tte}(p_yes_raw) on
+# first-observation-per-(market,tte_bucket) settled records and ships
+# "identity" for any cell whose OOS Brier/log-loss does not improve, so
+# loading the artifact is safe: unproven cells are literal no-ops.
+# Applied once to the canonical (anchored) p_yes BEFORE the per-side
+# evidence caps, preserving p_no = 1 - p_yes coherence while caps remain
+# safety bounds.  Disable with MERID_WALKFWD_CAL_ENABLED=0.
+MERID_WALKFWD_CAL_ENABLED = os.environ.get(
+    "MERID_WALKFWD_CAL_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes")
+_WALKFWD_CAL_PATH = os.path.join("data", "calibration", "walkforward_calibrator.json")
+_walkfwd_cal_cache: Dict[str, Any] = {"mtime": None, "artifact": None}
+
+
+def _walkforward_tte_bucket(seconds_to_expiry: float) -> str:
+    if seconds_to_expiry > 600.0:
+        return "early"
+    if seconds_to_expiry >= 300.0:
+        return "mid"
+    return "late"
+
+
+def _load_walkforward_calibrator() -> Optional[Dict[str, Any]]:
+    """Load the walk-forward calibration artifact (mtime-cached)."""
+    if not MERID_WALKFWD_CAL_ENABLED:
+        return None
+    try:
+        mtime = os.path.getmtime(_WALKFWD_CAL_PATH)
+        if _walkfwd_cal_cache["artifact"] is not None and _walkfwd_cal_cache["mtime"] == mtime:
+            return _walkfwd_cal_cache["artifact"]
+        with open(_WALKFWD_CAL_PATH, "r", encoding="utf-8") as f:
+            artifact = json.load(f)
+        if artifact.get("version") != "walkforward_v1":
+            return None
+        _walkfwd_cal_cache["mtime"] = mtime
+        _walkfwd_cal_cache["artifact"] = artifact
+        return artifact
+    except Exception:
+        return None
+
+
+def _walkforward_calibrate_p_yes(asset: str, seconds_to_expiry: float, p_yes: float) -> Optional[float]:
+    """Map canonical p_yes through the fitted (asset, tte) corrector.
+
+    Returns None when the artifact is missing/disabled or the cell is
+    identity — the caller leaves p_yes unchanged.  Output is clamped to
+    [0.01, 0.99]; the caller's [0.05, 0.95] venue clamp still applies.
+    """
+    artifact = _load_walkforward_calibrator()
+    if artifact is None:
+        return None
+    cell = (artifact.get("cells") or {}).get(
+        f"{str(asset).upper()}:{_walkforward_tte_bucket(float(seconds_to_expiry))}"
+    )
+    if not cell:
+        return None
+    method = cell.get("method")
+    if method == "isotonic":
+        xs, ys = cell.get("x") or [], cell.get("y") or []
+        if len(xs) < 2 or len(xs) != len(ys):
+            return None
+        p = float(p_yes)
+        if p <= xs[0]:
+            out = ys[0]
+        elif p >= xs[-1]:
+            out = ys[-1]
+        else:
+            lo, hi = 0, len(xs) - 1
+            while hi - lo > 1:
+                mid_i = (lo + hi) // 2
+                if xs[mid_i] <= p:
+                    lo = mid_i
+                else:
+                    hi = mid_i
+            x0, x1, y0, y1 = xs[lo], xs[hi], ys[lo], ys[hi]
+            out = y0 + (y1 - y0) * (p - x0) / max(x1 - x0, 1e-12)
+        return max(0.01, min(0.99, float(out)))
+    if method in ("platt", "pooled_platt"):
+        a, b = float(cell.get("a", 0.0)), float(cell.get("b", 1.0))
+        x = max(1e-6, min(1.0 - 1e-6, float(p_yes)))
+        z = a + b * math.log(x / (1.0 - x))
+        return max(0.01, min(0.99, 1.0 / (1.0 + math.exp(-z))))
+    return None
+
 # 2026-09-23: Minimum time-to-expiry for new entries.  Late-window fills were
 # empirically the most adversely selected (momentum dominates the last minutes
 # of a 15m window and the market is most efficient there).  New entries must
@@ -2189,6 +2274,19 @@ def compute_trade_decision(
         "p_yes_pre_anchor": p_yes_pre_anchor,
         "p_yes_post_anchor": p_yes_for_yes,
     })
+
+    # Walk-forward asset x TTE canonical calibration (2026-09-29).  One
+    # correction on the anchored p_yes; the NO lane derives the complement so
+    # YES and NO remain coherent.  Per-side evidence caps below still bind as
+    # safety bounds on whichever lane is evaluated.
+    _p_yes_wf = _walkforward_calibrate_p_yes(asset, seconds_to_expiry, p_yes_for_yes)
+    if _p_yes_wf is not None:
+        indicators["p_yes_pre_walkforward"] = p_yes_for_yes
+        indicators["walkforward_cal_applied"] = True
+        p_yes_for_yes = _p_yes_wf
+        p_no_for_no = 1.0 - p_yes_for_yes
+    else:
+        indicators["walkforward_cal_applied"] = False
 
     # YES-held curve: calibrate p_yes when the artifact has support at the held
     # price.  2026-09-25: extended from tail-only (<35c) to the full fitted

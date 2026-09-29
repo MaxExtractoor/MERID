@@ -8390,6 +8390,48 @@ class LeanAgent15m:
             execution_mode = "taker"
             fee_cents = taker_fee_cents
 
+        # Cheap-NO research shadow lane (read-only): score every evaluation
+        # whose executable NO ask sits in the research band so the
+        # post-settlement join can validate or kill the conditioned cohort
+        # out-of-sample.  Never influences routing.
+        try:
+            from merid.prediction.cheap_no_research import log_cheap_no_research
+            _dm = locals().get("decision_maker")
+            _ind_t = (decision_taker.indicators or {}) if decision_taker is not None else {}
+            log_cheap_no_research(
+                run_id=run_id,
+                decision_id=decision.decision_id,
+                asset=asset,
+                ticker=ticker,
+                yes_bid_cents=float(yes_bid),
+                yes_ask_cents=float(yes_ask),
+                no_bid_cents=float(no_bid),
+                no_ask_cents=float(no_ask),
+                no_depth_cc=float(no_depth_cc),
+                p_no_calibrated=float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
+                p_no_raw=float(_ind_t.get("p_no_raw")) if _ind_t.get("p_no_raw") is not None else None,
+                net_edge_taker=float(decision_taker.no_net_edge) if decision_taker is not None and decision_taker.no_net_edge is not None else None,
+                net_edge_maker=float(_dm.no_net_edge) if _dm is not None and _dm.no_net_edge is not None else None,
+                edge_threshold=float(decision.edge_threshold) if decision.edge_threshold is not None else None,
+                fee_cents_maker=float(maker_fee_no_cents),
+                fee_cents_taker=float(taker_fee_no_cents),
+                tte_seconds=float(seconds_to_expiry),
+                z_score=float(_ind_t.get("z_score")) if _ind_t.get("z_score") is not None else None,
+                log_moneyness=float(_ind_t.get("log_moneyness")) if _ind_t.get("log_moneyness") is not None else None,
+                annualized_vol=float(_ind_t.get("annualized_vol")) if _ind_t.get("annualized_vol") is not None else None,
+                vol_source=_ind_t.get("annualized_vol_source"),
+                quote_age_ms=_quote_age_ms_for_decision,
+                rti_age_ms=_rti_age_ms_for_decision,
+                rti_book_skew_ms=_rti_book_skew_ms_for_decision,
+                regime=regime,
+                market_lean_cents=float(_ind_t.get("market_lean_cents")) if _ind_t.get("market_lean_cents") is not None else None,
+                liquidity_role_eval=liquidity_role,
+                decision_reason=decision.no_trade_reason or ("selected" if decision.selected_outcome else "none"),
+                was_selected=bool(decision.selected_outcome == "no"),
+            )
+        except Exception:
+            pass
+
         # Cheap-tail canary lane must be post-only/maker, one contract, short TTL.
         # This is enforced regardless of the ordinary taker/maker selection because
         # the canary is an exploration lane with explicit no-chase rules.
