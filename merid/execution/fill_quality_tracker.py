@@ -255,6 +255,27 @@ class FillQualityTracker:
                 matched = False
             if not matched:
                 continue
+            # 2026-09-30: threshold-cell lane invariant — a fill attributed to
+            # this order must be on the intent's outcome side.  A side flip is
+            # structural corruption, not performance: suspend the cell at once.
+            _f_side = (getattr(f, "side", None) or getattr(f, "action", None) or "")
+            _f_side = str(_f_side).lower()
+            _r_side = (rec.side or "").lower()
+            _f_is_no = _f_side == "no" or _f_side.endswith("_no")
+            _r_is_no = _r_side == "no" or _r_side.endswith("_no")
+            if (
+                rec.threshold_cell_id
+                and _f_side in ("yes", "no", "buy_yes", "buy_no")
+                and _f_is_no != _r_is_no
+            ):
+                try:
+                    from merid.prediction import threshold_cells as _tc
+                    _tc.record_cell_invariant_violation(
+                        rec.threshold_cell_id,
+                        f"fill_side={_f_side} intent_side={_r_side}",
+                    )
+                except Exception:
+                    pass
             fill_ts = getattr(f, "created_time", None)
             fill_ts = fill_ts.timestamp() if hasattr(fill_ts, "timestamp") else (fill_ts or now)
             # Fill price in the intent's outcome space: yes_price_cents is the

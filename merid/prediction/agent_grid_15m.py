@@ -18703,6 +18703,78 @@ class LeanAgentGrid15m:
                 except Exception:
                     pass
 
+                # Threshold-cell parity + admission-owner heartbeats
+                # (2026-09-30): prove every asset reaches the same resolver —
+                # BTC/ETH report matched_cell=none (no approved cell), never
+                # "not evaluated".  The owner line names which policy owned
+                # each asset's admission: threshold_cell, evidence_escape,
+                # formula, price_band, or hard_block.
+                try:
+                    from merid.prediction.threshold_cells import (
+                        cells_for_asset, get_cell_state,
+                    )
+                    _tc_parts = []
+                    _ao_parts = []
+                    for _r in records:
+                        _an = _r.get("asset", "?")
+                        _cells = cells_for_asset(_an)
+                        _cid = (
+                            _r.get("no_thr_cell_id")
+                            or _r.get("yes_thr_cell_id")
+                        )
+                        _best_ev = _r.get("best_executable_ev_cents")
+                        _tc_parts.append(
+                            "%s evaluated=yes matched_cell=%s cell_state=%s "
+                            "best_ev=%s terminal=%s" % (
+                                _an,
+                                _cid or ("none" if not _cells else "none_in_band"),
+                                get_cell_state(_cid) if _cid else "n/a",
+                                ("%.2f" % _best_ev)
+                                if isinstance(_best_ev, (int, float))
+                                else "n/a",
+                                _r.get("terminal_code") or "UNCLASSIFIED",
+                            )
+                        )
+                        # Admission owner: selected side's owner, else the
+                        # side that produced the terminal blocker.
+                        _owner = _r.get("admission_owner")
+                        _areason = _r.get("admission_reason")
+                        if _owner is None:
+                            _no_own = _r.get("no_admission_owner")
+                            _yes_own = _r.get("yes_admission_owner")
+                            _no_ev = _r.get("no_ev_net_cents")
+                            _yes_ev = _r.get("yes_ev_net_cents")
+                            if (
+                                _no_own
+                                and (
+                                    _yes_own is None
+                                    or (_no_ev or -1e9) >= (_yes_ev or -1e9)
+                                )
+                            ):
+                                _owner = _no_own
+                                _areason = _r.get("no_admission_reason")
+                            elif _yes_own:
+                                _owner = _yes_own
+                                _areason = _r.get("yes_admission_reason")
+                        _ao_parts.append(
+                            "asset=%s owner=%s reason=%s" % (
+                                _an, _owner or "unclassified",
+                                _areason or (
+                                    _r.get("terminal_code") or "n/a"
+                                ).lower(),
+                            )
+                        )
+                    logger.info(
+                        "[THRESHOLD-CELL-PARITY] cycle=%d %s",
+                        tick, " | ".join(_tc_parts),
+                    )
+                    logger.info(
+                        "[ADMISSION-OWNER] cycle=%d %s",
+                        tick, " | ".join(_ao_parts),
+                    )
+                except Exception:
+                    pass
+
                 if not _telemetry_write_enabled:
                     return
 
