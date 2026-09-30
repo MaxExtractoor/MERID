@@ -2733,18 +2733,27 @@ _KALSHI_15M_CRYPTO_AGENTS: set = {
 
 
 def _get_caller_module() -> str:
-    """Return the calling module name (first non-router caller in stack)."""
+    """Return the calling module name (first non-router caller in stack).
+
+    2026-09-30 (execution-lane latency): the previous implementation used
+    ``inspect.getouterframes()`` + ``inspect.getmodule()`` per frame.  On a
+    deep asyncio stack that materializes Traceback objects, resolves modules
+    via ``sys.modules`` scans, and reads source context through linecache for
+    every frame — observed ~11s on the live order path, freezing the event
+    loop while a threshold-cell candidate went stale before submission.
+    ``frame.f_back`` + ``f_globals['__name__']`` is the same walk at O(depth)
+    pointer hops with no file I/O.
+    """
     import inspect
-    import sys
 
     frame = inspect.currentframe()
     try:
-        # Walk up stack to find first caller outside this module
-        for f in inspect.getouterframes(frame):
-            mod = inspect.getmodule(f.frame)
-            if mod is None:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            mod_name = frame.f_globals.get("__name__") or ""
+            frame = frame.f_back
+            if not mod_name:
                 continue
-            mod_name = mod.__name__
             # Skip router internals
             if mod_name.startswith("merid.event_venues.kalshi.order_router"):
                 continue
@@ -2785,6 +2794,146 @@ def _is_kalshi_15m_crypto_agent(agent_id: str) -> bool:
         if whitelisted in agent_id:
             return True
     return False
+
+
+# ── Execution-lane contract helpers (2026-09-30) ───────────────────────────
+#
+# One canonical lifecycle for every asset/lane:
+#   candidate → intent + immutable ExecutionPolicy → bounded nonblocking
+#   checks → final revalidation → strictly passive wire → ACK → lifecycle.
+# Monotonic stage stamps below exist because a ~11s synchronous stall inside
+# ``inspect.getouterframes`` (see _get_caller_module) let a valid
+# threshold-cell candidate decay past the 3.5s stale-decision ceiling before
+# it could reach the wire.  Every attempted order — including pre-wire
+# rejects — emits one EXECUTION-STAGE-LATENCY record so the stall class can
+# never hide again.
+
+
+def _exec_stamp(intent: "OrderIntent", name: str) -> None:
+    """Record a monotonic stage-boundary timestamp (first write wins)."""
+    try:
+        marks = getattr(intent, "exec_stage_marks_ns", None)
+        if marks is not None and name not in marks:
+            marks[name] = _time.monotonic_ns()
+    except Exception:
+        pass
+
+
+def _exec_delta_ms(intent: "OrderIntent", a: str, b: str) -> Optional[int]:
+    marks = getattr(intent, "exec_stage_marks_ns", None) or {}
+    ta, tb = marks.get(a), marks.get(b)
+    if ta is None or tb is None or tb < ta:
+        return None
+    return int(round((tb - ta) / 1_000_000))
+
+
+def _emit_execution_stage_latency(
+    intent: "OrderIntent", result: "Optional[OrderResult]" = None
+) -> None:
+    """Emit one structured per-attempt latency record (pre-wire or on-wire)."""
+    try:
+        asset = (
+            extract_asset_from_ticker(getattr(intent, "ticker", "") or "")
+            or ""
+        )
+        fields = {
+            "event": "execution_stage_latency",
+            "asset": asset,
+            "ticker": getattr(intent, "ticker", "") or "",
+            "decision_id": getattr(intent, "decision_id", "") or "",
+            "intent_id": getattr(intent, "intent_id", "") or "",
+            "lane": getattr(intent, "decision_lane", "") or "",
+            "threshold_cell_id": getattr(intent, "threshold_cell_id", "") or "",
+            "admission_owner": getattr(intent, "admission_owner", "") or "",
+            "outcome": getattr(result, "status", "") or "",
+            "reason": getattr(result, "reason", "") or "",
+            # Per-stage durations (ms, derived from monotonic_ns marks).
+            "intent_to_canonical_ms": _exec_delta_ms(
+                intent, "intent_created", "canonical_pass"
+            ),
+            "canonical_to_risk_ms": _exec_delta_ms(
+                intent, "canonical_pass", "risk_check_start"
+            ),
+            "risk_ms": _exec_delta_ms(
+                intent, "risk_check_start", "risk_check_end"
+            ),
+            "maker_taker_ms": _exec_delta_ms(
+                intent, "maker_taker_start", "maker_taker_end"
+            ),
+            "edge_gate_ms": _exec_delta_ms(
+                intent, "edge_gate_start", "edge_gate_end"
+            ),
+            "revalidation_ms": _exec_delta_ms(
+                intent, "revalidation_start", "revalidation_end"
+            ),
+            "prepare_gate_ms": _exec_delta_ms(
+                intent, "prepare_gate_start", "prepare_gate_end"
+            ),
+            "construct_to_send_ms": _exec_delta_ms(
+                intent, "wire_constructed", "api_send"
+            ),
+            "send_to_ack_ms": _exec_delta_ms(intent, "api_send", "api_ack"),
+            "total_to_send_ms": _exec_delta_ms(
+                intent, "intent_created", "api_send"
+            ),
+            "total_to_terminal_ms": _exec_delta_ms(
+                intent, "intent_created", "router_terminal"
+            ),
+            "caller_resolution_ms": _exec_delta_ms(
+                intent, "caller_resolution_start", "caller_resolution_end"
+            ),
+        }
+        logger.info("EXECUTION-STAGE-LATENCY %s", json.dumps(fields, default=str))
+    except Exception:
+        pass
+
+
+def _intent_requires_post_only(intent: "OrderIntent") -> bool:
+    """True when the intent's lane contract forbids a marketable/taker order.
+
+    Derived from the immutable ``execution_policy`` when present, otherwise
+    from the lane identity stamped at admission — never recomputed from
+    aggressiveness or generic maker settings.
+    """
+    policy = getattr(intent, "execution_policy", None)
+    if policy is not None:
+        return bool(getattr(policy, "required_post_only", False))
+    return getattr(intent, "decision_lane", None) in (
+        "threshold_cell",
+        "evidence_cell_escape",
+    ) and bool(getattr(intent, "post_only", False))
+
+
+def _record_cell_pre_wire_reject(intent: "OrderIntent", code: str) -> None:
+    """Feed a pre-wire terminal reject into threshold-cell lane bookkeeping.
+
+    Every emitted cell candidate must reach a recorded terminal state; a
+    pre-wire drop releases the submission reservation and counts toward the
+    router-reject suspension rule.
+    """
+    cell_id = getattr(intent, "threshold_cell_id", None)
+    if not cell_id:
+        return
+    try:
+        from merid.prediction import threshold_cells as _tc
+
+        _tc.record_cell_pre_wire_reject(
+            cell_id=cell_id,
+            decision_id=getattr(intent, "decision_id", None)
+            or getattr(intent, "decision_trace_id", None),
+            intent_id=getattr(intent, "intent_id", None),
+            rejection_code=str(code or "pre_wire_reject"),
+            stage="pre_wire",
+            asset=(
+                extract_asset_from_ticker(getattr(intent, "ticker", "") or "")
+                or None
+            ),
+            ticker=getattr(intent, "ticker", None),
+        )
+    except Exception as _tc_err:
+        logger.debug(
+            "[CELL-BOOKKEEPING] pre-wire reject record failed: %s", _tc_err
+        )
 
 
 PAPER_SLIPPAGE_BPS = float(os.getenv("MERID_KALSHI_PAPER_SLIPPAGE_BPS", "8.0"))
@@ -2908,6 +3057,23 @@ async def handle_order_group_triggered(group_id: str, group_data: Dict[str, Any]
 
 
 # ── OrderIntent ───────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    """Immutable execution contract attached at intent construction.
+
+    The admission lane that produced a decision owns the execution contract;
+    downstream policy engines (maker/taker, repricer) may tighten within it but
+    may never relax it.  For ``threshold_cell`` orders this is a controlled
+    post-only maker validation: never downgrade to a marketable/taker order.
+    """
+    lane: str = ""
+    required_post_only: bool = False
+    required_liquidity_role: str = ""
+    allow_taker_fallback: bool = True
+    max_reprice_attempts: int = 1
+    max_order_lifetime_s: int = 60
+
 
 @dataclass
 class OrderIntent:
@@ -3165,6 +3331,17 @@ class OrderIntent:
     # recomputed downstream — attribution only.
     threshold_cell_id: Optional[str] = None
     decision_lane: Optional[str] = None
+
+    # EXECUTION-LANE CONTRACT (2026-09-30): the lane that admitted this
+    # candidate owns its execution semantics.  ``execution_policy`` is an
+    # immutable contract stamped at intent construction; downstream policy
+    # engines must not rebuild or weaken it (a threshold-cell order is always
+    # post-only maker with no taker fallback).
+    admission_owner: Optional[str] = None
+    execution_policy: Optional[ExecutionPolicy] = None
+    # Monotonic stage timestamps (ns) for the shared execution-lane
+    # contract — one record per attempt, populated by _exec_stamp().
+    exec_stage_marks_ns: Dict[str, int] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
@@ -12473,6 +12650,7 @@ def _prepare_order_for_gate(
     from merid.event_venues.kalshi.canonical_portfolio import get_canonical_portfolio_store
 
     _is_exit = _is_exit_order(intent)
+    _exec_stamp(intent, "prepare_gate_start")
 
     # Snapshot staleness gate
     _SNAPSHOT_MAX_AGE_S = float(os.getenv("KALSHI_ORDER_SNAPSHOT_MAX_AGE_S", "90"))
@@ -12970,6 +13148,7 @@ def _prepare_order_for_gate(
             )
             return _fill_edge_result, None
 
+    _exec_stamp(intent, "prepare_gate_end")
     return None, state
 
 
@@ -13161,7 +13340,9 @@ async def _route_live(
         # "continue on the stale authorization".
         if not _is_exit_gate and getattr(intent, "_exec_revalidate_required", False):
             intent._exec_revalidate_required = False
+            _exec_stamp(intent, "revalidation_start")
             _rev = await _revalidate_entry_economics(intent, mode=mode, t0=t0)
+            _exec_stamp(intent, "revalidation_end")
             if _rev is not None:
                 _release_gate_record(intent, _rev.reason or "exec_revalidation")
                 _release_allocated_slot(intent)
@@ -14976,6 +15157,7 @@ async def _route_live(
                 expiration_ts=resolved_tif.expiration_time,
                 post_only=effective_post_only,
             )
+            _exec_stamp(intent, "wire_constructed")
         except ValueError as _req_err:
             latency = (_time.monotonic() - t0) * 1000
             logger.error(
@@ -16001,6 +16183,7 @@ async def _route_live(
 
         placed_res = None
         _submit_timed_out = False
+        _exec_stamp(intent, "api_send")
         _send_mono = _time.monotonic()
         try:
             placed_res = await port.create_order(create_request)
@@ -16011,6 +16194,7 @@ async def _route_live(
                 intent.intent_id, intent.ticker, intent.client_tag, _submit_to_exc,
             )
         _ack_mono = _time.monotonic()
+        _exec_stamp(intent, "api_ack")
         latency = (_time.monotonic() - t0) * 1000
 
         # Timeout-after-submit (or a venue-reported timeout): mark the gate
@@ -17400,7 +17584,9 @@ def _route_order_impl(intent: OrderIntent) -> OrderResult:
     t0 = _time.monotonic()
 
     # ── Caller module audit (AGENT_WIRING_AUDIT.md) ─────────────────────
+    _exec_stamp(intent, "caller_resolution_start")
     _caller = _get_caller_module()
+    _exec_stamp(intent, "caller_resolution_end")
     _caller_allowed = _is_authorized_caller(_caller)
 
     # Structured audit log for production traceability
@@ -18361,6 +18547,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
         )
 
     t0 = _time.monotonic()
+    _exec_stamp(intent, "router_entry")
 
     # Resolve the canonical trading mode once for the entire route.
     # This field is required on every OrderResult; referencing it before
@@ -18446,6 +18633,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     canonical_rejection = await _canonical_order_intent_validation(intent, t0)
     if canonical_rejection:
         return canonical_rejection
+    _exec_stamp(intent, "canonical_pass")
 
     # EXECUTION RISK FIREWALL (2026-08-13): final stateful gate for exits.
     # Re-fetches fresh position + book, recomputes P&L, and emits a durable
@@ -18757,6 +18945,7 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     except Exception as monitor_err:
         # Don't fail order routing if monitoring fails
         pass
+    _exec_stamp(intent, "monitor_metrics")
     
     # ── Production scope validation (Step 1 of audit plan) ───────────────
     if TRADING_SCOPE_AVAILABLE:
@@ -18836,7 +19025,8 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             reason="rate_limit:order_rate_exceeded",
             latency_ms=round(latency, 2),
         )
-    
+    _exec_stamp(intent, "rate_limiter")
+
     # ── PRICING VALIDATION: Ensure valid price format ─────────────────────
     # Guardrail: Prevent dollar amounts being passed as prices
     # First check if price_cents is an integer (not string or float)
@@ -18933,8 +19123,16 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
 
     # ── ORDER AGGRESSIVENESS COMPUTATION (UNIFIED EDGE THRESHOLD SYSTEM) ─────
     # Compute aggressiveness from edge, asset, and time-to-expiry
-    # This integrates the unified 2% resting / 4% marketable edge thresholds
-    if intent.edge_pct is not None and intent.aggressiveness == 0.0:
+    # This integrates the unified 2% resting / 4% marketable edge thresholds.
+    # 2026-09-30: a lane with an immutable post-only contract deliberately
+    # carries aggressiveness=0.0 (resting) — recomputing it here silently
+    # flipped threshold-cell intents to marketable/taker downstream.  Never
+    # overwrite lane-declared posture.
+    if (
+        intent.edge_pct is not None
+        and intent.aggressiveness == 0.0
+        and not _intent_requires_post_only(intent)
+    ):
         try:
             from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
@@ -19010,7 +19208,9 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
         )
 
     # ── Caller module audit (AGENT_WIRING_AUDIT.md) ─────────────────────
+    _exec_stamp(intent, "caller_resolution_start")
     _caller = _get_caller_module()
+    _exec_stamp(intent, "caller_resolution_end")
     _caller_allowed = _is_authorized_caller(_caller)
 
     # PIPELINE CHECKPOINT: Log execution-eligible assets
@@ -19119,9 +19319,33 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
 
     # ── FEE/MAKER-TAKER AWARENESS: Apply policy engine for optimal role selection ─────
     from merid.event_venues.kalshi.maker_taker_integration import apply_maker_taker_policy
+    _exec_stamp(intent, "maker_taker_start")
     apply_maker_taker_policy(intent)
+    _exec_stamp(intent, "maker_taker_end")
 
+    # IMMUTABLE EXECUTION-POLICY GATE (2026-09-30): a lane that requires
+    # post-only (threshold_cell) may never be silently downgraded to a
+    # marketable/taker order by maker/taker policy.  If the lane contract
+    # cannot be honored, reject pre-wire instead of sending taker.
+    if _intent_requires_post_only(intent) and not intent.post_only:
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason="PRE_WIRE_POST_ONLY_UNAVAILABLE",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+    if getattr(intent, "_execution_policy_violation", None):
+        _viol = str(intent._execution_policy_violation)
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=_viol,
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
+
+    _exec_stamp(intent, "risk_check_start")
     reject_reason = _check_intent_risk(intent)
+    _exec_stamp(intent, "risk_check_end")
     if reject_reason:
         latency = (_time.monotonic() - t0) * 1000
         logger.info(
@@ -19589,6 +19813,25 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             async with _IN_FLIGHT_LOCK:
                 _IN_FLIGHT_COIDS.discard(coid)
     _post_route_canonical_idempotency_cleanup(intent, result)
+
+    _exec_stamp(intent, "router_terminal")
+    _emit_execution_stage_latency(intent, result)
+
+    # Threshold-cell lifecycle (2026-09-30): every emitted cell candidate must
+    # terminate in recorded lane accounting.  A terminal reject that never
+    # reached the wire releases the submission reservation and counts toward
+    # the router-reject suspension rule; on-wire outcomes are recorded by the
+    # submission block in _route_live, so only pre-wire rejects are handled
+    # here.
+    if (
+        getattr(intent, "threshold_cell_id", None)
+        and result is not None
+        and result.status == "rejected"
+        and not getattr(result, "submission_attempted", False)
+    ):
+        _record_cell_pre_wire_reject(
+            intent, result.reason or "pre_wire_reject"
+        )
 
     # 2026-08-25: Immutable terminal lifecycle record.
     _filled_count = 0

@@ -721,6 +721,84 @@ def record_cell_router_reject(cell_id: str) -> None:
     _evaluate_suspension(cell_id)
 
 
+def release_cell_submission_reservation(
+    cell_id: str,
+    *,
+    intent_id: Optional[str] = None,
+    decision_id: Optional[str] = None,
+) -> bool:
+    """Release the submission slot a cell candidate reserved at emission.
+
+    A candidate whose intent never reached the venue (pre-wire reject) must
+    not burn scarce lane capacity.  Idempotent per (intent_id | decision_id)
+    so duplicate release calls are harmless.  Returns True when a slot was
+    actually released.
+    """
+    if not cell_id:
+        return False
+    key = intent_id or decision_id
+    if not key:
+        return False
+    st = _load_state()
+    released = st.setdefault("released_reservations", {})
+    if key in released:
+        return False
+    released[key] = {"cell_id": cell_id, "ts": time.time()}
+    subs = st.setdefault("submissions", {})
+    if int(subs.get(cell_id) or 0) > 0:
+        subs[cell_id] = int(subs.get(cell_id) or 0) - 1
+    if int(st.get("count") or 0) > 0:
+        st["count"] = int(st.get("count") or 0) - 1
+    _save_state()
+    return True
+
+
+def record_cell_pre_wire_reject(
+    cell_id: str,
+    *,
+    decision_id: Optional[str] = None,
+    intent_id: Optional[str] = None,
+    rejection_code: str = "pre_wire_reject",
+    stage: str = "pre_wire",
+    asset: Optional[str] = None,
+    ticker: Optional[str] = None,
+) -> None:
+    """Terminal accounting for a cell intent rejected before reaching the wire.
+
+    Per the shared execution-lane contract: a pre-wire drop releases the
+    submission reservation AND counts toward the router-reject suspension
+    rule — the lane sees every attempt's true outcome instead of silently
+    consuming its daily submission budget.
+    """
+    if not cell_id:
+        return
+    released = release_cell_submission_reservation(
+        cell_id, intent_id=intent_id, decision_id=decision_id
+    )
+    record_cell_router_reject(cell_id)
+    code = str(rejection_code or "pre_wire_reject")
+    _base = {
+        "threshold_cell_id": cell_id,
+        "asset": asset,
+        "ticker": ticker,
+        "decision_id": decision_id,
+        "intent_id": intent_id,
+        "rejection_code": code.split(":", 1)[0].upper(),
+        "rejection_detail": code[:200],
+        "exec_stage": stage,
+    }
+    # Complete lifecycle accounting: every emitted candidate terminates in
+    # router_rejected -> reservation released -> lane state updated.
+    emit_cell_lifecycle(
+        "router_rejected", submitted=False, terminal_state="router_rejected",
+        reservation_released=released, **_base,
+    )
+    emit_cell_lifecycle(
+        "submission_reservation_released", released=released, **_base,
+    )
+    emit_cell_lifecycle("lane_state_updated", **_base)
+
+
 def record_cell_exec_failure(cell_id: str, reason: str) -> None:
     """Integrity/execution failure (e.g. identity mismatch, coercion, missing
     fill attribution).  More than ``_suspend_exec_failures`` -> SUSPENDED."""
