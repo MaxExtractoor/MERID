@@ -446,3 +446,72 @@ key at authorization), `MERID_EV_EXIT_MIN_SECONDS_TO_EXPIRY` (120) /
 (`FRESH_RTI`, `SEQUENCE_CONFIRMED_BOOK`, `ENTRY_PROVENANCE`,
 `SUFFICIENT_BID_DEPTH`, `CALIBRATED_MODEL`) default to the strict posture.
 Do not widen the envelope without a replay report showing clean behavior.
+
+## Current-build dual-side provisional lane (2026-09-30)
+
+`merid/prediction/current_build_provisional.py` implements the
+`current_build_provisional` execution lane: a bounded, versioned
+live-learning regime that evaluates YES and NO independently for
+BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
+
+- **Domain (hard, fail-closed):** executable ask 20-89c, TTE 120-600s,
+  quantity 1 contract, post-only maker only, no taker/IOC fallback, at most
+  one reprice (the router's one-shot `_post_only_repriced_once` bound), one
+  open order globally, max 3 fills/day lane-total, 1 fill/asset/day, 1
+  fill/cell/day, and 1 YES fill/day initially. Env overrides may only narrow
+  the domain.
+- **Thresholds:** per asset x side provisional min net EV (BTC/ETH 2.0c NO /
+  2.5c YES; SOL/XRP/DOGE 2.5c NO / 3.0c YES), env-overridable via
+  `MERID_PROVISIONAL_MIN_EV_C[_<ASSET>_<SIDE>]`. The threshold is residual
+  margin measured AFTER fees, executable-side price, book/depth reserve,
+  pre-submit revalidation, passive construction, and source-degradation
+  reserves — it never waives current costs.
+- **Evidence policy:** legacy/pre-change evidence (including old
+  hard-block verdicts) is demoted to `LEGACY_RISK_LABEL` + uncertainty
+  reserve for this lane — it can change labels and monitoring intensity but
+  cannot veto a current-build, current-market, positive-EV candidate.
+  Current-build hard safety failures (untrusted book/spot, stale
+  revalidation, non-passive construction, domain violation, mapping
+  invariants, risk/account blocks, nonpositive EV) remain hard blocks.
+  `MERID_PROVISIONAL_EVIDENCE_OVERRIDE=0` restores legacy vetoes as an
+  emergency off-switch.
+- **Cell authority:** a registered `threshold_cells` cell owns its
+  asset x side x price x TTE region absolutely — even when SUSPENDED or
+  when `MERID_THRESHOLD_CELLS=0` kills that lane (`cell_region_registered`
+  is consulted state-blind). Provisional cells (`cbp_*`) claim only
+  genuinely unregistered regions and never rescue a blocked registered band.
+- **Execution policy:** intents carry an immutable `ExecutionPolicy`
+  (`required_post_only`, `allow_taker_fallback=False`, `max_reprice_attempts=1`,
+  `max_order_lifetime_s=45`) plus `provisional_cell_id`; `max_rest_seconds`
+  is set to the lane lifetime (45s) so unfilled orders expire and free the
+  global open-order slot promptly. `MERID_PROVISIONAL_MAKER=0` suppresses
+  emission rather than coercing to taker.
+- **Suspension (fail-closed, per cell):** immediate — first fill with 5s
+  markout <= -3c, fill-time revalidated EV <= 0, first-trade PnL
+  < -(entry edge + 2c), post-only order filling as taker, side/mapping
+  invariant violation, or two consecutive router rejects. Rolling
+  (default 3-fill window) — mean net PnL < -1c, median 5s markout < -1c,
+  two-of-three negative 5s markouts, or router reject rate > 40% after
+  >=5 attempts.
+- **Evidence separation:** records persist under
+  `data/evidence/current_build/<build_sha>/<model_version>/` and carry
+  build_sha, model_version, calibration_version, policy_version
+  (`cbp_v1`), admission_lane, asset/side/price/TTE buckets, decision- and
+  fill-time EV, post-only limit, depth, fill latency, 1s/5s/30s markouts,
+  realized/settlement PnL, and terminal reason. Legacy artifacts are never
+  merged into this store.
+- **Promotion:** `promotion_review_report()` marks a cell
+  `promotion_ready` only on current-build evidence (>=10 passive attempts,
+  >=3 fills, non-negative mean PnL and median 5s markout, reject rate <=
+  suspension ceiling, zero post-only breaches, not suspended). Promotion to
+  the permanent registry is an explicit review act — never automatic off a
+  single winner.
+- **Kill switches:** `MERID_PROVISIONAL_LANE=0` disables the lane (all
+  candidates fall back to the formula path); lane state lives in
+  `data/current_build_provisional_lane.json` (test-isolated via
+  `MERID_PROVISIONAL_STATE_PATH` / `_LIFECYCLE_PATH` / `_EVIDENCE_DIR`).
+
+Tests: `tests/test_current_build_provisional.py` (grid/domain, thresholds,
+precedence over the formula, registered-cell authority, legacy demotion,
+caps, suspension rules, evidence store, promotion report, decision-level
+lane stamping).

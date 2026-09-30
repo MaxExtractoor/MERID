@@ -8448,6 +8448,7 @@ class LeanAgent15m:
                 "cheap_tail_canary",
                 "evidence_cell_escape",
                 "threshold_cell",
+                "current_build_provisional",
             )
         ):
             logger.info(
@@ -8538,7 +8539,108 @@ class LeanAgent15m:
                     )
                 except Exception:
                     pass
-            if _decision_lane in ("evidence_cell_escape", "threshold_cell"):
+            if _decision_lane == "current_build_provisional":
+                try:
+                    from merid.prediction import current_build_provisional as _cbp
+                    _pcell_id = decision.indicators.get("provisional_cell_id")
+                    _n = _cbp.record_provisional_submission(
+                        cell_id=_pcell_id,
+                        decision_id=getattr(decision, "decision_id", None),
+                    )
+                    _cbp.bump_provisional_funnel("emitted", _pcell_id)
+                    _sel_key = str(decision.selected_outcome or "").lower()
+                    _formula_req = decision.indicators.get(
+                        f"{_sel_key}_formula_required_edge_cents"
+                    )
+                    _prov_req = decision.indicators.get(
+                        f"{_sel_key}_provisional_required_edge_cents"
+                    )
+                    _ev_c = None
+                    try:
+                        _bd = (
+                            decision.yes_net_edge if _sel_key == "yes"
+                            else decision.no_net_edge
+                        )
+                        if _bd is not None:
+                            _ev_c = float(_bd) * 100.0
+                    except Exception:
+                        _ev_c = None
+                    _pcell = _cbp.provisional_cell_for_id(_pcell_id)
+                    _quote_owner = getattr(market_state, "quote_owner", None)
+                    _book_age_ms = getattr(market_state, "age_ms", None)
+                    _cbp.emit_provisional_lifecycle(
+                        "candidate_emitted",
+                        provisional_cell_id=_pcell_id,
+                        asset=asset,
+                        side=str(decision.selected_outcome or "").upper(),
+                        decision_id=getattr(decision, "decision_id", None),
+                        candidate_ev_cents=_ev_c,
+                        provisional_required_ev_cents=_prov_req,
+                        formula_required_ev_cents=_formula_req,
+                        threshold_source=decision.indicators.get(
+                            f"{_sel_key}_threshold_source"
+                        ),
+                        book_source=_quote_owner,
+                        book_age_ms=_book_age_ms,
+                        price_bucket=(
+                            _cbp.price_band_label(_pcell) if _pcell else None
+                        ),
+                        tte_bucket=(
+                            _cbp.tte_band_label(_pcell) if _pcell else None
+                        ),
+                        legacy_risk_label=decision.indicators.get(
+                            f"{_sel_key}_legacy_risk_label"
+                        ),
+                        post_only=True,
+                        submitted=False,
+                        submissions_today=_n,
+                        funnel=_cbp.provisional_funnel_counters().get("funnel"),
+                        build_sha=_cbp.current_build_sha(),
+                        model_version=_cbp.current_model_version(
+                            decision.indicators
+                        ),
+                        calibration_version=_cbp.current_calibration_version(),
+                        terminal_state="emitted",
+                    )
+                    _cbp.record_cb_evidence(
+                        "candidate_emitted",
+                        indicators=decision.indicators,
+                        provisional_cell_id=_pcell_id,
+                        asset=asset,
+                        side=str(decision.selected_outcome or "").upper(),
+                        price_bucket=(
+                            _cbp.price_band_label(_pcell) if _pcell else None
+                        ),
+                        tte_bucket=(
+                            _cbp.tte_band_label(_pcell) if _pcell else None
+                        ),
+                        entry_price_cents=(
+                            int(round(float(decision.selected_outcome_price) * 100.0))
+                            if decision.selected_outcome_price is not None
+                            else None
+                        ),
+                        decision_ev_cents=_ev_c,
+                        required_ev_cents=_prov_req,
+                        post_only=True,
+                        filled=False,
+                        legacy_risk_label=decision.indicators.get(
+                            f"{_sel_key}_legacy_risk_label"
+                        ),
+                        decision_id=getattr(decision, "decision_id", None),
+                        book_source=_quote_owner,
+                    )
+                    logger.info(
+                        "[CBP-LANE] asset=%s side=%s cell=%s lane submissions today=%d",
+                        asset, decision.selected_outcome,
+                        _pcell_id, _n,
+                    )
+                except Exception:
+                    pass
+            if _decision_lane in (
+                "evidence_cell_escape",
+                "threshold_cell",
+                "current_build_provisional",
+            ):
                 if int(decision.approved_size_cc) > 100:
                     decision = replace(decision, approved_size_cc=Decimal("100"))
 
@@ -9097,10 +9199,15 @@ class LeanAgent15m:
             # provenance — the router/ledger must not recompute these.
             "decision_lane": _ind.get("decision_lane"),
             "threshold_cell_id": _ind.get("threshold_cell_id"),
+            "provisional_cell_id": _ind.get("provisional_cell_id"),
             "admission_owner": _ind.get(f"{str(side).lower()}_admission_owner"),
             "threshold_source": _ind.get(f"{str(side).lower()}_threshold_source"),
             "formula_required_edge_cents": _ind.get(f"{str(side).lower()}_formula_required_edge_cents"),
             "cell_required_edge_cents": _ind.get(f"{str(side).lower()}_cell_required_edge_cents"),
+            "provisional_required_edge_cents": _ind.get(f"{str(side).lower()}_provisional_required_edge_cents"),
+            "provisional_price_bucket": _ind.get("provisional_price_bucket"),
+            "provisional_tte_bucket": _ind.get("provisional_tte_bucket"),
+            "legacy_risk_label": _ind.get(f"{str(side).lower()}_legacy_risk_label"),
             "effective_required_edge_cents": _ind.get(f"{str(side).lower()}_effective_required_edge_cents"),
         }
 
@@ -10210,6 +10317,17 @@ class LeanAgent15m:
                 "no_thr_cell_miss_reason": _ind.get("no_thr_cell_miss_reason"),
                 "yes_thr_cell_block_reason": _ind.get("yes_thr_cell_block_reason"),
                 "no_thr_cell_block_reason": _ind.get("no_thr_cell_block_reason"),
+                "yes_thr_prov_cell_id": _ind.get("yes_thr_prov_cell_id"),
+                "no_thr_prov_cell_id": _ind.get("no_thr_prov_cell_id"),
+                "yes_prov_required_edge_cents": _ind.get("yes_provisional_required_edge_cents"),
+                "no_prov_required_edge_cents": _ind.get("no_provisional_required_edge_cents"),
+                "yes_thr_prov_block_reason": _ind.get("yes_thr_prov_block_reason"),
+                "no_thr_prov_block_reason": _ind.get("no_thr_prov_block_reason"),
+                "yes_prov_cell_miss_reason": _ind.get("yes_prov_cell_miss_reason"),
+                "no_prov_cell_miss_reason": _ind.get("no_prov_cell_miss_reason"),
+                "yes_legacy_risk_label": _ind.get("yes_legacy_risk_label"),
+                "no_legacy_risk_label": _ind.get("no_legacy_risk_label"),
+                "provisional_cell_id": _ind.get("provisional_cell_id"),
                 "threshold_cell_id": _ind.get("threshold_cell_id"),
                 "yes_eligible": _ind.get("yes_qualifies"),
                 "no_eligible": _ind.get("no_qualifies"),
@@ -12559,12 +12677,23 @@ class LeanAgent15m:
             _tc_miss_no = None
             try:
                 from merid.prediction import threshold_cells as _tc
+                from merid.prediction import current_build_provisional as _cbp
                 for _s, _px in (("yes", yes_price_cents), ("no", no_price_cents)):
                     _hit = _tc.resolve_threshold_cell(
                         asset, _s, _px, seconds_to_expiry
                     )
                     if _hit is not None:
                         _tc.bump_cell_funnel("blocked_by_price_band", _hit.cell_id)
+                    elif not _tc.cell_region_registered(
+                        asset, _s, _px, seconds_to_expiry
+                    ):
+                        _phit = _cbp.resolve_provisional_cell(
+                            asset, _s, _px, seconds_to_expiry
+                        )
+                        if _phit is not None:
+                            _cbp.bump_provisional_funnel(
+                                "blocked_by_price_band", _phit.cell_id
+                            )
                     _miss = _tc.explain_cell_miss(
                         asset, _s, _px, seconds_to_expiry
                     )
@@ -18798,6 +18927,16 @@ class LeanAgentGrid15m:
                             "[ALL-FIVE-PROMOTION-STATUS] %s",
                             promotion_status_rollup(),
                         )
+                        try:
+                            from merid.prediction.current_build_provisional import (
+                                provisional_status_rollup,
+                            )
+                            logger.info(
+                                "[CBP-LANE-STATUS] %s",
+                                provisional_status_rollup(),
+                            )
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 

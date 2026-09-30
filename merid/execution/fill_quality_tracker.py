@@ -63,7 +63,8 @@ class _OrderRecord:
         "yes_bid_cents", "yes_ask_cents", "edge_pct", "ev_net_cents",
         "p_selected", "markouts", "filled", "fill_ts", "fill_price_cents",
         "terminal", "terminal_ts", "closed",
-        "decision_id", "threshold_cell_id",
+        "decision_id", "threshold_cell_id", "provisional_cell_id",
+        "expire_after_ts",
     )
 
     def __init__(self, **kw: Any) -> None:
@@ -100,10 +101,19 @@ class FillQualityTracker:
         p_selected: Optional[float],
         decision_id: Optional[str] = None,
         threshold_cell_id: Optional[str] = None,
+        provisional_cell_id: Optional[str] = None,
+        record_ttl_s: Optional[float] = None,
     ) -> None:
-        """Register an acknowledged post_only entry order for tracking."""
+        """Register an acknowledged post_only entry order for tracking.
+
+        ``record_ttl_s`` bounds how long an unfilled record stays open; lanes
+        with a bounded resting lifetime (the current-build provisional lane's
+        45s contract) pass it so an expired order frees its open-order slot
+        promptly instead of holding it until ``_MAX_RECORD_AGE_S``.
+        """
         if not client_order_id:
             return
+        submit_ts = _now()
         rec = _OrderRecord(
             client_order_id=client_order_id,
             intent_id=intent_id,
@@ -113,7 +123,7 @@ class FillQualityTracker:
             side=side,
             action=action,
             limit_price_cents=limit_price_cents,
-            submit_ts=_now(),
+            submit_ts=submit_ts,
             yes_bid_cents=yes_bid_cents,
             yes_ask_cents=yes_ask_cents,
             edge_pct=edge_pct,
@@ -121,6 +131,11 @@ class FillQualityTracker:
             p_selected=p_selected,
             decision_id=decision_id,
             threshold_cell_id=threshold_cell_id,
+            provisional_cell_id=provisional_cell_id,
+            expire_after_ts=(
+                submit_ts + float(record_ttl_s)
+                if record_ttl_s is not None else None
+            ),
         )
         with self._lock:
             self._records[client_order_id] = rec
@@ -146,6 +161,7 @@ class FillQualityTracker:
             "p_selected": p_selected,
             "decision_id": decision_id,
             "threshold_cell_id": threshold_cell_id,
+            "provisional_cell_id": provisional_cell_id,
         })
 
     def poll(self) -> None:
@@ -196,6 +212,7 @@ class FillQualityTracker:
                         "markout_cents": rec.markouts[key]["markout_cents"],
                         "decision_id": rec.decision_id,
                         "threshold_cell_id": rec.threshold_cell_id,
+                        "provisional_cell_id": rec.provisional_cell_id,
                     })
                     # 2026-09-30: feed per-cell suspension stats — persistent
                     # negative markouts on a passive lane are the
@@ -211,9 +228,57 @@ class FillQualityTracker:
                             )
                         except Exception:
                             pass
+                    if rec.provisional_cell_id:
+                        try:
+                            from merid.prediction import (
+                                current_build_provisional as _cbp,
+                            )
+                            _cbp.record_provisional_markout(
+                                rec.provisional_cell_id,
+                                rec.decision_id,
+                                int(horizon),
+                                rec.markouts[key]["markout_cents"],
+                            )
+                            _cbp.record_cb_evidence(
+                                "markout",
+                                provisional_cell_id=rec.provisional_cell_id,
+                                asset=rec.asset,
+                                side=(rec.side or "").upper(),
+                                decision_id=rec.decision_id,
+                                order_id=rec.order_id,
+                                fill_price_cents=rec.fill_price_cents,
+                                limit_price_cents=rec.limit_price_cents,
+                                markout_1s_cents=(
+                                    (rec.markouts.get("1s") or {}).get(
+                                        "markout_cents"
+                                    )
+                                ),
+                                markout_5s_cents=(
+                                    (rec.markouts.get("5s") or {}).get(
+                                        "markout_cents"
+                                    )
+                                ),
+                                markout_30s_cents=(
+                                    (rec.markouts.get("30s") or {}).get(
+                                        "markout_cents"
+                                    )
+                                ),
+                                horizon_s=int(horizon),
+                                filled=rec.filled,
+                            )
+                        except Exception:
+                            pass
             if not rec.filled:
                 self._detect_fill(rec, ledger, now)
-            if age > _MAX_RECORD_AGE_S:
+            if (
+                rec.expire_after_ts is not None
+                and not rec.filled
+                and now >= rec.expire_after_ts
+            ):
+                # Lane-bounded resting lifetime elapsed with no fill — the
+                # order is expired/cancelled on the venue; free the slot.
+                self._close(rec, "rest_ttl_expired", now)
+            elif age > _MAX_RECORD_AGE_S:
                 self._close(rec, "aged_out", now)
 
     # -------------------------------------------------------------- helpers
@@ -264,16 +329,25 @@ class FillQualityTracker:
             _f_is_no = _f_side == "no" or _f_side.endswith("_no")
             _r_is_no = _r_side == "no" or _r_side.endswith("_no")
             if (
-                rec.threshold_cell_id
+                (rec.threshold_cell_id or rec.provisional_cell_id)
                 and _f_side in ("yes", "no", "buy_yes", "buy_no")
                 and _f_is_no != _r_is_no
             ):
                 try:
-                    from merid.prediction import threshold_cells as _tc
-                    _tc.record_cell_invariant_violation(
-                        rec.threshold_cell_id,
-                        f"fill_side={_f_side} intent_side={_r_side}",
-                    )
+                    if rec.threshold_cell_id:
+                        from merid.prediction import threshold_cells as _tc
+                        _tc.record_cell_invariant_violation(
+                            rec.threshold_cell_id,
+                            f"fill_side={_f_side} intent_side={_r_side}",
+                        )
+                    if rec.provisional_cell_id:
+                        from merid.prediction import (
+                            current_build_provisional as _cbp,
+                        )
+                        _cbp.record_provisional_invariant_violation(
+                            rec.provisional_cell_id,
+                            f"fill_side={_f_side} intent_side={_r_side}",
+                        )
                 except Exception:
                     pass
             fill_ts = getattr(f, "created_time", None)
@@ -309,6 +383,7 @@ class FillQualityTracker:
                 "gross_edge_cents_at_fill": edge_at_fill,
                 "decision_id": rec.decision_id,
                 "threshold_cell_id": rec.threshold_cell_id,
+                "provisional_cell_id": rec.provisional_cell_id,
             })
             # 2026-09-30: threshold-cell lane bookkeeping — the fill is the
             # exposure event; drives fills/day caps and suspension stats.
@@ -345,6 +420,77 @@ class FillQualityTracker:
                     )
                 except Exception:
                     pass
+            # Current-build provisional lane: the same fill event feeds the
+            # lane's fills/day caps, first-fill suspension rules, and the
+            # versioned evidence store.  A fill priced through the limit is a
+            # post-only contract breach — the lane suspends immediately.
+            if rec.provisional_cell_id:
+                try:
+                    from merid.prediction import (
+                        current_build_provisional as _cbp,
+                    )
+                    _resting_ms = round(
+                        (rec.fill_ts - (rec.submit_ts or rec.fill_ts)) * 1000.0,
+                        1,
+                    )
+                    _cbp.record_provisional_fill(
+                        rec.provisional_cell_id,
+                        decision_id=rec.decision_id,
+                        fill_ev_cents=edge_at_fill,
+                        candidate_ev_cents=rec.ev_net_cents,
+                        fill_price_cents=fill_px,
+                        limit_price_cents=rec.limit_price_cents,
+                        action=rec.action,
+                    )
+                    _cbp.record_provisional_order_closed(
+                        rec.provisional_cell_id, rec.order_id
+                    )
+                    _pcell = _cbp.provisional_cell_for_id(rec.provisional_cell_id)
+                    _cbp.emit_provisional_lifecycle(
+                        "filled",
+                        provisional_cell_id=rec.provisional_cell_id,
+                        asset=rec.asset,
+                        side=(rec.side or "").upper(),
+                        decision_id=rec.decision_id,
+                        intent_id=rec.intent_id,
+                        client_order_id=rec.client_order_id,
+                        order_id=rec.order_id,
+                        post_only=True,
+                        submitted=True,
+                        filled=True,
+                        fill_price_cents=fill_px,
+                        limit_price_cents=rec.limit_price_cents,
+                        resting_ms=_resting_ms,
+                        ev_net_cents_at_candidate=rec.ev_net_cents,
+                        gross_edge_cents_at_fill=edge_at_fill,
+                        price_bucket=(
+                            _cbp.price_band_label(_pcell) if _pcell else None
+                        ),
+                        tte_bucket=(
+                            _cbp.tte_band_label(_pcell) if _pcell else None
+                        ),
+                        build_sha=_cbp.current_build_sha(),
+                        calibration_version=_cbp.current_calibration_version(),
+                        terminal_state="filled",
+                    )
+                    _cbp.record_cb_evidence(
+                        "fill",
+                        provisional_cell_id=rec.provisional_cell_id,
+                        asset=rec.asset,
+                        side=(rec.side or "").upper(),
+                        decision_id=rec.decision_id,
+                        order_id=rec.order_id,
+                        entry_price_cents=rec.limit_price_cents,
+                        fill_price_cents=fill_px,
+                        fill_ev_cents=edge_at_fill,
+                        decision_ev_cents=rec.ev_net_cents,
+                        fill_latency_ms=_resting_ms,
+                        post_only=True,
+                        filled=True,
+                        terminal_reason="filled",
+                    )
+                except Exception:
+                    pass
             break
 
     def _close(self, rec: _OrderRecord, reason: str, now: float) -> None:
@@ -361,6 +507,7 @@ class FillQualityTracker:
             "markouts": rec.markouts or None,
             "decision_id": rec.decision_id,
             "threshold_cell_id": rec.threshold_cell_id,
+            "provisional_cell_id": rec.provisional_cell_id,
         })
         # 2026-09-30: free the cell's open-order slot and leave a terminal
         # lifecycle record (fill/no-fill + markouts at close).
@@ -383,6 +530,58 @@ class FillQualityTracker:
                     fill_price_cents=rec.fill_price_cents,
                     markouts=rec.markouts or None,
                     terminal_state=reason,
+                )
+            except Exception:
+                pass
+        if rec.provisional_cell_id:
+            try:
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
+                )
+                _cbp.record_provisional_order_closed(
+                    rec.provisional_cell_id, rec.order_id
+                )
+                _pcell = _cbp.provisional_cell_for_id(rec.provisional_cell_id)
+                _cbp.emit_provisional_lifecycle(
+                    "terminal",
+                    provisional_cell_id=rec.provisional_cell_id,
+                    asset=rec.asset,
+                    side=(rec.side or "").upper(),
+                    decision_id=rec.decision_id,
+                    intent_id=rec.intent_id,
+                    client_order_id=rec.client_order_id,
+                    order_id=rec.order_id,
+                    post_only=True,
+                    submitted=True,
+                    filled=rec.filled,
+                    fill_price_cents=rec.fill_price_cents,
+                    markouts=rec.markouts or None,
+                    price_bucket=(
+                        _cbp.price_band_label(_pcell) if _pcell else None
+                    ),
+                    tte_bucket=(
+                        _cbp.tte_band_label(_pcell) if _pcell else None
+                    ),
+                    terminal_state=reason,
+                )
+                _mk = rec.markouts or {}
+                _cbp.record_cb_evidence(
+                    "terminal",
+                    provisional_cell_id=rec.provisional_cell_id,
+                    asset=rec.asset,
+                    side=(rec.side or "").upper(),
+                    decision_id=rec.decision_id,
+                    order_id=rec.order_id,
+                    entry_price_cents=rec.limit_price_cents,
+                    fill_price_cents=rec.fill_price_cents,
+                    filled=rec.filled,
+                    markout_1s_cents=(_mk.get("1s") or {}).get("markout_cents"),
+                    markout_5s_cents=(_mk.get("5s") or {}).get("markout_cents"),
+                    markout_30s_cents=(
+                        _mk.get("30s") or {}
+                    ).get("markout_cents"),
+                    post_only=True,
+                    terminal_reason=reason,
                 )
             except Exception:
                 pass

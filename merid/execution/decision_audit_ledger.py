@@ -857,12 +857,21 @@ class DecisionAuditLedger:
                     # filled, settlement IS the realized PnL when no exit order
                     # already booked it (held-to-settlement).  Attributed via
                     # the decision->cell binding recorded at submission.
+                    # The current-build provisional lane binds its own
+                    # decision->cell map; both bindings are checked so each
+                    # lane's realized-PnL window stays separate.
                     try:
                         from merid.prediction.threshold_cells import (
                             cell_for_decision,
                             record_cell_settlement,
                         )
-                        if cell_for_decision(decision_id):
+                        from merid.prediction.current_build_provisional import (
+                            provisional_cell_for_decision,
+                            record_provisional_settlement,
+                        )
+                        _tc_cell = cell_for_decision(decision_id)
+                        _cbp_cell = provisional_cell_for_decision(decision_id)
+                        if _tc_cell or _cbp_cell:
                             orow = conn.execute(
                                 "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
                                 "realized_net_pnl_cents FROM strategy_decision_outcomes "
@@ -888,10 +897,18 @@ class DecisionAuditLedger:
                                     if drow["selected_side"] == "yes"
                                     else (100 - settlement_value_cents)
                                 )
-                                record_cell_settlement(
-                                    decision_id=decision_id,
-                                    net_pnl_cents=_settle_leg - _fill - _fee,
-                                )
+                                _net_pnl_cents = _settle_leg - _fill - _fee
+                                if _tc_cell:
+                                    record_cell_settlement(
+                                        decision_id=decision_id,
+                                        net_pnl_cents=_net_pnl_cents,
+                                    )
+                                if _cbp_cell:
+                                    record_provisional_settlement(
+                                        decision_id=decision_id,
+                                        net_pnl_cents=_net_pnl_cents,
+                                        cell_id=_cbp_cell,
+                                    )
                     except Exception:
                         pass
         except Exception as exc:

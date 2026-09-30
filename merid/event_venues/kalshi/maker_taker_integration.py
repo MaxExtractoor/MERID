@@ -128,7 +128,8 @@ def apply_maker_taker_policy(intent) -> None:
         # leave the order resting unfilled. Policy post_only applies to resting intents only.
         #
         # IMMUTABLE EXECUTION POLICY (2026-09-30): a lane that requires
-        # post-only (threshold_cell / evidence_cell_escape) owns its execution
+        # post-only (threshold_cell / evidence_cell_escape /
+        # current_build_provisional) owns its execution
         # contract — this function may never downgrade it to a marketable/
         # taker order.  If the intent's posture is marketable, or the policy
         # engine cannot support passive placement, the order must be rejected
@@ -139,7 +140,11 @@ def apply_maker_taker_policy(intent) -> None:
             if _policy is not None
             else (
                 getattr(intent, "decision_lane", None)
-                in ("threshold_cell", "evidence_cell_escape")
+                in (
+                    "threshold_cell",
+                    "evidence_cell_escape",
+                    "current_build_provisional",
+                )
                 and bool(getattr(intent, "post_only", False))
             )
         )
@@ -215,7 +220,11 @@ def apply_maker_taker_policy(intent) -> None:
         _policy = getattr(intent, "execution_policy", None)
         if (
             (getattr(_policy, "required_post_only", False) if _policy is not None
-             else getattr(intent, "decision_lane", None) in ("threshold_cell", "evidence_cell_escape"))
+             else getattr(intent, "decision_lane", None) in (
+                 "threshold_cell",
+                 "evidence_cell_escape",
+                 "current_build_provisional",
+             ))
             and getattr(intent, "post_only", False)
         ):
             intent._execution_policy_violation = "PRE_WIRE_POST_ONLY_UNAVAILABLE"

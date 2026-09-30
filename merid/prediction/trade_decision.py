@@ -21,10 +21,12 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
+from merid.prediction import current_build_provisional as _cbp
 from merid.prediction.threshold_cells import (
     THRESHOLD_CELLS,
     bump_cell_funnel,
     cell_admission,
+    cell_region_registered,
     cell_fills_today,
     emit_cell_lifecycle,
     explain_cell_miss,
@@ -781,6 +783,10 @@ class EdgeThresholdDecomposition(NamedTuple):
     cell_cap_exhausted: bool = False    # cell matched but daily lane cap hit
     formula_total: Optional[float] = None     # formula output before cell replace
     cell_block_reason: Optional[str] = None   # matched-but-suppressed reason
+    provisional_cell_id: Optional[str] = None       # current-build provisional cell
+    provisional_min_ev_cents: Optional[float] = None
+    provisional_cap_exhausted: bool = False         # cell matched but lane cap/state blocked
+    provisional_block_reason: Optional[str] = None
 
 
 def _compute_dynamic_min_required_edge(
@@ -898,6 +904,9 @@ def _decompose_dynamic_min_required_edge(
     formula_total = total
     cell_cap_hit = False
     cell_block_reason: Optional[str] = None
+    prov_cell = None
+    prov_cap_hit = False
+    prov_block_reason: Optional[str] = None
     if cell is not None:
         bump_cell_funnel("matched", cell.cell_id)
         _allowed, _block = cell_admission(cell.cell_id)
@@ -907,8 +916,27 @@ def _decompose_dynamic_min_required_edge(
             cell_cap_hit = True
             cell_block_reason = _block or "cell_admission_blocked"
             cell = None
+    if cell is None and cell_block_reason is None and not cell_region_registered(
+        asset, side, price_cents, seconds_to_expiry
+    ):
+        # Current-build dual-side provisional lane: owns only regions with no
+        # configured registry cell.  A SUSPENDED, cap-blocked, or lane-disabled
+        # registered cell keeps sole authority over its band — never re-opened
+        # here.
+        prov_cell = _cbp.resolve_provisional_cell(
+            asset, side, price_cents, seconds_to_expiry
+        )
+        if prov_cell is not None:
+            _cbp.bump_provisional_funnel("matched", prov_cell.cell_id)
+            _p_ok, _p_block = _cbp.provisional_cell_admission(prov_cell.cell_id)
+            if not _p_ok:
+                prov_cap_hit = True
+                prov_block_reason = _p_block or "provisional_admission_blocked"
+                prov_cell = None
     if cell is not None:
         total = max(0.0, min(cell.min_net_ev_cents / 100.0, 0.15))
+    elif prov_cell is not None:
+        total = max(0.0, min(_cbp.cell_min_ev_cents(prov_cell) / 100.0, 0.15))
 
     return EdgeThresholdDecomposition(
         total=total,
@@ -926,6 +954,15 @@ def _decompose_dynamic_min_required_edge(
         cell_cap_exhausted=cell_cap_hit,
         formula_total=formula_total,
         cell_block_reason=cell_block_reason,
+        provisional_cell_id=(
+            prov_cell.cell_id if prov_cell is not None else None
+        ),
+        provisional_min_ev_cents=(
+            float(_cbp.cell_min_ev_cents(prov_cell))
+            if prov_cell is not None else None
+        ),
+        provisional_cap_exhausted=prov_cap_hit,
+        provisional_block_reason=prov_block_reason,
     )
 
 
@@ -2035,6 +2072,50 @@ def _live_evidence_allows(
     return True, None
 
 
+def _provisional_evidence_probe(
+    _d: Optional["EdgeThresholdDecomposition"],
+    side: str,
+    net_ev_cents: Optional[float],
+    evidence_code: Optional[str],
+    matching_hard_block: bool,
+    indicators: Dict[str, Any],
+) -> bool:
+    """Demote a legacy evidence verdict to a live-monitoring label when the
+    current-build provisional lane owns this region.
+
+    A verdict produced by a *pre-change* build (any cell-aware code, the v1
+    rolling win-rate block, or ``matching_hard_block``) is never by itself an
+    execution veto for a current-build candidate inside the bounded
+    provisional domain: it becomes ``legacy_risk_label`` + monitoring
+    metadata, and the candidate proceeds when its current net EV clears the
+    cell's provisional threshold and the lane has capacity.  Current-build
+    operational hard blocks (stale book, negative EV, post-only construction,
+    tail/timing) are enforced elsewhere and are untouched here.
+
+    Returns True when the side's admission is rescued by this lane.
+    """
+    if _d is None or _d.provisional_cell_id is None:
+        return False
+    ok, _reason = _cbp.provisional_admission_allowed(
+        cell_id=_d.provisional_cell_id,
+        evidence_code=evidence_code,
+        matching_hard_block=matching_hard_block,
+        net_ev_cents=net_ev_cents,
+        effective_required_edge_cents=_d.total * 100.0,
+    )
+    if not ok:
+        return False
+    _cbp.bump_provisional_funnel(
+        "legacy_evidence_labelled", _d.provisional_cell_id
+    )
+    indicators[f"{side}_admission_owner"] = "current_build_provisional"
+    indicators[f"{side}_admission_decision"] = "allowed"
+    indicators[f"{side}_admission_reason"] = "cbp_legacy_evidence_labelled"
+    indicators[f"{side}_legacy_risk_label"] = str(evidence_code or "legacy")
+    indicators[f"{side}_legacy_risk_hard_block"] = bool(matching_hard_block)
+    return True
+
+
 def _select_best_side(
     yes_breakdown: EdgeBreakdown,
     no_breakdown: EdgeBreakdown,
@@ -2685,11 +2766,21 @@ def compute_trade_decision(
         )
         indicators[f"{_pfx}_formula_required_edge_cents"] = _formula_c
         indicators[f"{_pfx}_cell_required_edge_cents"] = _d.cell_min_ev_cents
+        indicators[f"{_pfx}_provisional_required_edge_cents"] = (
+            _d.provisional_min_ev_cents
+        )
         indicators[f"{_pfx}_effective_required_edge_cents"] = _d.total * 100.0
         indicators[f"{_pfx}_threshold_source"] = (
-            "threshold_cell" if _d.cell_id is not None else "formula"
+            "threshold_cell" if _d.cell_id is not None
+            else "current_build_provisional" if _d.provisional_cell_id is not None
+            else "formula"
         )
         indicators[f"{_pfx}_thr_cell_block_reason"] = _d.cell_block_reason
+        indicators[f"{_pfx}_thr_prov_cell_id"] = _d.provisional_cell_id
+        indicators[f"{_pfx}_thr_prov_cap_exhausted"] = (
+            _d.provisional_cap_exhausted
+        )
+        indicators[f"{_pfx}_thr_prov_block_reason"] = _d.provisional_block_reason
         # Boundary-miss attribution: when the (asset, side) pair has cells but
         # none matched, name the exact boundary that excluded this quote so a
         # near-miss never silently falls through to the generic formula.
@@ -2698,6 +2789,14 @@ def compute_trade_decision(
             _miss = explain_cell_miss(asset, _pfx, _miss_px, seconds_to_expiry)
             if _miss and _miss != "no_cells_for_asset_side":
                 indicators[f"{_pfx}_thr_cell_miss_reason"] = _miss
+            if _d.provisional_cell_id is None and not cell_region_registered(
+                asset, _pfx, _miss_px, seconds_to_expiry
+            ):
+                _pmiss = _cbp.explain_provisional_miss(
+                    asset, _pfx, _miss_px, seconds_to_expiry
+                )
+                if _pmiss and _pmiss != "provisional_lane_disabled":
+                    indicators[f"{_pfx}_prov_cell_miss_reason"] = _pmiss
 
     # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
     # notes at module level — applies the evidence-floor semantics to the
@@ -2758,6 +2857,21 @@ def compute_trade_decision(
                                 _d.total * 100.0 if _d.cell_id is not None else None
                             ),
                         )
+                        # Current-build provisional lane: when no registered
+                        # cell owns the region, a *legacy* verdict (including
+                        # a legacy hard block) is a label, not a veto — the
+                        # probe enforces current EV >= provisional threshold,
+                        # lane state, and all cbp caps.
+                        _ovr_via_cbp = False
+                        if not _ovr_ok and _d.provisional_cell_id is not None:
+                            _ovr_via_cbp = _provisional_evidence_probe(
+                                _d,
+                                _side,
+                                _ne_c,
+                                _ed.code,
+                                bool(_ed.matching_hard_block),
+                                indicators,
+                            )
                         if _ovr_ok:
                             bump_cell_funnel("soft_evidence_override", _d.cell_id)
                             indicators[f"{_side}_admission_owner"] = "threshold_cell"
@@ -2820,6 +2934,71 @@ def compute_trade_decision(
                                 )
                             except Exception:
                                 pass
+                        elif _ovr_via_cbp:
+                            # Legacy evidence demoted to a monitoring label;
+                            # the provisional lane admitted on current-build
+                            # economics alone.
+                            indicators[f"{_side}_evidence_override"] = (
+                                "current_build_provisional_lane"
+                            )
+                            indicators[f"{_side}_legacy_risk_detail"] = (
+                                _ed.detail()
+                            )
+                            try:
+                                _pcell = _cbp.provisional_cell_for_id(
+                                    _d.provisional_cell_id
+                                )
+                                _cbp.emit_provisional_lifecycle(
+                                    "legacy_evidence_labelled",
+                                    provisional_cell_id=_d.provisional_cell_id,
+                                    asset=asset,
+                                    side=_side.upper(),
+                                    lane_state_before=_cbp.get_cell_state(
+                                        _d.provisional_cell_id
+                                    ),
+                                    legacy_risk_label=_ed.code,
+                                    matching_hard_block=bool(
+                                        _ed.matching_hard_block
+                                    ),
+                                    provisional_required_ev_cents=(
+                                        _d.total * 100.0
+                                    ),
+                                    candidate_net_ev_cents=_ne_c,
+                                    formula_required_edge_cents=(
+                                        _d.formula_total * 100.0
+                                        if _d.formula_total is not None
+                                        else None
+                                    ),
+                                    quantity=1,
+                                    post_only=True,
+                                    tte_seconds=seconds_to_expiry,
+                                    price_cents=_px,
+                                    price_bucket=(
+                                        _cbp.price_band_label(_pcell)
+                                        if _pcell else None
+                                    ),
+                                    tte_bucket=(
+                                        _cbp.tte_band_label(_pcell)
+                                        if _pcell else None
+                                    ),
+                                    decision_id=decision_id,
+                                    admission_owner=(
+                                        "current_build_provisional"
+                                    ),
+                                    build_sha=_cbp.current_build_sha(),
+                                    model_version=(
+                                        _cbp.current_model_version(indicators)
+                                    ),
+                                    calibration_version=(
+                                        _cbp.current_calibration_version()
+                                    ),
+                                    evidence_generation=(
+                                        (_live_ev or {}).get("generated_at")
+                                    ),
+                                    terminal_state="override_admitted",
+                                )
+                            except Exception:
+                                pass
                         else:
                             # The cell matched but could not admit — name the
                             # owner and the true blocker for audit.
@@ -2839,6 +3018,19 @@ def compute_trade_decision(
                                 indicators[
                                     f"{_side}_evidence_override_denied"
                                 ] = _ovr_reason
+                            elif _d.provisional_cell_id is not None:
+                                indicators[f"{_side}_admission_owner"] = (
+                                    "current_build_provisional"
+                                )
+                                indicators[f"{_side}_admission_decision"] = (
+                                    "blocked"
+                                )
+                                indicators[f"{_side}_admission_reason"] = (
+                                    _d.provisional_block_reason or _ed.code.lower()
+                                )
+                                indicators[
+                                    f"{_side}_evidence_override_denied"
+                                ] = _d.provisional_block_reason or _ed.code
                             else:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "evidence_escape"
@@ -2881,6 +3073,8 @@ def compute_trade_decision(
                         _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
                         indicators[f"{_side}_admission_owner"] = (
                             "threshold_cell" if _d.cell_id is not None
+                            else "current_build_provisional"
+                            if _d.provisional_cell_id is not None
                             else "evidence_escape" if _ed.escape_required
                             else "formula"
                         )
@@ -2893,14 +3087,31 @@ def compute_trade_decision(
                 _no_live_ok, _no_live_det = _live_evidence_allows(
                     _live_ev, asset, "no", no_price_cents, fee
                 )
+                # The v1 rolling-win-rate block is itself pre-change legacy
+                # evidence — inside the provisional domain it labels rather
+                # than vetoes, subject to the same EV + lane-capacity checks.
                 if not _yes_live_ok and yes_evidence_ok:
-                    yes_evidence_ok = False
-                    yes_evidence_reason = f"live_evidence_{_yes_live_det['level']}_yes"
-                    indicators[yes_evidence_reason] = _yes_live_det
+                    if _provisional_evidence_probe(
+                        _yes_edge_thr, "yes",
+                        float(yes_breakdown.net_edge) * 100.0,
+                        "LEGACY_V1_BLOCK", False, indicators,
+                    ):
+                        indicators["legacy_risk_label_yes_v1"] = _yes_live_det
+                    else:
+                        yes_evidence_ok = False
+                        yes_evidence_reason = f"live_evidence_{_yes_live_det['level']}_yes"
+                        indicators[yes_evidence_reason] = _yes_live_det
                 if not _no_live_ok and no_evidence_ok:
-                    no_evidence_ok = False
-                    no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
-                    indicators[no_evidence_reason] = _no_live_det
+                    if _provisional_evidence_probe(
+                        _no_edge_thr, "no",
+                        float(no_breakdown.net_edge) * 100.0,
+                        "LEGACY_V1_BLOCK", False, indicators,
+                    ):
+                        indicators["legacy_risk_label_no_v1"] = _no_live_det
+                    else:
+                        no_evidence_ok = False
+                        no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
+                        indicators[no_evidence_reason] = _no_live_det
 
     # Funnel: a cell that matched (and survived lane admission) but loses its
     # side to an evidence hard block is a distinct cohort from unmatched
@@ -2911,6 +3122,10 @@ def compute_trade_decision(
     ):
         if _d.cell_id is not None and not _ev_ok:
             bump_cell_funnel("blocked_by_evidence", _d.cell_id)
+        if _d.provisional_cell_id is not None and not _ev_ok:
+            _cbp.bump_provisional_funnel(
+                "blocked_by_evidence", _d.provisional_cell_id
+            )
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
     # Best-side executable economics snapshot: the single line that separates
@@ -3489,22 +3704,54 @@ def compute_trade_decision(
             indicators["decision_lane"] = "threshold_cell"
             indicators["threshold_cell_id"] = _sel_thr.cell_id
             indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
+        elif (
+            _sel_thr.provisional_cell_id is not None
+            and not indicators.get("decision_lane")
+        ):
+            # Current-build dual-side provisional lane: stamps only when it
+            # actually admitted (caps/state checked during decomposition) —
+            # an unregistered region with no provisional admission falls
+            # through to the formula lane.
+            indicators["decision_lane"] = "current_build_provisional"
+            indicators["provisional_cell_id"] = _sel_thr.provisional_cell_id
+            indicators["provisional_cell_min_ev_cents"] = (
+                _sel_thr.provisional_min_ev_cents
+            )
 
         # Generic evidence escape lane: a pass resting on sparse/pooled cell
         # evidence is admissible only as a bounded post-only canary entry —
-        # and only for candidates without a matched threshold cell.
+        # and only for candidates owned by no cell lane.  A provisional
+        # cell (or a cap-blocked one) owns its region's evidence treatment,
+        # so the shared escape budget must not double-dip it.
         _sel_ev = indicators.get(f"evidence_{selected_outcome}") or {}
         if (
             isinstance(_sel_ev, dict)
             and _sel_ev.get("allowed")
             and _sel_ev.get("escape_required")
             and not indicators.get("decision_lane")
+            and _sel_thr.provisional_cell_id is None
+            and not _sel_thr.provisional_cap_exhausted
         ):
             indicators["decision_lane"] = "evidence_cell_escape"
 
         if _sel_thr.cell_id is not None:
             indicators["threshold_cell_id"] = _sel_thr.cell_id
             indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
+        if _sel_thr.provisional_cell_id is not None:
+            indicators["provisional_cell_id"] = _sel_thr.provisional_cell_id
+            indicators["provisional_cell_min_ev_cents"] = (
+                _sel_thr.provisional_min_ev_cents
+            )
+            _sel_pcell = _cbp.provisional_cell_for_id(
+                _sel_thr.provisional_cell_id
+            )
+            if _sel_pcell is not None:
+                indicators["provisional_price_bucket"] = _cbp.price_band_label(
+                    _sel_pcell
+                )
+                indicators["provisional_tte_bucket"] = _cbp.tte_band_label(
+                    _sel_pcell
+                )
 
         # Top-level admission owner mirrors the selected side's per-side
         # fields (set in the evidence gate above) for audit readability.
