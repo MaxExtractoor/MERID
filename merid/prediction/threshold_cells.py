@@ -211,8 +211,79 @@ assert {
 
 
 def cells_for_asset(asset: str) -> Tuple[str, ...]:
+
     """Enabled cell ids for an asset (empty -> formula path, still evaluated)."""
     return CELLS_BY_ASSET.get(str(asset).upper(), ())
+
+
+_DISCOVERY_ARTIFACT_ENV = "MERID_CELL_DISCOVERY_PATH"
+_DISCOVERY_ARTIFACT_DEFAULT = "data/cell_discovery.json"
+
+# Discovery artifact cache: (abs_path, mtime_ns, per_asset payload).
+# Reloaded only when the file changes so the per-cycle parity heartbeat
+# performs at most one stat call per cycle.
+_discovery_cache: Dict[str, Any] = {"path": None, "mtime_ns": None, "per_asset": {}}
+
+
+def _load_discovery_artifact() -> Dict[str, Any]:
+    """mtime-cached reader for data/cell_discovery.json.
+
+    Written by scripts/cell_discovery_report.py; a missing or stale artifact
+    must never raise into the live loop — absence is itself a status.
+    """
+    path = os.path.abspath(
+        os.environ.get(_DISCOVERY_ARTIFACT_ENV, _DISCOVERY_ARTIFACT_DEFAULT)
+    )
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        _discovery_cache.update(path=path, mtime_ns=None, per_asset={})
+        return {}
+    if _discovery_cache["path"] == path and _discovery_cache["mtime_ns"] == mtime:
+        return _discovery_cache["per_asset"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        per_asset = payload.get("per_asset") or {}
+        if not isinstance(per_asset, dict):
+            per_asset = {}
+    except Exception:
+        per_asset = {}
+    _discovery_cache.update(path=path, mtime_ns=mtime, per_asset=per_asset)
+    return per_asset
+
+
+def cell_discovery_status(asset: str) -> str:
+    """Uniform discovery-state label for the parity heartbeat.
+
+    Resolves, for every asset in the universe, why it is or is not on the
+    cell path so 'evaluated but not qualified' can never be confused with
+    'silently excluded'.  Statuses come from the same promotion rule the
+    discovery report applies to all five assets:
+
+      qualified:N_cells          - approved cells exist in the registry
+      INSUFFICIENT_SAMPLE        - every bucket below n_min
+      INSUFFICIENT_POSITIVE_LCB  - best bucket's LCB10 <= 0
+      FAILS_+1C_STRESS           - LCB10 > 0 but fails +1c adverse stress
+      FOLD_INSTABILITY           - passes stats but chronological folds
+                                   disagree
+      no_discovery_data          - asset absent from the report artifact
+      no_discovery_artifact      - report has never been run
+      registry_disabled          - MERID_THRESHOLD_CELLS=0 kill switch
+    """
+    if not threshold_cells_enabled():
+        return "registry_disabled"
+    asset_u = str(asset).upper()
+    n_cells = len(CELLS_BY_ASSET.get(asset_u, ()))
+    if n_cells:
+        return f"qualified:{n_cells}_cells"
+    per_asset = _load_discovery_artifact()
+    if not per_asset:
+        return "no_discovery_artifact" if not _discovery_cache["mtime_ns"] else "no_discovery_data"
+    rec = per_asset.get(asset_u)
+    if not rec:
+        return "no_discovery_data"
+    return str(rec.get("status") or "no_qualified_cells")
 
 
 # Soft evidence codes the threshold-cell lane may override under its own

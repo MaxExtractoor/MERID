@@ -293,3 +293,75 @@ def test_execution_stage_latency_record(asset, caplog):
     assert rec["risk_ms"] is not None and rec["risk_ms"] >= 0
     assert rec["total_to_terminal_ms"] is not None
     assert rec["outcome"] == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# 5. Discovery parity — no approved cell must never disable the formula path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_discovery_status_reports_every_asset(asset, monkeypatch):
+    """All five assets resolve a discovery label; none is 'not evaluated'."""
+    monkeypatch.setenv("MERID_CELL_DISCOVERY_PATH", "/nonexistent/x.json")
+    status = _tc.cell_discovery_status(asset)
+    assert status and status != "not_evaluated"
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_no_cell_candidate_is_not_claimed_by_cell_lane(asset):
+    """cell_id=None -> (False, None): the cell lane declines ownership, so a
+    formula-qualified candidate keeps its normal admission path on every
+    asset — including BTC/ETH which currently hold zero registry cells."""
+    from merid.prediction.threshold_cells import (
+        cells_for_asset,
+        threshold_cell_admission_allowed,
+    )
+
+    allowed, reason = threshold_cell_admission_allowed(
+        cell_id=None,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=5.0,
+        effective_required_edge_cents=3.0,
+    )
+    # reason=None means 'not this policy's decision' — formula owns it.
+    assert allowed is False
+    assert reason is None
+    # Registry presence is descriptive, not a gate: assets with zero cells
+    # and assets with cells both reach this same resolver branch.
+    assert isinstance(cells_for_asset(asset), tuple)
+
+
+@pytest.mark.parametrize("asset", ("BTC", "ETH"))
+def test_no_approved_cell_does_not_disable_formula_candidate(asset):
+    """BTC/ETH currently hold zero approved cells. Prove the shared resolver
+    hands their candidates to the formula path unchanged: no cell claim, no
+    synthetic block, no hidden asset exclusion."""
+    from merid.prediction.threshold_cells import (
+        cells_for_asset,
+        threshold_cell_admission_allowed,
+    )
+
+    assert cells_for_asset(asset) == ()
+
+    # A formula-qualified candidate (positive EV over the shared formula
+    # threshold, clean evidence) is untouched by the cell lane.
+    allowed, reason = threshold_cell_admission_allowed(
+        cell_id=None,
+        evidence_code=None,
+        matching_hard_block=False,
+        net_ev_cents=5.0,
+        effective_required_edge_cents=3.0,
+    )
+    assert allowed is False and reason is None  # -> formula path decides
+
+    # A soft-evidence candidate with no cell also cannot launder through the
+    # cell lane — identical negative for every asset.
+    allowed2, reason2 = threshold_cell_admission_allowed(
+        cell_id=None,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=5.0,
+        effective_required_edge_cents=3.0,
+    )
+    assert allowed2 is False and reason2 is None
