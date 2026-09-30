@@ -8994,6 +8994,32 @@ class LeanAgent15m:
             "selected_outcome_price": int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else price_cents,
             "settlement_input_price": float(settlement_input_price) if settlement_input_price is not None else float(strike),
             "cf_rti_basis": float(cf_rti_basis) if cf_rti_basis is not None else 0.0,
+            # 2026-09-29: immutable probability inputs for the router's
+            # stale-decision model revalidation.  The warn band re-runs the
+            # real Bachelier + anchor + walkforward + tail-cap chain against a
+            # fresh RTI spot and fresh BBO rather than only repricing the old
+            # EV.  Vol is decision-snapshot (vol refresh is not router-visible);
+            # telemetry labels it honestly.
+            "probability_inputs": {
+                "model": "bachelier_digital_anchor_wf_tailcap",
+                "asset": asset,
+                "side": side,
+                "spot_price_decision": float(bachelier_spot_price),
+                "strike_price": float(strike),
+                "reference_price": float(cf_rti_basis) if cf_rti_basis is not None else float(settlement_input_price or 0.0),
+                "seconds_to_expiry_decision": float(seconds_to_expiry),
+                "annualized_vol": float(annualized_vol) if annualized_vol is not None else None,
+                "p_yes_calibrated": float(decision.p_yes_calibrated),
+                "p_no_calibrated": float(decision.p_no_calibrated),
+                "p_selected": float(model_prob),
+                "bachelier_only": bool(bachelier_only_live),
+                "hybrid_influenced": bool(fvg_influenced) or (
+                    hybrid is not None and abs(float(getattr(hybrid, "total_delta", 0.0) or 0.0)) > 0.0
+                ),
+                "market_anchor_weight_decision": float(_ind.get("market_anchor_weight", 0.0) or 0.0),
+                "market_anchor_prob_decision": float(_ind.get("market_anchor_prob", 0.0) or 0.0),
+                "p_yes_raw_decision": float(_ind.get("p_yes_raw", 0.0) or 0.0),
+            },
             "settlement_reference": settlement_reference,
             "flb_position_multiplier": 1.0,
             # CRITICAL FIX 2026-08-20: carry the per-decision edge threshold so the

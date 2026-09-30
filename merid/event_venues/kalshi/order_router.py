@@ -3154,6 +3154,12 @@ class OrderIntent:
     quote_owner: Optional[str] = None
     degraded_mode: bool = False
 
+    # STALE-DECISION MODEL REVALIDATION (2026-09-29): immutable decision-time
+    # probability inputs (spot, strike, TTE, vol, calibrated p) so the router's
+    # warn-band revalidation can re-run the Bachelier + anchor + calibration
+    # chain against fresh market state instead of only repricing stale EV.
+    probability_inputs: Optional[Dict[str, Any]] = None
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -4408,9 +4414,13 @@ async def _revalidate_entry_economics(
     bound.  On pass, ``intent.ev_net_cents`` is rebound to the refreshed
     value so downstream caps see current economics.
 
-    ``model_recompute`` stays ``unavailable``: the intent does not carry the
-    vol input needed for a Bachelier reprice, so probability drift is bounded
-    by the spot-freshness and edge-decay checks rather than a full re-model.
+    When ``intent.probability_inputs`` is present the warn band performs a
+    FULL model recompute — fresh CFB-RTI spot + elapsed TTE re-run through the
+    Bachelier/anchor/walkforward/tail-cap chain — so a stale candidate keeps
+    its model authorization only if the fresh probability still supports it.
+    Without the inputs it falls back to ``partial_price_revalidation`` (fresh
+    executable price only), and a TTE calibration-bucket crossing under the
+    partial path fails closed as ``stale_decision_tte_regime_changed``.
     """
     _rej = lambda reason: OrderResult(
         status="rejected",
@@ -4444,26 +4454,215 @@ async def _revalidate_entry_economics(
     if not isinstance(_exec_px, int) or _exec_px <= 0:
         return _rej("stale_decision_refresh_failed:no_exec_price")
 
-    # 2) Net-EV recompute at the executable price.
     _sel_px = getattr(intent, "selected_outcome_price_cents", None) or getattr(
         intent, "price_cents", None
     )
     _ev0 = getattr(intent, "ev_net_cents", None)
     if _sel_px is None or _ev0 is None:
         return _rej("stale_decision_refresh_failed:no_economics")
-    _delta = (int(_sel_px) - _exec_px) if _action == "buy" else (_exec_px - int(_sel_px))
-    _ev_new = float(_ev0) + float(_delta)
+    _p_sel0 = getattr(intent, "p_selected", None)
+
     _min_req = getattr(intent, "min_required_edge", None)
     if _min_req is None or float(_min_req) <= 0:
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         _min_req = TRADE_DECISION_MIN_REQUIRED_EDGE
     _req_cents = float(_min_req) * 100.0
-    if _ev_new < _req_cents:
-        return _rej(
-            f"stale_decision_edge_decayed:ev={_ev_new:.1f}<req={_req_cents:.1f}"
-        )
 
-    # 3) Edge cap: the executable price must still sit inside the budget.
+    # 2) Model recompute when the immutable probability inputs are present.
+    _pinputs = getattr(intent, "probability_inputs", None)
+    _revalidation_kind = "partial_price_revalidation"
+    _model_recompute = "unavailable"
+    _p_sel_fresh: Optional[float] = None
+    _p_yes_fresh: Optional[float] = None
+    _tte_now: Optional[float] = None
+    _tte_regime_changed = False
+    _spot_state = "unavailable"
+    _p_sel0_f = float(_p_sel0) if _p_sel0 is not None else None
+
+    _pin_ok = (
+        isinstance(_pinputs, dict)
+        and _pinputs.get("strike_price")
+        and _pinputs.get("seconds_to_expiry_decision") is not None
+        and _p_sel0_f is not None
+    )
+    if _pin_ok:
+        try:
+            from merid.data.cf_rti_adapter import get_live_rti
+            from merid.prediction.trade_decision import (
+                _compute_bachelier_components,
+                _dual_tail_shrinkage_weight,
+                _walkforward_calibrate_p_yes,
+                _walkforward_tte_bucket,
+                MERID_CALIBRATION_CAP_FULL_RANGE,
+                MERID_MARKET_ANCHOR_MAX_W,
+                MERID_MARKET_ANCHOR_MIN_W,
+                MERID_MARKET_ANCHOR_WINDOW_S,
+                MERID_SETTLEMENT_ANCHOR_RELEASE,
+                MERID_TAIL_CALIBRATION_ENABLED,
+                MERID_TAIL_CALIBRATION_PRICE_FLOOR,
+            )
+            from merid.risk.probability.tail_calibrator import load_tail_calibrator
+
+            _asset = str(_pinputs.get("asset") or (intent.ticker or "").split("-")[0])
+            _side_l = (intent.side or _pinputs.get("side") or "").strip().lower()
+            _vol = _pinputs.get("annualized_vol")
+            _tte0 = float(_pinputs["seconds_to_expiry_decision"])
+            _dec_age_s = max(0.0, _time.time() - float(getattr(intent, "snapshot_ts", _time.time())))
+            _tte_now = _tte0 - _dec_age_s
+            if _tte_now <= 0:
+                return _rej("stale_decision_tte_expired")
+            _tte_regime_changed = (
+                _walkforward_tte_bucket(_tte0) != _walkforward_tte_bucket(_tte_now)
+            )
+
+            # Vol input is decision-snapshot: if it is missing/invalid a full
+            # recompute cannot run — fail closed rather than fake the model.
+            _vol_f = float(_vol) if _vol is not None else None
+            if _vol_f is None or _vol_f <= 0 or not math.isfinite(_vol_f):
+                return _rej("stale_decision_volatility_stale:no_vol_input")
+
+            # Fresh settlement-native spot: the same execution-eligible CFB
+            # RTI observation class the decision consumed.
+            _obs = get_live_rti(_asset)
+            _spot_f = None
+            _spot_age_s: Optional[float] = None
+            if _obs is not None and getattr(_obs, "execution_eligible", False):
+                try:
+                    _v = float(getattr(_obs, "value", 0.0) or 0.0)
+                    if math.isfinite(_v) and _v > 0:
+                        _spot_f = _v
+                        _mono = getattr(_obs, "observed_ts_mono_ns", None)
+                        if _mono:
+                            _spot_age_s = max(
+                                0.0, (_time.monotonic_ns() - int(_mono)) / 1e9
+                            )
+                except (TypeError, ValueError, OverflowError):
+                    _spot_f = None
+            if _spot_f is None:
+                return _rej("stale_decision_spot_stale:rti_ineligible")
+            _spot_state = f"rti_ok_age={_spot_age_s:.1f}s" if _spot_age_s is not None else "rti_ok"
+
+            # Replay the decision chain: Bachelier raw -> market-anchor logit
+            # blend (fresh mid + fresh weight) -> walkforward cal -> held-side
+            # tail cap -> venue clamp -> deviation guard.
+            _comps = _compute_bachelier_components(
+                _spot_f, float(_pinputs["strike_price"]), _tte_now, _vol_f
+            )
+            _p_yes_raw_f = float(_comps["p_yes_raw"]) if _comps else 0.5
+            _p_yes_f = _p_yes_raw_f
+            _yes_mid = (_book["yes_bid_cents"] + _book["yes_ask_cents"]) / 200.0
+            _mkt_prob = max(0.01, min(0.99, _yes_mid))
+            _anchor_w = 0.0
+            if _book["yes_ask_cents"] > _book["yes_bid_cents"]:
+                _frac = max(0.0, min(1.0, 1.0 - _tte_now / max(MERID_MARKET_ANCHOR_WINDOW_S, 1.0)))
+                _anchor_w = MERID_MARKET_ANCHOR_MIN_W + (
+                    MERID_MARKET_ANCHOR_MAX_W - MERID_MARKET_ANCHOR_MIN_W
+                ) * _frac
+                _anchor_w = max(0.0, min(0.98, _anchor_w))
+                if MERID_SETTLEMENT_ANCHOR_RELEASE and _tte_now <= 60.0:
+                    # remaining_count = max(0, 60 - elapsed_in_window) = int(tte)
+                    _anchor_w *= max(0.0, min(1.0, float(int(_tte_now)) / 60.0))
+            if _anchor_w > 0.0:
+                def _lg(x: float) -> float:
+                    x = max(1e-6, min(1.0 - 1e-6, x))
+                    return math.log(x / (1.0 - x))
+                _blended = (1.0 - _anchor_w) * _lg(_p_yes_f) + _anchor_w * _lg(_mkt_prob)
+                _p_yes_f = max(0.0, min(1.0, 1.0 / (1.0 + math.exp(-_blended))))
+
+            _wf = _walkforward_calibrate_p_yes(_asset, _tte_now, _p_yes_f)
+            if _wf is not None:
+                _p_yes_f = _wf
+
+            _entry_frac = _exec_px / 100.0
+            _tc = load_tail_calibrator() if MERID_TAIL_CALIBRATION_ENABLED else None
+            if _side_l == "no":
+                _p_raw_side = 1.0 - _p_yes_raw_f
+                _p_side = 1.0 - _p_yes_f
+                _no_in_scope = _tc is not None and (
+                    _entry_frac < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+                    or (MERID_CALIBRATION_CAP_FULL_RANGE and not _tc.no_curve_is_dual)
+                )
+                if _no_in_scope:
+                    if _tc.no_curve_is_dual:
+                        _w_no = _dual_tail_shrinkage_weight(_p_side)
+                        _p_side = _p_side + _w_no * (
+                            _tc.cap_p_no(_p_side, _entry_frac, asset=_asset) - _p_side
+                        )
+                    else:
+                        _p_side = _tc.cap_p_no(_p_side, _entry_frac, asset=_asset)
+                _p_sel_fresh = max(0.05, min(0.95, _p_side))
+            else:
+                _p_raw_side = _p_yes_raw_f
+                _p_side = _p_yes_f
+                if _tc is not None and (
+                    MERID_CALIBRATION_CAP_FULL_RANGE
+                    or _entry_frac < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+                ):
+                    _p_side = _tc.cap_p_yes(_p_side, _entry_frac, asset=_asset)
+                _p_sel_fresh = max(0.05, min(0.95, _p_side))
+            _p_yes_fresh = _p_yes_f if _side_l == "yes" else 1.0 - _p_sel_fresh
+
+            # Calibration-inflation guard (same rule as the decision layer):
+            # large upward move outside the cheap tail = fail closed.
+            _guard = float(os.environ.get("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "0.15"))
+            _in_tail = _entry_frac < MERID_TAIL_CALIBRATION_PRICE_FLOOR
+            if (
+                _exec_px > 0
+                and (_p_sel_fresh - _p_raw_side) > _guard
+                and not _in_tail
+            ):
+                return _rej(
+                    f"stale_decision_calibration_guard:"
+                    f"p={_p_sel_fresh:.3f}-raw={_p_raw_side:.3f}>{_guard:.2f}"
+                )
+
+            _revalidation_kind = "full_model_revalidation"
+            _model_recompute = (
+                "bachelier_wf_anchor_tailcap"
+                + ("_tte_regime_x" if _tte_regime_changed else "")
+            )
+        except OrderIdentityError:
+            raise
+        except Exception as _m_exc:
+            return _rej(f"stale_decision_refresh_failed:model_err:{type(_m_exc).__name__}")
+    else:
+        # Partial path cannot survive a calibration-regime crossing: the
+        # decision-time calibrated cell no longer owns this probability.
+        try:
+            from merid.prediction.trade_decision import _walkforward_tte_bucket
+            _tte0_pin = (_pinputs or {}).get("seconds_to_expiry_decision") or getattr(
+                intent, "time_to_expiry_seconds", None
+            )
+            if _tte0_pin is not None:
+                _dec_age = _time.time() - float(getattr(intent, "snapshot_ts", _time.time()))
+                _tte_now_pin = float(_tte0_pin) - max(0.0, _dec_age)
+                _tte_regime_changed = (
+                    _tte_now_pin > 0
+                    and _walkforward_tte_bucket(float(_tte0_pin))
+                    != _walkforward_tte_bucket(_tte_now_pin)
+                )
+                if _tte_regime_changed:
+                    return _rej("stale_decision_tte_regime_changed")
+        except ImportError:
+            pass
+
+    # 3) Net-EV recompute: price delta + (when available) probability delta.
+    _delta_px = (int(_sel_px) - _exec_px) if _action == "buy" else (_exec_px - int(_sel_px))
+    _delta_p = (
+        (_p_sel_fresh - _p_sel0_f) * 100.0
+        if (_p_sel_fresh is not None and _p_sel0_f is not None)
+        else 0.0
+    )
+    _ev_new = float(_ev0) + float(_delta_px) + float(_delta_p)
+    if _ev_new < _req_cents:
+        _stem = (
+            "stale_decision_model_edge_decayed"
+            if _p_sel_fresh is not None
+            else "stale_decision_price_edge_decayed"
+        )
+        return _rej(f"{_stem}:ev={_ev_new:.1f}<req={_req_cents:.1f}")
+
+    # 4) Edge cap: the executable price must still sit inside the budget.
     _cap = None
     if _action == "buy":
         _cap = _max_edge_preserving_buy_price(intent)
@@ -4472,46 +4671,66 @@ async def _revalidate_entry_economics(
             _chase = int(_sel) + int(os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5"))
             _cap = min(_cap, _chase) if _cap is not None else _chase
         if _cap is not None and _exec_px > _cap:
-            return _rej(f"stale_decision_edge_decayed:exec_px={_exec_px}>cap={_cap}")
+            _stem = (
+                "stale_decision_model_edge_decayed"
+                if _p_sel_fresh is not None
+                else "stale_decision_price_edge_decayed"
+            )
+            return _rej(f"{_stem}:exec_px={_exec_px}>cap={_cap}")
 
-    # 4) Model-input drift bound: the spot leg must still be fresh.
-    _spot_state = "unavailable"
-    try:
-        from data.unified_spot_service import get_unified_spot_service, SpotError
-        _asset = (intent.ticker or "").split("-")[0]
-        for _prefix in ("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"):
-            if (intent.ticker or "").startswith(_prefix):
-                _asset = _prefix[2:]
-                break
-        _sp = get_unified_spot_service().get(_asset)
-        if _sp is None or isinstance(_sp, SpotError):
-            return _rej("stale_decision_refresh_failed:no_spot")
-        _sp_ts = getattr(_sp, "timestamp", 0) or 0
-        _sp_age_s = replay_time() - (_sp_ts / 1000.0 if _sp_ts > 1e12 else _sp_ts)
-        _sp_max_s = float(os.getenv("MERID_EXECUTION_SPOT_MAX_AGE_S", "5"))
-        if _sp_age_s > _sp_max_s:
-            return _rej(f"stale_decision_spot_stale:age={_sp_age_s:.1f}s")
-        _spot_state = f"fresh_{_sp_age_s:.1f}s"
-    except ImportError:
-        _spot_state = "service_missing"
-    except Exception as _sp_exc:
-        return _rej(f"stale_decision_refresh_failed:spot_err:{type(_sp_exc).__name__}")
+    # 5) Partial path still needs the legacy unified-spot freshness bound;
+    # the model path already gated on execution-eligible RTI.
+    if _p_sel_fresh is None:
+        try:
+            from data.unified_spot_service import get_unified_spot_service, SpotError
+            _asset = (intent.ticker or "").split("-")[0]
+            for _prefix in ("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"):
+                if (intent.ticker or "").startswith(_prefix):
+                    _asset = _prefix[2:]
+                    break
+            _sp = get_unified_spot_service().get(_asset)
+            if _sp is None or isinstance(_sp, SpotError):
+                return _rej("stale_decision_refresh_failed:no_spot")
+            _sp_ts = getattr(_sp, "timestamp", 0) or 0
+            _sp_age_s = replay_time() - (_sp_ts / 1000.0 if _sp_ts > 1e12 else _sp_ts)
+            _sp_max_s = float(os.getenv("MERID_EXECUTION_SPOT_MAX_AGE_S", "5"))
+            if _sp_age_s > _sp_max_s:
+                return _rej(f"stale_decision_spot_stale:age={_sp_age_s:.1f}s")
+            _spot_state = f"fresh_{_sp_age_s:.1f}s"
+        except ImportError:
+            _spot_state = "service_missing"
+        except Exception as _sp_exc:
+            return _rej(f"stale_decision_refresh_failed:spot_err:{type(_sp_exc).__name__}")
 
-    # 5) Rebind economics to the refreshed computation.
+    # 6) Rebind economics to the refreshed computation.
     intent.ev_net_cents = _ev_new
+    if _p_sel_fresh is not None:
+        intent.p_selected = _p_sel_fresh
+        if _p_yes_fresh is not None:
+            intent.p_yes = _p_yes_fresh
+            intent.p_no = 1.0 - _p_yes_fresh
+            intent.p_hat_yes_cents = _p_yes_fresh * 100.0
+            intent.p_hat_no_cents = (1.0 - _p_yes_fresh) * 100.0
+        intent.entry_model_probability = _p_sel_fresh
     intent._execution_revalidated = True
     intent._revalidated_mono = _time.monotonic()
     logger.info(
         "[EXEC-REVALIDATION] intent_id=%s ticker=%s side=%s action=%s role=%s "
         "candidate_px=%dc routed_px=%dc exec_px=%dc side_bid=%dc side_ask=%dc "
         "max_px=%s net_ev_before=%.1f net_ev_recomputed=%.1f req_ev=%.1f "
-        "spot=%s model_recompute=unavailable decision=ALLOW",
+        "p_sel_before=%s p_sel_fresh=%s tte_now=%s tte_regime_changed=%s "
+        "spot=%s revalidation=%s model_recompute=%s decision=ALLOW",
         intent.intent_id, intent.ticker, intent.side, _action,
         "maker" if _is_maker else "taker",
         int(_sel_px), int(getattr(intent, "price_cents", 0) or 0), _exec_px,
         _side_book["bid_cents"], _side_book["ask_cents"],
         _cap if _cap is not None else "na",
-        float(_ev0), _ev_new, _req_cents, _spot_state,
+        float(_ev0), _ev_new, _req_cents,
+        f"{_p_sel0_f:.4f}" if _p_sel0_f is not None else "na",
+        f"{_p_sel_fresh:.4f}" if _p_sel_fresh is not None else "na",
+        f"{_tte_now:.1f}s" if _tte_now is not None else "na",
+        _tte_regime_changed,
+        _spot_state, _revalidation_kind, _model_recompute,
     )
     return None
 

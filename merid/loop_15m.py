@@ -9887,6 +9887,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # CRITICAL FIX (2026-08-19): carry the decision edge threshold for
             # fill-adjusted edge gating.
             min_required_edge=candidate.get("min_required_edge"),
+            # 2026-09-29: immutable model inputs for warn-band Bachelier +
+            # calibration recompute at the router (stale-decision revalidation).
+            probability_inputs=candidate.get("probability_inputs"),
             # Quote-feed provenance bound to the admitted candidate so the
             # router/order/audit records carry which feed owned the entry quote.
             quote_owner=candidate.get("quote_owner"),
