@@ -442,6 +442,49 @@ def build_asset_record(
         "required_edge_no_cents": _first_float(
             _resolve(candidate, decision, ["required_edge_no_cents"], ["required_edge_no_cents"])
         ),
+        # Dynamic-threshold decomposition + best-side snapshot (2026-09-30).
+        "yes_thr_base_floor_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_base_floor_cents"], ["yes_thr_base_floor_cents"])
+        ),
+        "no_thr_base_floor_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_base_floor_cents"], ["no_thr_base_floor_cents"])
+        ),
+        "yes_thr_convexity_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_convexity_cents"], ["yes_thr_convexity_cents"])
+        ),
+        "no_thr_convexity_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_convexity_cents"], ["no_thr_convexity_cents"])
+        ),
+        "yes_thr_flb_premium_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_flb_premium_cents"], ["yes_thr_flb_premium_cents"])
+        ),
+        "no_thr_flb_premium_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_flb_premium_cents"], ["no_thr_flb_premium_cents"])
+        ),
+        "yes_thr_global_floor_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_global_floor_cents"], ["yes_thr_global_floor_cents"])
+        ),
+        "no_thr_global_floor_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_global_floor_cents"], ["no_thr_global_floor_cents"])
+        ),
+        "yes_thr_asset_base_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_asset_base_cents"], ["yes_thr_asset_base_cents"])
+        ),
+        "no_thr_asset_base_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_asset_base_cents"], ["no_thr_asset_base_cents"])
+        ),
+        "best_executable_side": _first_str(
+            _resolve(candidate, decision, ["best_executable_side"], ["best_executable_side"])
+        ),
+        "best_executable_ev_cents": _first_float(
+            _resolve(candidate, decision, ["best_executable_ev_cents"], ["best_executable_ev_cents"])
+        ),
+        "best_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["best_required_edge_cents"], ["best_required_edge_cents"])
+        ),
+        "edge_shortfall_cents": _first_float(
+            _resolve(candidate, decision, ["edge_shortfall_cents"], ["edge_shortfall_cents"])
+        ),
         "yes_eligible": _first_bool(
             _resolve(candidate, decision, ["yes_eligible", "yes_qualifies"], ["yes_eligible", "yes_qualifies"])
         ),
@@ -666,16 +709,24 @@ def format_scorecard(cycle_id: int, records: List[Dict[str, Any]]) -> str:
         elif not r.get("market_available"):
             status = f"REJECT | {r.get('rejection_stage')} | {r.get('rejection_reason') or 'market_unavailable'}"
         else:
-            side = r.get("selected_side") or "-"
-            model = r.get("model_prob_selected")
-            market = r.get("market_p_selected")
-            raw_edge = r.get("raw_edge_cents")
-            robust = r.get("robust_ev_cents")
-            reason = r.get("rejection_reason") or r.get("rejection_stage") or "no_candidate"
+            best_side = r.get("best_executable_side") or r.get("selected_side") or "-"
+            best_ev = r.get("best_executable_ev_cents")
+            if best_ev is None:
+                best_ev = r.get("ev_net_cents")
+            best_thr = r.get("best_required_edge_cents")
+            if best_thr is None:
+                sel = str(best_side).lower()
+                best_thr = r.get(f"required_edge_{sel}_cents")
+            shortfall = r.get("edge_shortfall_cents")
+            if shortfall is None and best_ev is not None and best_thr is not None:
+                shortfall = max(0.0, float(best_thr) - float(best_ev))
+            code = r.get("terminal_code") or r.get("rejection_reason") or r.get("rejection_stage") or "no_candidate"
+            ev_txt = "-" if best_ev is None else f"{float(best_ev):+.2f}c"
+            thr_txt = "-" if best_thr is None else f"{float(best_thr):+.2f}c"
+            short_txt = "-" if shortfall is None else f"{float(shortfall):.2f}c"
             status = (
-                f"REJECT | {reason} | side={side} "
-                f"model={_fmt_prob(model)} market={_fmt_prob(market)} "
-                f"raw_edge={_fmt_ev(raw_edge)} robust_ev={_fmt_ev(robust)}"
+                f"REJECT | best={str(best_side).upper()} ev={ev_txt} "
+                f"thr={thr_txt} short={short_txt} -> {code}"
             )
         parts.append(f"{asset}: {status}")
     return "\n".join(parts)
