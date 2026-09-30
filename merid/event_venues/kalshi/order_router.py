@@ -4394,6 +4394,128 @@ def _post_only_strict_passivity(
     return None, None
 
 
+async def _revalidate_entry_economics(
+    intent: "OrderIntent", *, mode: "TradingMode", t0: float
+) -> Optional["OrderResult"]:
+    """Revalidate an aged entry decision against current executable economics.
+
+    Spec invariant (2026-09-29): a decision older than the warn band may
+    continue ONLY after its economics are recomputed against a fresh book —
+    never on the stale authorization alone.  Steps: fresh REST BBO ->
+    executable price for the role (maker: the resting limit, which is the
+    worst-case fill; taker: the fresh ask/bid) -> net-EV recompute at that
+    price -> min-required-edge and edge-cap checks -> spot-input freshness
+    bound.  On pass, ``intent.ev_net_cents`` is rebound to the refreshed
+    value so downstream caps see current economics.
+
+    ``model_recompute`` stays ``unavailable``: the intent does not carry the
+    vol input needed for a Bachelier reprice, so probability drift is bounded
+    by the spot-freshness and edge-decay checks rather than a full re-model.
+    """
+    _rej = lambda reason: OrderResult(
+        status="rejected",
+        mode=mode,
+        reason=reason,
+        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+    )
+
+    # 1) Fresh venue-valid BBO.
+    try:
+        from merid.event_venues.kalshi.port import get_kalshi_execution_port
+        _port = get_kalshi_execution_port()
+        _ob = await asyncio.wait_for(
+            _port.get_orderbook(intent.ticker), timeout=3.0
+        )
+    except Exception:
+        _ob = None
+    _book = _canonical_yes_book_from_port(_ob)
+    if _book is None:
+        return _rej("stale_decision_refresh_failed:no_fresh_book")
+    _side_book = _side_aware_book_for_intent(_book, intent.side)
+    _action = (getattr(intent, "action", "") or "").lower()
+    _is_maker = _resolve_execution_mode(intent) in ("maker", "passive_quote")
+    # A resting maker fill can never cost more than its limit; a taker pays
+    # the fresh ask/bid.
+    _exec_px = (
+        int(getattr(intent, "price_cents", 0) or 0)
+        if _is_maker
+        else (_side_book["ask_cents"] if _action == "buy" else _side_book["bid_cents"])
+    )
+    if not isinstance(_exec_px, int) or _exec_px <= 0:
+        return _rej("stale_decision_refresh_failed:no_exec_price")
+
+    # 2) Net-EV recompute at the executable price.
+    _sel_px = getattr(intent, "selected_outcome_price_cents", None) or getattr(
+        intent, "price_cents", None
+    )
+    _ev0 = getattr(intent, "ev_net_cents", None)
+    if _sel_px is None or _ev0 is None:
+        return _rej("stale_decision_refresh_failed:no_economics")
+    _delta = (int(_sel_px) - _exec_px) if _action == "buy" else (_exec_px - int(_sel_px))
+    _ev_new = float(_ev0) + float(_delta)
+    _min_req = getattr(intent, "min_required_edge", None)
+    if _min_req is None or float(_min_req) <= 0:
+        from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
+        _min_req = TRADE_DECISION_MIN_REQUIRED_EDGE
+    _req_cents = float(_min_req) * 100.0
+    if _ev_new < _req_cents:
+        return _rej(
+            f"stale_decision_edge_decayed:ev={_ev_new:.1f}<req={_req_cents:.1f}"
+        )
+
+    # 3) Edge cap: the executable price must still sit inside the budget.
+    _cap = None
+    if _action == "buy":
+        _cap = _max_edge_preserving_buy_price(intent)
+        _sel = getattr(intent, "selected_outcome_price_cents", None)
+        if _sel is not None and int(_sel) > 0:
+            _chase = int(_sel) + int(os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5"))
+            _cap = min(_cap, _chase) if _cap is not None else _chase
+        if _cap is not None and _exec_px > _cap:
+            return _rej(f"stale_decision_edge_decayed:exec_px={_exec_px}>cap={_cap}")
+
+    # 4) Model-input drift bound: the spot leg must still be fresh.
+    _spot_state = "unavailable"
+    try:
+        from data.unified_spot_service import get_unified_spot_service, SpotError
+        _asset = (intent.ticker or "").split("-")[0]
+        for _prefix in ("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"):
+            if (intent.ticker or "").startswith(_prefix):
+                _asset = _prefix[2:]
+                break
+        _sp = get_unified_spot_service().get(_asset)
+        if _sp is None or isinstance(_sp, SpotError):
+            return _rej("stale_decision_refresh_failed:no_spot")
+        _sp_ts = getattr(_sp, "timestamp", 0) or 0
+        _sp_age_s = replay_time() - (_sp_ts / 1000.0 if _sp_ts > 1e12 else _sp_ts)
+        _sp_max_s = float(os.getenv("MERID_EXECUTION_SPOT_MAX_AGE_S", "5"))
+        if _sp_age_s > _sp_max_s:
+            return _rej(f"stale_decision_spot_stale:age={_sp_age_s:.1f}s")
+        _spot_state = f"fresh_{_sp_age_s:.1f}s"
+    except ImportError:
+        _spot_state = "service_missing"
+    except Exception as _sp_exc:
+        return _rej(f"stale_decision_refresh_failed:spot_err:{type(_sp_exc).__name__}")
+
+    # 5) Rebind economics to the refreshed computation.
+    intent.ev_net_cents = _ev_new
+    intent._execution_revalidated = True
+    intent._revalidated_mono = _time.monotonic()
+    logger.info(
+        "[EXEC-REVALIDATION] intent_id=%s ticker=%s side=%s action=%s role=%s "
+        "candidate_px=%dc routed_px=%dc exec_px=%dc side_bid=%dc side_ask=%dc "
+        "max_px=%s net_ev_before=%.1f net_ev_recomputed=%.1f req_ev=%.1f "
+        "spot=%s model_recompute=unavailable decision=ALLOW",
+        intent.intent_id, intent.ticker, intent.side, _action,
+        "maker" if _is_maker else "taker",
+        int(_sel_px), int(getattr(intent, "price_cents", 0) or 0), _exec_px,
+        _side_book["bid_cents"], _side_book["ask_cents"],
+        _cap if _cap is not None else "na",
+        float(_ev0), _ev_new, _req_cents, _spot_state,
+    )
+    return None
+
+
 def _is_ws_authoritative(state: KalshiMarketState) -> bool:
     """Return True when the WebSocket feed is the live, trusted primary book."""
     if state is None:
@@ -12167,9 +12289,14 @@ def _prepare_order_for_gate(
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             ), None
         if _decision_age_ms > _decision_warn_ms:
+            # Aged authorization: economics MUST be recomputed against a fresh
+            # book/spot before the order can continue — telemetry alone is not
+            # sufficient (2026-09-29 spec).  _route_live runs the async
+            # revalidation and rejects edge-decayed or unrefreshable intents.
+            intent._exec_revalidate_required = True
             logger.info(
                 "[STALE-DECISION] ticker=%s code=stale_decision_recompute age_ms=%.0f "
-                "warn_ms=%.0f max_ms=%.0f — aged authorization; allowing with flag",
+                "warn_ms=%.0f max_ms=%.0f — aged authorization; economics revalidation required",
                 intent.ticker, _decision_age_ms, _decision_warn_ms, _decision_max_ms,
             )
 
@@ -12803,6 +12930,17 @@ async def _route_live(
             "[order-router] Order passed executable/planning gate: ticker=%s plan_done=%s",
             intent.ticker, plan_done,
         )
+
+        # 2026-09-29 (execution coherence): mandatory economics revalidation for
+        # aged decisions — the warn-band flag means "recompute or reject", never
+        # "continue on the stale authorization".
+        if not _is_exit_gate and getattr(intent, "_exec_revalidate_required", False):
+            intent._exec_revalidate_required = False
+            _rev = await _revalidate_entry_economics(intent, mode=mode, t0=t0)
+            if _rev is not None:
+                _release_gate_record(intent, _rev.reason or "exec_revalidation")
+                _release_allocated_slot(intent)
+                return _rev
 
         # CRITICAL FIX (2026-07-19): Validate price placement matches liquidity role intent
         # This prevents maker orders from incorrectly crossing the spread (incurring taker fees)
@@ -15638,6 +15776,7 @@ async def _route_live(
 
         placed_res = None
         _submit_timed_out = False
+        _send_mono = _time.monotonic()
         try:
             placed_res = await port.create_order(create_request)
         except asyncio.TimeoutError as _submit_to_exc:
@@ -15646,6 +15785,7 @@ async def _route_live(
                 "[SUBMIT-TIMEOUT] intent_id=%s ticker=%s client_tag=%s — ack lost in flight: %s",
                 intent.intent_id, intent.ticker, intent.client_tag, _submit_to_exc,
             )
+        _ack_mono = _time.monotonic()
         latency = (_time.monotonic() - t0) * 1000
 
         # Timeout-after-submit (or a venue-reported timeout): mark the gate
@@ -15785,6 +15925,32 @@ async def _route_live(
                     "[POST-ONLY-REPRICE] retry failed intent_id=%s ticker=%s err=%s",
                     intent.intent_id, intent.ticker, _rt_exc,
                 )
+
+        # 2026-09-29: consolidated pipeline stage timing — decision age,
+        # router-entry to economics revalidation, revalidation to wire, wire
+        # to first exchange ack, and the per-side price drift since the
+        # decision.  Aggregated offline into p50/p95/p99 per asset.
+        try:
+            _rv_mono = getattr(intent, "_revalidated_mono", None)
+            _sel_for_delta = getattr(intent, "selected_outcome_price_cents", None)
+            _px_delta = (
+                int(getattr(intent, "price_cents", 0) or 0) - int(_sel_for_delta)
+                if _sel_for_delta else None
+            )
+            logger.info(
+                "[EXEC-LATENCY] intent_id=%s ticker=%s status=%s "
+                "decision_age_ms=%.0f route_to_reval_ms=%s reval_to_send_ms=%s "
+                "send_to_ack_ms=%.0f price_delta_c=%s",
+                intent.intent_id, intent.ticker,
+                "accepted" if (placed_res and placed_res.success) else "rejected",
+                _strategy_snapshot_age_ms,
+                f"{(_rv_mono - t0) * 1000.0:.0f}" if _rv_mono else "na",
+                f"{(_send_mono - _rv_mono) * 1000.0:.0f}" if _rv_mono else "na",
+                (_ack_mono - _send_mono) * 1000.0,
+                _px_delta if _px_delta is not None else "na",
+            )
+        except Exception as _lat_err:
+            logger.debug("[EXEC-LATENCY] emit failed: %s", _lat_err)
 
         # CRITICAL 2026-08-11: Bind the exchange order_id to the intent and to
         # the position_cache order_id -> client_tag map as soon as the response
