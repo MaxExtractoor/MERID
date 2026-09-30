@@ -205,6 +205,18 @@ def _terminal_code(
         return "TTE_ENTRY_CUTOFF"
     if rl.startswith("exception") or "model_unavailable" in rl:
         return "MODEL_UNAVAILABLE"
+    # 2026-09-29: execution-coherence rejects (decision-age deadline,
+    # pre-submit strict passivity, post-only repricing) — distinct from the
+    # strategy-edge rejects so dashboards can see quote-to-submit failures.
+    if rl.startswith("stale_decision"):
+        return "STALE_DECISION"
+    if (
+        rl.startswith("pre_submit_passivity")
+        or rl.startswith("post_only_passivity")
+        or rl.startswith("post_only_no_passive_price")
+        or "post only cross" in rl
+    ):
+        return "EXECUTION_REJECT"
     if candidate is not None or (
         rl.startswith("cooldown") or "session" in rl or "consecutive" in rl
         or "knapsack" in rl or rl.startswith("allocator") or "risk" in rl
