@@ -1759,10 +1759,10 @@ def _compute_confidence(
         reasons.append(f"yes_spread={yes_spread:.1f}c")
     if no_bid_cents > 0 and no_ask_cents > 0 and no_spread > 5.0:
         reasons.append(f"no_spread={no_spread:.1f}c")
-    if yes_depth_cc < 100.0:
-        reasons.append(f"yes_depth_cc={yes_depth_cc:.0f}")
-    if no_depth_cc < 100.0:
-        reasons.append(f"no_depth_cc={no_depth_cc:.0f}")
+    if yes_depth_cc < 100.0 and no_depth_cc < 100.0:
+        reasons.append(
+            f"no_executable_depth:yes={yes_depth_cc:.0f},no={no_depth_cc:.0f}"
+        )
 
     if reasons:
         return ConfidenceResult(
@@ -2680,14 +2680,21 @@ def compute_trade_decision(
     yes_min_p = _min_p_for_side(yes_breakdown, min_p_selected)
     no_min_p = _min_p_for_side(no_breakdown, min_p_selected)
 
+    # 2026-09-30: side-specific depth eligibility.  A side whose executable
+    # book cannot absorb one contract is ineligible on its own; it must not
+    # poison the opposite side via the (now both-empty-only) confidence floor.
+    yes_depth_ok = yes_depth_cc >= 100.0
+    no_depth_ok = no_depth_cc >= 100.0
     yes_qualifies = (
-        yes_breakdown.net_edge >= yes_min_edge
+        yes_depth_ok
+        and yes_breakdown.net_edge >= yes_min_edge
         and yes_breakdown.p_selected > yes_min_p
         and not tail_guard_violation_yes
         and yes_evidence_ok
     )
     no_qualifies = (
-        no_breakdown.net_edge >= no_min_edge
+        no_depth_ok
+        and no_breakdown.net_edge >= no_min_edge
         and no_breakdown.p_selected > no_min_p
         and not tail_guard_violation_no
         and no_evidence_ok
@@ -2704,17 +2711,25 @@ def compute_trade_decision(
         min_p_s: float,
         evidence_ok_s: bool,
         tail_violation_s: bool,
+        depth_ok_s: bool = True,
     ) -> Optional[str]:
+        if not depth_ok_s:
+            return f"insufficient_depth_{side}"
         if tail_violation_s:
             return f"tail_guard_{side}"
-        if not evidence_ok_s:
-            return (
-                yes_evidence_reason if side == "yes" else no_evidence_reason
-            ) or f"evidence_{side}"
+        # 2026-09-30: economics first — a side that never had positive
+        # executable EV is an EV rejection, not an evidence-policy block.
+        # Evidence only owns the terminal code when the economics cleared.
+        if bd.net_edge <= 0:
+            return f"no_positive_executable_edge_{side}"
         if bd.net_edge < min_edge_s:
             return f"edge_below_threshold_{side}"
         if bd.p_selected <= min_p_s:
             return f"cost_basis_{side}"
+        if not evidence_ok_s:
+            return (
+                yes_evidence_reason if side == "yes" else no_evidence_reason
+            ) or f"evidence_{side}"
         return None
 
     indicators.update({
@@ -2736,11 +2751,11 @@ def compute_trade_decision(
         "no_qualifies": bool(no_qualifies),
         "yes_block": _side_block_reason(
             "yes", yes_breakdown, yes_min_edge, yes_min_p,
-            yes_evidence_ok, tail_guard_violation_yes,
+            yes_evidence_ok, tail_guard_violation_yes, yes_depth_ok,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
-            no_evidence_ok, tail_guard_violation_no,
+            no_evidence_ok, tail_guard_violation_no, no_depth_ok,
         ),
     })
 
@@ -2766,7 +2781,21 @@ def compute_trade_decision(
             best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
             best_min_p = yes_min_p if best_side == "yes" else no_min_p
             best_evidence_ok = yes_evidence_ok if best_side == "yes" else no_evidence_ok
-            if not best_evidence_ok:
+            if best_net_edge <= 0:
+                # 2026-09-30: both legs uneconomic is an EV rejection, not an
+                # evidence-policy veto.  Label it honestly so the funnel can
+                # separate "no edge right now" from "historically censored".
+                no_trade_reason = "no_positive_executable_edge"
+            elif best_net_edge < best_threshold:
+                if best_side == "yes":
+                    no_trade_reason = "yes_edge_below_threshold"
+                else:
+                    no_trade_reason = "no_edge_below_threshold"
+            elif not (yes_depth_ok if best_side == "yes" else no_depth_ok):
+                # Edge and evidence cleared but the held side's book cannot
+                # absorb a contract — label it a liquidity rejection.
+                no_trade_reason = f"insufficient_depth_{best_side}"
+            elif not best_evidence_ok:
                 # The observed win-rate evidence at this held-side price does
                 # not clear price + fee + margin: the cell is unprofitable for
                 # our signal population regardless of what the model claims.
@@ -2774,11 +2803,6 @@ def compute_trade_decision(
                 no_trade_reason = (
                     yes_evidence_reason if best_side == "yes" else no_evidence_reason
                 ) or f"calibration_evidence_{best_side}"
-            elif best_net_edge < best_threshold:
-                if best_side == "yes":
-                    no_trade_reason = "yes_edge_below_threshold"
-                else:
-                    no_trade_reason = "no_edge_below_threshold"
             else:
                 # Edge is sufficient but p_selected does not clear the side-aware
                 # positive-EV floor (entry + all-in cost reserve).

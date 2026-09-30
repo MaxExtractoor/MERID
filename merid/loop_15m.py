@@ -4695,6 +4695,16 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 "market_state": state,
             })
 
+    except AttributeError as e:
+        # 2026-09-30: a missing member here is a code bug, not market caution.
+        # Swallowing it manufactured allow_new_entries=False on fully healthy
+        # state.  Fail loudly so the defect is unmistakable.
+        logger.critical(
+            "[ENTRY-READINESS-BUG] readiness compute hit missing member: %r; "
+            "fail_closed=true",
+            e,
+        )
+        raise
     except Exception as e:
         logger.warning("[15m-LOOP] Failed to compute allow_new_entries: %s", e)
 
@@ -8495,6 +8505,26 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
             )
             import faulthandler
 
+            # 2026-09-30: serialize strategy cycles — never start tick N while a
+            # previous run_cycle task is still alive.  Orphaned tasks keep
+            # reading prior-tick state, contending for the event loop, and can
+            # emit stale candidates; the invariant is active_cycles <= 1.
+            _live_orphans = getattr(self, "_grid_orphan_tasks", None) or set()
+            _live_orphans = {t for t in _live_orphans if not t.done()}
+            if _live_orphans:
+                self._cycle_blocked_by_orphan = getattr(
+                    self, "_cycle_blocked_by_orphan", 0
+                ) + 1
+                logger.critical(
+                    "[GRID-CYCLE-BLOCKED] tick=%d skipped: %d prior run_cycle "
+                    "task(s) still alive after cancellation (ticks=%s) "
+                    "blocked_total=%d — refusing concurrent evaluation",
+                    tick, len(_live_orphans),
+                    sorted(t.get_name() for t in _live_orphans),
+                    self._cycle_blocked_by_orphan,
+                )
+                return []
+
             cycle_task = asyncio.create_task(
                 self.agent_grid.run_cycle(
                     tick,
@@ -10544,6 +10574,7 @@ def summary(self) -> Dict[str, Any]:
 Kalshi15mLoop._execute_exit_order = _execute_exit_order
 Kalshi15mLoop._rearm_position_after_failed_exit = _rearm_position_after_failed_exit
 Kalshi15mLoop._compute_allow_new_entries = _compute_allow_new_entries
+Kalshi15mLoop._readiness_mark = _readiness_mark
 Kalshi15mLoop._emit_rollover_readiness = _emit_rollover_readiness
 Kalshi15mLoop._run_loop = _run_loop
 Kalshi15mLoop.stop = stop
