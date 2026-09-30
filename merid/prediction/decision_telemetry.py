@@ -636,6 +636,15 @@ def build_asset_record(
     ):
         record[_k] = _resolve(candidate, decision, [_k], [_k])
 
+    # Every terminal decision carries the shared pipeline's policy provenance —
+    # per-market inputs vary, the policy object does not.
+    if record.get("policy_id") is None:
+        record["policy_id"] = "crypto_15m_common_v1"
+    if record.get("policy_path") is None:
+        record["policy_path"] = "crypto_15m_common_v1"
+    if record.get("tte_policy_id") is None:
+        record["tte_policy_id"] = "market_regime_v1:per_band_tte_floor"
+
     return sanitize(record)
 
 
