@@ -3160,6 +3160,12 @@ class OrderIntent:
     # chain against fresh market state instead of only repricing stale EV.
     probability_inputs: Optional[Dict[str, Any]] = None
 
+    # THRESHOLD-CELL LANE (2026-09-30): the cell that admitted this decision,
+    # propagated from TradeDecision.indicators through the candidate.  Never
+    # recomputed downstream — attribution only.
+    threshold_cell_id: Optional[str] = None
+    decision_lane: Optional[str] = None
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -16236,6 +16242,8 @@ async def _route_live(
                         edge_pct=getattr(intent, "edge_pct", None) or getattr(intent, "edgepct", None),
                         ev_net_cents=getattr(intent, "ev_net_cents", None),
                         p_selected=getattr(intent, "p_selected", None),
+                        decision_id=getattr(intent, "decision_id", None),
+                        threshold_cell_id=getattr(intent, "threshold_cell_id", None),
                     )
             except Exception as _fq_err:
                 logger.debug("[FILL-QUALITY] record_order failed for %s: %s", intent.ticker, _fq_err)
@@ -16245,6 +16253,43 @@ async def _route_live(
                 "[ORDER-ACK] intent_id=%s ticker=%s status=rejected reason=%s latency_ms=%.2f",
                 intent.intent_id, intent.ticker, getattr(placed_res, 'error', 'unknown'), latency
             )
+
+        # 2026-09-30: threshold-cell lifecycle — the venue ack is the first
+        # authoritative router outcome.  Accepted -> "submitted"; rejected ->
+        # router_reject funnel + cell suspension bookkeeping.
+        _tc_id = getattr(intent, "threshold_cell_id", None)
+        if _tc_id:
+            try:
+                from merid.prediction import threshold_cells as _tc
+                _tc.record_cell_router_attempt(_tc_id)
+                _accepted = bool(placed_res and placed_res.success)
+                _tc.emit_cell_lifecycle(
+                    "router_result",
+                    threshold_cell_id=_tc_id,
+                    asset=(intent.ticker or "").split("-")[0],
+                    side=(intent.side or "").upper(),
+                    decision_id=getattr(intent, "decision_id", None),
+                    intent_id=intent.intent_id,
+                    client_order_id=intent.client_order_id or intent.client_tag,
+                    order_id=getattr(placed_res, "order_id", None),
+                    post_only=bool(getattr(create_request, "post_only", False)),
+                    submitted=_accepted,
+                    limit_price_cents=getattr(intent, "price_cents", None),
+                    reject_reason=(
+                        getattr(placed_res, "error", None)
+                        or getattr(placed_res, "reason", None)
+                    ) if not _accepted else None,
+                    terminal_state="accepted" if _accepted else "rejected",
+                )
+                if _accepted:
+                    _tc.bump_cell_funnel("submitted", _tc_id)
+                    _tc.record_cell_order_open(
+                        _tc_id, getattr(placed_res, "order_id", None)
+                    )
+                else:
+                    _tc.record_cell_router_reject(_tc_id)
+            except Exception as _tc_err:
+                logger.debug("[THRESHOLD-CELL] router lifecycle emit failed: %s", _tc_err)
 
         # Record intent in fills_ledger for TRADE-TRACE (links fill back to edge/sizing decision)
         try:

@@ -146,6 +146,11 @@ for _env_key, _fname in {
     "MERID_SESSION_LOG_PATH": "session_log.jsonl",
     "MERID_REJECTIONS_DIR": "rejections",
     "MERID_BACKUP_DIR": "backups",
+    # Threshold-cell lane: state, lifecycle log, and fill-quality records are
+    # live-trading evidence — tests must never write to the real files.
+    "MERID_THRESHOLD_CELL_STATE_PATH": "threshold_cell_lane.json",
+    "MERID_THRESHOLD_CELL_LIFECYCLE_PATH": "threshold_cell_lifecycle.jsonl",
+    "MERID_FILL_QUALITY_PATH": "fill_quality.jsonl",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

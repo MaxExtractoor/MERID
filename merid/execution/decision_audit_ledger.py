@@ -852,6 +852,48 @@ class DecisionAuditLedger:
                             decision_id,
                         ),
                     )
+
+                    # 2026-09-30: for a threshold-cell decision that actually
+                    # filled, settlement IS the realized PnL when no exit order
+                    # already booked it (held-to-settlement).  Attributed via
+                    # the decision->cell binding recorded at submission.
+                    try:
+                        from merid.prediction.threshold_cells import (
+                            cell_for_decision,
+                            record_cell_settlement,
+                        )
+                        if cell_for_decision(decision_id):
+                            orow = conn.execute(
+                                "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
+                                "realized_net_pnl_cents FROM strategy_decision_outcomes "
+                                "WHERE decision_id = ?",
+                                (decision_id,),
+                            ).fetchone()
+                            drow = conn.execute(
+                                "SELECT selected_side FROM strategy_decisions "
+                                "WHERE decision_id = ?",
+                                (decision_id,),
+                            ).fetchone()
+                            if (
+                                orow is not None
+                                and drow is not None
+                                and orow["actual_fill_price_cents"] is not None
+                                and orow["realized_net_pnl_cents"] is None
+                                and settlement_value_cents is not None
+                            ):
+                                _fill = float(orow["actual_fill_price_cents"])
+                                _fee = float(orow["actual_entry_fee_cents"] or 0.0)
+                                _settle_leg = float(
+                                    settlement_value_cents
+                                    if drow["selected_side"] == "yes"
+                                    else (100 - settlement_value_cents)
+                                )
+                                record_cell_settlement(
+                                    decision_id=decision_id,
+                                    net_pnl_cents=_settle_leg - _fill - _fee,
+                                )
+                    except Exception:
+                        pass
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] record_settlement failed for %s: %s",

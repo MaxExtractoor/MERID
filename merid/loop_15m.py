@@ -6204,6 +6204,30 @@ async def _run_loop(self) -> None:
                                         reason="Order submission failed or blocked",
                                         context={"ticker": ticker}
                                     )
+                                # 2026-09-30: threshold-cell funnel — an emitted
+                                # cell candidate that dies before the router must
+                                # be counted so matched/emitted/submitted stay
+                                # reconcilable per cell.
+                                if candidate.get("threshold_cell_id"):
+                                    try:
+                                        from merid.prediction import threshold_cells as _tc
+                                        _tc.bump_cell_funnel(
+                                            "allocator_rejected",
+                                            candidate["threshold_cell_id"],
+                                        )
+                                        _tc.emit_cell_lifecycle(
+                                            "rejected_pre_router",
+                                            threshold_cell_id=candidate["threshold_cell_id"],
+                                            asset=candidate.get("asset"),
+                                            side=candidate.get("side"),
+                                            decision_id=candidate.get("decision_id"),
+                                            candidate_id=candidate_id,
+                                            post_only=bool(candidate.get("post_only", False)),
+                                            submitted=False,
+                                            terminal_state=str(current_state or "REJECTED"),
+                                        )
+                                    except Exception:
+                                        pass
                                 else:
                                     logger.info(
                                         "[15M-LOOP] Candidate %s already has terminal state %s; skipping duplicate REJECTED lifecycle event",
@@ -8799,6 +8823,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 candidate["decision_id"] = _td_decision_id
                 candidate["decision_trace_id"] = _td_decision_id
             candidate["approved_price_cents"] = approved_price_cents
+            # 2026-09-30: threshold-cell lane identity must be authoritative —
+            # the indicators on the TradeDecision, not regenerated downstream.
+            _td_ind = getattr(trade_decision, "indicators", None) or {}
+            if _td_ind.get("decision_lane"):
+                candidate["decision_lane"] = _td_ind["decision_lane"]
+            if _td_ind.get("threshold_cell_id"):
+                candidate["threshold_cell_id"] = _td_ind["threshold_cell_id"]
+                _sel_key = str(getattr(trade_decision, "selected_outcome", "") or "").lower()
+                candidate["threshold_source"] = _td_ind.get(f"{_sel_key}_threshold_source")
+                candidate["formula_required_edge_cents"] = _td_ind.get(f"{_sel_key}_formula_required_edge_cents")
+                candidate["cell_required_edge_cents"] = _td_ind.get(f"{_sel_key}_cell_required_edge_cents")
+                candidate["effective_required_edge_cents"] = _td_ind.get(f"{_sel_key}_effective_required_edge_cents")
         elif candidate.get("selected_outcome_price"):
             approved_price_cents = int(candidate["selected_outcome_price"])
             candidate["approved_price_cents"] = approved_price_cents
@@ -9792,15 +9828,66 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         if resolved_liquidity_role == "maker" and os.environ.get(
             "MERID_ENTRY_MAKER_ENABLED", ""
         ).strip().lower() not in ("1", "true", "yes"):
-            logger.warning(
-                "[15M-LOOP] ENTRY-MAKER-DISABLED: coercing maker intent to taker/IOC for %s",
-                ticker,
+            # 2026-09-30: the threshold-cell lane is an explicitly approved
+            # post-only experiment — coercing it to taker/IOC would silently
+            # change the approved execution contract.  Instead it keeps its
+            # maker posture (MERID_THRESHOLD_CELL_MAKER=0 disables the lane
+            # entirely — fail closed, never a quiet taker substitution).
+            _is_tc_lane = (
+                candidate.get("decision_lane") == "threshold_cell"
+                or (
+                    trade_decision is not None
+                    and (getattr(trade_decision, "indicators", None) or {}).get(
+                        "decision_lane"
+                    ) == "threshold_cell"
+                )
             )
-            resolved_time_in_force = "ioc"
-            resolved_execution_mode = "taker"
-            resolved_liquidity_role = "taker"
-            resolved_post_only = False
-            aggressiveness = 1.0
+            _tc_maker_ok = False
+            _cell_id = candidate.get("threshold_cell_id")
+            if _is_tc_lane:
+                try:
+                    from merid.prediction import threshold_cells as _tc
+                    _tc_maker_ok = _tc.threshold_cell_maker_enabled()
+                except Exception:
+                    _tc_maker_ok = False
+            if _is_tc_lane and _tc_maker_ok:
+                logger.info(
+                    "[15M-LOOP] THRESHOLD-CELL lane keeps post-only posture for %s "
+                    "(MERID_ENTRY_MAKER_ENABLED off globally; lane-scoped exemption)",
+                    ticker,
+                )
+            elif _is_tc_lane:
+                logger.warning(
+                    "[15M-LOOP] THRESHOLD-CELL maker disabled "
+                    "(MERID_THRESHOLD_CELL_MAKER=0): rejecting %s rather than "
+                    "coercing to taker — no silent mode substitution",
+                    ticker,
+                )
+                try:
+                    from merid.prediction import threshold_cells as _tc
+                    _tc.emit_cell_lifecycle(
+                        "rejected",
+                        threshold_cell_id=_cell_id,
+                        asset=asset,
+                        decision_id=candidate.get("decision_id"),
+                        post_only=True,
+                        submitted=False,
+                        terminal_state="maker_disabled",
+                    )
+                    _tc.record_cell_exec_failure(_cell_id, "maker_disabled_env")
+                except Exception:
+                    pass
+                return False
+            else:
+                logger.warning(
+                    "[15M-LOOP] ENTRY-MAKER-DISABLED: coercing maker intent to taker/IOC for %s",
+                    ticker,
+                )
+                resolved_time_in_force = "ioc"
+                resolved_execution_mode = "taker"
+                resolved_liquidity_role = "taker"
+                resolved_post_only = False
+                aggressiveness = 1.0
 
         intent = OrderIntent(
             ticker=ticker,
@@ -9917,6 +10004,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # CRITICAL FIX (2026-08-19): carry the decision edge threshold for
             # fill-adjusted edge gating.
             min_required_edge=candidate.get("min_required_edge"),
+            # 2026-09-30: threshold-cell lane identity — the single source of
+            # truth for cell attribution through the order lifecycle.
+            threshold_cell_id=candidate.get("threshold_cell_id"),
+            decision_lane=candidate.get("decision_lane"),
             # 2026-09-29: immutable model inputs for warn-band Bachelier +
             # calibration recompute at the router (stale-decision revalidation).
             probability_inputs=candidate.get("probability_inputs"),
@@ -9956,6 +10047,52 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             float(edge_pct) if edge_pct is not None else 0.0,
             agent_id,
         )
+
+        # 2026-09-30: threshold-cell lifecycle — the intent is the first point
+        # where the full identity chain (decision -> intent -> client_order_id)
+        # exists.  Emitted only for cell-lane candidates.
+        if intent.threshold_cell_id:
+            try:
+                from merid.prediction import threshold_cells as _tc
+                _dec_ts = getattr(trade_decision, "timestamp_utc", None)
+                _dec_age_ms = None
+                if _dec_ts is not None:
+                    try:
+                        _dec_age_ms = int(
+                            (time.time() - (
+                                _dec_ts.timestamp()
+                                if hasattr(_dec_ts, "timestamp")
+                                else float(_dec_ts)
+                            )) * 1000
+                        )
+                    except Exception:
+                        _dec_age_ms = None
+                _tc.emit_cell_lifecycle(
+                    "order_intent_created",
+                    threshold_cell_id=intent.threshold_cell_id,
+                    asset=asset,
+                    side=str(candidate.get("side") or "").upper(),
+                    decision_id=intent.decision_id,
+                    candidate_id=candidate.get("candidate_id"),
+                    intent_id=intent.intent_id,
+                    candidate_ev_cents=candidate.get("ev_net_cents"),
+                    cell_required_ev_cents=candidate.get("cell_required_edge_cents"),
+                    formula_required_ev_cents=candidate.get("formula_required_edge_cents"),
+                    threshold_reduction_cents=(
+                        round(candidate["formula_required_edge_cents"] - candidate["cell_required_edge_cents"], 3)
+                        if candidate.get("formula_required_edge_cents") is not None
+                        and candidate.get("cell_required_edge_cents") is not None
+                        else None
+                    ),
+                    threshold_source=candidate.get("threshold_source"),
+                    book_source=candidate.get("quote_owner"),
+                    decision_age_ms=_dec_age_ms,
+                    post_only=resolved_post_only,
+                    submitted=False,
+                    terminal_state="intent_created",
+                )
+            except Exception:
+                pass
 
         # CRITICAL DIAGNOSTIC: Log exit_policy_id being set
         logger.info("[15M-LOOP] Setting exit_policy_id=%s for ticker=%s (exit_policy=%s)",

@@ -8481,11 +8481,60 @@ class LeanAgent15m:
             if _decision_lane == "threshold_cell":
                 try:
                     from merid.prediction import threshold_cells as _tc
-                    _n = _tc.record_cell_submission()
+                    _cell_id = decision.indicators.get("threshold_cell_id")
+                    _n = _tc.record_cell_submission(
+                        cell_id=_cell_id,
+                        decision_id=getattr(decision, "decision_id", None),
+                    )
+                    _tc.bump_cell_funnel("emitted", _cell_id)
+                    _sel_key = str(decision.selected_outcome or "").lower()
+                    _formula_req = decision.indicators.get(
+                        f"{_sel_key}_formula_required_edge_cents"
+                    )
+                    _cell_req = decision.indicators.get(
+                        f"{_sel_key}_cell_required_edge_cents"
+                    )
+                    _ev_c = None
+                    try:
+                        _bd = (
+                            decision.yes_net_edge if _sel_key == "yes"
+                            else decision.no_net_edge
+                        )
+                        if _bd is not None:
+                            _ev_c = float(_bd) * 100.0
+                    except Exception:
+                        _ev_c = None
+                    _quote_owner = getattr(market_state, "quote_owner", None)
+                    _book_age_ms = getattr(market_state, "age_ms", None)
+                    _tc.emit_cell_lifecycle(
+                        "candidate_emitted",
+                        threshold_cell_id=_cell_id,
+                        asset=asset,
+                        side=str(decision.selected_outcome or "").upper(),
+                        decision_id=getattr(decision, "decision_id", None),
+                        candidate_ev_cents=_ev_c,
+                        cell_required_ev_cents=_cell_req,
+                        formula_required_ev_cents=_formula_req,
+                        threshold_reduction_cents=(
+                            round(_formula_req - _cell_req, 3)
+                            if _formula_req is not None and _cell_req is not None
+                            else None
+                        ),
+                        threshold_source=decision.indicators.get(
+                            f"{_sel_key}_threshold_source"
+                        ),
+                        book_source=_quote_owner,
+                        book_age_ms=_book_age_ms,
+                        post_only=True,
+                        submitted=False,
+                        submissions_today=_n,
+                        funnel=_tc.funnel_counters().get("funnel"),
+                        terminal_state="emitted",
+                    )
                     logger.info(
                         "[THRESHOLD-CELL] asset=%s side=%s cell=%s lane submissions today=%d",
                         asset, decision.selected_outcome,
-                        decision.indicators.get("threshold_cell_id"), _n,
+                        _cell_id, _n,
                     )
                 except Exception:
                     pass
@@ -9044,6 +9093,14 @@ class LeanAgent15m:
             # CRITICAL FIX 2026-08-20: carry the per-decision edge threshold so the
             # router's fill-adjusted edge gate and repricer use the same minimum.
             "min_required_edge": float(decision.min_required_edge) if decision.min_required_edge is not None else 0.03,
+            # 2026-09-30: threshold-cell lane identity + unambiguous threshold
+            # provenance — the router/ledger must not recompute these.
+            "decision_lane": _ind.get("decision_lane"),
+            "threshold_cell_id": _ind.get("threshold_cell_id"),
+            "threshold_source": _ind.get(f"{str(side).lower()}_threshold_source"),
+            "formula_required_edge_cents": _ind.get(f"{str(side).lower()}_formula_required_edge_cents"),
+            "cell_required_edge_cents": _ind.get(f"{str(side).lower()}_cell_required_edge_cents"),
+            "effective_required_edge_cents": _ind.get(f"{str(side).lower()}_effective_required_edge_cents"),
         }
 
     def _generate_price_based_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
@@ -10140,6 +10197,18 @@ class LeanAgent15m:
                 "no_thr_cell_min_ev_cents": _ind.get("no_thr_cell_min_ev_cents"),
                 "yes_thr_cell_cap_exhausted": _ind.get("yes_thr_cell_cap_exhausted"),
                 "no_thr_cell_cap_exhausted": _ind.get("no_thr_cell_cap_exhausted"),
+                "yes_formula_required_edge_cents": _ind.get("yes_formula_required_edge_cents"),
+                "no_formula_required_edge_cents": _ind.get("no_formula_required_edge_cents"),
+                "yes_cell_required_edge_cents": _ind.get("yes_cell_required_edge_cents"),
+                "no_cell_required_edge_cents": _ind.get("no_cell_required_edge_cents"),
+                "yes_effective_required_edge_cents": _ind.get("yes_effective_required_edge_cents"),
+                "no_effective_required_edge_cents": _ind.get("no_effective_required_edge_cents"),
+                "yes_threshold_source": _ind.get("yes_threshold_source"),
+                "no_threshold_source": _ind.get("no_threshold_source"),
+                "yes_thr_cell_miss_reason": _ind.get("yes_thr_cell_miss_reason"),
+                "no_thr_cell_miss_reason": _ind.get("no_thr_cell_miss_reason"),
+                "yes_thr_cell_block_reason": _ind.get("yes_thr_cell_block_reason"),
+                "no_thr_cell_block_reason": _ind.get("no_thr_cell_block_reason"),
                 "threshold_cell_id": _ind.get("threshold_cell_id"),
                 "yes_eligible": _ind.get("yes_qualifies"),
                 "no_eligible": _ind.get("no_qualifies"),
@@ -12476,6 +12545,32 @@ class LeanAgent15m:
             from merid.event_venues.kalshi.market_regime import describe_price_band
             _yes_band = describe_price_band(yes_price_cents)
             _no_band = describe_price_band(no_price_cents)
+
+            # Threshold-cell funnel: if a qualified cell would have matched on
+            # price+TTE but the regime band/TTE floor rejected the side first,
+            # count it — matched > 0 with emitted == 0 would signal a hidden
+            # gate contradiction.  Miss reasons keep near-boundary quotes
+            # auditable instead of silently falling through to the formula.
+            _tc_miss_yes = None
+            _tc_miss_no = None
+            try:
+                from merid.prediction import threshold_cells as _tc
+                for _s, _px in (("yes", yes_price_cents), ("no", no_price_cents)):
+                    _hit = _tc.resolve_threshold_cell(
+                        asset, _s, _px, seconds_to_expiry
+                    )
+                    if _hit is not None:
+                        _tc.bump_cell_funnel("blocked_by_price_band", _hit.cell_id)
+                    _miss = _tc.explain_cell_miss(
+                        asset, _s, _px, seconds_to_expiry
+                    )
+                    if _miss and _miss != "no_cells_for_asset_side":
+                        if _s == "yes":
+                            _tc_miss_yes = _miss
+                        else:
+                            _tc_miss_no = _miss
+            except Exception:
+                pass
             _yes_band_reason = (
                 "tte_floor" if _yes_band["enabled"] and _yes_regime_no_tte is not None
                 else _yes_band["reason"]
@@ -12551,6 +12646,8 @@ class LeanAgent15m:
                 no_price_band_lo=_no_band["lo"],
                 no_price_band_hi=_no_band["hi"],
                 no_price_band_reason=_no_band_reason,
+                threshold_cell_miss_yes=_tc_miss_yes,
+                threshold_cell_miss_no=_tc_miss_no,
                 quote_owner=_quote_owner,
                 book_source_degraded=(
                     bool(getattr(market_state, "degraded_mode", False))
