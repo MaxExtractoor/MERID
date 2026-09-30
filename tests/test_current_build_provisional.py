@@ -587,3 +587,77 @@ def test_rollup_includes_all_five_assets():
     for a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
         assert f"{a}: cells=28" in s
     assert "lane: fills=0/3" in s
+
+# ---------------------------------------------------------------------------
+# signal -> candidate -> intent identity propagation (2026-09-30 live audit:
+# CBP orders reached the router with lane="" / admission_owner="formula"
+# because collect_order_candidate's whitelisted rebuild dropped every lane
+# field and the canonical TradeDecision object).
+# ---------------------------------------------------------------------------
+
+
+def test_collect_order_candidate_carries_lane_identity():
+    """The candidate whitelist must carry the lane fields + TradeDecision.
+
+    Regression guard: collect_order_candidate rebuilds the signal dict key by
+    key; any lane field not explicitly copied silently arrives at the router
+    as a formula-lane order with no EV re-gate and no approved-size cap.
+    """
+    import inspect
+
+    from merid.prediction.agent_grid_15m import LeanAgent15m
+
+    src = inspect.getsource(LeanAgent15m.collect_order_candidate)
+    for key in (
+        "trade_decision",
+        "decision_lane",
+        "provisional_cell_id",
+        "threshold_cell_id",
+        "admission_owner",
+        "provisional_required_edge_cents",
+        "effective_required_edge_cents",
+        "provisional_price_bucket",
+        "provisional_tte_bucket",
+        "legacy_risk_label",
+        "threshold_source",
+        "min_required_edge",
+        "probability_inputs",
+        "execution_mode",
+        "liquidity_role",
+        "time_in_force",
+        "build_sha",
+        "config_hash",
+    ):
+        assert f'"{key}": signal.get("{key}")' in src, (
+            f"candidate whitelist dropped signal key {key!r} — lane identity "
+            "will not reach the OrderIntent"
+        )
+
+
+def test_bounded_lane_normalizes_to_one_contract():
+    """_execute_candidate must force exactly 1.0 contract for bounded lanes.
+
+    Regression guard: the lane-cap block must restore a shrunk fractional
+    count to 1.0 (the allocator pre-fit and compute_order_size may emit
+    sub-contract quantities for cap-constrained accounts).
+    """
+    import inspect
+
+    from merid import loop_15m
+
+    src = inspect.getsource(loop_15m._execute_candidate)
+    assert '"threshold_cell", "current_build_provisional"' in src
+    # Lane block must trigger on any non-1.0 count, not only count > 1.0.
+    assert "count != 1.0" in src
+    assert "count = 1.0" in src
+
+
+def test_allocator_prefit_does_not_shrink_bounded_lane():
+    """The global-allocator cap pre-fit must not under-size a bounded lane."""
+    import inspect
+
+    from merid.prediction import agent_grid_15m
+
+    src = inspect.getsource(agent_grid_15m.LeanAgentGrid15m.run_cycle)
+    assert "_bounded_lane" in src
+    assert '"threshold_cell", "current_build_provisional"' in src

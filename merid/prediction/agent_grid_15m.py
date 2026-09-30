@@ -17355,6 +17355,33 @@ class LeanAgent15m:
                 "is_counter_trend": signal.get("is_counter_trend", False),
                 "edge_yes": signal.get("edge_yes"),
                 "edge_no": signal.get("edge_no"),
+                # 2026-09-30: the canonical TradeDecision + lane identity must
+                # survive the signal→candidate flatten.  _execute_candidate's
+                # provenance backfill, EV-approved size cap, executable-cost
+                # re-gate, and the router's per-lane policy all key off these
+                # fields; without them a bounded-lane order ships as an
+                # unlabeled "formula" order with no EV re-gate.
+                "trade_decision": signal.get("trade_decision"),
+                "decision_lane": signal.get("decision_lane"),
+                "threshold_cell_id": signal.get("threshold_cell_id"),
+                "provisional_cell_id": signal.get("provisional_cell_id"),
+                "admission_owner": signal.get("admission_owner"),
+                "threshold_source": signal.get("threshold_source"),
+                "formula_required_edge_cents": signal.get("formula_required_edge_cents"),
+                "cell_required_edge_cents": signal.get("cell_required_edge_cents"),
+                "provisional_required_edge_cents": signal.get("provisional_required_edge_cents"),
+                "effective_required_edge_cents": signal.get("effective_required_edge_cents"),
+                "provisional_price_bucket": signal.get("provisional_price_bucket"),
+                "provisional_tte_bucket": signal.get("provisional_tte_bucket"),
+                "legacy_risk_label": signal.get("legacy_risk_label"),
+                "min_required_edge": signal.get("min_required_edge"),
+                "probability_inputs": signal.get("probability_inputs"),
+                "execution_mode": signal.get("execution_mode"),
+                "liquidity_role": signal.get("liquidity_role"),
+                "time_in_force": signal.get("time_in_force"),
+                "config_hash": signal.get("config_hash"),
+                "build_sha": signal.get("build_sha"),
+                "flb_position_multiplier": signal.get("flb_position_multiplier", 1.0),
 
             }
 
@@ -19210,13 +19237,25 @@ class LeanAgentGrid15m:
                     # even though 0.12 contracts is a perfectly valid Kalshi V2
                     # count_fp order.  ROUND_DOWN so the fit never exceeds the cap.
                     _pre_count = float(candidate.get('count', 0.0) or 0.0)
+                    # Bounded lanes (threshold_cell / current_build_provisional)
+                    # are one-contract instruments: never pre-shrink them to the
+                    # cap fit.  The allocator evaluates the full contract and
+                    # rejects when it does not fit — under-sizing here would let
+                    # execution submit a non-canonical quantity the lane's
+                    # bookkeeping cannot attribute.
+                    _bounded_lane = bool(
+                        candidate.get('decision_lane')
+                        in ("threshold_cell", "current_build_provisional")
+                        or candidate.get('threshold_cell_id')
+                        or candidate.get('provisional_cell_id')
+                    )
                     try:
                         from decimal import Decimal as _D, ROUND_DOWN as _RD
                         _cap_usd = _D(str(getattr(allocator, "venue_cap_usd", 0.0) or 0.0))
                         _price_usd = _D(price_cents) / _D(100)
                         if _price_usd > 0 and _cap_usd > 0:
                             _fit = (_cap_usd / _price_usd).quantize(_D("0.01"), rounding=_RD)
-                            if _pre_count <= 0.0 or _D(str(_pre_count)) > _fit:
+                            if _pre_count <= 0.0 or (_D(str(_pre_count)) > _fit and not _bounded_lane):
                                 _pre_count = float(_fit)
                         if _pre_count <= 0.0:
                             _pre_count = 1.0

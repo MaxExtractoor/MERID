@@ -9172,15 +9172,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # 2026-09-30: threshold-cell lane is a bounded experiment — hard-capped
         # at exactly 1 contract regardless of the global per-order ceiling.
         # The current-build provisional lane carries the same one-contract cap.
+        # A fractional sizing estimate must also never shrink the lane below
+        # its contract: if the trading shard cannot collateralize 1 contract
+        # the router's insufficient_shard_balance gate rejects locally.
         if (
             candidate.get("decision_lane") in (
                 "threshold_cell", "current_build_provisional",
             )
             or candidate.get("threshold_cell_id")
             or candidate.get("provisional_cell_id")
-        ) and count > 1.0:
+        ) and count != 1.0 and count >= 0.01:
             logger.warning(
-                "[15M-LOOP] CELL-LANE count=%s exceeds lane cap=1.0, capping. ticker=%s lane=%s",
+                "[15M-LOOP] CELL-LANE count=%s != lane contract=1.0, normalizing. ticker=%s lane=%s",
                 count, ticker, candidate.get("decision_lane"),
             )
             count = 1.0
