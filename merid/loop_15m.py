@@ -9140,6 +9140,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             )
             count = max_per_order
 
+        # 2026-09-30: threshold-cell lane is a bounded experiment — hard-capped
+        # at exactly 1 contract regardless of the global per-order ceiling.
+        if (
+            candidate.get("decision_lane") == "threshold_cell"
+            or candidate.get("threshold_cell_id")
+        ) and count > 1.0:
+            logger.warning(
+                "[15M-LOOP] THRESHOLD-CELL count=%s exceeds lane cap=1.0, capping. ticker=%s",
+                count, ticker
+            )
+            count = 1.0
+
         # Validate count is reasonable.  Anything below one centi-contract is effectively zero.
         if count < 0.01:
             logger.warning("[15M-LOOP] Invalid count=%s from candidate, rejecting", count)
