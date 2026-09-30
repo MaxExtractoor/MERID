@@ -2590,6 +2590,64 @@ def validate_legacy_lane_not_in_production() -> None:
     )
 
 
+def validate_threshold_cell_band_containment() -> None:
+    """Assert approved threshold cells are reachable inside the live band domain.
+
+    Every cell in ``merid.prediction.threshold_cells.THRESHOLD_CELLS`` must
+    contain at least one (price, TTE) point the market-regime price-band
+    policy admits.  A cell that can never fire is a deployment bug — fail
+    closed at startup rather than discovering it as a silent funnel dead-end.
+
+    Also logs per-cell band coverage (a partially-blocked cell like DOGE
+    20-24c inside the 180s TTE floor is allowed but reported) and checks the
+    lane's post-only posture flag is consistent.
+
+    Raises:
+        StartupValidationError: If any approved cell is unreachable under the
+            live price-band policy.
+    """
+    if os.getenv("MERID_THRESHOLD_CELLS", "1").strip().lower() in (
+        "0", "false", "no", "off"
+    ):
+        logger.info("[THRESHOLD-CELL-VALIDATION] cells disabled — skipping containment check")
+        return
+
+    log_startup_phase("validate_threshold_cell_band_containment", "merid.startup_validations")
+
+    from merid.prediction import threshold_cells as _tc
+
+    try:
+        report = _tc.validate_cells_within_price_bands()
+    except AssertionError as exc:
+        raise StartupValidationError(str(exc)) from exc
+
+    for row in report:
+        logger.info(
+            "[THRESHOLD-CELL-VALIDATION] cell=%s reachable=%s covered=%d blocked=%d",
+            row["cell_id"], row["reachable"],
+            row["covered_points"], row["blocked_points"],
+        )
+        if row["blocked_points"]:
+            logger.warning(
+                "[THRESHOLD-CELL-VALIDATION] cell=%s has %d band-blocked "
+                "(price,TTE) points — reachable but partially suppressed by "
+                "the regime/TTE floor; visible via blocked_by_price_band funnel",
+                row["cell_id"], row["blocked_points"],
+            )
+
+    if not _tc.threshold_cell_maker_enabled():
+        logger.warning(
+            "[THRESHOLD-CELL-VALIDATION] MERID_THRESHOLD_CELL_MAKER=0 — cell "
+            "candidates will be rejected at intent time rather than coerced to "
+            "taker (fail-closed posture)"
+        )
+
+    logger.info(
+        "[THRESHOLD-CELL-VALIDATION] OK: %d cells all reachable inside the live band domain",
+        len(report),
+    )
+
+
 def validate_catalog_refresh_interval() -> None:
     """Validate catalog refresh interval is above minimum guard.
 
@@ -4895,6 +4953,7 @@ def validate_all_kalshi_15m() -> None:
     # Risk / guards validations
     validate_no_test_fills_in_database()
     validate_entry_window_params()
+    validate_threshold_cell_band_containment()
     validate_no_direct_bankroll_usage()
     validate_kalshi_bankroll_source_consistency()
     validate_limit_matrix_consistency()

@@ -63,6 +63,7 @@ class _OrderRecord:
         "yes_bid_cents", "yes_ask_cents", "edge_pct", "ev_net_cents",
         "p_selected", "markouts", "filled", "fill_ts", "fill_price_cents",
         "terminal", "terminal_ts", "closed",
+        "decision_id", "threshold_cell_id",
     )
 
     def __init__(self, **kw: Any) -> None:
@@ -97,6 +98,8 @@ class FillQualityTracker:
         edge_pct: Optional[float],
         ev_net_cents: Optional[float],
         p_selected: Optional[float],
+        decision_id: Optional[str] = None,
+        threshold_cell_id: Optional[str] = None,
     ) -> None:
         """Register an acknowledged post_only entry order for tracking."""
         if not client_order_id:
@@ -116,6 +119,8 @@ class FillQualityTracker:
             edge_pct=edge_pct,
             ev_net_cents=ev_net_cents,
             p_selected=p_selected,
+            decision_id=decision_id,
+            threshold_cell_id=threshold_cell_id,
         )
         with self._lock:
             self._records[client_order_id] = rec
@@ -139,6 +144,8 @@ class FillQualityTracker:
             "edge_pct": edge_pct,
             "ev_net_cents": ev_net_cents,
             "p_selected": p_selected,
+            "decision_id": decision_id,
+            "threshold_cell_id": threshold_cell_id,
         })
 
     def poll(self) -> None:
@@ -187,7 +194,23 @@ class FillQualityTracker:
                         "age_ms": rec.markouts[key]["age_ms"],
                         "mid_cents": mid,
                         "markout_cents": rec.markouts[key]["markout_cents"],
+                        "decision_id": rec.decision_id,
+                        "threshold_cell_id": rec.threshold_cell_id,
                     })
+                    # 2026-09-30: feed per-cell suspension stats — persistent
+                    # negative markouts on a passive lane are the
+                    # adverse-selection signal that suspends the cell.
+                    if rec.threshold_cell_id:
+                        try:
+                            from merid.prediction import threshold_cells as _tc
+                            _tc.record_cell_markout(
+                                rec.threshold_cell_id,
+                                rec.decision_id,
+                                int(horizon),
+                                rec.markouts[key]["markout_cents"],
+                            )
+                        except Exception:
+                            pass
             if not rec.filled:
                 self._detect_fill(rec, ledger, now)
             if age > _MAX_RECORD_AGE_S:
@@ -263,7 +286,44 @@ class FillQualityTracker:
                 "edge_pct_at_candidate": rec.edge_pct,
                 "ev_net_cents_at_candidate": rec.ev_net_cents,
                 "gross_edge_cents_at_fill": edge_at_fill,
+                "decision_id": rec.decision_id,
+                "threshold_cell_id": rec.threshold_cell_id,
             })
+            # 2026-09-30: threshold-cell lane bookkeeping — the fill is the
+            # exposure event; drives fills/day caps and suspension stats.
+            if rec.threshold_cell_id:
+                try:
+                    from merid.prediction import threshold_cells as _tc
+                    _tc.record_cell_fill(
+                        rec.threshold_cell_id,
+                        decision_id=rec.decision_id,
+                        fill_ev_cents=edge_at_fill,
+                        candidate_ev_cents=rec.ev_net_cents,
+                    )
+                    _tc.record_cell_order_closed(rec.threshold_cell_id, rec.order_id)
+                    _tc.emit_cell_lifecycle(
+                        "filled",
+                        threshold_cell_id=rec.threshold_cell_id,
+                        asset=rec.asset,
+                        side=(rec.side or "").upper(),
+                        decision_id=rec.decision_id,
+                        intent_id=rec.intent_id,
+                        client_order_id=rec.client_order_id,
+                        order_id=rec.order_id,
+                        post_only=True,
+                        submitted=True,
+                        filled=True,
+                        fill_price_cents=fill_px,
+                        limit_price_cents=rec.limit_price_cents,
+                        resting_ms=round(
+                            (rec.fill_ts - (rec.submit_ts or rec.fill_ts)) * 1000.0, 1
+                        ),
+                        ev_net_cents_at_candidate=rec.ev_net_cents,
+                        gross_edge_cents_at_fill=edge_at_fill,
+                        terminal_state="filled",
+                    )
+                except Exception:
+                    pass
             break
 
     def _close(self, rec: _OrderRecord, reason: str, now: float) -> None:
@@ -278,7 +338,33 @@ class FillQualityTracker:
             "filled": rec.filled,
             "fill_price_cents": rec.fill_price_cents,
             "markouts": rec.markouts or None,
+            "decision_id": rec.decision_id,
+            "threshold_cell_id": rec.threshold_cell_id,
         })
+        # 2026-09-30: free the cell's open-order slot and leave a terminal
+        # lifecycle record (fill/no-fill + markouts at close).
+        if rec.threshold_cell_id:
+            try:
+                from merid.prediction import threshold_cells as _tc
+                _tc.record_cell_order_closed(rec.threshold_cell_id, rec.order_id)
+                _tc.emit_cell_lifecycle(
+                    "terminal",
+                    threshold_cell_id=rec.threshold_cell_id,
+                    asset=rec.asset,
+                    side=(rec.side or "").upper(),
+                    decision_id=rec.decision_id,
+                    intent_id=rec.intent_id,
+                    client_order_id=rec.client_order_id,
+                    order_id=rec.order_id,
+                    post_only=True,
+                    submitted=True,
+                    filled=rec.filled,
+                    fill_price_cents=rec.fill_price_cents,
+                    markouts=rec.markouts or None,
+                    terminal_state=reason,
+                )
+            except Exception:
+                pass
 
 
 _tracker: Optional[FillQualityTracker] = None

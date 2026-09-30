@@ -22,7 +22,9 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
 from merid.prediction.threshold_cells import (
-    cell_cap_remaining,
+    bump_cell_funnel,
+    cell_admission,
+    explain_cell_miss,
     resolve_threshold_cell,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
@@ -772,6 +774,8 @@ class EdgeThresholdDecomposition(NamedTuple):
     cell_id: Optional[str] = None       # threshold-cell override id
     cell_min_ev_cents: Optional[float] = None  # cell threshold, cents
     cell_cap_exhausted: bool = False    # cell matched but daily lane cap hit
+    formula_total: Optional[float] = None     # formula output before cell replace
+    cell_block_reason: Optional[str] = None   # matched-but-suppressed reason
 
 
 def _compute_dynamic_min_required_edge(
@@ -886,12 +890,18 @@ def _decompose_dynamic_min_required_edge(
     # 0.02 floor clamp intentionally does NOT apply (SOL-NO mid band is
     # qualified at 1.5c).  Formula components are still returned for audit.
     cell = resolve_threshold_cell(asset, side, price_cents, seconds_to_expiry)
+    formula_total = total
     cell_cap_hit = False
-    if cell is not None and cell_cap_remaining() <= 0:
-        # Daily lane budget exhausted: fail closed to the legacy formula and
-        # surface the suppression in telemetry rather than silently dropping it.
-        cell_cap_hit = True
-        cell = None
+    cell_block_reason: Optional[str] = None
+    if cell is not None:
+        bump_cell_funnel("matched", cell.cell_id)
+        _allowed, _block = cell_admission(cell.cell_id)
+        if not _allowed:
+            # Lane not admitting (suspended / caps / kill switch): fail closed
+            # to the legacy formula and surface the suppression in telemetry.
+            cell_cap_hit = True
+            cell_block_reason = _block or "cell_admission_blocked"
+            cell = None
     if cell is not None:
         total = max(0.0, min(cell.min_net_ev_cents / 100.0, 0.15))
 
@@ -909,6 +919,8 @@ def _decompose_dynamic_min_required_edge(
             float(cell.min_net_ev_cents) if cell is not None else None
         ),
         cell_cap_exhausted=cell_cap_hit,
+        formula_total=formula_total,
+        cell_block_reason=cell_block_reason,
     )
 
 
@@ -2660,6 +2672,27 @@ def compute_trade_decision(
         indicators[f"{_pfx}_thr_cell_id"] = _d.cell_id
         indicators[f"{_pfx}_thr_cell_min_ev_cents"] = _d.cell_min_ev_cents
         indicators[f"{_pfx}_thr_cell_cap_exhausted"] = _d.cell_cap_exhausted
+        # Unambiguous threshold-source fields: the formula output, the cell's
+        # value, the effective enforced value, and which one authorized.
+        _formula_c = (
+            _d.formula_total * 100.0 if _d.formula_total is not None
+            else _d.total * 100.0
+        )
+        indicators[f"{_pfx}_formula_required_edge_cents"] = _formula_c
+        indicators[f"{_pfx}_cell_required_edge_cents"] = _d.cell_min_ev_cents
+        indicators[f"{_pfx}_effective_required_edge_cents"] = _d.total * 100.0
+        indicators[f"{_pfx}_threshold_source"] = (
+            "threshold_cell" if _d.cell_id is not None else "formula"
+        )
+        indicators[f"{_pfx}_thr_cell_block_reason"] = _d.cell_block_reason
+        # Boundary-miss attribution: when the (asset, side) pair has cells but
+        # none matched, name the exact boundary that excluded this quote so a
+        # near-miss never silently falls through to the generic formula.
+        if _d.cell_id is None:
+            _miss_px = yes_price_cents if _pfx == "yes" else no_price_cents
+            _miss = explain_cell_miss(asset, _pfx, _miss_px, seconds_to_expiry)
+            if _miss and _miss != "no_cells_for_asset_side":
+                indicators[f"{_pfx}_thr_cell_miss_reason"] = _miss
 
     # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
     # notes at module level — applies the evidence-floor semantics to the
@@ -2736,6 +2769,16 @@ def compute_trade_decision(
                     no_evidence_ok = False
                     no_evidence_reason = f"live_evidence_{_no_live_det['level']}_no"
                     indicators[no_evidence_reason] = _no_live_det
+
+    # Funnel: a cell that matched (and survived lane admission) but loses its
+    # side to an evidence hard block is a distinct cohort from unmatched
+    # quotes — count it so blocked_by_evidence is measurable per cell.
+    for _pfx, _d, _ev_ok in (
+        ("yes", _yes_edge_thr, yes_evidence_ok),
+        ("no", _no_edge_thr, no_evidence_ok),
+    ):
+        if _d.cell_id is not None and not _ev_ok:
+            bump_cell_funnel("blocked_by_evidence", _d.cell_id)
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
     # Best-side executable economics snapshot: the single line that separates

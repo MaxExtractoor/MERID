@@ -509,6 +509,55 @@ def build_asset_record(
         "threshold_cell_id": _first_str(
             _resolve(candidate, decision, ["threshold_cell_id"], ["threshold_cell_id"])
         ),
+        # Unambiguous threshold provenance (2026-09-30): the formula's output,
+        # the cell's value, the effective enforced threshold, and which source
+        # authorized — so a 1.5c cell admission is never attributed to the
+        # generic ~6c formula.
+        "yes_formula_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_formula_required_edge_cents"], ["yes_formula_required_edge_cents"])
+        ),
+        "no_formula_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_formula_required_edge_cents"], ["no_formula_required_edge_cents"])
+        ),
+        "yes_cell_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_cell_required_edge_cents"], ["yes_cell_required_edge_cents"])
+        ),
+        "no_cell_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_cell_required_edge_cents"], ["no_cell_required_edge_cents"])
+        ),
+        "yes_effective_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_effective_required_edge_cents"], ["yes_effective_required_edge_cents"])
+        ),
+        "no_effective_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_effective_required_edge_cents"], ["no_effective_required_edge_cents"])
+        ),
+        "yes_threshold_source": _first_str(
+            _resolve(candidate, decision, ["yes_threshold_source"], ["yes_threshold_source"])
+        ),
+        "no_threshold_source": _first_str(
+            _resolve(candidate, decision, ["no_threshold_source"], ["no_threshold_source"])
+        ),
+        "yes_thr_cell_miss_reason": _first_str(
+            _resolve(candidate, decision, ["yes_thr_cell_miss_reason"], ["yes_thr_cell_miss_reason"])
+        ),
+        "no_thr_cell_miss_reason": _first_str(
+            _resolve(candidate, decision, ["no_thr_cell_miss_reason"], ["no_thr_cell_miss_reason"])
+        ),
+        # Regime-reject path aliases: when the price band stops the asset
+        # before the decision engine runs, the miss reason arrives via
+        # _record_signal_rejection kwargs instead of decision.indicators.
+        "threshold_cell_miss_yes": _first_str(
+            _resolve(candidate, decision, ["threshold_cell_miss_yes"], ["threshold_cell_miss_yes"])
+        ),
+        "threshold_cell_miss_no": _first_str(
+            _resolve(candidate, decision, ["threshold_cell_miss_no"], ["threshold_cell_miss_no"])
+        ),
+        "yes_thr_cell_block_reason": _first_str(
+            _resolve(candidate, decision, ["yes_thr_cell_block_reason"], ["yes_thr_cell_block_reason"])
+        ),
+        "no_thr_cell_block_reason": _first_str(
+            _resolve(candidate, decision, ["no_thr_cell_block_reason"], ["no_thr_cell_block_reason"])
+        ),
         "yes_eligible": _first_bool(
             _resolve(candidate, decision, ["yes_eligible", "yes_qualifies"], ["yes_eligible", "yes_qualifies"])
         ),

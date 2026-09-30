@@ -21,10 +21,26 @@ import pytest
 
 import merid.prediction.trade_decision as _td
 from merid.prediction.threshold_cells import (
+    FUNNEL_STAGES,
     THRESHOLD_CELLS,
     ThresholdCell,
+    bind_decision_cell,
+    bump_cell_funnel,
+    cell_admission,
+    cell_for_decision,
+    emit_cell_lifecycle,
+    explain_cell_miss,
+    funnel_counters,
+    get_cell_state,
+    record_cell_fill,
+    record_cell_markout,
+    record_cell_router_attempt,
+    record_cell_router_reject,
+    record_cell_settlement,
+    reset_cell_state_cache,
     resolve_threshold_cell,
     threshold_cells_enabled,
+    validate_cells_within_price_bands,
 )
 from merid.prediction.trade_decision import (
     _decompose_dynamic_min_required_edge,
@@ -33,11 +49,14 @@ from merid.prediction.trade_decision import (
 
 
 @pytest.fixture(autouse=True)
-def _disable_market_anchor(monkeypatch):
+def _disable_market_anchor(monkeypatch, tmp_path):
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
     monkeypatch.setattr(_td, "MERID_CALIBRATION_CAP_FULL_RANGE", False)
     monkeypatch.delenv("MERID_THRESHOLD_CELLS", raising=False)
+    # Isolate the lane state file per test so caps/suspension don't leak.
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_STATE_PATH", str(tmp_path / "cells.json"))
+    reset_cell_state_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +87,11 @@ def test_cell_bounds_are_half_open():
     assert resolve_threshold_cell("SOL", "no", 59.99, 300.0).cell_id == "sol_no_30_60_t120_600"
     assert resolve_threshold_cell("SOL", "no", 60.0, 300.0).cell_id == "sol_no_60_80_t120_600"
     assert resolve_threshold_cell("SOL", "no", 80.0, 300.0) is None
-    # TTE bounds: 120 inclusive, 600 exclusive.
+    # TTE bounds are INCLUSIVE: 120 <= tte <= 600 (approved contract).
     assert resolve_threshold_cell("SOL", "no", 45.0, 119.9) is None
     assert resolve_threshold_cell("SOL", "no", 45.0, 120.0) is not None
-    assert resolve_threshold_cell("SOL", "no", 45.0, 600.0) is None
+    assert resolve_threshold_cell("SOL", "no", 45.0, 600.0) is not None
+    assert resolve_threshold_cell("SOL", "no", 45.0, 600.01) is None
 
 
 def test_no_cells_for_yes_side():
@@ -230,3 +250,194 @@ def test_decision_cell_lane_when_selected(monkeypatch):
         # If a downstream gate (confidence/EV-gate) vetoed, the cell threshold
         # must still be what the record shows the side was measured against.
         assert math.isclose(d.indicators["no_min_edge"], 0.015, abs_tol=1e-9)
+
+# ---------------------------------------------------------------------------
+# Boundary miss reasons
+# ---------------------------------------------------------------------------
+
+def test_explain_cell_miss_reasons():
+    # A real match is not a miss.
+    assert explain_cell_miss("SOL", "no", 45.0, 300.0) is None
+    assert explain_cell_miss("SOL", "no", 45.0, 100.0) == "threshold_cell_tte_below_min"
+    assert explain_cell_miss("SOL", "no", 45.0, 700.0) == "threshold_cell_tte_above_max"
+    assert explain_cell_miss("SOL", "no", 15.0, 300.0) == "threshold_cell_price_below_min"
+    assert explain_cell_miss("SOL", "no", 85.0, 300.0) == "threshold_cell_price_above_max"
+    # DOGE 35c sits between the 20-30 and 40-50 cells: an unqualified gap.
+    assert explain_cell_miss("DOGE", "no", 35.0, 300.0) == "threshold_cell_price_in_unqualified_gap"
+    assert explain_cell_miss("SOL", "yes", 45.0, 300.0) == "no_cells_for_asset_side"
+    assert explain_cell_miss("BTC", "no", 45.0, 300.0) == "no_cells_for_asset_side"
+    assert explain_cell_miss("SOL", "no", None, 300.0) == "threshold_cell_price_unknown"
+    assert explain_cell_miss("SOL", "no", 45.0, None) == "threshold_cell_tte_unknown"
+
+
+def test_explain_cell_miss_kill_switch(monkeypatch):
+    monkeypatch.setenv("MERID_THRESHOLD_CELLS", "0")
+    assert explain_cell_miss("SOL", "no", 45.0, 300.0) == "threshold_cells_disabled"
+
+
+# ---------------------------------------------------------------------------
+# Unambiguous threshold field names on the decision
+# ---------------------------------------------------------------------------
+
+def test_decision_emits_unambiguous_threshold_fields():
+    d = compute_trade_decision(
+        run_id="t", decision_id="t", ticker="KXSOL15M-X",
+        asset="SOL", spot_price=99.0, strike_price=100.0,
+        seconds_to_expiry=300.0,
+        yes_bid_cents=50.0, yes_ask_cents=52.0,
+        no_bid_cents=43.0, no_ask_cents=45.0,
+        yes_depth_cc=200.0, no_depth_cc=200.0,
+        fee_per_contract_cents=1.0, annualized_vol=0.60,
+        model_uncertainty=0.0, data_quality="live", regime="normal",
+        min_required_edge=0.02, settlement_reference="cfb_rti_live",
+        p_yes_model=0.50,
+    )
+    ind = d.indicators
+    # Per-side decomposed fields: formula vs cell vs effective.
+    assert math.isclose(ind["no_effective_required_edge_cents"], 1.5, abs_tol=1e-9)
+    assert math.isclose(ind["no_cell_required_edge_cents"], 1.5, abs_tol=1e-9)
+    assert ind["no_formula_required_edge_cents"] > 1.5
+    assert ind["no_threshold_source"] == "threshold_cell"
+    # YES side keeps the formula.
+    assert ind["yes_threshold_source"] == "formula"
+    assert ind["yes_cell_required_edge_cents"] is None
+
+
+# ---------------------------------------------------------------------------
+# Lane state machine + split caps
+# ---------------------------------------------------------------------------
+
+def _cell():
+    return THRESHOLD_CELLS[0]
+
+
+def test_cell_admission_ok_by_default():
+    ok, blocked = cell_admission(_cell().cell_id)
+    assert ok is True and blocked is None
+    assert get_cell_state(_cell().cell_id) == "PROVISIONAL"
+
+
+def test_cell_suspension_blocks_admission():
+    cell = _cell()
+    # Suspend via rolling-5 negative mean realized PnL (settled outcomes).
+    for i in range(5):
+        record_cell_settlement(f"d{i}", -5.0, cell_id=cell.cell_id)
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_suspended"
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_cell_fill_promotes_to_observation():
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0")
+    assert get_cell_state(cell.cell_id) == "OBSERVATION"
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is True and blocked is None
+
+
+def test_fill_cap_blocks_admission(monkeypatch):
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS", "1")
+    record_cell_fill(cell.cell_id, decision_id="d0")
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_fills_cap_exhausted"
+
+
+def test_submission_cap_blocks_admission(monkeypatch):
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS", "0")
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cap_exhausted"
+
+
+def test_open_order_blocks_admission():
+    from merid.prediction.threshold_cells import record_cell_order_open
+    cell = _cell()
+    record_cell_order_open(cell.cell_id, "ord-1")
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_open_order_exists"
+
+
+def test_router_reject_rate_suspends():
+    cell = _cell()
+    for _ in range(5):
+        record_cell_router_attempt(cell.cell_id)
+    for _ in range(3):
+        record_cell_router_reject(cell.cell_id)
+    # 3/5 = 60% > 40% reject ceiling -> SUSPENDED, admission denied.
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_suspended"
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_markout_suspension():
+    cell = _cell()
+    for i in range(5):
+        record_cell_fill(cell.cell_id, decision_id=f"d{i}")
+        record_cell_markout(cell.cell_id, f"d{i}", 5, -2.0)
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_suspended"
+
+
+def test_exec_failures_suspend():
+    cell = _cell()
+    from merid.prediction.threshold_cells import record_cell_exec_failure
+    for _ in range(3):
+        record_cell_exec_failure(cell.cell_id, "identity_mismatch")
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_suspended"
+
+
+def test_positive_outcomes_do_not_suspend():
+    cell = _cell()
+    for i in range(5):
+        record_cell_settlement(f"d{i}", 4.0, cell_id=cell.cell_id)
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is True and blocked is None
+
+
+def test_funnel_counters():
+    cell = _cell()
+    bump_cell_funnel("matched", cell.cell_id)
+    bump_cell_funnel("matched", cell.cell_id)
+    bump_cell_funnel("emitted", cell.cell_id)
+    bump_cell_funnel("matched")  # global-only bump
+    bump_cell_funnel("not_a_stage", cell.cell_id)  # ignored
+    counters = funnel_counters()
+    per = counters["funnel_by_cell"][cell.cell_id]
+    assert per["matched"] == 2
+    assert per["emitted"] == 1
+    assert counters["funnel"]["matched"] == 3
+    assert "not_a_stage" not in per
+    for stage in ("matched", "emitted", "filled"):
+        assert stage in FUNNEL_STAGES
+
+
+def test_band_containment_validation_passes():
+    report = validate_cells_within_price_bands()
+    assert len(report) == len(THRESHOLD_CELLS)
+    assert all(r["reachable"] for r in report)
+    ids = {r["cell_id"] for r in report}
+    assert ids == {c.cell_id for c in THRESHOLD_CELLS}
+
+
+def test_decision_cell_binding():
+    bind_decision_cell("dec-1", "sol_no_30_60_t120_600")
+    assert cell_for_decision("dec-1") == "sol_no_30_60_t120_600"
+    assert cell_for_decision("nope") is None
+
+
+def test_lifecycle_event_schema(tmp_path, monkeypatch):
+    import json as _json
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_LIFECYCLE_PATH", str(path))
+    emit_cell_lifecycle(
+        "candidate_emitted",
+        threshold_cell_id="sol_no_30_60_t120_600",
+        decision_id="d1",
+    )
+    rows = [_json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert rows and rows[0]["event"] == "threshold_cell_lifecycle"
+    assert rows[0]["threshold_cell_id"] == "sol_no_30_60_t120_600"
+    assert rows[0]["stage"] == "candidate_emitted"
+    assert "ts" in rows[0]
