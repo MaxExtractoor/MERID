@@ -260,11 +260,11 @@ def test_replay_fixture_stable_scorecard():
     assert lines[0] == "DECISION-SCORECARD cycle=842"
     assert "BTC: PASS | robust_ev=+8c | rank=1 | selected" in lines[1]
     eth_line = next(l for l in lines if l.startswith("ETH:"))
-    assert "ev_gate_non_positive" in eth_line
-    assert "robust_ev=-8c" in eth_line
+    assert "NO_POSITIVE_EXECUTABLE_EDGE" in eth_line
+    assert "ev=-8.00c" in eth_line
     doge_line = next(l for l in lines if l.startswith("DOGE:"))
-    assert "raw_edge=+1c" in doge_line
-    assert "robust_ev=-6c" in doge_line
+    assert "best=YES" in doge_line
+    assert "ev=-6.00c" in doge_line
     # Stability: identical input produces identical output
     assert dt.format_scorecard(842, _make_five_asset_records()) == scorecard
 

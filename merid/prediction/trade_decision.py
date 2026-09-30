@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
@@ -750,6 +750,23 @@ def _get_resolved_min_required_edge(default: float) -> float:
     return max(default, resolved_edge)
 
 
+class EdgeThresholdDecomposition(NamedTuple):
+    """Component breakdown of the dynamic min-required-edge threshold.
+
+    Every value is in probability points (0-1 scale); multiply by 100 for
+    cents.  ``total`` is the clamped value actually compared against
+    ``net_edge``.
+    """
+    total: float
+    base_floor: float          # max(global floor, asset tier floor)
+    global_floor: float        # floor_min_required_edge input
+    asset_base: float          # asset liquidity tier floor
+    convexity: float           # K * p*(1-p) adverse-selection term
+    flb_premium: float         # favorite-longshot-bias premium (p < 0.35)
+    clamped_floor: bool        # True if the 0.02 floor bound
+    clamped_ceiling: bool      # True if the 0.15 ceiling bound
+
+
 def _compute_dynamic_min_required_edge(
     asset: str,
     price_cents: int,
@@ -760,7 +777,34 @@ def _compute_dynamic_min_required_edge(
     no_ask_cents: float,
     floor_min_required_edge: float,
 ) -> float:
-    """Compute a fee-aware, asset-tiered edge threshold.
+    """Compute a fee-aware, asset-tiered edge threshold (total only).
+
+    Returns ``_decompose_dynamic_min_required_edge(...).total``; call sites
+    that need the component breakdown use the decompose variant directly.
+    """
+    return _decompose_dynamic_min_required_edge(
+        asset=asset,
+        price_cents=price_cents,
+        side=side,
+        yes_bid_cents=yes_bid_cents,
+        yes_ask_cents=yes_ask_cents,
+        no_bid_cents=no_bid_cents,
+        no_ask_cents=no_ask_cents,
+        floor_min_required_edge=floor_min_required_edge,
+    ).total
+
+
+def _decompose_dynamic_min_required_edge(
+    asset: str,
+    price_cents: int,
+    side: Literal["yes", "no"],
+    yes_bid_cents: float,
+    yes_ask_cents: float,
+    no_bid_cents: float,
+    no_ask_cents: float,
+    floor_min_required_edge: float,
+) -> EdgeThresholdDecomposition:
+    """Compute a fee-aware, asset-tiered edge threshold with decomposition.
 
     The threshold is applied to ``net_edge`` (after Kalshi fees, exit-cost
     reserve, and model-risk reserve).  It therefore represents the required
@@ -823,7 +867,17 @@ def _compute_dynamic_min_required_edge(
     flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.35 - p)
 
     dynamic = base + price_adj + flb_adj
-    return max(0.02, min(dynamic, 0.15))
+    total = max(0.02, min(dynamic, 0.15))
+    return EdgeThresholdDecomposition(
+        total=total,
+        base_floor=base,
+        global_floor=float(floor_min_required_edge),
+        asset_base=asset_base,
+        convexity=price_adj,
+        flb_premium=flb_adj,
+        clamped_floor=(total == 0.02 and dynamic < 0.02),
+        clamped_ceiling=(total == 0.15 and dynamic > 0.15),
+    )
 
 
 def _get_resolved_min_p_selected(default: float) -> float:
@@ -2535,7 +2589,7 @@ def compute_trade_decision(
     # price and spread.  ``min_required_edge`` remains the hard global floor.
     yes_price_cents = int(round(yes_entry * 100.0))
     no_price_cents = int(round(no_entry * 100.0))
-    yes_min_edge = _compute_dynamic_min_required_edge(
+    _yes_edge_thr = _decompose_dynamic_min_required_edge(
         asset=asset,
         price_cents=yes_price_cents,
         side="yes",
@@ -2545,7 +2599,7 @@ def compute_trade_decision(
         no_ask_cents=no_ask_cents,
         floor_min_required_edge=min_required_edge,
     )
-    no_min_edge = _compute_dynamic_min_required_edge(
+    _no_edge_thr = _decompose_dynamic_min_required_edge(
         asset=asset,
         price_cents=no_price_cents,
         side="no",
@@ -2555,8 +2609,20 @@ def compute_trade_decision(
         no_ask_cents=no_ask_cents,
         floor_min_required_edge=min_required_edge,
     )
+    yes_min_edge = _yes_edge_thr.total
+    no_min_edge = _no_edge_thr.total
     indicators["yes_min_edge"] = yes_min_edge
     indicators["no_min_edge"] = no_min_edge
+    # Threshold decomposition (probability points) — lets the audit answer
+    # "what reserve blocked this candidate" rather than just the total.
+    for _pfx, _d in (("yes", _yes_edge_thr), ("no", _no_edge_thr)):
+        indicators[f"{_pfx}_thr_base_floor_cents"] = _d.base_floor * 100.0
+        indicators[f"{_pfx}_thr_global_floor_cents"] = _d.global_floor * 100.0
+        indicators[f"{_pfx}_thr_asset_base_cents"] = _d.asset_base * 100.0
+        indicators[f"{_pfx}_thr_convexity_cents"] = _d.convexity * 100.0
+        indicators[f"{_pfx}_thr_flb_premium_cents"] = _d.flb_premium * 100.0
+        indicators[f"{_pfx}_thr_clamped_floor"] = _d.clamped_floor
+        indicators[f"{_pfx}_thr_clamped_ceiling"] = _d.clamped_ceiling
 
     # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
     # notes at module level — applies the evidence-floor semantics to the
@@ -2635,6 +2701,16 @@ def compute_trade_decision(
                     indicators[no_evidence_reason] = _no_live_det
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
+    # Best-side executable economics snapshot: the single line that separates
+    # "no positive edge exists" from "edge exists but the reserve ate it".
+    if best_side is not None:
+        _best_min_edge = yes_min_edge if best_side == "yes" else no_min_edge
+        _best_ev_c = float(best_net_edge) * 100.0
+        _best_thr_c = float(_best_min_edge) * 100.0
+        indicators["best_executable_side"] = best_side
+        indicators["best_executable_ev_cents"] = _best_ev_c
+        indicators["best_required_edge_cents"] = _best_thr_c
+        indicators["edge_shortfall_cents"] = max(0.0, _best_thr_c - _best_ev_c)
     if selected_side_pre_edge is None and best_side is not None:
         selected_side_pre_edge = best_side
     if selection_reason == "best_executable_edge" and best_reason:
