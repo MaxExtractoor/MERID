@@ -10033,6 +10033,41 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         intent.process_id = str(os.getpid())
         intent.reason = candidate.get("rationale") or "candidate_entry"
 
+        # EXECUTION-LANE CONTRACT (2026-09-30): stamp the immutable execution
+        # policy + admission owner at construction.  A threshold-cell order is
+        # a controlled post-only maker validation — the router may tighten
+        # within this contract but must never downgrade it to marketable/taker.
+        try:
+            _lane = candidate.get("decision_lane")
+            if _lane == "threshold_cell":
+                from merid.event_venues.kalshi.order_router import ExecutionPolicy
+                intent.execution_policy = ExecutionPolicy(
+                    lane="threshold_cell",
+                    required_post_only=True,
+                    required_liquidity_role="maker",
+                    allow_taker_fallback=False,
+                    max_reprice_attempts=1,
+                    max_order_lifetime_s=60,
+                )
+            intent.admission_owner = (
+                candidate.get("admission_owner") or _lane or "formula"
+            )
+            intent.exec_stage_marks_ns["intent_created"] = time.monotonic_ns()
+            if _lane == "threshold_cell" and intent.threshold_cell_id:
+                from merid.prediction import threshold_cells as _tc
+                _tc.emit_cell_lifecycle(
+                    "intent_created",
+                    threshold_cell_id=intent.threshold_cell_id,
+                    asset=asset,
+                    ticker=ticker,
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    side=candidate.get("side"),
+                    price_cents=price_cents,
+                )
+        except Exception:
+            pass
+
         # PROFIT_ONLY LIFECYCLE CONTRACT: attach the canonical lifecycle plan at
         # intent creation so the audit/ledger record carries it even before
         # routing.  The router re-validates (or derives if absent) pre-submit.

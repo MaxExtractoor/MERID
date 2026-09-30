@@ -9097,6 +9097,7 @@ class LeanAgent15m:
             # provenance — the router/ledger must not recompute these.
             "decision_lane": _ind.get("decision_lane"),
             "threshold_cell_id": _ind.get("threshold_cell_id"),
+            "admission_owner": _ind.get(f"{str(side).lower()}_admission_owner"),
             "threshold_source": _ind.get(f"{str(side).lower()}_threshold_source"),
             "formula_required_edge_cents": _ind.get(f"{str(side).lower()}_formula_required_edge_cents"),
             "cell_required_edge_cents": _ind.get(f"{str(side).lower()}_cell_required_edge_cents"),
@@ -10220,6 +10221,9 @@ class LeanAgent15m:
                 "evidence_yes": _ind.get("evidence_yes"),
                 "evidence_no": _ind.get("evidence_no"),
                 "decision_lane": _ind.get("decision_lane"),
+                "yes_admission_owner": _ind.get("yes_admission_owner"),
+                "no_admission_owner": _ind.get("no_admission_owner"),
+                "admission_owner": _ind.get(f"{str(side).lower()}_admission_owner"),
                 "walkforward_cal_applied": _ind.get("walkforward_cal_applied"),
                 "market_anchor_weight": _ind.get("market_anchor_weight"),
                 "ws_age_ms": _ind.get("ws_last_event_age_ms") or _ind.get("quote_age_ms"),

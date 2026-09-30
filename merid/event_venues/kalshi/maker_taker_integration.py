@@ -126,8 +126,42 @@ def apply_maker_taker_policy(intent) -> None:
         # forced to post_only=True. The router's marketable-limit logic prices these orders
         # to cross the spread; post_only would cause Kalshi "post-only cross" rejections or
         # leave the order resting unfilled. Policy post_only applies to resting intents only.
+        #
+        # IMMUTABLE EXECUTION POLICY (2026-09-30): a lane that requires
+        # post-only (threshold_cell / evidence_cell_escape) owns its execution
+        # contract — this function may never downgrade it to a marketable/
+        # taker order.  If the intent's posture is marketable, or the policy
+        # engine cannot support passive placement, the order must be rejected
+        # pre-wire (PRE_WIRE_POST_ONLY_UNAVAILABLE), never sent as taker.
+        _policy = getattr(intent, "execution_policy", None)
+        _required_post_only = (
+            bool(getattr(_policy, "required_post_only", False))
+            if _policy is not None
+            else (
+                getattr(intent, "decision_lane", None)
+                in ("threshold_cell", "evidence_cell_escape")
+                and bool(getattr(intent, "post_only", False))
+            )
+        )
         intent_aggressiveness = getattr(intent, "aggressiveness", 0.0) or 0.0
-        if intent_aggressiveness > 0.0:
+        if _required_post_only:
+            if intent_aggressiveness > 0.0:
+                # Marketable posture cannot satisfy the lane's post-only
+                # contract — flag for pre-wire rejection by the router.
+                logger.warning(
+                    f"[MAKER-TAKER] lane requires post_only but intent is marketable "
+                    f"(aggressiveness={intent_aggressiveness:.2f}) — flagging "
+                    f"PRE_WIRE_POST_ONLY_UNAVAILABLE | ticker={intent.ticker} "
+                    f"lane={getattr(intent, 'decision_lane', None)}"
+                )
+                intent._execution_policy_violation = "PRE_WIRE_POST_ONLY_UNAVAILABLE"
+            intent.post_only = True
+            # Fee semantics stay maker for a post-only lane even if the policy
+            # engine recommended taker — the lane contract wins.
+            if intent.fee_type == "taker":
+                intent.fee_type = "maker"
+                intent.expected_role = "maker"
+        elif intent_aggressiveness > 0.0:
             if role_decision.post_only:
                 logger.info(
                     f"[MAKER-TAKER] Policy recommended maker/post_only but intent is marketable "
@@ -175,3 +209,13 @@ def apply_maker_taker_policy(intent) -> None:
         intent.estimated_fee_cents = None
         intent.edge_net_of_fees_pct = None
         intent.policy_mode = None
+        # A post-only lane cannot proceed on unverified maker semantics —
+        # flag for clean pre-wire rejection rather than sending with an
+        # unverifiable fee model.
+        _policy = getattr(intent, "execution_policy", None)
+        if (
+            (getattr(_policy, "required_post_only", False) if _policy is not None
+             else getattr(intent, "decision_lane", None) in ("threshold_cell", "evidence_cell_escape"))
+            and getattr(intent, "post_only", False)
+        ):
+            intent._execution_policy_violation = "PRE_WIRE_POST_ONLY_UNAVAILABLE"
