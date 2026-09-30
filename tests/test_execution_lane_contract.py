@@ -365,3 +365,49 @@ def test_no_approved_cell_does_not_disable_formula_candidate(asset):
         effective_required_edge_cents=3.0,
     )
     assert allowed2 is False and reason2 is None
+
+
+# ---------------------------------------------------------------------------
+# 6. Config-driven registry — live cells are data, loaded identically for all
+# ---------------------------------------------------------------------------
+
+def test_live_registry_yaml_matches_builtin(tmp_path):
+    """config/threshold_cells_live.yaml parses to exactly the built-in cells."""
+    loaded = _tc._load_registry_from_config(_tc._registry_config_path())
+    assert loaded is not None, "live registry yaml must exist and parse"
+    assert [c.cell_id for c in loaded] == [c.cell_id for c in _tc._builtin_cells()]
+
+
+def test_registry_missing_file_falls_back_to_builtin(tmp_path):
+    missing = str(tmp_path / "absent.yaml")
+    assert _tc._load_registry_from_config(missing) is None
+
+
+def test_registry_malformed_file_fails_closed(tmp_path):
+    """A present-but-broken registry -> EMPTY (no cell may admit)."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("cells:\n  - cell_id: wrong\n    asset: BTC\n", "utf-8")
+    assert _tc._load_registry_from_config(str(bad)) == []
+
+    # Missing 'cells' key entirely.
+    bad.write_text("registry_version: '1'\n", "utf-8")
+    assert _tc._load_registry_from_config(str(bad)) == []
+
+
+def test_registry_rejects_noncanonical_cell_id(tmp_path):
+    """cell_id must equal asset_side_pmin_pmax_t{tlo}_{thi} — a hand-edited
+    id that drifts from its bounds empties the registry."""
+    bad = tmp_path / "bad_id.yaml"
+    bad.write_text(
+        "cells:\n"
+        "  - cell_id: btc_no_99_99_t120_600\n"
+        "    asset: BTC\n"
+        "    side: \"no\"\n"
+        "    price_min_cents: 40\n"
+        "    price_max_cents: 50\n"
+        "    tte_min_seconds: 120\n"
+        "    tte_max_seconds: 600\n"
+        "    min_net_ev_cents: 2.0\n",
+        "utf-8",
+    )
+    assert _tc._load_registry_from_config(str(bad)) == []

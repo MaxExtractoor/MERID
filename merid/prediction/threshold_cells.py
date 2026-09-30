@@ -132,55 +132,55 @@ class ThresholdCell(NamedTuple):
 # Approved 2026-09-30 from the settled counterfactual frontier.  LCB10 = the
 # ~10% lower confidence bound on mean net c/contract at the decision-time
 # executable ask (taker-fee counterfactual — conservative vs post-only).
-THRESHOLD_CELLS: List[ThresholdCell] = [
-    # SOL NO mid band: frontier marginal band realized +14.4/+21.3/+18.7c mean
-    # at 30-59c asks (LCB +8.8..+14.7); blocked cohort avg req was 6.4c.
-    ThresholdCell(
-        "sol_no_30_60_t120_600", "SOL", "no", 30, 60, 120.0, 600.0, 1.5,
-        "frontier: SOL-NO 30-59c LCB10 +8.8..+14.7c; TTE120-300 LCB +14.1c",
-        8.8,
-    ),
-    # SOL NO 60-79c: 70-79c bucket +10.3c (LCB +2.7) but 60-69c weak (-2.3c);
-    # admitted at a higher bar.
-    ThresholdCell(
-        "sol_no_60_80_t120_600", "SOL", "no", 60, 80, 120.0, 600.0, 2.5,
-        "frontier: SOL-NO 70-79c LCB +2.7c; 60-69c weak -> higher bar",
-        2.7,
-    ),
-    # DOGE NO: 20-29c +7.7c (LCB +1.6) and 40-49c +9.5c (LCB +2.4); the 30-39c
-    # cell was inconclusive (LCB -4.8) and is deliberately not qualified.
-    # Note: the held-price floor (25c) still vetoes the 20-24c half of the
-    # first cell — the cell relaxes only the edge gate.
-    ThresholdCell(
-        "doge_no_20_30_t120_600", "DOGE", "no", 20, 30, 120.0, 600.0, 2.0,
-        "frontier: DOGE-NO 20-29c LCB +1.6c (held floor still applies <25c)",
-        1.6,
-    ),
-    ThresholdCell(
-        "doge_no_40_50_t120_600", "DOGE", "no", 40, 50, 120.0, 600.0, 2.0,
-        "frontier: DOGE-NO 40-49c LCB +2.4c",
-        2.4,
-    ),
-    # DOGE NO 70-89c: +22.2c (70-79, LCB +21.5) / +9.6c (80-89, LCB +6.2);
-    # higher bar for the execution-sensitive upper band.
-    ThresholdCell(
-        "doge_no_70_90_t120_600", "DOGE", "no", 70, 90, 120.0, 600.0, 3.0,
-        "frontier: DOGE-NO 70-89c LCB +6.2..+21.5c",
-        6.2,
-    ),
-    # XRP NO 30-39c +9.8c (LCB +3.7) and 80-89c +5.8c (LCB +2.2); the 40-79c
-    # middle was mixed and stays on the legacy formula.
-    ThresholdCell(
-        "xrp_no_30_40_t120_600", "XRP", "no", 30, 40, 120.0, 600.0, 2.5,
-        "frontier: XRP-NO 30-39c LCB +3.7c",
-        3.7,
-    ),
-    ThresholdCell(
-        "xrp_no_80_90_t120_600", "XRP", "no", 80, 90, 120.0, 600.0, 2.5,
-        "frontier: XRP-NO 80-89c LCB +2.2c",
-        2.2,
-    ),
-]
+#
+# The live registry is data, not code: rows are read from
+# ``config/threshold_cells_live.yaml`` (override:
+# ``MERID_THRESHOLD_CELLS_CONFIG``).  Cells reach that file only through the
+# promotion pipeline — discovery report -> promotion compiler -> explicit
+# approval manifest.  If the file is absent, the built-in fallback below is
+# used (identical to the checked-in registry).  If the file is present but
+# malformed, the registry loads EMPTY — no cell can admit, every candidate
+# falls back to the formula path (fail-closed, never fail-open).
+
+def _builtin_cells() -> List[ThresholdCell]:
+    """Fallback registry — must mirror config/threshold_cells_live.yaml."""
+    return [
+        ThresholdCell(
+            "sol_no_30_60_t120_600", "SOL", "no", 30, 60, 120.0, 600.0, 1.5,
+            "frontier: SOL-NO 30-59c LCB10 +8.8..+14.7c; TTE120-300 LCB +14.1c",
+            8.8,
+        ),
+        ThresholdCell(
+            "sol_no_60_80_t120_600", "SOL", "no", 60, 80, 120.0, 600.0, 2.5,
+            "frontier: SOL-NO 70-79c LCB +2.7c; 60-69c weak -> higher bar",
+            2.7,
+        ),
+        ThresholdCell(
+            "doge_no_20_30_t120_600", "DOGE", "no", 20, 30, 120.0, 600.0, 2.0,
+            "frontier: DOGE-NO 20-29c LCB +1.6c (held floor still applies <25c)",
+            1.6,
+        ),
+        ThresholdCell(
+            "doge_no_40_50_t120_600", "DOGE", "no", 40, 50, 120.0, 600.0, 2.0,
+            "frontier: DOGE-NO 40-49c LCB +2.4c",
+            2.4,
+        ),
+        ThresholdCell(
+            "doge_no_70_90_t120_600", "DOGE", "no", 70, 90, 120.0, 600.0, 3.0,
+            "frontier: DOGE-NO 70-89c LCB +6.2..+21.5c",
+            6.2,
+        ),
+        ThresholdCell(
+            "xrp_no_30_40_t120_600", "XRP", "no", 30, 40, 120.0, 600.0, 2.5,
+            "frontier: XRP-NO 30-39c LCB +3.7c",
+            3.7,
+        ),
+        ThresholdCell(
+            "xrp_no_80_90_t120_600", "XRP", "no", 80, 90, 120.0, 600.0, 2.5,
+            "frontier: XRP-NO 80-89c LCB +2.2c",
+            2.2,
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -193,18 +193,116 @@ THRESHOLD_CELLS: List[ThresholdCell] = [
 # asset x side x price x TTE data, not by asset-level branches.
 ALL_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
+_REGISTRY_REQUIRED_KEYS = (
+    "cell_id", "asset", "side",
+    "price_min_cents", "price_max_cents",
+    "tte_min_seconds", "tte_max_seconds",
+    "min_net_ev_cents",
+)
+
+
+def _registry_config_path() -> str:
+    override = os.environ.get("MERID_THRESHOLD_CELLS_CONFIG")
+    if override:
+        return os.path.abspath(override)
+    # merid/prediction/threshold_cells.py -> repo root/config/...
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        "config", "threshold_cells_live.yaml",
+    )
+
+
+def _load_registry_from_config(path: str) -> Optional[List[ThresholdCell]]:
+    """Parse a live-registry yaml.  Returns None if the file does not exist
+    (caller falls back to built-in); returns a list — possibly EMPTY — for a
+    present file.  Any malformed row empties the whole registry
+    (fail-closed)."""
+    if not os.path.exists(path):
+        return None
+    try:
+        import yaml  # local import: threshold_cells is on the live hot path
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as exc:
+        logger.critical(
+            "[THRESHOLD-CELL-REGISTRY] config %s unreadable (%s) -> EMPTY registry",
+            path, exc,
+        )
+        return []
+    rows = data.get("cells")
+    if not isinstance(rows, list):
+        logger.critical(
+            "[THRESHOLD-CELL-REGISTRY] config %s missing cells list -> EMPTY registry",
+            path,
+        )
+        return []
+    cells: List[ThresholdCell] = []
+    for row in rows:
+        try:
+            if not isinstance(row, dict) or any(
+                k not in row for k in _REGISTRY_REQUIRED_KEYS
+            ):
+                raise ValueError(f"missing required keys: {row!r}")
+            asset = str(row["asset"]).upper()
+            side = str(row["side"]).lower()
+            pmin = int(row["price_min_cents"])
+            pmax = int(row["price_max_cents"])
+            tlo = float(row["tte_min_seconds"])
+            thi = float(row["tte_max_seconds"])
+            cell_id = str(row["cell_id"])
+            if asset not in ALL_ASSETS:
+                raise ValueError(f"unknown asset {asset!r}")
+            if side not in ("yes", "no"):
+                raise ValueError(f"bad side {side!r}")
+            if not (0 <= pmin < pmax <= 100 and 0 <= tlo < thi):
+                raise ValueError(f"bad bounds px={pmin}-{pmax} tte={tlo}-{thi}")
+            expected_id = (
+                f"{asset.lower()}_{side}_{pmin}_{pmax}"
+                f"_t{int(tlo)}_{int(thi)}"
+            )
+            if cell_id != expected_id:
+                raise ValueError(
+                    f"cell_id {cell_id!r} != canonical {expected_id!r}"
+                )
+            cells.append(ThresholdCell(
+                cell_id=cell_id,
+                asset=asset,
+                side=side,
+                price_min_cents=pmin,
+                price_max_cents=pmax,
+                tte_min_seconds=tlo,
+                tte_max_seconds=thi,
+                min_net_ev_cents=float(row["min_net_ev_cents"]),
+                evidence=str(row.get("evidence") or ""),
+                historical_lcb10_cents=float(
+                    row.get("historical_lcb10_cents") or 0.0
+                ),
+            ))
+        except Exception as exc:
+            logger.critical(
+                "[THRESHOLD-CELL-REGISTRY] malformed cell row in %s (%s) "
+                "-> EMPTY registry",
+                path, exc,
+            )
+            return []
+    return cells
+
+
+def _load_registry() -> Tuple[List[ThresholdCell], str]:
+    path = _registry_config_path()
+    loaded = _load_registry_from_config(path)
+    if loaded is None:
+        return _builtin_cells(), "builtin_fallback"
+    return loaded, f"config:{os.path.basename(path)}"
+
+
+THRESHOLD_CELLS, REGISTRY_SOURCE = _load_registry()
+
 CELLS_BY_ASSET: Dict[str, Tuple[str, ...]] = {
-    "BTC": (),
-    "ETH": (),
-    "SOL": ("sol_no_30_60_t120_600", "sol_no_60_80_t120_600"),
-    "XRP": ("xrp_no_30_40_t120_600", "xrp_no_80_90_t120_600"),
-    "DOGE": (
-        "doge_no_20_30_t120_600",
-        "doge_no_40_50_t120_600",
-        "doge_no_70_90_t120_600",
-    ),
+    a: tuple(c.cell_id for c in THRESHOLD_CELLS if c.asset == a)
+    for a in ALL_ASSETS
 }
-assert set(CELLS_BY_ASSET) == set(ALL_ASSETS), "registry must cover ALL_ASSETS"
 assert {
     cid for ids in CELLS_BY_ASSET.values() for cid in ids
 } == {c.cell_id for c in THRESHOLD_CELLS}, "CELLS_BY_ASSET must mirror THRESHOLD_CELLS"
@@ -284,6 +382,70 @@ def cell_discovery_status(asset: str) -> str:
     if not rec:
         return "no_discovery_data"
     return str(rec.get("status") or "no_qualified_cells")
+
+
+_CANDIDATES_ARTIFACT_ENV = "MERID_CELL_CANDIDATES_PATH"
+_CANDIDATES_ARTIFACT_DEFAULT = "data/threshold_cell_candidates.json"
+_candidates_cache: Dict[str, Any] = {"path": None, "mtime_ns": None, "rows": []}
+
+
+def _load_candidates_artifact() -> List[Dict[str, Any]]:
+    """mtime-cached reader for data/threshold_cell_candidates.json."""
+    path = os.path.abspath(
+        os.environ.get(_CANDIDATES_ARTIFACT_ENV, _CANDIDATES_ARTIFACT_DEFAULT)
+    )
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        _candidates_cache.update(path=path, mtime_ns=None, rows=[])
+        return []
+    if _candidates_cache["path"] == path and _candidates_cache["mtime_ns"] == mtime:
+        return _candidates_cache["rows"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        rows = payload.get("per_cell") or []
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    _candidates_cache.update(path=path, mtime_ns=mtime, rows=rows)
+    return rows
+
+
+def cell_discovery_detail(asset: str) -> Dict[str, Any]:
+    """Heartbeat detail for one asset — answers 'why is a qualifying
+    discovery cell not live?' with the exact pipeline position:
+
+      {status, top_candidate, promotion_status, live_registry}
+    """
+    asset_u = str(asset).upper()
+    live = list(CELLS_BY_ASSET.get(asset_u, ()))
+    detail = {
+        "status": cell_discovery_status(asset_u),
+        "live_registry": len(live),
+        "top_candidate": None,
+        "promotion_status": None,
+    }
+    # Best promotion-pipeline row for the asset (highest LCB10).
+    best = None
+    for row in _load_candidates_artifact():
+        if str(row.get("asset", "")).upper() != asset_u:
+            continue
+        if best is None or (row.get("lcb10_cents") or -1e9) > (
+            best.get("lcb10_cents") or -1e9
+        ):
+            best = row
+    if best is not None:
+        detail["top_candidate"] = best.get("cell_key")
+        detail["promotion_status"] = best.get("promotion_status")
+        return detail
+    # No compiler row: fall back to the discovery artifact's top candidate.
+    rec = _load_discovery_artifact().get(asset_u) or {}
+    if rec.get("top_candidate"):
+        detail["top_candidate"] = rec["top_candidate"]
+        detail["promotion_status"] = "NOT_COMPILED"
+    return detail
 
 
 # Soft evidence codes the threshold-cell lane may override under its own

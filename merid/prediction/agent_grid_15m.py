@@ -18715,7 +18715,7 @@ class LeanAgentGrid15m:
                 # formula, price_band, or hard_block.
                 try:
                     from merid.prediction.threshold_cells import (
-                        cell_discovery_status, cells_for_asset,
+                        cell_discovery_detail, cells_for_asset,
                         get_cell_state,
                     )
                     _tc_parts = []
@@ -18728,13 +18728,20 @@ class LeanAgentGrid15m:
                             or _r.get("yes_thr_cell_id")
                         )
                         _best_ev = _r.get("best_executable_ev_cents")
+                        _dd = cell_discovery_detail(_an)
                         _tc_parts.append(
                             "%s evaluated=yes matched_cell=%s cell_state=%s "
-                            "discovery=%s best_ev=%s terminal=%s" % (
+                            "discovery=%s top_candidate=%s promotion=%s "
+                            "live_registry=%d formula_path=%s "
+                            "best_ev=%s terminal=%s" % (
                                 _an,
                                 _cid or ("none" if not _cells else "none_in_band"),
                                 get_cell_state(_cid) if _cid else "n/a",
-                                cell_discovery_status(_an),
+                                _dd["status"],
+                                _dd["top_candidate"] or "none",
+                                _dd["promotion_status"] or "n/a",
+                                _dd["live_registry"],
+                                "yes" if not _cid else "no",
                                 ("%.2f" % _best_ev)
                                 if isinstance(_best_ev, (int, float))
                                 else "n/a",
