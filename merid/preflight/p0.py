@@ -300,4 +300,34 @@ async def run_p0_preflight_checks(
     except Exception as e:
         results.append(_check("rti_stream_fresh", False, f"{e} {rti_detail}".strip()))
 
+    # 7. Threshold-cell band containment.  Every approved conditional
+    # threshold cell must contain at least one (price, TTE) point the live
+    # market-regime band policy admits — a cell that can never fire is a
+    # deployment bug and must fail closed, not die silently in the funnel.
+    try:
+        from merid.prediction import threshold_cells as _tc
+
+        if not _tc.threshold_cells_enabled():
+            results.append(
+                _check("threshold_cell_band_containment", True, "cells disabled")
+            )
+        else:
+            _report = _tc.validate_cells_within_price_bands()
+            results.append(
+                _check(
+                    "threshold_cell_band_containment",
+                    True,
+                    "cells=%d reachable=%d" % (
+                        len(_report),
+                        sum(1 for r in _report if r["reachable"]),
+                    ),
+                )
+            )
+    except AssertionError as _tc_assert:
+        results.append(
+            _check("threshold_cell_band_containment", False, str(_tc_assert))
+        )
+    except Exception as e:
+        results.append(_check("threshold_cell_band_containment", False, str(e)))
+
     return results
