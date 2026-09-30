@@ -21,6 +21,10 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
+from merid.prediction.threshold_cells import (
+    cell_cap_remaining,
+    resolve_threshold_cell,
+)
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
@@ -765,6 +769,9 @@ class EdgeThresholdDecomposition(NamedTuple):
     flb_premium: float         # favorite-longshot-bias premium (p < 0.35)
     clamped_floor: bool        # True if the 0.02 floor bound
     clamped_ceiling: bool      # True if the 0.15 ceiling bound
+    cell_id: Optional[str] = None       # threshold-cell override id
+    cell_min_ev_cents: Optional[float] = None  # cell threshold, cents
+    cell_cap_exhausted: bool = False    # cell matched but daily lane cap hit
 
 
 def _compute_dynamic_min_required_edge(
@@ -776,6 +783,7 @@ def _compute_dynamic_min_required_edge(
     no_bid_cents: float,
     no_ask_cents: float,
     floor_min_required_edge: float,
+    seconds_to_expiry: Optional[float] = None,
 ) -> float:
     """Compute a fee-aware, asset-tiered edge threshold (total only).
 
@@ -791,6 +799,7 @@ def _compute_dynamic_min_required_edge(
         no_bid_cents=no_bid_cents,
         no_ask_cents=no_ask_cents,
         floor_min_required_edge=floor_min_required_edge,
+        seconds_to_expiry=seconds_to_expiry,
     ).total
 
 
@@ -803,6 +812,7 @@ def _decompose_dynamic_min_required_edge(
     no_bid_cents: float,
     no_ask_cents: float,
     floor_min_required_edge: float,
+    seconds_to_expiry: Optional[float] = None,
 ) -> EdgeThresholdDecomposition:
     """Compute a fee-aware, asset-tiered edge threshold with decomposition.
 
@@ -868,6 +878,23 @@ def _decompose_dynamic_min_required_edge(
 
     dynamic = base + price_adj + flb_adj
     total = max(0.02, min(dynamic, 0.15))
+
+    # 2026-09-30: conditional threshold cells (merid.prediction.threshold_cells)
+    # replace the formula output inside the empirically-qualified
+    # asset x side x price x TTE regions from the settled counterfactual
+    # frontier.  The cell value is the single source of truth there — the
+    # 0.02 floor clamp intentionally does NOT apply (SOL-NO mid band is
+    # qualified at 1.5c).  Formula components are still returned for audit.
+    cell = resolve_threshold_cell(asset, side, price_cents, seconds_to_expiry)
+    cell_cap_hit = False
+    if cell is not None and cell_cap_remaining() <= 0:
+        # Daily lane budget exhausted: fail closed to the legacy formula and
+        # surface the suppression in telemetry rather than silently dropping it.
+        cell_cap_hit = True
+        cell = None
+    if cell is not None:
+        total = max(0.0, min(cell.min_net_ev_cents / 100.0, 0.15))
+
     return EdgeThresholdDecomposition(
         total=total,
         base_floor=base,
@@ -875,8 +902,13 @@ def _decompose_dynamic_min_required_edge(
         asset_base=asset_base,
         convexity=price_adj,
         flb_premium=flb_adj,
-        clamped_floor=(total == 0.02 and dynamic < 0.02),
-        clamped_ceiling=(total == 0.15 and dynamic > 0.15),
+        clamped_floor=(cell is None and total == 0.02 and dynamic < 0.02),
+        clamped_ceiling=(cell is None and total == 0.15 and dynamic > 0.15),
+        cell_id=cell.cell_id if cell is not None else None,
+        cell_min_ev_cents=(
+            float(cell.min_net_ev_cents) if cell is not None else None
+        ),
+        cell_cap_exhausted=cell_cap_hit,
     )
 
 
@@ -2598,6 +2630,7 @@ def compute_trade_decision(
         no_bid_cents=no_bid_cents,
         no_ask_cents=no_ask_cents,
         floor_min_required_edge=min_required_edge,
+        seconds_to_expiry=seconds_to_expiry,
     )
     _no_edge_thr = _decompose_dynamic_min_required_edge(
         asset=asset,
@@ -2608,6 +2641,7 @@ def compute_trade_decision(
         no_bid_cents=no_bid_cents,
         no_ask_cents=no_ask_cents,
         floor_min_required_edge=min_required_edge,
+        seconds_to_expiry=seconds_to_expiry,
     )
     yes_min_edge = _yes_edge_thr.total
     no_min_edge = _no_edge_thr.total
@@ -2623,6 +2657,9 @@ def compute_trade_decision(
         indicators[f"{_pfx}_thr_flb_premium_cents"] = _d.flb_premium * 100.0
         indicators[f"{_pfx}_thr_clamped_floor"] = _d.clamped_floor
         indicators[f"{_pfx}_thr_clamped_ceiling"] = _d.clamped_ceiling
+        indicators[f"{_pfx}_thr_cell_id"] = _d.cell_id
+        indicators[f"{_pfx}_thr_cell_min_ev_cents"] = _d.cell_min_ev_cents
+        indicators[f"{_pfx}_thr_cell_cap_exhausted"] = _d.cell_cap_exhausted
 
     # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
     # notes at module level — applies the evidence-floor semantics to the
@@ -3279,6 +3316,20 @@ def compute_trade_decision(
             and not indicators.get("decision_lane")
         ):
             indicators["decision_lane"] = "evidence_cell_escape"
+
+        # Conditional threshold-cell lane: the selected side was admitted by a
+        # data-qualified cell (threshold_cells.py) rather than the generic
+        # formula.  Same bounded execution contract as the escape lane —
+        # one contract, post-only — enforced by the order-style block in
+        # agent_grid_15m.  Does not override an existing lane marker.
+        if not indicators.get("decision_lane"):
+            _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
+            if _sel_thr.cell_id is not None:
+                indicators["decision_lane"] = "threshold_cell"
+        _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
+        if _sel_thr.cell_id is not None:
+            indicators["threshold_cell_id"] = _sel_thr.cell_id
+            indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
 
     decision = TradeDecision(
         run_id=run_id,

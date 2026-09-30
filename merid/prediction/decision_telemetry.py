@@ -485,6 +485,30 @@ def build_asset_record(
         "edge_shortfall_cents": _first_float(
             _resolve(candidate, decision, ["edge_shortfall_cents"], ["edge_shortfall_cents"])
         ),
+        # Conditional threshold-cell policy (2026-09-30): which cell, if any,
+        # supplied the side's required edge; and the lane stamp when the
+        # selected side was cell-admitted.
+        "yes_thr_cell_id": _first_str(
+            _resolve(candidate, decision, ["yes_thr_cell_id"], ["yes_thr_cell_id"])
+        ),
+        "no_thr_cell_id": _first_str(
+            _resolve(candidate, decision, ["no_thr_cell_id"], ["no_thr_cell_id"])
+        ),
+        "yes_thr_cell_min_ev_cents": _first_float(
+            _resolve(candidate, decision, ["yes_thr_cell_min_ev_cents"], ["yes_thr_cell_min_ev_cents"])
+        ),
+        "no_thr_cell_min_ev_cents": _first_float(
+            _resolve(candidate, decision, ["no_thr_cell_min_ev_cents"], ["no_thr_cell_min_ev_cents"])
+        ),
+        "yes_thr_cell_cap_exhausted": _first_bool(
+            _resolve(candidate, decision, ["yes_thr_cell_cap_exhausted"], ["yes_thr_cell_cap_exhausted"])
+        ),
+        "no_thr_cell_cap_exhausted": _first_bool(
+            _resolve(candidate, decision, ["no_thr_cell_cap_exhausted"], ["no_thr_cell_cap_exhausted"])
+        ),
+        "threshold_cell_id": _first_str(
+            _resolve(candidate, decision, ["threshold_cell_id"], ["threshold_cell_id"])
+        ),
         "yes_eligible": _first_bool(
             _resolve(candidate, decision, ["yes_eligible", "yes_qualifies"], ["yes_eligible", "yes_qualifies"])
         ),
@@ -676,6 +700,10 @@ def build_asset_record(
         "shadow_yes_ev_cents", "shadow_no_ev_cents",
         "shadow_selected_side", "shadow_p_source",
         "regime_reject_cause", "yes_regime_no_tte", "no_regime_no_tte",
+        # Self-explanatory band rejection + book-source provenance.
+        "yes_price_band_lo", "yes_price_band_hi", "yes_price_band_reason",
+        "no_price_band_lo", "no_price_band_hi", "no_price_band_reason",
+        "quote_owner", "book_source_degraded", "book_source_reserve_cents",
     ):
         record[_k] = _resolve(candidate, decision, [_k], [_k])
 
@@ -751,6 +779,65 @@ def _fmt_ev(value: Any) -> str:
     return f"{v:+.0f}c"
 
 
+def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
+    """Check the terminal-code / economics invariants on a decision record.
+
+    Returns a list of violation strings (empty when clean).  These are the
+    cross-field identities that make a terminal code trustworthy:
+    best_ev == max(side EVs), shortfall == threshold - best_ev, and the
+    terminal code must agree with the economics it claims to summarize.
+    """
+    violations: List[str] = []
+    if record.get("type") != "decision_record":
+        return violations
+    best_ev = record.get("best_executable_ev_cents")
+    yes_ev = record.get("yes_ev_net_cents")
+    no_ev = record.get("no_ev_net_cents")
+    thr = record.get("best_required_edge_cents")
+    shortfall = record.get("edge_shortfall_cents")
+    code = record.get("terminal_code")
+    # Only economics-evaluated records can be checked; domain exclusions
+    # (band/TTE/book/spot) legitimately carry no side EVs.
+    economics_evaluated = yes_ev is not None or no_ev is not None
+    if not economics_evaluated:
+        return violations
+    try:
+        if best_ev is not None and yes_ev is not None and no_ev is not None:
+            if abs(float(best_ev) - max(float(yes_ev), float(no_ev))) > 0.51:
+                violations.append(
+                    f"best_executable_ev_cents={best_ev} != max(yes,no)= "
+                    f"{max(float(yes_ev), float(no_ev))}"
+                )
+        if best_ev is not None and thr is not None and shortfall is not None:
+            if abs(float(shortfall) - max(0.0, float(thr) - float(best_ev))) > 0.51:
+                violations.append(
+                    f"edge_shortfall_cents={shortfall} != "
+                    f"thr({thr}) - best_ev({best_ev})"
+                )
+        if code == "NO_POSITIVE_EXECUTABLE_EDGE" and best_ev is not None:
+            if float(best_ev) > 0.05:
+                violations.append(
+                    f"NO_POSITIVE_EXECUTABLE_EDGE but best_ev={best_ev} > 0"
+                )
+        if code == "EDGE_BELOW_DYNAMIC_THRESHOLD":
+            if best_ev is not None and float(best_ev) <= 0.0:
+                violations.append(
+                    f"EDGE_BELOW_DYNAMIC_THRESHOLD but best_ev={best_ev} <= 0"
+                )
+            if (
+                best_ev is not None
+                and thr is not None
+                and float(best_ev) >= float(thr) + 0.51
+            ):
+                violations.append(
+                    f"EDGE_BELOW_DYNAMIC_THRESHOLD but best_ev={best_ev} "
+                    f">= thr={thr}"
+                )
+    except (TypeError, ValueError):
+        pass
+    return violations
+
+
 def emit_cycle(
     cycle_id: int,
     records: List[Dict[str, Any]],
@@ -770,6 +857,12 @@ def emit_cycle(
         logger.info("%s", scorecard)
         ok = True
         for record in records:
+            for _v in _validate_record_invariants(record):
+                logger.warning(
+                    "[TELEMETRY-INVARIANT] asset=%s ticker=%s code=%s violation=%s",
+                    record.get("asset"), record.get("ticker"),
+                    record.get("terminal_code"), _v,
+                )
             ok = writer.append(sanitize(record)) and ok
         scorecard_record = {
             "type": "decision_scorecard",

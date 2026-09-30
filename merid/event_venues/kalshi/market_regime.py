@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from utils.logger import get_logger
 
@@ -177,6 +177,50 @@ def classify_market_regime(
             return regime
     
     return None
+
+
+def describe_price_band(price_cents: int) -> Dict[str, Any]:
+    """Return the band window containing ``price_cents`` for audit telemetry.
+
+    Unlike :func:`classify_market_regime` this ignores TTE and reports the
+    disabled-tail windows explicitly, so a ``NO_ELIGIBLE_PRICE_BAND`` record
+    can show the exact bounds and rule the price violated.  Shared policy:
+    identical result for any asset.
+    """
+    for _name, _r in REGIME_CONFIGS.items():
+        if _name == "disabled_tail":
+            continue
+        if _r.min_price_cents <= price_cents <= _r.max_price_cents:
+            return {
+                "band": _r.name,
+                "lo": _r.min_price_cents,
+                "hi": _r.max_price_cents,
+                "enabled": bool(_r.enabled),
+                "min_tte_s": _r.min_time_to_expiry_seconds,
+                "rule_id": f"market_regime_v1:{_r.name}",
+                "reason": "enabled_band",
+            }
+    if 1 <= price_cents <= 9:
+        _band = "disabled_tail_low"
+        _lo, _hi = 1, 9
+    elif 91 <= price_cents <= 99:
+        _band = "disabled_tail_high"
+        _lo, _hi = 91, 99
+    elif price_cents < 1:
+        _band = "below_floor"
+        _lo, _hi = None, 0
+    else:
+        _band = "above_ceiling"
+        _lo, _hi = 100, None
+    return {
+        "band": _band,
+        "lo": _lo,
+        "hi": _hi,
+        "enabled": False,
+        "min_tte_s": None,
+        "rule_id": f"market_regime_v1:{_band}",
+        "reason": f"price_in_disabled_tail:{_band}",
+    }
 
 
 @dataclass(frozen=True)
