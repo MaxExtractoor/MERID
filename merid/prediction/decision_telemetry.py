@@ -552,6 +552,49 @@ def build_asset_record(
         "threshold_cell_miss_no": _first_str(
             _resolve(candidate, decision, ["threshold_cell_miss_no"], ["threshold_cell_miss_no"])
         ),
+        # Admission owner (2026-09-30): which policy owned each side's
+        # admission decision — threshold_cell | evidence_escape | formula |
+        # price_band | hard_block — so a rejection names its true blocker
+        # instead of an opaque gate conflict.
+        "yes_admission_owner": _first_str(
+            _resolve(candidate, decision, ["yes_admission_owner"], ["yes_admission_owner"])
+        ),
+        "yes_admission_decision": _first_str(
+            _resolve(candidate, decision, ["yes_admission_decision"], ["yes_admission_decision"])
+        ),
+        "yes_admission_reason": _first_str(
+            _resolve(candidate, decision, ["yes_admission_reason"], ["yes_admission_reason"])
+        ),
+        "no_admission_owner": _first_str(
+            _resolve(candidate, decision, ["no_admission_owner"], ["no_admission_owner"])
+        ),
+        "no_admission_decision": _first_str(
+            _resolve(candidate, decision, ["no_admission_decision"], ["no_admission_decision"])
+        ),
+        "no_admission_reason": _first_str(
+            _resolve(candidate, decision, ["no_admission_reason"], ["no_admission_reason"])
+        ),
+        "admission_owner": _first_str(
+            _resolve(candidate, decision, ["admission_owner"], ["admission_owner"])
+        ),
+        "admission_decision": _first_str(
+            _resolve(candidate, decision, ["admission_decision"], ["admission_decision"])
+        ),
+        "admission_reason": _first_str(
+            _resolve(candidate, decision, ["admission_reason"], ["admission_reason"])
+        ),
+        "yes_evidence_override": _first_str(
+            _resolve(candidate, decision, ["yes_evidence_override"], ["yes_evidence_override"])
+        ),
+        "no_evidence_override": _first_str(
+            _resolve(candidate, decision, ["no_evidence_override"], ["no_evidence_override"])
+        ),
+        "yes_evidence_override_denied": _first_str(
+            _resolve(candidate, decision, ["yes_evidence_override_denied"], ["yes_evidence_override_denied"])
+        ),
+        "no_evidence_override_denied": _first_str(
+            _resolve(candidate, decision, ["no_evidence_override_denied"], ["no_evidence_override_denied"])
+        ),
         "yes_thr_cell_block_reason": _first_str(
             _resolve(candidate, decision, ["yes_thr_cell_block_reason"], ["yes_thr_cell_block_reason"])
         ),

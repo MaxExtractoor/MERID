@@ -914,6 +914,72 @@ def build_cells(
 
 
 # ---------------------------------------------------------------------------
+# Multi-horizon decayed-evidence report (diagnostic)
+# ---------------------------------------------------------------------------
+
+def decayed_evidence_report(
+    evidence: Dict[str, Any],
+    asset: str,
+    side: str,
+    entry_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+    fee_frac: float = 0.0,
+) -> Dict[str, Any]:
+    """Per-horizon matched-cohort posterior for telemetry.
+
+    w(d) = 2**(-d/H) is already applied at artifact build time; the artifact
+    stores one cell table per half-life variant (H=7 responsive view,
+    H=21 stable view).  This report re-aggregates the finest-grain cohort
+    (asset x side x price-bucket x TTE-bucket) under each variant so a
+    soft-override record can show whether the recent regime agrees with the
+    stable prior.  ``*_raw`` columns are the undecayed observation counts —
+    the full-history diagnostic view.
+
+    Diagnostic only: a drifted hard block is an operator-review item, never
+    an auto-downgrade — ``drift_score`` informs review, it does not flip a
+    MATCHING_TOXIC_CELL into a soft verdict.
+    """
+    variants = evidence.get("cells")
+    if not isinstance(variants, dict) or not variants:
+        return {}
+    pb = price_bucket(entry_price_cents)
+    tb = tte_bucket(tte_seconds)
+    out: Dict[str, Any] = {}
+    for hkey in ("7", "21"):
+        sub = variants.get(hkey)
+        if not isinstance(sub, dict):
+            continue
+        agg = aggregate_at_level(
+            sub, asset, side, pb, tb, _HIERARCHY[0][1]
+        )
+        # Leave-one-out parent = asset x side level minus the exact cohort.
+        broad = aggregate_at_level(
+            sub, asset, side, pb, tb, ("asset", "side")
+        ).minus(agg)
+        alpha, bet, mean, lcb = _posterior(agg, broad)
+        out[f"h{hkey}_n_eff"] = round(agg.n_eff, 3)
+        out[f"h{hkey}_n_raw"] = agg.n_raw
+        out[f"h{hkey}_wr"] = round(mean, 4)
+        out[f"h{hkey}_lcb_wr"] = round(lcb, 4)
+        if entry_price_cents is not None:
+            out[f"h{hkey}_lcb_ev_cents"] = round(
+                (lcb - float(entry_price_cents) / 100.0 - float(fee_frac))
+                * 100.0,
+                3,
+            )
+    # User-facing aliases: historical = stable (H21) view, recent = H7.
+    if "h21_n_eff" in out:
+        out["historical_prior_n_eff"] = out["h21_n_eff"]
+        out["historical_lcb"] = out.get("h21_lcb_ev_cents")
+    if "h7_n_eff" in out:
+        out["recent_n_eff"] = out["h7_n_eff"]
+        out["recent_lcb"] = out.get("h7_lcb_ev_cents")
+    if out.get("recent_lcb") is not None and out.get("historical_lcb") is not None:
+        out["drift_score"] = round(out["recent_lcb"] - out["historical_lcb"], 3)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Escape-lane daily cap (durable one-line counter)
 # ---------------------------------------------------------------------------
 

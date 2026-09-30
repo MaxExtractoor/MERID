@@ -42,6 +42,10 @@ Each cell carries a persistent lane state in ``data/threshold_cell_lane.json``:
   separate review widens it.
 
 Automatic suspension (evaluated on every recorded fill / router reject):
+  - pre-five emergency rules: 5s markout <= -3c on the first fill, first
+    settled trade losing more than candidate EV + 2c stress, nonpositive
+    fill-time EV, two consecutive router rejects, or a price/side mapping
+    invariant violation (``record_cell_invariant_violation``, immediate);
   - rolling ``MERID_THRESHOLD_CELL_SUSPEND_MIN_FILLS`` (default 5) filled
     trades: mean realized net PnL < ``_SUSPEND_MEAN_PNL`` (default -1c);
   - rolling 5 fills with a 5s markout: median markout_5s <
@@ -55,11 +59,15 @@ Automatic suspension (evaluated on every recorded fill / router reject):
     failures recorded for the cell.
 
 Caps (all independent):
-  - ``MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS`` (default 20): global lane
+  - ``MERID_THRESHOLD_CELL_PER_CELL_MAX_SUBMISSIONS`` (default 5): candidate
+    submissions per cell per UTC day.
+  - ``MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS`` (default 15): global lane
     submissions/day.  ``MERID_THRESHOLD_CELL_DAILY_MAX`` remains as a legacy
     alias.
-  - ``MERID_THRESHOLD_CELL_DAILY_MAX_FILLS`` (default 3): filled trades per
+  - ``MERID_THRESHOLD_CELL_DAILY_MAX_FILLS`` (default 2): filled trades per
     cell per UTC day — fills, not submissions, are the exposure.
+  - ``MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_TOTAL`` (default 3): lane-wide
+    fills/day across all cells.
   - ``MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS`` (default 1): resting orders per
     cell, tracked via the fill-quality tracker.
 
@@ -173,6 +181,64 @@ THRESHOLD_CELLS: List[ThresholdCell] = [
         2.2,
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Five-asset registry (2026-09-30)
+# ---------------------------------------------------------------------------
+# Every first-class 15m asset is listed, even when it has zero enabled cells.
+# An empty tuple means "no historically qualified cell currently exists —
+# evaluate through the shared formula path and keep emitting discovery
+# telemetry", never "do not evaluate this asset".  Cells are enabled by
+# asset x side x price x TTE data, not by asset-level branches.
+ALL_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+
+CELLS_BY_ASSET: Dict[str, Tuple[str, ...]] = {
+    "BTC": (),
+    "ETH": (),
+    "SOL": ("sol_no_30_60_t120_600", "sol_no_60_80_t120_600"),
+    "XRP": ("xrp_no_30_40_t120_600", "xrp_no_80_90_t120_600"),
+    "DOGE": (
+        "doge_no_20_30_t120_600",
+        "doge_no_40_50_t120_600",
+        "doge_no_70_90_t120_600",
+    ),
+}
+assert set(CELLS_BY_ASSET) == set(ALL_ASSETS), "registry must cover ALL_ASSETS"
+assert {
+    cid for ids in CELLS_BY_ASSET.values() for cid in ids
+} == {c.cell_id for c in THRESHOLD_CELLS}, "CELLS_BY_ASSET must mirror THRESHOLD_CELLS"
+
+
+def cells_for_asset(asset: str) -> Tuple[str, ...]:
+    """Enabled cell ids for an asset (empty -> formula path, still evaluated)."""
+    return CELLS_BY_ASSET.get(str(asset).upper(), ())
+
+
+# Soft evidence codes the threshold-cell lane may override under its own
+# caps/suspension state.  These are uncertainty or generic-budget verdicts,
+# never adverse matched evidence:
+#   SPARSE_MATCHED_INSUFFICIENT - no adequately-sampled price-matched cell.
+#   SOFT_PENALTY_INSUFFICIENT   - matched LCB short, no contradiction.
+#   CHALLENGE_INSUFFICIENT      - recent outcomes contradict prior but the
+#                                 model edge did not clear the challenge
+#                                 margin on its own.
+#   ESCAPE_CAP_EXHAUSTED        - candidate cleared the uncertainty reserve
+#                                 but the *generic* escape-lane daily budget
+#                                 (shared with non-cell trades) is spent.
+#   CHALLENGE_CAP_EXHAUSTED     - same generic escape budget reached via the
+#                                 challenge path.
+# Hard verdicts — MATCHING_TOXIC_CELL, CELL_EVIDENCE_INSUFFICIENT (matched,
+# adequately-sampled adverse posterior), EVIDENCE_*_INSUFFICIENT without
+# cells, *_LANE_DISABLED (deliberate config), and matching_hard_block=True —
+# are never bypassable.
+SOFT_EVIDENCE_CODES = frozenset({
+    "SPARSE_MATCHED_INSUFFICIENT",
+    "SOFT_PENALTY_INSUFFICIENT",
+    "CHALLENGE_INSUFFICIENT",
+    "ESCAPE_CAP_EXHAUSTED",
+    "CHALLENGE_CAP_EXHAUSTED",
+})
 
 
 def threshold_cells_enabled() -> bool:
@@ -319,7 +385,7 @@ FUNNEL_STAGES = (
     "matched",
     "blocked_by_price_band",
     "blocked_by_evidence",
-    "sparse_override",
+    "soft_evidence_override",
     "emitted",
     "allocator_rejected",
     "router_rejected",
@@ -804,13 +870,13 @@ def _evaluate_suspension(cell_id: str) -> None:
                 f"first_fill_markout_5s={float(m5):+.2f}c <= -3.00c",
             )
             return
-        # Fill-time EV negative after revalidation: the passive fill landed
-        # strictly worse than the decision economics allowed.
+        # Fill-time EV nonpositive after revalidation: the passive fill
+        # landed at or beyond the edge the decision economics assumed.
         fev = first.get("fill_ev_cents")
-        if fev is not None and float(fev) < 0.0:
+        if fev is not None and float(fev) <= 0.0:
             _suspend_cell(
                 cell_id,
-                f"fill_ev_below_zero={float(fev):+.2f}c",
+                f"fill_ev_nonpositive={float(fev):+.2f}c",
             )
             return
         # First settled trade lost more than expected edge + 2c stress.
@@ -824,11 +890,11 @@ def _evaluate_suspension(cell_id: str) -> None:
                     f"first_trade_pnl={float(pnl):+.2f}c < -(edge {float(cand):+.2f}c + 2c)",
                 )
                 return
-    # Any fill (not just the first) with negative fill-time EV suspends.
+    # Any fill (not just the first) with nonpositive fill-time EV suspends.
     for o in fills:
         fev = o.get("fill_ev_cents")
-        if fev is not None and float(fev) < 0.0:
-            _suspend_cell(cell_id, f"fill_ev_below_zero={float(fev):+.2f}c")
+        if fev is not None and float(fev) <= 0.0:
+            _suspend_cell(cell_id, f"fill_ev_nonpositive={float(fev):+.2f}c")
             return
 
     # Rolling-N realized net PnL (settled outcomes only).
@@ -937,31 +1003,41 @@ def threshold_cell_sparse_override_enabled() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
-def may_bypass_sparse_evidence(
+def threshold_cell_admission_allowed(
     cell_id: Optional[str],
     evidence_code: Optional[str],
     matching_hard_block: bool,
     net_ev_cents: Optional[float],
     effective_required_edge_cents: Optional[float],
 ) -> Tuple[bool, Optional[str]]:
-    """Bounded sparse-evidence override for the threshold-cell lane.
+    """Bounded soft-evidence override for the threshold-cell lane.
 
-    The lane exists to generate the first *live* fill evidence inside
-    historically qualified cohorts — evidence the settled-outcome store can
-    never contain while the gate blocks every entry.  The override admits a
-    cell-matched candidate past ``SPARSE_MATCHED_INSUFFICIENT`` only.  Hard
-    blocks (``MATCHING_TOXIC_CELL``), soft-penalty lanes, low-EV candidates,
-    suspended/capped lanes, and unmatched inputs all keep their original
-    rejection.  Returns (allowed, reason).
+    A matched, historically qualified cell whose *current* executable net EV
+    clears its own effective threshold owns the admission decision for its
+    candidate: soft evidence verdicts (``SOFT_EVIDENCE_CODES``) are routed
+    through the cell lane's own caps and suspension state instead of the
+    generic escape-lane budget.  Hard blocks (``matching_hard_block``,
+    ``MATCHING_TOXIC_CELL``, matched adverse posteriors such as
+    ``CELL_EVIDENCE_INSUFFICIENT``), disabled config lanes
+    (``*_LANE_DISABLED``), low-EV candidates, suspended/capped lanes, and
+    unmatched inputs keep their original rejection.
+
+    Returns ``(allowed, reason)``.  ``reason`` is None both when allowed and
+    when the candidate simply has no cell (not this policy's decision).
     """
     if not cell_id:
         return False, None
+    # Registered cells only — a synthetic or stale id must never admit.
+    # Membership is checked against the live table so tests/updates that
+    # modify THRESHOLD_CELLS take effect immediately.
+    if all(c.cell_id != cell_id for c in THRESHOLD_CELLS):
+        return False, "unknown_cell_id"
     if not threshold_cell_sparse_override_enabled():
-        return False, "sparse_override_disabled"
+        return False, "soft_override_disabled"
     if matching_hard_block:
         return False, "matching_hard_block"
-    if evidence_code != "SPARSE_MATCHED_INSUFFICIENT":
-        return False, f"evidence_code_not_sparse:{evidence_code}"
+    if evidence_code not in SOFT_EVIDENCE_CODES:
+        return False, f"evidence_code_not_soft:{evidence_code}"
     if net_ev_cents is None or effective_required_edge_cents is None:
         return False, "missing_ev_or_threshold"
     if float(net_ev_cents) < float(effective_required_edge_cents):
@@ -973,6 +1049,39 @@ def may_bypass_sparse_evidence(
     if not allowed:
         return False, block
     return True, None
+
+
+# Backwards-compatible alias (earlier name covered only SPARSE_*).
+def may_bypass_sparse_evidence(
+    cell_id: Optional[str],
+    evidence_code: Optional[str],
+    matching_hard_block: bool,
+    net_ev_cents: Optional[float],
+    effective_required_edge_cents: Optional[float],
+) -> Tuple[bool, Optional[str]]:
+    return threshold_cell_admission_allowed(
+        cell_id, evidence_code, matching_hard_block,
+        net_ev_cents, effective_required_edge_cents,
+    )
+
+
+def record_cell_invariant_violation(cell_id: Optional[str], reason: str) -> None:
+    """Immediate suspension: a filled threshold-cell order violated a
+    price/side mapping invariant.  This is structural corruption, not
+    performance — no rolling window applies."""
+    if not cell_id:
+        return
+    logger.warning(
+        "[THRESHOLD-CELL-SUSPEND] cell=%s invariant_violation=%s",
+        cell_id, reason,
+    )
+    _suspend_cell(cell_id, f"invariant_violation:{str(reason)[:120]}")
+    emit_cell_lifecycle(
+        "suspended",
+        threshold_cell_id=cell_id,
+        terminal_state="SUSPENDED",
+        reason=f"invariant_violation:{str(reason)[:120]}",
+    )
 
 
 # ---------------------------------------------------------------------------

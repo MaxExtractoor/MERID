@@ -472,11 +472,13 @@ def test_sparse_override_never_bypasses_hard_block():
     assert ok is False and reason == "matching_hard_block"
 
 
-def test_sparse_override_rejects_non_sparse_codes():
+def test_soft_override_rejects_non_soft_codes():
     from merid.prediction.threshold_cells import may_bypass_sparse_evidence
     cell = _cell()
     for code in ("MATCHING_TOXIC_CELL", "EVIDENCE_EMPTY_INSUFFICIENT",
-                 "SOFT_PENALTY_INSUFFICIENT", "SPARSE_MATCHED_PASS"):
+                 "CELL_EVIDENCE_INSUFFICIENT", "SPARSE_MATCHED_PASS",
+                 "ESCAPE_LANE_DISABLED", "SOFT_PENALTY_LANE_DISABLED",
+                 "CHALLENGE_LANE_DISABLED"):
         ok, reason = may_bypass_sparse_evidence(
             cell_id=cell.cell_id,
             evidence_code=code,
@@ -484,7 +486,38 @@ def test_sparse_override_rejects_non_sparse_codes():
             net_ev_cents=9.0,
             effective_required_edge_cents=1.5,
         )
-        assert ok is False and reason and reason.startswith("evidence_code_not_sparse")
+        assert ok is False and reason and reason.startswith("evidence_code_not_soft")
+
+
+@pytest.mark.parametrize("code", sorted({
+    "SPARSE_MATCHED_INSUFFICIENT", "SOFT_PENALTY_INSUFFICIENT",
+    "CHALLENGE_INSUFFICIENT", "ESCAPE_CAP_EXHAUSTED",
+    "CHALLENGE_CAP_EXHAUSTED",
+}))
+def test_soft_override_admits_all_soft_codes(code):
+    """The generic escape budget must not gate a qualified cell candidate."""
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code=code,
+        matching_hard_block=False,
+        net_ev_cents=2.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is True and reason is None
+
+
+def test_soft_override_rejects_unknown_cell_id():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id="btc_no_50_60_t120_600",  # no approved BTC cell
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=9.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "unknown_cell_id"
 
 
 def test_sparse_override_requires_ev_above_cell_threshold():
@@ -526,7 +559,7 @@ def test_sparse_override_kill_switch(monkeypatch):
         net_ev_cents=9.0,
         effective_required_edge_cents=1.5,
     )
-    assert ok is False and reason == "sparse_override_disabled"
+    assert ok is False and reason == "soft_override_disabled"
 
 
 def test_sparse_override_respects_caps(monkeypatch):
@@ -603,3 +636,140 @@ def test_historical_lcb10_on_cells():
     assert by_id["sol_no_30_60_t120_600"].historical_lcb10_cents == 8.8
     assert by_id["doge_no_70_90_t120_600"].historical_lcb10_cents == 6.2
     assert all(c.historical_lcb10_cents > 0 for c in THRESHOLD_CELLS)
+
+# ---------------------------------------------------------------------------
+# Five-asset parity: every asset uses the same admission resolver
+# ---------------------------------------------------------------------------
+
+ALL_FIVE = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+SOFT_CODES = (
+    "SPARSE_MATCHED_INSUFFICIENT",
+    "SOFT_PENALTY_INSUFFICIENT",
+    "CHALLENGE_INSUFFICIENT",
+    "ESCAPE_CAP_EXHAUSTED",
+    "CHALLENGE_CAP_EXHAUSTED",
+)
+
+
+def _register_cell(monkeypatch, asset):
+    """Attach a synthetic approved cell for ANY asset — proves the resolver
+    treats asset as data, not as a policy branch."""
+    import merid.prediction.threshold_cells as _tc_mod
+    cell = ThresholdCell(
+        f"{asset.lower()}_no_40_60_t120_600", asset, "no",
+        40, 60, 120.0, 600.0, 2.0, "test", 5.0,
+    )
+    monkeypatch.setattr(_tc_mod, "THRESHOLD_CELLS",
+                        list(_tc_mod.THRESHOLD_CELLS) + [cell])
+    return cell
+
+
+@pytest.mark.parametrize("asset", ALL_FIVE)
+@pytest.mark.parametrize("code", SOFT_CODES)
+def test_any_asset_cell_owns_soft_evidence(monkeypatch, asset, code):
+    """A registered cell + EV clearing its bar + soft evidence -> cell lane
+    admits, for every asset including BTC/ETH (no asset-specific branches)."""
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _register_cell(monkeypatch, asset)
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code=code,
+        matching_hard_block=False,
+        net_ev_cents=3.0,
+        effective_required_edge_cents=2.0,
+    )
+    assert ok is True and reason is None
+
+
+@pytest.mark.parametrize("asset", ALL_FIVE)
+def test_hard_block_cannot_be_bypassed_any_asset(monkeypatch, asset):
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _register_cell(monkeypatch, asset)
+    for code in ("MATCHING_TOXIC_CELL", "CELL_EVIDENCE_INSUFFICIENT",
+                 "SPARSE_MATCHED_INSUFFICIENT"):
+        ok, reason = may_bypass_sparse_evidence(
+            cell_id=cell.cell_id,
+            evidence_code=code,
+            matching_hard_block=True,
+            net_ev_cents=9.0,
+            effective_required_edge_cents=2.0,
+        )
+        assert ok is False and reason == "matching_hard_block"
+
+
+@pytest.mark.parametrize("asset", ALL_FIVE)
+def test_non_soft_codes_rejected_any_asset(monkeypatch, asset):
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _register_cell(monkeypatch, asset)
+    for code in ("MATCHING_TOXIC_CELL", "CELL_EVIDENCE_INSUFFICIENT",
+                 "EVIDENCE_EMPTY_INSUFFICIENT", "ESCAPE_LANE_DISABLED"):
+        ok, reason = may_bypass_sparse_evidence(
+            cell_id=cell.cell_id,
+            evidence_code=code,
+            matching_hard_block=False,
+            net_ev_cents=9.0,
+            effective_required_edge_cents=2.0,
+        )
+        assert ok is False and reason.startswith("evidence_code_not_soft")
+
+
+@pytest.mark.parametrize("asset", ALL_FIVE)
+def test_negative_ev_never_uses_override_any_asset(monkeypatch, asset):
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _register_cell(monkeypatch, asset)
+    for ev in (-0.1, 0.0, 1.99):
+        ok, reason = may_bypass_sparse_evidence(
+            cell_id=cell.cell_id,
+            evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+            matching_hard_block=False,
+            net_ev_cents=ev,
+            effective_required_edge_cents=2.0,
+        )
+        assert ok is False and reason == "ev_below_cell_threshold"
+
+
+def test_registry_covers_all_five_assets():
+    from merid.prediction.threshold_cells import (
+        ALL_ASSETS, CELLS_BY_ASSET, cells_for_asset,
+    )
+    assert set(CELLS_BY_ASSET) == set(ALL_ASSETS) == set(ALL_FIVE)
+    assert cells_for_asset("BTC") == ()
+    assert cells_for_asset("ETH") == ()
+    # BTC/ETH resolve cleanly through the shared resolver (no cell -> formula).
+    assert resolve_threshold_cell("BTC", "no", 45.0, 300.0) is None
+    assert explain_cell_miss("BTC", "no", 45.0, 300.0) == "no_cells_for_asset_side"
+    assert explain_cell_miss("ETH", "no", 45.0, 300.0) == "no_cells_for_asset_side"
+
+
+def test_invariant_violation_suspends_immediately():
+    from merid.prediction.threshold_cells import record_cell_invariant_violation
+    cell = _cell()
+    record_cell_invariant_violation(cell.cell_id, "side_flip:no_fill_on_yes_leg")
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_zero_fill_time_ev_suspends():
+    """Nonpositive (<=0) revalidated fill-time EV suspends on first fill."""
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0",
+                     fill_ev_cents=0.0, candidate_ev_cents=2.0)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_decayed_report_fields(monkeypatch):
+    """decayed_evidence_report emits H7/H21 horizons + drift aliases."""
+    from merid.prediction import evidence_policy as ep
+    ev_artifact = {
+        "cells": {
+            "7": {"SOL|no|25-49|mid": {"w": 4.0, "l": 1.0, "n_eff": 5.0,
+                                       "n_raw": 5, "entry_wsum": 200.0}},
+            "21": {"SOL|no|25-49|mid": {"w": 9.0, "l": 4.0, "n_eff": 13.0,
+                                        "n_raw": 13, "entry_wsum": 520.0}},
+        }
+    }
+    rep = ep.decayed_evidence_report(ev_artifact, "SOL", "no", 40.0, 350.0, 0.0)
+    assert rep["h7_n_eff"] == 5.0 and rep["h21_n_eff"] == 13.0
+    assert rep["recent_n_eff"] == rep["h7_n_eff"]
+    assert rep["historical_prior_n_eff"] == rep["h21_n_eff"]
+    assert "recent_lcb" in rep and "historical_lcb" in rep
+    assert "drift_score" in rep

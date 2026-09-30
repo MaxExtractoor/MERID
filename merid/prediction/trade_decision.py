@@ -29,7 +29,7 @@ from merid.prediction.threshold_cells import (
     emit_cell_lifecycle,
     explain_cell_miss,
     get_cell_state,
-    may_bypass_sparse_evidence,
+    threshold_cell_admission_allowed,
     resolve_threshold_cell,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
@@ -2738,17 +2738,18 @@ def compute_trade_decision(
                     if _ed.escape_required:
                         indicators[f"evidence_escape_{_side}"] = True
                     if not _ed.allowed:
-                        # 2026-09-30: bounded sparse-evidence override for the
+                        # 2026-09-30: bounded soft-evidence override for the
                         # threshold-cell lane.  A matched, historically
                         # qualified cell whose current net EV already clears
-                        # its own effective threshold may pass
-                        # SPARSE_MATCHED_INSUFFICIENT — the lane exists to
-                        # generate the live fill evidence the settled-outcome
-                        # store can never contain while every entry is gated.
-                        # Hard blocks, non-sparse codes, low-EV candidates, and
-                        # suspended/capped lanes keep their original rejection.
+                        # its own effective threshold owns its admission —
+                        # soft verdicts (SOFT_EVIDENCE_CODES, incl. the
+                        # generic escape-lane budget) route through the cell
+                        # lane's own caps/suspension instead of the shared
+                        # escape budget.  Hard blocks, non-soft codes,
+                        # low-EV candidates, and suspended/capped lanes keep
+                        # their original rejection.
                         _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
-                        _ovr_ok, _ovr_reason = may_bypass_sparse_evidence(
+                        _ovr_ok, _ovr_reason = threshold_cell_admission_allowed(
                             cell_id=_d.cell_id,
                             evidence_code=_ed.code,
                             matching_hard_block=bool(_ed.matching_hard_block),
@@ -2758,9 +2759,14 @@ def compute_trade_decision(
                             ),
                         )
                         if _ovr_ok:
-                            bump_cell_funnel("sparse_override", _d.cell_id)
+                            bump_cell_funnel("soft_evidence_override", _d.cell_id)
+                            indicators[f"{_side}_admission_owner"] = "threshold_cell"
+                            indicators[f"{_side}_admission_decision"] = "allowed"
+                            indicators[f"{_side}_admission_reason"] = (
+                                "qualified_cell_soft_evidence_override"
+                            )
                             indicators[f"{_side}_evidence_override"] = (
-                                "threshold_cell_sparse_provisional"
+                                "threshold_cell_soft_evidence_provisional"
                             )
                             indicators[f"{_side}_evidence_override_detail"] = (
                                 _ed.detail()
@@ -2771,9 +2777,13 @@ def compute_trade_decision(
                                      if c.cell_id == _d.cell_id),
                                     None,
                                 )
+                                _decay = evidence_policy.decayed_evidence_report(
+                                    _live_ev, asset, _side, _px,
+                                    seconds_to_expiry,
+                                )
                                 emit_cell_lifecycle(
-                                    "sparse_evidence_override",
-                                    event="threshold_cell_sparse_override",
+                                    "soft_evidence_override",
+                                    event="threshold_cell_soft_evidence_override",
                                     threshold_cell_id=_d.cell_id,
                                     asset=asset,
                                     side=_side.upper(),
@@ -2804,15 +2814,46 @@ def compute_trade_decision(
                                     tte_seconds=seconds_to_expiry,
                                     price_cents=_px,
                                     decision_id=decision_id,
+                                    admission_owner="threshold_cell",
+                                    decayed_evidence=_decay,
                                     terminal_state="override_admitted",
                                 )
                             except Exception:
                                 pass
                         else:
-                            if _d.cell_id is not None and _ovr_reason:
+                            # The cell matched but could not admit — name the
+                            # owner and the true blocker for audit.
+                            if _d.cell_id is not None:
+                                indicators[f"{_side}_admission_owner"] = (
+                                    "hard_block"
+                                    if _ed.matching_hard_block
+                                    or _ed.code == "MATCHING_TOXIC_CELL"
+                                    else "threshold_cell"
+                                )
+                                indicators[f"{_side}_admission_decision"] = (
+                                    "blocked"
+                                )
+                                indicators[f"{_side}_admission_reason"] = (
+                                    _ovr_reason or _ed.code.lower()
+                                )
                                 indicators[
                                     f"{_side}_evidence_override_denied"
                                 ] = _ovr_reason
+                            else:
+                                indicators[f"{_side}_admission_owner"] = (
+                                    "evidence_escape"
+                                )
+                                indicators[f"{_side}_admission_decision"] = (
+                                    "blocked"
+                                )
+                                indicators[f"{_side}_admission_reason"] = (
+                                    "generic_escape_budget_exhausted"
+                                    if _ed.code in (
+                                        "ESCAPE_CAP_EXHAUSTED",
+                                        "CHALLENGE_CAP_EXHAUSTED",
+                                    )
+                                    else _ed.code.lower()
+                                )
                             _reason_stem = {
                                 "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
                                 "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
@@ -2834,6 +2875,17 @@ def compute_trade_decision(
                                 no_evidence_ok = False
                                 no_evidence_reason = f"{_reason_stem}_no"
                                 indicators[no_evidence_reason] = _ed.detail()
+                    else:
+                        # Evidence passed cleanly — name the owner so the
+                        # admission lineage is explicit either way.
+                        _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
+                        indicators[f"{_side}_admission_owner"] = (
+                            "threshold_cell" if _d.cell_id is not None
+                            else "evidence_escape" if _ed.escape_required
+                            else "formula"
+                        )
+                        indicators[f"{_side}_admission_decision"] = "allowed"
+                        indicators[f"{_side}_admission_reason"] = _ed.code.lower()
             else:
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee
@@ -3426,11 +3478,21 @@ def compute_trade_decision(
         p_yes_calibrated = max(0.05, min(0.95, float(p_yes_raw)))
         p_no_calibrated = 1.0 - p_yes_calibrated
 
-    # Cell-aware evidence escape lane: a pass resting on sparse/pooled cell
-    # evidence is admissible only as a bounded post-only canary entry.  The
-    # lane marker is consumed by the order-style forcing block in
-    # agent_grid_15m (maker post-only, one contract, daily cap).
+    # Lane precedence (2026-09-30): a qualified threshold cell owns its
+    # candidate end-to-end — the generic evidence escape lane (and its
+    # shared daily budget) applies only to non-cell candidates.  A
+    # cell-matched selection is stamped ``threshold_cell`` first; the escape
+    # stamp is considered only when no cell matched the selected side.
     if selected_outcome is not None:
+        _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
+        if _sel_thr.cell_id is not None and not indicators.get("decision_lane"):
+            indicators["decision_lane"] = "threshold_cell"
+            indicators["threshold_cell_id"] = _sel_thr.cell_id
+            indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
+
+        # Generic evidence escape lane: a pass resting on sparse/pooled cell
+        # evidence is admissible only as a bounded post-only canary entry —
+        # and only for candidates without a matched threshold cell.
         _sel_ev = indicators.get(f"evidence_{selected_outcome}") or {}
         if (
             isinstance(_sel_ev, dict)
@@ -3440,19 +3502,16 @@ def compute_trade_decision(
         ):
             indicators["decision_lane"] = "evidence_cell_escape"
 
-        # Conditional threshold-cell lane: the selected side was admitted by a
-        # data-qualified cell (threshold_cells.py) rather than the generic
-        # formula.  Same bounded execution contract as the escape lane —
-        # one contract, post-only — enforced by the order-style block in
-        # agent_grid_15m.  Does not override an existing lane marker.
-        if not indicators.get("decision_lane"):
-            _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
-            if _sel_thr.cell_id is not None:
-                indicators["decision_lane"] = "threshold_cell"
-        _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
         if _sel_thr.cell_id is not None:
             indicators["threshold_cell_id"] = _sel_thr.cell_id
             indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
+
+        # Top-level admission owner mirrors the selected side's per-side
+        # fields (set in the evidence gate above) for audit readability.
+        for _f in ("admission_owner", "admission_decision", "admission_reason"):
+            _v = indicators.get(f"{selected_outcome}_{_f}")
+            if _v is not None:
+                indicators[_f] = _v
 
     decision = TradeDecision(
         run_id=run_id,
