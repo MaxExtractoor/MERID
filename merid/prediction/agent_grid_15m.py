@@ -8438,10 +8438,17 @@ class LeanAgent15m:
         # The evidence-cell escape lane gets the same bounded treatment: its
         # pass rests on sparse/pooled cell evidence, so it enters only as a
         # one-contract post-only order, capped per day.
+        # Conditional threshold-cell lane gets the identical bounded treatment:
+        # admitted by a data-qualified cell (threshold_cells.py), enters only
+        # as a one-contract post-only order.
         _decision_lane = decision.indicators.get("decision_lane")
         if (
             decision.selected_outcome is not None
-            and _decision_lane in ("cheap_tail_canary", "evidence_cell_escape")
+            and _decision_lane in (
+                "cheap_tail_canary",
+                "evidence_cell_escape",
+                "threshold_cell",
+            )
         ):
             logger.info(
                 "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s lane=%s "
@@ -8471,6 +8478,18 @@ class LeanAgent15m:
                     )
                 except Exception:
                     pass
+            if _decision_lane == "threshold_cell":
+                try:
+                    from merid.prediction import threshold_cells as _tc
+                    _n = _tc.record_cell_submission()
+                    logger.info(
+                        "[THRESHOLD-CELL] asset=%s side=%s cell=%s lane submissions today=%d",
+                        asset, decision.selected_outcome,
+                        decision.indicators.get("threshold_cell_id"), _n,
+                    )
+                except Exception:
+                    pass
+            if _decision_lane in ("evidence_cell_escape", "threshold_cell"):
                 if int(decision.approved_size_cc) > 100:
                     decision = replace(decision, approved_size_cc=Decimal("100"))
 
@@ -10066,9 +10085,24 @@ class LeanAgent15m:
         if decision is not None:
             edge_threshold = float(decision.edge_threshold) if decision.edge_threshold is not None else None
             _ind = decision.indicators or {}
+            # Book-source provenance for the normal decision path — proves
+            # whether a rejection rode a degraded REST quote or a trusted WS
+            # book, and that no degraded-source reserve was charged.
+            _ms = None
+            try:
+                _tk = getattr(decision, "ticker", None)
+                if _tk and self.market_state_store is not None:
+                    _ms = self.market_state_store.get(_tk)
+            except Exception:
+                _ms = None
             context.update({
                 "ticker": getattr(decision, "ticker", None),
                 "decision_id": getattr(decision, "decision_id", None),
+                "quote_owner": getattr(_ms, "quote_owner", None),
+                "book_source_degraded": (
+                    bool(getattr(_ms, "degraded_mode", False)) if _ms is not None else None
+                ),
+                "book_source_reserve_cents": 0.0,
                 "spot_price": spot_price,
                 "minutes_to_expiry": (seconds_to_expiry / 60.0) if seconds_to_expiry is not None else None,
                 "model_p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
@@ -10100,6 +10134,13 @@ class LeanAgent15m:
                 "best_executable_ev_cents": _ind.get("best_executable_ev_cents"),
                 "best_required_edge_cents": _ind.get("best_required_edge_cents"),
                 "edge_shortfall_cents": _ind.get("edge_shortfall_cents"),
+                "yes_thr_cell_id": _ind.get("yes_thr_cell_id"),
+                "no_thr_cell_id": _ind.get("no_thr_cell_id"),
+                "yes_thr_cell_min_ev_cents": _ind.get("yes_thr_cell_min_ev_cents"),
+                "no_thr_cell_min_ev_cents": _ind.get("no_thr_cell_min_ev_cents"),
+                "yes_thr_cell_cap_exhausted": _ind.get("yes_thr_cell_cap_exhausted"),
+                "no_thr_cell_cap_exhausted": _ind.get("no_thr_cell_cap_exhausted"),
+                "threshold_cell_id": _ind.get("threshold_cell_id"),
                 "yes_eligible": _ind.get("yes_qualifies"),
                 "no_eligible": _ind.get("no_qualifies"),
                 "yes_block": _ind.get("yes_block"),
@@ -12430,6 +12471,21 @@ class LeanAgent15m:
             )
             _min_ttes = [v for v in (_yes_min_tte, _no_min_tte) if v is not None]
 
+            # Self-explanatory band rejection: per-side band bounds + the
+            # precise rule violated (disabled tail vs TTE floor vs enabled).
+            from merid.event_venues.kalshi.market_regime import describe_price_band
+            _yes_band = describe_price_band(yes_price_cents)
+            _no_band = describe_price_band(no_price_cents)
+            _yes_band_reason = (
+                "tte_floor" if _yes_band["enabled"] and _yes_regime_no_tte is not None
+                else _yes_band["reason"]
+            )
+            _no_band_reason = (
+                "tte_floor" if _no_band["enabled"] and _no_regime_no_tte is not None
+                else _no_band["reason"]
+            )
+            _quote_owner = getattr(market_state, "quote_owner", None) if market_state else None
+
             # Shadow EV: compare both sides' executable prices against the
             # latest model fair prob when one is available on market_state —
             # research observability only; never an entry authorization.
@@ -12489,6 +12545,20 @@ class LeanAgent15m:
                 yes_regime_no_tte=(_yes_regime_no_tte.name if _yes_regime_no_tte else "none"),
                 no_regime_no_tte=(_no_regime_no_tte.name if _no_regime_no_tte else "none"),
                 regime_reject_cause=_regime_reject_cause,
+                yes_price_band_lo=_yes_band["lo"],
+                yes_price_band_hi=_yes_band["hi"],
+                yes_price_band_reason=_yes_band_reason,
+                no_price_band_lo=_no_band["lo"],
+                no_price_band_hi=_no_band["hi"],
+                no_price_band_reason=_no_band_reason,
+                quote_owner=_quote_owner,
+                book_source_degraded=(
+                    bool(getattr(market_state, "degraded_mode", False))
+                    if market_state else None
+                ),
+                # No degraded-source reserve is charged today — the field is
+                # emitted so audits can prove that explicitly.
+                book_source_reserve_cents=0.0,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
                 **_shadow,
             )
