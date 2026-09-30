@@ -850,9 +850,17 @@ class ExecutionRiskFirewall:
     def _persist_decision(self, decision: FirewallDecision) -> None:
         self._decisions[decision.client_order_id] = decision
         try:
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/order_decisions.jsonl", "a") as f:
-                f.write(json.dumps(decision.to_dict(), default=str, sort_keys=True) + "\n")
+            # 2026-09-30: quarantine test writes — pytest runs must never
+            # append to the production decision ledger.
+            _payload = decision.to_dict()
+            _is_test = os.environ.get("PYTEST_CURRENT_TEST") is not None
+            _payload["is_test"] = bool(_is_test)
+            _payload.setdefault("environment", os.environ.get("MERID_ENV", "production"))
+            _log_dir = os.environ.get("MERID_ORDER_DECISIONS_DIR") or "logs"
+            os.makedirs(_log_dir, exist_ok=True)
+            _fname = "order_decisions_test.jsonl" if _is_test else "order_decisions.jsonl"
+            with open(os.path.join(_log_dir, _fname), "a") as f:
+                f.write(json.dumps(_payload, default=str, sort_keys=True) + "\n")
         except Exception as exc:
             logger.debug("[FIREWALL] persist_decision failed: %s", exc)
 

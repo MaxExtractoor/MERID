@@ -48,7 +48,7 @@ def test_terminal_code_waterfall_stages():
             market_open={"status": False, "reason": "price_history=0 < 1 (warmup)"},
         ),
         None, False, "", None,
-    ) == "FEATURE_INVALID"
+    ) == "SPOT_NOT_TRUSTED"
     assert dt._terminal_code(
         _wf(
             market_discovered={"status": True},
@@ -61,25 +61,38 @@ def test_terminal_code_waterfall_stages():
 
 def test_terminal_code_reason_mapping():
     cases = [
-        ("both_sides_disabled_regime", "PRICE_BAND_REJECT"),
-        ("price_band_both_sides_disabled", "PRICE_BAND_REJECT"),
+        ("both_sides_disabled_regime", "NO_ELIGIBLE_PRICE_BAND"),
+        ("price_band_both_sides_disabled", "NO_ELIGIBLE_PRICE_BAND"),
         ("tte_entry_cutoff", "TTE_ENTRY_CUTOFF"),
         ("min_tte_entry_disabled", "TTE_ENTRY_CUTOFF"),
         ("final_minute_entry_disabled", "TTE_ENTRY_CUTOFF"),
-        ("evidence_toxic_cell_no", "TOXIC_CELL_BLOCK"),
-        ("calibration_evidence_yes", "CALIBRATION_QUARANTINE"),
-        ("calibration_evidence_no", "CALIBRATION_QUARANTINE"),
-        ("live_evidence_asset_no", "CALIBRATION_QUARANTINE"),
-        ("live_evidence_cell_no", "CALIBRATION_QUARANTINE"),
-        ("market_fade_blocked_no", "CALIBRATION_QUARANTINE"),
-        ("insufficient_depth", "FILL_OR_DEPTH_REJECT"),
+        ("evidence_toxic_cell_no", "EVIDENCE_HARD_BLOCK"),
+        ("evidence_cell_insufficient_no", "EVIDENCE_HARD_BLOCK"),
+        ("calibration_evidence_yes", "EVIDENCE_HARD_BLOCK"),
+        ("calibration_evidence_no", "EVIDENCE_HARD_BLOCK"),
+        ("live_evidence_asset_no", "EVIDENCE_HARD_BLOCK"),
+        ("live_evidence_cell_no", "EVIDENCE_HARD_BLOCK"),
+        ("market_fade_blocked_no", "EVIDENCE_HARD_BLOCK"),
+        # Soft/sparse/challenge insufficiency = model edge could not clear the
+        # elevated evidence reserve — an edge-threshold failure, not a veto.
+        ("evidence_soft_penalty_insufficient_yes", "EDGE_BELOW_DYNAMIC_THRESHOLD"),
+        ("evidence_challenge_insufficient_no", "EDGE_BELOW_DYNAMIC_THRESHOLD"),
+        ("evidence_sparse_matched_yes", "EDGE_BELOW_DYNAMIC_THRESHOLD"),
+        ("insufficient_depth", "SIDE_NOT_LIQUID"),
+        ("insufficient_depth_no", "SIDE_NOT_LIQUID"),
         ("SKIP_MARKET_NOT_READY", "BOOK_NOT_TRUSTED"),
+        ("invalid_confidence", "BOOK_NOT_TRUSTED"),
         ("cost_basis_override_no", "NO_POSITIVE_EXECUTABLE_EDGE"),
         ("directional_tie", "NO_POSITIVE_EXECUTABLE_EDGE"),
+        ("no_positive_executable_edge", "NO_POSITIVE_EXECUTABLE_EDGE"),
         ("no_trade_without_exit", "ENTRY_LIFECYCLE_INVALID"),
+        ("allocator_not_selected", "ALLOCATION_NOT_SELECTED"),
+        ("allocator_loss", "ALLOCATION_NOT_SELECTED"),
         ("cooldown: x", "RISK_OR_ALLOCATION_REJECT"),
         ("KNAPSACK_CAP", "RISK_OR_ALLOCATION_REJECT"),
         ("exception: boom", "MODEL_UNAVAILABLE"),
+        ("stale_decision_hard_cap", "EXECUTION_REJECT"),
+        ("post_only_passivity_no_cross", "EXECUTION_REJECT"),
         ("something_never_seen", "UNCLASSIFIED"),
     ]
     for reason, expected in cases:
@@ -96,14 +109,14 @@ def test_terminal_code_regime_tte_floor_is_market_unavailable():
     assert dt._terminal_code(
         {}, None, False, "both_sides_disabled_regime", None,
         decision={"regime_reject_cause": "price_band"},
-    ) == "PRICE_BAND_REJECT"
-    # Missing discriminator keeps the conservative PRICE_BAND_REJECT mapping.
-    assert dt._terminal_code({}, None, False, "both_sides_disabled_regime", None) == "PRICE_BAND_REJECT"
+    ) == "NO_ELIGIBLE_PRICE_BAND"
+    # Missing discriminator keeps the conservative price-band mapping.
+    assert dt._terminal_code({}, None, False, "both_sides_disabled_regime", None) == "NO_ELIGIBLE_PRICE_BAND"
 
 
 def test_terminal_code_edge_sign_disambiguation():
-    # Positive-but-insufficient edge -> EDGE_BELOW_THRESHOLD.
-    assert dt._terminal_code({}, None, False, "yes_edge_below_threshold", 1.5) == "EDGE_BELOW_THRESHOLD"
+    # Positive-but-insufficient edge -> EDGE_BELOW_DYNAMIC_THRESHOLD.
+    assert dt._terminal_code({}, None, False, "yes_edge_below_threshold", 1.5) == "EDGE_BELOW_DYNAMIC_THRESHOLD"
     # Non-positive net EV -> NO_POSITIVE_EXECUTABLE_EDGE.
     assert dt._terminal_code({}, None, False, "yes_edge_below_threshold", -3.0) == "NO_POSITIVE_EXECUTABLE_EDGE"
     assert dt._terminal_code({}, None, False, "yes_edge_below_threshold", 0.0) == "NO_POSITIVE_EXECUTABLE_EDGE"
@@ -117,7 +130,7 @@ def test_terminal_code_candidate_not_selected_is_allocator_reject():
         signal_generated={"status": True},
         candidate_generated={"status": True},
     )
-    assert dt._terminal_code(rec_wf, {"ticker": "T", "side": "yes"}, False, "allocator_loss", 5.0) == "RISK_OR_ALLOCATION_REJECT"
+    assert dt._terminal_code(rec_wf, {"ticker": "T", "side": "yes"}, False, "allocator_loss", 5.0) == "ALLOCATION_NOT_SELECTED"
 
 
 def test_build_asset_record_surface_fields():
@@ -156,7 +169,7 @@ def test_build_asset_record_surface_fields():
         ),
         candidate=None,
     )
-    assert rec["terminal_code"] == "EDGE_BELOW_THRESHOLD"
+    assert rec["terminal_code"] == "EDGE_BELOW_DYNAMIC_THRESHOLD"
     assert rec["ticker"] == "KXETH15M-TEST"
     assert rec["yes_bid_cents"] == 52.0
     assert rec["no_ask_cents"] == 48.0

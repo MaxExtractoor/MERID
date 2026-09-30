@@ -164,7 +164,8 @@ def _terminal_code(
     if mo is not None and not mo.get("status"):
         r = str(mo.get("reason") or "").lower()
         if "warmup" in r or "price_history" in r:
-            return "FEATURE_INVALID"
+            # Warmup = spot/price history not yet built — spot untrusted.
+            return "SPOT_NOT_TRUSTED"
         if "time_to_expiry" in r:
             return "TTE_ENTRY_CUTOFF"
         if "stale" in r or "illiquid" in r or "validation" in r or "not ready" in r:
@@ -172,59 +173,16 @@ def _terminal_code(
         # expired / settled / no contract in the entry window
         return "MARKET_UNAVAILABLE"
     rl = (rejection_reason or "").strip().lower()
-    if "lifecycle" in rl or "no_trade_without_exit" in rl:
-        return "ENTRY_LIFECYCLE_INVALID"
-    # 2026-09-29: split the conflated regime rejection into a TTE cutoff
-    # (intentional no-entry state) vs a genuine both-sides price-band reject.
-    if "tte_entry_cutoff" in rl:
-        return "TTE_ENTRY_CUTOFF"
-    if "price_band_both_sides_disabled" in rl:
-        return "PRICE_BAND_REJECT"
-    if "both_sides_disabled_regime" in rl or "price_band" in rl or "final_price_out_of_range" in rl:
-        # Legacy reason strings (pre-split): the regime gate fires on price
-        # band OR on the per-regime TTE floor; a side still in-band without
-        # the time bound means the window closed.
-        if (decision or {}).get("regime_reject_cause") == "tte_floor":
-            return "TTE_ENTRY_CUTOFF"
-        return "PRICE_BAND_REJECT"
-    if "evidence_toxic_cell" in rl:
-        return "TOXIC_CELL_BLOCK"
-    if rl.startswith("calibration_evidence") or rl.startswith("live_evidence") or rl.startswith("evidence_") or rl.startswith("market_fade_blocked"):
-        return "CALIBRATION_QUARANTINE"
-    if "insufficient_depth" in rl or rl.startswith("fill_or_depth"):
-        return "FILL_OR_DEPTH_REJECT"
-    if rl == "skip_market_not_ready":
-        return "BOOK_NOT_TRUSTED"
-    if rl.startswith("cost_basis_override") or rl == "directional_tie" or rl == "ev_gate_non_positive" or rl.startswith("no_positive_executable_edge"):
-        return "NO_POSITIVE_EXECUTABLE_EDGE"
-    if "edge_below_threshold" in rl or rl in ("insufficient_edge", "ev_extreme_price", "kelly_filter"):
-        if best_ev_cents is not None and best_ev_cents <= 0.0:
-            return "NO_POSITIVE_EXECUTABLE_EDGE"
-        return "EDGE_BELOW_THRESHOLD"
-    if rl.startswith("min_tte") or rl.startswith("final_minute") or "time_to_expiry" in rl:
-        return "TTE_ENTRY_CUTOFF"
-    if rl.startswith("exception") or "model_unavailable" in rl:
-        return "MODEL_UNAVAILABLE"
-    # 2026-09-29: execution-coherence rejects (decision-age deadline,
-    # pre-submit strict passivity, post-only repricing) — distinct from the
-    # strategy-edge rejects so dashboards can see quote-to-submit failures.
-    if rl.startswith("stale_decision"):
-        return "STALE_DECISION"
-    if (
-        rl.startswith("pre_submit_passivity")
-        or rl.startswith("post_only_passivity")
-        or rl.startswith("post_only_no_passive_price")
-        or "post only cross" in rl
-    ):
-        return "EXECUTION_REJECT"
-    if candidate is not None or (
-        rl.startswith("cooldown") or "session" in rl or "consecutive" in rl
-        or "knapsack" in rl or rl.startswith("allocator") or "risk" in rl
-    ):
-        return "RISK_OR_ALLOCATION_REJECT"
-    if not rl:
-        return "MODEL_UNAVAILABLE"
-    return "UNCLASSIFIED"
+    # 2026-09-30: single canonical resolver (merid.prediction.terminal_codes).
+    # All raw reasons funnel through one precedence-ordered cascade so every
+    # asset resolves to the same code for the same normalized inputs.
+    from merid.prediction.terminal_codes import canonical_terminal_code
+    return canonical_terminal_code(
+        rl,
+        best_ev_cents,
+        regime_reject_cause=(decision or {}).get("regime_reject_cause"),
+        candidate_present=candidate is not None,
+    )
 
 
 def _terminal_stage(waterfall: Dict[str, Any], candidate: Optional[Dict[str, Any]],
@@ -662,6 +620,21 @@ def build_asset_record(
     record["microstructure_btc_log_return"] = _first_float(
         _resolve(candidate, decision, ["microstructure_btc_log_return"], ["microstructure_btc_log_return"])
     )
+
+    # 2026-09-30: canonical audit surface — proves a terminal code came from
+    # the shared policy applied to per-market inputs, not asset branches.
+    # Identical field set for every asset (BTC/ETH/SOL/XRP/DOGE).
+    for _k in (
+        "policy_id", "policy_path", "tte_policy_id",
+        "yes_price_band", "no_price_band",
+        "yes_price_band_rule_id", "no_price_band_rule_id",
+        "yes_min_tte_s", "no_min_tte_s", "min_entry_tte_seconds",
+        "yes_real_depth", "no_real_depth",
+        "shadow_yes_ev_cents", "shadow_no_ev_cents",
+        "shadow_selected_side", "shadow_p_source",
+        "regime_reject_cause", "yes_regime_no_tte", "no_regime_no_tte",
+    ):
+        record[_k] = _resolve(candidate, decision, [_k], [_k])
 
     return sanitize(record)
 
