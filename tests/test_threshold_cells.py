@@ -188,10 +188,17 @@ def test_btc_no_cell_same_inputs():
 
 
 def test_btc_outside_cell_tte_uses_formula():
-    """BTC cells cover only 120-300s; at 400s the formula decides."""
+    """BTC cells cover only 120-300s; at 400s the current-build provisional
+    lane (BTC-NO 2.0c) owns the unregistered region, and past the provisional
+    600s bound the formula decides."""
     d = _decomp("BTC", "no", 45, tte=400.0)
     assert d.cell_id is None
-    assert d.total > 0.02
+    assert d.provisional_cell_id == "cbp_btc_no_40_50_t300_600"
+    assert math.isclose(d.total, 0.020, abs_tol=1e-9)
+    d2 = _decomp("BTC", "no", 45, tte=700.0)
+    assert d2.cell_id is None
+    assert d2.provisional_cell_id is None
+    assert d2.total > 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -320,9 +327,12 @@ def test_decision_emits_unambiguous_threshold_fields():
     assert math.isclose(ind["no_cell_required_edge_cents"], 1.5, abs_tol=1e-9)
     assert ind["no_formula_required_edge_cents"] > 1.5
     assert ind["no_threshold_source"] == "threshold_cell"
-    # YES side keeps the formula.
-    assert ind["yes_threshold_source"] == "formula"
+    # YES side at 52c/300s has no registry cell but sits inside the
+    # current-build provisional domain (SOL-YES provisional bar: 3.0c).
+    assert ind["yes_threshold_source"] == "current_build_provisional"
     assert ind["yes_cell_required_edge_cents"] is None
+    assert ind["yes_thr_prov_cell_id"] == "cbp_sol_yes_50_60_t120_300"
+    assert math.isclose(ind["yes_provisional_required_edge_cents"], 3.0, abs_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------

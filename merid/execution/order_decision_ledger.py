@@ -226,13 +226,21 @@ class OrderDecisionLedger:
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record exit failed: %s", audit_exc)
-        # 2026-09-30: attribute realized exit PnL to the admitting threshold
-        # cell (decision -> cell binding was recorded at submission).
+        # 2026-09-30: attribute realized exit PnL to the admitting cell lane
+        # (decision -> cell binding was recorded at submission).  Threshold
+        # cells and current-build provisional cells keep separate windows.
         if realized_pnl_cents is not None:
             try:
                 from merid.prediction.threshold_cells import record_cell_settlement
+                from merid.prediction.current_build_provisional import (
+                    record_provisional_settlement,
+                )
 
                 record_cell_settlement(
+                    decision_id=decision_id,
+                    net_pnl_cents=float(realized_pnl_cents),
+                )
+                record_provisional_settlement(
                     decision_id=decision_id,
                     net_pnl_cents=float(realized_pnl_cents),
                 )

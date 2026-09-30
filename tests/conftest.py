@@ -151,6 +151,10 @@ for _env_key, _fname in {
     "MERID_THRESHOLD_CELL_STATE_PATH": "threshold_cell_lane.json",
     "MERID_THRESHOLD_CELL_LIFECYCLE_PATH": "threshold_cell_lifecycle.jsonl",
     "MERID_FILL_QUALITY_PATH": "fill_quality.jsonl",
+    # Current-build provisional lane: same isolation contract.
+    "MERID_PROVISIONAL_STATE_PATH": "current_build_provisional_lane.json",
+    "MERID_PROVISIONAL_LIFECYCLE_PATH": "current_build_provisional_lifecycle.jsonl",
+    "MERID_PROVISIONAL_EVIDENCE_DIR": "cbp_evidence",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

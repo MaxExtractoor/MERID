@@ -2844,6 +2844,7 @@ def _emit_execution_stage_latency(
             "intent_id": getattr(intent, "intent_id", "") or "",
             "lane": getattr(intent, "decision_lane", "") or "",
             "threshold_cell_id": getattr(intent, "threshold_cell_id", "") or "",
+            "provisional_cell_id": getattr(intent, "provisional_cell_id", "") or "",
             "admission_owner": getattr(intent, "admission_owner", "") or "",
             "outcome": getattr(result, "status", "") or "",
             "reason": getattr(result, "reason", "") or "",
@@ -2901,35 +2902,55 @@ def _intent_requires_post_only(intent: "OrderIntent") -> bool:
     return getattr(intent, "decision_lane", None) in (
         "threshold_cell",
         "evidence_cell_escape",
+        "current_build_provisional",
     ) and bool(getattr(intent, "post_only", False))
 
 
 def _record_cell_pre_wire_reject(intent: "OrderIntent", code: str) -> None:
-    """Feed a pre-wire terminal reject into threshold-cell lane bookkeeping.
+    """Feed a pre-wire terminal reject into cell-lane bookkeeping.
 
     Every emitted cell candidate must reach a recorded terminal state; a
     pre-wire drop releases the submission reservation and counts toward the
-    router-reject suspension rule.
+    router-reject suspension rule.  Handles both the threshold-cell lane and
+    the current-build provisional lane (mutually exclusive ids).
     """
     cell_id = getattr(intent, "threshold_cell_id", None)
-    if not cell_id:
+    prov_id = getattr(intent, "provisional_cell_id", None)
+    if not cell_id and not prov_id:
         return
     try:
-        from merid.prediction import threshold_cells as _tc
+        if cell_id:
+            from merid.prediction import threshold_cells as _tc
 
-        _tc.record_cell_pre_wire_reject(
-            cell_id=cell_id,
-            decision_id=getattr(intent, "decision_id", None)
-            or getattr(intent, "decision_trace_id", None),
-            intent_id=getattr(intent, "intent_id", None),
-            rejection_code=str(code or "pre_wire_reject"),
-            stage="pre_wire",
-            asset=(
-                extract_asset_from_ticker(getattr(intent, "ticker", "") or "")
-                or None
-            ),
-            ticker=getattr(intent, "ticker", None),
-        )
+            _tc.record_cell_pre_wire_reject(
+                cell_id=cell_id,
+                decision_id=getattr(intent, "decision_id", None)
+                or getattr(intent, "decision_trace_id", None),
+                intent_id=getattr(intent, "intent_id", None),
+                rejection_code=str(code or "pre_wire_reject"),
+                stage="pre_wire",
+                asset=(
+                    extract_asset_from_ticker(getattr(intent, "ticker", "") or "")
+                    or None
+                ),
+                ticker=getattr(intent, "ticker", None),
+            )
+        if prov_id:
+            from merid.prediction import current_build_provisional as _cbp
+
+            _cbp.record_provisional_pre_wire_reject(
+                cell_id=prov_id,
+                decision_id=getattr(intent, "decision_id", None)
+                or getattr(intent, "decision_trace_id", None),
+                intent_id=getattr(intent, "intent_id", None),
+                rejection_code=str(code or "pre_wire_reject"),
+                stage="pre_wire",
+                asset=(
+                    extract_asset_from_ticker(getattr(intent, "ticker", "") or "")
+                    or None
+                ),
+                ticker=getattr(intent, "ticker", None),
+            )
     except Exception as _tc_err:
         logger.debug(
             "[CELL-BOOKKEEPING] pre-wire reject record failed: %s", _tc_err
@@ -3330,6 +3351,10 @@ class OrderIntent:
     # propagated from TradeDecision.indicators through the candidate.  Never
     # recomputed downstream — attribution only.
     threshold_cell_id: Optional[str] = None
+    # CURRENT-BUILD PROVISIONAL LANE: the provisional cell that admitted this
+    # decision under current-build economics — separate attribution from the
+    # threshold-cell lane; the two are mutually exclusive by construction.
+    provisional_cell_id: Optional[str] = None
     decision_lane: Optional[str] = None
 
     # EXECUTION-LANE CONTRACT (2026-09-30): the lane that admitted this
@@ -16413,6 +16438,17 @@ async def _route_live(
             try:
                 if bool(getattr(create_request, "post_only", False)) and not _is_exit_order(intent):
                     from merid.execution.fill_quality_tracker import get_fill_quality_tracker
+                    # Lane-scoped TTL: the cbp lane bounds resting life at
+                    # max_order_lifetime_s; give the tracker a grace window so
+                    # an expired-unfilled order frees its open-order slot
+                    # promptly (default records only age out after 3600s).
+                    _pol = getattr(intent, "execution_policy", None)
+                    _record_ttl_s = (
+                        float(_pol.max_order_lifetime_s) + 30.0
+                        if _pol is not None
+                        and getattr(_pol, "max_order_lifetime_s", None)
+                        else None
+                    )
                     get_fill_quality_tracker().record_order(
                         client_order_id=intent.client_order_id or intent.client_tag or intent.intent_id,
                         intent_id=intent.intent_id,
@@ -16428,6 +16464,8 @@ async def _route_live(
                         p_selected=getattr(intent, "p_selected", None),
                         decision_id=getattr(intent, "decision_id", None),
                         threshold_cell_id=getattr(intent, "threshold_cell_id", None),
+                        provisional_cell_id=getattr(intent, "provisional_cell_id", None),
+                        record_ttl_s=_record_ttl_s,
                     )
             except Exception as _fq_err:
                 logger.debug("[FILL-QUALITY] record_order failed for %s: %s", intent.ticker, _fq_err)
@@ -16474,6 +16512,46 @@ async def _route_live(
                     _tc.record_cell_router_reject(_tc_id)
             except Exception as _tc_err:
                 logger.debug("[THRESHOLD-CELL] router lifecycle emit failed: %s", _tc_err)
+
+        # Current-build provisional lane: identical authoritative router
+        # outcome bookkeeping — the venue ack owns submitted/rejected.
+        _pc_id = getattr(intent, "provisional_cell_id", None)
+        if _pc_id:
+            try:
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
+                )
+                _cbp.record_provisional_router_attempt(_pc_id)
+                _accepted = bool(placed_res and placed_res.success)
+                _cbp.emit_provisional_lifecycle(
+                    "router_result",
+                    provisional_cell_id=_pc_id,
+                    asset=(intent.ticker or "").split("-")[0],
+                    side=(intent.side or "").upper(),
+                    decision_id=getattr(intent, "decision_id", None),
+                    intent_id=intent.intent_id,
+                    client_order_id=intent.client_order_id or intent.client_tag,
+                    order_id=getattr(placed_res, "order_id", None),
+                    post_only=bool(getattr(create_request, "post_only", False)),
+                    submitted=_accepted,
+                    limit_price_cents=getattr(intent, "price_cents", None),
+                    reject_reason=(
+                        getattr(placed_res, "error", None)
+                        or getattr(placed_res, "reason", None)
+                    ) if not _accepted else None,
+                    build_sha=_cbp.current_build_sha(),
+                    calibration_version=_cbp.current_calibration_version(),
+                    terminal_state="accepted" if _accepted else "rejected",
+                )
+                if _accepted:
+                    _cbp.bump_provisional_funnel("submitted", _pc_id)
+                    _cbp.record_provisional_order_open(
+                        _pc_id, getattr(placed_res, "order_id", None)
+                    )
+                else:
+                    _cbp.record_provisional_router_reject(_pc_id)
+            except Exception as _cbp_err:
+                logger.debug("[CBP-LANE] router lifecycle emit failed: %s", _cbp_err)
 
         # Record intent in fills_ledger for TRADE-TRACE (links fill back to edge/sizing decision)
         try:
@@ -19824,7 +19902,10 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # submission block in _route_live, so only pre-wire rejects are handled
     # here.
     if (
-        getattr(intent, "threshold_cell_id", None)
+        (
+            getattr(intent, "threshold_cell_id", None)
+            or getattr(intent, "provisional_cell_id", None)
+        )
         and result is not None
         and result.status == "rejected"
         and not getattr(result, "submission_attempted", False)

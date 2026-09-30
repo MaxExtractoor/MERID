@@ -684,6 +684,32 @@ def resolve_threshold_cell(
     return best
 
 
+def cell_region_registered(
+    asset: str,
+    side: str,
+    price_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> bool:
+    """True when *any* configured cell covers the point — regardless of the
+    lane enabled flag or per-cell state.  Used by other lanes (the
+    current-build provisional lane) so a disabled or suspended registered
+    cell keeps sole authority over its band instead of silently releasing
+    it to a different admission path.
+    """
+    if price_cents is None or tte_seconds is None:
+        return False
+    asset_u, side_l = asset.upper(), side.lower()
+    px, tte = float(price_cents), float(tte_seconds)
+    for cell in THRESHOLD_CELLS:
+        if cell.asset != asset_u or cell.side != side_l:
+            continue
+        if cell.price_min_cents <= px < cell.price_max_cents and (
+            cell.tte_min_seconds <= tte <= cell.tte_max_seconds
+        ):
+            return True
+    return False
+
+
 def explain_cell_miss(
     asset: str,
     side: str,

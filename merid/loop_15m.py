@@ -6228,6 +6228,28 @@ async def _run_loop(self) -> None:
                                         )
                                     except Exception:
                                         pass
+                                elif candidate.get("provisional_cell_id"):
+                                    try:
+                                        from merid.prediction import (
+                                            current_build_provisional as _cbp,
+                                        )
+                                        _cbp.bump_provisional_funnel(
+                                            "allocator_rejected",
+                                            candidate["provisional_cell_id"],
+                                        )
+                                        _cbp.emit_provisional_lifecycle(
+                                            "rejected_pre_router",
+                                            provisional_cell_id=candidate["provisional_cell_id"],
+                                            asset=candidate.get("asset"),
+                                            side=candidate.get("side"),
+                                            decision_id=candidate.get("decision_id"),
+                                            candidate_id=candidate_id,
+                                            post_only=bool(candidate.get("post_only", False)),
+                                            submitted=False,
+                                            terminal_state=str(current_state or "REJECTED"),
+                                        )
+                                    except Exception:
+                                        pass
                                 else:
                                     logger.info(
                                         "[15M-LOOP] Candidate %s already has terminal state %s; skipping duplicate REJECTED lifecycle event",
@@ -8830,11 +8852,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 candidate["decision_lane"] = _td_ind["decision_lane"]
             if _td_ind.get("threshold_cell_id"):
                 candidate["threshold_cell_id"] = _td_ind["threshold_cell_id"]
+            if _td_ind.get("provisional_cell_id"):
+                candidate["provisional_cell_id"] = _td_ind["provisional_cell_id"]
+            if _td_ind.get("threshold_cell_id") or _td_ind.get("provisional_cell_id"):
                 _sel_key = str(getattr(trade_decision, "selected_outcome", "") or "").lower()
                 candidate["threshold_source"] = _td_ind.get(f"{_sel_key}_threshold_source")
                 candidate["formula_required_edge_cents"] = _td_ind.get(f"{_sel_key}_formula_required_edge_cents")
                 candidate["cell_required_edge_cents"] = _td_ind.get(f"{_sel_key}_cell_required_edge_cents")
+                candidate["provisional_required_edge_cents"] = _td_ind.get(f"{_sel_key}_provisional_required_edge_cents")
                 candidate["effective_required_edge_cents"] = _td_ind.get(f"{_sel_key}_effective_required_edge_cents")
+                candidate["legacy_risk_label"] = _td_ind.get(f"{_sel_key}_legacy_risk_label")
+                candidate["provisional_price_bucket"] = _td_ind.get("provisional_price_bucket")
+                candidate["provisional_tte_bucket"] = _td_ind.get("provisional_tte_bucket")
         elif candidate.get("selected_outcome_price"):
             approved_price_cents = int(candidate["selected_outcome_price"])
             candidate["approved_price_cents"] = approved_price_cents
@@ -9142,13 +9171,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         # 2026-09-30: threshold-cell lane is a bounded experiment — hard-capped
         # at exactly 1 contract regardless of the global per-order ceiling.
+        # The current-build provisional lane carries the same one-contract cap.
         if (
-            candidate.get("decision_lane") == "threshold_cell"
+            candidate.get("decision_lane") in (
+                "threshold_cell", "current_build_provisional",
+            )
             or candidate.get("threshold_cell_id")
+            or candidate.get("provisional_cell_id")
         ) and count > 1.0:
             logger.warning(
-                "[15M-LOOP] THRESHOLD-CELL count=%s exceeds lane cap=1.0, capping. ticker=%s",
-                count, ticker
+                "[15M-LOOP] CELL-LANE count=%s exceeds lane cap=1.0, capping. ticker=%s lane=%s",
+                count, ticker, candidate.get("decision_lane"),
             )
             count = 1.0
 
@@ -9854,39 +9887,78 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     ) == "threshold_cell"
                 )
             )
+            _is_cbp_lane = (
+                candidate.get("decision_lane") == "current_build_provisional"
+                or candidate.get("provisional_cell_id") is not None
+                or (
+                    trade_decision is not None
+                    and (getattr(trade_decision, "indicators", None) or {}).get(
+                        "decision_lane"
+                    ) == "current_build_provisional"
+                )
+            )
             _tc_maker_ok = False
+            _cbp_maker_ok = False
             _cell_id = candidate.get("threshold_cell_id")
+            _pcell_id = candidate.get("provisional_cell_id")
             if _is_tc_lane:
                 try:
                     from merid.prediction import threshold_cells as _tc
                     _tc_maker_ok = _tc.threshold_cell_maker_enabled()
                 except Exception:
                     _tc_maker_ok = False
-            if _is_tc_lane and _tc_maker_ok:
+            if _is_cbp_lane:
+                try:
+                    from merid.prediction import (
+                        current_build_provisional as _cbp,
+                    )
+                    _cbp_maker_ok = _cbp.provisional_maker_enabled()
+                except Exception:
+                    _cbp_maker_ok = False
+            if (_is_tc_lane and _tc_maker_ok) or (_is_cbp_lane and _cbp_maker_ok):
                 logger.info(
-                    "[15M-LOOP] THRESHOLD-CELL lane keeps post-only posture for %s "
+                    "[15M-LOOP] %s lane keeps post-only posture for %s "
                     "(MERID_ENTRY_MAKER_ENABLED off globally; lane-scoped exemption)",
+                    "THRESHOLD-CELL" if _is_tc_lane else "CBP",
                     ticker,
                 )
-            elif _is_tc_lane:
+            elif _is_tc_lane or _is_cbp_lane:
                 logger.warning(
-                    "[15M-LOOP] THRESHOLD-CELL maker disabled "
-                    "(MERID_THRESHOLD_CELL_MAKER=0): rejecting %s rather than "
-                    "coercing to taker — no silent mode substitution",
+                    "[15M-LOOP] %s maker disabled (lane maker kill-switch=0): "
+                    "rejecting %s rather than coercing to taker — no silent "
+                    "mode substitution",
+                    "THRESHOLD-CELL" if _is_tc_lane else "CBP",
                     ticker,
                 )
                 try:
-                    from merid.prediction import threshold_cells as _tc
-                    _tc.emit_cell_lifecycle(
-                        "rejected",
-                        threshold_cell_id=_cell_id,
-                        asset=asset,
-                        decision_id=candidate.get("decision_id"),
-                        post_only=True,
-                        submitted=False,
-                        terminal_state="maker_disabled",
-                    )
-                    _tc.record_cell_exec_failure(_cell_id, "maker_disabled_env")
+                    if _is_tc_lane:
+                        from merid.prediction import threshold_cells as _tc
+                        _tc.emit_cell_lifecycle(
+                            "rejected",
+                            threshold_cell_id=_cell_id,
+                            asset=asset,
+                            decision_id=candidate.get("decision_id"),
+                            post_only=True,
+                            submitted=False,
+                            terminal_state="maker_disabled",
+                        )
+                        _tc.record_cell_exec_failure(_cell_id, "maker_disabled_env")
+                    else:
+                        from merid.prediction import (
+                            current_build_provisional as _cbp,
+                        )
+                        _cbp.emit_provisional_lifecycle(
+                            "rejected",
+                            provisional_cell_id=_pcell_id,
+                            asset=asset,
+                            decision_id=candidate.get("decision_id"),
+                            post_only=True,
+                            submitted=False,
+                            terminal_state="maker_disabled",
+                        )
+                        _cbp.record_provisional_exec_failure(
+                            _pcell_id, "maker_disabled_env"
+                        )
                 except Exception:
                     pass
                 return False
@@ -9900,6 +9972,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 resolved_liquidity_role = "taker"
                 resolved_post_only = False
                 aggressiveness = 1.0
+
+        # Lane-scoped resting lifetime: the current-build provisional policy
+        # binds max_order_lifetime_s=45; that bound must reach the wire as
+        # intent.max_rest_seconds (the OrderIntent default is 180s) or the
+        # lane contract would be declared but unenforced.
+        _resolved_max_rest_s: Optional[int] = None
+        if candidate.get("decision_lane") == "current_build_provisional":
+            try:
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
+                )
+                _resolved_max_rest_s = int(
+                    _cbp.provisional_max_order_lifetime_s()
+                )
+            except Exception:
+                _resolved_max_rest_s = None
 
         intent = OrderIntent(
             ticker=ticker,
@@ -9993,6 +10081,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             entry_or_exit=entry_or_exit,
             pre_position_size=pre_position_size if entry_or_exit == "exit" else 0,
             expected_post_position_size=expected_post_position_size if entry_or_exit == "exit" else count,
+            max_rest_seconds=(
+                _resolved_max_rest_s
+                if _resolved_max_rest_s is not None else 180
+            ),
             # Phase 1: Add market microstructure data for fee-aware edge and microstructure gates
             yes_bid_cents=candidate.get("yes_bid_cents"),
             yes_ask_cents=candidate.get("yes_ask_cents"),
@@ -10019,6 +10111,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # 2026-09-30: threshold-cell lane identity — the single source of
             # truth for cell attribution through the order lifecycle.
             threshold_cell_id=candidate.get("threshold_cell_id"),
+            provisional_cell_id=candidate.get("provisional_cell_id"),
             decision_lane=candidate.get("decision_lane"),
             # 2026-09-29: immutable model inputs for warn-band Bachelier +
             # calibration recompute at the router (stale-decision revalidation).
@@ -10049,6 +10142,29 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     max_reprice_attempts=1,
                     max_order_lifetime_s=60,
                 )
+            elif _lane == "current_build_provisional":
+                # Same immutable post-only maker contract, 45s resting life —
+                # a current-build measurement order that cannot touch inside
+                # one reprice window is evidence, not a chased taker fill.
+                from merid.event_venues.kalshi.order_router import ExecutionPolicy
+                intent.execution_policy = ExecutionPolicy(
+                    lane="current_build_provisional",
+                    required_post_only=True,
+                    required_liquidity_role="maker",
+                    allow_taker_fallback=False,
+                    max_reprice_attempts=1,
+                    max_order_lifetime_s=45,
+                )
+                if intent.provisional_cell_id is not None:
+                    from merid.prediction import (
+                        current_build_provisional as _cbp,
+                    )
+                    intent.exec_stage_marks_ns[
+                        "policy_stamped"
+                    ] = time.monotonic_ns()
+                    intent.exec_stage_marks_ns[
+                        "policy_max_rest_ms"
+                    ] = int(_cbp.provisional_max_order_lifetime_s() * 1000)
             intent.admission_owner = (
                 candidate.get("admission_owner") or _lane or "formula"
             )
@@ -10064,6 +10180,28 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     intent_id=intent.intent_id,
                     side=candidate.get("side"),
                     price_cents=price_cents,
+                )
+            elif (
+                _lane == "current_build_provisional"
+                and intent.provisional_cell_id
+            ):
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
+                )
+                _cbp.emit_provisional_lifecycle(
+                    "intent_created",
+                    provisional_cell_id=intent.provisional_cell_id,
+                    asset=asset,
+                    ticker=ticker,
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    side=candidate.get("side"),
+                    price_cents=price_cents,
+                    build_sha=_cbp.current_build_sha(),
+                    model_version=_cbp.current_model_version(
+                        getattr(trade_decision, "indicators", None)
+                    ),
+                    calibration_version=_cbp.current_calibration_version(),
                 )
         except Exception:
             pass
@@ -10136,6 +10274,61 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     decision_age_ms=_dec_age_ms,
                     post_only=resolved_post_only,
                     submitted=False,
+                    terminal_state="intent_created",
+                )
+            except Exception:
+                pass
+        elif intent.provisional_cell_id:
+            try:
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
+                )
+                _dec_ts = getattr(trade_decision, "timestamp_utc", None)
+                _dec_age_ms = None
+                if _dec_ts is not None:
+                    try:
+                        _dec_age_ms = int(
+                            (time.time() - (
+                                _dec_ts.timestamp()
+                                if hasattr(_dec_ts, "timestamp")
+                                else float(_dec_ts)
+                            )) * 1000
+                        )
+                    except Exception:
+                        _dec_age_ms = None
+                _pcell = _cbp.provisional_cell_for_id(intent.provisional_cell_id)
+                _cbp.emit_provisional_lifecycle(
+                    "order_intent_created",
+                    provisional_cell_id=intent.provisional_cell_id,
+                    asset=asset,
+                    side=str(candidate.get("side") or "").upper(),
+                    decision_id=intent.decision_id,
+                    candidate_id=candidate.get("candidate_id"),
+                    intent_id=intent.intent_id,
+                    candidate_ev_cents=candidate.get("ev_net_cents"),
+                    provisional_required_ev_cents=candidate.get(
+                        "provisional_required_edge_cents"
+                    ),
+                    formula_required_ev_cents=candidate.get(
+                        "formula_required_edge_cents"
+                    ),
+                    threshold_source=candidate.get("threshold_source"),
+                    legacy_risk_label=candidate.get("legacy_risk_label"),
+                    price_bucket=(
+                        _cbp.price_band_label(_pcell) if _pcell else None
+                    ),
+                    tte_bucket=(
+                        _cbp.tte_band_label(_pcell) if _pcell else None
+                    ),
+                    book_source=candidate.get("quote_owner"),
+                    decision_age_ms=_dec_age_ms,
+                    post_only=resolved_post_only,
+                    submitted=False,
+                    build_sha=_cbp.current_build_sha(),
+                    model_version=_cbp.current_model_version(
+                        getattr(trade_decision, "indicators", None)
+                    ),
+                    calibration_version=_cbp.current_calibration_version(),
                     terminal_state="intent_created",
                 )
             except Exception:
