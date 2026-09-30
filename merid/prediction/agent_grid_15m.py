@@ -12400,6 +12400,39 @@ class LeanAgent15m:
                 "tte_floor" if (_yes_regime_no_tte or _no_regime_no_tte)
                 else "price_band"
             )
+
+            # 2026-09-30: canonical per-asset audit fields — the same keys are
+            # emitted for every asset so a PRICE_BAND/TTE reject is provably
+            # input-driven (same REGIME_CONFIGS policy), not an asset override.
+            _yes_min_tte = (
+                _yes_regime_no_tte.min_time_to_expiry_seconds
+                if _yes_regime_no_tte is not None else None
+            )
+            _no_min_tte = (
+                _no_regime_no_tte.min_time_to_expiry_seconds
+                if _no_regime_no_tte is not None else None
+            )
+            _min_ttes = [v for v in (_yes_min_tte, _no_min_tte) if v is not None]
+
+            # Shadow EV: compare both sides' executable prices against the
+            # latest model fair prob when one is available on market_state —
+            # research observability only; never an entry authorization.
+            _shadow_p = getattr(market_state, "model_fair_prob", None) if market_state else None
+            _shadow = {}
+            if _shadow_p is not None:
+                try:
+                    _shadow_yes_ev = (float(_shadow_p) - float(yes_price_cents) / 100.0) * 100.0
+                    _shadow_no_ev = ((1.0 - float(_shadow_p)) - float(no_price_cents) / 100.0) * 100.0
+                    _shadow_side = "yes" if _shadow_yes_ev >= _shadow_no_ev else "no"
+                    _shadow = {
+                        "shadow_yes_ev_cents": round(_shadow_yes_ev, 2),
+                        "shadow_no_ev_cents": round(_shadow_no_ev, 2),
+                        "shadow_selected_side": _shadow_side,
+                        "shadow_p_source": "market_state.model_fair_prob",
+                    }
+                except Exception:
+                    _shadow = {}
+
             self._record_signal_rejection(
                 (
                     "tte_entry_cutoff" if _regime_reject_cause == "tte_floor"
@@ -12415,10 +12448,33 @@ class LeanAgent15m:
                 no_entry_price_cents=no_price_cents,
                 yes_ask_cents=yes_price_cents,
                 no_ask_cents=no_price_cents,
+                yes_price_band=(yes_regime.name if yes_regime else "disabled"),
+                no_price_band=(no_regime.name if no_regime else "disabled"),
+                yes_price_band_rule_id=(
+                    f"market_regime_v1:{yes_regime.name}" if yes_regime
+                    else "market_regime_v1:none"
+                ),
+                no_price_band_rule_id=(
+                    f"market_regime_v1:{no_regime.name}" if no_regime
+                    else "market_regime_v1:none"
+                ),
+                yes_min_tte_s=_yes_min_tte,
+                no_min_tte_s=_no_min_tte,
+                min_entry_tte_seconds=(min(_min_ttes) if _min_ttes else None),
+                tte_policy_id="market_regime_v1:per_band_tte_floor",
+                policy_id="crypto_15m_common_v1",
+                policy_path="crypto_15m_common_v1",
+                yes_real_depth=(
+                    getattr(market_state, "min_depth_yes", 0) if market_state else 0
+                ),
+                no_real_depth=(
+                    getattr(market_state, "min_depth_no", 0) if market_state else 0
+                ),
                 yes_regime_no_tte=(_yes_regime_no_tte.name if _yes_regime_no_tte else "none"),
                 no_regime_no_tte=(_no_regime_no_tte.name if _no_regime_no_tte else "none"),
                 regime_reject_cause=_regime_reject_cause,
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
+                **_shadow,
             )
             return None
 

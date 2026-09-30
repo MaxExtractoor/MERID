@@ -1288,19 +1288,47 @@ async def fetch_fresh_signed_yes_exposure(
 _order_decision_lock: threading.Lock = threading.Lock()
 
 
+_TEST_TICKER_MARKERS = ("-TEST", "-STALE", "-FRESH", "-MOCK")
+
+
 def persist_order_decision(record: dict) -> None:
     """Append a structured order decision record to ``logs/order_decisions.jsonl``.
 
     Writes are fsync'd before returning so the record survives an OS crash or
     power failure.  Failures are logged but never raise, so the trading path is
     not blocked by a logging problem.
+
+    2026-09-30: observability integrity — test/mock records must never share
+    the production decision ledger.  A record is quarantined to
+    ``order_decisions_test.jsonl`` when running under pytest, when ``mode`` is
+    anything other than ``live``, or when the ticker carries a test marker.
+    Every record is stamped with ``environment``, ``profile``, ``mode`` and
+    ``is_test`` so report queries can enforce environment=production,
+    mode=live, is_test=false.
     """
     try:
-        # Project root is four parents up from this file.
-        log_dir = Path(__file__).resolve().parents[3] / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "order_decisions.jsonl"
         record.setdefault("ts", time.time())
+        _mode = str(record.get("mode") or "")
+        _ticker = str(record.get("ticker") or "")
+        _is_test = (
+            os.environ.get("PYTEST_CURRENT_TEST") is not None
+            or (_mode not in ("", "live"))
+            or any(m in _ticker.upper() for m in _TEST_TICKER_MARKERS)
+        )
+        record.setdefault("environment", os.environ.get("MERID_ENV", "production"))
+        record.setdefault("profile", os.environ.get("MERID_PROFILE", ""))
+        record["is_test"] = bool(_is_test)
+
+        # Project root is four parents up from this file; an explicit env dir
+        # lets tests/operators redirect the sink without monkeypatching.
+        log_dir = Path(
+            os.environ.get("MERID_ORDER_DECISIONS_DIR")
+            or (Path(__file__).resolve().parents[3] / "logs")
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / (
+            "order_decisions_test.jsonl" if _is_test else "order_decisions.jsonl"
+        )
         line = json.dumps(record, default=str, separators=(",", ":")) + "\n"
         with _order_decision_lock:
             with open(log_file, "a", encoding="utf-8") as f:

@@ -166,6 +166,9 @@ def test_rejects_cost_basis_override_yes(monkeypatch):
     assert d.no_trade_reason in (
         "cost_basis_override_yes",
         "yes_edge_below_threshold",
+        # 2026-09-30: economics-first ordering reports a non-positive-EV
+        # side honestly instead of attributing it to the evidence policy.
+        "no_positive_executable_edge",
     )
 
 
