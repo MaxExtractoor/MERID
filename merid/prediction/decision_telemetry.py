@@ -195,7 +195,7 @@ def _terminal_code(
         return "FILL_OR_DEPTH_REJECT"
     if rl == "skip_market_not_ready":
         return "BOOK_NOT_TRUSTED"
-    if rl.startswith("cost_basis_override") or rl == "directional_tie" or rl == "ev_gate_non_positive":
+    if rl.startswith("cost_basis_override") or rl == "directional_tie" or rl == "ev_gate_non_positive" or rl.startswith("no_positive_executable_edge"):
         return "NO_POSITIVE_EXECUTABLE_EDGE"
     if "edge_below_threshold" in rl or rl in ("insufficient_edge", "ev_extreme_price", "kelly_filter"):
         if best_ev_cents is not None and best_ev_cents <= 0.0:

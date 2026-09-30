@@ -2039,6 +2039,65 @@ class KalshiWebSocket(EventVenueStream):
                         if isinstance(_nested_d, dict):
                             _nested_d["_t_pq_dequeue_ns"] = _pq_deq_ns
 
+                    # 2026-09-30: drop hopelessly stale orderbook deltas BEFORE
+                    # paying parse+bridge+apply cost.  A delta that already sat
+                    # in _msg_queue beyond the drop bound will be rejected as
+                    # BOOK_EVENT_TOO_OLD downstream anyway; replaying it late
+                    # also wastes the exact consumer capacity that caused the
+                    # backlog.  One stale delta per ticker per notify interval
+                    # is still forwarded so market_state keeps scheduling
+                    # snapshot recovery; the rest are superseded (a newer delta
+                    # for the same ticker makes older queued work obsolete).
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == "orderbook_delta"
+                    ):
+                        _ws_recv_ns0 = data.get("_t_ws_recv_ns")
+                        if _ws_recv_ns0:
+                            _res_ms = (_pq_deq_ns - float(_ws_recv_ns0)) / 1e6
+                            _drop_ms = float(
+                                os.environ.get("MERID_WS_DELTA_DROP_RES_MS", "2500")
+                            )
+                            if _res_ms > _drop_ms:
+                                _tk = (
+                                    data.get("ticker")
+                                    or data.get("market_ticker")
+                                    or "?"
+                                )
+                                _st = getattr(self, "_stale_delta_drop", None)
+                                if _st is None:
+                                    _st = self._stale_delta_drop = {}
+                                _ent = _st.setdefault(_tk, [0, 0.0])
+                                _ent[0] += 1
+                                _now_m = _pq_deq_ns / 1e9
+                                _notify_s = float(
+                                    os.environ.get(
+                                        "MERID_WS_DELTA_DROP_NOTIFY_S", "5.0"
+                                    )
+                                )
+                                if _now_m - _ent[1] >= _notify_s:
+                                    # Let one through: triggers untrusted +
+                                    # bounded snapshot recovery downstream.
+                                    _ent[1] = _now_m
+                                    data["_stale_dropped_since"] = _ent[0] - 1
+                                    logger.warning(
+                                        "[WS-DELTA-DROP] ticker=%s res_ms=%.0f "
+                                        ">%.0fms — forwarding one stale delta "
+                                        "to trigger resync; superseded=%d",
+                                        _tk, _res_ms, _drop_ms, _ent[0] - 1,
+                                    )
+                                else:
+                                    logger.debug(
+                                        "[WS-DELTA-DROP] superseded stale "
+                                        "delta ticker=%s res_ms=%.0f",
+                                        _tk, _res_ms,
+                                    )
+                                    try:
+                                        batch_queue.task_done()
+                                    except Exception:
+                                        pass
+                                    continue
+
                     try:
                         event = self._parse_message(data)
                         if event:
