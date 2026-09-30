@@ -1,0 +1,101 @@
+# Threshold-cell live registry — the ONLY cells the threshold-cell lane may admit.
+#
+# Promotion path (fail-closed):
+#   scripts/cell_discovery_report.py      -> data/cell_discovery.json
+#   scripts/cell_promotion_compiler.py    -> data/threshold_cell_candidates.json
+#                                          + config/threshold_cells_candidates.yaml
+#   explicit human/operator approval      -> THIS FILE (with approval block)
+#
+# A cell that is discovered or promoted-candidate but not listed here is NOT
+# tradable.  Removing a row disables the cell at next process start; edits are
+# picked up at import time (MERID_THRESHOLD_CELLS_CONFIG overrides the path).
+#
+# Lane contract applied to every row (immutable ExecutionPolicy):
+#   required_post_only=True, allow_taker_fallback=False, max_reprice_attempts=1,
+#   one open order per cell, per-cell daily fill/submission caps,
+#   first-fill + rolling-markout suspension.
+
+registry_version: "2026-09-30.2"
+approval:
+  manifest_sha256: null          # filled when promoted from a candidates manifest
+  approved_by: "manual-frontier-review"
+  approved_at: "2026-09-30"
+
+# Evidence stats are priors only — never mixed into live-fill evidence.
+cells:
+  - cell_id: sol_no_30_60_t120_600
+    asset: SOL
+    side: "no"
+    price_min_cents: 30
+    price_max_cents: 60
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 1.5
+    historical_lcb10_cents: 8.8
+    evidence: "frontier: SOL-NO 30-59c LCB10 +8.8..+14.7c; TTE120-300 LCB +14.1c"
+
+  - cell_id: sol_no_60_80_t120_600
+    asset: SOL
+    side: "no"
+    price_min_cents: 60
+    price_max_cents: 80
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 2.7
+    evidence: "frontier: SOL-NO 70-79c LCB +2.7c; 60-69c weak -> higher bar"
+
+  - cell_id: doge_no_20_30_t120_600
+    asset: DOGE
+    side: "no"
+    price_min_cents: 20
+    price_max_cents: 30
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 2.0
+    historical_lcb10_cents: 1.6
+    evidence: "frontier: DOGE-NO 20-29c LCB +1.6c (held floor still applies <25c)"
+
+  - cell_id: doge_no_40_50_t120_600
+    asset: DOGE
+    side: "no"
+    price_min_cents: 40
+    price_max_cents: 50
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 2.0
+    historical_lcb10_cents: 2.4
+    evidence: "frontier: DOGE-NO 40-49c LCB +2.4c"
+
+  - cell_id: doge_no_70_90_t120_600
+    asset: DOGE
+    side: "no"
+    price_min_cents: 70
+    price_max_cents: 90
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 3.0
+    historical_lcb10_cents: 6.2
+    evidence: "frontier: DOGE-NO 70-89c LCB +6.2..+21.5c"
+
+  - cell_id: xrp_no_30_40_t120_600
+    asset: XRP
+    side: "no"
+    price_min_cents: 30
+    price_max_cents: 40
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 3.7
+    evidence: "frontier: XRP-NO 30-39c LCB +3.7c"
+
+  - cell_id: xrp_no_80_90_t120_600
+    asset: XRP
+    side: "no"
+    price_min_cents: 80
+    price_max_cents: 90
+    tte_min_seconds: 120
+    tte_max_seconds: 600
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 2.2
+    evidence: "frontier: XRP-NO 80-89c LCB +2.2c"
