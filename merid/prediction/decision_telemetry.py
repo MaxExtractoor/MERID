@@ -473,11 +473,19 @@ def build_asset_record(
         "no_thr_asset_base_cents": _first_float(
             _resolve(candidate, decision, ["no_thr_asset_base_cents"], ["no_thr_asset_base_cents"])
         ),
+        # Final-record economics (2026-09-30): when the producer didn't
+        # stamp best_executable_*, fall back to the per-side net EVs this
+        # record already carries so heartbeats/final state never read n/a
+        # on evaluated assets.
         "best_executable_side": _first_str(
-            _resolve(candidate, decision, ["best_executable_side"], ["best_executable_side"])
+            _resolve(candidate, decision, ["best_executable_side"], ["best_executable_side"]),
+            "yes" if (_yes_ev_c is not None and _yes_ev_c == _best_ev_c)
+            else ("no" if _no_ev_c is not None and _no_ev_c == _best_ev_c
+                  else None),
         ),
         "best_executable_ev_cents": _first_float(
-            _resolve(candidate, decision, ["best_executable_ev_cents"], ["best_executable_ev_cents"])
+            _resolve(candidate, decision, ["best_executable_ev_cents"], ["best_executable_ev_cents"]),
+            _best_ev_c,
         ),
         "best_required_edge_cents": _first_float(
             _resolve(candidate, decision, ["best_required_edge_cents"], ["best_required_edge_cents"])

@@ -100,6 +100,7 @@ import os
 import statistics
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -179,6 +180,32 @@ def _builtin_cells() -> List[ThresholdCell]:
             "xrp_no_80_90_t120_600", "XRP", "no", 80, 90, 120.0, 600.0, 2.5,
             "frontier: XRP-NO 80-89c LCB +2.2c",
             2.2,
+        ),
+        # 2026-09-30 batch 1: BTC/ETH PROVISIONAL measurement cells.
+        ThresholdCell(
+            "btc_no_30_40_t120_300", "BTC", "no", 30, 40, 120.0, 300.0, 2.5,
+            "discovery20260930: BTC-NO 30-39c t120-300 n=85 mkts=72 LCB10 +5.23c",
+            5.23,
+        ),
+        ThresholdCell(
+            "btc_no_40_50_t120_300", "BTC", "no", 40, 50, 120.0, 300.0, 2.5,
+            "discovery20260930: BTC-NO 40-49c t120-300 n=71 mkts=59 LCB10 +5.39c",
+            5.39,
+        ),
+        ThresholdCell(
+            "btc_no_50_60_t120_300", "BTC", "no", 50, 60, 120.0, 300.0, 3.0,
+            "discovery20260930: BTC-NO 50-59c t120-300 n=70 mkts=62 LCB10 +4.19c",
+            4.19,
+        ),
+        ThresholdCell(
+            "eth_no_50_60_t120_300", "ETH", "no", 50, 60, 120.0, 300.0, 2.5,
+            "discovery20260930: ETH-NO 50-59c t120-300 n=65 mkts=55 LCB10 +5.84c",
+            5.84,
+        ),
+        ThresholdCell(
+            "eth_no_60_70_t120_300", "ETH", "no", 60, 70, 120.0, 300.0, 3.0,
+            "discovery20260930: ETH-NO 60-69c t120-300 n=76 mkts=69 LCB10 +3.98c",
+            3.98,
         ),
     ]
 
@@ -298,6 +325,8 @@ def _load_registry() -> Tuple[List[ThresholdCell], str]:
 
 
 THRESHOLD_CELLS, REGISTRY_SOURCE = _load_registry()
+
+_CELLS_BY_ID: Dict[str, ThresholdCell] = {c.cell_id: c for c in THRESHOLD_CELLS}
 
 CELLS_BY_ASSET: Dict[str, Tuple[str, ...]] = {
     a: tuple(c.cell_id for c in THRESHOLD_CELLS if c.asset == a)
@@ -440,12 +469,133 @@ def cell_discovery_detail(asset: str) -> Dict[str, Any]:
         detail["top_candidate"] = best.get("cell_key")
         detail["promotion_status"] = best.get("promotion_status")
         return detail
-    # No compiler row: fall back to the discovery artifact's top candidate.
+    # No candidate row: check whether the asset's top IN-DOMAIN discovery
+    # bucket was REJECTED by the compiler before reporting it as merely
+    # uncompiled.  S2_domain rejections are expected tail-bucket vetoes —
+    # they are never the asset's best candidate.
+    rej_best = None
+    for row in _load_rejections_artifact():
+        if str(row.get("asset", "")).upper() != asset_u:
+            continue
+        if str(row.get("failed_stage")) == "S2_domain":
+            continue
+        if rej_best is None or (row.get("lcb10_cents") or -1e9) > (
+            rej_best.get("lcb10_cents") or -1e9
+        ):
+            rej_best = row
+    if rej_best is not None:
+        detail["top_candidate"] = rej_best.get("cell_key")
+        detail["promotion_status"] = (
+            f"REJECTED@{rej_best.get('failed_stage') or 'unknown'}"
+        )
+        return detail
+    # Fall back to the discovery artifact's top candidate.
     rec = _load_discovery_artifact().get(asset_u) or {}
     if rec.get("top_candidate"):
         detail["top_candidate"] = rec["top_candidate"]
         detail["promotion_status"] = "NOT_COMPILED"
     return detail
+
+
+_REJECTIONS_ARTIFACT_ENV = "MERID_CELL_REJECTIONS_PATH"
+_REJECTIONS_ARTIFACT_DEFAULT = "data/threshold_cell_rejections.json"
+_rejections_cache: Dict[str, Any] = {"path": None, "mtime_ns": None, "rows": []}
+
+
+def _load_rejections_artifact() -> List[Dict[str, Any]]:
+    """mtime-cached reader for data/threshold_cell_rejections.json."""
+    path = os.path.abspath(
+        os.environ.get(_REJECTIONS_ARTIFACT_ENV, _REJECTIONS_ARTIFACT_DEFAULT)
+    )
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        _rejections_cache.update(path=path, mtime_ns=None, rows=[])
+        return []
+    if _rejections_cache["path"] == path and _rejections_cache["mtime_ns"] == mtime:
+        return _rejections_cache["rows"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        rows = payload.get("per_cell") or []
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    _rejections_cache.update(path=path, mtime_ns=mtime, rows=rows)
+    return rows
+
+
+_ASSETS_UNIVERSE = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+
+
+def promotion_status_rollup() -> str:
+    """One-line all-five promotion status — answers 'why is asset X not
+    trading?' from the promotion artifacts plus the live registry:
+
+        BTC: live=3 live_provisional=3 candidates=1 pending_feasibility=1
+             rejected_domain=38 rejected_stats=19 rejected_concentration=0
+             rejected_execution=0 suspended=0 | ETH: ...
+
+    Absence of artifacts is explicit ('no_compiler_artifact') — never an
+    error in the live loop.
+    """
+    cand = _load_candidates_artifact()
+    rej = _load_rejections_artifact()
+    by_asset: Dict[str, Any] = {a: defaultdict(int) for a in _ASSETS_UNIVERSE}
+    for row in cand:
+        a = str(row.get("asset", "")).upper()
+        if a not in by_asset:
+            continue
+        by_asset[a]["candidates"] += 1
+        st = str(row.get("promotion_status") or "")
+        if st == "CANDIDATE_PENDING_EXECUTION_FEASIBILITY":
+            by_asset[a]["pending_feasibility"] += 1
+        elif st == "CANDIDATE_PENDING_RECENCY_AND_CALIBRATION":
+            by_asset[a]["pending_recency"] += 1
+        elif st == "CANDIDATE_READY_FOR_APPROVAL":
+            by_asset[a]["ready_for_approval"] += 1
+        elif st == "LIVE_PROVISIONAL":
+            by_asset[a]["live_provisional"] += 1
+        elif st == "APPROVED":
+            by_asset[a]["approved"] += 1
+    for row in rej:
+        a = str(row.get("asset", "")).upper()
+        if a not in by_asset:
+            continue
+        fs = str(row.get("failed_stage") or "")
+        if fs == "S2_domain":
+            by_asset[a]["rejected_domain"] += 1
+        elif fs == "S1b_market_concentration":
+            by_asset[a]["rejected_concentration"] += 1
+        elif fs == "S3_execution_feasibility":
+            by_asset[a]["rejected_execution"] += 1
+        else:
+            by_asset[a]["rejected_stats"] += 1
+    parts = []
+    for a in _ASSETS_UNIVERSE:
+        c = by_asset[a]
+        live = CELLS_BY_ASSET.get(a, ())
+        n_susp = sum(
+            1 for cid in live
+            if get_cell_state(cid) == CELL_STATE_SUSPENDED
+        )
+        if not cand and not rej:
+            parts.append(f"{a}: live={len(live)} no_compiler_artifact")
+            continue
+        parts.append(
+            f"{a}: live={len(live)} suspended={n_susp} "
+            f"candidates={c['candidates']} approved={c['approved']} "
+            f"live_provisional={c['live_provisional']} "
+            f"pending_feasibility={c['pending_feasibility']} "
+            f"pending_recency={c['pending_recency']} "
+            f"ready_for_approval={c['ready_for_approval']} "
+            f"rejected_domain={c['rejected_domain']} "
+            f"rejected_concentration={c['rejected_concentration']} "
+            f"rejected_execution={c['rejected_execution']} "
+            f"rejected_stats={c['rejected_stats']}"
+        )
+    return " | ".join(parts)
 
 
 # Soft evidence codes the threshold-cell lane may override under its own
@@ -677,6 +827,17 @@ def cell_daily_max_fills_total() -> int:
 def cell_max_open_orders() -> int:
     """Resting orders per cell — prevents duplicate race submissions."""
     return _env_int("MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS", 1)
+
+
+def cell_max_open_orders_total() -> int:
+    """Resting cell orders across the whole lane — the measurement lane
+    runs at most one open passive order at a time."""
+    return _env_int("MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS_TOTAL", 1)
+
+
+def cell_daily_max_fills_per_asset() -> int:
+    """Filled trades/day per asset — fair allocation across the universe."""
+    return _env_int("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_PER_ASSET", 2)
 
 
 def _suspend_min_fills() -> int:
@@ -1280,6 +1441,28 @@ def cell_fills_today_total() -> int:
     return sum(int(v or 0) for v in (st.get("fills_today") or {}).values())
 
 
+def cell_fills_today_asset(asset: str) -> int:
+    """Per-asset filled trades/day — fair allocation: no single asset may
+    consume the lane's exploratory fill budget."""
+    st = _load_state()
+    want = str(asset).upper()
+    total = 0
+    for cid, n in (st.get("fills_today") or {}).items():
+        cell = _CELLS_BY_ID.get(cid)
+        if cell is not None and cell.asset == want:
+            total += int(n or 0)
+    return total
+
+
+def cell_open_orders_total() -> int:
+    """Resting cell orders across ALL cells — the lane runs at most one
+    open passive order at a time (global serialization)."""
+    st = _load_state()
+    return sum(
+        len(v) for v in (st.get("open_orders") or {}).values() if v
+    )
+
+
 def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
     """(allowed, block_reason) — all lane admission checks in one place.
 
@@ -1299,6 +1482,16 @@ def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
         return False, "cell_fills_total_cap_exhausted"
     if cell_open_orders(cell_id) >= cell_max_open_orders():
         return False, "cell_open_order_exists"
+    # Fair allocation (2026-09-30): one resting cell order globally and at
+    # most N fills per asset per day, so a single asset's regime cannot
+    # consume the lane's exploratory budget ahead of the others.
+    if cell_open_orders_total() >= cell_max_open_orders_total():
+        return False, "lane_open_order_exists"
+    _cell = _CELLS_BY_ID.get(cell_id)
+    if _cell is not None and cell_fills_today_asset(
+        _cell.asset
+    ) >= cell_daily_max_fills_per_asset():
+        return False, "asset_fills_cap_exhausted"
     if cell_submissions_today_cell(cell_id) >= cell_daily_max_submissions_per_cell():
         return False, "cell_submissions_cap_exhausted"
     if cell_submissions_today() >= cell_daily_max():

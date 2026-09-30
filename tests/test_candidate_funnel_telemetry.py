@@ -99,6 +99,52 @@ def test_terminal_code_reason_mapping():
         assert dt._terminal_code({}, None, False, reason, None) == expected, reason
 
 
+def test_terminal_code_never_unclassified_with_evaluated_economics():
+    """2026-09-30 heartbeat fix: when per-side net EVs were computed, the
+    final record must report the first economic blocker — never UNCLASSIFIED
+    or MODEL_UNAVAILABLE — even when the raw reason is empty or unmapped."""
+    # Evaluated, no positive side -> NO_POSITIVE_EXECUTABLE_EDGE.
+    assert dt._terminal_code({}, None, False, "", -1.0) == \
+        "NO_POSITIVE_EXECUTABLE_EDGE"
+    assert dt._terminal_code({}, None, False, "", 0.0) == \
+        "NO_POSITIVE_EXECUTABLE_EDGE"
+    assert dt._terminal_code(
+        {}, None, False, "unmapped_reason_xyz", -2.0
+    ) == "NO_POSITIVE_EXECUTABLE_EDGE"
+    # Evaluated, positive side exists but nothing emitted -> the edge could
+    # not clear its gate (the honest economic blocker).
+    assert dt._terminal_code({}, None, False, "", 3.5) == \
+        "EDGE_BELOW_DYNAMIC_THRESHOLD"
+    assert dt._terminal_code(
+        {}, None, False, "unmapped_reason_xyz", 1.0
+    ) == "EDGE_BELOW_DYNAMIC_THRESHOLD"
+    # No economics at all -> compatibility codes still apply.
+    assert dt._terminal_code({}, None, False, "", None) == "MODEL_UNAVAILABLE"
+    assert dt._terminal_code({}, None, False, "never_seen", None) == \
+        "UNCLASSIFIED"
+
+
+def test_asset_record_populates_final_best_side_ev_terminal():
+    """The final per-asset record must carry best_side / best_ev / terminal
+    derived from evaluated per-side economics — never n/a + UNCLASSIFIED
+    when yes/no net EVs are present."""
+    decision = {
+        "ticker": "KXBTC15M-T", "rejection_reason": "",
+        "yes_ev_net_cents": -1.2, "no_ev_net_cents": 0.8,
+    }
+    rec = dt.build_asset_record(
+        cycle_id=1, asset="BTC", decision=decision,
+        waterfall=_wf(market_discovered={"status": True},
+                      spot_price={"status": True},
+                      market_open={"status": True}),
+        candidate=None, allocator_selected=False,
+    )
+    assert rec["best_executable_ev_cents"] == 0.8
+    assert rec["best_executable_side"] == "no"
+    assert rec["terminal_code"] == "EDGE_BELOW_DYNAMIC_THRESHOLD"
+    assert rec["terminal_code"] != "UNCLASSIFIED"
+
+
 def test_terminal_code_regime_tte_floor_is_market_unavailable():
     """Both-sides regime disablement inside the TTE floor is an expired entry
     window, not a toxic price band — distinguishable on the record."""

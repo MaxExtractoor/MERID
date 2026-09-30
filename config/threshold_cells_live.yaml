@@ -15,10 +15,10 @@
 #   one open order per cell, per-cell daily fill/submission caps,
 #   first-fill + rolling-markout suspension.
 
-registry_version: "2026-09-30.2"
+registry_version: "2026-09-30.3"
 approval:
   manifest_sha256: null          # filled when promoted from a candidates manifest
-  approved_by: "manual-frontier-review"
+  approved_by: "manual-frontier-review + operator directive 2026-09-30"
   approved_at: "2026-09-30"
 
 # Evidence stats are priors only — never mixed into live-fill evidence.
@@ -99,3 +99,72 @@ cells:
     min_net_ev_cents: 2.5
     historical_lcb10_cents: 2.2
     evidence: "frontier: XRP-NO 80-89c LCB +2.2c"
+
+  # --- 2026-09-30 batch 1: BTC/ETH promotion candidates -------------------
+  # Added as PROVISIONAL measurement cells under operator directive after the
+  # discovery report + promotion compiler showed statistically clean in-domain
+  # cohorts (n>=50 markets, LCB10>0, +1c-stress LCB10>0, all folds>0,
+  # max_day_share<=0.18).  Execution feasibility is still being measured —
+  # these run on the identical bounded post-only lane: 1 contract, post-only,
+  # <=1 reprice, first-fill + rolling-markout suspension.  min_net_ev floors
+  # are held above the stressed bound, not at the historical mean.
+
+  - cell_id: btc_no_30_40_t120_300
+    asset: BTC
+    side: "no"
+    price_min_cents: 30
+    price_max_cents: 40
+    tte_min_seconds: 120
+    tte_max_seconds: 300
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 5.23
+    state: PROVISIONAL
+    evidence: "discovery20260930: BTC-NO 30-39c t120-300 n=85 mkts=72 LCB10 +5.23c (+1c +4.23) folds +23.4/+12.0/+1.5"
+
+  - cell_id: btc_no_40_50_t120_300
+    asset: BTC
+    side: "no"
+    price_min_cents: 40
+    price_max_cents: 50
+    tte_min_seconds: 120
+    tte_max_seconds: 300
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 5.39
+    state: PROVISIONAL
+    evidence: "discovery20260930: BTC-NO 40-49c t120-300 n=71 mkts=59 LCB10 +5.39c (+1c +4.39) folds +21.3/+12.1/+5.7"
+
+  - cell_id: btc_no_50_60_t120_300
+    asset: BTC
+    side: "no"
+    price_min_cents: 50
+    price_max_cents: 60
+    tte_min_seconds: 120
+    tte_max_seconds: 300
+    min_net_ev_cents: 3.0
+    historical_lcb10_cents: 4.19
+    state: PROVISIONAL
+    evidence: "discovery20260930: BTC-NO 50-59c t120-300 n=70 mkts=62 LCB10 +4.19c (+1c +3.19) folds +10.2/+20.9/+3.0"
+
+  - cell_id: eth_no_50_60_t120_300
+    asset: ETH
+    side: "no"
+    price_min_cents: 50
+    price_max_cents: 60
+    tte_min_seconds: 120
+    tte_max_seconds: 300
+    min_net_ev_cents: 2.5
+    historical_lcb10_cents: 5.84
+    state: PROVISIONAL
+    evidence: "discovery20260930: ETH-NO 50-59c t120-300 n=65 mkts=55 LCB10 +5.84c folds +13.2/+9.8/+14.6"
+
+  - cell_id: eth_no_60_70_t120_300
+    asset: ETH
+    side: "no"
+    price_min_cents: 60
+    price_max_cents: 70
+    tte_min_seconds: 120
+    tte_max_seconds: 300
+    min_net_ev_cents: 3.0
+    historical_lcb10_cents: 3.98
+    state: PROVISIONAL
+    evidence: "discovery20260930: ETH-NO 60-69c t120-300 n=76 mkts=69 LCB10 +3.98c (+1c +2.98) folds +8.3/+12.2/+10.1"

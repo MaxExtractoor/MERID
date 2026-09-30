@@ -30,7 +30,10 @@ Usage:
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 IN = "data/cell_discovery.json"
 OUT_CANDIDATES = "data/threshold_cell_candidates.json"
@@ -43,6 +46,11 @@ ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 MIN_N = 50
 MIN_DAY_SHARE = 0.5
 MIN_N_EFF_21D = 10.0
+
+# Market-concentration gate (S1b): repeated decision ticks inside one market
+# are not independent evidence.
+MIN_MARKETS = 50
+MAX_MARKET_SHARE = 0.05
 
 
 def _verdict_to_reason(verdict):
@@ -64,8 +72,11 @@ def _bucket_to_cell_id(bucket_key):
     return f"{asset.lower()}_{side}_{plo}_{phi}_t{tlo}_{thi}"
 
 
-def compile_candidates(discovery, live_registry):
+def compile_candidates(discovery, live_registry, touch_map=None,
+                       live_map=None):
     """Evaluate every bucket row for all five assets through the 5 stages."""
+    touch_map = touch_map or {}
+    live_map = live_map or {}
     candidates, rejections = [], []
     for asset in ASSETS:
         rec = (discovery.get("per_asset") or {}).get(asset) or {}
@@ -97,6 +108,10 @@ def compile_candidates(discovery, live_registry):
                 "fill_feasibility": "FILL_FEASIBILITY_UNKNOWN",
                 "actual_depth_eligible_rate": None,
                 "maker_touchable_rate": None,
+                "touchable_informative_n": None,
+                "touchable_lcb10_cents": None,
+                "touchability_labels": None,
+                "live": None,
                 "recent_calibration_residual": None,
                 "already_live": _bucket_to_cell_id(b["bucket"]) in live_ids,
                 "discovery_verdict": b["verdict"],
@@ -132,12 +147,75 @@ def compile_candidates(discovery, live_registry):
                 rejections.append(row)
                 continue
 
+            # ---- Stage 1b: market concentration -----------------------------
+            # n_observations can be inflated by repeated ticks inside one
+            # market; require >=50 distinct markets and <=5% single-market
+            # share so independence is real, not assumed.
+            n_mkts = b.get("n_markets") or 0
+            mkt_share = b.get("max_market_share")
+            if n_mkts < MIN_MARKETS:
+                row["promotion_status"] = "REJECTED"
+                row["exclusion_reason"] = (
+                    f"S1b concentration: {n_mkts} distinct markets < "
+                    f"{MIN_MARKETS}"
+                )
+                row["failed_stage"] = "S1b_market_concentration"
+                rejections.append(row)
+                continue
+            if mkt_share is not None and mkt_share > MAX_MARKET_SHARE:
+                row["promotion_status"] = "REJECTED"
+                row["exclusion_reason"] = (
+                    f"S1b concentration: max_market_share "
+                    f"{mkt_share:.3f} > {MAX_MARKET_SHARE}"
+                )
+                row["failed_stage"] = "S1b_market_concentration"
+                rejections.append(row)
+                continue
+
             # ---- Stage 3: execution feasibility -----------------------------
-            # No historical book-touch / maker-fill data wired yet — every
-            # passing bucket is capped at pending-feasibility, never APPROVED.
-            row["promotion_status"] = "CANDIDATE_PENDING_EXECUTION_FEASIBILITY"
-            row["exclusion_reason"] = None
-            row["failed_stage"] = "S3_execution_feasibility"
+            # Real labels when the rows artifact + snapshot history exist;
+            # explicit UNKNOWN otherwise — never fabricated.
+            tcell_id = _bucket_to_cell_id(b["bucket"])
+            t = touch_map.get(b["bucket"])
+            live = live_map.get(tcell_id)
+            if live:
+                row["live"] = live
+            if t is None:
+                row["fill_feasibility"] = "FILL_FEASIBILITY_UNKNOWN"
+            else:
+                row["fill_feasibility"] = t["verdict"]
+                row["maker_touchable_rate"] = t["touchable_rate"]
+                row["touchable_informative_n"] = t["informative_n"]
+                row["touchable_lcb10_cents"] = t["touchable_lcb10_cents"]
+                row["touchability_labels"] = t["label_counts"]
+
+            if row["already_live"]:
+                # Already in the live registry (PROVISIONAL lane) — report
+                # status; promotion gates no longer apply, measurement does.
+                row["promotion_status"] = "LIVE_PROVISIONAL"
+                row["exclusion_reason"] = None
+                row["failed_stage"] = None
+                candidates.append(row)
+                continue
+
+            if row["fill_feasibility"] == "TOUCHABILITY_FAIL":
+                row["promotion_status"] = "REJECTED"
+                row["exclusion_reason"] = (
+                    "S3 execution: passive touchability gate failed "
+                    f"(rate={row['maker_touchable_rate']}, "
+                    f"informative_n={row['touchable_informative_n']}, "
+                    f"touch_lcb10={row['touchable_lcb10_cents']})"
+                )
+                row["failed_stage"] = "S3_execution_feasibility"
+                rejections.append(row)
+                continue
+
+            if row["fill_feasibility"] != "TOUCHABILITY_PASS":
+                row["promotion_status"] = "CANDIDATE_PENDING_EXECUTION_FEASIBILITY"
+                row["exclusion_reason"] = None
+                row["failed_stage"] = "S3_execution_feasibility"
+                candidates.append(row)
+                continue
 
             # ---- Stage 4: recency & calibration -----------------------------
             n21 = b.get("n_eff_21d")
@@ -148,9 +226,16 @@ def compile_candidates(discovery, live_registry):
             ):
                 row["promotion_status"] = "CANDIDATE_PENDING_RECENCY_AND_CALIBRATION"
                 row["failed_stage"] = "S4_recency_calibration"
+                candidates.append(row)
+                continue
 
             # ---- Stage 5: deployment ---------------------------------------
-            # Unreachable while S3 == UNKNOWN; documented for completeness.
+            # S3+S4 concretely passed — the row is eligible for a human to
+            # copy into config/threshold_cells_live.yaml.  This compiler
+            # never writes the live registry itself.
+            row["promotion_status"] = "CANDIDATE_READY_FOR_APPROVAL"
+            row["exclusion_reason"] = None
+            row["failed_stage"] = None
             candidates.append(row)
 
     order = lambda r: (r["asset"], -(r["lcb10_cents"] or 0))
@@ -185,10 +270,13 @@ def _write_manifest(candidates, path):
             f"    tte_max_seconds: {thi}",
             f"    promotion_status: {r['promotion_status']}",
             f"    historical_n: {r['historical_n']}",
+            f"    n_markets: {r['n_markets']}",
             f"    lcb10_cents: {r['lcb10_cents']}",
             f"    mean_net_cents: {r['mean_net_cents']}",
             f"    folds: {r['folds']}",
             f"    fill_feasibility: {r['fill_feasibility']}",
+            f"    maker_touchable_rate: {r['maker_touchable_rate']}",
+            f"    touchable_informative_n: {r['touchable_informative_n']}",
         ]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -217,21 +305,48 @@ def main():
     ap.add_argument("--out-rejections", default=OUT_REJECTIONS)
     ap.add_argument("--out-manifest", default=OUT_MANIFEST)
     ap.add_argument("--registry", default="config/threshold_cells_live.yaml")
+    ap.add_argument("--rows", default="data/cell_discovery_rows.jsonl",
+                    help="in-domain row file for the touchability labeler")
+    ap.add_argument("--skip-touchability", action="store_true",
+                    help="leave S3 as FILL_FEASIBILITY_UNKNOWN for all cells")
     args = ap.parse_args()
 
     with open(args.inp, "r", encoding="utf-8") as f:
         discovery = json.load(f)
     live_registry = _load_live_registry(args.registry)
 
-    candidates, rejections = compile_candidates(discovery, live_registry)
+    touch_map, live_map = {}, {}
+    if not args.skip_touchability:
+        try:
+            import touchability_labels as tl
+            if os.path.exists(args.rows):
+                touch_map = tl.classify_all(
+                    rows_path=args.rows, db_path=tl.DB
+                )
+            live_map = tl.live_attempts()
+        except Exception as e:
+            # Fail-closed: a labeler error must not fabricate feasibility —
+            # every cell simply stays FILL_FEASIBILITY_UNKNOWN.
+            print(f"touchability labeler unavailable ({e}); "
+                  f"all cells stay FILL_FEASIBILITY_UNKNOWN",
+                  file=sys.stderr)
+            touch_map, live_map = {}, {}
+
+    candidates, rejections = compile_candidates(
+        discovery, live_registry, touch_map=touch_map, live_map=live_map,
+    )
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": args.inp,
         "promotion_contract": (
             "S1 n>=50 & lcb10>0 & lcb10+1c>0 & folds>0 & day_share<=0.5 | "
-            "S2 20-89c x 120-600s | S3 execution feasibility (UNKNOWN today) | "
-            "S4 n_eff_21d>=10 & mean_21d>0 | S5 explicit approval -> live yaml"
+            "S1b markets>=50 & max_market_share<=0.05 | "
+            "S2 20-89c x 120-600s | "
+            "S3 touchability: rate>=0.20 & informative>=20 & touch_lcb10-1c>0 "
+            "(UNKNOWN -> pending, never fabricated) | "
+            "S4 n_eff_21d>=10 & mean_21d>0 | "
+            "S5 READY_FOR_APPROVAL -> human copies row to live yaml"
         ),
         "per_cell": candidates,
     }
@@ -244,7 +359,9 @@ def main():
     print(f"\n== promotion compiler ==")
     print(f"candidates: {len(candidates)}  rejections: {len(rejections)}")
     for r in candidates:
+        _rate = r.get("maker_touchable_rate")
         print(f"  {r['cell_key']:48} lcb={r['lcb10_cents']:>+7.2f} "
+              f"touch={('%s' % _rate) if _rate is not None else '  n/a':>6} "
               f"{r['promotion_status']}")
     rej_by = {}
     for r in rejections:
