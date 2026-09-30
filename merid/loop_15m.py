@@ -1324,6 +1324,9 @@ class Kalshi15mLoop:
         # (asset, window_start_epoch) dedup for the ROLLOVER-READINESS audit
         # emitted once per asset in the first seconds of each 15m window.
         self._rollover_readiness_emitted: set = set()
+        # (asset, window_bucket) -> {component: first_seen_epoch} — the
+        # readiness timing chain listed->state->md->spot->depth->ready.
+        self._readiness_markers: dict = {}
         self._rollover_readiness_window_s = float(
             os.getenv("MERID_ROLLOVER_READINESS_WINDOW_S", "45")
         )
@@ -4471,6 +4474,23 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             exc_info=True,
         )
 
+def _readiness_mark(self, asset: str, component: str) -> None:
+    """Stamp the first-seen epoch of a readiness component for this window."""
+    try:
+        key = (asset, int(time.time() // 900))
+        marks = self._readiness_markers.get(key)
+        if marks is None:
+            marks = {}
+            self._readiness_markers[key] = marks
+            if len(self._readiness_markers) > 200:
+                self._readiness_markers.clear()
+                self._readiness_markers[key] = marks
+        if component not in marks:
+            marks[component] = time.time()
+    except Exception:
+        pass
+
+
 def _emit_rollover_readiness(self, asset: str, ticker: Optional[str], missing: List[str]) -> None:
     """Emit one ``[ROLLOVER-READINESS]`` record per asset per 15m window.
 
@@ -4478,23 +4498,67 @@ def _emit_rollover_readiness(self, asset: str, ticker: Optional[str], missing: L
     after a window boundary (default 45s, covers the spec's open+10s target).
     Distinguishes true no-edge windows from operational blindness: NOT_READY
     carries the exact missing component (catalog_ticker, market_state_store,
-    md:<reason>, spot_fresh, book_depth).
+    md:<reason>, spot_fresh, book_depth) plus the readiness timing chain
+    (listed/state/md/spot/depth first-seen latencies) and a dominant_delay
+    attribution (KALSHI_LISTING|LOCAL_STATE|MD_FRESHNESS|SPOT|BOOK_DEPTH|READY).
     """
     try:
-        window_age_s = time.time() % 900.0
+        now = time.time()
+        window_open = float(int(now // 900) * 900)
+        window_age_s = now - window_open
         if window_age_s > self._rollover_readiness_window_s:
             return
-        key = (asset, int(time.time() // 900))
-        if key in self._rollover_readiness_emitted:
-            return
-        self._rollover_readiness_emitted.add(key)
+        key = (asset, int(now // 900))
+        eval_key = key + ("eval",)
+        ready_key = key + ("ready",)
+        # Emit once at first evaluation (whatever state), and once more when the
+        # asset first reaches READY — the second record carries ready_latency_ms
+        # and the completed timing chain.
+        if not missing:
+            if ready_key in self._rollover_readiness_emitted:
+                return
+            self._rollover_readiness_emitted.add(ready_key)
+            first_eval = eval_key not in self._rollover_readiness_emitted
+            if first_eval:
+                self._rollover_readiness_emitted.add(eval_key)
+        else:
+            if eval_key in self._rollover_readiness_emitted:
+                return
+            self._rollover_readiness_emitted.add(eval_key)
         if len(self._rollover_readiness_emitted) > 1000:
             self._rollover_readiness_emitted.clear()
+
+        marks = self._readiness_markers.get(key, {})
+
+        def _ms(comp: str) -> str:
+            ts = marks.get(comp)
+            return f"{(ts - window_open) * 1000.0:.0f}" if ts else "na"
+
+        if not missing:
+            dominant = "READY"
+        elif "catalog_ticker" in missing:
+            dominant = "KALSHI_LISTING"
+        elif "market_state_store" in missing:
+            dominant = "LOCAL_STATE"
+        elif any(m.startswith("md:") for m in missing):
+            dominant = "MD_FRESHNESS"
+        elif "spot_fresh" in missing:
+            dominant = "SPOT"
+        elif "book_depth" in missing:
+            dominant = "BOOK_DEPTH"
+        else:
+            dominant = "LOCAL"
+
         logger.info(
-            "[ROLLOVER-READINESS] asset=%s ticker=%s window_age_s=%.0f state=%s missing=%s",
+            "[ROLLOVER-READINESS] asset=%s ticker=%s window_age_s=%.0f state=%s "
+            "missing=%s dominant_delay=%s listed_ms=%s state_ms=%s md_ms=%s "
+            "spot_ms=%s depth_ms=%s ready_ms=%s",
             asset, ticker or "none", window_age_s,
             "READY" if not missing else "NOT_READY",
             ",".join(missing) if missing else "none",
+            dominant,
+            _ms("listed"), _ms("state"), _ms("md_fresh"),
+            _ms("spot_fresh"), _ms("depth_ok"), _ms("ready"),
         )
     except Exception:
         pass
@@ -4542,6 +4606,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 self._emit_rollover_readiness(asset, None, ["catalog_ticker"])
                 continue
             markets_present = True
+            self._readiness_mark(asset, "listed")
             market_id = (
                 current_market.market.market_id
                 if hasattr(current_market, "market")
@@ -4551,6 +4616,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             if state is None:
                 self._emit_rollover_readiness(asset, market_id, ["market_state_store"])
                 continue
+            self._readiness_mark(asset, "state")
 
             # CRITICAL FIX (2026-08-22): Use the authoritative *entry* readiness gate
             # for per-asset MD freshness.  This guarantees that the loop's allow-new-entry
@@ -4570,6 +4636,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
 
             if asset_md_fresh:
                 md_fresh_count += 1
+                self._readiness_mark(asset, "md_fresh")
 
             # Spot freshness (best effort).
             asset_spot_fresh = False
@@ -4584,6 +4651,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                     pass
             if asset_spot_fresh:
                 spot_fresh_count += 1
+                self._readiness_mark(asset, "spot_fresh")
 
             # Depth/liquidity sufficiency: use the same function as the main loop.
             if risk_envelope is not None:
@@ -4607,6 +4675,10 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 _rr_missing.append("spot_fresh")
             if not _depth_ok:
                 _rr_missing.append("book_depth")
+            if _depth_ok:
+                self._readiness_mark(asset, "depth_ok")
+            if asset_md_fresh and _depth_ok:
+                self._readiness_mark(asset, "ready")
             self._emit_rollover_readiness(asset, market_id, _rr_missing)
             if asset_md_fresh and _depth_ok:
                 ready_assets_count += 1

@@ -4338,6 +4338,62 @@ def _is_marketable_against_book(intent: OrderIntent, book_side: Dict[str, Any]) 
             return order_price <= bid_cents
 
 
+def _post_only_strict_passivity(
+    intent: "OrderIntent", side_book: Dict[str, Any]
+) -> Tuple[Optional[int], Optional[str]]:
+    """Strict-passivity evaluation for a ``post_only`` order against a fresh BBO.
+
+    A post-only order must rest *strictly* inside the book — a buy strictly
+    below the ask, a sell strictly above the bid.  Equality crosses on Kalshi
+    (``post only cross``).  When the current limit would cross on the supplied
+    side-aware BBO, compute the nearest strictly-passive price and return it
+    if it stays inside the signal's edge budget.
+
+    Returns ``(new_price_cents, None)`` when a passive reprice is required and
+    valid, ``(None, None)`` when the order is already strictly passive or the
+    inputs are unusable, and ``(None, reason)`` when the order crosses and no
+    in-budget passive price exists.
+    """
+    price = getattr(intent, "price_cents", None)
+    bid_cents = side_book.get("bid_cents")
+    ask_cents = side_book.get("ask_cents")
+    if price is None or bid_cents is None or ask_cents is None:
+        return None, None
+    try:
+        price, bid_cents, ask_cents = int(price), int(bid_cents), int(ask_cents)
+    except Exception:
+        return None, None
+
+    action = (getattr(intent, "action", "") or "").lower()
+    if action == "buy":
+        if ask_cents <= 0 or price < ask_cents:
+            return None, None  # already strictly passive
+        new_px = ask_cents - 1
+        cap = _max_edge_preserving_buy_price(intent)
+        sel_px = getattr(intent, "selected_outcome_price_cents", None)
+        if sel_px is not None and int(sel_px) > 0:
+            chase = int(sel_px) + int(
+                os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+            )
+            cap = min(cap, chase) if cap is not None else chase
+        if new_px < 1:
+            return None, f"post_only_no_passive_price:ask={ask_cents}"
+        if cap is not None and new_px > cap:
+            return None, (
+                f"post_only_passivity_over_budget:new_px={new_px}:"
+                f"cap={cap}:ask={ask_cents}"
+            )
+        return new_px, None
+    if action == "sell":
+        if bid_cents <= 0 or price > bid_cents:
+            return None, None
+        new_px = bid_cents + 1
+        if new_px > 99:
+            return None, f"post_only_no_passive_price:bid={bid_cents}"
+        return new_px, None
+    return None, None
+
+
 def _is_ws_authoritative(state: KalshiMarketState) -> bool:
     """Return True when the WebSocket feed is the live, trusted primary book."""
     if state is None:
@@ -4756,6 +4812,44 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
 
         rest_book_side = _side_aware_book_for_intent(rest_book, intent.side)
         rest_marketable = _is_marketable_against_book(intent, rest_book_side)
+
+        # 2026-09-29: strict passivity for post_only entries on the fresh REST
+        # book — the freshest venue-valid BBO available before submit.  For a
+        # maker order, ``rest_marketable`` False means the limit would cross;
+        # Kalshi would reject it as post-only-cross.  Reprice once to a
+        # strictly passive price inside the signal's edge budget instead of
+        # dying at the exchange.
+        if (
+            not _is_exit
+            and getattr(intent, "post_only", False)
+            and _resolve_execution_mode(intent) in ("maker", "passive_quote")
+            and not rest_marketable
+        ):
+            _po_px, _po_rej = _post_only_strict_passivity(intent, rest_book_side)
+            if _po_rej is not None:
+                logger.warning(
+                    "[POST-ONLY-PASSIVITY] ticker=%s decision=BLOCKED reason=%s "
+                    "price=%dc rest_bid=%dc rest_ask=%dc",
+                    intent.ticker, _po_rej,
+                    getattr(intent, "price_cents", 0) or 0,
+                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+                )
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=_po_rej,
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            if _po_px is not None:
+                _old_po_px = int(getattr(intent, "price_cents", 0) or 0)
+                intent.price_cents = _po_px
+                rest_marketable = _is_marketable_against_book(intent, rest_book_side)
+                logger.info(
+                    "[POST-ONLY-PASSIVITY] ticker=%s repriced %dc->%dc on fresh REST book "
+                    "bid=%dc ask=%dc — strictly passive, still within edge budget",
+                    intent.ticker, _old_po_px, _po_px,
+                    rest_book_side["bid_cents"], rest_book_side["ask_cents"],
+                )
 
         bid_divergence_cents = abs(ws_book["bid_cents"] - rest_book_side["bid_cents"])
         ask_divergence_cents = abs(ws_book["ask_cents"] - rest_book_side["ask_cents"])
@@ -12049,6 +12143,36 @@ def _prepare_order_for_gate(
             latency_ms=round(latency, 2),
         ), None
 
+    # 2026-09-29 (execution coherence): decision-age deadline for entries.
+    # ``intent.snapshot_ts`` is stamped at intent creation (~decision time), so
+    # this bounds decision->submit pipeline age.  Candidates priced on a stale
+    # decision basis are dropped and the loop re-scores fresh on the next tick.
+    # Bands: warn -> telemetry only (pipeline latency today runs ~2-4s), drop
+    # -> hard reject.  Targets from the spec are 1s recompute / 2s drop; the
+    # defaults are set from observed latency and tighten via env.
+    if not _is_exit:
+        _decision_warn_ms = float(os.getenv("MERID_EXECUTION_DECISION_WARN_MS", "1500"))
+        _decision_max_ms = float(os.getenv("MERID_EXECUTION_DECISION_MAX_AGE_MS", "3500"))
+        _decision_age_ms = _snap_age * 1000.0
+        if _decision_age_ms > _decision_max_ms:
+            logger.warning(
+                "[STALE-DECISION] ticker=%s code=stale_decision_dropped age_ms=%.0f "
+                "max_ms=%.0f — entry authorization too old at submit; re-score next tick",
+                intent.ticker, _decision_age_ms, _decision_max_ms,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"stale_decision_dropped:{intent.ticker}:age_ms={_decision_age_ms:.0f}",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            ), None
+        if _decision_age_ms > _decision_warn_ms:
+            logger.info(
+                "[STALE-DECISION] ticker=%s code=stale_decision_recompute age_ms=%.0f "
+                "warn_ms=%.0f max_ms=%.0f — aged authorization; allowing with flag",
+                intent.ticker, _decision_age_ms, _decision_warn_ms, _decision_max_ms,
+            )
+
     # Market state / executable / freshness checks
     store = get_kalshi_market_state_store()
     state = store.get(intent.ticker)
@@ -12278,6 +12402,32 @@ def _prepare_order_for_gate(
             reason=f"reprice_would_cross:{e.reason}",
             latency_ms=round(latency, 2),
         ), None
+
+    # 2026-09-29: every router price mutation must be auditable — original
+    # decision price, routed price, book at mutation time, revised net-edge
+    # estimate, the signal's edge-preserving cap, and the fee assumption.
+    # An unchanged price emits nothing.
+    if original_price is not None and intent.price_cents != original_price:
+        try:
+            _pm_dir = -1.0 if (getattr(intent, "action", "") or "").lower() == "buy" else 1.0
+            _pm_ev0 = getattr(intent, "ev_net_cents", None)
+            _pm_ev = (
+                float(_pm_ev0) + _pm_dir * float(intent.price_cents - original_price)
+                if _pm_ev0 is not None else None
+            )
+            logger.info(
+                "[PRICE-MUTATION] ticker=%s side=%s action=%s original_price=%dc "
+                "routed_price=%dc yes_bid=%s yes_ask=%s revised_net_ev_c=%s "
+                "edge_cap=%s fee_cents=%s reason=adjust_for_fill_rate",
+                intent.ticker, intent.side, intent.action,
+                int(original_price), int(intent.price_cents),
+                getattr(state, "best_bid_cents", "?"), getattr(state, "best_ask_cents", "?"),
+                f"{_pm_ev:+.1f}" if _pm_ev is not None else "na",
+                _max_edge_preserving_buy_price(intent),
+                getattr(intent, "fee_cents", None),
+            )
+        except Exception as _pm_err:
+            logger.debug("[PRICE-MUTATION] emit failed for %s: %s", intent.ticker, _pm_err)
 
     # Sizing: risk before depth, then risk again to cap.
     # Work in fixed-point contracts; ``count`` is kept as the display floor.
@@ -15384,6 +15534,103 @@ async def _route_live(
             intent.count,
         )
 
+        # 2026-09-29 (execution coherence): last-moment strict-passivity
+        # revalidation for post_only entries.  The WS/REST coherence check ran
+        # earlier in the pipeline; the book may have moved since.  When the
+        # local book is older than MERID_PRE_SUBMIT_BOOK_FRESH_MS, pull a fresh
+        # REST snapshot and require the wire price to be strictly passive —
+        # otherwise reprice once inside the edge budget or reject.
+        if effective_post_only and not _is_exit_order(intent):
+            try:
+                _ps_book: Optional[Dict[str, Any]] = None
+                _ps_age_ms = float("inf")
+                _ps_state = None
+                try:
+                    _ps_state = (
+                        market_state_store.get(intent.ticker)
+                        if market_state_store is not None else None
+                    )
+                except Exception:
+                    _ps_state = None
+                if (
+                    _ps_state is not None
+                    and getattr(_ps_state, "best_bid_cents", None) is not None
+                    and getattr(_ps_state, "best_ask_cents", None) is not None
+                ):
+                    _yb = int(round(float(_ps_state.best_bid_cents)))
+                    _ya = int(round(float(_ps_state.best_ask_cents)))
+                    _ps_book = {
+                        "yes_bid_cents": _yb,
+                        "yes_ask_cents": _ya,
+                        "no_bid_cents": 100 - _ya,
+                        "no_ask_cents": 100 - _yb,
+                    }
+                    _lb = getattr(_ps_state, "last_book_update_ts", 0.0) or 0.0
+                    if _lb > 0:
+                        _ps_age_ms = max(0.0, (_time.monotonic() - _lb) * 1000.0)
+                _ps_fresh_ms = float(os.getenv("MERID_PRE_SUBMIT_BOOK_FRESH_MS", "1500"))
+                if _ps_book is None or _ps_age_ms > _ps_fresh_ms:
+                    _ps_ob = None
+                    try:
+                        _ps_ob = await asyncio.wait_for(
+                            port.get_orderbook(intent.ticker), timeout=3.0
+                        )
+                    except Exception as _ps_ob_err:
+                        logger.debug(
+                            "[PRE-SUBMIT-PASSIVITY] REST book fetch failed for %s: %s",
+                            intent.ticker, _ps_ob_err,
+                        )
+                    _ps_book = _canonical_yes_book_from_port(_ps_ob)
+                if _ps_book is not None:
+                    _ps_side = _side_aware_book_for_intent(_ps_book, intent.side)
+                    _po_px, _po_rej = _post_only_strict_passivity(intent, _ps_side)
+                    if _po_rej is not None:
+                        latency = (_time.monotonic() - t0) * 1000
+                        logger.warning(
+                            "[PRE-SUBMIT-PASSIVITY] ticker=%s decision=BLOCKED reason=%s "
+                            "price=%dc book_bid=%dc book_ask=%dc book_age_ms=%.0f",
+                            intent.ticker, _po_rej,
+                            int(getattr(intent, "price_cents", 0) or 0),
+                            _ps_side["bid_cents"], _ps_side["ask_cents"], _ps_age_ms,
+                        )
+                        _release_gate_record(intent, f"pre_submit_passivity:{_po_rej}")
+                        _release_allocated_slot(intent)
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"pre_submit_passivity:{_po_rej}",
+                            latency_ms=round(latency, 2),
+                        )
+                    if _po_px is not None:
+                        _old_ps_px = int(getattr(intent, "price_cents", 0) or 0)
+                        intent.price_cents = _po_px
+                        final_price_cents = int(final_price_cents) + (_po_px - _old_ps_px)
+                        create_request = _build_create_order_request(
+                            intent,
+                            ticker=_wire_ticker,
+                            exchange_index=_resolved_exchange_index,
+                            final_price_cents=final_price_cents,
+                            effective_order_type=effective_order_type,
+                            effective_tif=effective_tif,
+                            expiration_ts=resolved_tif.expiration_time,
+                            post_only=effective_post_only,
+                        )
+                        logger.info(
+                            "[PRE-SUBMIT-PASSIVITY] ticker=%s repriced %dc->%dc on pre-submit book "
+                            "bid=%dc ask=%dc age_ms=%.0f — strictly passive within edge budget",
+                            intent.ticker, _old_ps_px, _po_px,
+                            _ps_side["bid_cents"], _ps_side["ask_cents"], _ps_age_ms,
+                        )
+            except OrderIdentityError:
+                raise
+            except Exception as _ps_err:
+                # Fail-open on infra errors only: the earlier coherence check and
+                # the exchange's own post-only enforcement still bound the outcome.
+                logger.debug(
+                    "[PRE-SUBMIT-PASSIVITY] check skipped for %s: %s",
+                    intent.ticker, _ps_err,
+                )
+
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.
         # Mark the durable attempt as SUBMITTING before the network call.
@@ -15458,6 +15705,87 @@ async def _route_live(
                 submission_certainty="unknown",
             )
 
+        # 2026-09-29 (execution coherence): one-shot bounded reprice on
+        # exchange ``post only cross``.  The rejection means the book moved
+        # between our last BBO read and order arrival; repricing to a strictly
+        # passive price at a freshly fetched BBO is always price-improving for
+        # the held side, so the retry is bounded, EV-safe, and happens exactly
+        # once.  Same client_order_id is reused — the rejected order never
+        # existed on the venue, and the identity chain stays intact.
+        _po_err_lower = str(getattr(placed_res, "error", "") or "").lower()
+        if (
+            placed_res is not None
+            and not placed_res.success
+            and "post only cross" in _po_err_lower
+            and bool(getattr(create_request, "post_only", False))
+            and not _is_exit_order(intent)
+            and not getattr(intent, "_post_only_repriced_once", False)
+        ):
+            intent._post_only_repriced_once = True
+            try:
+                _orig_yb = getattr(_send_state, "best_bid_cents", None)
+                _orig_ya = getattr(_send_state, "best_ask_cents", None)
+                _rt_ob = await asyncio.wait_for(
+                    port.get_orderbook(intent.ticker), timeout=3.0
+                )
+                _rt_book = _canonical_yes_book_from_port(_rt_ob)
+                if _rt_book is not None:
+                    _rt_side = _side_aware_book_for_intent(_rt_book, intent.side)
+                    _rt_px, _rt_rej = _post_only_strict_passivity(intent, _rt_side)
+                    if _rt_px is not None:
+                        _rt_old = int(getattr(intent, "price_cents", 0) or 0)
+                        intent.price_cents = _rt_px
+                        final_price_cents = int(final_price_cents) + (_rt_px - _rt_old)
+                        create_request = _build_create_order_request(
+                            intent,
+                            ticker=_wire_ticker,
+                            exchange_index=_resolved_exchange_index,
+                            final_price_cents=final_price_cents,
+                            effective_order_type=effective_order_type,
+                            effective_tif=effective_tif,
+                            expiration_ts=resolved_tif.expiration_time,
+                            post_only=effective_post_only,
+                        )
+                        _rt_old_res = placed_res
+                        placed_res = await port.create_order(create_request)
+                        latency = (_time.monotonic() - t0) * 1000
+                        _rt_ev = getattr(intent, "ev_net_cents", None)
+                        _rt_ev_new = (
+                            float(_rt_ev) + float(_rt_old - _rt_px)
+                            if _rt_ev is not None
+                            and (getattr(intent, "action", "") or "").lower() == "buy"
+                            else None
+                        )
+                        logger.info(
+                            "[POST-ONLY-REPRICE] intent_id=%s ticker=%s orig_bbo=%s/%s "
+                            "reject=%s fresh_bid=%dc fresh_ask=%dc price=%dc->%dc "
+                            "ev_net_c=%s retry_success=%s",
+                            intent.intent_id, intent.ticker, _orig_yb, _orig_ya,
+                            str(getattr(_rt_old_res, "error", ""))[:80],
+                            _rt_side["bid_cents"], _rt_side["ask_cents"],
+                            _rt_old, _rt_px,
+                            f"{_rt_ev_new:+.1f}" if _rt_ev_new is not None else "na",
+                            bool(getattr(placed_res, "success", False)),
+                        )
+                    else:
+                        logger.warning(
+                            "[POST-ONLY-REPRICE] declined intent_id=%s ticker=%s "
+                            "reason=%s fresh_bid=%dc fresh_ask=%dc",
+                            intent.intent_id, intent.ticker,
+                            _rt_rej or "no_reprice_needed",
+                            _rt_side["bid_cents"], _rt_side["ask_cents"],
+                        )
+                else:
+                    logger.warning(
+                        "[POST-ONLY-REPRICE] no fresh book for %s — cross stands",
+                        intent.ticker,
+                    )
+            except Exception as _rt_exc:
+                logger.warning(
+                    "[POST-ONLY-REPRICE] retry failed intent_id=%s ticker=%s err=%s",
+                    intent.intent_id, intent.ticker, _rt_exc,
+                )
+
         # CRITICAL 2026-08-11: Bind the exchange order_id to the intent and to
         # the position_cache order_id -> client_tag map as soon as the response
         # arrives.  Kalshi's HTTP /portfolio/fills does not echo client_order_id,
@@ -15504,6 +15832,28 @@ async def _route_live(
                 "[ORDER-ACK] intent_id=%s ticker=%s order_id=%s status=accepted latency_ms=%.2f",
                 intent.intent_id, intent.ticker, getattr(placed_res, 'order_id', 'N/A'), latency
             )
+            # 2026-09-29: register resting maker entries for fill-quality
+            # accounting (resting time, markouts, fill vs no-fill, edge at
+            # candidate vs edge at fill).  Observability-only.
+            try:
+                if bool(getattr(create_request, "post_only", False)) and not _is_exit_order(intent):
+                    from merid.execution.fill_quality_tracker import get_fill_quality_tracker
+                    get_fill_quality_tracker().record_order(
+                        client_order_id=intent.client_order_id or intent.client_tag or intent.intent_id,
+                        intent_id=intent.intent_id,
+                        order_id=getattr(placed_res, "order_id", None),
+                        ticker=intent.ticker,
+                        side=(intent.side or ""),
+                        action=(intent.action or ""),
+                        limit_price_cents=getattr(intent, "price_cents", None),
+                        yes_bid_cents=getattr(_send_state, "best_bid_cents", None) if _send_state is not None else None,
+                        yes_ask_cents=getattr(_send_state, "best_ask_cents", None) if _send_state is not None else None,
+                        edge_pct=getattr(intent, "edge_pct", None) or getattr(intent, "edgepct", None),
+                        ev_net_cents=getattr(intent, "ev_net_cents", None),
+                        p_selected=getattr(intent, "p_selected", None),
+                    )
+            except Exception as _fq_err:
+                logger.debug("[FILL-QUALITY] record_order failed for %s: %s", intent.ticker, _fq_err)
         else:
             _mark_attempt_status(intent, "REJECTED")
             logger.warning(

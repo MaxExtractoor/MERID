@@ -3205,6 +3205,15 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
     # The to_add/to_remove logic is disabled - we rely on static market set per session
     logger.debug(f"[WS-REFRESH] WS subscriptions unchanged (iteration {iteration})")
 
+    # 2026-09-29: fill-quality markout/fill/terminal stamping for resting maker
+    # entries (1s/5s/30s markouts on the store's current BBO, fill detection
+    # via the fills ledger).  Driven by this loop's ~5s cadence.
+    try:
+        from merid.execution.fill_quality_tracker import get_fill_quality_tracker
+        get_fill_quality_tracker().poll()
+    except Exception as _fq_err:
+        logger.debug("[WS-REFRESH] fill-quality poll failed: %s", _fq_err)
+
 
 async def refresh_ws_subscriptions_periodically(catalog, ws_bridge, interval_s: float, stop_event: asyncio.Event):
     """Periodic WS subscription refresh - safe background task with proper cancellation handling."""
