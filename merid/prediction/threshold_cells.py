@@ -115,6 +115,10 @@ class ThresholdCell(NamedTuple):
     tte_max_seconds: float
     min_net_ev_cents: float
     evidence: str  # provenance note for audit
+    # Historical counterfactual LCB10 (net c/contract at the executable ask)
+    # from the settled frontier study — prior evidence only, never mixed into
+    # the live-fill evidence store.  Emitted on sparse-override records.
+    historical_lcb10_cents: float = 0.0
 
 
 # Approved 2026-09-30 from the settled counterfactual frontier.  LCB10 = the
@@ -126,12 +130,14 @@ THRESHOLD_CELLS: List[ThresholdCell] = [
     ThresholdCell(
         "sol_no_30_60_t120_600", "SOL", "no", 30, 60, 120.0, 600.0, 1.5,
         "frontier: SOL-NO 30-59c LCB10 +8.8..+14.7c; TTE120-300 LCB +14.1c",
+        8.8,
     ),
     # SOL NO 60-79c: 70-79c bucket +10.3c (LCB +2.7) but 60-69c weak (-2.3c);
     # admitted at a higher bar.
     ThresholdCell(
         "sol_no_60_80_t120_600", "SOL", "no", 60, 80, 120.0, 600.0, 2.5,
         "frontier: SOL-NO 70-79c LCB +2.7c; 60-69c weak -> higher bar",
+        2.7,
     ),
     # DOGE NO: 20-29c +7.7c (LCB +1.6) and 40-49c +9.5c (LCB +2.4); the 30-39c
     # cell was inconclusive (LCB -4.8) and is deliberately not qualified.
@@ -140,26 +146,31 @@ THRESHOLD_CELLS: List[ThresholdCell] = [
     ThresholdCell(
         "doge_no_20_30_t120_600", "DOGE", "no", 20, 30, 120.0, 600.0, 2.0,
         "frontier: DOGE-NO 20-29c LCB +1.6c (held floor still applies <25c)",
+        1.6,
     ),
     ThresholdCell(
         "doge_no_40_50_t120_600", "DOGE", "no", 40, 50, 120.0, 600.0, 2.0,
         "frontier: DOGE-NO 40-49c LCB +2.4c",
+        2.4,
     ),
     # DOGE NO 70-89c: +22.2c (70-79, LCB +21.5) / +9.6c (80-89, LCB +6.2);
     # higher bar for the execution-sensitive upper band.
     ThresholdCell(
         "doge_no_70_90_t120_600", "DOGE", "no", 70, 90, 120.0, 600.0, 3.0,
         "frontier: DOGE-NO 70-89c LCB +6.2..+21.5c",
+        6.2,
     ),
     # XRP NO 30-39c +9.8c (LCB +3.7) and 80-89c +5.8c (LCB +2.2); the 40-79c
     # middle was mixed and stays on the legacy formula.
     ThresholdCell(
         "xrp_no_30_40_t120_600", "XRP", "no", 30, 40, 120.0, 600.0, 2.5,
         "frontier: XRP-NO 30-39c LCB +3.7c",
+        3.7,
     ),
     ThresholdCell(
         "xrp_no_80_90_t120_600", "XRP", "no", 80, 90, 120.0, 600.0, 2.5,
         "frontier: XRP-NO 80-89c LCB +2.2c",
+        2.2,
     ),
 ]
 
@@ -308,6 +319,7 @@ FUNNEL_STAGES = (
     "matched",
     "blocked_by_price_band",
     "blocked_by_evidence",
+    "sparse_override",
     "emitted",
     "allocator_rejected",
     "router_rejected",
@@ -340,16 +352,27 @@ def cell_daily_max() -> int:
     """Global lane submissions/day (legacy alias honored)."""
     v = os.environ.get("MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS")
     if v is None:
-        v = os.environ.get("MERID_THRESHOLD_CELL_DAILY_MAX", "20")
+        v = os.environ.get("MERID_THRESHOLD_CELL_DAILY_MAX", "15")
     try:
         return int(v)
     except Exception:
-        return 20
+        return 15
+
+
+def cell_daily_max_submissions_per_cell() -> int:
+    """Per-cell candidate submissions/day — one cell must not consume the
+    lane's whole exploration budget."""
+    return _env_int("MERID_THRESHOLD_CELL_PER_CELL_MAX_SUBMISSIONS", 5)
 
 
 def cell_daily_max_fills() -> int:
     """Per-cell filled trades/day — fills are the real exposure."""
-    return _env_int("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS", 3)
+    return _env_int("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS", 2)
+
+
+def cell_daily_max_fills_total() -> int:
+    """Lane-wide filled trades/day across all cells."""
+    return _env_int("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_TOTAL", 3)
 
 
 def cell_max_open_orders() -> int:
@@ -404,6 +427,7 @@ def _default_state(now: float) -> Dict[str, Any]:
         "open_orders": {},
         "router_attempts": {},
         "router_rejects": {},
+        "router_consecutive_rejects": {},
         "cell_states": {},
         "outcomes": {},
         "decision_cell_map": {},
@@ -448,6 +472,7 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
                 "fills_today",
                 "router_attempts",
                 "router_rejects",
+                "router_consecutive_rejects",
             ):
                 if isinstance(rec.get(k), (int, dict)):
                     state[k] = rec[k]
@@ -593,6 +618,8 @@ def record_cell_order_open(cell_id: str, order_id: Optional[str]) -> None:
     opens = st.setdefault("open_orders", {}).setdefault(cell_id, [])
     if order_id not in opens:
         opens.append(order_id)
+    # An accepted order breaks any consecutive router-reject run.
+    st.setdefault("router_consecutive_rejects", {})[cell_id] = 0
     _save_state()
 
 
@@ -614,12 +641,15 @@ def record_cell_router_attempt(cell_id: str) -> None:
 
 
 def record_cell_router_reject(cell_id: str) -> None:
-    """Post-only cross/reprice/venue reject; feeds the reject-rate rule."""
+    """Post-only cross/reprice/venue reject; feeds the reject-rate rule and
+    the consecutive-reject emergency rule (two in a row -> suspend)."""
     if not cell_id:
         return
     st = _load_state()
     rej = st.setdefault("router_rejects", {})
     rej[cell_id] = int(rej.get(cell_id) or 0) + 1
+    consec = st.setdefault("router_consecutive_rejects", {})
+    consec[cell_id] = int(consec.get(cell_id) or 0) + 1
     _save_state()
     bump_cell_funnel("router_rejected", cell_id)
     _evaluate_suspension(cell_id)
@@ -751,6 +781,56 @@ def _evaluate_suspension(cell_id: str) -> None:
     outs = list((st.get("outcomes") or {}).get(cell_id) or [])
     min_fills = _suspend_min_fills()
 
+    # ── Pre-five emergency rules (2026-09-30): a newly-live lane cannot wait
+    # for five fills to discover adverse selection.  Any of these suspends
+    # the cell immediately.
+    consec = int((st.get("router_consecutive_rejects") or {}).get(cell_id) or 0)
+    if consec >= 2:
+        _suspend_cell(
+            cell_id,
+            f"consecutive_router_rejects={consec} (post-only cross/stale "
+            "revalidation twice in a row)",
+        )
+        return
+
+    fills = [o for o in outs if o.get("kind") in ("fill", "settled")]
+    if fills:
+        first = fills[0]
+        # First fill whose 5s markout is deeply negative: adverse selection.
+        m5 = first.get("markout_5s_cents")
+        if m5 is not None and float(m5) <= -3.0:
+            _suspend_cell(
+                cell_id,
+                f"first_fill_markout_5s={float(m5):+.2f}c <= -3.00c",
+            )
+            return
+        # Fill-time EV negative after revalidation: the passive fill landed
+        # strictly worse than the decision economics allowed.
+        fev = first.get("fill_ev_cents")
+        if fev is not None and float(fev) < 0.0:
+            _suspend_cell(
+                cell_id,
+                f"fill_ev_below_zero={float(fev):+.2f}c",
+            )
+            return
+        # First settled trade lost more than expected edge + 2c stress.
+        pnl = first.get("net_pnl_cents")
+        cand = first.get("candidate_ev_cents")
+        if pnl is not None and cand is not None:
+            bound = -(float(cand) + 2.0)
+            if float(pnl) < bound:
+                _suspend_cell(
+                    cell_id,
+                    f"first_trade_pnl={float(pnl):+.2f}c < -(edge {float(cand):+.2f}c + 2c)",
+                )
+                return
+    # Any fill (not just the first) with negative fill-time EV suspends.
+    for o in fills:
+        fev = o.get("fill_ev_cents")
+        if fev is not None and float(fev) < 0.0:
+            _suspend_cell(cell_id, f"fill_ev_below_zero={float(fev):+.2f}c")
+            return
+
     # Rolling-N realized net PnL (settled outcomes only).
     net_pnls = [o["net_pnl_cents"] for o in outs if o.get("net_pnl_cents") is not None]
     if len(net_pnls) >= min_fills:
@@ -813,6 +893,16 @@ def _evaluate_suspension(cell_id: str) -> None:
         return
 
 
+def cell_submissions_today_cell(cell_id: str) -> int:
+    st = _load_state()
+    return int((st.get("submissions") or {}).get(cell_id) or 0)
+
+
+def cell_fills_today_total() -> int:
+    st = _load_state()
+    return sum(int(v or 0) for v in (st.get("fills_today") or {}).values())
+
+
 def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
     """(allowed, block_reason) — all lane admission checks in one place.
 
@@ -828,10 +918,60 @@ def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
         return False, f"cell_state_unknown:{state}"
     if cell_fills_today(cell_id) >= cell_daily_max_fills():
         return False, "cell_fills_cap_exhausted"
+    if cell_fills_today_total() >= cell_daily_max_fills_total():
+        return False, "cell_fills_total_cap_exhausted"
     if cell_open_orders(cell_id) >= cell_max_open_orders():
         return False, "cell_open_order_exists"
+    if cell_submissions_today_cell(cell_id) >= cell_daily_max_submissions_per_cell():
+        return False, "cell_submissions_cap_exhausted"
     if cell_submissions_today() >= cell_daily_max():
         return False, "cap_exhausted"
+    return True, None
+
+
+def threshold_cell_sparse_override_enabled() -> bool:
+    """``MERID_THRESHOLD_CELL_SPARSE_OVERRIDE=0`` restores strict evidence
+    gating for cell-matched candidates (emergency off-switch)."""
+    return os.environ.get(
+        "MERID_THRESHOLD_CELL_SPARSE_OVERRIDE", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def may_bypass_sparse_evidence(
+    cell_id: Optional[str],
+    evidence_code: Optional[str],
+    matching_hard_block: bool,
+    net_ev_cents: Optional[float],
+    effective_required_edge_cents: Optional[float],
+) -> Tuple[bool, Optional[str]]:
+    """Bounded sparse-evidence override for the threshold-cell lane.
+
+    The lane exists to generate the first *live* fill evidence inside
+    historically qualified cohorts — evidence the settled-outcome store can
+    never contain while the gate blocks every entry.  The override admits a
+    cell-matched candidate past ``SPARSE_MATCHED_INSUFFICIENT`` only.  Hard
+    blocks (``MATCHING_TOXIC_CELL``), soft-penalty lanes, low-EV candidates,
+    suspended/capped lanes, and unmatched inputs all keep their original
+    rejection.  Returns (allowed, reason).
+    """
+    if not cell_id:
+        return False, None
+    if not threshold_cell_sparse_override_enabled():
+        return False, "sparse_override_disabled"
+    if matching_hard_block:
+        return False, "matching_hard_block"
+    if evidence_code != "SPARSE_MATCHED_INSUFFICIENT":
+        return False, f"evidence_code_not_sparse:{evidence_code}"
+    if net_ev_cents is None or effective_required_edge_cents is None:
+        return False, "missing_ev_or_threshold"
+    if float(net_ev_cents) < float(effective_required_edge_cents):
+        return False, "ev_below_cell_threshold"
+    state = get_cell_state(cell_id)
+    if state not in (CELL_STATE_PROVISIONAL, CELL_STATE_OBSERVATION):
+        return False, f"cell_state_{state.lower()}"
+    allowed, block = cell_admission(cell_id)
+    if not allowed:
+        return False, block
     return True, None
 
 

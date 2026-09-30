@@ -22,9 +22,14 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
 from merid.prediction.threshold_cells import (
+    THRESHOLD_CELLS,
     bump_cell_funnel,
     cell_admission,
+    cell_fills_today,
+    emit_cell_lifecycle,
     explain_cell_miss,
+    get_cell_state,
+    may_bypass_sparse_evidence,
     resolve_threshold_cell,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
@@ -2733,27 +2738,102 @@ def compute_trade_decision(
                     if _ed.escape_required:
                         indicators[f"evidence_escape_{_side}"] = True
                     if not _ed.allowed:
-                        _reason_stem = {
-                            "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
-                            "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
-                            "MATCHING_TOXIC_CELL": "evidence_toxic_cell",
-                            "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
-                            "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
-                            "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
-                            "CHALLENGE_INSUFFICIENT": "evidence_challenge_insufficient",
-                            "CHALLENGE_LANE_DISABLED": "evidence_escape_disabled",
-                            "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
-                            "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
-                            "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
-                        }.get(_ed.code, f"evidence_{_ed.code.lower()}")
-                        if _side == "yes" and yes_evidence_ok:
-                            yes_evidence_ok = False
-                            yes_evidence_reason = f"{_reason_stem}_yes"
-                            indicators[yes_evidence_reason] = _ed.detail()
-                        elif _side == "no" and no_evidence_ok:
-                            no_evidence_ok = False
-                            no_evidence_reason = f"{_reason_stem}_no"
-                            indicators[no_evidence_reason] = _ed.detail()
+                        # 2026-09-30: bounded sparse-evidence override for the
+                        # threshold-cell lane.  A matched, historically
+                        # qualified cell whose current net EV already clears
+                        # its own effective threshold may pass
+                        # SPARSE_MATCHED_INSUFFICIENT — the lane exists to
+                        # generate the live fill evidence the settled-outcome
+                        # store can never contain while every entry is gated.
+                        # Hard blocks, non-sparse codes, low-EV candidates, and
+                        # suspended/capped lanes keep their original rejection.
+                        _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
+                        _ovr_ok, _ovr_reason = may_bypass_sparse_evidence(
+                            cell_id=_d.cell_id,
+                            evidence_code=_ed.code,
+                            matching_hard_block=bool(_ed.matching_hard_block),
+                            net_ev_cents=_ne_c,
+                            effective_required_edge_cents=(
+                                _d.total * 100.0 if _d.cell_id is not None else None
+                            ),
+                        )
+                        if _ovr_ok:
+                            bump_cell_funnel("sparse_override", _d.cell_id)
+                            indicators[f"{_side}_evidence_override"] = (
+                                "threshold_cell_sparse_provisional"
+                            )
+                            indicators[f"{_side}_evidence_override_detail"] = (
+                                _ed.detail()
+                            )
+                            try:
+                                _cell = next(
+                                    (c for c in THRESHOLD_CELLS
+                                     if c.cell_id == _d.cell_id),
+                                    None,
+                                )
+                                emit_cell_lifecycle(
+                                    "sparse_evidence_override",
+                                    event="threshold_cell_sparse_override",
+                                    threshold_cell_id=_d.cell_id,
+                                    asset=asset,
+                                    side=_side.upper(),
+                                    lane_state_before=get_cell_state(_d.cell_id),
+                                    evidence_code=_ed.code,
+                                    matching_hard_block=bool(
+                                        _ed.matching_hard_block
+                                    ),
+                                    historical_counterfactual_lcb10_cents=(
+                                        _cell.historical_lcb10_cents
+                                        if _cell else None
+                                    ),
+                                    live_fill_count_before=cell_fills_today(
+                                        _d.cell_id
+                                    ),
+                                    cell_required_edge_cents=_d.total * 100.0,
+                                    candidate_net_ev_cents=_ne_c,
+                                    formula_required_edge_cents=(
+                                        _d.formula_total * 100.0
+                                        if _d.formula_total is not None
+                                        else None
+                                    ),
+                                    override_reason=(
+                                        "bounded_live_execution_validation"
+                                    ),
+                                    quantity=1,
+                                    post_only=True,
+                                    tte_seconds=seconds_to_expiry,
+                                    price_cents=_px,
+                                    decision_id=decision_id,
+                                    terminal_state="override_admitted",
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            if _d.cell_id is not None and _ovr_reason:
+                                indicators[
+                                    f"{_side}_evidence_override_denied"
+                                ] = _ovr_reason
+                            _reason_stem = {
+                                "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
+                                "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
+                                "MATCHING_TOXIC_CELL": "evidence_toxic_cell",
+                                "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
+                                "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
+                                "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
+                                "CHALLENGE_INSUFFICIENT": "evidence_challenge_insufficient",
+                                "CHALLENGE_LANE_DISABLED": "evidence_escape_disabled",
+                                "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
+                                "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
+                                "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
+                            }.get(_ed.code, f"evidence_{_ed.code.lower()}")
+                            if _side == "yes" and yes_evidence_ok:
+                                yes_evidence_ok = False
+                                yes_evidence_reason = f"{_reason_stem}_yes"
+                                indicators[yes_evidence_reason] = _ed.detail()
+                            elif _side == "no" and no_evidence_ok:
+                                no_evidence_ok = False
+                                no_evidence_reason = f"{_reason_stem}_no"
+                                indicators[no_evidence_reason] = _ed.detail()
             else:
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee

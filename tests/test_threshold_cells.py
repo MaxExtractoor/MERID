@@ -441,3 +441,165 @@ def test_lifecycle_event_schema(tmp_path, monkeypatch):
     assert rows[0]["threshold_cell_id"] == "sol_no_30_60_t120_600"
     assert rows[0]["stage"] == "candidate_emitted"
     assert "ts" in rows[0]
+
+# ---------------------------------------------------------------------------
+# Sparse-evidence provisional override (may_bypass_sparse_evidence)
+# ---------------------------------------------------------------------------
+
+def test_sparse_override_admits_cell_matched_sparse_block():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=2.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is True and reason is None
+
+
+def test_sparse_override_never_bypasses_hard_block():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=True,
+        net_ev_cents=9.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "matching_hard_block"
+
+
+def test_sparse_override_rejects_non_sparse_codes():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    for code in ("MATCHING_TOXIC_CELL", "EVIDENCE_EMPTY_INSUFFICIENT",
+                 "SOFT_PENALTY_INSUFFICIENT", "SPARSE_MATCHED_PASS"):
+        ok, reason = may_bypass_sparse_evidence(
+            cell_id=cell.cell_id,
+            evidence_code=code,
+            matching_hard_block=False,
+            net_ev_cents=9.0,
+            effective_required_edge_cents=1.5,
+        )
+        assert ok is False and reason and reason.startswith("evidence_code_not_sparse")
+
+
+def test_sparse_override_requires_ev_above_cell_threshold():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=1.4,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "ev_below_cell_threshold"
+
+
+def test_sparse_override_blocked_when_suspended():
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    for i in range(5):
+        record_cell_settlement(f"d{i}", -5.0, cell_id=cell.cell_id)
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=9.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "cell_state_suspended"
+
+
+def test_sparse_override_kill_switch(monkeypatch):
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_SPARSE_OVERRIDE", "0")
+    cell = _cell()
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=9.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "sparse_override_disabled"
+
+
+def test_sparse_override_respects_caps(monkeypatch):
+    from merid.prediction.threshold_cells import may_bypass_sparse_evidence
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS", "1")
+    record_cell_fill(cell.cell_id, decision_id="d0")
+    ok, reason = may_bypass_sparse_evidence(
+        cell_id=cell.cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=9.0,
+        effective_required_edge_cents=1.5,
+    )
+    assert ok is False and reason == "cell_fills_cap_exhausted"
+
+
+# ---------------------------------------------------------------------------
+# Tightened caps + emergency suspension rules
+# ---------------------------------------------------------------------------
+
+def test_per_cell_submission_cap(monkeypatch):
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PER_CELL_MAX_SUBMISSIONS", "2")
+    from merid.prediction.threshold_cells import record_cell_submission
+    record_cell_submission(cell_id=cell.cell_id)
+    record_cell_submission(cell_id=cell.cell_id)
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "cell_submissions_cap_exhausted"
+
+
+def test_total_fills_cap(monkeypatch):
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_TOTAL", "2")
+    c1, c2 = THRESHOLD_CELLS[0], THRESHOLD_CELLS[2]
+    record_cell_fill(c1.cell_id, decision_id="d0")
+    record_cell_fill(c2.cell_id, decision_id="d1")
+    ok, blocked = cell_admission(THRESHOLD_CELLS[4].cell_id)
+    assert ok is False and blocked == "cell_fills_total_cap_exhausted"
+
+
+def test_two_consecutive_router_rejects_suspend():
+    cell = _cell()
+    record_cell_router_attempt(cell.cell_id)
+    record_cell_router_reject(cell.cell_id)
+    record_cell_router_attempt(cell.cell_id)
+    record_cell_router_reject(cell.cell_id)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_first_fill_bad_markout_suspends():
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0")
+    record_cell_markout(cell.cell_id, "d0", 5, -3.5)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_first_fill_loss_exceeds_edge_stress_suspends():
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0", candidate_ev_cents=2.0)
+    # First settled trade loses more than edge+2c stress (bound = -4.0c).
+    record_cell_settlement("d0", -4.5, cell_id=cell.cell_id)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_fill_time_ev_negative_suspends():
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0",
+                     fill_ev_cents=-0.5, candidate_ev_cents=2.0)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_historical_lcb10_on_cells():
+    by_id = {c.cell_id: c for c in THRESHOLD_CELLS}
+    assert by_id["sol_no_30_60_t120_600"].historical_lcb10_cents == 8.8
+    assert by_id["doge_no_70_90_t120_600"].historical_lcb10_cents == 6.2
+    assert all(c.historical_lcb10_cents > 0 for c in THRESHOLD_CELLS)
