@@ -18729,11 +18729,12 @@ class LeanAgentGrid15m:
                         )
                         _best_ev = _r.get("best_executable_ev_cents")
                         _dd = cell_discovery_detail(_an)
+                        _bside = _r.get("best_executable_side")
                         _tc_parts.append(
                             "%s evaluated=yes matched_cell=%s cell_state=%s "
                             "discovery=%s top_candidate=%s promotion=%s "
                             "live_registry=%d formula_path=%s "
-                            "best_ev=%s terminal=%s" % (
+                            "best_side=%s best_ev=%s terminal=%s" % (
                                 _an,
                                 _cid or ("none" if not _cells else "none_in_band"),
                                 get_cell_state(_cid) if _cid else "n/a",
@@ -18742,6 +18743,7 @@ class LeanAgentGrid15m:
                                 _dd["promotion_status"] or "n/a",
                                 _dd["live_registry"],
                                 "yes" if not _cid else "no",
+                                str(_bside).upper() if _bside else "n/a",
                                 ("%.2f" % _best_ev)
                                 if isinstance(_best_ev, (int, float))
                                 else "n/a",
@@ -18785,6 +18787,17 @@ class LeanAgentGrid15m:
                         "[ADMISSION-OWNER] cycle=%d %s",
                         tick, " | ".join(_ao_parts),
                     )
+                    # All-five promotion rollup (first cycle + ~every 25 min
+                    # at 5s cadence): one authoritative answer to
+                    # "why is asset X not trading".
+                    if tick == 1 or tick % 300 == 0:
+                        from merid.prediction.threshold_cells import (
+                            promotion_status_rollup,
+                        )
+                        logger.info(
+                            "[ALL-FIVE-PROMOTION-STATUS] %s",
+                            promotion_status_rollup(),
+                        )
                 except Exception:
                     pass
 

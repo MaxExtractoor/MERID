@@ -100,11 +100,17 @@ def test_no_cells_for_yes_side():
     assert resolve_threshold_cell("SOL", "yes", 45.0, 300.0) is None
 
 
-def test_no_cells_below_20c_or_for_btc_eth():
+def test_no_cells_below_20c_and_btc_eth_tte_window():
     for cell in THRESHOLD_CELLS:
         assert cell.price_min_cents >= 20
     assert resolve_threshold_cell("SOL", "no", 15.0, 300.0) is None
-    assert resolve_threshold_cell("BTC", "no", 45.0, 300.0) is None
+    # BTC/ETH have PROVISIONAL cells since 2026-09-30 batch 1 — in-band
+    # quotes resolve, out-of-TTE (their cells are t120-300) fall back.
+    assert resolve_threshold_cell("BTC", "no", 45.0, 300.0).cell_id == \
+        "btc_no_40_50_t120_300"
+    assert resolve_threshold_cell("ETH", "no", 55.0, 200.0).cell_id == \
+        "eth_no_50_60_t120_300"
+    assert resolve_threshold_cell("BTC", "no", 45.0, 400.0) is None
     assert resolve_threshold_cell("ETH", "no", 45.0, 300.0) is None
 
 
@@ -173,9 +179,18 @@ def test_out_of_band_tte_falls_back_to_formula():
 
 
 def test_btc_no_cell_same_inputs():
+    """BTC at 45c/300s resolves the btc_no_40_50_t120_300 PROVISIONAL cell —
+    its own 2.5c floor is the threshold, not the BTC formula."""
     d = _decomp("BTC", "no", 45, tte=300.0)
+    assert d.cell_id == "btc_no_40_50_t120_300"
+    assert math.isclose(d.cell_min_ev_cents, 2.5, abs_tol=1e-9)
+    assert math.isclose(d.total, 0.025, abs_tol=1e-9)
+
+
+def test_btc_outside_cell_tte_uses_formula():
+    """BTC cells cover only 120-300s; at 400s the formula decides."""
+    d = _decomp("BTC", "no", 45, tte=400.0)
     assert d.cell_id is None
-    # BTC base 1.5c + convexity(0.4*0.6*4%=0.96c) ~ 2.46c.
     assert d.total > 0.02
 
 
@@ -265,7 +280,14 @@ def test_explain_cell_miss_reasons():
     # DOGE 35c sits between the 20-30 and 40-50 cells: an unqualified gap.
     assert explain_cell_miss("DOGE", "no", 35.0, 300.0) == "threshold_cell_price_in_unqualified_gap"
     assert explain_cell_miss("SOL", "yes", 45.0, 300.0) == "no_cells_for_asset_side"
-    assert explain_cell_miss("BTC", "no", 45.0, 300.0) == "no_cells_for_asset_side"
+    # BTC has cells now: 45c/300s matches; 45c/400s misses on TTE; 75c/200s
+    # is a genuine unqualified gap between the 50-60 cell and nothing.
+    assert explain_cell_miss("BTC", "no", 45.0, 300.0) is None
+    assert explain_cell_miss("BTC", "no", 45.0, 400.0) == "threshold_cell_tte_above_max"
+    # 75c exceeds BTC's highest cell band (50-60) -> above_max; 25c is below
+    # the lowest (30-40) -> below_min.  The domain floor is 20c.
+    assert explain_cell_miss("BTC", "no", 75.0, 200.0) == "threshold_cell_price_above_max"
+    assert explain_cell_miss("BTC", "no", 25.0, 200.0) == "threshold_cell_price_below_min"
     assert explain_cell_miss("SOL", "no", None, 300.0) == "threshold_cell_price_unknown"
     assert explain_cell_miss("SOL", "no", 45.0, None) == "threshold_cell_tte_unknown"
 
@@ -511,7 +533,7 @@ def test_soft_override_admits_all_soft_codes(code):
 def test_soft_override_rejects_unknown_cell_id():
     from merid.prediction.threshold_cells import may_bypass_sparse_evidence
     ok, reason = may_bypass_sparse_evidence(
-        cell_id="btc_no_50_60_t120_600",  # no approved BTC cell
+        cell_id="btc_no_50_60_t120_600",  # not in the registry (t120_600)
         evidence_code="SPARSE_MATCHED_INSUFFICIENT",
         matching_hard_block=False,
         net_ev_cents=9.0,
@@ -733,12 +755,20 @@ def test_registry_covers_all_five_assets():
         ALL_ASSETS, CELLS_BY_ASSET, cells_for_asset,
     )
     assert set(CELLS_BY_ASSET) == set(ALL_ASSETS) == set(ALL_FIVE)
-    assert cells_for_asset("BTC") == ()
-    assert cells_for_asset("ETH") == ()
-    # BTC/ETH resolve cleanly through the shared resolver (no cell -> formula).
-    assert resolve_threshold_cell("BTC", "no", 45.0, 300.0) is None
-    assert explain_cell_miss("BTC", "no", 45.0, 300.0) == "no_cells_for_asset_side"
-    assert explain_cell_miss("ETH", "no", 45.0, 300.0) == "no_cells_for_asset_side"
+    # 2026-09-30 batch 1: every asset now carries live registry cells.
+    assert len(cells_for_asset("BTC")) == 3
+    assert len(cells_for_asset("ETH")) == 2
+    assert len(cells_for_asset("SOL")) == 2
+    assert len(cells_for_asset("XRP")) == 2
+    assert len(cells_for_asset("DOGE")) == 3
+    # BTC/ETH resolve through the same shared resolver as SOL/XRP/DOGE.
+    assert resolve_threshold_cell("BTC", "no", 45.0, 300.0).cell_id == \
+        "btc_no_40_50_t120_300"
+    assert explain_cell_miss("BTC", "no", 45.0, 300.0) is None
+    # ETH 45c is below every ETH cell floor (50c) — a miss, but an
+    # explicit, attributed one.
+    assert explain_cell_miss("ETH", "no", 45.0, 300.0) == \
+        "threshold_cell_price_below_min"
 
 
 def test_invariant_violation_suspends_immediately():

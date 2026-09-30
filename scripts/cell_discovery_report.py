@@ -100,7 +100,7 @@ def _stats(pnls):
 
 def _fold_means(pnls_ts, folds=N_FOLDS):
     """Per-fold means over chronological thirds (adjacent, never shuffled)."""
-    vals = [cf for _, cf, _t in pnls_ts]
+    vals = [cf for _ts, cf, _t, _p, _d, _c in pnls_ts]
     n = len(vals)
     if n < folds * 2:
         return [None] * folds
@@ -115,7 +115,7 @@ def _fold_means(pnls_ts, folds=N_FOLDS):
 def _decayed(pnls_ts, now_ts):
     """Exponential-decay effective n and mean at 7d/21d horizons."""
     n7 = n21 = wsum7 = wsum21 = 0.0
-    for ts, cf, _t in pnls_ts:
+    for ts, cf, _t, _p, _d, _c in pnls_ts:
         age = max(0.0, now_ts - ts)
         w7 = math.exp(-age / SECONDS_7D)
         w21 = math.exp(-age / SECONDS_21D)
@@ -129,10 +129,20 @@ def _decayed(pnls_ts, now_ts):
 def _day_share(pnls_ts):
     """Largest single-UTC-day share of the cohort (concentration bound)."""
     days = defaultdict(int)
-    for ts, _cf, _t in pnls_ts:
+    for ts, _cf, _t, _p, _d, _c in pnls_ts:
         days[int(ts // 86400)] += 1
     n = len(pnls_ts)
     return (max(days.values()) / n) if n else 0.0
+
+
+def _market_share(pnls_ts):
+    """Largest single-ticker share — repeated decision ticks inside one
+    market are not independent evidence."""
+    mkts = defaultdict(int)
+    for _ts, _cf, t, _p, _d, _c in pnls_ts:
+        mkts[t] += 1
+    n = len(pnls_ts)
+    return (max(mkts.values()) / n) if n else 0.0
 
 
 def _bucket(lo_hi_list, v):
@@ -155,15 +165,17 @@ def _eval_bucket(pnls_ts, min_n, now_ts, in_domain):
     Returns (verdict, stats_dict).  Out-of-domain buckets are recorded with
     stats but verdict=EXCLUDED_DOMAIN — they never feed promotion.
     """
-    pnls = [cf for _, cf, _t in pnls_ts]
-    tickers = {t for _ts, _cf, t in pnls_ts}
+    pnls = [cf for _ts, cf, _t, _p, _d, _c in pnls_ts]
+    tickers = {t for _ts, _cf, t, _p, _d, _c in pnls_ts}
     n, mean, med, lcb = _stats(pnls)
     folds = _fold_means(pnls_ts)
     n7, n21, m7, m21 = _decayed(pnls_ts, now_ts)
     day_share = _day_share(pnls_ts)
+    mkt_share = _market_share(pnls_ts)
     rec = {
         "n": n, "n_markets": len(tickers),
         "max_day_share": round(day_share, 3),
+        "max_market_share": round(mkt_share, 3),
         "mean": round(mean, 3), "median": round(med, 3),
         "lcb10": round(lcb, 3), "lcb10_plus1c": round(lcb - 1.0, 3),
         "mean_plus2c": round(mean - 2.0, 3),
@@ -221,7 +233,8 @@ def main():
                se.side, se.executable_entry_price_cents px,
                se.expected_net_ev_cents nev,
                o.counterfactual_yes_pnl_cents cy,
-               o.counterfactual_no_pnl_cents cn
+               o.counterfactual_no_pnl_cents cn,
+               d.decision_id, d.close_ts
         FROM strategy_decisions d
         JOIN strategy_decision_side_ev se ON se.decision_id = d.decision_id
         JOIN strategy_decision_outcomes o ON o.decision_id = d.decision_id
@@ -238,7 +251,7 @@ def main():
     # One candidate per (ticker, side, 60s bucket).
     seen = set()
     obs = []
-    for tick, asset, ts, tte, side, px, nev, cy, cn in rows:
+    for tick, asset, ts, tte, side, px, nev, cy, cn, did, cts in rows:
         key = (tick, side, int(ts // 60))
         if key in seen:
             continue
@@ -247,19 +260,22 @@ def main():
         if cf is None or px is None or tte is None:
             continue
         obs.append((str(asset).upper(), side, float(px), float(tte),
-                    float(cf), float(ts), tick))
+                    float(cf), float(ts), tick, did,
+                    float(cts) if cts is not None else None))
 
-    buckets = defaultdict(list)  # key -> [(ts, cf, ticker)]
+    buckets = defaultdict(list)  # key -> [(ts, cf, ticker, px, did, close_ts)]
     asset_seen = defaultdict(int)
-    for asset, side, px, tte, cf, ts, tick in obs:
+    for asset, side, px, tte, cf, ts, tick, did, cts in obs:
         asset_seen[asset] += 1
         pb = _bucket(PRICE_BUCKETS, px)
         tb = _bucket(TTE_BUCKETS, tte)
         if pb is None or tb is None:
             continue
-        buckets[(asset, side, pb[0], pb[1], tb[0], tb[1])].append((ts, cf, tick))
+        buckets[(asset, side, pb[0], pb[1], tb[0], tb[1])].append(
+            (ts, cf, tick, px, did, cts))
     for v in buckets.values():
-        v.sort()
+        v.sort(key=lambda r: r[0])  # chronological by decision_ts only —
+                                    # avoids None comparisons in tail fields
 
     registry = _load_live_registry(args.registry)
 
@@ -328,6 +344,26 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=1)
+
+    # Row-level companion: every IN-DOMAIN observation, consumed by the
+    # promotion compiler's stage-3 touchability labeler (forward book
+    # evolution per ticker).  Out-of-domain rows are excluded — they can
+    # never promote, so they need no feasibility evaluation.
+    rows_path = os.path.splitext(args.out)[0] + "_rows.jsonl"
+    n_rows = 0
+    with open(rows_path, "w", encoding="utf-8") as f:
+        for (asset, side, plo, phi, tlo, thi), pts in buckets.items():
+            if not _in_domain(plo, phi, tlo, thi):
+                continue
+            for ts, cf, tick, px, did, cts in pts:
+                f.write(json.dumps({
+                    "asset": asset, "side": side, "ticker": tick,
+                    "ts": ts, "cf": cf, "px": px, "tte": tlo,
+                    "decision_id": did, "close_ts": cts,
+                    "bucket": f"{asset}|{side}|{plo:02d}-{phi:02d}"
+                              f"|t{tlo}_{thi}|{EXEC_MODE}",
+                }) + "\n")
+                n_rows += 1
 
     # Console table.
     print(f"\n== cell discovery (min_n={args.min_n}, mode={EXEC_MODE}, "

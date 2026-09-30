@@ -224,6 +224,21 @@ def canonical_terminal_code(
         return TerminalCode.RISK_OR_ALLOCATION_REJECT.value
     if candidate_present:
         return TerminalCode.RISK_OR_ALLOCATION_REJECT.value
+
+    # Evaluated-economics fallback (2026-09-30): when per-side net EVs were
+    # computed, the record must never end at UNCLASSIFIED/MODEL_UNAVAILABLE —
+    # the honest first economic blocker is that no side had positive
+    # executable edge, or that the best side's positive edge still could not
+    # clear its dynamic threshold.  Unknown reasons WITHOUT economics still
+    # resolve to the compatibility codes.
     if not rl:
+        if best_ev_cents is not None:
+            if best_ev_cents <= 0.0:
+                return TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+            return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
         return TerminalCode.MODEL_UNAVAILABLE.value
+    if best_ev_cents is not None:
+        if best_ev_cents <= 0.0:
+            return TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
     return TerminalCode.UNCLASSIFIED.value

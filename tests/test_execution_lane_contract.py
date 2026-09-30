@@ -332,17 +332,209 @@ def test_no_cell_candidate_is_not_claimed_by_cell_lane(asset):
     assert isinstance(cells_for_asset(asset), tuple)
 
 
-@pytest.mark.parametrize("asset", ("BTC", "ETH"))
-def test_no_approved_cell_does_not_disable_formula_candidate(asset):
-    """BTC/ETH currently hold zero approved cells. Prove the shared resolver
-    hands their candidates to the formula path unchanged: no cell claim, no
-    synthetic block, no hidden asset exclusion."""
+@pytest.mark.parametrize("asset", ASSETS)
+def test_out_of_band_quote_falls_back_to_formula(asset):
+    """A quote outside every configured cell's bounds resolves no cell, and
+    the cell lane declines admission ownership — the formula path stays the
+    decision-maker for all five assets (no hidden asset exclusion)."""
     from merid.prediction.threshold_cells import (
-        cells_for_asset,
+        cells_for_asset, resolve_threshold_cell,
         threshold_cell_admission_allowed,
     )
 
-    assert cells_for_asset(asset) == ()
+    # 15c is below every cell's price floor (all cells start >=20c).
+    assert resolve_threshold_cell(asset, "no", 15.0, 200.0) is None
+    # tte below every cell's TTE floor.
+    assert resolve_threshold_cell(asset, "no", 45.0, 60.0) is None
+
+    allowed, reason = threshold_cell_admission_allowed(
+        cell_id=None,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=5.0,
+        effective_required_edge_cents=3.0,
+    )
+    assert allowed is False and reason is None  # formula path decides
+
+
+# ---------------------------------------------------------------------------
+# 7. 2026-09-30 batch-1 cells — BTC/ETH match-and-admit contract
+# ---------------------------------------------------------------------------
+
+NEW_CELLS = [
+    # (cell_id, asset, in-band ask, in-band tte, min_ev, admit_ev)
+    ("btc_no_30_40_t120_300", "BTC", 35, 180, 2.5, 2.5),
+    ("btc_no_40_50_t120_300", "BTC", 45, 180, 2.5, 2.5),
+    ("btc_no_50_60_t120_300", "BTC", 55, 180, 3.0, 3.0),
+    ("eth_no_50_60_t120_300", "ETH", 55, 180, 2.5, 2.5),
+    ("eth_no_60_70_t120_300", "ETH", 65, 180, 3.0, 3.0),
+]
+
+
+@pytest.mark.parametrize(
+    "cell_id,asset,ask,tte,ev,required", NEW_CELLS,
+    ids=[c[0] for c in NEW_CELLS],
+)
+def test_new_cells_match_and_admit_at_threshold(
+    cell_id, asset, ask, tte, ev, required
+):
+    """Each promoted cell must (a) resolve for its in-domain quote and
+    (b) admit a soft-evidence candidate that clears its own floor."""
+    from merid.prediction.threshold_cells import (
+        resolve_threshold_cell, threshold_cell_admission_allowed,
+    )
+
+    cell = resolve_threshold_cell(asset, "no", ask, tte)
+    assert cell is not None and cell.cell_id == cell_id
+    assert cell.min_net_ev_cents == required
+
+    allowed, reason = threshold_cell_admission_allowed(
+        cell_id=cell_id,
+        evidence_code="SPARSE_MATCHED_INSUFFICIENT",
+        matching_hard_block=False,
+        net_ev_cents=ev,
+        effective_required_edge_cents=required,
+    )
+    assert allowed is True, reason
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_cell_boundaries_are_exact(asset):
+    """Promotion domain is exact: outside 20-89c or 120-600s -> no match."""
+    from merid.prediction.threshold_cells import resolve_threshold_cell
+
+    assert resolve_threshold_cell(asset, "no", 19, 180) is None
+    assert resolve_threshold_cell(asset, "no", 90, 180) is None
+    assert resolve_threshold_cell(asset, "no", 45, 119.9) is None
+    assert resolve_threshold_cell(asset, "no", 45, 600.1) is None
+
+
+@pytest.mark.parametrize("cell_id,asset,ask,tte,ev,required", NEW_CELLS,
+                         ids=[c[0] for c in NEW_CELLS])
+def test_hard_block_cannot_emit_even_when_ev_clears(cell_id, asset, ask,
+                                                    tte, ev, required):
+    """Universal hard-block rule: a matched toxic cell / hard evidence block
+    vetoes admission no matter how far EV clears the cell floor."""
+    from merid.prediction.threshold_cells import (
+        threshold_cell_admission_allowed,
+    )
+
+    allowed, reason = threshold_cell_admission_allowed(
+        cell_id=cell_id,
+        evidence_code="MATCHING_TOXIC_CELL",
+        matching_hard_block=True,
+        net_ev_cents=ev + 10.0,
+        effective_required_edge_cents=required,
+    )
+    assert allowed is False and reason == "matching_hard_block"
+
+
+# ---------------------------------------------------------------------------
+# 8. Fair allocation — per-asset fill cap + one global resting order
+# ---------------------------------------------------------------------------
+
+def test_asset_fill_cap_blocks_third_fill_same_asset():
+    """Two fills already landed for BTC today -> the next BTC cell is
+    refused with asset_fills_cap_exhausted, while an ETH cell still admits."""
+    from merid.prediction.threshold_cells import (
+        cell_admission, record_cell_fill,
+    )
+
+    record_cell_fill("btc_no_30_40_t120_300", decision_id="d1")
+    record_cell_fill("btc_no_40_50_t120_300", decision_id="d2")
+    assert _tc.cell_fills_today_asset("BTC") == 2
+
+    allowed, reason = cell_admission("btc_no_50_60_t120_300")
+    assert allowed is False and reason == "asset_fills_cap_exhausted"
+
+    allowed2, reason2 = cell_admission("eth_no_50_60_t120_300")
+    assert allowed2 is True, reason2
+
+
+def test_global_open_order_serializes_the_lane():
+    """One resting order anywhere in the lane blocks every other cell —
+    the measurement lane runs a single passive order at a time."""
+    from merid.prediction.threshold_cells import (
+        cell_admission, record_cell_order_open,
+    )
+
+    record_cell_order_open("sol_no_60_80_t120_600", "ord-1")
+    assert _tc.cell_open_orders_total() == 1
+
+    allowed, reason = cell_admission("xrp_no_80_90_t120_600")
+    assert allowed is False and reason == "lane_open_order_exists"
+
+
+def test_per_asset_cap_counts_across_cells():
+    """Fills on two different ETH cells both count toward the ETH cap —
+    cells cannot multiply an asset's daily fill budget."""
+    from merid.prediction.threshold_cells import record_cell_fill
+
+    record_cell_fill("eth_no_50_60_t120_300", decision_id="e1")
+    record_cell_fill("eth_no_60_70_t120_300", decision_id="e2")
+    assert _tc.cell_fills_today_asset("ETH") == 2
+
+    from merid.prediction.threshold_cells import cell_admission
+    allowed, reason = cell_admission("eth_no_50_60_t120_300")
+    # per-cell cap (2) also reached on this cell, but the ASSET reason must
+    # surface for a fresh ETH cell; here cell-cap wins precedence — either
+    # way ETH is capped.  A clean ETH assertion:
+    assert allowed is False
+    assert reason in ("cell_fills_cap_exhausted", "asset_fills_cap_exhausted")
+
+
+# ---------------------------------------------------------------------------
+# 9. [ALL-FIVE-PROMOTION-STATUS] rollup — one authoritative answer per asset
+# ---------------------------------------------------------------------------
+
+def test_promotion_status_rollup_counts(tmp_path, monkeypatch):
+    """The rollup must name live cells, pending candidates, and rejections
+    per asset — and degrade to 'no_compiler_artifact' when artifacts are
+    absent (never an error)."""
+    cand_path = tmp_path / "candidates.json"
+    rej_path = tmp_path / "rejections.json"
+    monkeypatch.setenv("MERID_CELL_CANDIDATES_PATH", str(cand_path))
+    monkeypatch.setenv("MERID_CELL_REJECTIONS_PATH", str(rej_path))
+
+    from merid.prediction import threshold_cells as tc
+    # Absent artifacts -> explicit marker, never a crash.
+    line = tc.promotion_status_rollup()
+    assert "no_compiler_artifact" in line
+    for a in ASSETS:
+        assert f"{a}:" in line
+
+    cand_path.write_text(json.dumps({"per_cell": [
+        {"asset": "BTC", "promotion_status": "LIVE_PROVISIONAL"},
+        {"asset": "BTC",
+         "promotion_status": "CANDIDATE_PENDING_EXECUTION_FEASIBILITY"},
+        {"asset": "ETH",
+         "promotion_status": "CANDIDATE_READY_FOR_APPROVAL"},
+        {"asset": "XRP",
+         "promotion_status": "CANDIDATE_PENDING_RECENCY_AND_CALIBRATION"},
+    ]}))
+    rej_path.write_text(json.dumps({"per_cell": [
+        {"asset": "BTC", "failed_stage": "S2_domain"},
+        {"asset": "BTC", "failed_stage": "S2_domain"},
+        {"asset": "ETH", "failed_stage": "S1_statistical"},
+        {"asset": "SOL", "failed_stage": "S1b_market_concentration"},
+        {"asset": "DOGE", "failed_stage": "S3_execution_feasibility"},
+    ]}))
+    line = tc.promotion_status_rollup()
+    assert "BTC: live=3 suspended=0 candidates=2 approved=0 " \
+        "live_provisional=1 pending_feasibility=1" in line
+    assert "rejected_domain=2" in line
+    assert "ETH:" in line and "ready_for_approval=1" in line
+    assert "rejected_concentration=1" in line
+    assert "rejected_execution=1" in line
+
+
+@pytest.mark.parametrize("asset", ASSETS)
+def test_no_cell_claim_never_launders_through_lane(asset):
+    """cell_id=None must never be claimed by the cell lane — the formula
+    path owns the admission decision for unmatched candidates."""
+    from merid.prediction.threshold_cells import (
+        threshold_cell_admission_allowed,
+    )
 
     # A formula-qualified candidate (positive EV over the shared formula
     # threshold, clean evidence) is untouched by the cell lane.
