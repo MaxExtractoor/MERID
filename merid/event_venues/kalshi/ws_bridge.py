@@ -3945,21 +3945,27 @@ class KalshiWebSocketBridge:
                             )
                 self._last_sequence[event_type] = seq
         
-        # Check for sequence gaps in orderbook events.  Kalshi scopes
-        # orderbook seq numbers per market ticker — keying by event type alone
-        # counts every interleaved market's deltas as a gap and produced
-        # ~120k spurious gaps.  Key by ticker instead; snapshot and delta share
-        # one per-market sequence space.
+        # Check for sequence gaps in orderbook events.  Kalshi scopes the
+        # orderbook ``seq`` to the subscription (sid), not the market: a single
+        # orderbook_delta subscription multiplexes every subscribed ticker on
+        # one seq space, so keying per ticker counts every other market's
+        # deltas as gaps (~600k false gaps/hr).  Track per sid — the true seq
+        # space — so a real gap still means a dropped frame for this feed, and
+        # keep the ticker in the log line for diagnosis.
         if isinstance(event, dict) and event.get("type") in ("orderbook_snapshot", "orderbook_delta"):
-            seq = event.get("sequence") or event.get("seq") or event.get("msg_id")
+            seq = event.get("seq")
+            if seq is None:
+                seq = event.get("sequence") or event.get("msg_id")
             if seq is not None and isinstance(seq, numbers.Integral) and not isinstance(seq, bool):
                 _msg = event.get("msg")
                 _ob_ticker = (
-                    event.get("ticker")
+                    (_msg.get("market_ticker") if isinstance(_msg, dict) else None)
+                    or event.get("ticker")
                     or event.get("market_ticker")
-                    or (_msg.get("market_ticker") if isinstance(_msg, dict) else None)
+                    or "unknown"
                 )
-                event_type = f"orderbook:{_ob_ticker or 'unknown'}"
+                _sid = event.get("sid")
+                event_type = f"orderbook:sid{_sid}" if _sid is not None else "orderbook"
                 if event_type in self._last_sequence:
                     expected = self._last_sequence[event_type] + 1
                     if seq > expected:
@@ -3970,13 +3976,13 @@ class KalshiWebSocketBridge:
                         # to avoid blocking I/O on the WebSocket event loop callback path.
                         if gap > 10 or self._sequence_gaps % 100 == 0:
                             logger.warning(
-                                "WS orderbook sequence gap: key=%s expected %s, got %s, gap=%s, total_gaps=%s",
-                                event_type, expected, seq, gap, self._sequence_gaps
+                                "WS orderbook sequence gap: key=%s ticker=%s expected %s, got %s, gap=%s, total_gaps=%s",
+                                event_type, _ob_ticker, expected, seq, gap, self._sequence_gaps
                             )
                         else:
                             logger.debug(
-                                "WS orderbook sequence gap: key=%s expected %s, got %s, gap=%s, total_gaps=%s",
-                                event_type, expected, seq, gap, self._sequence_gaps
+                                "WS orderbook sequence gap: key=%s ticker=%s expected %s, got %s, gap=%s, total_gaps=%s",
+                                event_type, _ob_ticker, expected, seq, gap, self._sequence_gaps
                             )
                 self._last_sequence[event_type] = seq
         
