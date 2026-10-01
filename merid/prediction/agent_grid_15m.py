@@ -8397,6 +8397,9 @@ class LeanAgent15m:
                 cfb_observation,
                 cycle_id=str(tick),
             )
+            _ctx = getattr(self, "_pdr_ctx", None)
+            if isinstance(_ctx, dict):
+                _ctx["decision_recorded"] = True
             try:
                 _emit_regime_aligned_opportunity(
                     asset, _dir_regime, decision.indicators or {}, time.time()
@@ -10281,6 +10284,11 @@ class LeanAgent15m:
             if getattr(self, "_pdr_emitted_for", None) == key:
                 return
             self._pdr_emitted_for = key
+            if ctx.get("decision_recorded"):
+                # The model stage already persisted this candidate's decision
+                # row — a trailing None-return from collect is the model
+                # rejection propagating, not a pre-decision exit.
+                return
             reason = (
                 explicit_reason
                 or (self._rejection_waterfall.get("final_reason") if isinstance(getattr(self, "_rejection_waterfall", None), dict) else None)
@@ -10347,6 +10355,15 @@ class LeanAgent15m:
             ledger = get_decision_audit_ledger()
             did = context.get("decision_id")
             if did:
+                # A decision row already exists for this candidate — its
+                # lifecycle is anchored at the MODEL stage.  Mark emitted so a
+                # trailing ``collect_order_candidate`` None-return does not
+                # double-record it as a pre-decision rejection.
+                _ctx = getattr(self, "_pdr_ctx", None) or {}
+                self._pdr_emitted_for = (
+                    context.get("tick", _ctx.get("tick")),
+                    context.get("asset") or self.config.name.split('_')[0],
+                )
                 selected = context.get("selected_outcome")
                 model_reason = context.get("model_no_trade_reason")
                 if selected and reason != model_reason:
@@ -10370,6 +10387,11 @@ class LeanAgent15m:
             if getattr(self, "_pdr_emitted_for", None) == key:
                 return
             self._pdr_emitted_for = key
+            if ctx.get("decision_recorded"):
+                # A model-stage decision row exists for this candidate — a
+                # rejection without decision_id context here is post-model,
+                # not a pre-decision exit.
+                return
             tte = context.get("market_time_remaining_s")
             if tte is None and context.get("minutes_to_expiry") is not None:
                 tte = float(context["minutes_to_expiry"]) * 60.0
