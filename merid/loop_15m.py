@@ -8787,6 +8787,21 @@ def _validate_candidate_edge(self, candidate: Dict) -> bool:
     
     return True
 
+def _entry_max_rest_seconds() -> int:
+    """Resting lifetime bound for 15m entry orders.
+
+    Live fill-quality audit (2026-10-01): non-cbp post-only entries rested up
+    to the 180s OrderIntent default and filled into fully repriced books —
+    the ETH NO@34 fill landed 150s after submission with the model's own
+    fill-time edge at -23.5c.  Entries now share the bounded-lane 45s
+    contract (env-overridable); exit orders keep the 180s default.
+    """
+    try:
+        return max(1, int(os.environ.get("MERID_ENTRY_MAX_REST_S", "45")))
+    except Exception:
+        return 45
+
+
 async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Convert candidate dict to OrderIntent and route to order router.
     # Returns True if order was submitted, False if order was rejected/skipped.
@@ -9976,21 +9991,26 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 resolved_post_only = False
                 aggressiveness = 1.0
 
-        # Lane-scoped resting lifetime: the current-build provisional policy
-        # binds max_order_lifetime_s=45; that bound must reach the wire as
-        # intent.max_rest_seconds (the OrderIntent default is 180s) or the
-        # lane contract would be declared but unenforced.
+        # Resting lifetime for entry orders: every live lane shares the
+        # bounded 45s contract (default, env-overridable).  cbp binds its own
+        # policy value explicitly; the formula lane previously fell through
+        # to the 180s OrderIntent default, which let stale orders fill into
+        # repriced books (ETH NO@34 filled 150s in at -23.5c stale edge).
+        # Exits keep the 180s default — they must fill, not time out.
         _resolved_max_rest_s: Optional[int] = None
-        if candidate.get("decision_lane") == "current_build_provisional":
-            try:
-                from merid.prediction import (
-                    current_build_provisional as _cbp,
-                )
-                _resolved_max_rest_s = int(
-                    _cbp.provisional_max_order_lifetime_s()
-                )
-            except Exception:
-                _resolved_max_rest_s = None
+        if entry_or_exit == "entry":
+            if candidate.get("decision_lane") == "current_build_provisional":
+                try:
+                    from merid.prediction import (
+                        current_build_provisional as _cbp,
+                    )
+                    _resolved_max_rest_s = int(
+                        _cbp.provisional_max_order_lifetime_s()
+                    )
+                except Exception:
+                    _resolved_max_rest_s = None
+            if _resolved_max_rest_s is None:
+                _resolved_max_rest_s = _entry_max_rest_seconds()
 
         intent = OrderIntent(
             ticker=ticker,

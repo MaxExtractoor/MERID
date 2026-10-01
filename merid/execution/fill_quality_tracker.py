@@ -323,22 +323,38 @@ class FillQualityTracker:
             # 2026-09-30: threshold-cell lane invariant — a fill attributed to
             # this order must be on the intent's outcome side.  A side flip is
             # structural corruption, not performance: suspend the cell at once.
-            _f_side = (getattr(f, "side", None) or getattr(f, "action", None) or "")
-            _f_side = str(_f_side).lower()
+            # Compare OUTCOME sides, not traded legs: a BUY_NO intent rests as
+            # a sell-YES leg (fill side=yes/action=sell produces a NO outcome),
+            # which is legitimate, not corruption.
+            _f_leg_side = str(
+                getattr(f, "canonical_position_side", None)
+                or getattr(f, "side", None) or ""
+            ).lower()
+            _f_leg_action = str(
+                getattr(f, "canonical_position_action", None)
+                or getattr(f, "action", None) or ""
+            ).lower()
+            if _f_leg_side in ("yes", "no"):
+                _f_outcome = (
+                    _f_leg_side
+                    if _f_leg_action != "sell"
+                    else ("no" if _f_leg_side == "yes" else "yes")
+                )
+            else:
+                _f_outcome = ""
             _r_side = (rec.side or "").lower()
-            _f_is_no = _f_side == "no" or _f_side.endswith("_no")
             _r_is_no = _r_side == "no" or _r_side.endswith("_no")
             if (
                 (rec.threshold_cell_id or rec.provisional_cell_id)
-                and _f_side in ("yes", "no", "buy_yes", "buy_no")
-                and _f_is_no != _r_is_no
+                and _f_outcome in ("yes", "no")
+                and (_f_outcome == "no") != _r_is_no
             ):
                 try:
                     if rec.threshold_cell_id:
                         from merid.prediction import threshold_cells as _tc
                         _tc.record_cell_invariant_violation(
                             rec.threshold_cell_id,
-                            f"fill_side={_f_side} intent_side={_r_side}",
+                            f"fill_outcome={_f_outcome} intent_side={_r_side}",
                         )
                     if rec.provisional_cell_id:
                         from merid.prediction import (
@@ -346,20 +362,31 @@ class FillQualityTracker:
                         )
                         _cbp.record_provisional_invariant_violation(
                             rec.provisional_cell_id,
-                            f"fill_side={_f_side} intent_side={_r_side}",
+                            f"fill_outcome={_f_outcome} intent_side={_r_side}",
                         )
                 except Exception:
                     pass
             fill_ts = getattr(f, "created_time", None)
             fill_ts = fill_ts.timestamp() if hasattr(fill_ts, "timestamp") else (fill_ts or now)
-            # Fill price in the intent's outcome space: yes_price_cents is the
-            # YES-leg price, so NO-side fills need the complement.
+            # Fill price in the intent's outcome space.  ``f.price_cents`` is
+            # the canonical leg price on the *traded* leg — a BUY_NO intent
+            # executes as a sell-YES leg whose price is YES-space — while
+            # ``rec.limit_price_cents`` and ``rec.p_selected`` live in the
+            # intent's outcome space.  Convert when the spaces differ or every
+            # NO fill records a space-inverted edge and a false post-only
+            # breach (fill 66 > limit 34 in mixed spaces).
             fill_px = getattr(f, "price_cents", None)
-            _fpx_yes = getattr(f, "yes_price_cents", None)
             _s = (rec.side or "").lower()
             _is_no = _s == "no" or _s.endswith("_no")
-            if _fpx_yes is not None:
-                fill_px = 100 - int(_fpx_yes) if _is_no else int(_fpx_yes)
+            if fill_px is not None:
+                _leg_side = (
+                    getattr(f, "canonical_position_side", None)
+                    or getattr(f, "side", None) or ""
+                ).lower()
+                _leg_is_no = _leg_side == "no" or _leg_side.endswith("_no")
+                fill_px = int(fill_px)
+                if _leg_is_no != _is_no:
+                    fill_px = 100 - fill_px
             rec.filled = True
             rec.fill_ts = float(fill_ts)
             rec.fill_price_cents = fill_px
