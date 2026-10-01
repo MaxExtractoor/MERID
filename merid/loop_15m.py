@@ -9990,9 +9990,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # 2026-10-01: the same contract applies to every bounded post-only
             # lane (BOUNDED_POST_ONLY_LANES) — each lane's enablement flag IS
             # its approval, so a maker intent from a live lane must never be
-            # coerced to taker/IOC here.
-            from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES
-
+            # coerced to taker/IOC here.  Uses the module-level import; a local
+            # import here made the name function-local and broke the earlier
+            # count-clamp read at ~L9287 with UnboundLocalError.
             _td_lane_for_coerce = candidate.get("decision_lane") or (
                 (getattr(trade_decision, "indicators", None) or {}).get(
                     "decision_lane"
