@@ -648,6 +648,29 @@ def test_first_fill_bad_markout_suspends():
     assert get_cell_state(cell.cell_id) == "SUSPENDED"
 
 
+def test_markout_arriving_before_fill_row_merges_and_suspends():
+    """Submit-relative markouts emit while the order still looks unfilled;
+    the fill recorder absorbs the standalone markout rows so the immediate
+    first-fill rule sees them."""
+    cell = _cell()
+    record_cell_markout(cell.cell_id, "d0", 1, -4.0)
+    record_cell_markout(cell.cell_id, "d0", 5, -3.5)
+    assert get_cell_state(cell.cell_id) != "SUSPENDED"
+    record_cell_fill(cell.cell_id, decision_id="d0")
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_settlement_idempotent_on_repeated_attribution():
+    cell = _cell()
+    record_cell_fill(cell.cell_id, decision_id="d0", candidate_ev_cents=2.0)
+    record_cell_settlement("d0", 1.5, cell_id=cell.cell_id)
+    record_cell_settlement("d0", 1.5, cell_id=cell.cell_id)
+    from merid.prediction.threshold_cells import _load_state
+    outs = _load_state()["outcomes"][cell.cell_id]
+    settled = [o for o in outs if o.get("kind") == "settled" and o.get("decision_id") == "d0"]
+    assert len(settled) == 1 and settled[0]["net_pnl_cents"] == 1.5
+
+
 def test_first_fill_loss_exceeds_edge_stress_suspends():
     cell = _cell()
     record_cell_fill(cell.cell_id, decision_id="d0", candidate_ev_cents=2.0)

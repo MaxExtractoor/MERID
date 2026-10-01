@@ -171,11 +171,17 @@ class OrderDecisionLedger:
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
 
-            get_decision_audit_ledger().record_outcome(
+            # record_entry_fill converts the venue-leg price into selected-side
+            # space (a sell-YES@46 fill is a NO@54 entry) and is fail-closed
+            # when the fill direction cannot be verified against the decision.
+            get_decision_audit_ledger().record_entry_fill(
                 decision_id=decision_id,
                 fill_id=fill.fill_id,
-                actual_fill_price_cents=fill.price_cents,
-                actual_entry_fee_cents=float(fill.fee_cents),
+                exchange_order_id=fill.order_id,
+                execution_outcome_side=fill.side,
+                execution_action=fill.action,
+                execution_price_cents=fill.price_cents,
+                entry_fee_cents=float(fill.fee_cents),
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record fill failed: %s", audit_exc)

@@ -692,6 +692,7 @@ def _default_state(now: float) -> Dict[str, Any]:
         "fills_today_asset": {},
         "fills_today_side": {},
         "open_orders": {},
+        "open_orders_ts": {},
         "router_attempts": {},
         "router_attempts_total": {},
         "router_rejects": {},
@@ -736,7 +737,7 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
         state = _default_state(now)
         for k in (
             "cell_states", "outcomes", "decision_cell_map",
-            "open_orders", "released_reservations",
+            "open_orders", "open_orders_ts", "released_reservations",
             # Cumulative evidence counters persist across days — daily caps
             # reset, but promotion/review evidence is build-scoped.
             "submissions_total", "router_attempts_total",
@@ -862,13 +863,61 @@ def provisional_fills_today_total() -> int:
     return sum(int(v or 0) for v in (st.get("fills_today") or {}).values())
 
 
+def _open_order_stale_s() -> float:
+    """Bound after which a persisted open order is presumed dead — the
+    lane's resting lifetime (plus reprice) is measured in tens of seconds,
+    so anything older than this can no longer be live on the venue.  Covers
+    the restart leak: the in-memory fill tracker drops its records on a
+    process restart, so ``record_provisional_order_closed`` never fires for
+    orders opened before it and the map would block the lane forever."""
+    try:
+        lifetime = float(provisional_max_order_lifetime_s())
+    except Exception:
+        lifetime = 45.0
+    return max(4.0 * lifetime, 300.0)
+
+
+def _prune_stale_open_orders(st: Dict[str, Any], now: float) -> bool:
+    """Drop open-order ids older than the staleness bound; stamp legacy
+    untracked ids as fresh so they self-expire within the bound.  Returns
+    True when the state changed."""
+    opens = st.get("open_orders") or {}
+    ts_map = st.setdefault("open_orders_ts", {})
+    changed = False
+    bound = _open_order_stale_s()
+    for cid, ids in list(opens.items()):
+        if not ids:
+            continue
+        cell_ts = ts_map.setdefault(cid, {})
+        keep = []
+        for oid in ids:
+            ots = cell_ts.get(oid)
+            if ots is None:
+                cell_ts[oid] = now
+                keep.append(oid)
+                changed = True
+            elif now - float(ots) <= bound:
+                keep.append(oid)
+            else:
+                cell_ts.pop(oid, None)
+                changed = True
+        if len(keep) != len(ids):
+            opens[cid] = keep
+            changed = True
+    return changed
+
+
 def provisional_open_orders(cell_id: str) -> int:
     st = _load_state()
+    if _prune_stale_open_orders(st, time.time()):
+        _save_state()
     return len((st.get("open_orders") or {}).get(cell_id) or [])
 
 
 def provisional_open_orders_total() -> int:
     st = _load_state()
+    if _prune_stale_open_orders(st, time.time()):
+        _save_state()
     return sum(len(v) for v in (st.get("open_orders") or {}).values() if v)
 
 
@@ -966,9 +1015,21 @@ def record_provisional_submission(
         subs_t[cell_id] = int(subs_t.get(cell_id) or 0) + 1
         if decision_id:
             st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+            _cap_decision_cell_map(st)
     _save_state(path)
     _maybe_emit_promotion_review(cell_id, st=st)
     return int(st["count"])
+
+
+def _cap_decision_cell_map(st: Dict[str, Any], limit: int = 500) -> None:
+    """Bound the persisted decision->cell map — 15m markets settle within
+    the hour, so entries beyond the most recent few hundred can never be
+    needed by a settlement/exit join and only bloat the state file."""
+    m = st.get("decision_cell_map") or {}
+    over = len(m) - limit
+    if over > 0:
+        for k in list(m.keys())[:over]:
+            m.pop(k, None)
 
 
 def bind_decision_provisional(decision_id: str, cell_id: str) -> None:
@@ -977,6 +1038,7 @@ def bind_decision_provisional(decision_id: str, cell_id: str) -> None:
         return
     st = _load_state()
     st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+    _cap_decision_cell_map(st)
     _save_state()
 
 
@@ -989,9 +1051,12 @@ def record_provisional_order_open(cell_id: str, order_id: Optional[str]) -> None
     if not cell_id or not order_id:
         return
     st = _load_state()
+    now = time.time()
+    _prune_stale_open_orders(st, now)
     opens = st.setdefault("open_orders", {}).setdefault(cell_id, [])
     if order_id not in opens:
         opens.append(order_id)
+    st.setdefault("open_orders_ts", {}).setdefault(cell_id, {})[order_id] = now
     # An accepted order breaks any consecutive router-reject run.
     st.setdefault("router_consecutive_rejects", {})[cell_id] = 0
     _save_state()
@@ -1002,8 +1067,13 @@ def record_provisional_order_closed(cell_id: str, order_id: Optional[str]) -> No
         return
     st = _load_state()
     opens = st.setdefault("open_orders", {}).setdefault(cell_id, [])
+    changed = False
     if order_id in opens:
         opens.remove(order_id)
+        changed = True
+    if (st.get("open_orders_ts") or {}).get(cell_id, {}).pop(order_id, None) is not None:
+        changed = True
+    if changed:
         _save_state()
 
 
@@ -1146,7 +1216,12 @@ def record_provisional_fill(
         fs = st.setdefault("fills_today_side", {})
         fs[cell.side] = int(fs.get(cell.side) or 0) + 1
     outs = st.setdefault("outcomes", {}).setdefault(cell_id, [])
-    outs.append({
+    # Absorb standalone markout rows that emitted for this decision before
+    # the fill was detected — the markout loop is submit-relative and often
+    # fires while the order still looks unfilled at poll time.  Without the
+    # merge the first-fill immediate rules read a null markout_5s_cents and
+    # the standalone rows double-count in the rolling window.
+    fill_row = {
         "ts": time.time(),
         "kind": "fill",
         "decision_id": decision_id,
@@ -1155,7 +1230,19 @@ def record_provisional_fill(
         "candidate_ev_cents": candidate_ev_cents,
         "fill_price_cents": fill_price_cents,
         "limit_price_cents": limit_price_cents,
-    })
+    }
+    if decision_id:
+        rest = []
+        for o in outs:
+            if o.get("decision_id") == decision_id and o.get("kind") == "markout":
+                for k, v in o.items():
+                    if k.startswith("markout_") and v is not None and fill_row.get(k) is None:
+                        fill_row[k] = float(v)
+            else:
+                rest.append(o)
+        if len(rest) != len(outs):
+            outs[:] = rest
+    outs.append(fill_row)
     del outs[:-25]
     # Post-only->taker breach: a resting buy can only fill at/below its
     # limit; a resting sell only at/above.  Anything else means the order
@@ -1180,6 +1267,7 @@ def record_provisional_fill(
         del outs[:-25]
     if decision_id:
         st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+        _cap_decision_cell_map(st)
     _save_state()
     bump_provisional_funnel("filled", cell_id)
     if get_cell_state(cell_id) == CELL_STATE_PROVISIONAL:
@@ -1231,7 +1319,10 @@ def record_provisional_settlement(
     st = _load_state()
     outs = st.setdefault("outcomes", {}).setdefault(cell_id, [])
     for o in reversed(outs):
-        if o.get("decision_id") == decision_id and o.get("kind") == "fill":
+        # Idempotent: match fill OR already-settled rows for this decision so a
+        # second attribution (exit path + settlement join) updates in place
+        # instead of appending a duplicate settled outcome.
+        if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
             o["net_pnl_cents"] = float(net_pnl_cents)
             o["kind"] = "settled"
             break
@@ -1647,8 +1738,6 @@ def _maybe_emit_promotion_review(
         dedupe_key = f"{current_build_sha()}:{cell_id}"
         if dedupe_key in reported:
             return
-        reported[dedupe_key] = time.time()
-        _save_state()
 
         cell = _CBP_BY_ID.get(cell_id)
         rep = promotion_review_report(
@@ -1667,13 +1756,15 @@ def _maybe_emit_promotion_review(
             promotion_ready=ready,
             report=rep,
         )
+        rpath = os.path.join(
+            evidence_dir(), f"promotion_review_{cell_id}.json"
+        )
         try:
-            rpath = os.path.join(
-                evidence_dir(), f"promotion_review_{cell_id}.json"
-            )
             os.makedirs(os.path.dirname(rpath) or ".", exist_ok=True)
-            with open(rpath, "w", encoding="utf-8") as fh:
+            tmp = rpath + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(rep, indent=2, default=str))
+            os.replace(tmp, rpath)
         except Exception as exc:
             logger.debug("[CBP-REVIEW] report persist failed: %s", exc)
         emit_provisional_lifecycle(
@@ -1688,6 +1779,8 @@ def _maybe_emit_promotion_review(
             "report=%s",
             cell_id, ready, attempts, n_fills, rpath,
         )
+        reported[dedupe_key] = time.time()
+        _save_state()
     except Exception:
         logger.debug(
             "[CBP-REVIEW] report generation failed for %s",

@@ -6132,6 +6132,29 @@ async def _run_loop(self) -> None:
                                         reason=f"Sizing returned count=0: {sizing_reason}",
                                         context={"asset": asset, "ticker": ticker, "notional": float(notional), "sizing_reason": sizing_reason}
                                     )
+                                    # Lane bookkeeping for a candidate that dies
+                                    # in sizing: count the allocator drop and
+                                    # release the submission reservation so it
+                                    # cannot burn the daily caps.
+                                    _sizing_cell = candidate.get("threshold_cell_id")
+                                    _sizing_prov = candidate.get("provisional_cell_id")
+                                    try:
+                                        if _sizing_cell:
+                                            from merid.prediction import threshold_cells as _tc
+                                            _tc.bump_cell_funnel("allocator_rejected", _sizing_cell)
+                                            _tc.release_cell_submission_reservation(
+                                                _sizing_cell,
+                                                decision_id=candidate.get("decision_id"),
+                                            )
+                                        elif _sizing_prov:
+                                            from merid.prediction import current_build_provisional as _cbp
+                                            _cbp.bump_provisional_funnel("allocator_rejected", _sizing_prov)
+                                            _cbp.release_provisional_submission_reservation(
+                                                _sizing_prov,
+                                                decision_id=candidate.get("decision_id"),
+                                            )
+                                    except Exception:
+                                        pass
                                     continue
                                 
                                 logger.info(
@@ -6189,6 +6212,30 @@ async def _run_loop(self) -> None:
                                 # Increment per-tick execution counter for sanity checks
                                 self._tick_executed_count += 1
                             else:
+                                # Lane reservation hygiene: a lane candidate that
+                                # returned without ever reaching the router died
+                                # pre-wire — release the submission reservation no
+                                # matter which early-return path took it down
+                                # (idempotent per decision_id; router-engaged
+                                # candidates are already accounted downstream).
+                                if not candidate.get("_router_engaged"):
+                                    _pre_wire_cell = candidate.get("threshold_cell_id")
+                                    _pre_wire_prov = candidate.get("provisional_cell_id")
+                                    try:
+                                        if _pre_wire_cell:
+                                            from merid.prediction import threshold_cells as _tc
+                                            _tc.release_cell_submission_reservation(
+                                                _pre_wire_cell,
+                                                decision_id=candidate.get("decision_id"),
+                                            )
+                                        elif _pre_wire_prov:
+                                            from merid.prediction import current_build_provisional as _cbp
+                                            _cbp.release_provisional_submission_reservation(
+                                                _pre_wire_prov,
+                                                decision_id=candidate.get("decision_id"),
+                                            )
+                                    except Exception:
+                                        pass
                                 # CRITICAL FIX: 2026-08-02 - Log lifecycle event for REJECTED state
                                 # CRITICAL FIX 2026-08-04: Avoid double-logging a terminal state.
                                 # _execute_candidate may already have logged a terminal state (e.g. BLOCKED_EDGE_THRESHOLD,
@@ -6215,6 +6262,10 @@ async def _run_loop(self) -> None:
                                             "allocator_rejected",
                                             candidate["threshold_cell_id"],
                                         )
+                                        _tc.release_cell_submission_reservation(
+                                            candidate["threshold_cell_id"],
+                                            decision_id=candidate.get("decision_id"),
+                                        )
                                         _tc.emit_cell_lifecycle(
                                             "rejected_pre_router",
                                             threshold_cell_id=candidate["threshold_cell_id"],
@@ -6236,6 +6287,10 @@ async def _run_loop(self) -> None:
                                         _cbp.bump_provisional_funnel(
                                             "allocator_rejected",
                                             candidate["provisional_cell_id"],
+                                        )
+                                        _cbp.release_provisional_submission_reservation(
+                                            candidate["provisional_cell_id"],
+                                            decision_id=candidate.get("decision_id"),
                                         )
                                         _cbp.emit_provisional_lifecycle(
                                             "rejected_pre_router",
@@ -8616,9 +8671,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                             "mutation is suspect poisoned_tick_completions=%d",
                             tick, self._poisoned_tick_completions,
                         )
-                    else:
+                    elif tick in (
+                        getattr(self, "_abandoned_ticks", None) or set()
+                    ):
                         logger.warning(
-                            "[15M-LOOP] orphaned run_cycle task for tick=%d eventually completed",
+                            "[15M-LOOP] abandoned run_cycle task for tick=%d completed "
+                            "after its timeout (within cancel grace)",
                             tick,
                         )
 
@@ -8632,6 +8690,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
 
             if cycle_task not in done_set:
                 self._cycle_timeout_total = getattr(self, "_cycle_timeout_total", 0) + 1
+                _abandoned = getattr(self, "_abandoned_ticks", None)
+                if _abandoned is None:
+                    _abandoned = self._abandoned_ticks = set()
+                _abandoned.add(tick)
+                if len(_abandoned) > 512:
+                    _abandoned.clear()
                 logger.critical(
                     "[GRID-CYCLE-TIMEOUT] tick=%d exceeded %.1fs bound; cancelling "
                     "cycle task (fail-closed, returning no candidates) "
@@ -8805,6 +8869,7 @@ def _entry_max_rest_seconds() -> int:
 async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Convert candidate dict to OrderIntent and route to order router.
     # Returns True if order was submitted, False if order was rejected/skipped.
+    candidate.pop("_router_engaged", None)
     try:
         from merid.event_venues.kalshi.order_router import (
             OrderIntent,
@@ -9961,6 +10026,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             terminal_state="maker_disabled",
                         )
                         _tc.record_cell_exec_failure(_cell_id, "maker_disabled_env")
+                        _tc.bump_cell_funnel("allocator_rejected", _cell_id)
+                        _tc.release_cell_submission_reservation(
+                            _cell_id, decision_id=candidate.get("decision_id"),
+                        )
                     else:
                         from merid.prediction import (
                             current_build_provisional as _cbp,
@@ -9976,6 +10045,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         )
                         _cbp.record_provisional_exec_failure(
                             _pcell_id, "maker_disabled_env"
+                        )
+                        _cbp.bump_provisional_funnel("allocator_rejected", _pcell_id)
+                        _cbp.release_provisional_submission_reservation(
+                            _pcell_id, decision_id=candidate.get("decision_id"),
                         )
                 except Exception:
                     pass
@@ -10787,7 +10860,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             ticker, kalshi_side, edge_yes, edge_no, min_edge
         )
 
-        # Route order
+        # Route order — mark the candidate router-engaged so a pre-wire drop
+        # upstream can release its lane submission reservation; once the
+        # router runs it owns the attempt accounting (pre-wire release or
+        # consumed reject) and the caller must not release again.
+        candidate["_router_engaged"] = True
         result = await route_order_async(intent)
 
         # Post-result accounting and audit log.  Risk/position exposure is recorded

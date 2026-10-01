@@ -780,6 +780,405 @@ class DecisionAuditLedger:
                 exc,
             )
 
+    def record_entry_fill(
+        self,
+        *,
+        decision_id: str,
+        fill_id: Optional[str] = None,
+        exchange_order_id: Optional[str] = None,
+        execution_outcome_side: Optional[str] = None,
+        execution_action: Optional[str] = None,
+        execution_price_cents: Optional[int] = None,
+        entry_fee_cents: Optional[float] = None,
+    ) -> bool:
+        """Persist an asynchronously-detected venue fill onto the outcome row.
+
+        The order-router only calls ``record_outcome`` for fills visible in the
+        synchronous submit response; post-only resting orders fill later and
+        arrive via the fills ledger instead.  This method performs the
+        venue-leg -> selected-side price conversion the settlement math expects:
+
+        - ``buy`` on leg L costs ``execution_price_cents`` in L space.
+        - ``sell`` on leg L is economically buying the opposite outcome at
+          ``100 - execution_price_cents``.
+
+        The implied exposure side must match the decision's ``selected_side``;
+        on mismatch the row is left untouched (fail-closed) rather than
+        writing a wrong-space price.  Returns True when a fill price was
+        written.
+        """
+        if not _is_enabled():
+            return False
+        if not decision_id or execution_price_cents is None:
+            return False
+        action = (execution_action or "").lower()
+        leg = (execution_outcome_side or "").lower()
+        if action not in ("buy", "sell") or leg not in ("yes", "no"):
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] entry fill for %s has undetermined "
+                "direction (outcome_side=%r action=%r) - skipping",
+                decision_id,
+                execution_outcome_side,
+                execution_action,
+            )
+            return False
+
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                return self._record_entry_fill_locked(
+                    conn,
+                    decision_id=decision_id,
+                    fill_id=fill_id,
+                    exchange_order_id=exchange_order_id,
+                    execution_outcome_side=execution_outcome_side,
+                    execution_action=execution_action,
+                    execution_price_cents=execution_price_cents,
+                    entry_fee_cents=entry_fee_cents,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] record_entry_fill failed for %s: %s",
+                decision_id,
+                exc,
+            )
+            return False
+
+    def _record_entry_fill_locked(
+        self,
+        conn: Any,
+        *,
+        decision_id: str,
+        fill_id: Optional[str] = None,
+        exchange_order_id: Optional[str] = None,
+        execution_outcome_side: Optional[str] = None,
+        execution_action: Optional[str] = None,
+        execution_price_cents: Optional[int] = None,
+        entry_fee_cents: Optional[float] = None,
+    ) -> bool:
+        """Lock-free core of ``record_entry_fill`` for in-transaction callers."""
+        action = (execution_action or "").lower()
+        leg = (execution_outcome_side or "").lower()
+        if not decision_id or execution_price_cents is None:
+            return False
+        if action not in ("buy", "sell") or leg not in ("yes", "no"):
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] entry fill for %s has undetermined "
+                "direction (outcome_side=%r action=%r) - skipping",
+                decision_id,
+                execution_outcome_side,
+                execution_action,
+            )
+            return False
+        drow = conn.execute(
+            "SELECT selected_side FROM strategy_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        if drow is None or not drow["selected_side"]:
+            return False
+        selected = str(drow["selected_side"]).lower()
+        exposure_side = (
+            leg if action == "buy" else ("no" if leg == "yes" else "yes")
+        )
+        if exposure_side != selected:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] entry fill side mismatch for %s: "
+                "exposure=%s (leg=%s action=%s) vs selected=%s - skipping",
+                decision_id, exposure_side, leg, action, selected,
+            )
+            return False
+        fill_price_selected = (
+            int(execution_price_cents)
+            if action == "buy"
+            else 100 - int(execution_price_cents)
+        )
+        cur = conn.execute(
+            """
+            UPDATE strategy_decision_outcomes
+            SET exchange_order_id = COALESCE(?, exchange_order_id),
+                fill_id = COALESCE(?, fill_id),
+                actual_fill_price_cents = COALESCE(?, actual_fill_price_cents),
+                actual_entry_fee_cents = COALESCE(?, actual_entry_fee_cents)
+            WHERE decision_id = ?
+            """,
+            (
+                exchange_order_id,
+                fill_id,
+                fill_price_selected,
+                entry_fee_cents,
+                decision_id,
+            ),
+        )
+        return cur.rowcount > 0
+
+    def _fills_db_path(self) -> Path:
+        return Path(
+            os.environ.get("MERID_FILLS_DB_PATH", "data/kalshi_fills.db")
+        )
+
+    def _resolve_entry_fill_from_fills_db(
+        self, decision_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Look up the venue fill for ``decision_id`` in the Kalshi fills DB.
+
+        Post-only fills are recorded there with ``decision_trace_id`` equal to
+        the audit ``decision_id``.  Returns the newest entry fill's execution
+        fields, or None when absent/unreadable.
+        """
+        path = self._fills_db_path()
+        if not path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                f"file:{path}?mode=ro", uri=True, timeout=5.0
+            )
+            try:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT fill_id, order_id, execution_outcome_side,
+                           execution_action, execution_price_cents, fee_cost
+                    FROM kalshi_fills
+                    WHERE decision_trace_id = ?
+                      AND COALESCE(is_exit, 0) = 0
+                      AND COALESCE(reduce_only, 0) = 0
+                      AND COALESCE(entry_or_exit, 'entry') = 'entry'
+                      AND execution_price_cents IS NOT NULL
+                      AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY')
+                          NOT IN ('UNTRUSTED_LEGACY', 'UNTRUSTED_RAW',
+                                  'UNTRUSTED_SIDE_CONFLICT')
+                    ORDER BY created_time DESC
+                    LIMIT 1
+                    """,
+                    (decision_id,),
+                ).fetchone()
+                return dict(row) if row is not None else None
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] fills-DB fill lookup failed for %s: %s",
+                decision_id,
+                exc,
+            )
+            return None
+
+    def _attribute_settlement(
+        self,
+        conn: Any,
+        *,
+        decision_id: str,
+        settlement_value_cents: Optional[int],
+        allow_lane_attribution: bool = True,
+    ) -> None:
+        """Resolve the entry fill (if missing) and persist realized PnL.
+
+        Runs inside the caller's transaction.  For decisions that actually
+        filled and held to settlement, realized PnL is
+        ``settle_leg - fill - fee`` in selected-side space; the fill row is
+        first backfilled from the Kalshi fills ledger when the ingest-time
+        bridge missed it.  Lane (threshold-cell / current-build-provisional)
+        settlement attribution fires only when ``allow_lane_attribution`` and
+        a cell binding exists.
+        """
+        orow = conn.execute(
+            "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
+            "realized_net_pnl_cents, settlement_value_cents "
+            "FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        if orow is None:
+            return
+        settle_val = settlement_value_cents
+        if settle_val is None:
+            settle_val = orow["settlement_value_cents"]
+        if settle_val is None:
+            return
+
+        if orow["actual_fill_price_cents"] is None:
+            f = self._resolve_entry_fill_from_fills_db(decision_id)
+            if f is not None:
+                try:
+                    self._record_entry_fill_locked(
+                        conn,
+                        decision_id=decision_id,
+                        fill_id=f.get("fill_id"),
+                        exchange_order_id=f.get("order_id"),
+                        execution_outcome_side=f.get("execution_outcome_side"),
+                        execution_action=f.get("execution_action"),
+                        execution_price_cents=f.get("execution_price_cents"),
+                        entry_fee_cents=float(f.get("fee_cost") or 0.0) * 100.0,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "[DECISION-AUDIT-LEDGER] settlement fill backfill "
+                        "failed for %s: %s",
+                        decision_id,
+                        exc,
+                    )
+                orow = conn.execute(
+                    "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
+                    "realized_net_pnl_cents FROM strategy_decision_outcomes "
+                    "WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+        if orow is None or orow["actual_fill_price_cents"] is None:
+            return
+        if orow["realized_net_pnl_cents"] is not None:
+            return
+
+        drow = conn.execute(
+            "SELECT selected_side FROM strategy_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        if drow is None or not drow["selected_side"]:
+            return
+        _fill = float(orow["actual_fill_price_cents"])
+        _fee = float(orow["actual_entry_fee_cents"] or 0.0)
+        _settle_leg = float(
+            settle_val
+            if str(drow["selected_side"]).lower() == "yes"
+            else (100 - settle_val)
+        )
+        _net_pnl_cents = _settle_leg - _fill - _fee
+        conn.execute(
+            "UPDATE strategy_decision_outcomes "
+            "SET realized_net_pnl_cents = ? WHERE decision_id = ?",
+            (_net_pnl_cents, decision_id),
+        )
+
+        if not allow_lane_attribution:
+            return
+        try:
+            from merid.prediction.threshold_cells import (
+                cell_for_decision,
+                record_cell_settlement,
+            )
+            from merid.prediction.current_build_provisional import (
+                provisional_cell_for_decision,
+                record_provisional_settlement,
+            )
+            _tc_cell = cell_for_decision(decision_id)
+            _cbp_cell = provisional_cell_for_decision(decision_id)
+            if _tc_cell:
+                record_cell_settlement(
+                    decision_id=decision_id,
+                    net_pnl_cents=_net_pnl_cents,
+                )
+            if _cbp_cell:
+                record_provisional_settlement(
+                    decision_id=decision_id,
+                    net_pnl_cents=_net_pnl_cents,
+                    cell_id=_cbp_cell,
+                )
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] lane settlement attribution failed "
+                "for %s: %s",
+                decision_id,
+                exc,
+            )
+
+    def reconcile_fill_outcomes(self) -> int:
+        """Backfill missing entry fills + realized PnL on settled outcomes.
+
+        Heals outcome rows whose fills arrived before the ingest-time audit
+        bridge existed (or were missed): resolves each from the fills DB,
+        recomputes realized PnL where settlement already landed, and fires the
+        lane settlement attribution the original pass skipped.  Returns the
+        number of outcome rows updated.
+        """
+        if not _is_enabled():
+            return 0
+        self._ensure_db()
+        healed = 0
+        try:
+            fills_path = self._fills_db_path()
+            if not fills_path.exists():
+                return 0
+            # Fresh autocommit connection: ATTACH/DETACH cannot run inside the
+            # shared writer's transaction, and this one-shot scan must not
+            # serialize against live decision writes anyway (WAL allows a
+            # concurrent reader).
+            scan_conn = sqlite3.connect(str(self.db_path), timeout=10)
+            scan_conn.isolation_level = None
+            scan_conn.row_factory = sqlite3.Row
+            scan_conn.execute("PRAGMA busy_timeout = 5000")
+            try:
+                scan_conn.execute(
+                    "ATTACH DATABASE ? AS fillsdb", (str(fills_path),)
+                )
+                try:
+                    rows = scan_conn.execute(
+                        """
+                        SELECT DISTINCT o.decision_id, o.settlement_value_cents
+                        FROM strategy_decision_outcomes o
+                        LEFT JOIN fillsdb.kalshi_fills f
+                          ON f.decision_trace_id = o.decision_id
+                        WHERE o.outcome_status = 'SETTLED'
+                          AND o.realized_net_pnl_cents IS NULL
+                          AND (
+                              o.actual_fill_price_cents IS NOT NULL
+                              OR (
+                                  f.fill_id IS NOT NULL
+                                  AND COALESCE(f.is_exit, 0) = 0
+                                  AND COALESCE(f.reduce_only, 0) = 0
+                                  AND COALESCE(f.entry_or_exit, 'entry')
+                                      = 'entry'
+                                  AND f.execution_price_cents IS NOT NULL
+                                  AND COALESCE(f.canonicalization_state,
+                                               'UNTRUSTED_LEGACY')
+                                      NOT IN ('UNTRUSTED_LEGACY',
+                                              'UNTRUSTED_RAW',
+                                              'UNTRUSTED_SIDE_CONFLICT')
+                              )
+                          )
+                        """
+                    ).fetchall()
+                finally:
+                    scan_conn.execute("DETACH DATABASE fillsdb")
+            finally:
+                scan_conn.close()
+            for row in rows:
+                decision_id = row["decision_id"]
+                with self._lock, self._conn() as conn:
+                    before = conn.execute(
+                        "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+                        "FROM strategy_decision_outcomes WHERE decision_id = ?",
+                        (decision_id,),
+                    ).fetchone()
+                    self._attribute_settlement(
+                        conn,
+                        decision_id=decision_id,
+                        settlement_value_cents=row["settlement_value_cents"],
+                    )
+                    after = conn.execute(
+                        "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+                        "FROM strategy_decision_outcomes WHERE decision_id = ?",
+                        (decision_id,),
+                    ).fetchone()
+                    if (
+                        after is not None
+                        and before is not None
+                        and (
+                            after["actual_fill_price_cents"]
+                            != before["actual_fill_price_cents"]
+                            or after["realized_net_pnl_cents"]
+                            != before["realized_net_pnl_cents"]
+                        )
+                    ):
+                        healed += 1
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes failed: %s", exc
+            )
+        if healed:
+            logger.info(
+                "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes healed %d rows",
+                healed,
+            )
+        return healed
+
     def record_settlement(
         self,
         ticker: str,
@@ -864,62 +1263,19 @@ class DecisionAuditLedger:
                         ),
                     )
 
-                    # 2026-09-30: for a threshold-cell decision that actually
-                    # filled, settlement IS the realized PnL when no exit order
-                    # already booked it (held-to-settlement).  Attributed via
-                    # the decision->cell binding recorded at submission.
-                    # The current-build provisional lane binds its own
-                    # decision->cell map; both bindings are checked so each
-                    # lane's realized-PnL window stays separate.
+                    # 2026-09-30: for a decision that actually filled,
+                    # settlement IS the realized PnL when no exit order
+                    # already booked it (held-to-settlement).  Backfills the
+                    # entry fill from the Kalshi fills ledger when the
+                    # ingest-time bridge missed it (post-only async fills),
+                    # persists realized_net_pnl_cents, then attributes to the
+                    # bound threshold-cell / current-build-provisional lane.
                     try:
-                        from merid.prediction.threshold_cells import (
-                            cell_for_decision,
-                            record_cell_settlement,
+                        self._attribute_settlement(
+                            conn,
+                            decision_id=decision_id,
+                            settlement_value_cents=settlement_value_cents,
                         )
-                        from merid.prediction.current_build_provisional import (
-                            provisional_cell_for_decision,
-                            record_provisional_settlement,
-                        )
-                        _tc_cell = cell_for_decision(decision_id)
-                        _cbp_cell = provisional_cell_for_decision(decision_id)
-                        if _tc_cell or _cbp_cell:
-                            orow = conn.execute(
-                                "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
-                                "realized_net_pnl_cents FROM strategy_decision_outcomes "
-                                "WHERE decision_id = ?",
-                                (decision_id,),
-                            ).fetchone()
-                            drow = conn.execute(
-                                "SELECT selected_side FROM strategy_decisions "
-                                "WHERE decision_id = ?",
-                                (decision_id,),
-                            ).fetchone()
-                            if (
-                                orow is not None
-                                and drow is not None
-                                and orow["actual_fill_price_cents"] is not None
-                                and orow["realized_net_pnl_cents"] is None
-                                and settlement_value_cents is not None
-                            ):
-                                _fill = float(orow["actual_fill_price_cents"])
-                                _fee = float(orow["actual_entry_fee_cents"] or 0.0)
-                                _settle_leg = float(
-                                    settlement_value_cents
-                                    if drow["selected_side"] == "yes"
-                                    else (100 - settlement_value_cents)
-                                )
-                                _net_pnl_cents = _settle_leg - _fill - _fee
-                                if _tc_cell:
-                                    record_cell_settlement(
-                                        decision_id=decision_id,
-                                        net_pnl_cents=_net_pnl_cents,
-                                    )
-                                if _cbp_cell:
-                                    record_provisional_settlement(
-                                        decision_id=decision_id,
-                                        net_pnl_cents=_net_pnl_cents,
-                                        cell_id=_cbp_cell,
-                                    )
                     except Exception:
                         pass
         except Exception as exc:
