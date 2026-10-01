@@ -230,6 +230,37 @@ def select_winner_side(
     return "none"
 
 
+def resolve_gate_side(
+    recomputed_side: str,
+    decision_side: Optional[str],
+    decision_lane_bounded: bool,
+) -> Tuple[str, bool]:
+    """Resolve which side downstream parity/integrity checks should evaluate.
+
+    Bounded post-only lanes enforce lane-specific, executable-price net EV in
+    the decision engine (executable ask, exact fees, depth, reserves) and are
+    re-gated at the submitted price downstream.  Re-deriving a threshold
+    verdict from orderbook *midpoints* with a second fee table is an
+    inconsistent double-gate for them, so their decision side is authoritative.
+
+    Args:
+        recomputed_side: Verdict from select_winner_side on midpoint edges.
+        decision_side:   The candidate's order side ("yes"/"no").
+        decision_lane_bounded: True when the candidate belongs to a bounded
+            post-only lane whose economics were already enforced upstream.
+
+    Returns:
+        (side, deferred) — the side to use for integrity checks, and whether
+        the midpoint verdict was overridden by the decision's authority.
+        Non-bounded candidates and unresolvable decision sides keep the
+        recomputed verdict (fail closed).
+    """
+    side = (decision_side or "").strip().lower()
+    if decision_lane_bounded and side in ("yes", "no"):
+        return side, side != recomputed_side
+    return recomputed_side, False
+
+
 def validate_price_parity(
     market_price_yes: Optional[float],
     market_price_no: Optional[float],

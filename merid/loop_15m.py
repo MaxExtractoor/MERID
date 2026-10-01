@@ -479,6 +479,7 @@ from merid.utils.kalshi_identity import extract_asset
 
 # Single source of truth for cycle rejection breakdown and lifecycle events
 from merid.prediction.agent_grid_15m import CycleResult
+from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES
 
 
 def _get_max_contracts_per_order() -> int:
@@ -9283,9 +9284,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # its contract: if the trading shard cannot collateralize 1 contract
         # the router's insufficient_shard_balance gate rejects locally.
         if (
-            candidate.get("decision_lane") in (
-                "threshold_cell", "current_build_provisional",
-            )
+            candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
             or candidate.get("threshold_cell_id")
             or candidate.get("provisional_cell_id")
         ) and count != 1.0 and count >= 0.01:
@@ -9988,27 +9987,38 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # change the approved execution contract.  Instead it keeps its
             # maker posture (MERID_THRESHOLD_CELL_MAKER=0 disables the lane
             # entirely — fail closed, never a quiet taker substitution).
-            _is_tc_lane = (
-                candidate.get("decision_lane") == "threshold_cell"
-                or (
-                    trade_decision is not None
-                    and (getattr(trade_decision, "indicators", None) or {}).get(
-                        "decision_lane"
-                    ) == "threshold_cell"
+            # 2026-10-01: the same contract applies to every bounded post-only
+            # lane (BOUNDED_POST_ONLY_LANES) — each lane's enablement flag IS
+            # its approval, so a maker intent from a live lane must never be
+            # coerced to taker/IOC here.
+            from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES
+
+            _td_lane_for_coerce = candidate.get("decision_lane") or (
+                (getattr(trade_decision, "indicators", None) or {}).get(
+                    "decision_lane"
                 )
+                if trade_decision is not None
+                else None
+            )
+            _is_tc_lane = (
+                _td_lane_for_coerce == "threshold_cell"
+                or candidate.get("threshold_cell_id") is not None
             )
             _is_cbp_lane = (
-                candidate.get("decision_lane") == "current_build_provisional"
+                _td_lane_for_coerce == "current_build_provisional"
                 or candidate.get("provisional_cell_id") is not None
-                or (
-                    trade_decision is not None
-                    and (getattr(trade_decision, "indicators", None) or {}).get(
-                        "decision_lane"
-                    ) == "current_build_provisional"
+            )
+            _is_bounded_lane = (
+                entry_or_exit != "exit"
+                and (
+                    _td_lane_for_coerce in BOUNDED_POST_ONLY_LANES
+                    or _is_tc_lane
+                    or _is_cbp_lane
                 )
             )
             _tc_maker_ok = False
             _cbp_maker_ok = False
+            _other_maker_ok = False
             _cell_id = candidate.get("threshold_cell_id")
             _pcell_id = candidate.get("provisional_cell_id")
             if _is_tc_lane:
@@ -10025,19 +10035,46 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     _cbp_maker_ok = _cbp.provisional_maker_enabled()
                 except Exception:
                     _cbp_maker_ok = False
-            if (_is_tc_lane and _tc_maker_ok) or (_is_cbp_lane and _cbp_maker_ok):
+            if _is_bounded_lane and not (_is_tc_lane or _is_cbp_lane):
+                # Lanes without a distinct maker kill-switch: the lane's own
+                # enablement flag is the approval.  trend_yes_hi is dormant
+                # (env flag), evidence_cell_escape is gated by
+                # escape_lane_enabled(), cheap_tail_canary by its own env flag.
+                try:
+                    if _td_lane_for_coerce == "trend_yes_hi":
+                        from merid.prediction import directional_regime as _dr
+
+                        _other_maker_ok = bool(_dr.trend_yes_hi_enabled())
+                    elif _td_lane_for_coerce == "evidence_cell_escape":
+                        from merid.prediction import evidence_policy as _ep
+
+                        _other_maker_ok = bool(_ep.escape_lane_enabled())
+                    elif _td_lane_for_coerce == "cheap_tail_canary":
+                        from merid.prediction import trade_decision as _tdm
+
+                        _other_maker_ok = bool(
+                            getattr(_tdm, "MERID_CHEAP_TAIL_CANARY_ENABLED", False)
+                        )
+                except Exception:
+                    _other_maker_ok = False
+            if (
+                (_is_tc_lane and _tc_maker_ok)
+                or (_is_cbp_lane and _cbp_maker_ok)
+                or (_is_bounded_lane and _other_maker_ok)
+            ):
                 logger.info(
                     "[15M-LOOP] %s lane keeps post-only posture for %s "
                     "(MERID_ENTRY_MAKER_ENABLED off globally; lane-scoped exemption)",
-                    "THRESHOLD-CELL" if _is_tc_lane else "CBP",
+                    str(_td_lane_for_coerce or "bounded").upper(),
                     ticker,
                 )
-            elif _is_tc_lane or _is_cbp_lane:
+            elif _is_bounded_lane:
+                _lane_label = str(_td_lane_for_coerce or "bounded").upper()
                 logger.warning(
                     "[15M-LOOP] %s maker disabled (lane maker kill-switch=0): "
                     "rejecting %s rather than coercing to taker — no silent "
                     "mode substitution",
-                    "THRESHOLD-CELL" if _is_tc_lane else "CBP",
+                    _lane_label,
                     ticker,
                 )
                 try:
@@ -10057,7 +10094,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         _tc.release_cell_submission_reservation(
                             _cell_id, decision_id=candidate.get("decision_id"),
                         )
-                    else:
+                    elif _is_cbp_lane:
                         from merid.prediction import (
                             current_build_provisional as _cbp,
                         )
@@ -10573,8 +10610,35 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 CENTS_EDGE_GATE_ENABLED,
                 compute_canonical_edges,
                 required_edge_cents,
+                resolve_gate_side,
                 select_winner_side,
                 validate_price_parity,
+            )
+
+            # Bounded post-only lanes already enforced lane-specific executable-price
+            # net EV in compute_trade_decision (executable ask, exact fees, depth,
+            # adverse-selection reserve) and were re-gated at the submitted price by
+            # evaluate_executable_cost_ev above.  Re-deriving a pass/fail verdict
+            # from orderbook midpoints with a second threshold table would be an
+            # inconsistent double-gate — e.g. an ETH NO admitted at the 69c ask with
+            # +4.4c net EV was vetoed on a 75.5c mid recomputation against a 4.0c
+            # required-edge table.  For those lanes the decision's selected side is
+            # authoritative here; the parity integrity checks below (price parity,
+            # WINNER_MISMATCH edge-argmax disagreement) still run and still block.
+            _td_lane = candidate.get("decision_lane") or (
+                (getattr(trade_decision, "indicators", None) or {}).get(
+                    "decision_lane"
+                )
+                if trade_decision is not None
+                else None
+            )
+            _is_bounded_lane = (
+                entry_or_exit != "exit"
+                and (
+                    _td_lane in BOUNDED_POST_ONLY_LANES
+                    or candidate.get("threshold_cell_id") is not None
+                    or candidate.get("provisional_cell_id") is not None
+                )
             )
 
             # The canonical asset was already resolved at the top of _execute_candidate;
@@ -10708,6 +10772,25 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 chosen_side = select_winner_side(edge_yes, edge_no, min_edge=min_edge)
                 min_edge_yes = min_edge
                 min_edge_no = min_edge
+
+            # Bounded lanes defer to the decision engine's authoritative side.
+            # The midpoint recompute above stays as diagnostics (logged), but
+            # its pass/fail verdict does not gate a lane whose economics were
+            # already enforced on the executable price upstream.  A side value
+            # that is somehow not yes/no still fails closed via "none".
+            _resolved_side, _deferred = resolve_gate_side(
+                chosen_side, side_raw, _is_bounded_lane
+            )
+            if _deferred:
+                logger.info(
+                    "[15M-LOOP] BOUNDED-LANE edge authority: ticker=%s lane=%s "
+                    "side=%s mid_recompute_verdict=%s edge_yes=%.4f edge_no=%.4f "
+                    "yes_required=%.4f no_required=%.4f — lane EV already enforced "
+                    "on executable price upstream; parity checks still apply",
+                    ticker, _td_lane, _resolved_side, chosen_side,
+                    edge_yes, edge_no, min_edge_yes, min_edge_no,
+                )
+                chosen_side = _resolved_side
 
             # A single display threshold for the rest of the pipeline logs.
             if chosen_side == "yes":
