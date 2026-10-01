@@ -851,3 +851,102 @@ def test_domain_gate_end_to_end_tte_ceiling():
     assert d.selected_outcome is None
     assert "bounded_domain_tte" in (d.no_trade_reason or "")
     assert d.indicators["bounded_domain_gate"]["gate"] == "tte_ceiling"
+
+
+def test_entry_orders_share_bounded_rest_ttl():
+    """All entry lanes must bind the 45s rest bound, not just cbp.
+
+    Regression guard (2026-10-01 ETH NO@34 loss): non-cbp entry intents
+    silently fell through to the 180s OrderIntent default; the order rested
+    150s and filled into a repriced book at -23.5c stale edge.  Entries now
+    share _entry_max_rest_seconds (env MERID_ENTRY_MAX_REST_S, default 45);
+    exits keep the 180s default since they must fill rather than time out.
+    """
+    import inspect
+
+    from merid import loop_15m
+
+    src = inspect.getsource(loop_15m._execute_candidate)
+    assert "entry_or_exit == \"entry\"" in src
+    assert "_entry_max_rest_seconds()" in src
+    assert "provisional_max_order_lifetime_s" in src
+    # The intent must consume the resolved bound, not the bare 180 default.
+    assert "max_rest_seconds=" in src
+
+    fn_src = inspect.getsource(loop_15m._entry_max_rest_seconds)
+    assert "MERID_ENTRY_MAX_REST_S" in fn_src
+
+
+# ---------------------------------------------------------------------------
+# Fill-space inversion guards (2026-10-01 audit): KalshiFill exposes
+# canonical leg prices in the TRADED leg's space; a BUY_NO intent executes
+# as a sell-YES leg whose price is YES-space.  fill_quality_tracker compared
+# that against the NO-space limit/probability -> space-inverted fill EV and
+# a false post_only_breach on every NO fill, which would suspend any cbp
+# cell on first touch.  Same mixed-space comparison fed the side invariant
+# (leg side 'yes' vs intent 'no' -> false side-flip suspension).
+# ---------------------------------------------------------------------------
+
+
+def _track_fill(tmp_path, monkeypatch, *, cell_px=34.0, leg_price_cents=66,
+                leg_side="yes", leg_action="sell", p_selected=0.4253,
+                limit=34):
+    """Drive _detect_fill on a stub ledger; return (tracker, rec, cell)."""
+    from types import SimpleNamespace
+
+    from merid.execution import fill_quality_tracker as fqt
+
+    monkeypatch.setenv("MERID_FILL_QUALITY_PATH", str(tmp_path / "fq.jsonl"))
+    tracker = fqt.FillQualityTracker()
+    cell = cbp.resolve_provisional_cell("ETH", "no", cell_px, 400.0)
+    tracker.record_order(
+        client_order_id="c1", intent_id="i1", order_id="o1",
+        ticker="KXETH15M-X", side="BUY_NO", action="buy",
+        limit_price_cents=limit, yes_bid_cents=63, yes_ask_cents=64,
+        edge_pct=0.04, ev_net_cents=4.1, p_selected=p_selected,
+        decision_id="d1", provisional_cell_id=cell.cell_id,
+    )
+    rec = tracker._records["c1"]
+    fill = SimpleNamespace(
+        order_id="o1", client_order_id="c1",
+        side=leg_side, action=leg_action,
+        canonical_position_side=leg_side,
+        canonical_position_action=leg_action,
+        price_cents=leg_price_cents,
+        created_time=fqt._now(),
+    )
+    ledger = SimpleNamespace(get_fills_by_market=lambda _t: [fill])
+    tracker._detect_fill(rec, ledger, fqt._now())
+    return tracker, rec, cell
+
+
+def test_no_fill_price_converted_to_outcome_space(tmp_path, monkeypatch):
+    """ETH NO@34 (sell-YES@66 leg) must record fill price 34, not 66."""
+    tracker, rec, cell = _track_fill(tmp_path, monkeypatch)
+    assert rec.filled
+    assert rec.fill_price_cents == 34
+    ev = json.loads((tmp_path / "fq.jsonl").read_text().splitlines()[-1])
+    assert ev["event"] == "fill"
+    assert ev["fill_price_cents"] == 34
+    assert abs(ev["gross_edge_cents_at_fill"] - 8.53) < 0.02
+    # No false post-only breach / suspension on the provisional cell.
+    st = cbp._load_state()
+    outs = (st.get("outcomes") or {}).get(cell.cell_id, [])
+    assert not any(o.get("kind") == "post_only_breach" for o in outs)
+    assert cbp.get_cell_state(cell.cell_id) != cbp.CELL_STATE_SUSPENDED
+
+
+def test_no_fill_sell_yes_leg_is_not_a_side_flip(tmp_path, monkeypatch):
+    """The sell-YES leg of a BUY_NO fill must not flag the side invariant."""
+    _track_fill(tmp_path, monkeypatch)
+    cell = cbp.resolve_provisional_cell("ETH", "no", 34.0, 400.0)
+    assert cbp.get_cell_state(cell.cell_id) != cbp.CELL_STATE_SUSPENDED
+
+
+def test_true_side_flip_still_suspends(tmp_path, monkeypatch):
+    """A real outcome mismatch (buy-YES fill on a BUY_NO intent) suspends."""
+    tracker, rec, cell = _track_fill(
+        tmp_path, monkeypatch, leg_side="yes", leg_action="buy",
+        leg_price_cents=34,
+    )
+    assert cbp.get_cell_state(cell.cell_id) == cbp.CELL_STATE_SUSPENDED
