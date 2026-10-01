@@ -523,9 +523,29 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   `MERID_ENTRY_MAX_REST_S`=45s (cbp binds its own policy value); exits keep
   the 180s `OrderIntent` default.  Unbounded resting life let stale orders
   fill into repriced books (ETH NO@34 fill at 150s, fill-time edge -23.5c).
+- **Promotion review trigger (2026-10-01):** `promotion_review_report`
+  now fires automatically once per (build, cell) when both review
+  thresholds are met (attempts >= `MERID_PROVISIONAL_REVIEW_MIN_ATTEMPTS`
+  AND settled fills >= `MERID_PROVISIONAL_REVIEW_MIN_FILLS`), recorded to
+  the evidence store and `promotion_review_<cell>.json`.  Attempts and
+  router counters accumulate in `submissions_total` /
+  `router_attempts_total` / `router_rejects_total` — the daily maps reset
+  per UTC day and could never reach the review threshold under the
+  5/day per-cell submission cap.
+- **Audit lane provenance (2026-10-01):** `strategy_decisions` now carries
+  `admission_lane`, `admission_owner`, `provisional_cell_id`, `build_sha`;
+  `strategy_decision_side_ev` carries per-side `admission_owner`,
+  `threshold_source`, `legacy_risk_label` — current-build evidence is
+  queryable apart from legacy rows.
+- **Live-evidence export guard (2026-10-01):** the settlement-triggered
+  rebuild of `data/live_entry_evidence.json` skips writes under pytest
+  unless `MERID_LIVE_EVIDENCE_PATH` is explicitly redirected, and the
+  export only counts `is_eligible_for_research=1` rows — test fixture
+  settlements can never contaminate the live evidence floor.
 
 Tests: `tests/test_current_build_provisional.py` (grid/domain, thresholds,
 precedence over the formula, registered-cell authority, legacy demotion,
 caps, suspension rules, evidence store, promotion report, decision-level
 lane stamping, bounded-domain gate, fill-space normalization,
-adverse-selection reserve).
+adverse-selection reserve, promotion-review trigger,
+audit provenance columns).
