@@ -1852,7 +1852,10 @@ def _build_side_ev_row(
         "gross_edge_cents": gross_edge_cents,
         "entry_fee_cents": entry_fee_cents,
         "exit_or_settlement_fee_cents": exit_fee_cents,
-        "adverse_selection_haircut_cents": 0.0,
+        "adverse_selection_haircut_cents": (
+            _to_float(getattr(decision, "adverse_selection_reserve", None))
+            or 0.0
+        ) * 100.0,
         "model_uncertainty_haircut_cents": model_risk_cents,
         "expected_net_ev_cents": expected_net_ev_cents,
         "lower_confidence_bound_ev_cents": lcb,
@@ -1942,7 +1945,10 @@ def _legacy_side_ev_row(
         "gross_edge_cents": gross_edge_cents,
         "entry_fee_cents": entry_fee_cents,
         "exit_or_settlement_fee_cents": exit_fee_cents,
-        "adverse_selection_haircut_cents": 0.0,
+        "adverse_selection_haircut_cents": (
+            _to_float(getattr(decision, "adverse_selection_reserve", None))
+            or 0.0
+        ) * 100.0,
         "model_uncertainty_haircut_cents": model_risk_cents,
         "expected_net_ev_cents": expected_net_ev_cents,
         "lower_confidence_bound_ev_cents": lcb,

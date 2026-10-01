@@ -950,3 +950,83 @@ def test_true_side_flip_still_suspends(tmp_path, monkeypatch):
         leg_price_cents=34,
     )
     assert cbp.get_cell_state(cell.cell_id) == cbp.CELL_STATE_SUSPENDED
+
+
+# ---------------------------------------------------------------------------
+# Adverse-selection reserve (2026-10-01): the EV gate's
+# adverse_selection_reserve_per_contract input was hardcoded Decimal("0") so
+# the authoritative net_ev never charged the pick-off cost, and the audit
+# column adverse_selection_haircut_cents was always 0.  The reserve is now
+# measured from the lane's own rolling 5s markouts (outcome-space), floored
+# on cold cells, capped so one toxic window cannot veto the lane.
+# ---------------------------------------------------------------------------
+
+
+def test_adverse_selection_reserve_floor_when_cold():
+    """No markout evidence -> bounded prior floor, not zero."""
+    r = cbp.adverse_selection_reserve_cents("XRP", "no", 75.0, 400.0)
+    assert r == pytest.approx(0.5)
+
+
+def test_adverse_selection_reserve_from_cell_evidence():
+    """Negative mean 5s markout on the resolved cell raises the reserve."""
+    cell = cbp.resolve_provisional_cell("XRP", "no", 75.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -4.0},
+        {"kind": "fill", "decision_id": "b", "markout_5s_cents": -6.0},
+    ]
+    cbp._save_state()
+    # mean -5.0 -> reserve 5.0 (at cap)
+    assert cbp.adverse_selection_reserve_cents(
+        "XRP", "no", 75.0, 400.0
+    ) == pytest.approx(5.0)
+
+
+def test_adverse_selection_reserve_widens_to_asset_side():
+    """Cold cell inherits the asset+side aggregate evidence."""
+    target = cbp.resolve_provisional_cell("ETH", "no", 35.0, 400.0)
+    sibling = cbp.resolve_provisional_cell("ETH", "no", 75.0, 400.0)
+    assert target.cell_id != sibling.cell_id
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[sibling.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -3.0},
+        {"kind": "fill", "decision_id": "b", "markout_5s_cents": -1.0},
+    ]
+    cbp._save_state()
+    # sibling mean -2.0 -> reserve max(0.5, 2.0)
+    assert cbp.adverse_selection_reserve_cents(
+        "ETH", "no", 35.0, 400.0
+    ) == pytest.approx(2.0)
+
+
+def test_adverse_selection_reserve_healthy_cells_stay_at_floor():
+    cell = cbp.resolve_provisional_cell("BTC", "yes", 45.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": 4.0},
+    ]
+    cbp._save_state()
+    assert cbp.adverse_selection_reserve_cents(
+        "BTC", "yes", 45.0, 400.0
+    ) == pytest.approx(0.5)
+
+
+def test_adverse_selection_reserve_disabled(monkeypatch):
+    monkeypatch.setenv("MERID_ADV_SEL_RESERVE_ENABLED", "0")
+    assert cbp.adverse_selection_reserve_cents("XRP", "no", 75.0, 400.0) == 0.0
+
+
+def test_audit_side_row_carries_adverse_selection():
+    """The audit side_ev row must record the decision's reserve in cents."""
+    from dataclasses import replace
+
+    from merid.execution import decision_audit_ledger as dal
+
+    decision = _decision()
+    assert decision.no_edge_breakdown is not None
+    decision = replace(decision, adverse_selection_reserve=Decimal("0.015"))
+    row = dal._build_side_ev_row(
+        decision, "no", decision.indicators, None, None
+    )
+    assert row["adverse_selection_haircut_cents"] == pytest.approx(1.5)

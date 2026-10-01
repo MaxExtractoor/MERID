@@ -510,8 +510,22 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   candidates fall back to the formula path); lane state lives in
   `data/current_build_provisional_lane.json` (test-isolated via
   `MERID_PROVISIONAL_STATE_PATH` / `_LIFECYCLE_PATH` / `_EVIDENCE_DIR`).
+- **Adverse-selection reserve (2026-10-01):** the authoritative EV gate's
+  `adverse_selection_reserve_per_contract` is now measured — the resolved
+  cell's rolling 5s markouts (widened to the asset+side aggregate when the
+  cell has < `MERID_ADV_SEL_MIN_SAMPLES`=2 samples), floored at
+  `MERID_ADV_SEL_FLOOR_CENTS`=0.5 and capped at `MERID_ADV_SEL_CAP_CENTS`=5.
+  `MERID_ADV_SEL_RESERVE_ENABLED`=0 restores the zero reserve.  The value
+  rides `TradeDecision.adverse_selection_reserve` into the gate, the audit
+  `adverse_selection_haircut_cents` column, the order-decision ledger, and
+  agent telemetry — previously all hardcoded to zero.
+- **Entry rest bound (2026-10-01):** all entry lanes bound resting life at
+  `MERID_ENTRY_MAX_REST_S`=45s (cbp binds its own policy value); exits keep
+  the 180s `OrderIntent` default.  Unbounded resting life let stale orders
+  fill into repriced books (ETH NO@34 fill at 150s, fill-time edge -23.5c).
 
 Tests: `tests/test_current_build_provisional.py` (grid/domain, thresholds,
 precedence over the formula, registered-cell authority, legacy demotion,
 caps, suspension rules, evidence store, promotion report, decision-level
-lane stamping).
+lane stamping, bounded-domain gate, fill-space normalization,
+adverse-selection reserve).
