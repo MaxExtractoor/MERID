@@ -10341,7 +10341,9 @@ class LeanAgent15m:
                 "decision_lane": _ind.get("decision_lane"),
                 "yes_admission_owner": _ind.get("yes_admission_owner"),
                 "no_admission_owner": _ind.get("no_admission_owner"),
-                "admission_owner": _ind.get(f"{str(side).lower()}_admission_owner"),
+                "admission_owner": _ind.get(
+                    f"{str(getattr(decision, 'selected_outcome', '') or '').lower()}_admission_owner"
+                ),
                 "walkforward_cal_applied": _ind.get("walkforward_cal_applied"),
                 "market_anchor_weight": _ind.get("market_anchor_weight"),
                 "ws_age_ms": _ind.get("ws_last_event_age_ms") or _ind.get("quote_age_ms"),

@@ -634,6 +634,59 @@ def test_collect_order_candidate_carries_lane_identity():
         )
 
 
+def test_rejection_context_survives_no_trade_decision():
+    """_build_trade_decision_rejection_context must not raise on a no-trade
+    decision where selected_outcome is None.
+
+    Regression guard: the context block referenced an unbound `side` and every
+    no-trade decision crashed with NameError, silently yielding zero
+    candidates across all assets (observed live 2026-09-30).
+    """
+    from types import SimpleNamespace
+
+    from merid.prediction.agent_grid_15m import LeanAgent15m
+
+    agent = LeanAgent15m.__new__(LeanAgent15m)
+    agent._last_signal_vol_context = {"strike": 83440.51}
+    agent._last_velocity_value = None
+    agent._last_velocity_source = "test"
+    agent._last_velocity_age_ms = None
+    agent._last_velocity_threshold = None
+    agent.market_state_store = None
+    agent._resolve_runtime_signal_mode = lambda: "test"
+    agent._get_candles_available = lambda asset: 0
+
+    decision = SimpleNamespace(
+        edge_threshold=0.02,
+        indicators={
+            "decision_lane": "current_build_provisional",
+            "provisional_cell_id": "cbp_btc_no_40_50_t300_600",
+            "yes_admission_owner": "formula",
+            "no_admission_owner": "current_build_provisional",
+        },
+        ticker="KXBTC15M-T",
+        decision_id="d1",
+        p_yes_calibrated=0.4,
+        p_no_calibrated=0.6,
+        yes_net_edge=-0.01,
+        no_net_edge=-0.005,
+        gross_edge=0.0,
+        net_edge=-0.005,
+        data_state="ok",
+        regime="r",
+        confidence_valid=True,
+        confidence_reasons=[],
+        selected_outcome=None,
+    )
+    ctx = agent._build_trade_decision_rejection_context(
+        "BTC", 100.0, 100.0, "ref", 300.0, decision=decision
+    )
+    assert ctx["decision_lane"] == "current_build_provisional"
+    assert ctx["provisional_cell_id"] == "cbp_btc_no_40_50_t300_600"
+    assert ctx["admission_owner"] is None
+    assert ctx["no_admission_owner"] == "current_build_provisional"
+
+
 def test_bounded_lane_normalizes_to_one_contract():
     """_execute_candidate must force exactly 1.0 contract for bounded lanes.
 
