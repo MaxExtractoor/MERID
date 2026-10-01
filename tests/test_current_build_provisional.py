@@ -61,10 +61,12 @@ def _isolate_lane(monkeypatch, tmp_path):
         "MERID_THRESHOLD_CELL_STATE_PATH", str(tmp_path / "tc_state.json")
     )
     cbp.reset_provisional_state_cache()
+    cbp.reset_calibration_version_cache()
     from merid.prediction.threshold_cells import reset_cell_state_cache
     reset_cell_state_cache()
     yield
     cbp.reset_provisional_state_cache()
+    cbp.reset_calibration_version_cache()
     reset_cell_state_cache()
 
 
@@ -395,6 +397,40 @@ def test_first_fill_bad_markout_suspends():
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
     ok, r = cbp.provisional_cell_admission(c.cell_id)
     assert not ok and r == "cell_suspended"
+
+
+def test_markout_arriving_before_fill_row_merges_and_suspends():
+    """Poll order emits a standalone markout row while the order still looks
+    unfilled; the fill record lands a pass later.  The fill recorder must
+    absorb the standalone markout so the first-fill immediate rule sees it
+    (live ordering observed 2026-10-01: 1s/5s markouts preceded the fill row
+    by up to 6s)."""
+    c = _prov_cell(side="no", px=45.0)
+    cbp.record_provisional_markout(c.cell_id, "d0", 1, -4.0)
+    cbp.record_provisional_markout(c.cell_id, "d0", 5, -3.5)
+    # Standalone markouts must not suspend before any fill exists.
+    assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
+    cbp.record_provisional_fill(c.cell_id, decision_id="d0")
+    st = cbp._load_state()
+    outs = st["outcomes"][c.cell_id]
+    assert not any(o.get("kind") == "markout" for o in outs)
+    fills = [o for o in outs if o.get("kind") == "fill"]
+    assert len(fills) == 1 and fills[0]["markout_5s_cents"] == -3.5
+    assert fills[0]["markout_1s_cents"] == -4.0
+    assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
+
+
+def test_settlement_idempotent_on_repeated_attribution():
+    """Exit-path attribution followed by the settlement join must update the
+    same outcome row, not append a duplicate settled row."""
+    c = _prov_cell(side="no", px=45.0)
+    cbp.record_provisional_fill(c.cell_id, decision_id="d0", candidate_ev_cents=3.0)
+    cbp.record_provisional_settlement("d0", net_pnl_cents=2.0)
+    cbp.record_provisional_settlement("d0", net_pnl_cents=2.0)
+    st = cbp._load_state()
+    outs = st["outcomes"][c.cell_id]
+    settled = [o for o in outs if o.get("kind") == "settled" and o.get("decision_id") == "d0"]
+    assert len(settled) == 1 and settled[0]["net_pnl_cents"] == 2.0
 
 
 def test_first_fill_nonpositive_ev_suspends():

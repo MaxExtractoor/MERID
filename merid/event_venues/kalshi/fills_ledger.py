@@ -365,6 +365,51 @@ def fee_dollars_to_cents(fee_dollars: Optional[Decimal]) -> int:
         return 0
 
 
+def _record_entry_fill_in_audit_ledger(fill: "KalshiFill") -> None:
+    """Bridge a newly-ingested venue fill to the decision-audit outcome row.
+
+    The order router only records outcomes for fills visible in the
+    synchronous submit response; post-only resting orders fill asynchronously
+    and arrive here via the fills poller / WebSocket bridge.  The fill's
+    ``decision_trace_id`` matches the audit ``decision_id``;
+    ``record_entry_fill`` performs the venue-leg -> selected-side price
+    conversion and is fail-closed on direction mismatch.
+    """
+    try:
+        trace_id = getattr(fill, "decision_trace_id", None)
+        if not trace_id:
+            return
+        if getattr(fill, "is_exit", None) or getattr(fill, "reduce_only", False):
+            return
+        if (getattr(fill, "entry_or_exit", None) or "entry").lower() == "exit":
+            return
+        # Quarantined fills (unmatched correlation or untrusted
+        # canonicalization) must not feed lane evidence/promotion; they are
+        # stored for reconciliation only.
+        if getattr(fill, "unmatched", False):
+            return
+        if getattr(fill, "canonicalization_state", None) in UNTRUSTED_CANONICALIZATION_STATES:
+            return
+        from merid.execution.decision_audit_ledger import (
+            get_decision_audit_ledger,
+        )
+        get_decision_audit_ledger().record_entry_fill(
+            decision_id=str(trace_id),
+            fill_id=fill.fill_id,
+            exchange_order_id=fill.order_id,
+            execution_outcome_side=fill.execution_outcome_side or fill.side,
+            execution_action=fill.execution_action or fill.action,
+            execution_price_cents=fill.execution_price_cents,
+            entry_fee_cents=float(fee_dollars_to_cents(fill.fee_cost)),
+        )
+    except Exception as exc:
+        logger.debug(
+            "[FILLS-LEDGER] audit entry-fill bridge failed for %s: %s",
+            getattr(fill, "fill_id", "?"),
+            exc,
+        )
+
+
 def validate_fee_vs_estimate(
     actual_fee_cents: Decimal,
     estimated_fee_cents: Optional[Decimal],
@@ -2213,6 +2258,11 @@ class KalshiFillsLedger:
                 except Exception as e:
                     logger.warning("[FILLS-LEDGER] bankroll reconciler record_fill failed: %s", e)
 
+                # 2026-10-01: Bridge async fills into the decision-audit
+                # outcome row (post-only fills never appear in the router's
+                # synchronous submit response).
+                _record_entry_fill_in_audit_ledger(fill)
+
                 # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
                 intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
                 # 2026-08-12: Log canonical side for accounting traceability.
@@ -2553,6 +2603,11 @@ class KalshiFillsLedger:
                     )
             except Exception as e:
                 logger.warning("[FILLS-LEDGER] bankroll reconciler record_fill failed: %s", e)
+
+            # 2026-10-01: Bridge async fills into the decision-audit
+            # outcome row (post-only fills never appear in the router's
+            # synchronous submit response).
+            _record_entry_fill_in_audit_ledger(fill)
 
             # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
             intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None

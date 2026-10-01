@@ -911,6 +911,7 @@ def _default_state(now: float) -> Dict[str, Any]:
         "submissions": {},
         "fills_today": {},
         "open_orders": {},
+        "open_orders_ts": {},
         "router_attempts": {},
         "router_rejects": {},
         "router_consecutive_rejects": {},
@@ -947,7 +948,7 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
             rec = {}
         state = _default_state(now)
         # Durable keys that survive the daily roll.
-        for k in ("cell_states", "outcomes", "decision_cell_map", "open_orders"):
+        for k in ("cell_states", "outcomes", "decision_cell_map", "open_orders", "open_orders_ts"):
             if isinstance(rec.get(k), dict):
                 state[k] = rec[k]
         # Daily-scoped keys only count when the file is from today.
@@ -1062,6 +1063,8 @@ def cell_fills_today(cell_id: str) -> int:
 
 def cell_open_orders(cell_id: str) -> int:
     st = _load_state()
+    if _prune_stale_open_orders(st, time.time()):
+        _save_state()
     return len((st.get("open_orders") or {}).get(cell_id) or [])
 
 
@@ -1079,8 +1082,20 @@ def record_cell_submission(
         subs[cell_id] = int(subs.get(cell_id) or 0) + 1
         if decision_id:
             st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+            _cap_decision_cell_map(st)
     _save_state(path)
     return int(st["count"])
+
+
+def _cap_decision_cell_map(st: Dict[str, Any], limit: int = 500) -> None:
+    """Bound the persisted decision->cell map — 15m markets settle within
+    the hour, so entries beyond the most recent few hundred can never be
+    needed by a settlement/exit join and only bloat the state file."""
+    m = st.get("decision_cell_map") or {}
+    over = len(m) - limit
+    if over > 0:
+        for k in list(m.keys())[:over]:
+            m.pop(k, None)
 
 
 def bind_decision_cell(decision_id: str, cell_id: str) -> None:
@@ -1089,6 +1104,7 @@ def bind_decision_cell(decision_id: str, cell_id: str) -> None:
         return
     st = _load_state()
     st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+    _cap_decision_cell_map(st)
     _save_state()
 
 
@@ -1097,13 +1113,52 @@ def cell_for_decision(decision_id: str) -> Optional[str]:
     return (st.get("decision_cell_map") or {}).get(decision_id)
 
 
+def _open_order_stale_s() -> float:
+    """Bound after which a persisted open order is presumed dead — the
+    lane's ExecutionPolicy rests orders at most 60s, so anything older can
+    no longer be live.  Covers the restart leak: the in-memory fill tracker
+    drops its records on restart, so ``record_cell_order_closed`` never
+    fires for orders opened before it and the map would block the lane."""
+    return max(4.0 * 60.0, 300.0)
+
+
+def _prune_stale_open_orders(st: Dict[str, Any], now: float) -> bool:
+    opens = st.get("open_orders") or {}
+    ts_map = st.setdefault("open_orders_ts", {})
+    changed = False
+    bound = _open_order_stale_s()
+    for cid, ids in list(opens.items()):
+        if not ids:
+            continue
+        cell_ts = ts_map.setdefault(cid, {})
+        keep = []
+        for oid in ids:
+            ots = cell_ts.get(oid)
+            if ots is None:
+                cell_ts[oid] = now
+                keep.append(oid)
+                changed = True
+            elif now - float(ots) <= bound:
+                keep.append(oid)
+            else:
+                cell_ts.pop(oid, None)
+                changed = True
+        if len(keep) != len(ids):
+            opens[cid] = keep
+            changed = True
+    return changed
+
+
 def record_cell_order_open(cell_id: str, order_id: Optional[str]) -> None:
     if not cell_id or not order_id:
         return
     st = _load_state()
+    now = time.time()
+    _prune_stale_open_orders(st, now)
     opens = st.setdefault("open_orders", {}).setdefault(cell_id, [])
     if order_id not in opens:
         opens.append(order_id)
+    st.setdefault("open_orders_ts", {}).setdefault(cell_id, {})[order_id] = now
     # An accepted order breaks any consecutive router-reject run.
     st.setdefault("router_consecutive_rejects", {})[cell_id] = 0
     _save_state()
@@ -1114,8 +1169,13 @@ def record_cell_order_closed(cell_id: str, order_id: Optional[str]) -> None:
         return
     st = _load_state()
     opens = st.setdefault("open_orders", {}).setdefault(cell_id, [])
+    changed = False
     if order_id in opens:
         opens.remove(order_id)
+        changed = True
+    if (st.get("open_orders_ts") or {}).get(cell_id, {}).pop(order_id, None) is not None:
+        changed = True
+    if changed:
         _save_state()
 
 
@@ -1254,17 +1314,34 @@ def record_cell_fill(
     fills = st.setdefault("fills_today", {})
     fills[cell_id] = int(fills.get(cell_id) or 0) + 1
     outs = st.setdefault("outcomes", {}).setdefault(cell_id, [])
-    outs.append({
+    # Absorb standalone markout rows that emitted for this decision before
+    # the fill was detected (the markout loop is submit-relative), so the
+    # first-fill immediate rules see them and they don't double-count in the
+    # rolling window.
+    fill_row = {
         "ts": time.time(),
         "kind": "fill",
         "decision_id": decision_id,
         "markout_5s_cents": markout_5s_cents,
         "fill_ev_cents": fill_ev_cents,
         "candidate_ev_cents": candidate_ev_cents,
-    })
+    }
+    if decision_id:
+        rest = []
+        for o in outs:
+            if o.get("decision_id") == decision_id and o.get("kind") == "markout":
+                for k, v in o.items():
+                    if k.startswith("markout_") and v is not None and fill_row.get(k) is None:
+                        fill_row[k] = float(v)
+            else:
+                rest.append(o)
+        if len(rest) != len(outs):
+            outs[:] = rest
+    outs.append(fill_row)
     del outs[:-25]
     if decision_id:
         st.setdefault("decision_cell_map", {})[decision_id] = cell_id
+        _cap_decision_cell_map(st)
     _save_state()
     bump_cell_funnel("filled", cell_id)
     # PROVISIONAL -> OBSERVATION once real fills exist for the cell.
@@ -1320,8 +1397,10 @@ def record_cell_settlement(
     st = _load_state()
     outs = st.setdefault("outcomes", {}).setdefault(cell_id, [])
     # Prefer updating the fill record for this decision to a settlement row.
+    # Match settled rows too — a second attribution (exit path + settlement
+    # join) updates in place instead of appending a duplicate outcome.
     for o in reversed(outs):
-        if o.get("decision_id") == decision_id and o.get("kind") == "fill":
+        if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
             o["net_pnl_cents"] = float(net_pnl_cents)
             o["kind"] = "settled"
             break
@@ -1484,6 +1563,8 @@ def cell_open_orders_total() -> int:
     """Resting cell orders across ALL cells — the lane runs at most one
     open passive order at a time (global serialization)."""
     st = _load_state()
+    if _prune_stale_open_orders(st, time.time()):
+        _save_state()
     return sum(
         len(v) for v in (st.get("open_orders") or {}).values() if v
     )

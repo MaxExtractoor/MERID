@@ -948,6 +948,23 @@ class KalshiSettlementPoller:
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
             ledger = get_decision_audit_ledger()
+            # 2026-10-01: one-shot reconcile at startup — SETTLED outcome rows
+            # whose entry fill predates the fills->audit bridge (or was missed)
+            # get fill price + realized PnL healed from kalshi_fills, then the
+            # lane settlement attribution that the original pass skipped.
+            if not getattr(self, "_fill_outcomes_reconciled", False):
+                self._fill_outcomes_reconciled = True
+                try:
+                    healed = await asyncio.to_thread(ledger.reconcile_fill_outcomes)
+                    if healed:
+                        logger.info(
+                            "[SETTLEMENT-POLLER] fill-outcome reconcile healed %d rows",
+                            healed,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "[SETTLEMENT-POLLER] fill-outcome reconcile failed: %s", exc
+                    )
             # Synchronous sqlite3 JOIN over ~200k decision rows — run off the
             # event loop so the query cannot stall WS deltas or order routing.
             pending = await asyncio.to_thread(

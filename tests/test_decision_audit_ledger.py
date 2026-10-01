@@ -470,3 +470,286 @@ def test_lane_provenance_columns(tmp_db: Path) -> None:
         assert no["legacy_risk_label"] == "MATCHING_TOXIC_CELL"
         assert yes["admission_owner"] == "formula"
         assert yes["legacy_risk_label"] is None
+
+
+def _enter_decision_no() -> _FakeTradeDecision:
+    """ENTER decision selecting NO (implemented as sell-YES at the venue)."""
+    dec = _no_trade_decision("")
+    dec.decision_id = "dec_no_entry"
+    dec.no_trade_reason = None
+    dec.selected_outcome = "no"
+    dec.selected_action = "sell"
+    dec.selected_outcome_price = Decimal("0.54")
+    return dec
+
+
+def _make_fills_db(path: Path, rows: List[Dict[str, Any]]) -> None:
+    """Minimal kalshi_fills table for the settlement-time fill fallback."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE kalshi_fills (
+            fill_id TEXT PRIMARY KEY,
+            order_id TEXT,
+            decision_trace_id TEXT,
+            execution_outcome_side TEXT,
+            execution_action TEXT,
+            execution_price_cents INTEGER,
+            fee_cost REAL,
+            is_exit INTEGER DEFAULT 0,
+            reduce_only INTEGER DEFAULT 0,
+            entry_or_exit TEXT DEFAULT 'entry',
+            canonicalization_state TEXT DEFAULT 'TRUSTED_LIVE_V1',
+            created_time TEXT
+        )
+        """
+    )
+    for r in rows:
+        conn.execute(
+            "INSERT INTO kalshi_fills (fill_id, order_id, decision_trace_id, "
+            "execution_outcome_side, execution_action, execution_price_cents, "
+            "fee_cost, is_exit, reduce_only, entry_or_exit, "
+            "canonicalization_state, created_time) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                r["fill_id"],
+                r.get("order_id", "o1"),
+                r["decision_trace_id"],
+                r.get("execution_outcome_side", "yes"),
+                r.get("execution_action", "sell"),
+                r["execution_price_cents"],
+                r.get("fee_cost", 0.0),
+                r.get("is_exit", 0),
+                r.get("reduce_only", 0),
+                r.get("entry_or_exit", "entry"),
+                r.get("canonicalization_state", "TRUSTED_LIVE_V1"),
+                r.get("created_time", "2026-10-01T02:52:47Z"),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_record_entry_fill_converts_sell_leg_to_selected_side(tmp_db: Path) -> None:
+    """A venue sell-YES@46 fill on a NO-selected decision must persist as
+    actual_fill_price_cents=54 (selected-side space), not the leg price 46."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    ledger.record_trade_decision(dec)
+
+    assert ledger.record_entry_fill(
+        decision_id=dec.decision_id,
+        fill_id="f1",
+        exchange_order_id="oid1",
+        execution_outcome_side="yes",
+        execution_action="sell",
+        execution_price_cents=46,
+        entry_fee_cents=0.0,
+    )
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT actual_fill_price_cents, actual_entry_fee_cents, fill_id, "
+            "exchange_order_id FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row["actual_fill_price_cents"] == 54
+        assert row["actual_entry_fee_cents"] == 0.0
+        assert row["fill_id"] == "f1"
+        assert row["exchange_order_id"] == "oid1"
+
+
+def test_record_entry_fill_buy_leg_passthrough(tmp_db: Path) -> None:
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = "dec_no_buy"
+    dec.selected_action = "buy"
+    ledger.record_trade_decision(dec)
+
+    assert ledger.record_entry_fill(
+        decision_id=dec.decision_id,
+        execution_outcome_side="no",
+        execution_action="buy",
+        execution_price_cents=54,
+        entry_fee_cents=1.0,
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        row = conn.execute(
+            "SELECT actual_fill_price_cents FROM strategy_decision_outcomes "
+            "WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row[0] == 54
+
+
+def test_record_entry_fill_side_mismatch_is_fail_closed(tmp_db: Path) -> None:
+    """A buy-YES fill cannot satisfy a NO-selected decision — skip the write
+    rather than record a wrong-direction price."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = "dec_mismatch"
+    ledger.record_trade_decision(dec)
+
+    assert not ledger.record_entry_fill(
+        decision_id=dec.decision_id,
+        execution_outcome_side="yes",
+        execution_action="buy",
+        execution_price_cents=46,
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        row = conn.execute(
+            "SELECT actual_fill_price_cents FROM strategy_decision_outcomes "
+            "WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row[0] is None
+
+
+def test_settlement_persists_realized_pnl_for_filled_decision(tmp_db: Path) -> None:
+    """Filled-and-held-to-settlement must write realized_net_pnl_cents on the
+    outcome row, in addition to the counterfactual columns."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = "dec_settled_fill"
+    ledger.record_trade_decision(dec)
+    ledger.record_entry_fill(
+        decision_id=dec.decision_id,
+        execution_outcome_side="yes",
+        execution_action="sell",
+        execution_price_cents=46,
+        entry_fee_cents=0.0,
+    )
+
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT actual_fill_price_cents, realized_net_pnl_cents, "
+            "outcome_status FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row["outcome_status"] == "SETTLED"
+        assert row["actual_fill_price_cents"] == 54
+        # Bought NO@54, YES settled 100 -> NO leg settles 0: 0 - 54 - 0 = -54
+        assert row["realized_net_pnl_cents"] == -54.0
+
+
+def test_settlement_backfills_fill_from_fills_db(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """When the ingest-time bridge never ran, record_settlement resolves the
+    fill from kalshi_fills via decision_trace_id and still computes PnL."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    fills_db = tmp_path / "kalshi_fills.db"
+    dec_id = "dec_backfill_fill"
+    _make_fills_db(
+        fills_db,
+        [
+            {
+                "fill_id": "fill_backfill_1",
+                "order_id": "oid_backfill",
+                "decision_trace_id": dec_id,
+                "execution_outcome_side": "yes",
+                "execution_action": "sell",
+                "execution_price_cents": 46,
+                "fee_cost": 0.0,
+            }
+        ],
+    )
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = dec_id
+    ledger.record_trade_decision(dec)
+
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT actual_fill_price_cents, realized_net_pnl_cents, fill_id "
+            "FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec_id,),
+        ).fetchone()
+        assert row["actual_fill_price_cents"] == 54
+        assert row["realized_net_pnl_cents"] == -54.0
+        assert row["fill_id"] == "fill_backfill_1"
+
+
+def test_reconcile_fill_outcomes_heals_settled_rows(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Rows settled before the fill bridge existed are healed by
+    reconcile_fill_outcomes: fill price + realized PnL both populated."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    fills_db = tmp_path / "kalshi_fills.db"
+    dec_id = "dec_reconcile_heal"
+    _make_fills_db(
+        fills_db,
+        [
+            {
+                "fill_id": "fill_heal_1",
+                "decision_trace_id": dec_id,
+                "execution_outcome_side": "yes",
+                "execution_action": "sell",
+                "execution_price_cents": 46,
+                "fee_cost": 0.0,
+            }
+        ],
+    )
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = dec_id
+    ledger.record_trade_decision(dec)
+
+    # Settle with NO fills DB reachable: row goes SETTLED with NULL fill.
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(tmp_path / "absent.db"))
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        row = conn.execute(
+            "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+            "FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec_id,),
+        ).fetchone()
+        assert row[0] is None and row[1] is None
+
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+    assert ledger.reconcile_fill_outcomes() == 1
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT actual_fill_price_cents, realized_net_pnl_cents, fill_id "
+            "FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec_id,),
+        ).fetchone()
+        assert row["actual_fill_price_cents"] == 54
+        assert row["realized_net_pnl_cents"] == -54.0
+        assert row["fill_id"] == "fill_heal_1"

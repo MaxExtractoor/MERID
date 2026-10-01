@@ -2959,6 +2959,14 @@ def compute_trade_decision(
                 )
                 if _pmiss and _pmiss != "provisional_lane_disabled":
                     indicators[f"{_pfx}_prov_cell_miss_reason"] = _pmiss
+                    if _pmiss in (
+                        "provisional_price_below_min",
+                        "provisional_price_above_max",
+                        "provisional_tte_below_min",
+                        "provisional_tte_above_max",
+                        "provisional_cell_gap",
+                    ):
+                        _cbp.bump_provisional_funnel("blocked_by_price_band")
 
     # 2026-09-28: Live rolling entry-evidence gate.  See MERID_LIVE_EVIDENCE_GATE
     # notes at module level — applies the evidence-floor semantics to the
@@ -3181,6 +3189,9 @@ def compute_trade_decision(
                                     f"{_side}_evidence_override_denied"
                                 ] = _ovr_reason
                             elif _d.provisional_cell_id is not None:
+                                _cbp.bump_provisional_funnel(
+                                    "blocked_by_evidence", _d.provisional_cell_id
+                                )
                                 indicators[f"{_side}_admission_owner"] = (
                                     "current_build_provisional"
                                 )
