@@ -272,13 +272,15 @@ def test_gate_evaluation_is_pure_and_additive(tmp_db: Path) -> None:
     assert "yes_regime" in ev.all_failed_gates
     assert "yes_edge_threshold" in ev.all_failed_gates
     assert names["yes_edge_threshold"].blocking_in_live_path
-    assert names["yes_regime"].blocking_in_live_path
+    # Regime co-failed but did not own the live rejection reason.
+    assert not names["yes_regime"].blocking_in_live_path
     assert names["yes_depth"].passed is True
     assert names["market_time"].passed is True  # seconds_to_expiry present
     # Persisted vector lands on the decision row.
     ledger = DecisionAuditLedger(db_path=tmp_db)
     ledger.record_trade_decision(dec, market_state=_GoodBook())
     with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT gate_results_json, all_failed_gates_json, "
             "gate_evaluation_schema_version FROM strategy_decisions "
@@ -326,7 +328,7 @@ def test_executability_and_depth_scaled_pnl(tmp_db: Path) -> None:
             (dec.decision_id,),
         ).fetchone()
         # 0.5 * (100 - 33 - 1 - 1) = 32.5 — scaled, not the full-contract 65.
-        assert oc["counterfactual_yes_pnl_cents"] == pytest.approx(32.5)
+        assert oc[0] == pytest.approx(32.5)
 
 
 def test_absent_book_is_unknown_not_stale(tmp_db: Path) -> None:
