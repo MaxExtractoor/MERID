@@ -3945,11 +3945,21 @@ class KalshiWebSocketBridge:
                             )
                 self._last_sequence[event_type] = seq
         
-        # Check for sequence gaps in orderbook events (per-event-type tracking)
+        # Check for sequence gaps in orderbook events.  Kalshi scopes
+        # orderbook seq numbers per market ticker — keying by event type alone
+        # counts every interleaved market's deltas as a gap and produced
+        # ~120k spurious gaps.  Key by ticker instead; snapshot and delta share
+        # one per-market sequence space.
         if isinstance(event, dict) and event.get("type") in ("orderbook_snapshot", "orderbook_delta"):
             seq = event.get("sequence") or event.get("seq") or event.get("msg_id")
             if seq is not None and isinstance(seq, numbers.Integral) and not isinstance(seq, bool):
-                event_type = event.get("type")  # "orderbook_snapshot" or "orderbook_delta"
+                _msg = event.get("msg")
+                _ob_ticker = (
+                    event.get("ticker")
+                    or event.get("market_ticker")
+                    or (_msg.get("market_ticker") if isinstance(_msg, dict) else None)
+                )
+                event_type = f"orderbook:{_ob_ticker or 'unknown'}"
                 if event_type in self._last_sequence:
                     expected = self._last_sequence[event_type] + 1
                     if seq > expected:
@@ -3960,13 +3970,13 @@ class KalshiWebSocketBridge:
                         # to avoid blocking I/O on the WebSocket event loop callback path.
                         if gap > 10 or self._sequence_gaps % 100 == 0:
                             logger.warning(
-                                "WS orderbook sequence gap: expected %s, got %s, gap=%s, total_gaps=%s",
-                                expected, seq, gap, self._sequence_gaps
+                                "WS orderbook sequence gap: key=%s expected %s, got %s, gap=%s, total_gaps=%s",
+                                event_type, expected, seq, gap, self._sequence_gaps
                             )
                         else:
                             logger.debug(
-                                "WS orderbook sequence gap: expected %s, got %s, gap=%s, total_gaps=%s",
-                                expected, seq, gap, self._sequence_gaps
+                                "WS orderbook sequence gap: key=%s expected %s, got %s, gap=%s, total_gaps=%s",
+                                event_type, expected, seq, gap, self._sequence_gaps
                             )
                 self._last_sequence[event_type] = seq
         
