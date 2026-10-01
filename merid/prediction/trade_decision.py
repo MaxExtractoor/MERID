@@ -233,7 +233,12 @@ MERID_FADE_ALLOWED_ASSETS = {
 MERID_WALKFWD_CAL_ENABLED = os.environ.get(
     "MERID_WALKFWD_CAL_ENABLED", "1"
 ).strip().lower() in ("1", "true", "yes")
-_WALKFWD_CAL_PATH = os.path.join("data", "calibration", "walkforward_calibrator.json")
+_WALKFWD_CAL_DEFAULT_PATH = os.path.join(
+    "data", "calibration", "walkforward_calibrator.json"
+)
+_WALKFWD_CAL_PATH = os.environ.get(
+    "MERID_WALKFWD_CAL_PATH", _WALKFWD_CAL_DEFAULT_PATH
+)
 _walkfwd_cal_cache: Dict[str, Any] = {"mtime": None, "artifact": None}
 
 
@@ -246,8 +251,23 @@ def _walkforward_tte_bucket(seconds_to_expiry: float) -> str:
 
 
 def _load_walkforward_calibrator() -> Optional[Dict[str, Any]]:
-    """Load the walk-forward calibration artifact (mtime-cached)."""
+    """Load the walk-forward calibration artifact (mtime-cached).
+
+    Hermetic-test guard (same convention as ``_load_live_evidence``): under
+    pytest the machine-local default artifact is ignored so a live-rebuilt
+    calibrator can never change unrelated test outcomes.  Tests opt in by
+    setting ``MERID_WALKFWD_CAL_PATH`` or monkeypatching ``_WALKFWD_CAL_PATH``.
+    """
     if not MERID_WALKFWD_CAL_ENABLED:
+        return None
+    if (
+        _WALKFWD_CAL_PATH == _WALKFWD_CAL_DEFAULT_PATH
+        and "MERID_WALKFWD_CAL_PATH" not in os.environ
+        and (
+            "PYTEST_CURRENT_TEST" in os.environ
+            or os.environ.get("MERID_ENV", "").strip().lower() in ("test", "ci")
+        )
+    ):
         return None
     try:
         mtime = os.path.getmtime(_WALKFWD_CAL_PATH)
@@ -3758,7 +3778,33 @@ def compute_trade_decision(
     # record as telemetry.
     ev_gate_allowed = False
     ev_gate_result: Optional[Dict[str, Any]] = None
+    # 2026-10-01: adverse-selection reserve is now measured, not hardcoded.
+    # Post-only fills are picked off when the market moves through them —
+    # the provisional lane's rolling 5s markouts are the realized cost for
+    # this (asset, side, price, tte) bucket, floored so cold cells still
+    # carry a prior.  Charged inside the authoritative EV gate; also stamped
+    # on the decision so the audit side_ev rows record it.
     adverse_selection_reserve = Decimal("0")
+    if (
+        selected_outcome is not None
+        and selected_outcome_price is not None
+        and seconds_to_expiry is not None
+    ):
+        try:
+            from merid.prediction import (
+                current_build_provisional as _cbp_asr,
+            )
+            _asr_cents = _cbp_asr.adverse_selection_reserve_cents(
+                asset,
+                selected_outcome,
+                float(selected_outcome_price) * 100.0,
+                float(seconds_to_expiry),
+            )
+            adverse_selection_reserve = (
+                Decimal(str(_asr_cents)) / Decimal("100")
+            )
+        except Exception:
+            adverse_selection_reserve = Decimal("0")
     uncertainty_reserve = Decimal(str(model_risk_reserve))
 
     if selected_outcome is not None:

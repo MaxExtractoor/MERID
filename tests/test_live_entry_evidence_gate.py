@@ -66,7 +66,7 @@ def _decision(**kwargs):
         asset="BTC",
         spot_price=99.5,
         strike_price=100.0,
-        seconds_to_expiry=900.0,
+        seconds_to_expiry=400.0,
         yes_bid_cents=40.0,
         yes_ask_cents=42.0,
         no_bid_cents=56.0,
@@ -152,11 +152,16 @@ def test_loader_reads_and_caches(_isolate_evidence):
 
 def test_decision_blocked_by_decayed_asset_cohort(_isolate_evidence):
     """A decision that would select NO is rejected when the asset+side cohort
-    decayed below its mean entry price — reason live_evidence_asset_no."""
+    decayed below its mean entry price — reason live_evidence_asset_no.
+
+    TTE 900s keeps this outside the provisional lane's domain: inside it, a
+    legacy evidence verdict is demoted to a label and the cbp cell's own
+    caps/threshold own admission — that is the intended demotion, not a bug.
+    """
     _write_evidence(_isolate_evidence, {
         "BTC": {"no": {"n": 40, "wr": 0.40, "avg_entry_cents": 55.0, "buckets": {}}}
     })
-    d = _decision()
+    d = _decision(seconds_to_expiry=900.0)
     assert d.selected_outcome is None
     assert d.no_trade_reason == "live_evidence_asset_no"
     assert d.indicators["live_evidence_evaluated"] is True
@@ -170,7 +175,9 @@ def test_decision_blocked_by_decayed_price_cell(_isolate_evidence):
             "buckets": {"50": {"n": 20, "wr": 0.30}},
         }}
     })
-    d = _decision()
+    # Legacy veto path: outside the provisional domain (>600s) the formula
+    # lane owns the point and a decayed cell still hard-blocks.
+    d = _decision(seconds_to_expiry=900.0)
     assert d.selected_outcome is None
     assert d.no_trade_reason == "live_evidence_cell_no"
 

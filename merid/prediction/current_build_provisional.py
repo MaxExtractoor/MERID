@@ -110,13 +110,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import statistics
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -569,6 +570,81 @@ def provisional_max_open_orders_total() -> int:
 
 def provisional_max_order_lifetime_s() -> int:
     return _env_int("MERID_PROVISIONAL_MAX_ORDER_LIFETIME_S", 45)
+
+
+def adverse_selection_reserve_enabled() -> bool:
+    """Master switch for the measured adverse-selection charge in the EV gate."""
+    return _env_flag("MERID_ADV_SEL_RESERVE_ENABLED", True)
+
+
+def adverse_selection_reserve_cents(
+    asset: str,
+    side: str,
+    price_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> float:
+    """Expected pick-off cost of a post-only fill at (asset, side, price, tte).
+
+    A resting maker order fills exactly when counterparties cross to it — on
+    a fast repricing book that correlates with informed flow.  The realized
+    cost is measurable directly: per-fill markouts are already recorded in
+    the cell's outcome window in the intent's outcome space, and a negative
+    mean short-horizon markout is the observed adverse-selection charge for
+    fills in this bucket.
+
+    Estimate = max(floor, min(cap, -mean(markout_5s))) where the sample is
+    the resolved cell's recent 5s markouts, widening to the asset+side
+    aggregate when the cell has < MERID_ADV_SEL_MIN_SAMPLES.  The bounded
+    floor (MERID_ADV_SEL_FLOOR_CENTS, default 0.5c) keeps a nonzero prior on
+    cold cells — the 2026-10-01 loss audit showed first-fills are the most
+    toxic (-8.5c at 1s on XRP NO@75) precisely because no local evidence
+    existed yet.  Capped at MERID_ADV_SEL_CAP_CENTS (default 5c) so one bad
+    window cannot veto the whole lane; that authority belongs to the
+    suspension rules, not the cost stack.
+    """
+    if not adverse_selection_reserve_enabled():
+        return 0.0
+    floor = max(0.0, _env_float("MERID_ADV_SEL_FLOOR_CENTS", 0.5))
+    cap = max(floor, _env_float("MERID_ADV_SEL_CAP_CENTS", 5.0))
+    min_samples = max(1, _env_int("MERID_ADV_SEL_MIN_SAMPLES", 2))
+    try:
+        st = _load_state()
+    except Exception:
+        return floor
+    outcomes = st.get("outcomes") or {}
+
+    def _samples(cell_ids: Iterable[str]) -> List[float]:
+        vals: List[float] = []
+        for cid in cell_ids:
+            for o in outcomes.get(cid) or []:
+                v = o.get("markout_5s_cents")
+                if v is None:
+                    v = o.get("markout_1s_cents")
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(fv):
+                    vals.append(fv)
+        return vals
+
+    cell = resolve_provisional_cell(asset, side, price_cents, tte_seconds)
+    cell_ids = [cell.cell_id] if cell is not None else []
+    vals = _samples(cell_ids)
+    if len(vals) < min_samples:
+        asset_u, side_l = str(asset).upper(), str(side).lower()
+        sibling_ids = [
+            c.cell_id
+            for c in PROVISIONAL_CELLS
+            if c.asset == asset_u and c.side == side_l
+        ]
+        vals = _samples(sibling_ids)
+    if not vals:
+        return floor
+    evidence = max(0.0, -(sum(vals) / len(vals)))
+    return min(cap, max(floor, evidence))
 
 
 def _suspend_min_fills() -> int:

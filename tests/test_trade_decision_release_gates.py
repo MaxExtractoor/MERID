@@ -49,7 +49,7 @@ def _make_decision(
     *,
     spot: float = 100.0,
     strike: float = 100.0,
-    seconds_to_expiry: float = 900.0,
+    seconds_to_expiry: float = 400.0,
     yes_bid: float = 40.0,
     yes_ask: float = 42.0,
     no_bid: float = 58.0,
