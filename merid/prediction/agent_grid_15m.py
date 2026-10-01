@@ -8253,6 +8253,19 @@ class LeanAgent15m:
             indicators["contract_fee_type"] = contract_spec.fee_type
             indicators["contract_fee_multiplier"] = contract_spec.fee_multiplier
             indicators["contract_fee_verified"] = contract_spec.fee_verified
+            # 2026-10-01 (post_drawdown epoch): shared cross-asset directional
+            # regime computed from the same FeatureSnapshot all agents consume
+            # this tick — the regime/conviction/throttle gates live inside
+            # compute_trade_decision so every admission lane sees them.
+            _dir_regime = None
+            try:
+                if getattr(self, "_feature_snapshot", None) is not None:
+                    from merid.prediction.directional_regime import (
+                        compute_directional_regime,
+                    )
+                    _dir_regime = compute_directional_regime(self._feature_snapshot)
+            except Exception as _dr_err:
+                logger.debug("[REGIME] compute failed: %s", _dr_err)
             decision = compute_trade_decision(
                 run_id=run_id,
                 decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
@@ -8287,6 +8300,8 @@ class LeanAgent15m:
                 book_sequence_confirmed=getattr(market_state, "live_sequence_confirmed", None),
                 book_initialized=getattr(market_state, "book_initialized", None),
                 cfb_execution_eligible=getattr(cfb_observation, "execution_eligible", None),
+                directional_regime=_dir_regime,
+                feature_snapshot=self._feature_snapshot,
             )
             _record_decision_audit(
                 decision,

@@ -3368,6 +3368,14 @@ class OrderIntent:
     # contract — one record per attempt, populated by _exec_stamp().
     exec_stage_marks_ns: Dict[str, int] = field(default_factory=dict, repr=False)
 
+    # DIRECTIONAL-REGIME EPOCH (2026-10-01): shared cross-asset regime label
+    # (NEUTRAL/RALLY_CONFIRMED/SELL_OFF_CONFIRMED) and the active policy
+    # epoch, propagated from the decision indicators so fills and markouts
+    # are regime/epoch-tagged for the conditional adverse-selection
+    # estimator and current-build evidence separation.
+    directional_regime: Optional[str] = None
+    policy_epoch: Optional[str] = None
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -16466,6 +16474,8 @@ async def _route_live(
                         threshold_cell_id=getattr(intent, "threshold_cell_id", None),
                         provisional_cell_id=getattr(intent, "provisional_cell_id", None),
                         record_ttl_s=_record_ttl_s,
+                        directional_regime=getattr(intent, "directional_regime", None),
+                        policy_epoch=getattr(intent, "policy_epoch", None),
                     )
             except Exception as _fq_err:
                 logger.debug("[FILL-QUALITY] record_order failed for %s: %s", intent.ticker, _fq_err)

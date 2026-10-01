@@ -2340,6 +2340,8 @@ def compute_trade_decision(
     book_initialized: Optional[bool] = None,
     cfb_execution_eligible: Optional[bool] = None,
     build_sha: Optional[str] = None,
+    directional_regime: Optional[Any] = None,
+    feature_snapshot: Optional[Any] = None,
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
 
@@ -3356,6 +3358,47 @@ def compute_trade_decision(
     yes_min_p = _min_p_for_side(yes_breakdown, min_p_selected)
     no_min_p = _min_p_for_side(no_breakdown, min_p_selected)
 
+    # 2026-10-01 (post_drawdown epoch): directional-regime, conviction,
+    # book-flow, countertrend cold-start and same-side throttle gates.
+    # All five are evaluated unconditionally so every gate's verdict is
+    # stamped on the decision even when economics own the terminal reason.
+    from merid.prediction import directional_regime as _dr
+
+    _dir_reg = directional_regime
+    indicators["policy_epoch"] = _dr.POLICY_EPOCH
+    if _dir_reg is not None:
+        indicators["dir_regime"] = _dir_reg.label
+        indicators["breadth60_pos"] = _dir_reg.breadth60_pos
+        indicators["breadth60_total"] = _dir_reg.breadth60_total
+        indicators["btc_r60"] = _dir_reg.btc_r60
+
+    _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
+    _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
+    _yes_conv_block = _dr.conviction_block_reason(asset, float(yes_breakdown.p_selected))
+    _no_conv_block = _dr.conviction_block_reason(asset, float(no_breakdown.p_selected))
+    _yes_throttle_block = _dr.side_throttle_block("yes", now.timestamp()) or _dr.strip_concentration_block(
+        "yes", float(yes_breakdown.net_edge) * 100.0, ts=now.timestamp()
+    )
+    _no_throttle_block = _dr.side_throttle_block("no", now.timestamp()) or _dr.strip_concentration_block(
+        "no", float(no_breakdown.net_edge) * 100.0, ts=now.timestamp()
+    )
+    _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg)
+    _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg)
+    _yes_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "yes")
+    _no_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "no")
+    indicators.update({
+        "yes_regime_block": _yes_regime_block,
+        "no_regime_block": _no_regime_block,
+        "yes_conviction_block": _yes_conv_block,
+        "no_conviction_block": _no_conv_block,
+        "yes_throttle_block": _yes_throttle_block,
+        "no_throttle_block": _no_throttle_block,
+        "yes_ct_lane_block": _yes_ct_lane_block,
+        "no_ct_lane_block": _no_ct_lane_block,
+        "yes_bookflow_block": _yes_bookflow_block,
+        "no_bookflow_block": _no_bookflow_block,
+    })
+
     # 2026-09-30: side-specific depth eligibility.  A side whose executable
     # book cannot absorb one contract is ineligible on its own; it must not
     # poison the opposite side via the (now both-empty-only) confidence floor.
@@ -3367,6 +3410,11 @@ def compute_trade_decision(
         and yes_breakdown.p_selected > yes_min_p
         and not tail_guard_violation_yes
         and yes_evidence_ok
+        and _yes_regime_block is None
+        and _yes_conv_block is None
+        and _yes_throttle_block is None
+        and _yes_ct_lane_block is None
+        and _yes_bookflow_block is None
     )
     no_qualifies = (
         no_depth_ok
@@ -3374,6 +3422,11 @@ def compute_trade_decision(
         and no_breakdown.p_selected > no_min_p
         and not tail_guard_violation_no
         and no_evidence_ok
+        and _no_regime_block is None
+        and _no_conv_block is None
+        and _no_throttle_block is None
+        and _no_ct_lane_block is None
+        and _no_bookflow_block is None
     )
 
     # Candidate-surface export: per-side executable economics and the first
@@ -3388,6 +3441,11 @@ def compute_trade_decision(
         evidence_ok_s: bool,
         tail_violation_s: bool,
         depth_ok_s: bool = True,
+        regime_block_s: Optional[str] = None,
+        conv_block_s: Optional[str] = None,
+        throttle_block_s: Optional[str] = None,
+        ct_lane_block_s: Optional[str] = None,
+        bookflow_block_s: Optional[str] = None,
     ) -> Optional[str]:
         if not depth_ok_s:
             return f"insufficient_depth_{side}"
@@ -3402,6 +3460,20 @@ def compute_trade_decision(
             return f"edge_below_threshold_{side}"
         if bd.p_selected <= min_p_s:
             return f"cost_basis_{side}"
+        # 2026-10-01 (post_drawdown): structural safety gates own the
+        # terminal code when the economics cleared — countertrend regime,
+        # coin-flip conviction, side-streak suspension, cold-start
+        # countertrend lane, and adverse book flow.
+        if regime_block_s:
+            return regime_block_s
+        if conv_block_s:
+            return f"{conv_block_s}_{side}"
+        if throttle_block_s:
+            return throttle_block_s
+        if ct_lane_block_s:
+            return ct_lane_block_s
+        if bookflow_block_s:
+            return bookflow_block_s
         if not evidence_ok_s:
             return (
                 yes_evidence_reason if side == "yes" else no_evidence_reason
@@ -3428,10 +3500,20 @@ def compute_trade_decision(
         "yes_block": _side_block_reason(
             "yes", yes_breakdown, yes_min_edge, yes_min_p,
             yes_evidence_ok, tail_guard_violation_yes, yes_depth_ok,
+            regime_block_s=_yes_regime_block,
+            conv_block_s=_yes_conv_block,
+            throttle_block_s=_yes_throttle_block,
+            ct_lane_block_s=_yes_ct_lane_block,
+            bookflow_block_s=_yes_bookflow_block,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
             no_evidence_ok, tail_guard_violation_no, no_depth_ok,
+            regime_block_s=_no_regime_block,
+            conv_block_s=_no_conv_block,
+            throttle_block_s=_no_throttle_block,
+            ct_lane_block_s=_no_ct_lane_block,
+            bookflow_block_s=_no_bookflow_block,
         ),
     })
 
@@ -3471,6 +3553,54 @@ def compute_trade_decision(
                 # Edge and evidence cleared but the held side's book cannot
                 # absorb a contract — label it a liquidity rejection.
                 no_trade_reason = f"insufficient_depth_{best_side}"
+            elif (
+                (yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected)
+                <= best_min_p
+            ):
+                # p_selected does not clear the side-aware positive-EV floor
+                # (entry + all-in cost reserve).  Checked before the
+                # structural safety gates to match _side_block_reason's
+                # ordering — a below-floor price is the deeper rejection.
+                best_p = yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
+                no_trade_reason = f"cost_basis_override_{best_side}"
+                indicators[f"cost_basis_override_{best_side}_p"] = best_p
+                indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
+            elif (
+                _yes_regime_block if best_side == "yes" else _no_regime_block
+            ) or (
+                _yes_conv_block if best_side == "yes" else _no_conv_block
+            ) or (
+                _yes_throttle_block if best_side == "yes" else _no_throttle_block
+            ) or (
+                _yes_ct_lane_block if best_side == "yes" else _no_ct_lane_block
+            ) or (
+                _yes_bookflow_block if best_side == "yes" else _no_bookflow_block
+            ):
+                # 2026-10-01: edge cleared the floor but a structural safety
+                # gate owns the rejection — report the gate, not evidence.
+                _gate_blocks = (
+                    (
+                        _yes_regime_block,
+                        _yes_conv_block,
+                        _yes_throttle_block,
+                        _yes_ct_lane_block,
+                        _yes_bookflow_block,
+                    )
+                    if best_side == "yes"
+                    else (
+                        _no_regime_block,
+                        _no_conv_block,
+                        _no_throttle_block,
+                        _no_ct_lane_block,
+                        _no_bookflow_block,
+                    )
+                )
+                _first_gate = next((b for b in _gate_blocks if b), None)
+                no_trade_reason = (
+                    f"{_first_gate}_{best_side}"
+                    if _first_gate == "low_conviction"
+                    else _first_gate
+                )
             elif not best_evidence_ok:
                 # The observed win-rate evidence at this held-side price does
                 # not clear price + fee + margin: the cell is unprofitable for
@@ -3480,12 +3610,10 @@ def compute_trade_decision(
                     yes_evidence_reason if best_side == "yes" else no_evidence_reason
                 ) or f"calibration_evidence_{best_side}"
             else:
-                # Edge is sufficient but p_selected does not clear the side-aware
-                # positive-EV floor (entry + all-in cost reserve).
-                best_p = yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
-                no_trade_reason = f"cost_basis_override_{best_side}"
-                indicators[f"cost_basis_override_{best_side}_p"] = best_p
-                indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
+                # Edge cleared, depth is fine, p clears the cost floor, no
+                # structural gate fired, evidence passed — yet the side did
+                # not qualify.  Defensive catch-all; should be unreachable.
+                no_trade_reason = "no_qualifying_side"
 
             # Counterfactual logging: record the rejected candidate so a
             # post-settlement join can classify saved/missed/flat per bucket.
@@ -3810,6 +3938,7 @@ def compute_trade_decision(
                 selected_outcome,
                 float(selected_outcome_price) * 100.0,
                 float(seconds_to_expiry),
+                regime_label=getattr(directional_regime, "label", None),
             )
             adverse_selection_reserve = (
                 Decimal(str(_asr_cents)) / Decimal("100")

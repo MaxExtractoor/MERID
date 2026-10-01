@@ -324,6 +324,8 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "admission_owner", "TEXT")
         _add_column(conn, "strategy_decisions", "provisional_cell_id", "TEXT")
         _add_column(conn, "strategy_decisions", "build_sha", "TEXT")
+        _add_column(conn, "strategy_decisions", "policy_epoch", "TEXT")
+        _add_column(conn, "strategy_decision_outcomes", "policy_epoch", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "admission_owner", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "threshold_source", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "legacy_risk_label", "TEXT")
@@ -1079,6 +1081,27 @@ class DecisionAuditLedger:
                 exc,
             )
 
+        # 2026-10-01 (post_drawdown epoch): feed the same-side loss-streak
+        # throttle.  Every settled decision funnels through here, so the
+        # directional streak tracker sees all lanes without per-lane wiring.
+        try:
+            from merid.prediction.directional_regime import (
+                record_side_settlement,
+            )
+            record_side_settlement(
+                str(drow["selected_side"]).lower(),
+                _net_pnl_cents,
+                ts=time.time(),
+                decision_id=decision_id,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] side-throttle settlement record "
+                "failed for %s: %s",
+                decision_id,
+                exc,
+            )
+
     def reconcile_fill_outcomes(self) -> int:
         """Backfill missing entry fills + realized PnL on settled outcomes.
 
@@ -1249,7 +1272,7 @@ class DecisionAuditLedger:
                         SET settled_at = ?, settled_yes = ?, settlement_value_cents = ?,
                             counterfactual_yes_pnl_cents = ?,
                             counterfactual_no_pnl_cents = ?,
-                            outcome_status = ?
+                            outcome_status = ?, policy_epoch = ?
                         WHERE decision_id = ?
                         """,
                         (
@@ -1259,6 +1282,7 @@ class DecisionAuditLedger:
                             yes_pnl,
                             no_pnl,
                             "SETTLED",
+                            _policy_epoch(),
                             decision_id,
                         ),
                     )
@@ -1855,8 +1879,9 @@ class DecisionAuditLedger:
                     settlement_rule_version, selected_side, decision, primary_reason_code,
                     reason_codes, record_environment, record_source, is_eligible_for_research,
                     exclusion_reason, shadow_cohort_json, created_at,
-                    admission_lane, admission_owner, provisional_cell_id, build_sha
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    admission_lane, admission_owner, provisional_cell_id, build_sha,
+                    policy_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1892,6 +1917,8 @@ class DecisionAuditLedger:
                     indicators.get(f"{_sel_for_owner}_admission_owner"),
                     indicators.get("provisional_cell_id"),
                     getattr(decision, "build_sha", None),
+                    indicators.get("policy_epoch")
+                    or _policy_epoch(),
                 ),
             )
 
@@ -2509,6 +2536,11 @@ def _safe_attr(obj: Any, name: str) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _policy_epoch() -> str:
+    """Active policy epoch stamped on new decisions and settlements."""
+    return os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01")
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:

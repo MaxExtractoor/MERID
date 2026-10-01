@@ -795,7 +795,7 @@ class KalshiFill:
     reconciliation_ts: Optional[datetime] = None
 
     # Intent correlation tracking
-    unmatched: bool = False  # True if this fill could not be durably correlated to an intent
+    unmatched: bool = False  # True if this fill could not be durably correlatedto an intent
     unmatched_reason: Optional[str] = None  # Why correlation failed
 
     # ENTRY/EXIT CLASSIFICATION (CRITICAL 2026-08-09)
@@ -875,6 +875,11 @@ class KalshiFill:
     # Fills are immutable audit records; the config hash links them to the
     # safety policy that was in effect when they were ingested.
     config_hash: Optional[str] = None
+
+    # 2026-10-01: policy epoch the fill was ingested under — separates
+    # current-build evidence from legacy evidence for the conditional
+    # adverse-selection estimator and streak throttle.
+    policy_epoch: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Fail-closed defaults for trust and canonical quantity.
@@ -9016,6 +9021,7 @@ class KalshiFillsLedger:
             "hedge_reason": "TEXT",
             "hedge_pnl_cents": "INTEGER DEFAULT 0",
             "related_alpha_fill_id": "TEXT",
+            "policy_epoch": "TEXT",
         }
         for col, type_ in v2_cols.items():
             if col not in existing_col_names:
@@ -9290,9 +9296,10 @@ class KalshiFillsLedger:
                          execution_outcome_side, execution_action, execution_price_cents,
                          canonical_position_side, canonical_position_action,
                          canonical_leg_price_cents, canonical_yes_delta_cc,
-                         ledger_schema_version, canonicalization_version, canonicalization_state)
+                         ledger_schema_version, canonicalization_version, canonicalization_state,
+                         policy_epoch)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+                                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
                         ON CONFLICT (fill_id) DO NOTHING
                     """,
                         fill.fill_id,
@@ -9325,6 +9332,10 @@ class KalshiFillsLedger:
                         fill.ledger_schema_version,
                         fill.canonicalization_version,
                         fill.canonicalization_state,
+                        fill.policy_epoch
+                        or os.environ.get(
+                            "MERID_POLICY_EPOCH", "post_drawdown_2026-10-01"
+                        ),
                     )
                 except Exception as e:
                     # Classify error
@@ -9413,8 +9424,9 @@ class KalshiFillsLedger:
                             ingestion_source, ingested_at, agent_id, intent_id,
                             reconciled, raw_payload, decision_trace_id, fill_source,
                             hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
-                            is_exit, reduce_only, entry_or_exit
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            is_exit, reduce_only, entry_or_exit,
+                            policy_epoch
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                         fill.side, fill.action, str(fill.count_fp), fill.quantity_cc or int(fill.count_fp * 100),
@@ -9449,6 +9461,10 @@ class KalshiFillsLedger:
                         1 if fill.is_exit is True else (0 if fill.is_exit is False else None),
                         1 if fill.reduce_only else 0,
                         fill.entry_or_exit,
+                        fill.policy_epoch
+                        or os.environ.get(
+                            "MERID_POLICY_EPOCH", "post_drawdown_2026-10-01"
+                        ),
                     ))
                 except Exception as e:
                     # Classify error

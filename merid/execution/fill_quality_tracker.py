@@ -64,7 +64,7 @@ class _OrderRecord:
         "p_selected", "markouts", "filled", "fill_ts", "fill_price_cents",
         "terminal", "terminal_ts", "closed",
         "decision_id", "threshold_cell_id", "provisional_cell_id",
-        "expire_after_ts",
+        "expire_after_ts", "directional_regime", "policy_epoch",
     )
 
     def __init__(self, **kw: Any) -> None:
@@ -103,6 +103,8 @@ class FillQualityTracker:
         threshold_cell_id: Optional[str] = None,
         provisional_cell_id: Optional[str] = None,
         record_ttl_s: Optional[float] = None,
+        directional_regime: Optional[str] = None,
+        policy_epoch: Optional[str] = None,
     ) -> None:
         """Register an acknowledged post_only entry order for tracking.
 
@@ -136,6 +138,8 @@ class FillQualityTracker:
                 submit_ts + float(record_ttl_s)
                 if record_ttl_s is not None else None
             ),
+            directional_regime=directional_regime,
+            policy_epoch=policy_epoch,
         )
         with self._lock:
             self._records[client_order_id] = rec
@@ -213,6 +217,8 @@ class FillQualityTracker:
                         "decision_id": rec.decision_id,
                         "threshold_cell_id": rec.threshold_cell_id,
                         "provisional_cell_id": rec.provisional_cell_id,
+                        "directional_regime": rec.directional_regime,
+                        "policy_epoch": rec.policy_epoch,
                     })
                     # 2026-09-30: feed per-cell suspension stats — persistent
                     # negative markouts on a passive lane are the
@@ -225,7 +231,19 @@ class FillQualityTracker:
                                 rec.decision_id,
                                 int(horizon),
                                 rec.markouts[key]["markout_cents"],
+                                regime=rec.directional_regime,
+                                policy_epoch=rec.policy_epoch,
                             )
+                        except TypeError:
+                            try:
+                                _tc.record_cell_markout(
+                                    rec.threshold_cell_id,
+                                    rec.decision_id,
+                                    int(horizon),
+                                    rec.markouts[key]["markout_cents"],
+                                )
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                     if rec.provisional_cell_id:
@@ -238,6 +256,8 @@ class FillQualityTracker:
                                 rec.decision_id,
                                 int(horizon),
                                 rec.markouts[key]["markout_cents"],
+                                regime=rec.directional_regime,
+                                policy_epoch=rec.policy_epoch,
                             )
                             _cbp.record_cb_evidence(
                                 "markout",
