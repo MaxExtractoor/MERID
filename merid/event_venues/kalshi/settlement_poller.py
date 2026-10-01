@@ -985,6 +985,14 @@ class KalshiSettlementPoller:
             record_outcome,
         )
 
+        # Terminal bound on ambiguity: once a market stays unresolved for
+        # longer than the unresolved grace, its pending outcomes transition to
+        # UNRESOLVED (with the last-observed exchange status as the reason)
+        # instead of being re-fetched forever.  This keeps the report's
+        # unresolved appendix honest and bounded.
+        unresolved_grace_s = float(
+            os.getenv("MERID_SETTLEMENT_UNRESOLVED_GRACE_S", "3600")
+        )
         swept = 0
         for ticker, close_ts in pending:
             try:
@@ -996,7 +1004,28 @@ class KalshiSettlementPoller:
                 market = resp.get("market", resp) if isinstance(resp, dict) else {}
                 event = normalize_market_record(market)
                 if event is None:
-                    continue  # still open, voided, or ambiguous — try next poll
+                    # still open, voided, or ambiguous — try next poll unless
+                    # the unresolved grace has already been exhausted.
+                    try:
+                        age_s = _time.time() - float(close_ts)
+                    except Exception:
+                        age_s = 0.0
+                    if age_s > unresolved_grace_s:
+                        status = str(
+                            (market or {}).get("status") or "unknown"
+                        ).strip().lower()
+                        await asyncio.to_thread(
+                            ledger.mark_outcome_unresolved,
+                            ticker,
+                            float(close_ts),
+                            reason=f"market_status_{status}_after_{int(age_s)}s",
+                        )
+                        logger.warning(
+                            "[SETTLEMENT-POLLER] %s unresolved after %.0fs "
+                            "(status=%s) - outcomes marked UNRESOLVED",
+                            ticker, age_s, status,
+                        )
+                    continue
                 settled_yes = event.outcome == "yes"
                 await asyncio.to_thread(
                     ledger.record_settlement,
@@ -1011,6 +1040,18 @@ class KalshiSettlementPoller:
                 logger.debug(
                     "[SETTLEMENT-POLLER] orphan sweep failed for %s: %s", ticker, exc
                 )
+                # Persistent lookup failure past the unresolved grace is also
+                # terminal — otherwise one bad ticker retries forever.
+                try:
+                    if (_time.time() - float(close_ts)) > unresolved_grace_s:
+                        await asyncio.to_thread(
+                            ledger.mark_outcome_unresolved,
+                            ticker,
+                            float(close_ts),
+                            reason="lookup_failed_after_grace",
+                        )
+                except Exception:
+                    pass
         if swept:
             logger.info(
                 "[SETTLEMENT-POLLER] swept %d orphaned decision outcomes "

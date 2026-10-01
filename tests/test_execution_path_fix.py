@@ -18,8 +18,9 @@ class TestExecutionPathFix:
         from merid.prediction.agent_grid_15m import LeanAgent15m
         import inspect
         
-        # Get the source code of collect_order_candidate
-        source = inspect.getsource(LeanAgent15m.collect_order_candidate)
+        # Get the source code of the implementation behind the
+        # collect_order_candidate audit wrapper.
+        source = inspect.getsource(LeanAgent15m._collect_order_candidate_impl)
         
         # Verify the critical fix is present
         assert "_kalshi_place_order" in source, "collect_order_candidate should call _kalshi_place_order"

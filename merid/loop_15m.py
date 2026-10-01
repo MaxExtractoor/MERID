@@ -1466,6 +1466,19 @@ class Kalshi15mLoop:
         CRITICAL FIX: 2026-08-02 - This provides a single source of truth for candidate state transitions
         and enables invariant checking: candidates = executed + rejected + blocked + expired
         """
+        # Map loop-level terminal states onto canonical audit-ledger lifecycle
+        # events.  The decision row's primary_reason_code is never mutated —
+        # these are appended to strategy_decision_events only.
+        _AUDIT_TERMINAL_STATES = {
+            "BLOCKED_EDGE_THRESHOLD": ("RISK_REJECTED", "RISK"),
+            "BLOCKED_POSITION": ("RISK_REJECTED", "RISK"),
+            "BLOCKED_RESTING_ORDER": ("RISK_REJECTED", "RISK"),
+            "BLOCKED_DUPLICATE": ("RISK_REJECTED", "RISK"),
+            "BLOCKED_PARITY": ("ROUTER_REJECTED", "EXECUTION"),
+            "REJECTED": ("ROUTER_REJECTED", "EXECUTION"),
+            "EXECUTED": ("ORDER_SUBMITTED", "EXECUTION"),
+        }
+
         def log_lifecycle_event(candidate_id: str, from_state: str, to_state: str, reason: str, context: dict = None):
             """Log a candidate lifecycle state transition."""
             timestamp_ms = int(time.time() * 1000)
@@ -1480,6 +1493,34 @@ class Kalshi15mLoop:
             }
             self._candidate_event_log.append(event)
             self._candidate_lifecycle_states[candidate_id] = to_state
+
+            # Persist terminal transitions to the audit ledger (fail-open).
+            _audit_terminal = _AUDIT_TERMINAL_STATES.get(to_state)
+            if _audit_terminal is not None:
+                try:
+                    _cand_ctx = getattr(self, "_candidate_context", {}).get(candidate_id) or {}
+                    _decision_id = _cand_ctx.get("decision_id")
+                    if _decision_id:
+                        from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+                        get_decision_audit_ledger().append_decision_event(
+                            decision_id=str(_decision_id),
+                            candidate_id=str(candidate_id) if candidate_id else None,
+                            event_type=_audit_terminal[0],
+                            stage=_audit_terminal[1],
+                            reason_code=str(reason)[:120] if reason else None,
+                            reason_detail={
+                                "to_state": to_state,
+                                "from_state": from_state,
+                                "side": _cand_ctx.get("side"),
+                                **(dict(context) if isinstance(context, dict) else {}),
+                            },
+                            trace_id=str(candidate_id) if candidate_id else None,
+                            run_id=_cand_ctx.get("run_id"),
+                            ticker=_cand_ctx.get("ticker") or (context or {}).get("ticker"),
+                            asset=_cand_ctx.get("asset") or (context or {}).get("asset"),
+                        )
+                except Exception:
+                    pass
             
             # Keep event log bounded (last 1000 events)
             if len(self._candidate_event_log) > 1000:
@@ -5485,6 +5526,14 @@ async def _run_loop(self) -> None:
                         try:
                             # CRITICAL FIX: 2026-08-02 - Log candidate lifecycle event for RECEIVED state
                             candidate_id = candidate.get("candidate_id", f"unknown-{int(time.time()*1000)}")
+                            try:
+                                if not hasattr(self, "_candidate_context"):
+                                    self._candidate_context = {}
+                                self._candidate_context[candidate_id] = candidate
+                                if len(self._candidate_context) > 512:
+                                    self._candidate_context = dict(list(self._candidate_context.items())[-256:])
+                            except Exception:
+                                pass
                             self._log_candidate_lifecycle_event(
                                 candidate_id=candidate_id,
                                 from_state="GENERATED",

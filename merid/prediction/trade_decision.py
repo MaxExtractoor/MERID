@@ -3475,6 +3475,21 @@ def compute_trade_decision(
     # poison the opposite side via the (now both-empty-only) confidence floor.
     yes_depth_ok = yes_depth_cc >= 100.0
     no_depth_ok = no_depth_cc >= 100.0
+    # Audit vector: stamp every primitive gate flag so the decision-audit
+    # ledger can persist the complete gate evaluation (not just the first
+    # live blocker).  Purely additive — no gate reads these keys.
+    indicators.update({
+        "yes_depth_ok": bool(yes_depth_ok),
+        "no_depth_ok": bool(no_depth_ok),
+        "yes_evidence_ok": bool(yes_evidence_ok),
+        "no_evidence_ok": bool(no_evidence_ok),
+        "yes_evidence_reason": locals().get("yes_evidence_reason"),
+        "no_evidence_reason": locals().get("no_evidence_reason"),
+        "tail_guard_violation_yes": bool(tail_guard_violation_yes),
+        "tail_guard_violation_no": bool(tail_guard_violation_no),
+        "yes_min_p_selected": float(yes_min_p),
+        "no_min_p_selected": float(no_min_p),
+    })
     # Two mutually exclusive YES qualification paths: the normal cell/formula
     # gates (inert while the ask sits in the 91-94c hi-price window) and the
     # armed trend-aligned hi-price lane (stricter: confirmed rally, breadth,
