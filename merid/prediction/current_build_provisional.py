@@ -687,17 +687,21 @@ def _default_state(now: float) -> Dict[str, Any]:
         "date": _utc_day(now),
         "count": 0,
         "submissions": {},
+        "submissions_total": {},
         "fills_today": {},
         "fills_today_asset": {},
         "fills_today_side": {},
         "open_orders": {},
         "router_attempts": {},
+        "router_attempts_total": {},
         "router_rejects": {},
+        "router_rejects_total": {},
         "router_consecutive_rejects": {},
         "cell_states": {},
         "outcomes": {},
         "decision_cell_map": {},
         "released_reservations": {},
+        "review_reported": {},
         "funnel": {s: 0 for s in FUNNEL_STAGES},
         "funnel_by_cell": {},
     }
@@ -733,6 +737,10 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
         for k in (
             "cell_states", "outcomes", "decision_cell_map",
             "open_orders", "released_reservations",
+            # Cumulative evidence counters persist across days — daily caps
+            # reset, but promotion/review evidence is build-scoped.
+            "submissions_total", "router_attempts_total",
+            "router_rejects_total", "review_reported",
         ):
             if isinstance(rec.get(k), dict):
                 state[k] = rec[k]
@@ -954,9 +962,12 @@ def record_provisional_submission(
     if cell_id:
         subs = st.setdefault("submissions", {})
         subs[cell_id] = int(subs.get(cell_id) or 0) + 1
+        subs_t = st.setdefault("submissions_total", {})
+        subs_t[cell_id] = int(subs_t.get(cell_id) or 0) + 1
         if decision_id:
             st.setdefault("decision_cell_map", {})[decision_id] = cell_id
     _save_state(path)
+    _maybe_emit_promotion_review(cell_id, st=st)
     return int(st["count"])
 
 
@@ -1000,6 +1011,8 @@ def record_provisional_router_attempt(cell_id: str) -> None:
     st = _load_state()
     att = st.setdefault("router_attempts", {})
     att[cell_id] = int(att.get(cell_id) or 0) + 1
+    att_t = st.setdefault("router_attempts_total", {})
+    att_t[cell_id] = int(att_t.get(cell_id) or 0) + 1
     _save_state()
 
 
@@ -1011,6 +1024,8 @@ def record_provisional_router_reject(cell_id: str) -> None:
     st = _load_state()
     rej = st.setdefault("router_rejects", {})
     rej[cell_id] = int(rej.get(cell_id) or 0) + 1
+    rej_t = st.setdefault("router_rejects_total", {})
+    rej_t[cell_id] = int(rej_t.get(cell_id) or 0) + 1
     consec = st.setdefault("router_consecutive_rejects", {})
     consec[cell_id] = int(consec.get(cell_id) or 0) + 1
     _save_state()
@@ -1039,6 +1054,9 @@ def release_provisional_submission_reservation(
     subs = st.setdefault("submissions", {})
     if int(subs.get(cell_id) or 0) > 0:
         subs[cell_id] = int(subs.get(cell_id) or 0) - 1
+    subs_t = st.setdefault("submissions_total", {})
+    if int(subs_t.get(cell_id) or 0) > 0:
+        subs_t[cell_id] = int(subs_t.get(cell_id) or 0) - 1
     if int(st.get("count") or 0) > 0:
         st["count"] = int(st.get("count") or 0) - 1
     _save_state()
@@ -1167,6 +1185,7 @@ def record_provisional_fill(
     if get_cell_state(cell_id) == CELL_STATE_PROVISIONAL:
         set_cell_state(cell_id, CELL_STATE_OBSERVATION, "first_fill")
     _evaluate_suspension(cell_id)
+    _maybe_emit_promotion_review(cell_id, st=st)
 
 
 def record_provisional_markout(
@@ -1226,6 +1245,7 @@ def record_provisional_settlement(
         del outs[:-25]
     _save_state()
     _evaluate_suspension(cell_id)
+    _maybe_emit_promotion_review(cell_id, st=st)
 
 
 def record_provisional_invariant_violation(cell_id: Optional[str], reason: str) -> None:
@@ -1494,6 +1514,7 @@ def review_min_fills() -> int:
 def promotion_review_report(
     asset: Optional[str] = None,
     side: Optional[str] = None,
+    st: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build-specific touchability/markout review per provisional cell.
 
@@ -1510,12 +1531,16 @@ def promotion_review_report(
     Legacy counterfactual data never feeds this report — promotion is earned
     only by current-build executions.
     """
-    st = _load_state()
+    st = st if isinstance(st, dict) else _load_state()
     outcomes = st.get("outcomes") or {}
     states = st.get("cell_states") or {}
-    attempts_map = st.get("submissions") or {}
-    router_att = st.get("router_attempts") or {}
-    router_rej = st.get("router_rejects") or {}
+    # Review evidence is build-scoped, not day-scoped — daily counters reset
+    # every UTC day and can never reach the review attempt threshold under
+    # the per-cell daily submission cap.  Fall back to the daily maps so a
+    # state file written before cumulative counters existed still reports.
+    attempts_map = st.get("submissions_total") or st.get("submissions") or {}
+    router_att = st.get("router_attempts_total") or st.get("router_attempts") or {}
+    router_rej = st.get("router_rejects_total") or st.get("router_rejects") or {}
     cells: List[Dict[str, Any]] = []
     for cell in PROVISIONAL_CELLS:
         if asset and cell.asset != str(asset).upper():
@@ -1544,7 +1569,10 @@ def promotion_review_report(
             attempts >= review_min_attempts()
             and len(outs) >= review_min_fills()
             and state != CELL_STATE_SUSPENDED
-            and (not pnls or (sum(pnls) / len(pnls)) >= 0.0)
+            # Realized PnL evidence must exist for the minimum fill count —
+            # "no negative PnL observed" is not the same as "PnL observed".
+            and len(pnls) >= review_min_fills()
+            and (sum(pnls) / len(pnls)) >= 0.0
             and (not m5s or statistics.median(m5s) >= 0.0)
             and (att == 0 or reject_rate <= _suspend_reject_rate())
             and breaches == 0
@@ -1577,3 +1605,91 @@ def promotion_review_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cells": cells,
     }
+
+
+def _maybe_emit_promotion_review(
+    cell_id: Optional[str],
+    st: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Generate the build-specific touchability/markout review once per
+    (build, cell) when both review thresholds are first met — attempts AND
+    settled fills.  The report is the promotion instrument: it is emitted
+    whether or not the cell is ``promotion_ready`` so a failing cell still
+    produces a reviewable artifact.  Promotion itself stays an explicit act —
+    nothing here widens caps or mutates the registry.
+
+    Callers pass their already-loaded ``st`` so this never re-loads state
+    with a different ``now`` — a fresh ``_load_state()`` could trip the
+    UTC-day rollover and wipe the very daily counters the caller just wrote.
+    """
+    if not cell_id:
+        return
+    try:
+        st = st if isinstance(st, dict) else _load_state()
+        attempts = int(
+            (st.get("submissions_total") or {}).get(cell_id)
+            or (st.get("submissions") or {}).get(cell_id) or 0
+        )
+        outs = (st.get("outcomes") or {}).get(cell_id) or []
+        n_fills = sum(
+            1 for o in outs if o.get("kind") in ("fill", "settled")
+        )
+        # Require realized PnL on the minimum fill count — a fill whose
+        # settlement join never landed is incomplete evidence, not a pass.
+        n_settled = sum(1 for o in outs if o.get("kind") == "settled")
+        if (
+            attempts < review_min_attempts()
+            or n_fills < review_min_fills()
+            or n_settled < review_min_fills()
+        ):
+            return
+        reported = st.setdefault("review_reported", {})
+        dedupe_key = f"{current_build_sha()}:{cell_id}"
+        if dedupe_key in reported:
+            return
+        reported[dedupe_key] = time.time()
+        _save_state()
+
+        cell = _CBP_BY_ID.get(cell_id)
+        rep = promotion_review_report(
+            asset=cell.asset if cell else None,
+            side=cell.side if cell else None,
+            st=st,
+        )
+        row = next(
+            (c for c in rep.get("cells") or [] if c.get("cell_id") == cell_id),
+            None,
+        )
+        ready = bool(row and row.get("promotion_ready"))
+        record_cb_evidence(
+            "promotion_review",
+            provisional_cell_id=cell_id,
+            promotion_ready=ready,
+            report=rep,
+        )
+        try:
+            rpath = os.path.join(
+                evidence_dir(), f"promotion_review_{cell_id}.json"
+            )
+            os.makedirs(os.path.dirname(rpath) or ".", exist_ok=True)
+            with open(rpath, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(rep, indent=2, default=str))
+        except Exception as exc:
+            logger.debug("[CBP-REVIEW] report persist failed: %s", exc)
+        emit_provisional_lifecycle(
+            "promotion_review",
+            provisional_cell_id=cell_id,
+            promotion_ready=ready,
+            attempts=attempts,
+            fills=n_fills,
+        )
+        logger.info(
+            "[CBP-REVIEW] cell=%s promotion_ready=%s attempts=%d fills=%d "
+            "report=%s",
+            cell_id, ready, attempts, n_fills, rpath,
+        )
+    except Exception:
+        logger.debug(
+            "[CBP-REVIEW] report generation failed for %s",
+            cell_id, exc_info=True,
+        )

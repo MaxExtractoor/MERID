@@ -317,6 +317,17 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "exclusion_reason", "TEXT")
         _add_column(conn, "strategy_decisions", "shadow_cohort_json", "TEXT")
 
+        # Current-build evidence provenance: the audit DB must segment fills
+        # by admitting lane and build without re-deriving from logs — the
+        # provisional lane's evidence is never merged with legacy rows.
+        _add_column(conn, "strategy_decisions", "admission_lane", "TEXT")
+        _add_column(conn, "strategy_decisions", "admission_owner", "TEXT")
+        _add_column(conn, "strategy_decisions", "provisional_cell_id", "TEXT")
+        _add_column(conn, "strategy_decisions", "build_sha", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "admission_owner", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "threshold_source", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "legacy_risk_label", "TEXT")
+
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_environment "
@@ -947,6 +958,12 @@ class DecisionAuditLedger:
             "yes",
         ):
             return
+        # Hermetic-test guard (same convention as _load_live_evidence in
+        # trade_decision): under pytest a test-scoped ledger must never
+        # rewrite the production evidence artifact — only an explicit
+        # MERID_LIVE_EVIDENCE_PATH redirect may write during tests.
+        if "MERID_LIVE_EVIDENCE_PATH" not in os.environ and _is_test_context():
+            return
         now = time.time()
         refresh_s = float(os.environ.get("MERID_LIVE_EVIDENCE_REFRESH_S", "120"))
         if now - self._last_evidence_refresh < refresh_s:
@@ -975,6 +992,7 @@ class DecisionAuditLedger:
                       AND o.settled_at >= ?
                       AND d.decision = 'ENTER'
                       AND d.selected_side IN ('yes', 'no')
+                      AND d.is_eligible_for_research = 1
                     """,
                     (now - window_hours * 3600.0,),
                 ).fetchall()
@@ -1468,6 +1486,9 @@ class DecisionAuditLedger:
             shadow_cohort = (indicators or {}).get("shadow_cohort")
             shadow_cohort_json = json.dumps(shadow_cohort, default=str) if shadow_cohort is not None else None
 
+            _sel_for_owner = str(
+                getattr(decision, "selected_outcome", "") or ""
+            ).lower()
             conn.execute(
                 """
                 INSERT INTO strategy_decisions (
@@ -1477,8 +1498,9 @@ class DecisionAuditLedger:
                     close_ts, close_ts_iso, seconds_to_close, strike, settlement_reference,
                     settlement_rule_version, selected_side, decision, primary_reason_code,
                     reason_codes, record_environment, record_source, is_eligible_for_research,
-                    exclusion_reason, shadow_cohort_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    exclusion_reason, shadow_cohort_json, created_at,
+                    admission_lane, admission_owner, provisional_cell_id, build_sha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1510,6 +1532,10 @@ class DecisionAuditLedger:
                     exclusion_reason,
                     shadow_cohort_json,
                     time.time(),
+                    indicators.get("decision_lane"),
+                    indicators.get(f"{_sel_for_owner}_admission_owner"),
+                    indicators.get("provisional_cell_id"),
+                    getattr(decision, "build_sha", None),
                 ),
             )
 
@@ -1606,8 +1632,9 @@ class DecisionAuditLedger:
                         gross_edge_cents, entry_fee_cents, exit_or_settlement_fee_cents,
                         adverse_selection_haircut_cents, model_uncertainty_haircut_cents,
                         expected_net_ev_cents, lower_confidence_bound_ev_cents,
-                        required_edge_cents, passed_edge_gate
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        required_edge_cents, passed_edge_gate,
+                        admission_owner, threshold_source, legacy_risk_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -1635,6 +1662,9 @@ class DecisionAuditLedger:
                         side_row["lower_confidence_bound_ev_cents"],
                         side_row["required_edge_cents"],
                         1 if side_row["passed_edge_gate"] else 0,
+                        side_row.get("admission_owner"),
+                        side_row.get("threshold_source"),
+                        side_row.get("legacy_risk_label"),
                     ),
                 )
 
@@ -1861,6 +1891,9 @@ def _build_side_ev_row(
         "lower_confidence_bound_ev_cents": lcb,
         "required_edge_cents": required_edge_cents,
         "passed_edge_gate": bool(passed_edge),
+        "admission_owner": indicators.get(f"{side}_admission_owner"),
+        "threshold_source": indicators.get(f"{side}_threshold_source"),
+        "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
     }
 
 
@@ -1954,6 +1987,9 @@ def _legacy_side_ev_row(
         "lower_confidence_bound_ev_cents": lcb,
         "required_edge_cents": required_edge_cents,
         "passed_edge_gate": passed_edge,
+        "admission_owner": indicators.get(f"{side}_admission_owner"),
+        "threshold_source": indicators.get(f"{side}_threshold_source"),
+        "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
     }
 
 

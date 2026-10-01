@@ -529,6 +529,70 @@ def test_promotion_review_report():
     assert rep["build_sha"] and rep["policy_version"] == "cbp_v1"
 
 
+def test_promotion_review_fires_once_at_thresholds(tmp_path):
+    """The review report is build-scoped evidence: daily submission counters
+    reset each UTC day, but attempts accumulate in submissions_total so the
+    10-attempt review threshold is reachable despite the 5/day per-cell cap.
+    The report is emitted exactly once per (build, cell)."""
+    import time as _time
+    c = _prov_cell(side="yes", px=45.0)
+    today = _time.time()
+    for _ in range(5):
+        cbp.record_provisional_submission(cell_id=c.cell_id, now=today)
+    for i in range(3):
+        cbp.record_provisional_fill(
+            c.cell_id, decision_id=f"d{i}",
+            fill_ev_cents=2.0, candidate_ev_cents=3.0,
+            fill_price_cents=44.0, limit_price_cents=45.0,
+        )
+        cbp.record_provisional_markout(c.cell_id, f"d{i}", 5, 0.5)
+        cbp.record_provisional_settlement(f"d{i}", net_pnl_cents=2.0)
+    # Day rollover: daily counters reset; cumulative evidence must persist.
+    tomorrow = today + 86400
+    for _ in range(5):
+        cbp.record_provisional_submission(cell_id=c.cell_id, now=tomorrow)
+    st = cbp._load_state(now=tomorrow)
+    assert st["submissions"].get(c.cell_id) == 5        # daily scope
+    assert st["submissions_total"].get(c.cell_id) == 10  # cumulative scope
+    reports = list((tmp_path / "cbp_ev").rglob("promotion_review_*.json"))
+    assert len(reports) == 1
+    rep = json.loads(reports[0].read_text())
+    row = next(r for r in rep["cells"] if r["cell_id"] == c.cell_id)
+    assert row["promotion_ready"] is True
+    assert row["attempts"] == 10 and row["fills"] == 3
+    assert f"{cbp.current_build_sha()}:{c.cell_id}" in st["review_reported"]
+    # Dedupe: later activity on the same build does not re-emit.
+    cbp.record_provisional_submission(cell_id=c.cell_id, now=tomorrow)
+    cbp.record_provisional_settlement(
+        "d_extra", net_pnl_cents=1.0, cell_id=c.cell_id,
+    )
+    reports = list((tmp_path / "cbp_ev").rglob("promotion_review_*.json"))
+    assert len(reports) == 1
+
+
+def test_promotion_review_waits_for_settled_fills(tmp_path):
+    """Fills without a settlement join are incomplete evidence — the report
+    must not fire until review_min_fills carries realized PnL."""
+    import time as _time
+    c = _prov_cell(side="yes", px=45.0)
+    now = _time.time()
+    for _ in range(10):
+        cbp.record_provisional_submission(cell_id=c.cell_id, now=now)
+    for i in range(3):
+        cbp.record_provisional_fill(
+            c.cell_id, decision_id=f"d{i}",
+            fill_ev_cents=2.0, candidate_ev_cents=3.0,
+            fill_price_cents=44.0, limit_price_cents=45.0,
+        )
+    cbp.record_provisional_settlement("d0", net_pnl_cents=2.0)
+    cbp.record_provisional_settlement("d1", net_pnl_cents=2.0)
+    # 10 attempts + 3 fills but only 2 settled -> no report yet.
+    assert not list((tmp_path / "cbp_ev").rglob("promotion_review_*.json"))
+    cbp.record_provisional_settlement("d2", net_pnl_cents=2.0)
+    reports = list((tmp_path / "cbp_ev").rglob("promotion_review_*.json"))
+    assert len(reports) == 1
+
+
 # ---------------------------------------------------------------------------
 # Decision-level integration
 # ---------------------------------------------------------------------------

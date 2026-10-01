@@ -420,3 +420,53 @@ def test_snapshot_book_age_uses_wall_clock(tmp_db: Path) -> None:
         ).fetchone()
         # ~200ms, not the multi-second garbage produced by mixing clocks.
         assert snap[0] is not None and 0 <= snap[0] < 5000
+
+
+def test_lane_provenance_columns(tmp_db: Path) -> None:
+    """admission_lane / admission_owner / provisional_cell_id / build_sha must
+    persist on the decision row, and per-side owner/threshold/legacy-label on
+    side_ev rows, so current-build fills are queryable apart from legacy
+    counterfactual evidence."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("")
+    dec.no_trade_reason = None
+    dec.selected_outcome = "no"
+    dec.selected_action = "buy"
+    dec.selected_outcome_price = Decimal("0.27")
+    dec.build_sha = "abc123def456"
+    dec.indicators.update({
+        "decision_lane": "current_build_provisional",
+        "provisional_cell_id": "cbp_btc_no_20_30_t120_300",
+        "no_admission_owner": "current_build_provisional",
+        "no_threshold_source": "current_build_provisional",
+        "no_legacy_risk_label": "MATCHING_TOXIC_CELL",
+        "yes_admission_owner": "formula",
+        "yes_threshold_source": "formula",
+    })
+    ledger.record_trade_decision(dec)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT admission_lane, admission_owner, provisional_cell_id, "
+            "build_sha FROM strategy_decisions WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row["admission_lane"] == "current_build_provisional"
+        assert row["admission_owner"] == "current_build_provisional"
+        assert row["provisional_cell_id"] == "cbp_btc_no_20_30_t120_300"
+        assert row["build_sha"] == "abc123def456"
+
+        side_rows = conn.execute(
+            "SELECT side, admission_owner, threshold_source, legacy_risk_label "
+            "FROM strategy_decision_side_ev WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchall()
+        yes = [r for r in side_rows if r["side"] == "yes"][0]
+        no = [r for r in side_rows if r["side"] == "no"][0]
+        assert no["admission_owner"] == "current_build_provisional"
+        assert no["threshold_source"] == "current_build_provisional"
+        assert no["legacy_risk_label"] == "MATCHING_TOXIC_CELL"
+        assert yes["admission_owner"] == "formula"
+        assert yes["legacy_risk_label"] is None
