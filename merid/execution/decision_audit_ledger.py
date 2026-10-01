@@ -12,6 +12,7 @@ live trading path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -243,6 +244,56 @@ CREATE INDEX IF NOT EXISTS idx_heartbeats_tick ON decision_audit_heartbeats(tick
 _CANONICAL_MIN_CENTS = 10
 _CANONICAL_MAX_CENTS = 95
 
+# ── Lifecycle events ───────────────────────────────────────────────────────
+#
+# ``strategy_decision_events`` is the append-only state-transition truth for the
+# candidate lifecycle.  ``strategy_decisions.primary_reason_code`` remains the
+# first decision-stage outcome and is never overwritten by downstream events.
+#
+# Event types (stable semantic names):
+DECISION_EVENT_CANDIDATE_OBSERVED = "CANDIDATE_OBSERVED"
+DECISION_EVENT_PRE_DECISION_REJECTED = "PRE_DECISION_REJECTED"
+DECISION_EVENT_MODEL_REJECTED = "MODEL_REJECTED"
+DECISION_EVENT_MODEL_SELECTED = "MODEL_SELECTED"
+DECISION_EVENT_ALLOCATION_REJECTED = "ALLOCATION_REJECTED"
+DECISION_EVENT_RISK_REJECTED = "RISK_REJECTED"
+DECISION_EVENT_COOLDOWN_REJECTED = "COOLDOWN_REJECTED"
+DECISION_EVENT_ROUTER_REJECTED = "ROUTER_REJECTED"
+DECISION_EVENT_ORDER_SUBMITTED = "ORDER_SUBMITTED"
+DECISION_EVENT_ORDER_FILLED = "ORDER_FILLED"
+DECISION_EVENT_SETTLEMENT_RESOLVED = "SETTLEMENT_RESOLVED"
+DECISION_EVENT_OUTCOME_UNRESOLVED = "OUTCOME_UNRESOLVED"
+DECISION_EVENT_INSTRUMENTATION_GAP = "INSTRUMENTATION_GAP"
+
+# Lifecycle stages.
+DECISION_STAGE_DISCOVERY = "DISCOVERY"
+DECISION_STAGE_PRE_DECISION = "PRE_DECISION"
+DECISION_STAGE_MODEL = "MODEL"
+DECISION_STAGE_ALLOCATION = "ALLOCATION"
+DECISION_STAGE_RISK = "RISK"
+DECISION_STAGE_COOLDOWN = "COOLDOWN"
+DECISION_STAGE_ROUTER = "ROUTER"
+DECISION_STAGE_EXECUTION = "EXECUTION"
+DECISION_STAGE_SETTLEMENT = "SETTLEMENT"
+DECISION_STAGE_OUTCOME = "OUTCOME"
+
+DECISION_EVENT_SCHEMA_VERSION = 1
+
+# Counterfactual model version tags persisted per side-EV row so the hourly
+# report can restate P&L under a different assumption set without ambiguity.
+COUNTERFACTUAL_FEE_MODEL_VERSION = "kalshi_contract_fee_v1"
+COUNTERFACTUAL_SLIPPAGE_MODEL_VERSION = "decision_time_quote_v1"
+COUNTERFACTUAL_FILL_MODEL_VERSION = "top_of_book_depth_cap_v1"
+
+# Executability classifications for counterfactual P&L rows.
+CF_FULLY_EXECUTABLE = "FULLY_EXECUTABLE"
+CF_PARTIALLY_EXECUTABLE = "PARTIALLY_EXECUTABLE"
+CF_NOT_EXECUTABLE_NO_DEPTH = "NOT_EXECUTABLE_NO_DEPTH"
+CF_NOT_EXECUTABLE_STALE_BOOK = "NOT_EXECUTABLE_STALE_BOOK"
+CF_NOT_EXECUTABLE_NO_PRICE = "NOT_EXECUTABLE_NO_PRICE"
+CF_UNKNOWN_EXECUTABILITY = "UNKNOWN_EXECUTABILITY"
+CF_NOT_APPLICABLE = "NOT_APPLICABLE"
+
 
 @dataclass(frozen=True)
 class DecisionAuditClassification:
@@ -361,6 +412,80 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decision_snapshots", "ws_rest_ask_diff_ticks", "INTEGER")
         _add_column(conn, "strategy_decision_snapshots", "ws_parity_healthy", "INTEGER")
         _add_column(conn, "strategy_decision_snapshots", "rest_age_ms", "INTEGER")
+
+        # ── Lifecycle event attribution (append-only) ────────────────────
+        # The decision row records the *first* decision-stage outcome; every
+        # later state transition (allocator/risk/cooldown/router rejection,
+        # submission, fill, settlement resolution) is a separate immutable
+        # event so reporting can distinguish e.g. "model selected but the
+        # allocator blocked it" from "the model rejected it".
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_decision_events (
+                event_id TEXT PRIMARY KEY,
+                decision_id TEXT NOT NULL,
+                candidate_id TEXT,
+                event_ts_utc TEXT NOT NULL,
+                event_ts REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                reason_code TEXT,
+                reason_detail_json TEXT NOT NULL DEFAULT '{}',
+                trace_id TEXT,
+                run_id TEXT,
+                ticker TEXT,
+                asset TEXT,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                created_at_utc TEXT NOT NULL,
+                UNIQUE(decision_id, event_type, stage, event_ts_utc)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sde_decision_ts
+                ON strategy_decision_events(decision_id, event_ts_utc);
+            CREATE INDEX IF NOT EXISTS idx_sde_run_type
+                ON strategy_decision_events(run_id, event_type);
+            CREATE INDEX IF NOT EXISTS idx_sde_reason
+                ON strategy_decision_events(reason_code);
+            CREATE INDEX IF NOT EXISTS idx_sde_candidate
+                ON strategy_decision_events(candidate_id);
+            """
+        )
+
+        # Stable candidate/decision identity + complete gate-vector evidence.
+        # ``candidate_id`` groups every evaluation attempt (taker/maker/shadow)
+        # of one market observation; ``decision_id`` remains per-pass
+        # (``<candidate_id>:<route>`` for instrumented writers).
+        _add_column(conn, "strategy_decisions", "candidate_id", "TEXT")
+        _add_column(conn, "strategy_decisions", "run_id", "TEXT")
+        _add_column(conn, "strategy_decisions", "gate_results_json", "TEXT NOT NULL DEFAULT '{}'")
+        _add_column(conn, "strategy_decisions", "all_failed_gates_json", "TEXT NOT NULL DEFAULT '[]'")
+        _add_column(conn, "strategy_decisions", "gate_evaluation_schema_version", "INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sd_candidate_id "
+            "ON strategy_decisions(candidate_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sd_run_id "
+            "ON strategy_decisions(run_id, decision_ts)"
+        )
+
+        # Counterfactual executability: requested vs visible top-of-book depth,
+        # fill ratio, and the versioned fill/fee/slippage assumptions used so a
+        # rejected candidate is never silently treated as a full fill.
+        _add_column(conn, "strategy_decision_side_ev", "requested_contracts", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "top_of_book_executable_contracts", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_assumed_filled_contracts", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_fill_ratio", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_full_fill_possible", "INTEGER")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_execution_status", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_entry_source", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_fee_model_version", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_slippage_model_version", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "counterfactual_fill_model_version", "TEXT")
+
+        # Terminal failure bookkeeping for outcomes that never resolve.
+        _add_column(conn, "strategy_decision_outcomes", "unresolved_reason", "TEXT")
+        _add_column(conn, "strategy_decision_outcomes", "unresolved_at", "REAL")
 
         # One-time data backfills for rows written before the columns above
         # existed.  On the production DB (hundreds of MB) the selected=1
@@ -562,6 +687,11 @@ class DecisionAuditLedger:
         spot_price: Optional[float] = None,
         strike_price: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
+        decision_id: Optional[str] = None,
+        candidate_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        event_type: str = DECISION_EVENT_PRE_DECISION_REJECTED,
+        event_stage: str = DECISION_STAGE_PRE_DECISION,
     ) -> bool:
         """Persist a rejection that occurs before a TradeDecision is created.
 
@@ -584,7 +714,13 @@ class DecisionAuditLedger:
         self._ensure_db()
         start = time.perf_counter()
         try:
-            decision_id = f"{run_id}_{ticker}_{uuid.uuid4().hex[:8]}"
+            if not decision_id:
+                if candidate_id:
+                    decision_id = f"{candidate_id}:pre"
+                else:
+                    decision_id = f"{run_id}_{ticker}_{uuid.uuid4().hex[:8]}"
+            if not candidate_id:
+                candidate_id = _candidate_id_from_decision_id(decision_id)
             classification = _classify_no_trade_reason(reason)
             now = time.time()
             now_dt = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -607,6 +743,22 @@ class DecisionAuditLedger:
             is_eligible_for_research = 0 if test_context else 1
             exclusion_reason = reason
 
+            # Minimal gate vector for pre-decision rows: the evaluation never
+            # reached the model, so a single pre-decision gate records the
+            # failure and downstream gates are honestly "not_evaluated".
+            _pre_gate_results = {
+                "pre_decision_pipeline": {
+                    "gate_name": "pre_decision_pipeline",
+                    "gate_code": classification.primary_reason_code,
+                    "stage": DECISION_STAGE_PRE_DECISION,
+                    "passed": False,
+                    "observed": {"raw_reason": reason},
+                    "threshold": {},
+                    "blocking_in_live_path": True,
+                }
+            }
+            _pre_failed = ["pre_decision_pipeline"]
+
             with self._lock, self._conn() as conn:
                 # Atomic bundle for pre-decision rejections: decision + snapshot + pending outcome.
                 conn.execute("BEGIN IMMEDIATE")
@@ -619,8 +771,10 @@ class DecisionAuditLedger:
                         close_ts, close_ts_iso, seconds_to_close, strike, settlement_reference,
                         settlement_rule_version, selected_side, decision, primary_reason_code,
                         reason_codes, record_environment, record_source, is_eligible_for_research,
-                        exclusion_reason, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        exclusion_reason, created_at,
+                        candidate_id, run_id, gate_results_json, all_failed_gates_json,
+                        gate_evaluation_schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -651,6 +805,11 @@ class DecisionAuditLedger:
                         is_eligible_for_research,
                         exclusion_reason,
                         now,
+                        candidate_id,
+                        run_id,
+                        json.dumps(_pre_gate_results),
+                        json.dumps(_pre_failed),
+                        1,
                     ),
                 )
                 conn.execute(
@@ -703,6 +862,24 @@ class DecisionAuditLedger:
                     "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
                     (decision_id,),
                 )
+                self._append_decision_event_locked(
+                    conn,
+                    decision_id=decision_id,
+                    candidate_id=candidate_id,
+                    event_type=event_type,
+                    stage=event_stage,
+                    event_ts=now,
+                    reason_code=classification.primary_reason_code,
+                    reason_detail={
+                        "raw_reason": reason,
+                        "cycle_id": cycle_id,
+                        **(dict(extra) if extra else {}),
+                    },
+                    trace_id=trace_id or candidate_id,
+                    run_id=run_id,
+                    ticker=ticker,
+                    asset=asset,
+                )
             latency_ms = (time.perf_counter() - start) * 1000.0
             self._bump_cycle_stats(
                 cycle_id,
@@ -730,6 +907,223 @@ class DecisionAuditLedger:
                 exc,
             )
             return False
+
+    # ── Lifecycle event API ──────────────────────────────────────────────
+
+    @staticmethod
+    def _event_id(
+        decision_id: str,
+        event_type: str,
+        stage: str,
+        reason_code: Optional[str],
+        event_ts: float,
+        seq: int = 0,
+    ) -> str:
+        """Deterministic idempotency key for a lifecycle event.
+
+        Built from the stable identity fields so a replay/retried delivery
+        collapses onto the same row instead of double-counting.
+        """
+        material = "|".join(
+            [
+                str(decision_id),
+                str(event_type),
+                str(stage),
+                str(reason_code or ""),
+                f"{float(event_ts):.3f}",
+                str(int(seq)),
+            ]
+        )
+        return "evt_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+    def _append_decision_event_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        decision_id: str,
+        event_type: str,
+        stage: str,
+        event_ts: Optional[float] = None,
+        reason_code: Optional[str] = None,
+        reason_detail: Optional[Mapping[str, Any]] = None,
+        trace_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        ticker: Optional[str] = None,
+        asset: Optional[str] = None,
+        candidate_id: Optional[str] = None,
+        seq: int = 0,
+    ) -> Optional[str]:
+        """Insert one lifecycle event inside the caller's transaction.
+
+        Idempotent: a duplicate (same deterministic ``event_id`` or the same
+        ``decision_id/event_type/stage/event_ts_utc`` tuple) is ignored.
+        Returns the event_id, or None when the insert was deduplicated/failed.
+        """
+        try:
+            ts = float(event_ts) if event_ts is not None else time.time()
+            now_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            event_id = self._event_id(
+                decision_id, event_type, stage, reason_code, ts, seq
+            )
+            if candidate_id is None:
+                candidate_id = _candidate_id_from_decision_id(decision_id)
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO strategy_decision_events (
+                    event_id, decision_id, candidate_id, event_ts_utc, event_ts,
+                    event_type, stage, reason_code, reason_detail_json,
+                    trace_id, run_id, ticker, asset, schema_version,
+                    created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    str(decision_id),
+                    candidate_id,
+                    now_dt.isoformat(),
+                    ts,
+                    str(event_type),
+                    str(stage),
+                    reason_code,
+                    json.dumps(dict(reason_detail or {}), default=str),
+                    trace_id,
+                    run_id,
+                    ticker,
+                    asset,
+                    DECISION_EVENT_SCHEMA_VERSION,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            return event_id if cur.rowcount > 0 else None
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] event append failed for %s/%s: %s",
+                decision_id,
+                event_type,
+                exc,
+            )
+            return None
+
+    def append_decision_event(
+        self,
+        *,
+        decision_id: str,
+        event_type: str,
+        stage: str,
+        event_ts_utc: Optional[Any] = None,
+        reason_code: Optional[str] = None,
+        reason_detail: Optional[Mapping[str, Any]] = None,
+        trace_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        ticker: Optional[str] = None,
+        asset: Optional[str] = None,
+        candidate_id: Optional[str] = None,
+        seq: int = 0,
+    ) -> Optional[str]:
+        """Append one immutable lifecycle event for ``decision_id``.
+
+        ``event_ts_utc`` may be a float epoch, a datetime, or None (now).
+        Fail-open: errors are logged, never raised; returns the event_id or
+        None on failure/dedup.
+        """
+        if not _is_enabled() or not decision_id:
+            return None
+        self._ensure_db()
+        try:
+            if isinstance(event_ts_utc, datetime):
+                ts = event_ts_utc.timestamp()
+            elif event_ts_utc is None:
+                ts = time.time()
+            else:
+                ts = float(event_ts_utc)
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                return self._append_decision_event_locked(
+                    conn,
+                    decision_id=decision_id,
+                    event_type=event_type,
+                    stage=stage,
+                    event_ts=ts,
+                    reason_code=reason_code,
+                    reason_detail=reason_detail,
+                    trace_id=trace_id,
+                    run_id=run_id,
+                    ticker=ticker,
+                    asset=asset,
+                    candidate_id=candidate_id,
+                    seq=seq,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] append_decision_event failed for %s/%s: %s",
+                decision_id,
+                event_type,
+                exc,
+            )
+            return None
+
+    def mark_outcome_unresolved(
+        self,
+        ticker: str,
+        close_ts: float,
+        *,
+        reason: str = "settlement_unresolved_after_grace",
+    ) -> int:
+        """Mark still-PENDING outcomes for ``ticker`` as terminally UNRESOLVED.
+
+        Called by the settlement sweep after its retry budget is exhausted
+        (market never produced a definitive exchange result).  Emits one
+        ``OUTCOME_UNRESOLVED`` event per affected decision.  Returns the number
+        of outcomes transitioned.
+        """
+        if not _is_enabled():
+            return 0
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    """
+                    SELECT d.decision_id, d.asset, d.run_id
+                    FROM strategy_decisions d
+                    JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
+                    WHERE d.ticker = ?
+                      AND o.outcome_status = 'PENDING'
+                      AND ABS(d.close_ts - ?) <= 900.0
+                    """,
+                    (ticker, close_ts),
+                ).fetchall()
+                now = time.time()
+                for row in rows:
+                    conn.execute(
+                        """
+                        UPDATE strategy_decision_outcomes
+                        SET outcome_status = 'UNRESOLVED',
+                            unresolved_reason = ?,
+                            unresolved_at = ?
+                        WHERE decision_id = ?
+                        """,
+                        (reason, now, row["decision_id"]),
+                    )
+                    self._append_decision_event_locked(
+                        conn,
+                        decision_id=row["decision_id"],
+                        event_type=DECISION_EVENT_OUTCOME_UNRESOLVED,
+                        stage=DECISION_STAGE_OUTCOME,
+                        event_ts=now,
+                        reason_code=reason,
+                        run_id=row["run_id"],
+                        ticker=ticker,
+                        asset=row["asset"],
+                    )
+                return len(rows)
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] mark_outcome_unresolved failed for %s: %s",
+                ticker,
+                exc,
+            )
+            return 0
 
     def record_outcome(
         self,
@@ -776,6 +1170,33 @@ class DecisionAuditLedger:
                         decision_id,
                     ),
                 )
+                # Lifecycle checkpoints for the execution stage.  The caller
+                # supplies whichever fields it observed; events are dedup-safe
+                # so overlapping deliveries (submit response + fills ledger)
+                # collapse instead of double-counting.
+                if order_intent_id or exchange_order_id:
+                    self._append_decision_event_locked(
+                        conn,
+                        decision_id=decision_id,
+                        event_type=DECISION_EVENT_ORDER_SUBMITTED,
+                        stage=DECISION_STAGE_EXECUTION,
+                        reason_detail={
+                            "order_intent_id": order_intent_id,
+                            "exchange_order_id": exchange_order_id,
+                        },
+                    )
+                if fill_id or actual_fill_price_cents is not None:
+                    self._append_decision_event_locked(
+                        conn,
+                        decision_id=decision_id,
+                        event_type=DECISION_EVENT_ORDER_FILLED,
+                        stage=DECISION_STAGE_EXECUTION,
+                        reason_detail={
+                            "fill_id": fill_id,
+                            "actual_fill_price_cents": actual_fill_price_cents,
+                            "actual_entry_fee_cents": actual_entry_fee_cents,
+                        },
+                    )
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] record_outcome failed for %s: %s",
@@ -912,6 +1333,22 @@ class DecisionAuditLedger:
                 decision_id,
             ),
         )
+        if cur.rowcount > 0:
+            self._append_decision_event_locked(
+                conn,
+                decision_id=decision_id,
+                event_type=DECISION_EVENT_ORDER_FILLED,
+                stage=DECISION_STAGE_EXECUTION,
+                reason_detail={
+                    "fill_id": fill_id,
+                    "exchange_order_id": exchange_order_id,
+                    "execution_outcome_side": leg,
+                    "execution_action": action,
+                    "fill_price_selected_side_cents": fill_price_selected,
+                    "entry_fee_cents": entry_fee_cents,
+                    "source": "fills_ledger",
+                },
+            )
         return cur.rowcount > 0
 
     def _fills_db_path(self) -> Path:
@@ -1224,7 +1661,7 @@ class DecisionAuditLedger:
             with self._lock, self._conn() as conn:
                 rows = conn.execute(
                     """
-                    SELECT d.decision_id, d.close_ts
+                    SELECT d.decision_id, d.close_ts, d.asset, d.run_id, d.candidate_id
                     FROM strategy_decisions d
                     JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
                     WHERE d.ticker = ?
@@ -1250,9 +1687,22 @@ class DecisionAuditLedger:
                         exit_fee = srow["exit_or_settlement_fee_cents"] or 0.0
                         if entry_cents is None:
                             continue
+                        # Conservative fill assumption: only the quantity that
+                        # was actually visible at top-of-book at decision time
+                        # earns counterfactual P&L.  Rows written before the
+                        # executability columns existed keep the historical
+                        # one-contract convention (q=1.0).
+                        _srow_keys = set(srow.keys())
+                        q_assumed = (
+                            srow["counterfactual_assumed_filled_contracts"]
+                            if "counterfactual_assumed_filled_contracts" in _srow_keys
+                            else None
+                        )
+                        if q_assumed is None:
+                            q_assumed = 1.0
                         if side == "yes":
                             if settlement_value_cents is not None:
-                                yes_pnl = (
+                                yes_pnl = q_assumed * (
                                     settlement_value_cents
                                     - entry_cents
                                     - entry_fee
@@ -1260,7 +1710,7 @@ class DecisionAuditLedger:
                                 )
                         elif side == "no":
                             if settlement_value_cents is not None:
-                                no_pnl = (
+                                no_pnl = q_assumed * (
                                     (100 - settlement_value_cents)
                                     - entry_cents
                                     - entry_fee
@@ -1303,6 +1753,28 @@ class DecisionAuditLedger:
                         )
                     except Exception:
                         pass
+
+                    # Terminal lifecycle event: official exchange outcome joined
+                    # to this decision.  Emitted once per resolved decision;
+                    # duplicate settlement deliveries dedupe on event_id.
+                    self._append_decision_event_locked(
+                        conn,
+                        decision_id=decision_id,
+                        candidate_id=row["candidate_id"],
+                        event_type=DECISION_EVENT_SETTLEMENT_RESOLVED,
+                        stage=DECISION_STAGE_OUTCOME,
+                        event_ts=time.time(),
+                        reason_code="settled_yes" if settled_yes else "settled_no",
+                        reason_detail={
+                            "settled_yes": bool(settled_yes),
+                            "settlement_value_cents": settlement_value_cents,
+                            "counterfactual_yes_pnl_cents": yes_pnl,
+                            "counterfactual_no_pnl_cents": no_pnl,
+                        },
+                        run_id=row["run_id"],
+                        ticker=ticker,
+                        asset=row["asset"],
+                    )
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] record_settlement failed for %s: %s",
@@ -1734,6 +2206,44 @@ class DecisionAuditLedger:
         primary_reason = classification.primary_reason_code
         reason_codes = classification.reason_codes
 
+        # Stable identity: ``candidate_id`` groups all evaluation attempts of
+        # one market observation; instrumented writers mint decision_id as
+        # ``<candidate_id>:<route>`` (taker/maker/shadow).  Legacy ids pass
+        # through unchanged.
+        candidate_id = _candidate_id_from_decision_id(decision_id)
+        run_id = _safe_attr(decision, "run_id")
+
+        # Complete gate vector: pure projection of the already-evaluated
+        # decision evidence.  Read-only — never re-runs gates, never mutates
+        # live state; the live path still short-circuits on first failure.
+        gate_results_json = "{}"
+        all_failed_gates_json = "[]"
+        gate_eval_version = 0
+        _gate_eval_error: Optional[str] = None
+        try:
+            from merid.prediction.gate_evaluation import evaluate_all_gates
+
+            _gate_eval = evaluate_all_gates(
+                decision, market_state=market_state
+            )
+            if _gate_eval is not None:
+                gate_results_json = json.dumps(
+                    _gate_eval.gate_results_dict(), default=str
+                )
+                all_failed_gates_json = json.dumps(
+                    list(_gate_eval.all_failed_gates)
+                )
+                gate_eval_version = _gate_eval.evaluation_schema_version
+            else:
+                _gate_eval_error = "evaluate_all_gates returned None"
+        except Exception as exc:
+            _gate_eval_error = f"{type(exc).__name__}: {exc}"
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] gate evaluation failed for %s: %s",
+                decision_id,
+                exc,
+            )
+
         strategy_name = os.environ.get("MERID_PROFILE", "kalshi_crypto_15m_v2")
         strategy_version = getattr(decision, "policy_version", "trade_decision_v2")
         model_version = getattr(decision, "policy_version", "trade_decision_v2")
@@ -1881,8 +2391,10 @@ class DecisionAuditLedger:
                     reason_codes, record_environment, record_source, is_eligible_for_research,
                     exclusion_reason, shadow_cohort_json, created_at,
                     admission_lane, admission_owner, provisional_cell_id, build_sha,
-                    policy_epoch, dir_regime
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    policy_epoch, dir_regime,
+                    candidate_id, run_id, gate_results_json, all_failed_gates_json,
+                    gate_evaluation_schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1921,6 +2433,11 @@ class DecisionAuditLedger:
                     indicators.get("policy_epoch")
                     or _policy_epoch(),
                     indicators.get("dir_regime"),
+                    candidate_id,
+                    run_id,
+                    gate_results_json,
+                    all_failed_gates_json,
+                    gate_eval_version,
                 ),
             )
 
@@ -2018,8 +2535,15 @@ class DecisionAuditLedger:
                         adverse_selection_haircut_cents, model_uncertainty_haircut_cents,
                         expected_net_ev_cents, lower_confidence_bound_ev_cents,
                         required_edge_cents, passed_edge_gate,
-                        admission_owner, threshold_source, legacy_risk_label
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        admission_owner, threshold_source, legacy_risk_label,
+                        requested_contracts, top_of_book_executable_contracts,
+                        counterfactual_assumed_filled_contracts,
+                        counterfactual_fill_ratio, counterfactual_full_fill_possible,
+                        counterfactual_execution_status, counterfactual_entry_source,
+                        counterfactual_fee_model_version,
+                        counterfactual_slippage_model_version,
+                        counterfactual_fill_model_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -2050,6 +2574,16 @@ class DecisionAuditLedger:
                         side_row.get("admission_owner"),
                         side_row.get("threshold_source"),
                         side_row.get("legacy_risk_label"),
+                        side_row.get("requested_contracts"),
+                        side_row.get("top_of_book_executable_contracts"),
+                        side_row.get("counterfactual_assumed_filled_contracts"),
+                        side_row.get("counterfactual_fill_ratio"),
+                        side_row.get("counterfactual_full_fill_possible"),
+                        side_row.get("counterfactual_execution_status"),
+                        side_row.get("counterfactual_entry_source"),
+                        side_row.get("counterfactual_fee_model_version"),
+                        side_row.get("counterfactual_slippage_model_version"),
+                        side_row.get("counterfactual_fill_model_version"),
                     ),
                 )
 
@@ -2058,6 +2592,53 @@ class DecisionAuditLedger:
                 "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
                 (decision_id,),
             )
+
+            # First decision-stage lifecycle event: the model either emitted an
+            # executable candidate or ended NO_TRADE.  ``primary_reason_code``
+            # preserves this first-stage outcome; any later allocator/risk/
+            # router rejection is appended as a separate event, never written
+            # over this one.
+            self._append_decision_event_locked(
+                conn,
+                decision_id=decision_id,
+                candidate_id=candidate_id,
+                event_type=(
+                    DECISION_EVENT_MODEL_SELECTED
+                    if decision_type == "ENTER"
+                    else DECISION_EVENT_MODEL_REJECTED
+                ),
+                stage=DECISION_STAGE_MODEL,
+                event_ts=decision_ts,
+                reason_code=primary_reason,
+                reason_detail={
+                    "decision": decision_type,
+                    "reason_codes": list(reason_codes),
+                    "selected_side": selected_side,
+                    "route": _route_from_decision_id(decision_id),
+                },
+                trace_id=candidate_id,
+                run_id=run_id,
+                ticker=str(getattr(decision, "ticker", "")) or None,
+                asset=str(getattr(decision, "asset", "")) or None,
+            )
+
+            # The spec's invariant is "gate vector OR an explicit
+            # instrumentation-gap event" — never a silent {}.
+            if _gate_eval_error is not None:
+                self._append_decision_event_locked(
+                    conn,
+                    decision_id=decision_id,
+                    candidate_id=candidate_id,
+                    event_type=DECISION_EVENT_INSTRUMENTATION_GAP,
+                    stage=DECISION_STAGE_MODEL,
+                    event_ts=decision_ts,
+                    reason_code="gate_evaluation_unavailable",
+                    reason_detail={"error": _gate_eval_error},
+                    trace_id=candidate_id,
+                    run_id=run_id,
+                    ticker=str(getattr(decision, "ticker", "")) or None,
+                    asset=str(getattr(decision, "asset", "")) or None,
+                )
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────
@@ -2249,6 +2830,23 @@ def _build_side_ev_row(
             if _p_yes_raw is not None:
                 side_raw_probability = 1.0 - _p_yes_raw
 
+    # Counterfactual executability: the size the policy would have requested
+    # (approved_size_cc when present, else the canonical one-contract unit)
+    # versus what the recorded top-of-book could actually absorb.
+    _approved_cc = _to_float(getattr(decision, "approved_size_cc", None))
+    _requested_contracts = (
+        _approved_cc / 100.0
+        if _approved_cc is not None and _approved_cc > 0
+        else 1.0
+    )
+    _exec = _counterfactual_executability(
+        entry_price_cents=entry_price_cents,
+        depth_cc=depth_cc,
+        requested_contracts=_requested_contracts,
+        market_state=market_state,
+        side=side,
+    )
+
     return {
         "eligible_for_model": bool(eligible_for_model),
         "eligible_for_policy": bool(eligible_for_policy),
@@ -2279,6 +2877,7 @@ def _build_side_ev_row(
         "admission_owner": indicators.get(f"{side}_admission_owner"),
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
+        **_exec,
     }
 
 
@@ -2345,6 +2944,20 @@ def _legacy_side_ev_row(
             if _p_yes_raw is not None:
                 side_raw_probability = 1.0 - _p_yes_raw
 
+    _approved_cc = _to_float(getattr(decision, "approved_size_cc", None))
+    _requested_contracts = (
+        _approved_cc / 100.0
+        if _approved_cc is not None and _approved_cc > 0
+        else 1.0
+    )
+    _exec = _counterfactual_executability(
+        entry_price_cents=entry_price_cents,
+        depth_cc=depth_cc,
+        requested_contracts=_requested_contracts,
+        market_state=market_state,
+        side=side,
+    )
+
     return {
         "eligible_for_model": entry_price is not None,
         "eligible_for_policy": entry_price is not None and in_canonical,
@@ -2375,6 +2988,7 @@ def _legacy_side_ev_row(
         "admission_owner": indicators.get(f"{side}_admission_owner"),
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
+        **_exec,
     }
 
 
@@ -2506,6 +3120,107 @@ def _distance_to_strike(spot: Optional[float], strike: Optional[float]) -> Optio
         return (spot - strike) / strike
     except Exception:
         return None
+
+
+def _candidate_id_from_decision_id(decision_id: Optional[str]) -> Optional[str]:
+    """Recover the stable candidate identity from a decision id.
+
+    Instrumented writers mint ``decision_id = "<candidate_id>:<route>"`` where
+    route is the evaluation pass (``t``/``m``/``b``/``pre``).  Legacy ids have
+    no route suffix and are their own candidate id.
+    """
+    if not decision_id:
+        return None
+    s = str(decision_id)
+    if s.startswith("cand_") and ":" in s:
+        head = s.rsplit(":", 1)[0]
+        if head:
+            return head
+    return s
+
+
+def _route_from_decision_id(decision_id: Optional[str]) -> Optional[str]:
+    """Return the evaluation-route suffix of a decision id, if present."""
+    if not decision_id:
+        return None
+    s = str(decision_id)
+    if s.startswith("cand_") and ":" in s:
+        return s.rsplit(":", 1)[1] or None
+    return None
+
+
+def _counterfactual_executability(
+    *,
+    entry_price_cents: Optional[int],
+    depth_cc: float,
+    requested_contracts: float,
+    market_state: Optional[Any],
+    side: str,
+) -> Dict[str, Any]:
+    """Classify whether the recorded decision-time quote could actually fill.
+
+    Conservative rule: the counterfactual only earns P&L on the quantity that
+    was visibly resting at the executable top-of-book price at decision time.
+    ``depth_cc`` is in fixed-point units (100.0 == 1 contract).
+    """
+    available_contracts = max(0.0, float(depth_cc or 0.0) / 100.0)
+    ask_attr = "best_ask_cents" if side == "yes" else "best_no_ask_cents"
+    ask = (
+        _to_int(getattr(market_state, ask_attr, None))
+        if market_state is not None
+        else None
+    )
+    if side == "yes":
+        entry_source = "yes_ask" if ask else "no_bid_complement"
+    else:
+        entry_source = "no_ask" if ask else "yes_bid_complement"
+
+    # Book-quality evidence only exists when a market_state snapshot was
+    # attached at write time.  Absent snapshot != bad book: that is
+    # UNKNOWN_EXECUTABILITY, and the fill assumption still respects the
+    # recorded depth cap.  A *known-bad* book is the only stale-book marker.
+    book_known_bad = (
+        market_state is not None and not _book_is_executable(market_state)
+    )
+
+    if entry_price_cents is None:
+        status = CF_NOT_EXECUTABLE_NO_PRICE
+        assumed = 0.0
+    elif book_known_bad:
+        status = CF_NOT_EXECUTABLE_STALE_BOOK
+        assumed = 0.0
+    elif available_contracts <= 0.0:
+        status = CF_NOT_EXECUTABLE_NO_DEPTH
+        assumed = 0.0
+    else:
+        assumed = min(float(requested_contracts or 0.0), available_contracts)
+        if assumed <= 0.0:
+            status = CF_NOT_EXECUTABLE_NO_DEPTH
+        elif assumed >= float(requested_contracts or 0.0) - 1e-9:
+            # FULLY_EXECUTABLE requires a verified book; without a market-state
+            # snapshot the quantity fits but book trust is unknown.
+            status = (
+                CF_FULLY_EXECUTABLE
+                if market_state is not None
+                else CF_UNKNOWN_EXECUTABILITY
+            )
+        else:
+            status = CF_PARTIALLY_EXECUTABLE
+
+    requested = float(requested_contracts or 0.0)
+    fill_ratio = (assumed / requested) if requested > 0 else 0.0
+    return {
+        "requested_contracts": requested,
+        "top_of_book_executable_contracts": available_contracts,
+        "counterfactual_assumed_filled_contracts": assumed,
+        "counterfactual_fill_ratio": fill_ratio,
+        "counterfactual_full_fill_possible": 1 if assumed >= requested - 1e-9 and requested > 0 else 0,
+        "counterfactual_execution_status": status,
+        "counterfactual_entry_source": entry_source,
+        "counterfactual_fee_model_version": COUNTERFACTUAL_FEE_MODEL_VERSION,
+        "counterfactual_slippage_model_version": COUNTERFACTUAL_SLIPPAGE_MODEL_VERSION,
+        "counterfactual_fill_model_version": COUNTERFACTUAL_FILL_MODEL_VERSION,
+    }
 
 
 def _to_float(value: Any) -> Optional[float]:

@@ -6,6 +6,8 @@ from __future__ import annotations
 from datetime import datetime as dt, timezone, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
 
+import hashlib
+
 import json
 from pathlib import Path
 
@@ -8211,6 +8213,25 @@ class LeanAgent15m:
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
+        # Stable logical candidate identity: exactly one per
+        # (run, asset, contract, observation tick).  Every evaluation pass
+        # (taker / maker / shadow) of this observation shares it; the per-pass
+        # decision_id is "<candidate_id>:<route>" so the audit ledger can join
+        # attempts back to one candidate instead of double-counting them.
+        _obs_seq = tick if isinstance(tick, int) and tick > 0 else int(time.time() * 1000)
+        candidate_id = "cand_" + hashlib.sha256(
+            f"{run_id}|{asset}|{ticker}|{_obs_seq}".encode("utf-8")
+        ).hexdigest()[:24]
+        _pdr_ctx = getattr(self, "_pdr_ctx", None)
+        if isinstance(_pdr_ctx, dict):
+            _pdr_ctx.update({
+                "candidate_id": candidate_id,
+                "ticker": ticker,
+                "seconds_to_expiry": seconds_to_expiry,
+                "strike": float(strike),
+                "run_id": run_id,
+            })
+
         # Hybrid probability: fuse Bachelier fair value with the live
         # indicator/velocity stack so the decision engine uses the research
         # signals instead of discarding them.
@@ -8287,8 +8308,14 @@ class LeanAgent15m:
             fee: float,
             p_yes: Optional[float],
             shadow_bachelier_only: bool = False,
+            route: str = "t",
         ) -> TradeDecision:
-            """Call compute_trade_decision with a specific fee and optional hybrid p."""
+            """Call compute_trade_decision with a specific fee and optional hybrid p.
+
+            ``route`` is the evaluation-pass suffix of the deterministic
+            decision_id (taker/maker/shadow passes of one candidate share the
+            candidate_id prefix so the audit ledger groups them).
+            """
             indicators = {}
             if p_yes is not None:
                 indicators["p_yes_model"] = p_yes
@@ -8327,7 +8354,7 @@ class LeanAgent15m:
                 logger.debug("[REGIME] compute failed: %s", _dr_err)
             decision = compute_trade_decision(
                 run_id=run_id,
-                decision_id=f"{run_id}_{uuid.uuid4().hex[:8]}",
+                decision_id=f"{candidate_id}:{route}",
                 ticker=ticker,
                 asset=asset,
                 spot_price=bachelier_spot_price,
@@ -8401,7 +8428,7 @@ class LeanAgent15m:
                 asset, ticker, contract_spec.fee_type,
             )
 
-        decision_taker = _call_trade_decision(taker_fee_cents, p_yes_model)
+        decision_taker = _call_trade_decision(taker_fee_cents, p_yes_model, route="taker")
 
         taker_edge_threshold = _numeric_pref(
             os.environ.get(f"MERID_TAKER_EDGE_THRESHOLD_{asset.upper()}")
@@ -8434,7 +8461,7 @@ class LeanAgent15m:
             execution_mode = "taker"
             fee_cents = taker_fee_cents
         elif maker_entries_enabled and not is_late:
-            decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model)
+            decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model, route="maker")
             if decision_maker.selected_outcome is not None:
                 decision = decision_maker
                 liquidity_role = "maker"
@@ -8748,6 +8775,7 @@ class LeanAgent15m:
                         fee_cents,
                         p_yes_bachelier,
                         shadow_bachelier_only=True,
+                        route="bshadow",
                     )
             except Exception as bachelier_exc:
                 logger.warning("[HYBRID-P-YES-BACHELIER-SHADOW] asset=%s failed: %s", asset, bachelier_exc)
@@ -9131,6 +9159,7 @@ class LeanAgent15m:
             "ticker": getattr(market, "ticker", asset),
             "run_id": run_id,
             "decision_id": decision.decision_id,
+            "candidate_id": candidate_id,
             "asset": asset,
             "side": side,
             "action": action,
@@ -10178,6 +10207,214 @@ class LeanAgent15m:
         except Exception as _lws_err:
             logger.debug("[LATE-WINDOW-SHADOW] emit failed (non-fatal): %s", _lws_err)
 
+        # Canonical audit-ledger wiring.  Every signal-level rejection becomes
+        # either a PRE_DECISION_REJECTED row+event (no TradeDecision existed)
+        # or a post-model stage-veto event on the existing decision row
+        # (context["decision_id"] set by callers that pass a decision).
+        # Fail-open: audit failures must never alter the trading path.
+        try:
+            self._audit_signal_rejection(reason, context)
+        except Exception as _audit_err:
+            logger.debug("[DECISION-AUDIT] signal-rejection audit failed (non-fatal): %s", _audit_err)
+
+    def _candidate_identity(
+        self, asset: str, ticker: Optional[str], tick: Any
+    ) -> Tuple[str, str]:
+        """Deterministic (run_id, candidate_id) for this market observation.
+
+        One candidate_id per (run, asset, contract, observation tick); every
+        evaluation pass shares it.  ``tick`` is the cycle counter supplied by
+        run_cycle (the observation sequence).
+        """
+        run_id = getattr(self, "run_id", None)
+        if not run_id:
+            run_id = getattr(self, "_fallback_run_id", None)
+            if not run_id:
+                run_id = f"{self.config.name}_{int(time.time())}"
+                self._fallback_run_id = run_id
+        obs_seq = tick if isinstance(tick, int) and tick > 0 else int(time.time() * 1000)
+        candidate_id = "cand_" + hashlib.sha256(
+            f"{run_id}|{asset}|{ticker or 'na'}|{obs_seq}".encode("utf-8")
+        ).hexdigest()[:24]
+        return run_id, candidate_id
+
+    def _resolve_current_contract_fallback(
+        self, asset: str
+    ) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+        """Best-effort (ticker, seconds_to_expiry, strike) for the current 15m
+        contract — used when a rejection fires before the pipeline resolved a
+        market.  Read-only; never raises."""
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+            cat = get_market_catalog()
+            cur = cat.get_current_15m_market(asset.upper()) if cat else None
+            if cur is None:
+                return None, None, None
+            ticker = getattr(getattr(cur, "market", None), "market_id", None)
+            mte = getattr(cur, "minutes_to_expiry", None)
+            tte = float(mte) * 60.0 if mte is not None else None
+            strike = (
+                getattr(getattr(cur, "market", None), "floor_strike", None)
+                or getattr(cur, "strike_price", None)
+            )
+            return ticker, tte, strike
+        except Exception:
+            return None, None, None
+
+    def _emit_pre_decision_audit(
+        self,
+        tick: Any,
+        explicit_reason: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist one pre-decision rejection row + lifecycle event.
+
+        Idempotent per (tick, asset): the first emitter in a cycle wins so a
+        rejection recorded by ``_record_signal_rejection`` is not duplicated by
+        the collect_order_candidate wrapper.
+        """
+        try:
+            asset = self.config.name.split('_')[0]
+            ctx = getattr(self, "_pdr_ctx", None) or {}
+            key = (tick, asset)
+            if getattr(self, "_pdr_emitted_for", None) == key:
+                return
+            self._pdr_emitted_for = key
+            reason = (
+                explicit_reason
+                or (self._rejection_waterfall.get("final_reason") if isinstance(getattr(self, "_rejection_waterfall", None), dict) else None)
+                or "no_candidate"
+            )
+            ticker = ctx.get("ticker")
+            tte = ctx.get("seconds_to_expiry")
+            strike = ctx.get("strike")
+            spot = ctx.get("spot_price")
+            if not ticker:
+                fb_ticker, fb_tte, fb_strike = self._resolve_current_contract_fallback(asset)
+                ticker = ticker or fb_ticker
+                tte = tte if tte is not None else fb_tte
+                strike = strike if strike is not None else fb_strike
+            run_id, _derived_candidate_id = self._candidate_identity(
+                asset, ticker, ctx.get("tick", tick)
+            )
+            candidate_id = ctx.get("candidate_id") or _derived_candidate_id
+            detail = {
+                "waterfall": getattr(self, "_rejection_waterfall", None),
+                **(dict(extra) if extra else {}),
+            }
+            # Cooldown/reentry exits are terminal pre-decision rejections whose
+            # semantic category is cooldown — keep the position-truthful stage
+            # while labeling the event type by category.
+            reason_l = str(reason).lower()
+            if reason_l.startswith("cooldown") or reason_l.startswith("reentry_guard"):
+                event_type = "COOLDOWN_REJECTED"
+            else:
+                event_type = "PRE_DECISION_REJECTED"
+            from merid.execution.decision_audit_ledger import (
+                get_decision_audit_ledger,
+            )
+            ledger = get_decision_audit_ledger()
+            ledger.record_pre_decision_rejection(
+                cycle_id=str(tick),
+                run_id=run_id,
+                ticker=ticker or "",
+                asset=asset,
+                reason=reason,
+                seconds_to_expiry=tte,
+                spot_price=spot,
+                strike_price=strike,
+                decision_id=f"{candidate_id}:pre",
+                candidate_id=candidate_id,
+                trace_id=candidate_id,
+                event_type=event_type,
+                extra=detail,
+            )
+        except Exception as _pdr_err:
+            logger.debug("[DECISION-AUDIT] pre-decision rejection emit failed (non-fatal): %s", _pdr_err)
+
+    def _audit_signal_rejection(self, reason: str, context: Dict[str, Any]) -> None:
+        """Route a signal-level rejection into the audit ledger.
+
+        With ``context["decision_id"]`` the decision row already exists — a
+        veto here is a post-model stage event, never a second decision row and
+        never an overwrite of ``primary_reason_code``.  Without it the
+        rejection predates the model and becomes a pre-decision row.
+        """
+        try:
+            from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+            ledger = get_decision_audit_ledger()
+            did = context.get("decision_id")
+            if did:
+                selected = context.get("selected_outcome")
+                model_reason = context.get("model_no_trade_reason")
+                if selected and reason != model_reason:
+                    ledger.append_decision_event(
+                        decision_id=str(did),
+                        event_type="RISK_REJECTED",
+                        stage="RISK",
+                        reason_code=str(reason),
+                        reason_detail={k: v for k, v in context.items() if isinstance(v, (str, int, float, bool, type(None)))},
+                        trace_id=str(did).split(":", 1)[0],
+                        run_id=context.get("run_id"),
+                        ticker=context.get("ticker") or context.get("market_id"),
+                        asset=context.get("asset"),
+                    )
+                return
+            ctx = getattr(self, "_pdr_ctx", None) or {}
+            asset = context.get("asset") or self.config.name.split('_')[0]
+            ticker = context.get("ticker") or context.get("market_id") or ctx.get("ticker")
+            tick = context.get("tick", ctx.get("tick"))
+            key = (tick, asset)
+            if getattr(self, "_pdr_emitted_for", None) == key:
+                return
+            self._pdr_emitted_for = key
+            tte = context.get("market_time_remaining_s")
+            if tte is None and context.get("minutes_to_expiry") is not None:
+                tte = float(context["minutes_to_expiry"]) * 60.0
+            if tte is None:
+                tte = ctx.get("seconds_to_expiry")
+            strike = context.get("strike") or ctx.get("strike")
+            spot = context.get("reference_price") or context.get("spot_price") or ctx.get("spot_price")
+            if not ticker:
+                fb_ticker, fb_tte, fb_strike = self._resolve_current_contract_fallback(asset)
+                ticker = fb_ticker
+                if tte is None:
+                    tte = fb_tte
+                if strike is None:
+                    strike = fb_strike
+            run_id, candidate_id = self._candidate_identity(asset, ticker, tick)
+            reason_l = str(reason).lower()
+            event_type = (
+                "COOLDOWN_REJECTED"
+                if reason_l.startswith(("cooldown", "reentry_guard"))
+                else "PRE_DECISION_REJECTED"
+            )
+            ledger.record_pre_decision_rejection(
+                cycle_id=str(tick),
+                run_id=context.get("run_id") or run_id,
+                ticker=ticker or "",
+                asset=asset,
+                reason=str(reason),
+                event_type=event_type,
+                seconds_to_expiry=tte,
+                spot_price=spot,
+                strike_price=strike,
+                decision_id=f"{candidate_id}:pre",
+                candidate_id=ctx.get("candidate_id") or candidate_id,
+                trace_id=ctx.get("candidate_id") or candidate_id,
+                extra={
+                    "signal_rejection_context": {
+                        k: v
+                        for k, v in context.items()
+                        if isinstance(v, (str, int, float, bool, type(None)))
+                    }
+                },
+            )
+        except Exception as _sig_audit_err:
+            logger.debug("[DECISION-AUDIT] signal rejection audit failed: %s", _sig_audit_err)
+
     def _log_tail_band_shadow(
         self,
         *,
@@ -10317,6 +10554,10 @@ class LeanAgent15m:
             "velocity_threshold": getattr(self, '_last_velocity_threshold', None),
             "threshold": getattr(self, '_last_velocity_threshold', None),
             "threshold_type": "velocity",
+            # Lifecycle identity for audit-ledger pre-decision persistence.
+            "asset": asset,
+            "run_id": getattr(self, "run_id", None),
+            "tick": (getattr(self, "_pdr_ctx", None) or {}).get("tick"),
         }
         if decision is not None:
             edge_threshold = float(decision.edge_threshold) if decision.edge_threshold is not None else None
@@ -10334,6 +10575,12 @@ class LeanAgent15m:
             context.update({
                 "ticker": getattr(decision, "ticker", None),
                 "decision_id": getattr(decision, "decision_id", None),
+                # Post-model veto distinction: when a TradeDecision exists the
+                # audit row already carries MODEL_REJECTED/MODEL_SELECTED; a
+                # rejection here is a downstream stage event, not a new
+                # pre-decision row.
+                "selected_outcome": getattr(decision, "selected_outcome", None),
+                "model_no_trade_reason": getattr(decision, "no_trade_reason", None),
                 "quote_owner": getattr(_ms, "quote_owner", None),
                 "book_source_degraded": (
                     bool(getattr(_ms, "degraded_mode", False)) if _ms is not None else None
@@ -16220,6 +16467,30 @@ class LeanAgent15m:
 
 
     async def collect_order_candidate(self, tick: int) -> Optional[Dict[str, Any]]:
+        """Collect an order candidate; persist every pre-decision rejection.
+
+        Any ``return None`` path inside ``_collect_order_candidate_impl`` is a
+        terminal rejection upstream of ``compute_trade_decision`` — cooldown,
+        reentry guard, missing spot, missing/untrusted market, warmup, expiry,
+        or signal failure.  The audit ledger must see all of them (stable
+        candidate identity + settlement-joinable PENDING outcome), so the
+        wrapper emits the pre-decision record centrally instead of requiring
+        each exit to remember to do it.  ``_record_signal_rejection`` emits
+        first for in-generator exits; ``_pdr_emitted_for`` dedupes.
+        """
+        asset = self.config.name.split('_')[0]
+        self._pdr_emitted_for = None
+        self._pdr_ctx = {"asset": asset, "tick": tick}
+        try:
+            candidate = await self._collect_order_candidate_impl(tick)
+        except Exception:
+            self._emit_pre_decision_audit(tick, explicit_reason="collect_exception")
+            raise
+        if candidate is None:
+            self._emit_pre_decision_audit(tick, explicit_reason=None)
+        return candidate
+
+    async def _collect_order_candidate_impl(self, tick: int) -> Optional[Dict[str, Any]]:
 
         # Collect order candidate for this agent.
 
@@ -16318,6 +16589,9 @@ class LeanAgent15m:
 
                 )
 
+                self._record_waterfall("consecutive_loss_pause", False, f"paused_until={pause_until}")
+                self._set_final_reason(f"risk_guard:consecutive_loss_pause until={pause_until}")
+
                 return None
 
 
@@ -16333,6 +16607,9 @@ class LeanAgent15m:
                     self.config.name, self._session_risk_usd, self._session_risk_cap_usd
 
                 )
+
+                self._record_waterfall("session_risk_cap", False, f"session_risk={self._session_risk_usd:.2f} >= cap={self._session_risk_cap_usd:.2f}")
+                self._set_final_reason(f"risk_guard:session_risk_cap session_risk={self._session_risk_usd:.2f}")
 
                 return None
 
@@ -16352,6 +16629,9 @@ class LeanAgent15m:
 
                 )
 
+                self._record_waterfall("portfolio_heat", False, heat_reason or "portfolio_heat")
+                self._set_final_reason(f"risk_guard:portfolio_heat {heat_reason}")
+
                 return None
 
 
@@ -16369,6 +16649,9 @@ class LeanAgent15m:
                     self.config.name, asset, pnl_reason
 
                 )
+
+                self._record_waterfall("rolling_pnl", False, pnl_reason or "rolling_pnl_limit")
+                self._set_final_reason(f"risk_guard:rolling_pnl {pnl_reason}")
 
                 return None
 
@@ -16399,6 +16682,9 @@ class LeanAgent15m:
                     self.config.name, asset, time_of_day_multiplier
 
                 )
+
+                self._record_waterfall("time_of_day_scaling", False, f"multiplier={time_of_day_multiplier}")
+                self._set_final_reason(f"risk_guard:time_of_day_scaling multiplier={time_of_day_multiplier}")
 
                 return None
 
@@ -16483,6 +16769,9 @@ class LeanAgent15m:
 
                         )
 
+                        self._record_waterfall("position_limit", False, f"positions={position_count} >= max={self.config.max_concurrent_positions}")
+                        self._set_final_reason(f"risk_guard:position_limit positions={position_count} max={self.config.max_concurrent_positions}")
+
                         return None
 
             except Exception as e:
@@ -16539,6 +16828,12 @@ class LeanAgent15m:
                 return None
 
             self._record_waterfall("spot_price", True)
+            try:
+                _ctx = getattr(self, "_pdr_ctx", None)
+                if isinstance(_ctx, dict):
+                    _ctx["spot_price"] = float(spot_price)
+            except Exception:
+                pass
 
 
 
@@ -17045,7 +17340,25 @@ class LeanAgent15m:
 
                 return None
 
-
+            # Stash contract identity for pre-decision audit rows so exits after
+            # this point carry the real ticker/expiry instead of a fallback.
+            try:
+                _ctx = getattr(self, "_pdr_ctx", None)
+                if isinstance(_ctx, dict):
+                    _pdr_ticker = (
+                        market.market.market_id
+                        if hasattr(market, "market")
+                        else getattr(market, "market_id", None)
+                    )
+                    _pdr_mte = getattr(market, "minutes_to_expiry", None)
+                    _ctx.update({
+                        "ticker": _pdr_ticker,
+                        "seconds_to_expiry": (
+                            float(_pdr_mte) * 60.0 if _pdr_mte is not None else None
+                        ),
+                    })
+            except Exception:
+                pass
 
             # CRITICAL FIX: Block trading during warmup to prevent trades based on insufficient data
             # Market validation requires sufficient depth and fresh data, which may not be available
@@ -17357,6 +17670,8 @@ class LeanAgent15m:
 
                 "agent_id": self.config.name,
 
+                "asset": asset,
+
                 "ticker": market.market.market_id if hasattr(market, 'market') else self.config.series_tickers[0],
 
                 "exchange_index": getattr(market, 'exchange_index', None) or (
@@ -17432,6 +17747,9 @@ class LeanAgent15m:
                 # and OrderIntent; it must never be regenerated after the decision.
                 "run_id": signal.get("run_id") or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}",
                 "decision_id": signal.get("decision_id") or f"decision_{uuid.uuid4().hex[:16]}",
+                # Stable candidate identity shared by every evaluation pass of
+                # this market observation (mirrors the decision_id prefix).
+                "candidate_id": signal.get("candidate_id"),
                 "data_state": "healthy" if "cfb_rti_live" in (signal.get("settlement_reference") or "") else "cf_rti_unavailable",
                 "regime_label": signal.get("regime") or "normal",
                 "regime_probability": signal.get("hmm_regime_confidence", 1.0) or 1.0,
@@ -19583,6 +19901,15 @@ class LeanAgentGrid15m:
                             cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0), concrete
                         )
                         rejection_breakdown[concrete] = rejection_breakdown.get(concrete, 0) + 1
+                        _append_candidate_lifecycle_event(
+                            oc,
+                            event_type="ALLOCATION_REJECTED",
+                            stage="ALLOCATION",
+                            reason=concrete,
+                            extra={
+                                "constraint_reasons": list(getattr(_ad, "constraint_reasons", []) or []),
+                            },
+                        )
                         lifecycle_events.append({
                             "candidate_id": cid,
                             "from_state": "RECEIVED",
@@ -19609,6 +19936,12 @@ class LeanAgentGrid15m:
                         float(oc.get("edge_pct", 0.0) or 0.0)
                     )
                     rejection_breakdown["allocator_phase_error"] = rejection_breakdown.get("allocator_phase_error", 0) + 1
+                    _append_candidate_lifecycle_event(
+                        oc,
+                        event_type="ALLOCATION_REJECTED",
+                        stage="ALLOCATION",
+                        reason="allocator_phase_error",
+                    )
                     lifecycle_events.append({
                         "candidate_id": oc.get("candidate_id"),
                         "from_state": "RECEIVED",
@@ -19640,6 +19973,12 @@ class LeanAgentGrid15m:
                     float(c.get("edge_pct", 0.0) or 0.0)
                 )
                 rejection_breakdown["ENTRIES_DISABLED"] = rejection_breakdown.get("ENTRIES_DISABLED", 0) + 1
+                _append_candidate_lifecycle_event(
+                    c,
+                    event_type="RISK_REJECTED",
+                    stage="RISK",
+                    reason="ENTRIES_DISABLED",
+                )
                 lifecycle_events.append({
                     "candidate_id": c.get("candidate_id"),
                     "from_state": "RECEIVED",
@@ -19657,6 +19996,46 @@ class LeanAgentGrid15m:
         # loop_15m expects run_cycle to return a list, not None
         _reconcile_cycle_counters(tick, total_generated, candidates, rejection_breakdown, allow_new_entries, len(self._agents))
         return CycleResult(candidates, total_generated, rejection_breakdown, lifecycle_events)
+
+
+def _append_candidate_lifecycle_event(
+    candidate: Dict[str, Any],
+    *,
+    event_type: str,
+    stage: str,
+    reason: Optional[str],
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append a post-model lifecycle event for a candidate to the audit ledger.
+
+    The decision row's ``primary_reason_code`` stays untouched — this is the
+    append-only record of what happened *after* the model emitted the
+    candidate.  Fail-open: never raises into the trading path.
+    """
+    try:
+        decision_id = candidate.get("decision_id")
+        if not decision_id:
+            return
+        from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+        get_decision_audit_ledger().append_decision_event(
+            decision_id=str(decision_id),
+            candidate_id=candidate.get("candidate_id"),
+            event_type=event_type,
+            stage=stage,
+            reason_code=reason,
+            reason_detail={
+                "side": candidate.get("side"),
+                "edge_pct": candidate.get("edge_pct"),
+                **(dict(extra) if extra else {}),
+            },
+            trace_id=str(candidate.get("candidate_id") or decision_id),
+            run_id=candidate.get("run_id"),
+            ticker=candidate.get("ticker"),
+            asset=candidate.get("asset"),
+        )
+    except Exception:
+        pass
 
 
 def _canonicalize_rejection_reason(reason: Optional[str]) -> str:

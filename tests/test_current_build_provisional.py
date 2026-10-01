@@ -734,7 +734,9 @@ def test_collect_order_candidate_carries_lane_identity():
 
     from merid.prediction.agent_grid_15m import LeanAgent15m
 
-    src = inspect.getsource(LeanAgent15m.collect_order_candidate)
+    # The public collect_order_candidate is a thin audit wrapper; the
+    # candidate whitelist lives in _collect_order_candidate_impl.
+    src = inspect.getsource(LeanAgent15m._collect_order_candidate_impl)
     for key in (
         "trade_decision",
         "decision_lane",
