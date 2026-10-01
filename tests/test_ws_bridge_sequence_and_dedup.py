@@ -231,5 +231,95 @@ class TestMessageDeduplicationLogic:
         assert events_processed == 2, "Both events should be processed"
 
 
+class TestOrderbookSidSequenceTracking:
+    """Regression tests for the real ``_enqueue_event`` orderbook seq tracker.
+
+    Kalshi scopes the orderbook ``seq`` to the subscription (``sid``), not the
+    market: one ``orderbook_delta`` subscribe covering all 5 crypto tickers
+    multiplexes every ticker on a single seq space.  Tracking per ticker
+    counted every other market's deltas as gaps (~600k false gaps/hr observed
+    live 2026-10-01).  The tracker must key by ``sid``.
+    """
+
+    def _bridge(self):
+        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+
+        # Bridge enforces single instantiation per process; reset for tests.
+        KalshiWebSocketBridge._instance_created = False
+        return KalshiWebSocketBridge(ws=MagicMock())
+
+    def _delta(self, sid, seq, ticker):
+        return {
+            "type": "orderbook_delta",
+            "sid": sid,
+            "seq": seq,
+            "msg": {
+                "market_ticker": ticker,
+                "price_dollars": "0.45",
+                "delta_fp": "10",
+                "side": "no",
+            },
+        }
+
+    def test_interleaved_tickers_same_sid_no_false_gaps(self):
+        """All 5 tickers share one sid: interleaved deltas must NOT count as gaps."""
+        import asyncio
+
+        bridge = self._bridge()
+        tickers = ["KXBTC15M-T", "KXETH15M-T", "KXSOL15M-T", "KXXRP15M-T", "KXDOGE15M-T"]
+        seq = 100
+        for _ in range(50):
+            for t in tickers:
+                asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=seq, ticker=t)))
+                seq += 1
+
+        assert bridge._sequence_gaps == 0, (
+            f"shared-sid interleaved deltas produced {bridge._sequence_gaps} false gaps"
+        )
+        assert bridge._last_sequence.get("orderbook:sid1") == seq - 1
+
+    def test_real_gap_on_sid_detected(self):
+        """A dropped frame on the sid seq space still counts as a real gap."""
+        import asyncio
+
+        bridge = self._bridge()
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=10, ticker="KXBTC15M-T")))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=15, ticker="KXETH15M-T")))
+
+        assert bridge._sequence_gaps == 4
+        assert bridge._sequence_gaps_list == [("orderbook:sid1", 11, 14)]
+
+    def test_separate_sids_are_independent_seq_spaces(self):
+        """A second subscription (e.g. rollover resubscribe) must not pollute sid1's tracker."""
+        import asyncio
+
+        bridge = self._bridge()
+        # Old sid=1 at high seq, then new sid=7 starts at its own seq 1.
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=689000, ticker="KXBTC15M-T")))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=7, seq=1, ticker="KXBTC15M-T2")))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=7, seq=2, ticker="KXETH15M-T2")))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=689001, ticker="KXETH15M-T")))
+
+        assert bridge._sequence_gaps == 0
+        assert bridge._last_sequence["orderbook:sid1"] == 689001
+        assert bridge._last_sequence["orderbook:sid7"] == 2
+
+    def test_snapshot_and_delta_share_sid_seq_space(self):
+        """Kalshi sends snapshot then deltas on the same sid with one seq counter."""
+        import asyncio
+
+        bridge = self._bridge()
+        asyncio.run(bridge._enqueue_event({
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 5,
+            "msg": {"market_ticker": "KXBTC15M-T", "yes_dollars_fp": [], "no_dollars_fp": []},
+        }))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=6, ticker="KXBTC15M-T")))
+        asyncio.run(bridge._enqueue_event(self._delta(sid=1, seq=7, ticker="KXETH15M-T")))
+
+        assert bridge._sequence_gaps == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
