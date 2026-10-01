@@ -625,6 +625,70 @@ def regime_markout_sample_count(
     return n
 
 
+def recent_regime_markout_values(
+    asset: str,
+    side: str,
+    regime_label: str,
+    limit: int = 3,
+    key: str = "markout_5s_cents",
+) -> List[float]:
+    """Latest ``limit`` recorded markouts for (asset, side, regime) this epoch.
+
+    Returns the raw values in chronological order (oldest -> newest) so the
+    caller can apply its own threshold.  Used by the trend-aligned
+    high-price YES lane, which refuses entry while any recent 5s markout in
+    the same lane+regime is negative.
+    """
+    try:
+        st = _load_state()
+    except Exception:
+        return []
+    outcomes = st.get("outcomes") or {}
+    asset_u, side_l = str(asset).upper(), str(side).lower()
+    epoch = _policy_epoch()
+    rows: List[Tuple[float, float]] = []
+    for c in PROVISIONAL_CELLS:
+        if c.asset != asset_u or c.side != side_l:
+            continue
+        for o in outcomes.get(c.cell_id) or []:
+            if o.get("regime") != regime_label:
+                continue
+            if o.get("policy_epoch") not in (None, epoch):
+                continue
+            v = o.get(key)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fv):
+                rows.append((float(o.get("ts") or 0.0), fv))
+    rows.sort(key=lambda r: r[0])
+    return [v for _, v in rows[-max(1, int(limit)):]]
+
+
+def _notify_side_catastrophe(cell_id: str, reason: str) -> None:
+    """Escalate a structural cell breach to the side-level throttle.
+
+    The graded side state machine keeps a true immediate stop for
+    catastrophic evidence (wrong-side mapping, post-only->taker, fill EV
+    <= 0, markout_5s <= -5c).  Cell suspension owns the lane; this escalates
+    the side so correlated cells do not keep admitting while the breach is
+    investigated.
+    """
+    try:
+        parts = str(cell_id).split("_")
+        side = parts[2].lower() if len(parts) >= 3 else ""
+        if side not in ("yes", "no"):
+            return
+        from merid.prediction import directional_regime as _dr
+
+        _dr.record_side_catastrophe(side, f"{cell_id}:{reason}")
+    except Exception:
+        pass
+
+
 def _quantile(vals: List[float], q: float) -> Optional[float]:
     if not vals:
         return None
@@ -1440,6 +1504,7 @@ def record_provisional_invariant_violation(cell_id: Optional[str], reason: str) 
         "[CBP-SUSPEND] cell=%s invariant_violation=%s", cell_id, reason,
     )
     _suspend_cell(cell_id, f"invariant_violation:{str(reason)[:120]}")
+    _notify_side_catastrophe(cell_id, f"invariant_violation:{str(reason)[:100]}")
     emit_provisional_lifecycle(
         "suspended",
         provisional_cell_id=cell_id,
@@ -1470,6 +1535,7 @@ def _evaluate_suspension(cell_id: str) -> None:
     # Post-only contract breach: the order filled as taker.
     if any(o.get("kind") == "post_only_breach" for o in outs):
         _suspend_cell(cell_id, "post_only_order_became_taker")
+        _notify_side_catastrophe(cell_id, "post_only_order_became_taker")
         return
 
     fills = [o for o in outs if o.get("kind") in ("fill", "settled")]
@@ -1481,10 +1547,20 @@ def _evaluate_suspension(cell_id: str) -> None:
                 cell_id,
                 f"first_fill_markout_5s={float(m5):+.2f}c <= -3.00c",
             )
+            # Side-level escalation only at the catastrophic depth — a -3c
+            # first-fill markout suspends the cell, a -5c one is a structural
+            # adverse-selection signature for the whole side.
+            if float(m5) <= _env_float("MERID_SIDE_CATASTROPHE_M5_CENTS", -5.0):
+                _notify_side_catastrophe(
+                    cell_id, f"first_fill_markout_5s={float(m5):+.2f}c"
+                )
             return
         fev = first.get("fill_ev_cents")
         if fev is not None and float(fev) <= 0.0:
             _suspend_cell(cell_id, f"fill_ev_nonpositive={float(fev):+.2f}c")
+            _notify_side_catastrophe(
+                cell_id, f"fill_ev_nonpositive={float(fev):+.2f}c"
+            )
             return
         pnl = first.get("net_pnl_cents")
         cand = first.get("candidate_ev_cents")

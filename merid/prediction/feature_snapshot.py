@@ -38,7 +38,7 @@ from merid.prediction.microstructure_features import (
 # Default lookbacks for RTI log returns, in seconds.  These are aligned to the
 # Kalshi 15m settlement index (CF Benchmarks RTI) so the directional feature is
 # priced from the same index that decides the contract.
-_RTI_LOOKBACKS_S = (1.0, 3.0, 10.0, 30.0, 60.0)
+_RTI_LOOKBACKS_S = (1.0, 3.0, 10.0, 30.0, 60.0, 120.0)
 
 # Default per-asset order-book history length (used for OFI accumulation).
 _BOOK_HISTORY_MAXLEN = int(os.environ.get("MERID_FEATURE_SNAPSHOT_BOOK_HISTORY", "120"))
