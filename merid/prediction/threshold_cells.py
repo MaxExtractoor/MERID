@@ -1355,6 +1355,8 @@ def record_cell_markout(
     decision_id: Optional[str],
     horizon_s: int,
     markout_cents: float,
+    regime: Optional[str] = None,
+    policy_epoch: Optional[str] = None,
 ) -> None:
     """Attach a post-fill markout to the cell's rolling outcome window.
 
@@ -1371,6 +1373,10 @@ def record_cell_markout(
     for o in reversed(outs):
         if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
             o[key] = float(markout_cents)
+            if regime is not None:
+                o["regime"] = regime
+            if policy_epoch is not None:
+                o["policy_epoch"] = policy_epoch
             break
     else:
         outs.append({
@@ -1378,6 +1384,8 @@ def record_cell_markout(
             "kind": "markout",
             "decision_id": decision_id,
             key: float(markout_cents),
+            "regime": regime,
+            "policy_epoch": policy_epoch,
         })
         del outs[:-25]
     _save_state()

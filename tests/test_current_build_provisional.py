@@ -1065,11 +1065,11 @@ def test_true_side_flip_still_suspends(tmp_path, monkeypatch):
 def test_adverse_selection_reserve_floor_when_cold():
     """No markout evidence -> bounded prior floor, not zero."""
     r = cbp.adverse_selection_reserve_cents("XRP", "no", 75.0, 400.0)
-    assert r == pytest.approx(0.5)
+    assert r == pytest.approx(1.0)
 
 
 def test_adverse_selection_reserve_from_cell_evidence():
-    """Negative mean 5s markout on the resolved cell raises the reserve."""
+    """Adverse markouts on the resolved cell raise the reserve (Q75 of cost)."""
     cell = cbp.resolve_provisional_cell("XRP", "no", 75.0, 400.0)
     st = cbp._load_state()
     st.setdefault("outcomes", {})[cell.cell_id] = [
@@ -1077,7 +1077,7 @@ def test_adverse_selection_reserve_from_cell_evidence():
         {"kind": "fill", "decision_id": "b", "markout_5s_cents": -6.0},
     ]
     cbp._save_state()
-    # mean -5.0 -> reserve 5.0 (at cap)
+    # costs [4,6] -> Q75 = 5.5 -> capped at 5.0
     assert cbp.adverse_selection_reserve_cents(
         "XRP", "no", 75.0, 400.0
     ) == pytest.approx(5.0)
@@ -1094,10 +1094,10 @@ def test_adverse_selection_reserve_widens_to_asset_side():
         {"kind": "fill", "decision_id": "b", "markout_5s_cents": -1.0},
     ]
     cbp._save_state()
-    # sibling mean -2.0 -> reserve max(0.5, 2.0)
+    # sibling costs [3,1] -> Q75 = 2.5 -> max(1.0, 2.5)
     assert cbp.adverse_selection_reserve_cents(
         "ETH", "no", 35.0, 400.0
-    ) == pytest.approx(2.0)
+    ) == pytest.approx(2.5)
 
 
 def test_adverse_selection_reserve_healthy_cells_stay_at_floor():
@@ -1109,7 +1109,67 @@ def test_adverse_selection_reserve_healthy_cells_stay_at_floor():
     cbp._save_state()
     assert cbp.adverse_selection_reserve_cents(
         "BTC", "yes", 45.0, 400.0
-    ) == pytest.approx(0.5)
+    ) == pytest.approx(1.0)
+
+
+def test_adverse_selection_reserve_regime_stratified():
+    """Regime-tagged marks condition the estimate; other regimes don't leak in."""
+    cell = cbp.resolve_provisional_cell("SOL", "no", 40.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -8.0,
+         "regime": "RALLY_CONFIRMED"},
+        {"kind": "fill", "decision_id": "b", "markout_5s_cents": -7.0,
+         "regime": "RALLY_CONFIRMED"},
+        {"kind": "fill", "decision_id": "c", "markout_5s_cents": 3.0,
+         "regime": "NEUTRAL"},
+    ]
+    cbp._save_state()
+    # rally-conditioned: costs [8,7] -> Q75 7.75 -> cap 5.0
+    assert cbp.adverse_selection_reserve_cents(
+        "SOL", "no", 40.0, 400.0, regime_label="RALLY_CONFIRMED"
+    ) == pytest.approx(5.0)
+    # no regime requested -> all marks: costs [8,7,-3] -> Q75 = 7.5 -> cap 5.0
+    assert cbp.adverse_selection_reserve_cents(
+        "SOL", "no", 40.0, 400.0
+    ) == pytest.approx(5.0)
+
+
+def test_adverse_selection_reserve_regime_softens_when_warm():
+    """Friendly regime-tagged marks lower the estimate vs hostile ones."""
+    cell = cbp.resolve_provisional_cell("XRP", "no", 75.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": 2.0,
+         "regime": "NEUTRAL"},
+        {"kind": "fill", "decision_id": "b", "markout_5s_cents": 1.0,
+         "regime": "NEUTRAL"},
+        {"kind": "fill", "decision_id": "c", "markout_5s_cents": 0.5,
+         "regime": "NEUTRAL"},
+    ]
+    cbp._save_state()
+    # NEUTRAL costs [-2,-1,-0.5] -> Q75 = -0.75 -> floor 1.0
+    assert cbp.adverse_selection_reserve_cents(
+        "XRP", "no", 75.0, 400.0, regime_label="NEUTRAL"
+    ) == pytest.approx(1.0)
+
+
+def test_regime_markout_sample_count():
+    """Countertrend cold-start gate counts only epoch+regime-tagged marks."""
+    cell = cbp.resolve_provisional_cell("XRP", "no", 75.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "markout", "decision_id": "a", "markout_5s_cents": -1.0,
+         "regime": "RALLY_CONFIRMED"},
+        {"kind": "markout", "decision_id": "b", "markout_5s_cents": 2.0,
+         "regime": "NEUTRAL"},
+        {"kind": "markout", "decision_id": "c", "markout_5s_cents": -1.5,
+         "regime": "RALLY_CONFIRMED", "policy_epoch": "pre_drawdown_legacy"},
+    ]
+    cbp._save_state()
+    assert cbp.regime_markout_sample_count("XRP", "no") == 2
+    assert cbp.regime_markout_sample_count("XRP", "no", "RALLY_CONFIRMED") == 1
+    assert cbp.regime_markout_sample_count("XRP", "no", "SELL_OFF_CONFIRMED") == 0
 
 
 def test_adverse_selection_reserve_disabled(monkeypatch):

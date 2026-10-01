@@ -67,6 +67,12 @@ _os.environ["MERID_SETTLEMENT_DISTRIBUTION_V2"] = "0"
 _os.environ["MERID_SETTLEMENT_LANE_ENABLED"] = "0"
 _os.environ["MERID_SETTLEMENT_ANCHOR_RELEASE"] = "0"
 _os.environ["MERID_SETTLEMENT_MAX_MISSING_SAMPLES"] = "0"
+# 2026-10-01 (post_drawdown epoch): the side-aware conviction gate
+# (|p-0.5| >= delta) blocks coin-flip entries by default.  Pin it off here
+# so legacy decision tests that exercise other gates with near-50% p values
+# keep their expected terminal reasons; it is exercised explicitly in
+# tests/test_directional_regime.py.
+_os.environ["MERID_CONVICTION_GATE_ENABLED"] = "0"
 # Markout telemetry must not write into production logs during tests.
 _os.environ["MERID_ENTRY_MARKOUT_LOG"] = str(
     __import__("pathlib").Path(
@@ -155,6 +161,10 @@ for _env_key, _fname in {
     "MERID_PROVISIONAL_STATE_PATH": "current_build_provisional_lane.json",
     "MERID_PROVISIONAL_LIFECYCLE_PATH": "current_build_provisional_lifecycle.jsonl",
     "MERID_PROVISIONAL_EVIDENCE_DIR": "cbp_evidence",
+    # Directional side-throttle (post_drawdown epoch): the seeded production
+    # file holds both sides in manual-review suspension — tests must start
+    # from a clean throttle and exercise suspensions explicitly.
+    "MERID_DIRECTIONAL_THROTTLE_PATH": "directional_throttle.json",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

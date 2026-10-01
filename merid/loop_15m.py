@@ -8522,6 +8522,33 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 logger.warning("[15M-LOOP] Feature snapshot build failed: %s", fs_err, exc_info=True)
                 feature_snapshot = None
 
+            # 2026-10-01 (post_drawdown epoch): compute the shared cross-asset
+            # directional regime once per tick from the same snapshot the
+            # agents will consume — the regime/conviction/throttle gates live
+            # inside compute_trade_decision and read this state.  One compact
+            # line per tick keeps the gate observable in logs.
+            try:
+                if feature_snapshot is not None:
+                    from merid.prediction.directional_regime import (
+                        compute_directional_regime,
+                    )
+                    _dir_regime = compute_directional_regime(feature_snapshot)
+                    logger.info(
+                        "[REGIME] tick=%d label=%s breadth60=%d/%d btc_r60=%s reason=%s",
+                        tick,
+                        _dir_regime.label,
+                        _dir_regime.breadth60_pos,
+                        _dir_regime.breadth60_total,
+                        (
+                            f"{_dir_regime.btc_r60:+.5f}"
+                            if _dir_regime.btc_r60 is not None
+                            else "n/a"
+                        ),
+                        _dir_regime.reason,
+                    )
+            except Exception as _dr_err:
+                logger.debug("[REGIME] compute failed: %s", _dr_err)
+
             # CRITICAL FIX (2026-08-11): Halt gating - stop signal generation, sizing,
             # allocation, and entry execution when the TradingCircuitBreaker is tripped.
             # Exchange reconciliation (sync_from_rest) and position monitoring remain alive;
@@ -10222,6 +10249,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         intent.process_id = str(os.getpid())
         intent.reason = candidate.get("rationale") or "candidate_entry"
 
+        # 2026-10-01 (post_drawdown epoch): carry the directional regime and
+        # policy epoch on the intent so fill-quality markouts, fills and
+        # settlement outcomes are regime-tagged for the conditional
+        # adverse-selection estimator and current-build evidence separation.
+        try:
+            _dec_inds = getattr(trade_decision, "indicators", None) or {}
+            intent.directional_regime = (
+                candidate.get("dir_regime") or _dec_inds.get("dir_regime")
+            )
+            intent.policy_epoch = (
+                _dec_inds.get("policy_epoch")
+                or os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01")
+            )
+        except Exception:
+            pass
+
         # EXECUTION-LANE CONTRACT (2026-09-30): stamp the immutable execution
         # policy + admission owner at construction.  A threshold-cell order is
         # a controlled post-only maker validation — the router may tighten
@@ -10953,6 +10996,23 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             )
 
         if result and (result.has_execution or (result.request_completed and not result.is_terminal)):
+            # 2026-10-01 (post_drawdown): record the accepted entry for the
+            # same-directional 15-minute strip concentration cap.  Exposure
+            # side is the decision's selected outcome (no = sell-yes leg).
+            try:
+                from merid.prediction import directional_regime as _dr
+                _exp_side = getattr(trade_decision, "selected_outcome", None) or candidate.get(
+                    "selected_outcome"
+                )
+                if entry_or_exit != "exit" and _exp_side in ("yes", "no"):
+                    _dr.record_strip_entry(
+                        _exp_side,
+                        candidate.get("ev_net_cents"),
+                        ts=time.time(),
+                        decision_id=intent.decision_id,
+                    )
+            except Exception:
+                pass
             logger.info("Order routed successfully: ticker=%s status=%s", ticker, result.status)
             return True
         self._rejection_counters["other"] += 1

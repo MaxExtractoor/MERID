@@ -1,0 +1,191 @@
+{
+ "verdicts": [
+  {
+   "utc": "09-29 20:38:33",
+   "asset": "DOGE",
+   "side": "no",
+   "pnl": 23.0,
+   "won": true,
+   "regime": "NEUTRAL",
+   "breadth60": "2/5",
+   "z": -0.8481066783392838,
+   "p_sel": 0.811851660030224,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "09-29 20:55:06",
+   "asset": "DOGE",
+   "side": "no",
+   "pnl": 31.0,
+   "won": true,
+   "regime": "NEUTRAL",
+   "breadth60": "2/5",
+   "z": -0.7126507318225042,
+   "p_sel": 0.7726704494864043,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "09-29 21:20:19",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": 11.0,
+   "won": true,
+   "regime": "SELL_OFF_CONFIRMED",
+   "breadth60": "0/5",
+   "z": -2.0890816267332264,
+   "p_sel": 0.95,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "09-30 18:07:52",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": 18.0,
+   "won": true,
+   "regime": "RALLY_CONFIRMED",
+   "breadth60": "5/5",
+   "z": -1.3686884826509658,
+   "p_sel": 0.8978738350762496,
+   "blocks": [
+    "countertrend_lane_cold_start"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "09-30 23:09:14",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": 27.0,
+   "won": true,
+   "regime": "SELL_OFF_CONFIRMED",
+   "breadth60": "0/5",
+   "z": -0.8602711618733144,
+   "p_sel": 0.8257276752413446,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "09-30 23:26:27",
+   "asset": "BTC",
+   "side": "yes",
+   "pnl": -77.0,
+   "won": false,
+   "regime": "NEUTRAL",
+   "breadth60": "2/5",
+   "z": 0.9941426026181771,
+   "p_sel": 0.8399232765046432,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "09-30 23:26:36",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": 50.0,
+   "won": true,
+   "regime": "SELL_OFF_CONFIRMED",
+   "breadth60": "0/5",
+   "z": -0.22171884541418518,
+   "p_sel": 0.567115,
+   "blocks": [
+    "low_conviction(dist=0.067<d=0.07)"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "09-30 23:35:28",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": -55.0,
+   "won": false,
+   "regime": "RALLY_CONFIRMED",
+   "breadth60": "5/5",
+   "z": -0.34562766134472533,
+   "p_sel": 0.652582479289862,
+   "blocks": [
+    "countertrend_no_rally_regime",
+    "countertrend_lane_cold_start"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "10-01 00:31:32",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": -75.0,
+   "won": false,
+   "regime": "NEUTRAL",
+   "breadth60": "2/5",
+   "z": -1.0358156201689779,
+   "p_sel": 0.8243817705691373,
+   "blocks": [],
+   "would_trade": true
+  },
+  {
+   "utc": "10-01 01:03:35",
+   "asset": "ETH",
+   "side": "no",
+   "pnl": -34.0,
+   "won": false,
+   "regime": "RALLY_CONFIRMED",
+   "breadth60": "4/5",
+   "z": 0.12645183121870027,
+   "p_sel": 0.4253199999999999,
+   "blocks": [
+    "countertrend_no_rally_regime",
+    "side_suspended:2_losses_60m",
+    "countertrend_lane_cold_start"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "10-01 02:52:44",
+   "asset": "XRP",
+   "side": "no",
+   "pnl": -54.0,
+   "won": false,
+   "regime": "NEUTRAL",
+   "breadth60": "4/5",
+   "z": -0.45493645256294596,
+   "p_sel": 0.6944948738766327,
+   "blocks": [
+    "side_suspended:3_epoch_losses_review"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "10-01 03:52:46",
+   "asset": "BTC",
+   "side": "no",
+   "pnl": -42.0,
+   "won": false,
+   "regime": "NEUTRAL",
+   "breadth60": "3/5",
+   "z": -0.0027478156830795285,
+   "p_sel": 0.5010962184752324,
+   "blocks": [
+    "low_conviction(dist=0.001<d=0.06)",
+    "side_suspended:4_epoch_losses_review"
+   ],
+   "would_trade": false
+  },
+  {
+   "utc": "10-01 03:52:47",
+   "asset": "SOL",
+   "side": "no",
+   "pnl": -34.0,
+   "won": false,
+   "regime": "NEUTRAL",
+   "breadth60": "3/5",
+   "z": 0.21197747500721875,
+   "p_sel": 0.4160623036689942,
+   "blocks": [
+    "side_suspended:4_epoch_losses_review"
+   ],
+   "would_trade": false
+  }
+ ]
+}

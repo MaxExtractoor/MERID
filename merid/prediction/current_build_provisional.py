@@ -577,73 +577,144 @@ def adverse_selection_reserve_enabled() -> bool:
     return _env_flag("MERID_ADV_SEL_RESERVE_ENABLED", True)
 
 
+def _markout_value(o: Dict[str, Any]) -> Optional[float]:
+    """Longest-horizon markout recorded for an outcome (30s > 5s > 1s)."""
+    for k in ("markout_30s_cents", "markout_5s_cents", "markout_1s_cents"):
+        v = o.get(k)
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(fv):
+            return fv
+    return None
+
+
+def regime_markout_sample_count(
+    asset: str,
+    side: str,
+    regime_label: Optional[str] = None,
+) -> int:
+    """Current-build markout samples for (asset, side), optionally regime-tagged.
+
+    Counts markout events (filled or resting) — an unfilled order that never
+    got picked off is itself evidence about the lane's toxicity.  Only
+    samples from the active policy epoch count.
+    """
+    try:
+        st = _load_state()
+    except Exception:
+        return 0
+    outcomes = st.get("outcomes") or {}
+    asset_u, side_l = str(asset).upper(), str(side).lower()
+    n = 0
+    for c in PROVISIONAL_CELLS:
+        if c.asset != asset_u or c.side != side_l:
+            continue
+        for o in outcomes.get(c.cell_id) or []:
+            if o.get("kind") != "markout":
+                continue
+            if regime_label is not None and o.get("regime") != regime_label:
+                continue
+            if o.get("policy_epoch") not in (None, _policy_epoch()):
+                continue
+            if _markout_value(o) is not None:
+                n += 1
+    return n
+
+
+def _quantile(vals: List[float], q: float) -> Optional[float]:
+    if not vals:
+        return None
+    xs = sorted(vals)
+    pos = (len(xs) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return xs[lo]
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
+
+
 def adverse_selection_reserve_cents(
     asset: str,
     side: str,
     price_cents: Optional[float],
     tte_seconds: Optional[float],
+    regime_label: Optional[str] = None,
 ) -> float:
     """Expected pick-off cost of a post-only fill at (asset, side, price, tte).
 
     A resting maker order fills exactly when counterparties cross to it — on
     a fast repricing book that correlates with informed flow.  The realized
-    cost is measurable directly: per-fill markouts are already recorded in
-    the cell's outcome window in the intent's outcome space, and a negative
-    mean short-horizon markout is the observed adverse-selection charge for
-    fills in this bucket.
+    cost is measurable directly from per-fill markouts.
 
-    Estimate = max(floor, min(cap, -mean(markout_5s))) where the sample is
-    the resolved cell's recent 5s markouts, widening to the asset+side
-    aggregate when the cell has < MERID_ADV_SEL_MIN_SAMPLES.  The bounded
-    floor (MERID_ADV_SEL_FLOOR_CENTS, default 0.5c) keeps a nonzero prior on
-    cold cells — the 2026-10-01 loss audit showed first-fills are the most
-    toxic (-8.5c at 1s on XRP NO@75) precisely because no local evidence
-    existed yet.  Capped at MERID_ADV_SEL_CAP_CENTS (default 5c) so one bad
-    window cannot veto the whole lane; that authority belongs to the
-    suspension rules, not the cost stack.
+    Post-2026-10-01 (``post_drawdown`` epoch): the estimate is the **75th
+    percentile of the adverse-cost distribution** ``-markout`` for the
+    resolved cell's recent outcomes, widening to the asset+side aggregate
+    (and then the regime-stratified aggregate) when the cell has fewer than
+    ``MERID_ADV_SEL_MIN_SAMPLES`` marks.  Marks are regime-tagged at fill
+    time so a rally-side estimate does not contaminate a selloff lane.
+
+    Floor = ``MERID_ADV_SEL_FLOOR_CENTS`` (default 1.0c — the forensic floor
+    per the loss audit), cap = ``MERID_ADV_SEL_CAP_CENTS`` (5c) so one bad
+    window cannot veto a lane; suspension rules own that authority.
     """
     if not adverse_selection_reserve_enabled():
         return 0.0
-    floor = max(0.0, _env_float("MERID_ADV_SEL_FLOOR_CENTS", 0.5))
+    floor = max(0.0, _env_float("MERID_ADV_SEL_FLOOR_CENTS", 1.0))
     cap = max(floor, _env_float("MERID_ADV_SEL_CAP_CENTS", 5.0))
-    min_samples = max(1, _env_int("MERID_ADV_SEL_MIN_SAMPLES", 2))
+    min_samples = max(1, _env_int("MERID_ADV_SEL_MIN_SAMPLES", 3))
     try:
         st = _load_state()
     except Exception:
         return floor
     outcomes = st.get("outcomes") or {}
+    epoch = _policy_epoch()
 
-    def _samples(cell_ids: Iterable[str]) -> List[float]:
+    def _samples(cell_ids: Iterable[str], regime: Optional[str]) -> List[float]:
         vals: List[float] = []
         for cid in cell_ids:
             for o in outcomes.get(cid) or []:
-                v = o.get("markout_5s_cents")
-                if v is None:
-                    v = o.get("markout_1s_cents")
+                if regime is not None and o.get("regime") != regime:
+                    continue
+                if o.get("policy_epoch") not in (None, epoch):
+                    continue
+                v = _markout_value(o)
                 if v is None:
                     continue
-                try:
-                    fv = float(v)
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(fv):
-                    vals.append(fv)
+                vals.append(v)
         return vals
 
     cell = resolve_provisional_cell(asset, side, price_cents, tte_seconds)
     cell_ids = [cell.cell_id] if cell is not None else []
-    vals = _samples(cell_ids)
+    asset_u, side_l = str(asset).upper(), str(side).lower()
+    sibling_ids = [
+        c.cell_id
+        for c in PROVISIONAL_CELLS
+        if c.asset == asset_u and c.side == side_l
+    ]
+
+    # Preference order: cell+regime -> cell -> siblings+regime -> siblings.
+    # ``sibling_ids`` already contains the resolved cell, so the widen steps
+    # only count *other* cells' marks — otherwise a thin cell's own samples
+    # would be appended twice and satisfy min_samples without new evidence.
+    vals = _samples(cell_ids, regime_label)
+    if len(vals) < min_samples and regime_label is not None:
+        vals = _samples(cell_ids, None)
     if len(vals) < min_samples:
-        asset_u, side_l = str(asset).upper(), str(side).lower()
-        sibling_ids = [
-            c.cell_id
-            for c in PROVISIONAL_CELLS
-            if c.asset == asset_u and c.side == side_l
-        ]
-        vals = _samples(sibling_ids)
+        vals += _samples([c for c in sibling_ids if c not in cell_ids], regime_label)
+    if len(vals) < min_samples and regime_label is not None:
+        vals += _samples([c for c in sibling_ids if c not in cell_ids], None)
     if not vals:
         return floor
-    evidence = max(0.0, -(sum(vals) / len(vals)))
+    # Q75 of the adverse-cost distribution: -markout (positive markouts yield
+    # negative cost, which correctly shrinks the reserve in friendly lanes).
+    costs = [-v for v in vals]
+    evidence = _quantile(costs, 0.75)
+    if evidence is None:
+        return floor
     return min(cap, max(floor, evidence))
 
 
@@ -1276,11 +1347,18 @@ def record_provisional_fill(
     _maybe_emit_promotion_review(cell_id, st=st)
 
 
+def _policy_epoch() -> str:
+    """Active policy epoch stamped on every new outcome/evidence row."""
+    return os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01")
+
+
 def record_provisional_markout(
     cell_id: str,
     decision_id: Optional[str],
     horizon_s: int,
     markout_cents: float,
+    regime: Optional[str] = None,
+    policy_epoch: Optional[str] = None,
 ) -> None:
     """Attach a post-fill markout to the cell's rolling outcome window and
     re-evaluate suspension (persistent negative 5s markouts are the primary
@@ -1293,14 +1371,21 @@ def record_provisional_markout(
     for o in reversed(outs):
         if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
             o[key] = float(markout_cents)
+            if regime is not None:
+                o["regime"] = regime
+            if policy_epoch is not None:
+                o["policy_epoch"] = policy_epoch
             break
     else:
-        outs.append({
+        row = {
             "ts": time.time(),
             "kind": "markout",
             "decision_id": decision_id,
             key: float(markout_cents),
-        })
+            "regime": regime,
+            "policy_epoch": policy_epoch or _policy_epoch(),
+        }
+        outs.append(row)
         del outs[:-25]
     _save_state()
     if horizon_s == 5:
@@ -1311,6 +1396,8 @@ def record_provisional_settlement(
     decision_id: str,
     net_pnl_cents: float,
     cell_id: Optional[str] = None,
+    regime: Optional[str] = None,
+    policy_epoch: Optional[str] = None,
 ) -> None:
     """Attach realized net PnL (exit or settlement join) to a cell's window."""
     cell_id = cell_id or provisional_cell_for_decision(decision_id)
@@ -1325,6 +1412,9 @@ def record_provisional_settlement(
         if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
             o["net_pnl_cents"] = float(net_pnl_cents)
             o["kind"] = "settled"
+            if regime is not None:
+                o["regime"] = regime
+            o["policy_epoch"] = policy_epoch or _policy_epoch()
             break
     else:
         outs.append({
@@ -1332,6 +1422,8 @@ def record_provisional_settlement(
             "kind": "settled",
             "decision_id": decision_id,
             "net_pnl_cents": float(net_pnl_cents),
+            "regime": regime,
+            "policy_epoch": policy_epoch or _policy_epoch(),
         })
         del outs[:-25]
     _save_state()
