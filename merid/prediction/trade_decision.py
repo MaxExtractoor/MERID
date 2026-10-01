@@ -3368,9 +3368,52 @@ def compute_trade_decision(
     indicators["policy_epoch"] = _dr.POLICY_EPOCH
     if _dir_reg is not None:
         indicators["dir_regime"] = _dir_reg.label
+        indicators["dir_regime_score"] = _dir_reg.score
         indicators["breadth60_pos"] = _dir_reg.breadth60_pos
         indicators["breadth60_total"] = _dir_reg.breadth60_total
         indicators["btc_r60"] = _dir_reg.btc_r60
+
+    # CAUTION tier: a post-release same-side loss tightens the edge floor
+    # rather than blocking the lane (graded state machine replaces the old
+    # one-loss -> manual-review relock).  The margin is added to the side's
+    # effective min edge so downstream threshold fields record what was
+    # actually enforced.
+    _yes_caution_c = _dr.side_caution_margin_cents("yes", now.timestamp())
+    _no_caution_c = _dr.side_caution_margin_cents("no", now.timestamp())
+    if _yes_caution_c > 0.0:
+        yes_min_edge = float(yes_min_edge) + _yes_caution_c / 100.0
+    if _no_caution_c > 0.0:
+        no_min_edge = float(no_min_edge) + _no_caution_c / 100.0
+    # Re-stamp: the indicator set earlier predates the CAUTION bump.
+    indicators["yes_min_edge"] = yes_min_edge
+    indicators["no_min_edge"] = no_min_edge
+    indicators["yes_caution_ev_margin_cents"] = _yes_caution_c
+    indicators["no_caution_ev_margin_cents"] = _no_caution_c
+    indicators["yes_lane_state"] = _dr.side_lane_state("yes", now.timestamp())
+    indicators["no_lane_state"] = _dr.side_lane_state("no", now.timestamp())
+
+    # Trend-aligned high-price YES lane (91-94c): armed only via
+    # MERID_TREND_YES_HI_ENABLED.  ``_yes_hi_price`` is flag-independent —
+    # while the price sits in the lane window the *normal* qualify path is
+    # disabled, so a >90c candidate can never ride ordinary gates through an
+    # admission path that skipped the upstream band filter.
+    _yes_hi_price = _dr.trend_yes_hi_band_match(yes_price_cents)
+    _yes_trend_hi_block = _dr.trend_yes_hi_block(
+        asset=asset,
+        yes_price_cents=float(yes_price_cents) if yes_price_cents else None,
+        p_yes_cal=float(yes_breakdown.p_selected),
+        net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        regime=_dir_reg,
+        feature_snapshot=feature_snapshot,
+    )
+    _yes_trend_hi_qualifies = (
+        _yes_hi_price
+        and _dr.trend_yes_hi_enabled()
+        and _yes_trend_hi_block is None
+    )
 
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
     _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
@@ -3386,6 +3429,16 @@ def compute_trade_decision(
     _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg)
     _yes_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "yes")
     _no_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "no")
+    # 91-94c YES window: the lane's strict-gate failure (armed) or the
+    # reserved-window price with the lane off both own the terminal reason.
+    _yes_lane_terminal = (
+        _yes_trend_hi_block
+        or (
+            "trend_yes_hi_disabled"
+            if (_yes_hi_price and not _dr.trend_yes_hi_enabled())
+            else None
+        )
+    )
     indicators.update({
         "yes_regime_block": _yes_regime_block,
         "no_regime_block": _no_regime_block,
@@ -3397,6 +3450,9 @@ def compute_trade_decision(
         "no_ct_lane_block": _no_ct_lane_block,
         "yes_bookflow_block": _yes_bookflow_block,
         "no_bookflow_block": _no_bookflow_block,
+        "yes_trend_hi_price": _yes_hi_price,
+        "yes_trend_hi_block": _yes_trend_hi_block,
+        "yes_trend_hi_qualifies": bool(_yes_trend_hi_qualifies),
     })
 
     # 2026-09-30: side-specific depth eligibility.  A side whose executable
@@ -3404,17 +3460,29 @@ def compute_trade_decision(
     # poison the opposite side via the (now both-empty-only) confidence floor.
     yes_depth_ok = yes_depth_cc >= 100.0
     no_depth_ok = no_depth_cc >= 100.0
+    # Two mutually exclusive YES qualification paths: the normal cell/formula
+    # gates (inert while the ask sits in the 91-94c hi-price window) and the
+    # armed trend-aligned hi-price lane (stricter: confirmed rally, breadth,
+    # BTC/asset momentum, p>=0.94, net EV>=3c, TTE 120-300s, no recent adverse
+    # m5 in the lane).  Integrity gates — depth, tail guard, evidence,
+    # throttle, book-flow — wrap both paths.
     yes_qualifies = (
         yes_depth_ok
-        and yes_breakdown.net_edge >= yes_min_edge
-        and yes_breakdown.p_selected > yes_min_p
         and not tail_guard_violation_yes
         and yes_evidence_ok
-        and _yes_regime_block is None
-        and _yes_conv_block is None
         and _yes_throttle_block is None
-        and _yes_ct_lane_block is None
         and _yes_bookflow_block is None
+        and (
+            _yes_trend_hi_qualifies
+            or (
+                not _yes_hi_price
+                and yes_breakdown.net_edge >= yes_min_edge
+                and yes_breakdown.p_selected > yes_min_p
+                and _yes_regime_block is None
+                and _yes_conv_block is None
+                and _yes_ct_lane_block is None
+            )
+        )
     )
     no_qualifies = (
         no_depth_ok
@@ -3446,6 +3514,8 @@ def compute_trade_decision(
         throttle_block_s: Optional[str] = None,
         ct_lane_block_s: Optional[str] = None,
         bookflow_block_s: Optional[str] = None,
+        hi_price_applies_s: bool = False,
+        trend_hi_block_s: Optional[str] = None,
     ) -> Optional[str]:
         if not depth_ok_s:
             return f"insufficient_depth_{side}"
@@ -3460,6 +3530,14 @@ def compute_trade_decision(
             return f"edge_below_threshold_{side}"
         if bd.p_selected <= min_p_s:
             return f"cost_basis_{side}"
+        # 91-94c YES window: the lane owns the terminal reason — the strict
+        # gate's specific failure when armed, or `trend_yes_hi_disabled` when
+        # the price sits in the reserved window with the lane off.
+        if hi_price_applies_s:
+            if trend_hi_block_s:
+                return trend_hi_block_s
+            if not _dr.trend_yes_hi_enabled():
+                return "trend_yes_hi_disabled"
         # 2026-10-01 (post_drawdown): structural safety gates own the
         # terminal code when the economics cleared — countertrend regime,
         # coin-flip conviction, side-streak suspension, cold-start
@@ -3505,6 +3583,8 @@ def compute_trade_decision(
             throttle_block_s=_yes_throttle_block,
             ct_lane_block_s=_yes_ct_lane_block,
             bookflow_block_s=_yes_bookflow_block,
+            hi_price_applies_s=_yes_hi_price,
+            trend_hi_block_s=_yes_trend_hi_block,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -3575,6 +3655,8 @@ def compute_trade_decision(
                 _yes_ct_lane_block if best_side == "yes" else _no_ct_lane_block
             ) or (
                 _yes_bookflow_block if best_side == "yes" else _no_bookflow_block
+            ) or (
+                best_side == "yes" and _yes_lane_terminal
             ):
                 # 2026-10-01: edge cleared the floor but a structural safety
                 # gate owns the rejection — report the gate, not evidence.
@@ -3585,6 +3667,7 @@ def compute_trade_decision(
                         _yes_throttle_block,
                         _yes_ct_lane_block,
                         _yes_bookflow_block,
+                        _yes_lane_terminal,
                     )
                     if best_side == "yes"
                     else (
@@ -3593,6 +3676,7 @@ def compute_trade_decision(
                         _no_throttle_block,
                         _no_ct_lane_block,
                         _no_bookflow_block,
+                        None,
                     )
                 )
                 _first_gate = next((b for b in _gate_blocks if b), None)
@@ -4027,6 +4111,14 @@ def compute_trade_decision(
     # cell-matched selection is stamped ``threshold_cell`` first; the escape
     # stamp is considered only when no cell matched the selected side.
     if selected_outcome is not None:
+        # Trend-aligned hi-price YES lane owns its region (91-94c): measured
+        # separately so it cannot contaminate ordinary YES cell evidence.
+        if (
+            selected_outcome == "yes"
+            and _yes_trend_hi_qualifies
+            and not indicators.get("decision_lane")
+        ):
+            indicators["decision_lane"] = "trend_yes_hi"
         _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
         if _sel_thr.cell_id is not None and not indicators.get("decision_lane"):
             indicators["decision_lane"] = "threshold_cell"

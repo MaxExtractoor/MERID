@@ -325,6 +325,7 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "provisional_cell_id", "TEXT")
         _add_column(conn, "strategy_decisions", "build_sha", "TEXT")
         _add_column(conn, "strategy_decisions", "policy_epoch", "TEXT")
+        _add_column(conn, "strategy_decisions", "dir_regime", "TEXT")
         _add_column(conn, "strategy_decision_outcomes", "policy_epoch", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "admission_owner", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "threshold_source", "TEXT")
@@ -1880,8 +1881,8 @@ class DecisionAuditLedger:
                     reason_codes, record_environment, record_source, is_eligible_for_research,
                     exclusion_reason, shadow_cohort_json, created_at,
                     admission_lane, admission_owner, provisional_cell_id, build_sha,
-                    policy_epoch
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    policy_epoch, dir_regime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -1919,6 +1920,7 @@ class DecisionAuditLedger:
                     getattr(decision, "build_sha", None),
                     indicators.get("policy_epoch")
                     or _policy_epoch(),
+                    indicators.get("dir_regime"),
                 ),
             )
 

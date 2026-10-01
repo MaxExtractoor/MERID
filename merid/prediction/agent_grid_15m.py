@@ -1357,6 +1357,65 @@ def _build_directional_trace_payload(
     }
 
 
+# ---------------------------------------------------------------------------
+# [REGIME-ALIGNED-OPPORTUNITY] telemetry (2026-10-01, post_drawdown epoch)
+#
+# Once per asset per 15-minute strip, while the directional regime is in a
+# directional state (confirmed or weakening), emit one line describing the
+# aligned side's executable ask, calibrated p, net EV, threshold, and the
+# terminal gate reason.  This is the direct answer to "why did nothing trade
+# in this rally" — the log line separates price-band, conviction, EV, and
+# structural-gate rejections instead of hiding them behind
+# price_band_both_sides_disabled.
+# ---------------------------------------------------------------------------
+
+_REGIME_ALIGNED_EMITTED: Dict[str, int] = {}
+
+
+def _emit_regime_aligned_opportunity(
+    asset: str,
+    regime: Any,
+    indicators: Dict[str, Any],
+    now_ts: float,
+) -> None:
+    label = str(getattr(regime, "label", "") or "")
+    if label.startswith("RALLY"):
+        fam = "yes"
+    elif label.startswith("SELL_OFF"):
+        fam = "no"
+    else:
+        return
+    strip = int(now_ts // 900)
+    key = f"{asset}:{fam}"
+    if _REGIME_ALIGNED_EMITTED.get(key) == strip:
+        return
+    _REGIME_ALIGNED_EMITTED[key] = strip
+    ask = indicators.get(f"{fam}_ask_cents")
+    if ask is None:
+        ask = indicators.get(f"{fam}_entry_price_cents")
+    p = indicators.get(f"{fam}_p_selected")
+    ev = indicators.get(f"{fam}_ev_net_cents")
+    thr = indicators.get(f"{fam}_min_edge")
+    try:
+        thr_c = float(thr) * 100.0 if thr is not None else None
+    except (TypeError, ValueError):
+        thr_c = None
+    verdict = (
+        indicators.get(f"{fam}_block")
+        or ("QUALIFIES" if indicators.get(f"{fam}_qualifies") else "no_candidate")
+    )
+    logger.info(
+        "[REGIME-ALIGNED-OPPORTUNITY] asset=%s strip=%d regime=%s score=%+.2f "
+        "side=%s ask=%sc p=%s ev_c=%s thr_c=%s verdict=%s",
+        asset, strip, label, float(getattr(regime, "score", 0.0) or 0.0),
+        fam,
+        ask if ask is not None else "n/a",
+        f"{float(p):.4f}" if p is not None else "n/a",
+        f"{float(ev):+.2f}" if ev is not None else "n/a",
+        f"{thr_c:.2f}" if thr_c is not None else "n/a",
+        verdict,
+    )
+
 
 # SEV-1 FIX: Time-based warmup guard
 
@@ -8311,6 +8370,12 @@ class LeanAgent15m:
                 cfb_observation,
                 cycle_id=str(tick),
             )
+            try:
+                _emit_regime_aligned_opportunity(
+                    asset, _dir_regime, decision.indicators or {}, time.time()
+                )
+            except Exception:
+                pass
             return decision
 
         # Role-aware fee selection.  Start with the conservative taker fee.
@@ -8464,6 +8529,7 @@ class LeanAgent15m:
                 "evidence_cell_escape",
                 "threshold_cell",
                 "current_build_provisional",
+                "trend_yes_hi",
             )
         ):
             logger.info(
@@ -8655,6 +8721,7 @@ class LeanAgent15m:
                 "evidence_cell_escape",
                 "threshold_cell",
                 "current_build_provisional",
+                "trend_yes_hi",
             ):
                 if int(decision.approved_size_cc) > 100:
                     decision = replace(decision, approved_size_cc=Decimal("100"))
@@ -12620,7 +12687,37 @@ class LeanAgent15m:
         # Classify regime for both YES and NO executable prices
         yes_regime = classify_market_regime(yes_price_cents, int(seconds_to_expiry))
         no_regime = classify_market_regime(no_price_cents, int(seconds_to_expiry))
-        
+
+        # 2026-10-01 (post_drawdown epoch): dormant research lane — a
+        # trend-aligned high-price YES ask (91-94c) may bypass the
+        # disabled-tail reject so compute_trade_decision can apply the strict
+        # lane gate.  Armed only via MERID_TREND_YES_HI_ENABLED; the
+        # pseudo-regime mirrors skewed_high bounds so downstream
+        # freshness/TTE plumbing sees consistent values.
+        if yes_regime is None:
+            try:
+                from merid.prediction import directional_regime as _dr_lane
+                if _dr_lane.trend_yes_hi_reachable(
+                    yes_price_cents, float(seconds_to_expiry)
+                ):
+                    from merid.event_venues.kalshi.market_regime import SkewRegime
+                    yes_regime = SkewRegime(
+                        name="trend_yes_hi",
+                        min_price_cents=91,
+                        max_price_cents=94,
+                        min_net_edge_cents=Decimal("3.0"),
+                        min_confidence=Decimal("0.80"),
+                        max_spread_cents=1,
+                        min_depth_multiple=Decimal("4.0"),
+                        size_multiplier=Decimal("0.50"),
+                        enabled=True,
+                        min_book_freshness_ms=1000,
+                        min_time_to_expiry_seconds=120,
+                        max_time_to_expiry_seconds=300,
+                    )
+            except Exception:
+                pass
+
         # Determine which side is tradable (if any)
         tradable_side = None
         tradable_regime = None

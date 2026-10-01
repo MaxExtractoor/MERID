@@ -64,10 +64,25 @@ def _isolate_lane(monkeypatch, tmp_path):
     cbp.reset_calibration_version_cache()
     from merid.prediction.threshold_cells import reset_cell_state_cache
     reset_cell_state_cache()
+    # Catastrophic cell breaches now escalate to the side-level throttle —
+    # isolate its file per test so a breach suspension cannot leak into a
+    # later decision-level test in the same worker.
+    from merid.prediction import directional_regime as _dr
+
+    monkeypatch.setenv(
+        "MERID_DIRECTIONAL_THROTTLE_PATH", str(tmp_path / "throttle.json")
+    )
+    monkeypatch.setenv(
+        "MERID_DIRECTIONAL_REGIME_STATE_PATH", str(tmp_path / "regime.json")
+    )
+    _dr._throttle_cache = (0.0, {})
+    _dr._regime_cache = (0.0, {})
     yield
     cbp.reset_provisional_state_cache()
     cbp.reset_calibration_version_cache()
     reset_cell_state_cache()
+    _dr._throttle_cache = (0.0, {})
+    _dr._regime_cache = (0.0, {})
 
 
 def _decomp(asset, side, px, tte=None):
@@ -458,12 +473,19 @@ def test_post_only_breach_suspends_immediately():
         fill_price_cents=46.0, limit_price_cents=45.0, action="buy",
     )
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
+    # Structural breach escalates to the side-level throttle (manual review).
+    from merid.prediction import directional_regime as _dr
+    blk = _dr.side_throttle_block("no")
+    assert blk and "catastrophic" in blk
 
 
 def test_invariant_violation_suspends_immediately():
     c = _prov_cell(side="no", px=45.0)
     cbp.record_provisional_invariant_violation(c.cell_id, "side_mismatch")
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
+    from merid.prediction import directional_regime as _dr
+    blk = _dr.side_throttle_block("no")
+    assert blk and "catastrophic" in blk
 
 
 def test_consecutive_router_rejects_suspend():

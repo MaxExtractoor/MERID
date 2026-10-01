@@ -165,6 +165,9 @@ for _env_key, _fname in {
     # file holds both sides in manual-review suspension — tests must start
     # from a clean throttle and exercise suspensions explicitly.
     "MERID_DIRECTIONAL_THROTTLE_PATH": "directional_throttle.json",
+    # Regime EMA/hysteresis state: production persistence must not leak into
+    # tests (stale confirmed labels would change gate verdicts).
+    "MERID_DIRECTIONAL_REGIME_STATE_PATH": "directional_regime_state.json",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

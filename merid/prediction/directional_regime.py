@@ -100,17 +100,168 @@ def directional_regime_enabled() -> bool:
 class DirectionalRegime:
     """Shared cross-asset directional state for one decision tick."""
 
-    label: str  # NEUTRAL | RALLY_CONFIRMED | SELL_OFF_CONFIRMED
+    label: str  # NEUTRAL | RALLY_CONFIRMED | RALLY_WEAKENING | SELL_OFF_CONFIRMED | SELL_OFF_WEAKENING
     breadth60_pos: int
     breadth60_total: int
     btc_r60: Optional[float]
     asset_r60: Dict[str, Optional[float]]
     ts: float
     reason: str = ""
+    score: float = 0.0       # EMA of the instant directional vote [-1, 1]
+    up_ticks: int = 0        # consecutive rally-aligned observations
+    down_ticks: int = 0      # consecutive selloff-aligned observations
 
 
 def _min_breadth_assets() -> int:
     return _env_int("MERID_REGIME_BREADTH_MIN_ASSETS", 4)
+
+
+def regime_hysteresis_enabled() -> bool:
+    return _env_flag("MERID_REGIME_HYSTERESIS_ENABLED", True)
+
+
+def _regime_state_path() -> str:
+    return os.environ.get(
+        "MERID_DIRECTIONAL_REGIME_STATE_PATH",
+        "data/directional_regime_state.json",
+    )
+
+
+def _regime_lambda() -> float:
+    return _env_float("MERID_REGIME_EMA_LAMBDA", 0.6)
+
+
+def _regime_confirm_score() -> float:
+    return _env_float("MERID_REGIME_CONFIRM_SCORE", 0.5)
+
+
+def _regime_weaken_score() -> float:
+    return _env_float("MERID_REGIME_WEAKEN_SCORE", 0.15)
+
+
+def _regime_confirm_ticks() -> int:
+    return _env_int("MERID_REGIME_CONFIRM_TICKS", 2)
+
+
+def _regime_min_tick_s() -> float:
+    return _env_float("MERID_REGIME_MIN_TICK_S", 1.5)
+
+
+def _regime_stale_s() -> float:
+    return _env_float("MERID_REGIME_STATE_STALE_S", 600.0)
+
+
+_REGIME_LOCK = threading.Lock()
+_regime_cache: Tuple[float, Dict[str, Any]] = (0.0, {})
+
+
+def _default_regime_state() -> Dict[str, Any]:
+    return {
+        "epoch": POLICY_EPOCH,
+        "score": 0.0,
+        "up_ticks": 0,
+        "down_ticks": 0,
+        "label": "NEUTRAL",
+        "last_ts": 0.0,
+    }
+
+
+def _load_regime_state(force: bool = False) -> Dict[str, Any]:
+    """Persisted regime EMA state.  Epoch mismatches reset to the neutral
+    prior.  Staleness is *not* checked here — the state's ``last_ts`` lives
+    in the caller's clock domain (tests drive synthetic timestamps), so only
+    ``_update_regime_state`` may compare it against the tick time."""
+    global _regime_cache
+    now = time.time()
+    if not force and now - _regime_cache[0] < _THROTTLE_CACHE_TTL_S:
+        return _regime_cache[1]
+    path = _regime_state_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            st = json.load(fh)
+    except Exception:
+        st = {}
+    if not isinstance(st, dict) or st.get("epoch") != POLICY_EPOCH:
+        st = _default_regime_state()
+    for k, v in _default_regime_state().items():
+        st.setdefault(k, v)
+    _regime_cache = (now, st)
+    return st
+
+
+def _save_regime_state(st: Dict[str, Any]) -> None:
+    path = _regime_state_path()
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d or ".", prefix=".regime_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(st, fh, separators=(",", ":"))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        global _regime_cache
+        _regime_cache = (time.time(), st)
+    except Exception as exc:
+        logger.debug("[REGIME] persist failed: %s", exc)
+
+
+def _update_regime_state(
+    instant_dir: int,
+    btc_r60: Optional[float],
+    ts: float,
+) -> Dict[str, Any]:
+    """Advance the persisted EMA at most once per ``MERID_REGIME_MIN_TICK_S``.
+
+    ``compute_directional_regime`` is invoked several times inside one loop
+    tick (once per asset's decision call plus the loop-level log).  Only the
+    first observation inside a tick window may advance the score/counters;
+    the rest reuse the stored state so one cycle cannot count as N ticks.
+    """
+    with _REGIME_LOCK:
+        st = _load_regime_state(force=True)
+        # Stale state (restart gap, clock jump): a hours-old confirmed label
+        # must not carry into a fresh session — decay back to the prior.
+        if ts - float(st.get("last_ts") or 0.0) > _regime_stale_s():
+            st.update(_default_regime_state())
+        elif ts - float(st.get("last_ts") or 0.0) < _regime_min_tick_s():
+            return st
+        lam = _regime_lambda()
+        st["score"] = lam * float(st.get("score") or 0.0) + (1.0 - lam) * float(instant_dir)
+        if instant_dir > 0:
+            st["up_ticks"] = int(st.get("up_ticks") or 0) + 1
+            st["down_ticks"] = 0
+        elif instant_dir < 0:
+            st["down_ticks"] = int(st.get("down_ticks") or 0) + 1
+            st["up_ticks"] = 0
+        else:
+            st["up_ticks"] = 0
+            st["down_ticks"] = 0
+        prev_label = str(st.get("label") or "NEUTRAL")
+        score = float(st["score"])
+        confirm = _regime_confirm_score()
+        weaken = _regime_weaken_score()
+        ticks = _regime_confirm_ticks()
+        if st["up_ticks"] >= ticks and score >= confirm and (btc_r60 or 0.0) > 0:
+            label = "RALLY_CONFIRMED"
+        elif st["down_ticks"] >= ticks and score <= -confirm and (btc_r60 or 0.0) < 0:
+            label = "SELL_OFF_CONFIRMED"
+        elif prev_label in ("RALLY_CONFIRMED", "RALLY_WEAKENING") and score >= weaken:
+            label = "RALLY_WEAKENING"
+        elif prev_label in ("SELL_OFF_CONFIRMED", "SELL_OFF_WEAKENING") and score <= -weaken:
+            label = "SELL_OFF_WEAKENING"
+        else:
+            label = "NEUTRAL"
+        st["label"] = label
+        st["last_ts"] = ts
+        _save_regime_state(st)
+        return st
 
 
 def compute_directional_regime(
@@ -124,6 +275,14 @@ def compute_directional_regime(
     ineligible RTI data are excluded from breadth and counted in
     ``breadth60_total`` so the gate degrades honestly instead of blocking on
     missing data.
+
+    With ``MERID_REGIME_HYSTERESIS_ENABLED`` (default on) the label is the
+    output of a decayed confidence score ``R_t = λ·R_{t-1} + (1-λ)·vote``
+    rather than the per-tick vote alone: a confirmed state requires
+    ``MERID_REGIME_CONFIRM_TICKS`` consecutive aligned observations and a
+    score beyond ``MERID_REGIME_CONFIRM_SCORE``; it decays through
+    ``*_WEAKENING`` before returning to ``NEUTRAL``.  This prevents a single
+    breadth flicker from toggling the countertrend prohibition.
     """
     ts = now or time.time()
     asset_r60: Dict[str, Optional[float]] = {}
@@ -160,13 +319,28 @@ def compute_directional_regime(
     min_assets = _min_breadth_assets()
     label = "NEUTRAL"
     reason = "insufficient_rti_breadth" if n_total < min_assets else "mixed"
+    instant_dir = 0
     if n_total >= min_assets:
         if n_pos >= 4 and (btc_r60 or 0.0) > 0:
             label = "RALLY_CONFIRMED"
+            instant_dir = 1
             reason = f"breadth60={n_pos}/{n_total} btc_r60={btc_r60:+.5f}"
         elif n_pos <= n_total - 4 and (btc_r60 or 0.0) < 0:
             label = "SELL_OFF_CONFIRMED"
+            instant_dir = -1
             reason = f"breadth60={n_pos}/{n_total} btc_r60={btc_r60:+.5f}"
+
+    score = 0.0
+    up_ticks = down_ticks = 0
+    if regime_hysteresis_enabled():
+        st = _update_regime_state(instant_dir, btc_r60, ts)
+        label = str(st.get("label") or "NEUTRAL")
+        score = float(st.get("score") or 0.0)
+        up_ticks = int(st.get("up_ticks") or 0)
+        down_ticks = int(st.get("down_ticks") or 0)
+        reason = (
+            f"{reason} score={score:+.3f} up={up_ticks} down={down_ticks}"
+        )
 
     return DirectionalRegime(
         label=label,
@@ -176,6 +350,9 @@ def compute_directional_regime(
         asset_r60=asset_r60,
         ts=ts,
         reason=reason,
+        score=score,
+        up_ticks=up_ticks,
+        down_ticks=down_ticks,
     )
 
 
@@ -359,6 +536,14 @@ def _strip_ev_margin_cents() -> float:
     return _env_float("MERID_STRIP_CONC_EV_MARGIN_CENTS", 3.0)
 
 
+def _caution_ttl_s() -> float:
+    return _env_float("MERID_SIDE_THROTTLE_CAUTION_S", 3600.0)
+
+
+def _caution_ev_margin_cents() -> float:
+    return _env_float("MERID_SIDE_THROTTLE_CAUTION_EV_CENTS", 2.0)
+
+
 def throttle_enabled() -> bool:
     return _env_flag("MERID_SIDE_THROTTLE_ENABLED", True)
 
@@ -368,6 +553,8 @@ def _default_throttle_state() -> Dict[str, Any]:
         "epoch": POLICY_EPOCH,
         "recent_settlements": [],   # [{ts, side, pnl, decision_id}]
         "suspensions": {},          # side -> {until, reason, triggered_at}
+        "cautions": {},             # side -> {until, reason, triggered_at}
+        "released_at": {},          # side -> ts of last operator release
         "strip_entries": {},        # strip_key -> [{side, ev, decision_id, open}]
     }
 
@@ -419,25 +606,38 @@ def _streak(
     side: str,
     now: float,
     window_s: Optional[float],
+    since_ts: float = 0.0,
 ) -> int:
     """Trailing consecutive settled losses for ``side``.
 
     A win on that side breaks the run; other-side outcomes are ignored.
     ``window_s=None`` counts the epoch-wide run (for the manual-review tier);
     a finite window bounds the 60-minute suspension tier — losses older than
-    the window no longer count toward it.
+    the window no longer count toward it.  ``since_ts`` is the operator
+    release watermark: settlements at or before it are review history and do
+    not count toward re-suspension (release = fresh-start semantics).
     """
     streak = 0
     for rec in reversed(list(settlements or [])):
         if rec.get("side") != side:
             continue
-        if window_s is not None and now - float(rec.get("ts") or 0.0) > window_s:
+        rts = float(rec.get("ts") or 0.0)
+        if rts <= since_ts:
+            break
+        if window_s is not None and now - rts > window_s:
             break
         if float(rec.get("pnl") or 0.0) < 0:
             streak += 1
         else:
             break
     return streak
+
+
+def _released_ts(st: Dict[str, Any], side: str) -> float:
+    try:
+        return float((st.get("released_at") or {}).get(side) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def record_side_settlement(
@@ -450,13 +650,23 @@ def record_side_settlement(
 
     Called from the audit ledger's settlement attribution (the single funnel
     every settled decision passes through).  Maintains the rolling loss
-    streak and applies the suspension rules:
+    streak and applies the graded state machine:
 
+      first post-release settled loss -> ``CAUTION`` for
+          ``MERID_SIDE_THROTTLE_CAUTION_S`` (3600s): the side stays open but
+          its required edge is raised by
+          ``MERID_SIDE_THROTTLE_CAUTION_EV_CENTS`` (default 2.0c).  An
+          ordinary one-off loss is signal noise, not proof of a broken lane.
       >= ``MERID_SIDE_THROTTLE_SUSPEND_COUNT`` (2) consecutive same-side
           losses inside ``MERID_SIDE_THROTTLE_LOSS_WINDOW_S`` (3600s)
           -> suspend that side for ``MERID_SIDE_THROTTLE_SUSPEND_S`` (3600s).
       >= ``MERID_SIDE_THROTTLE_REVIEW_COUNT`` (3) consecutive same-side
-          losses -> suspend until manual review or the next policy epoch.
+          losses post-release -> suspend until manual review or the next
+          policy epoch.
+
+    Streaks count only settlements after ``released_at[side]`` — an operator
+    release is an explicit reviewed restart, not a continuation of the run
+    that produced the suspension.
     """
     if not throttle_enabled() or side not in ("yes", "no"):
         return
@@ -474,17 +684,23 @@ def record_side_settlement(
                 if decision_id and e.get("decision_id") == decision_id:
                     e["open"] = False
         window = _loss_window_s()
-        streak_window = _streak(st["recent_settlements"], side, ts, window)
-        streak_epoch = _streak(st["recent_settlements"], side, ts, None)
+        released = _released_ts(st, side)
+        streak_window = _streak(
+            st["recent_settlements"], side, ts, window, since_ts=released
+        )
+        streak_epoch = _streak(
+            st["recent_settlements"], side, ts, None, since_ts=released
+        )
         if pnl < 0 and streak_epoch >= _loss_review_count():
             st["suspensions"][side] = {
                 "until": None,
                 "reason": f"{streak_epoch}_consecutive_losses_manual_review",
                 "triggered_at": ts,
             }
+            st.setdefault("cautions", {}).pop(side, None)
             logger.warning(
                 "[SIDE-THROTTLE] side=%s suspended until manual review "
-                "(%d consecutive epoch losses)",
+                "(%d consecutive post-release epoch losses)",
                 side, streak_epoch,
             )
         elif pnl < 0 and streak_window >= _loss_suspend_count():
@@ -493,12 +709,89 @@ def record_side_settlement(
                 "reason": f"{streak_window}_consecutive_losses",
                 "triggered_at": ts,
             }
+            st.setdefault("cautions", {}).pop(side, None)
             logger.warning(
                 "[SIDE-THROTTLE] side=%s suspended %.0fs "
                 "(%d consecutive losses in %.0fs window)",
                 side, _loss_suspend_seconds(), streak_window, window,
             )
+        elif pnl < 0:
+            st.setdefault("cautions", {})[side] = {
+                "until": ts + _caution_ttl_s(),
+                "reason": f"{streak_epoch}_post_release_loss",
+                "triggered_at": ts,
+            }
+            logger.info(
+                "[SIDE-THROTTLE] side=%s CAUTION %.0fs — edge floor +%.1fc "
+                "(post-release loss streak=%d)",
+                side, _caution_ttl_s(), _caution_ev_margin_cents(),
+                streak_epoch,
+            )
+        else:
+            # A win/push breaks the run and clears caution; timed suspensions
+            # stay on their clock (deliberate: a fast win does not erase the
+            # evidence that produced the suspension).
+            (st.get("cautions") or {}).pop(side, None)
         _save_throttle_state(st)
+
+
+def release_side(side: str, ts: Optional[float] = None) -> None:
+    """Operator release from suspension/manual review.
+
+    Clears the suspension and caution, and watermarks ``released_at[side]``
+    so streak tiers count only settlements after the release — the reviewed
+    history is preserved in ``recent_settlements`` but cannot re-lock the
+    side on the very next loss.
+    """
+    if side not in ("yes", "no"):
+        return
+    ts = float(ts or time.time())
+    with _THROTTLE_LOCK:
+        st = _load_throttle_state(force=True)
+        (st.get("suspensions") or {}).pop(side, None)
+        (st.get("cautions") or {}).pop(side, None)
+        st.setdefault("released_at", {})[side] = ts
+        _save_throttle_state(st)
+    logger.warning(
+        "[SIDE-THROTTLE] side=%s released by operator at ts=%.0f — "
+        "streak tiers restart from post-release settlements",
+        side, ts,
+    )
+
+
+def release_all_sides(ts: Optional[float] = None) -> None:
+    for _s in ("yes", "no"):
+        release_side(_s, ts=ts)
+
+
+def record_side_catastrophe(
+    side: Optional[str],
+    reason: str,
+    ts: Optional[float] = None,
+) -> None:
+    """Immediate manual-review stop on catastrophic execution evidence.
+
+    Reserved for structural breaches, not performance: wrong-side mapping,
+    post-only order filling as taker, fill-time EV <= 0, or a 5s markout at
+    or beyond ``MERID_SIDE_CATASTROPHE_M5_CENTS`` (default -5.0c).  These are
+    integrity failures — the side stops until an operator reviews, rather
+    than earning a graded caution.
+    """
+    if not throttle_enabled() or side not in ("yes", "no"):
+        return
+    ts = float(ts or time.time())
+    with _THROTTLE_LOCK:
+        st = _load_throttle_state(force=True)
+        st["suspensions"][side] = {
+            "until": None,
+            "reason": f"catastrophic:{str(reason)[:120]}",
+            "triggered_at": ts,
+        }
+        _save_throttle_state(st)
+    logger.warning(
+        "[SIDE-THROTTLE] side=%s CATASTROPHE -> manual review (%s)",
+        side, reason,
+    )
 
 
 def side_throttle_block(side: str, now: Optional[float] = None) -> Optional[str]:
@@ -516,6 +809,42 @@ def side_throttle_block(side: str, now: Optional[float] = None) -> Optional[str]
     if now < float(until):
         return f"side_suspended:{sus.get('reason')}"
     return None
+
+
+def side_caution_margin_cents(side: str, now: Optional[float] = None) -> float:
+    """Additive edge-floor margin while ``side`` is in the CAUTION tier.
+
+    CAUTION is not a suspension — the side keeps trading, but each candidate
+    must clear ``min_edge + margin`` until the caution expires or a win
+    resets the streak.
+    """
+    if not throttle_enabled() or side not in ("yes", "no"):
+        return 0.0
+    now = float(now or time.time())
+    st = _load_throttle_state()
+    caution = (st.get("cautions") or {}).get(side)
+    if not caution:
+        return 0.0
+    until = caution.get("until")
+    if until is None or now >= float(until):
+        return 0.0
+    return _caution_ev_margin_cents()
+
+
+def side_lane_state(side: str, now: Optional[float] = None) -> str:
+    """Graded lane level for telemetry: OPEN | CAUTION | SUSPENDED | MANUAL_REVIEW."""
+    if side not in ("yes", "no"):
+        return "OPEN"
+    now = float(now or time.time())
+    st = _load_throttle_state()
+    sus = (st.get("suspensions") or {}).get(side)
+    if sus:
+        return "MANUAL_REVIEW" if sus.get("until") is None else (
+            "SUSPENDED" if now < float(sus["until"]) else "OPEN"
+        )
+    if side_caution_margin_cents(side, now) > 0.0:
+        return "CAUTION"
+    return "OPEN"
 
 
 def _strip_key(ts: float) -> str:
@@ -583,11 +912,200 @@ def throttle_status() -> Dict[str, Any]:
     """Observability snapshot for heartbeats/tests."""
     st = _load_throttle_state()
     now = time.time()
+    recs = st.get("recent_settlements")
+    rel_no = _released_ts(st, "no")
+    rel_yes = _released_ts(st, "yes")
     return {
         "epoch": st.get("epoch"),
         "suspensions": st.get("suspensions"),
-        "no_streak_60m": _streak(st.get("recent_settlements"), "no", now, _loss_window_s()),
-        "yes_streak_60m": _streak(st.get("recent_settlements"), "yes", now, _loss_window_s()),
-        "no_streak_epoch": _streak(st.get("recent_settlements"), "no", now, None),
-        "yes_streak_epoch": _streak(st.get("recent_settlements"), "yes", now, None),
+        "cautions": st.get("cautions"),
+        "released_at": st.get("released_at"),
+        "yes_lane_state": side_lane_state("yes", now),
+        "no_lane_state": side_lane_state("no", now),
+        "no_streak_60m": _streak(recs, "no", now, _loss_window_s()),
+        "yes_streak_60m": _streak(recs, "yes", now, _loss_window_s()),
+        "no_streak_epoch": _streak(recs, "no", now, None),
+        "yes_streak_epoch": _streak(recs, "yes", now, None),
+        "no_streak_post_release": _streak(recs, "no", now, None, since_ts=rel_no),
+        "yes_streak_post_release": _streak(recs, "yes", now, None, since_ts=rel_yes),
     }
+
+
+# ---------------------------------------------------------------------------
+# Trend-aligned high-price YES research lane (built, disabled by default)
+# ---------------------------------------------------------------------------
+#
+# Rationale (2026-10-01 operator directive): in RALLY_CONFIRMED the only
+# aligned side is YES, but YES asks frequently sit at 91-94c — outside every
+# enabled market_regime band — so the band filter rejects the whole market
+# before decision evaluation.  This lane is a *narrow* exception for that
+# specific structure: it never re-opens 95-99c, it requires a confirmed
+# multi-asset rally, and it is measured under its own ``decision_lane`` tag
+# so it cannot contaminate the ordinary 10-90c evidence pools.
+#
+# Built but OFF: ``MERID_TREND_YES_HI_ENABLED`` defaults false.  Enabling is
+# a replay-gated operator decision, not a code change.
+
+
+def trend_yes_hi_enabled() -> bool:
+    return _env_flag("MERID_TREND_YES_HI_ENABLED", False)
+
+
+def _trend_yes_hi_lo() -> float:
+    # 91c, not 90c: 90c is already inside the enabled skewed_high band and
+    # trades under normal rules — the lane owns only the disabled region.
+    return _env_float("MERID_TREND_YES_HI_PRICE_LO", 91.0)
+
+
+def _trend_yes_hi_hi() -> float:
+    return _env_float("MERID_TREND_YES_HI_PRICE_HI", 94.0)
+
+
+def _trend_yes_hi_min_tte() -> float:
+    return _env_float("MERID_TREND_YES_HI_MIN_TTE_S", 120.0)
+
+
+def _trend_yes_hi_max_tte() -> float:
+    return _env_float("MERID_TREND_YES_HI_MAX_TTE_S", 300.0)
+
+
+def _trend_yes_hi_min_p() -> float:
+    return _env_float("MERID_TREND_YES_HI_MIN_P", 0.94)
+
+
+def _trend_yes_hi_min_ev_cents() -> float:
+    return _env_float("MERID_TREND_YES_HI_MIN_EV_CENTS", 3.0)
+
+
+def _trend_yes_hi_min_breadth() -> int:
+    return _env_int("MERID_TREND_YES_HI_MIN_BREADTH", 4)
+
+
+def _trend_yes_hi_m5_lookback() -> int:
+    return _env_int("MERID_TREND_YES_HI_M5_LOOKBACK", 3)
+
+
+def trend_yes_hi_band_match(price_cents: Optional[float]) -> bool:
+    """True when the executable YES ask sits inside the lane's price window.
+
+    Flag-independent on purpose: ``compute_trade_decision`` uses this to
+    disable the *normal* YES-qualify path at 91-94c even when the lane is
+    off, so a high-price candidate that somehow reaches the decision engine
+    without the band filter cannot slip through the ordinary gates.
+    """
+    if price_cents is None:
+        return False
+    try:
+        p = float(price_cents)
+    except (TypeError, ValueError):
+        return False
+    return _trend_yes_hi_lo() <= p <= _trend_yes_hi_hi()
+
+
+def trend_yes_hi_reachable(
+    yes_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> bool:
+    """Reachability check for the agent_grid band bypass.
+
+    Lets a 91-94c YES ask pass the disabled-tail reject so
+    ``compute_trade_decision`` can apply the strict lane gate.  False unless
+    the lane is armed AND price/TTE are inside the lane window.
+    """
+    if not trend_yes_hi_enabled():
+        return False
+    if not trend_yes_hi_band_match(yes_price_cents):
+        return False
+    if tte_seconds is None:
+        return False
+    try:
+        tte = float(tte_seconds)
+    except (TypeError, ValueError):
+        return False
+    return _trend_yes_hi_min_tte() <= tte <= _trend_yes_hi_max_tte()
+
+
+def _rti_return_at(feature_snapshot: Any, asset: str, key: str) -> Optional[float]:
+    try:
+        sl = (feature_snapshot.by_asset or {}).get(str(asset).upper())
+    except Exception:
+        sl = None
+    if sl is None:
+        return None
+    try:
+        v = (sl.rti_returns or {}).get(key)
+    except Exception:
+        v = None
+    if v is None:
+        return None
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    return fv if math.isfinite(fv) else None
+
+
+def trend_yes_hi_block(
+    asset: str,
+    yes_price_cents: Optional[float],
+    p_yes_cal: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+    regime: Optional[DirectionalRegime],
+    feature_snapshot: Any,
+) -> Optional[str]:
+    """Strict trend-aligned high-price YES admission gate.
+
+    Applies only when the lane is armed and the YES ask is in the lane
+    window; returns ``None`` in both the inert case and when every strict
+    condition passes.  Each failure names the violated condition so the
+    [REGIME-ALIGNED-OPPORTUNITY] telemetry can say *why* an aligned rally
+    candidate did not trade.
+
+    Missing momentum inputs fail closed: a 91-94c YES needs positive asset
+    30s/60s and BTC 120s returns, and an unverifiable input is a reject, not
+    a pass.
+    """
+    if not trend_yes_hi_enabled():
+        return None
+    if not trend_yes_hi_band_match(yes_price_cents):
+        # Fail closed when armed: a caller that forgot the band pre-check
+        # must get a veto, not a pass.  (Inert when disabled so telemetry
+        # can consult it unconditionally.)
+        return "trend_yes_hi_band"
+    if regime is None or regime.label != "RALLY_CONFIRMED":
+        return "trend_yes_hi_regime_not_confirmed"
+    min_breadth = _trend_yes_hi_min_breadth()
+    if regime.breadth60_pos < min_breadth or regime.breadth60_total < min_breadth:
+        return "trend_yes_hi_breadth"
+    if not (regime.btc_r60 or 0.0) > 0.0:
+        return "trend_yes_hi_btc_r60"
+    btc_r120 = _rti_return_at(feature_snapshot, "BTC", "rti_return_120s")
+    if btc_r120 is None or btc_r120 <= 0.0:
+        return "trend_yes_hi_btc_r120"
+    a_r30 = _rti_return_at(feature_snapshot, asset, "rti_return_30s")
+    a_r60 = (regime.asset_r60 or {}).get(str(asset).upper())
+    if a_r30 is None or a_r30 <= 0.0 or a_r60 is None or a_r60 <= 0.0:
+        return "trend_yes_hi_asset_momentum"
+    if p_yes_cal is None or float(p_yes_cal) < _trend_yes_hi_min_p():
+        return "trend_yes_hi_low_conviction"
+    if net_ev_cents is None or float(net_ev_cents) < _trend_yes_hi_min_ev_cents():
+        return "trend_yes_hi_low_ev"
+    if tte_seconds is None or not (
+        _trend_yes_hi_min_tte() <= float(tte_seconds) <= _trend_yes_hi_max_tte()
+    ):
+        return "trend_yes_hi_tte"
+    # Lane memory: any negative 5s markout in the asset's YES lane tagged
+    # with RALLY_CONFIRMED this epoch closes the lane until the evidence
+    # window rolls forward past it.
+    try:
+        from merid.prediction import current_build_provisional as _cbp
+
+        m5s = _cbp.recent_regime_markout_values(
+            asset, "yes", "RALLY_CONFIRMED", limit=_trend_yes_hi_m5_lookback()
+        )
+    except Exception:
+        m5s = []
+    if m5s and any(v < 0.0 for v in m5s):
+        return "trend_yes_hi_adverse_markout"
+    return None
