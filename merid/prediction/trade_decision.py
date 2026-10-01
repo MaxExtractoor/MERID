@@ -459,6 +459,34 @@ MERID_CHEAP_TAIL_CANARY_DAILY_FILE = os.environ.get(
     "data/cheap_tail_canary_daily.json",
 )
 
+# Bounded live-entry domain + tail LCB admission gate (2026-10-01).
+#
+# The controlled dual-side rollout restricts *live* entries to the bounded
+# domain (20-89c executable ask, 120-600s TTE).  The cbp/threshold cell grids
+# bound their own admission, but the residual formula lane could still emit
+# live orders outside the box — observed live: XRP NO@75 entered at TTE 823s
+# and lost -75c on a toxic fill.  ``MERID_LIVE_ENTRY_MAX_TTE_S`` is the
+# emit-side ceiling; decisions outside remain audited as no-trade so the band
+# stays measurable.  The lower bound is untouched: per-band regime TTE floors
+# and the settlement-convergence lane own it.
+#
+# The tail LCB gate addresses the second observed failure mode: entries at
+# >=70c passed the point-EV bar while their lower confidence bound
+# (net_edge - model_risk_reserve) sat below the required edge — the claimed
+# edge did not survive the model's own uncertainty charge (BTC YES@77:
+# lcb 1.68c < 2.5c required; XRP NO@75: lcb 1.11c < 2.85c — both lost).  In
+# the 70-89c band one miss costs 70-89c against an 11-30c win, so admission
+# there requires LCB >= the threshold the side was admitted on.
+MERID_LIVE_ENTRY_MAX_TTE_S = float(
+    os.environ.get("MERID_LIVE_ENTRY_MAX_TTE_S", "600")
+)
+MERID_TAIL_LCB_GATE_ENABLED = os.environ.get(
+    "MERID_TAIL_LCB_GATE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_TAIL_LCB_MIN_PRICE_CENTS = int(
+    os.environ.get("MERID_TAIL_LCB_MIN_PRICE_CENTS", "70")
+)
+
 
 # In-memory and persisted daily canary attempt accounting.
 _cheap_tail_canary_daily_lock = threading.RLock()
@@ -1186,6 +1214,120 @@ def apply_canary_lcb_gate(
         no_trade_reason=shadow_cohort["delta_reason"] or decision.no_trade_reason or "lcb_canary_no_trade",
         indicators=new_indicators,
     )
+
+
+def _downgrade_live_selection(
+    decision: TradeDecision,
+    reason: str,
+    gate_record: Dict[str, Any],
+) -> TradeDecision:
+    """Downgrade a selected decision to no-trade under a bounded-domain gate.
+
+    The selection fields are cleared exactly as the canary overlays do; the
+    per-side breakdowns stay attached so audit rows keep the measured EV, and
+    ``indicators["bounded_domain_gate"]`` records why the live emit was vetoed.
+    """
+    new_indicators = dict(decision.indicators or {})
+    new_indicators["bounded_domain_gate"] = gate_record
+    return replace(
+        decision,
+        selected_outcome=None,
+        selected_action=None,
+        selected_side_pre_edge=None,
+        selected_outcome_price=None,
+        p_selected=None,
+        p_opposite=None,
+        gross_edge=None,
+        net_edge=None,
+        edge_breakdown=None,
+        approved_size_cc=Decimal("0"),
+        no_trade_reason=reason,
+        ev_gate_allowed=False,
+        indicators=new_indicators,
+    )
+
+
+def apply_bounded_live_domain_gate(
+    decision: TradeDecision,
+    *,
+    yes_threshold: Optional[EdgeThresholdDecomposition] = None,
+    no_threshold: Optional[EdgeThresholdDecomposition] = None,
+) -> TradeDecision:
+    """Final bounded-domain admission gate for live selections.
+
+    Runs after all selection overlays.  Two independent checks:
+
+      1. TTE ceiling — selections past ``MERID_LIVE_ENTRY_MAX_TTE_S``
+         (default 600s, the rollout's bounded live domain) are downgraded.
+         The lower bound is intentionally left to the per-band regime TTE
+         floors and the settlement-convergence lane.
+      2. Tail LCB — at executable prices >= ``MERID_TAIL_LCB_MIN_PRICE_CENTS``
+         (default 70c) the selected side's lower confidence bound
+         (``net_edge - model_risk_reserve``) must clear the edge threshold it
+         was admitted on.  Point-EV passes with sub-threshold LCB in the
+         loss-asymmetric tail were the common signature of the 2026-09-30
+         losing entries (BTC YES@77, XRP NO@75).
+
+    Downgraded decisions carry a ``bounded_domain_gate`` indicator record;
+    evaluated-and-passed tail selections are stamped too, so current-build
+    evidence shows the gate ran.
+    """
+    if decision.selected_outcome is None:
+        return decision
+
+    sel = str(decision.selected_outcome)
+
+    tte = float(decision.seconds_to_expiry) if decision.seconds_to_expiry is not None else None
+    if tte is not None and tte > MERID_LIVE_ENTRY_MAX_TTE_S:
+        record = {
+            "gate": "tte_ceiling",
+            "seconds_to_expiry": tte,
+            "max_tte_s": MERID_LIVE_ENTRY_MAX_TTE_S,
+            "would_enter_at_prior": True,
+        }
+        return _downgrade_live_selection(
+            decision,
+            f"bounded_domain_tte:{tte:.0f}s>{MERID_LIVE_ENTRY_MAX_TTE_S:.0f}s",
+            record,
+        )
+
+    breakdown = decision.edge_breakdown or (
+        decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
+    )
+    if not MERID_TAIL_LCB_GATE_ENABLED or breakdown is None:
+        return decision
+
+    price_cents = int(round(float(breakdown.executable_entry_price) * 100.0))
+    if price_cents < MERID_TAIL_LCB_MIN_PRICE_CENTS:
+        return decision
+
+    thr = yes_threshold if sel == "yes" else no_threshold
+    required_cents = float(thr.total) * 100.0 if thr is not None else 0.0
+    lcb_cents = (
+        float(breakdown.net_edge) - float(breakdown.model_risk_reserve)
+    ) * 100.0
+    record = {
+        "gate": "tail_lcb",
+        "price_cents": price_cents,
+        "lcb_cents": round(lcb_cents, 3),
+        "required_cents": round(required_cents, 3),
+        "would_enter_at_prior": True,
+    }
+    if lcb_cents < required_cents - 1e-9:
+        return _downgrade_live_selection(
+            decision,
+            (
+                f"tail_lcb_gate:lcb={lcb_cents:.2f}c"
+                f"<required={required_cents:.2f}c@{price_cents}c"
+            ),
+            record,
+        )
+
+    record["would_enter_at_prior"] = True
+    record["passed"] = True
+    new_indicators = dict(decision.indicators or {})
+    new_indicators["bounded_domain_gate"] = record
+    return replace(decision, indicators=new_indicators)
 
 
 def _log_canary_rejected(
@@ -3860,6 +4002,17 @@ def compute_trade_decision(
     # after the 4c LCB overlay and may select a side the core lane rejected.
     if MERID_CHEAP_TAIL_CANARY_ENABLED:
         decision = _apply_cheap_tail_canary_lane(decision, quote_age_ms=quote_age_ms)
+
+    # Bounded live-entry domain: the rollout restricts live admission to
+    # TTE <= MERID_LIVE_ENTRY_MAX_TTE_S and, in the >=70c tail, requires the
+    # claimed edge to survive the model-risk reserve (LCB).  Selections
+    # outside are downgraded to no-trade with a shadow record; measurement
+    # and per-side audit rows continue unaffected.
+    decision = apply_bounded_live_domain_gate(
+        decision,
+        yes_threshold=_yes_edge_thr,
+        no_threshold=_no_edge_thr,
+    )
 
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 
