@@ -826,7 +826,9 @@ def test_bounded_lane_normalizes_to_one_contract():
     from merid import loop_15m
 
     src = inspect.getsource(loop_15m._execute_candidate)
-    assert '"threshold_cell", "current_build_provisional"' in src
+    # The clamp must cover every bounded post-only lane via the shared
+    # constant — not just the two lanes that existed when this guard landed.
+    assert "BOUNDED_POST_ONLY_LANES" in src
     # Lane block must trigger on any non-1.0 count, not only count > 1.0.
     assert "count != 1.0" in src
     assert "count = 1.0" in src
@@ -840,7 +842,7 @@ def test_allocator_prefit_does_not_shrink_bounded_lane():
 
     src = inspect.getsource(agent_grid_15m.LeanAgentGrid15m.run_cycle)
     assert "_bounded_lane" in src
-    assert '"threshold_cell", "current_build_provisional"' in src
+    assert "BOUNDED_POST_ONLY_LANES" in src
 
 # ---------------------------------------------------------------------------
 # Bounded live-domain gate + tail LCB admission (2026-10-01 loss audit: the

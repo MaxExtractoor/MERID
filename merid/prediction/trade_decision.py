@@ -479,6 +479,21 @@ MERID_CHEAP_TAIL_CANARY_DAILY_FILE = os.environ.get(
     "data/cheap_tail_canary_daily.json",
 )
 
+# Bounded post-only lanes: every lane whose decision contract is one-contract
+# post-only maker regardless of the primary lane's execution posture.  These
+# lanes carry authoritative executable-price economics from this decision
+# engine (executable ask, exact fees, depth, adverse-selection reserve), so
+# downstream gates must not re-derive an approval verdict from orderbook
+# midpoints or silently substitute a taker/IOC order style — they keep their
+# own admission thresholds and fail closed instead.
+BOUNDED_POST_ONLY_LANES = frozenset({
+    "cheap_tail_canary",
+    "evidence_cell_escape",
+    "threshold_cell",
+    "current_build_provisional",
+    "trend_yes_hi",
+})
+
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
 #
 # The controlled dual-side rollout restricts *live* entries to the bounded

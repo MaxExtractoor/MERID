@@ -8524,13 +8524,7 @@ class LeanAgent15m:
         _decision_lane = decision.indicators.get("decision_lane")
         if (
             decision.selected_outcome is not None
-            and _decision_lane in (
-                "cheap_tail_canary",
-                "evidence_cell_escape",
-                "threshold_cell",
-                "current_build_provisional",
-                "trend_yes_hi",
-            )
+            and _decision_lane in BOUNDED_POST_ONLY_LANES
         ):
             logger.info(
                 "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s lane=%s "
@@ -8717,12 +8711,7 @@ class LeanAgent15m:
                     )
                 except Exception:
                     pass
-            if _decision_lane in (
-                "evidence_cell_escape",
-                "threshold_cell",
-                "current_build_provisional",
-                "trend_yes_hi",
-            ):
+            if _decision_lane in BOUNDED_POST_ONLY_LANES:
                 if int(decision.approved_size_cc) > 100:
                     decision = replace(decision, approved_size_cc=Decimal("100"))
 
@@ -19351,15 +19340,15 @@ class LeanAgentGrid15m:
                     # even though 0.12 contracts is a perfectly valid Kalshi V2
                     # count_fp order.  ROUND_DOWN so the fit never exceeds the cap.
                     _pre_count = float(candidate.get('count', 0.0) or 0.0)
-                    # Bounded lanes (threshold_cell / current_build_provisional)
-                    # are one-contract instruments: never pre-shrink them to the
-                    # cap fit.  The allocator evaluates the full contract and
-                    # rejects when it does not fit — under-sizing here would let
-                    # execution submit a non-canonical quantity the lane's
-                    # bookkeeping cannot attribute.
+                    # Bounded lanes (BOUNDED_POST_ONLY_LANES) are one-contract
+                    # instruments: never pre-shrink them to the cap fit.  The
+                    # allocator evaluates the full contract and rejects when it
+                    # does not fit — under-sizing here would let execution
+                    # submit a non-canonical quantity the lane's bookkeeping
+                    # cannot attribute.
                     _bounded_lane = bool(
                         candidate.get('decision_lane')
-                        in ("threshold_cell", "current_build_provisional")
+                        in BOUNDED_POST_ONLY_LANES
                         or candidate.get('threshold_cell_id')
                         or candidate.get('provisional_cell_id')
                     )
@@ -19776,6 +19765,7 @@ AgentGrid15M = LeanAgent15m
 # marginal-but-profitable edges.
 from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact as _kalshi_fee_cents_exact
 from merid.prediction.trade_decision import (
+    BOUNDED_POST_ONLY_LANES,
     compute_trade_decision,
     _resolve_annualized_vol,
     _compute_bachelier_components,
