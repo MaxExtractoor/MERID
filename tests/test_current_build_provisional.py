@@ -18,9 +18,11 @@ owning suspension/promotion.  These tests prove:
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import os
+from decimal import Decimal
 
 import pytest
 
@@ -28,7 +30,10 @@ import merid.prediction.trade_decision as _td
 from merid.prediction import current_build_provisional as cbp
 from merid.prediction.threshold_cells import cell_region_registered
 from merid.prediction.trade_decision import (
+    EdgeBreakdown,
+    TradeDecision,
     _decompose_dynamic_min_required_edge,
+    apply_bounded_live_domain_gate,
     compute_trade_decision,
 )
 
@@ -714,3 +719,135 @@ def test_allocator_prefit_does_not_shrink_bounded_lane():
     src = inspect.getsource(agent_grid_15m.LeanAgentGrid15m.run_cycle)
     assert "_bounded_lane" in src
     assert '"threshold_cell", "current_build_provisional"' in src
+
+# ---------------------------------------------------------------------------
+# Bounded live-domain gate + tail LCB admission (2026-10-01 loss audit: the
+# last three live losses were BTC YES@77 with LCB 1.68c < 2.5c required, XRP
+# NO@75 emitted by the formula lane at TTE 823s -- outside the bounded
+# 120-600s live domain -- with LCB 1.11c < 2.85c, and XRP NO@55 which only
+# existed because a candidate-identity bug had disabled the per-asset cap).
+# ---------------------------------------------------------------------------
+
+
+def _mk_live_decision(*, asset="BTC", side="yes", tte=300.0, exec_price=0.77,
+                      net_edge=0.0368, risk=0.02):
+    """Minimal selected TradeDecision for apply_bounded_live_domain_gate."""
+    bd = EdgeBreakdown(
+        p_yes=0.84, p_no=0.16, selected_side=side,
+        p_selected=0.84 if side == "yes" else 0.16,
+        p_opposite=0.16 if side == "yes" else 0.84,
+        executable_entry_price=exec_price,
+        entry_fee=0.003, exit_cost_reserve=0.0,
+        model_risk_reserve=risk,
+        gross_edge=net_edge + 0.023, net_edge=net_edge,
+    )
+    return TradeDecision(
+        run_id="t", decision_id="t", ticker=f"KX{asset}15M-X", asset=asset,
+        timestamp_utc=_dt.datetime.now(_dt.timezone.utc),
+        p_yes_raw=Decimal("0.84"), p_yes_calibrated=Decimal("0.84"),
+        p_yes_uncertainty=Decimal(str(risk)),
+        p_no_calibrated=Decimal("0.16"),
+        seconds_to_expiry=Decimal(str(tte)),
+        selected_outcome=side, selected_action="buy",
+        selected_outcome_price=Decimal(str(exec_price)),
+        edge_breakdown=bd,
+        yes_edge_breakdown=bd if side == "yes" else None,
+        no_edge_breakdown=bd if side == "no" else None,
+        approved_size_cc=Decimal("100"),
+        ev_gate_allowed=True,
+        data_state="healthy",
+        data_quality="live",
+        regime="normal",
+        regime_label="normal",
+        confidence_valid=True,
+        indicators={},
+    )
+
+
+def test_domain_gate_tte_ceiling_blocks_late_entry():
+    """Formula-lane selection at TTE 823s (the XRP NO@75 loss) is vetoed."""
+    d = _mk_live_decision(tte=823.0, exec_price=0.75)
+    out = apply_bounded_live_domain_gate(
+        d,
+        yes_threshold=_decomp("BTC", "yes", 75, tte=300),
+        no_threshold=_decomp("BTC", "no", 75, tte=300),
+    )
+    assert out.selected_outcome is None
+    assert out.approved_size_cc == 0
+    assert out.ev_gate_allowed is False
+    assert out.no_trade_reason.startswith("bounded_domain_tte")
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["gate"] == "tte_ceiling"
+    assert rec["seconds_to_expiry"] == 823.0
+
+
+def test_domain_gate_tte_inside_domain_untouched():
+    d = _mk_live_decision(tte=599.9, exec_price=0.45, net_edge=0.20)
+    out = apply_bounded_live_domain_gate(
+        d, yes_threshold=_decomp("BTC", "yes", 45, tte=300),
+    )
+    assert out.selected_outcome == "yes"
+
+
+def test_domain_gate_tail_lcb_blocks_thin_tail_edge():
+    """BTC YES@77 (lcb 1.68c < 2.5c required) must not admit."""
+    thr = _decomp("BTC", "yes", 77, tte=300)
+    d = _mk_live_decision(
+        side="yes", exec_price=0.77,
+        net_edge=float(thr.total) + 0.01,  # point EV clears, LCB does not
+        risk=0.02,
+    )
+    out = apply_bounded_live_domain_gate(d, yes_threshold=thr)
+    assert out.selected_outcome is None
+    assert "tail_lcb_gate" in out.no_trade_reason
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["gate"] == "tail_lcb" and rec["price_cents"] == 77
+    assert rec["lcb_cents"] < rec["required_cents"]
+
+
+def test_domain_gate_tail_lcb_passes_when_edge_survives():
+    """Deep edge in the tail (lcb >= required) still admits."""
+    thr = _decomp("BTC", "yes", 77, tte=300)
+    d = _mk_live_decision(
+        side="yes", exec_price=0.77,
+        net_edge=float(thr.total) + 0.05,  # lcb = total+0.03 > total
+        risk=0.02,
+    )
+    out = apply_bounded_live_domain_gate(d, yes_threshold=thr)
+    assert out.selected_outcome == "yes"
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["gate"] == "tail_lcb" and rec["passed"] is True
+
+
+def test_domain_gate_tail_lcb_ignores_mid_band():
+    """Sub-70c entries keep the plain point-EV bar (XRP NO@55 band)."""
+    thr = _decomp("XRP", "no", 55, tte=300)
+    d = _mk_live_decision(
+        asset="XRP", side="no", exec_price=0.55,
+        net_edge=float(thr.total) + 0.005,  # lcb below required, but mid-band
+        risk=0.02,
+    )
+    out = apply_bounded_live_domain_gate(d, no_threshold=thr)
+    assert out.selected_outcome == "no"
+    assert "bounded_domain_gate" not in (out.indicators or {})
+
+
+def test_domain_gate_end_to_end_tte_ceiling():
+    """compute_trade_decision itself must veto a >600s live selection.
+
+    Mirrors the XRP-2045 loss: XRP NO at ~77c executable, model ~0.82,
+    TTE 823s — inside the formula lane's old window, outside the bounded
+    live domain.
+    """
+    d = _decision(
+        asset="XRP",
+        spot_price=1.4863, strike_price=1.4886,
+        seconds_to_expiry=823.0,
+        yes_bid_cents=23.0, yes_ask_cents=25.0,
+        no_bid_cents=75.0, no_ask_cents=77.0,
+        p_yes_model=0.08,
+        annualized_vol=0.30,
+    )
+    assert d.selected_outcome is None
+    assert "bounded_domain_tte" in (d.no_trade_reason or "")
+    assert d.indicators["bounded_domain_gate"]["gate"] == "tte_ceiling"
