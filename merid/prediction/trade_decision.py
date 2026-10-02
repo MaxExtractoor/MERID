@@ -64,6 +64,25 @@ TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P
 # but never below the hard 0.02 floor.
 TRADE_DECISION_MIN_REQUIRED_EDGE = float(os.environ.get("MERID_TRADE_DECISION_MIN_REQUIRED_EDGE", "0.02"))
 
+# 2026-10-02: Marginal-band threshold relief.  The settled-rejection
+# counterfactual (541k rejected candidates, joined to outcomes) shows the
+# 0-1c and 1-2c bands *below* the gate are net profitable (+3.76c and
+# +2.96c per trade) — but only at held prices 50-89c; the <50c and >=90c
+# cohorts rejected at the margin were correctly blocked.  The formula
+# threshold in that band is therefore reduced by a bounded constant,
+# floored at the global hard floor.  Approved threshold-cell and
+# provisional-cell values are untouched (they replace the formula output).
+# Override with MERID_EDGE_MID_BAND_RELIEF_CENTS; set 0 to disable.
+MERID_EDGE_MID_BAND_RELIEF_CENTS = max(
+    0.0, float(os.environ.get("MERID_EDGE_MID_BAND_RELIEF_CENTS", "1.5"))
+)
+MERID_EDGE_MID_BAND_LO_CENTS = float(
+    os.environ.get("MERID_EDGE_MID_BAND_LO_CENTS", "50")
+)
+MERID_EDGE_MID_BAND_HI_CENTS = float(
+    os.environ.get("MERID_EDGE_MID_BAND_HI_CENTS", "89")
+)
+
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
 # the 0-19c tail.  Override with MERID_MIN_HELD_PRICE_CENTS to raise/lower.
@@ -841,6 +860,7 @@ class EdgeThresholdDecomposition(NamedTuple):
     flb_premium: float         # favorite-longshot-bias premium (p < 0.35)
     clamped_floor: bool        # True if the 0.02 floor bound
     clamped_ceiling: bool      # True if the 0.15 ceiling bound
+    band_relief: float = 0.0   # 50-89c marginal-band threshold relief (subtracted)
     cell_id: Optional[str] = None       # threshold-cell override id
     cell_min_ev_cents: Optional[float] = None  # cell threshold, cents
     cell_cap_exhausted: bool = False    # cell matched but daily lane cap hit
@@ -954,7 +974,17 @@ def _decompose_dynamic_min_required_edge(
     # our model-conditioned 35-50c cells clear fees).
     flb_adj = MERID_FLB_LONGSHOT_SLOPE * max(0.0, 0.35 - p)
 
-    dynamic = base + price_adj + flb_adj
+    # 2026-10-02: marginal-band relief — the settled counterfactual shows the
+    # 0-2c-below-gate cohort is net profitable only at held prices 50-89c.
+    # Subtracted before the clamp; the 0.02 hard floor still binds.
+    band_relief = 0.0
+    if (
+        MERID_EDGE_MID_BAND_RELIEF_CENTS > 0.0
+        and MERID_EDGE_MID_BAND_LO_CENTS <= float(price_cents) <= MERID_EDGE_MID_BAND_HI_CENTS
+    ):
+        band_relief = MERID_EDGE_MID_BAND_RELIEF_CENTS / 100.0
+
+    dynamic = base + price_adj + flb_adj - band_relief
     total = max(0.02, min(dynamic, 0.15))
 
     # 2026-09-30: conditional threshold cells (merid.prediction.threshold_cells)
@@ -1014,6 +1044,7 @@ def _decompose_dynamic_min_required_edge(
         asset_base=asset_base,
         convexity=price_adj,
         flb_premium=flb_adj,
+        band_relief=band_relief,
         clamped_floor=(cell is None and total == 0.02 and dynamic < 0.02),
         clamped_ceiling=(cell is None and total == 0.15 and dynamic > 0.15),
         cell_id=cell.cell_id if cell is not None else None,
@@ -2938,6 +2969,7 @@ def compute_trade_decision(
         indicators[f"{_pfx}_thr_asset_base_cents"] = _d.asset_base * 100.0
         indicators[f"{_pfx}_thr_convexity_cents"] = _d.convexity * 100.0
         indicators[f"{_pfx}_thr_flb_premium_cents"] = _d.flb_premium * 100.0
+        indicators[f"{_pfx}_thr_band_relief_cents"] = _d.band_relief * 100.0
         indicators[f"{_pfx}_thr_clamped_floor"] = _d.clamped_floor
         indicators[f"{_pfx}_thr_clamped_ceiling"] = _d.clamped_ceiling
         indicators[f"{_pfx}_thr_cell_id"] = _d.cell_id

@@ -1233,6 +1233,21 @@ def release_cell_submission_reservation(
     return True
 
 
+# 2026-10-02: pre-wire rejection codes that are *revalidation* outcomes, not
+# lane-quality failures.  ``fill_adjusted_edge_below_threshold`` fires when
+# the book moved between decision and wire — the safety gate working as
+# designed.  ``stale_decision_*``/``book_stale`` are data-freshness guards.
+# Counting these toward the consecutive-reject suspension punished cells for
+# the protective layer doing its job (observed: sol_no_30_60 suspended on two
+# edge-gate rejects).  Post-only cross/reprice/venue rejects still count.
+_CELL_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES = frozenset({
+    "FILL_ADJUSTED_EDGE_BELOW_THRESHOLD",
+    "STALE_DECISION",
+    "BOOK_STALE",
+    "STALE_BOOK",
+})
+
+
 def record_cell_pre_wire_reject(
     cell_id: str,
     *,
@@ -1248,15 +1263,26 @@ def record_cell_pre_wire_reject(
     Per the shared execution-lane contract: a pre-wire drop releases the
     submission reservation AND counts toward the router-reject suspension
     rule — the lane sees every attempt's true outcome instead of silently
-    consuming its daily submission budget.
+    consuming its daily submission budget.  Revalidation/data-freshness
+    rejects (see ``_CELL_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES``) release the
+    reservation and complete lifecycle accounting but do not count toward
+    the suspension counters.
     """
     if not cell_id:
         return
     released = release_cell_submission_reservation(
         cell_id, intent_id=intent_id, decision_id=decision_id
     )
-    record_cell_router_reject(cell_id)
     code = str(rejection_code or "pre_wire_reject")
+    _code_head = code.split(":", 1)[0].upper()
+    _no_suspend = any(
+        _code_head.startswith(prefix)
+        for prefix in _CELL_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES
+    )
+    if not _no_suspend:
+        record_cell_router_reject(cell_id)
+    else:
+        bump_cell_funnel("router_rejected", cell_id)
     _base = {
         "threshold_cell_id": cell_id,
         "asset": asset,

@@ -1286,6 +1286,19 @@ def release_provisional_submission_reservation(
     return True
 
 
+# 2026-10-02: pre-wire rejection codes that are *revalidation* outcomes, not
+# lane-quality failures (edge moved / data stale between decision and wire).
+# They release the reservation and complete lifecycle accounting but do not
+# count toward the consecutive-reject suspension.  Mirrors
+# threshold_cells._CELL_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES.
+_PROV_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES = frozenset({
+    "FILL_ADJUSTED_EDGE_BELOW_THRESHOLD",
+    "STALE_DECISION",
+    "BOOK_STALE",
+    "STALE_BOOK",
+})
+
+
 def record_provisional_pre_wire_reject(
     cell_id: str,
     *,
@@ -1303,8 +1316,16 @@ def record_provisional_pre_wire_reject(
     released = release_provisional_submission_reservation(
         cell_id, intent_id=intent_id, decision_id=decision_id
     )
-    record_provisional_router_reject(cell_id)
     code = str(rejection_code or "pre_wire_reject")
+    _code_head = code.split(":", 1)[0].upper()
+    _no_suspend = any(
+        _code_head.startswith(prefix)
+        for prefix in _PROV_PRE_WIRE_REJECT_NO_SUSPEND_PREFIXES
+    )
+    if not _no_suspend:
+        record_provisional_router_reject(cell_id)
+    else:
+        bump_provisional_funnel("router_rejected", cell_id)
     _base = {
         "provisional_cell_id": cell_id,
         "asset": asset,

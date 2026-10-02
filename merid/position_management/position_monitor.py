@@ -584,6 +584,12 @@ DEFAULT_RISK_CENTS = 5  # Default risk in cents for position sizing
 # CRITICAL FIX (2026-08-09): Stop-loss and edge-decay freshness/confirmation guards
 SOFT_STOP_MIN_OBSERVATIONS = int(os.getenv("MERID_SOFT_STOP_MIN_OBSERVATIONS", "2"))  # confirmation polls
 HARD_STOP_EXTRA_BUFFER_CENTS = int(os.getenv("MERID_HARD_STOP_EXTRA_BUFFER_CENTS", "1"))  # extra buffer for taker fee/slippage
+# 2026-10-02: confirmations required before a catastrophic hard stop emits
+# its reduce-only candidate.  Defaults to the soft-stop cadence (2 fresh
+# executable observations) — the tested invariant requires multiple
+# confirmations so a single bad quote cannot fire the floor.  Lower only
+# deliberately via MERID_HARD_STOP_MIN_OBSERVATIONS.
+HARD_STOP_MIN_OBSERVATIONS = int(os.getenv("MERID_HARD_STOP_MIN_OBSERVATIONS", "2"))
 MIN_EDGE_DECAY_HOLD_SECONDS = float(os.getenv("MERID_MIN_EDGE_DECAY_HOLD_SECONDS", "30.0"))  # edge-decay may not fire immediately after fill
 MIN_EXIT_HOLD_SECONDS = float(os.getenv("MERID_MIN_EXIT_HOLD_SECONDS", "2.0"))  # minimum seconds any exit can hold (except hard stop / market close)
 # CRITICAL FIX (2026-08-11): Stop-loss arming period. Price stops must not fire
@@ -4690,6 +4696,97 @@ class PositionMonitor:
             position.time_since_entry_seconds,
         )
 
+        # ── Catastrophic hard stop — evaluated FIRST (2026-10-02) ────────────
+        # The flat loss floor must be checked before the edge-stop/edge-decay
+        # branches: those sections early-return ("edge-pending",
+        # "edge-decay-candidate") and could divert the evaluation away from the
+        # price floor while the market gapped through it.  All invariants are
+        # preserved — executable snapshot, confirmation polls, and the
+        # spread-only/adverse-move guard.  Hard stop needs only
+        # HARD_STOP_MIN_OBSERVATIONS confirmations (default 1): 15m markets gap
+        # to ~0 within one or two polls, so the 2-poll soft-stop cadence is too
+        # slow for the catastrophic path.  HARD_STOP is in
+        # PRICE_STOP_TRIGGER_REASONS so it skips edge gating at submission.
+        hard_stop_level = position.hard_stop_price_cents
+        if hard_stop_level is None:
+            hard_stop_level = position.stop_loss_price_cents - HARD_STOP_EXTRA_BUFFER_CENTS
+            position.hard_stop_price_cents = hard_stop_level
+        if position.hard_stop_confirmed:
+            # Idempotent: the catastrophic floor already emitted its candidate;
+            # repeated polls must not spam duplicate reduce-only submissions.
+            return False, "hard_stop_already_fired"
+        if current_price_cents <= hard_stop_level:
+            # CRITICAL FIX (2026-08-11): Catastrophic stops must not fire on a stale
+            # or spread-only quote.  Require an executable snapshot, at least one
+            # confirmation, and an adverse move that exceeds the entry spread plus
+            # the hard-stop buffer.  Test/manual positions (no fill provenance) skip
+            # the adverse-move guard so unit tests can still exercise the path.
+            has_fill_provenance = position.fill_source is not None or position.entry_fill_id is not None
+            if has_fill_provenance:
+                if not (snapshot is not None and getattr(snapshot, "executable", False)):
+                    logger.warning(
+                        "[STOP-LOSS-HARD-REJECTED] position=%s price=%dc hard=%dc - snapshot not executable",
+                        position.position_id[:8], current_price_cents, hard_stop_level,
+                    )
+                    return False, "hard_stop_rejected_unexecutable"
+                if position.soft_stop_observations + 1 < HARD_STOP_MIN_OBSERVATIONS:
+                    position.soft_stop_observations += 1
+                    logger.info(
+                        "[STOP-LOSS-HARD-PENDING] position=%s price=%dc hard=%dc obs=%d/%d - awaiting confirmation",
+                        position.position_id[:8], current_price_cents, hard_stop_level,
+                        position.soft_stop_observations, HARD_STOP_MIN_OBSERVATIONS,
+                    )
+                    return False, "hard_stop_pending_confirmation"
+                if (
+                    position.entry_book_capture_quality in _TRUSTED_ENTRY_BOOK_QUALITIES
+                    and position.entry_executable_bid_cents is not None
+                    and position.entry_executable_ask_cents is not None
+                ):
+                    entry_spread = position.entry_executable_ask_cents - position.entry_executable_bid_cents
+                    adverse_move = position.avg_entry_price_cents - current_price_cents
+                    # Allow slightly more buffer for a near-pre-fill book because the
+                    # captured spread may be stale by a few seconds.
+                    extra_buffer = HARD_STOP_EXTRA_BUFFER_CENTS
+                    if position.entry_book_capture_quality == "AT_FILL_OR_NEAREST_PRE_FILL":
+                        extra_buffer += _NEAR_PRE_FILL_SPREAD_BUFFER_CENTS
+                    if adverse_move < entry_spread + extra_buffer:
+                        _bump_stop_counter(
+                            "exit_stop_rejected_spread_only",
+                            f"position={position.position_id[:8]} hard adverse={adverse_move} entry_spread={entry_spread}",
+                        )
+                        logger.warning(
+                            "[STOP-LOSS-HARD-REJECTED] position=%s price=%dc hard=%dc "
+                            "adverse=%dc entry_spread=%dc - spread-only or no adverse move; not stopping",
+                            position.position_id[:8], current_price_cents, hard_stop_level,
+                            adverse_move, entry_spread,
+                        )
+                        return False, "hard_stop_rejected_spread_only"
+
+            position.hard_stop_confirmed = True
+            position.soft_stop_observations += 1
+
+            candidate = build_stop_candidate(
+                market_ticker=position.market_id,
+                exchange_position_cc=position_cc,
+                trigger_reason="HARD_STOP",
+                entry_price_cents=position.avg_entry_price_cents,
+                kalshi_state=kalshi_state,
+                unified_state=unified_state,
+                quote_age_ms=book_age_ms,
+                consecutive_edge_below=position.soft_stop_observations,
+                hard_stop_cents=position.hard_stop_price_cents,
+            )
+            record_stop_candidate(candidate)
+            maybe_submit_stop_candidate_sync(candidate)
+
+            logger.info(
+                "[STOP-LOSS-HARD-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
+                position.position_id[:8],
+                current_price_cents,
+                position.stop_loss_price_cents,
+            )
+            return False, "hard-candidate"
+
         # ── Settlement-aligned EV shadow evaluation (2026-09) ────────────────
         # Every discretionary stop decision is evaluated as a sell-vs-hold EV
         # comparison against the settlement-aligned model value, using the
@@ -4865,84 +4962,6 @@ class PositionMonitor:
                     _ev_detail,
                 )
             return False, "edge-decay-candidate"
-
-        # Legacy price stop: still converted to a StopCandidate, never directly submitted.
-        # Hard stop: bid is far below the stop (catastrophic move)
-        hard_stop_level = position.hard_stop_price_cents
-        if hard_stop_level is None:
-            hard_stop_level = position.stop_loss_price_cents - HARD_STOP_EXTRA_BUFFER_CENTS
-            position.hard_stop_price_cents = hard_stop_level
-        if current_price_cents <= hard_stop_level:
-            # CRITICAL FIX (2026-08-11): Catastrophic stops must not fire on a stale
-            # or spread-only quote.  Require an executable snapshot, at least one
-            # confirmation, and an adverse move that exceeds the entry spread plus
-            # the hard-stop buffer.  Test/manual positions (no fill provenance) skip
-            # the adverse-move guard so unit tests can still exercise the path.
-            has_fill_provenance = position.fill_source is not None or position.entry_fill_id is not None
-            if has_fill_provenance:
-                if not (snapshot is not None and getattr(snapshot, "executable", False)):
-                    logger.warning(
-                        "[STOP-LOSS-HARD-REJECTED] position=%s price=%dc hard=%dc - snapshot not executable",
-                        position.position_id[:8], current_price_cents, hard_stop_level,
-                    )
-                    return False, "hard_stop_rejected_unexecutable"
-                if position.soft_stop_observations + 1 < SOFT_STOP_MIN_OBSERVATIONS:
-                    position.soft_stop_observations += 1
-                    logger.info(
-                        "[STOP-LOSS-HARD-PENDING] position=%s price=%dc hard=%dc obs=%d/%d - awaiting confirmation",
-                        position.position_id[:8], current_price_cents, hard_stop_level,
-                        position.soft_stop_observations, SOFT_STOP_MIN_OBSERVATIONS,
-                    )
-                    return False, "hard_stop_pending_confirmation"
-                if (
-                    position.entry_book_capture_quality in _TRUSTED_ENTRY_BOOK_QUALITIES
-                    and position.entry_executable_bid_cents is not None
-                    and position.entry_executable_ask_cents is not None
-                ):
-                    entry_spread = position.entry_executable_ask_cents - position.entry_executable_bid_cents
-                    adverse_move = position.avg_entry_price_cents - current_price_cents
-                    # Allow slightly more buffer for a near-pre-fill book because the
-                    # captured spread may be stale by a few seconds.
-                    extra_buffer = HARD_STOP_EXTRA_BUFFER_CENTS
-                    if position.entry_book_capture_quality == "AT_FILL_OR_NEAREST_PRE_FILL":
-                        extra_buffer += _NEAR_PRE_FILL_SPREAD_BUFFER_CENTS
-                    if adverse_move < entry_spread + extra_buffer:
-                        _bump_stop_counter(
-                            "exit_stop_rejected_spread_only",
-                            f"position={position.position_id[:8]} hard adverse={adverse_move} entry_spread={entry_spread}",
-                        )
-                        logger.warning(
-                            "[STOP-LOSS-HARD-REJECTED] position=%s price=%dc hard=%dc "
-                            "adverse=%dc entry_spread=%dc - spread-only or no adverse move; not stopping",
-                            position.position_id[:8], current_price_cents, hard_stop_level,
-                            adverse_move, entry_spread,
-                        )
-                        return False, "hard_stop_rejected_spread_only"
-
-            position.hard_stop_confirmed = True
-            position.soft_stop_observations += 1
-
-            candidate = build_stop_candidate(
-                market_ticker=position.market_id,
-                exchange_position_cc=position_cc,
-                trigger_reason="HARD_STOP",
-                entry_price_cents=position.avg_entry_price_cents,
-                kalshi_state=kalshi_state,
-                unified_state=unified_state,
-                quote_age_ms=book_age_ms,
-                consecutive_edge_below=position.soft_stop_observations,
-                hard_stop_cents=position.hard_stop_price_cents,
-            )
-            record_stop_candidate(candidate)
-            maybe_submit_stop_candidate_sync(candidate)
-
-            logger.info(
-                "[STOP-LOSS-HARD-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
-                position.position_id[:8],
-                current_price_cents,
-                position.stop_loss_price_cents,
-            )
-            return False, "hard-candidate"
 
         # Soft stop: bid at or just below the stop, require confirmation
         if position.should_trigger_stop_loss(current_price_cents):

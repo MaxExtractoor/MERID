@@ -642,7 +642,91 @@ class RestingOrderMonitor:
                     current_vol_tier=window_res.volatility_tier,
                     model_quality_good=model_quality_good,
                 )
-            
+
+            # 4b. Toxic-fill cancel (2026-10-02): a resting entry whose limit is
+            # at or through the *side-aware mid* is offering a stale price —
+            # fills there are adversely selected (the 2026-10-02 audit found
+            # entries filled mid-crash with -2.5..-9.5c 30s markouts).  Cancel
+            # when the fresh mid has crossed the limit against the order.
+            # Exit orders are exempted above; a missing/stale book keeps the
+            # order rather than cancelling on bad data.  Kill switch:
+            # MERID_RESTING_TOXIC_MID_CANCEL=0.
+            try:
+                import os as _os
+                if _os.environ.get("MERID_RESTING_TOXIC_MID_CANCEL", "1").strip().lower() in ("1", "true", "yes"):
+                    from merid.event_venues.kalshi.market_state import (
+                        get_kalshi_market_state_store,
+                    )
+                    _tox_store = get_kalshi_market_state_store()
+                    _tox_state = _tox_store.get(record.ticker) if _tox_store else None
+                    if _tox_state is not None:
+                        _yb = getattr(_tox_state, "best_bid_cents", None)
+                        _ya = getattr(_tox_state, "best_ask_cents", None)
+                        _updated = (
+                            getattr(_tox_state, "book_updated_ts", None)
+                            or getattr(_tox_state, "last_book_update_ts", None)
+                        )
+                        _book_age_ms = (
+                            max(0, int((time.monotonic() - float(_updated)) * 1000))
+                            if isinstance(_updated, (int, float)) and _updated > 0
+                            else None
+                        )
+                        _max_age_ms = float(
+                            _os.environ.get("MERID_RESTING_TOXIC_MID_MAX_AGE_MS", "10000")
+                        )
+                        if (
+                            _yb is not None and _ya is not None
+                            and 0 < float(_yb) < 100 and 0 < float(_ya) < 100
+                            and _book_age_ms is not None
+                            and _book_age_ms <= _max_age_ms
+                        ):
+                            _side = (record.side or "").upper()
+                            _act = (record.action or "").upper()
+                            _is_buy = "BUY" in _act or "BUY" in _side
+                            _is_no = "NO" in _side
+                            _yes_mid = (float(_yb) + float(_ya)) / 2.0
+                            _side_mid = 100.0 - _yes_mid if _is_no else _yes_mid
+                            _lim = int(record.price_cents or 0)
+                            if _is_buy and _lim > 0 and _side_mid <= _lim:
+                                logger.warning(
+                                    "[RESTING-TOXIC-MID-CANCEL] kalshi_order_id=%s ticker=%s "
+                                    "side=%s limit=%dc side_mid=%.1fc - mid crossed limit, "
+                                    "cancelling stale-price entry",
+                                    record.kalshi_order_id, record.ticker,
+                                    record.side, _lim, _side_mid,
+                                )
+                                return RecheckResult(
+                                    intent_id=record.intent_id,
+                                    ticker=record.ticker,
+                                    action="cancel",
+                                    reason=f"toxic_mid_cross:mid={_side_mid:.1f}<=limit={_lim}",
+                                    current_regime=regime,
+                                    current_vol_tier=window_res.volatility_tier,
+                                    model_quality_good=model_quality_good,
+                                )
+                            if not _is_buy and _lim > 0 and _side_mid >= _lim:
+                                logger.warning(
+                                    "[RESTING-TOXIC-MID-CANCEL] kalshi_order_id=%s ticker=%s "
+                                    "side=%s limit=%dc side_mid=%.1fc - mid crossed limit, "
+                                    "cancelling stale-price entry",
+                                    record.kalshi_order_id, record.ticker,
+                                    record.side, _lim, _side_mid,
+                                )
+                                return RecheckResult(
+                                    intent_id=record.intent_id,
+                                    ticker=record.ticker,
+                                    action="cancel",
+                                    reason=f"toxic_mid_cross:mid={_side_mid:.1f}>=limit={_lim}",
+                                    current_regime=regime,
+                                    current_vol_tier=window_res.volatility_tier,
+                                    model_quality_good=model_quality_good,
+                                )
+            except Exception as _tox_exc:
+                logger.debug(
+                    "[RESTING_ORDER_MONITOR] toxic-mid check failed for %s: %s",
+                    record.kalshi_order_id, _tox_exc,
+                )
+
             # 5. Market order fallback check (NEW)
             if self._fallback_enabled and self._fallback_engine and _FALLBACK_AVAILABLE:
                 try:

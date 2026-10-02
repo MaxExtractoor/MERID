@@ -4679,7 +4679,10 @@ async def _revalidate_entry_economics(
     _p_sel0 = getattr(intent, "p_selected", None)
 
     _min_req = getattr(intent, "min_required_edge", None)
-    if _min_req is None or float(_min_req) <= 0:
+    # 2026-10-02: honor an explicit non-positive threshold — bounded bootstrap
+    # lanes intentionally carry shallow/negative required edge; replacing it
+    # with the global floor silently reimposed a gate the admission waived.
+    if _min_req is None:
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         _min_req = TRADE_DECISION_MIN_REQUIRED_EDGE
     _req_cents = float(_min_req) * 100.0
@@ -9459,7 +9462,9 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
         return None
 
     min_required_edge = getattr(intent, "min_required_edge", None)
-    if min_required_edge is None or float(min_required_edge) <= 0:
+    # 2026-10-02: honor an explicit non-positive threshold — bounded bootstrap
+    # lanes intentionally authorize shallow/negative required edge.
+    if min_required_edge is None:
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         min_required_edge = TRADE_DECISION_MIN_REQUIRED_EDGE
     threshold_cents = Decimal(str(min_required_edge)) * 100
@@ -11724,7 +11729,11 @@ def _check_fill_adjusted_edge(
     min_required_edge = getattr(intent, "min_required_edge", None)
     # 2026-08-20: Backstop: if the signal did not carry a threshold, use the
     # global trade-decision floor so this gate is never silently disabled.
-    if min_required_edge is None or float(min_required_edge) <= 0:
+    # 2026-10-02: honor an explicit non-positive threshold — bounded bootstrap
+    # lanes (e.g. current-build provisional) intentionally authorize shallow or
+    # negative required edge; replacing it with the global floor silently
+    # reimposed a gate the admission layer had already waived.
+    if min_required_edge is None:
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         min_required_edge = TRADE_DECISION_MIN_REQUIRED_EDGE
     ev_net_cents = getattr(intent, "ev_net_cents", None)
@@ -11746,12 +11755,27 @@ def _check_fill_adjusted_edge(
     # repricer moves the fill price away from the signal basis. The fee is
     # parabolic (depends on P*(1-P)), so a price shift can slightly change the
     # per-contract fee and therefore the realized net edge.
+    # 2026-10-02: fee the fill at the intent's resolved liquidity role.
+    # Charging the taker schedule on a post-only maker fill overstated the
+    # fee drift and rejected fills whose realized edge was intact.
+    try:
+        from decimal import Decimal as _Dec
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+        _fqty = _Dec(str(intent.count_fp if intent.count_fp is not None else (getattr(intent, "count", None) or 1)))
+        if not _fqty.is_finite() or _fqty <= 0:
+            _fqty = _Dec("1")
+        _frole = "maker" if _resolve_execution_mode(intent) in ("maker", "passive_quote") else "taker"
+        def _role_fee(_px: int) -> float:
+            return float(kalshi_fee_cents_exact(_Dec(int(_px)) / _Dec(100), _fqty, _frole) / _fqty)
+    except Exception:
+        def _role_fee(_px: int) -> float:
+            return float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(_px)))
     fee_basis = getattr(intent, "fee_cents", None)
     if fee_basis is None or float(fee_basis) <= 0:
-        fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+        fee_basis = _role_fee(int(basis))
     else:
         fee_basis = float(fee_basis)
-    fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(fill_price)))
+    fee_fill = _role_fee(int(fill_price))
 
     net_edge_at_fill = float(ev_net_cents) - (float(fill_price) - float(basis)) - (fee_fill - fee_basis)
     if net_edge_at_fill < threshold_cents - 1e-9:
@@ -11790,12 +11814,22 @@ def _compute_net_edge_at_fill(intent: OrderIntent, fill_price_cents: int) -> Opt
     if ev_net_cents is None or basis is None or basis <= 0:
         return None
     try:
+        # 2026-10-02: fee both sides at the intent's resolved liquidity role so
+        # a post-only maker fill is not charged the taker schedule.
+        from decimal import Decimal as _Dec
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
+        _fqty = _Dec(str(intent.count_fp if intent.count_fp is not None else (getattr(intent, "count", None) or 1)))
+        if not _fqty.is_finite() or _fqty <= 0:
+            _fqty = _Dec("1")
+        _frole = "maker" if _resolve_execution_mode(intent) in ("maker", "passive_quote") else "taker"
+        def _role_fee(_px: int) -> float:
+            return float(kalshi_fee_cents_exact(_Dec(int(_px)) / _Dec(100), _fqty, _frole) / _fqty)
         fee_basis = getattr(intent, "fee_cents", None)
         if fee_basis is None or float(fee_basis) <= 0:
-            fee_basis = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(basis)))
+            fee_basis = _role_fee(int(basis))
         else:
             fee_basis = float(fee_basis)
-        fee_fill = float(calculate_kalshi_fee_cents(contracts=1, price_cents=int(fill_price_cents)))
+        fee_fill = _role_fee(int(fill_price_cents))
         return float(ev_net_cents) - (float(fill_price_cents) - float(basis)) - (fee_fill - fee_basis)
     except Exception:
         return None
