@@ -229,19 +229,37 @@ def domain_tte_max_seconds() -> float:
     )
 
 
+def provisional_min_ev_floor_cents() -> float:
+    """How far below zero a per-cell provisional min-EV override may reach.
+
+    ``MERID_PROVISIONAL_MIN_EV_FLOOR_C`` (default 0.0) bounds the negative
+    excursion.  Values below zero only take effect when an explicit
+    ``MERID_PROVISIONAL_MIN_EV_C_*`` override drives a cell under zero;
+    defaults can never produce a negative threshold.  Hard-clamped to
+    [-10, 0] so a misconfigured floor cannot silently open the lane.
+    """
+    v = _env_float("MERID_PROVISIONAL_MIN_EV_FLOOR_C", 0.0)
+    # Only a negative setting opens negative admission; zero/positive values
+    # are a floor of zero, never a loosened one.
+    return -min(max(-v, 0.0), 10.0)
+
+
 def provisional_min_ev_cents(asset: str, side: str) -> float:
     """Per (asset, side) provisional min net EV in cents; env-overridable via
     ``MERID_PROVISIONAL_MIN_EV_C_{ASSET}_{SIDE}`` or the shared
-    ``MERID_PROVISIONAL_MIN_EV_C`` fallback."""
+    ``MERID_PROVISIONAL_MIN_EV_C`` fallback.  Negative overrides are honored
+    only down to ``provisional_min_ev_floor_cents()`` — a value below the
+    floor is clamped to the floor."""
     a, s = str(asset).upper(), str(side).lower()
     default = _DEFAULT_MIN_EV_CENTS.get(a, {}).get(s, 3.0)
     v = os.environ.get(f"MERID_PROVISIONAL_MIN_EV_C_{a}_{s.upper()}")
     if v is None:
         v = os.environ.get("MERID_PROVISIONAL_MIN_EV_C")
     try:
-        return float(v) if v is not None else float(default)
+        out = float(v) if v is not None else float(default)
     except Exception:
         return float(default)
+    return max(out, provisional_min_ev_floor_cents())
 
 
 class ProvisionalCell(NamedTuple):
@@ -1732,8 +1750,11 @@ def provisional_thresholds() -> Dict[str, Dict[str, float]]:
 
 def validate_provisional_domain() -> List[Dict[str, Any]]:
     """Sanity report: every generated cell sits inside the configured domain
-    and carries a positive min EV.  Raises AssertionError on any violation —
-    a malformed lane must fail closed, never admit."""
+    and carries a min EV within the configured floor.  Negative cell
+    thresholds are legal only when MERID_PROVISIONAL_MIN_EV_FLOOR_C was set
+    below zero at import; the hard clamp bounds them at -10c.  Raises
+    AssertionError on any violation — a malformed lane must fail closed,
+    never admit."""
     problems: List[str] = []
     report: List[Dict[str, Any]] = []
     pmin, pmax = domain_price_min_cents(), domain_price_max_cents()
@@ -1744,7 +1765,12 @@ def validate_provisional_domain() -> List[Dict[str, Any]]:
             and cell.price_max_cents <= pmax
             and cell.tte_min_seconds >= tmin - 1e-9
             and cell.tte_max_seconds <= tmax + 1e-9
-            and cell.min_net_ev_cents > 0.0
+            # Structural bounds only: the resolver's hard clamp (-10c) and the
+            # effective ceiling (15c).  Cell values were baked at import under
+            # the then-current env, so comparing against a live env floor
+            # would misreport a legitimate value lane as malformed.
+            and cell.min_net_ev_cents >= -10.0
+            and cell.min_net_ev_cents <= 15.0
             and cell.asset in ALL_ASSETS
             and cell.side in ALL_SIDES
         )

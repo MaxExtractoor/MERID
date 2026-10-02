@@ -114,6 +114,11 @@ function Write-StartupFingerprint {
     Write-Host "[start_15m] MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS=$env:MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS" -ForegroundColor Green
     Write-Host "[start_15m] MERID_EXECUTION_DECISION_MAX_AGE_MS=$env:MERID_EXECUTION_DECISION_MAX_AGE_MS" -ForegroundColor Green
     Write-Host "[start_15m] MERID_ASR_COUNTERTREND_MIN_MARKOUTS=$env:MERID_ASR_COUNTERTREND_MIN_MARKOUTS" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_PROVISIONAL_MIN_EV_FLOOR_C=$env:MERID_PROVISIONAL_MIN_EV_FLOOR_C" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_PROVISIONAL_MIN_EV_C_ETH_YES=$env:MERID_PROVISIONAL_MIN_EV_C_ETH_YES" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_PROVISIONAL_MIN_EV_C_SOL_YES=$env:MERID_PROVISIONAL_MIN_EV_C_SOL_YES" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_PROVISIONAL_MIN_EV_C_XRP_YES=$env:MERID_PROVISIONAL_MIN_EV_C_XRP_YES" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_PROVISIONAL_DAILY_MAX_FILLS_PER_ASSET=$env:MERID_PROVISIONAL_DAILY_MAX_FILLS_PER_ASSET TOTAL=$env:MERID_PROVISIONAL_DAILY_MAX_FILLS_TOTAL YES=$env:MERID_PROVISIONAL_DAILY_MAX_FILLS_YES" -ForegroundColor Green
     Write-Host "[start_15m] MERID_TREND_YES_HI_ENABLED=$env:MERID_TREND_YES_HI_ENABLED" -ForegroundColor Green
     Write-Host "[start_15m] MERID_MANUAL_EMERGENCY_TOKEN=$manualToken" -ForegroundColor Green
     Write-Host "[start_15m] MERID_BREAKER_RELEASE_TOKEN=$breakerToken" -ForegroundColor Green

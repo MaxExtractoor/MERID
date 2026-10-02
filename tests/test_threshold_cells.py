@@ -56,6 +56,15 @@ def _disable_market_anchor(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_THRESHOLD_CELLS", raising=False)
     # Isolate the lane state file per test so caps/suspension don't leak.
     monkeypatch.setenv("MERID_THRESHOLD_CELL_STATE_PATH", str(tmp_path / "cells.json"))
+    # Provisional-lane env overrides must not leak from .env — these tests
+    # assert formula-vs-cell resolution on the default threshold table.
+    monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
+    monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
+    for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        for _s in ("YES", "NO"):
+            monkeypatch.delenv(
+                f"MERID_PROVISIONAL_MIN_EV_C_{_a}_{_s}", raising=False
+            )
     reset_cell_state_cache()
 
 

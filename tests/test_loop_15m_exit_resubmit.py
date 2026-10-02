@@ -24,6 +24,7 @@ def self_mock():
     pm._has_exit_order.return_value = False
     pm._get_exit_orders_for_position.return_value = []
     pm._get_total_exit_quantity.return_value = 0
+    pm._reconcile_exit_registry.return_value = []
     self._position_monitor = pm
     self._rearm_position_after_failed_exit = MagicMock()
     self._mark_exited = MagicMock()
