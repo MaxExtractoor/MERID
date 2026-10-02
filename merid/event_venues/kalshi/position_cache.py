@@ -1129,6 +1129,13 @@ class KalshiPositionCache:
         # signed-YES exposure diverges for a ticker, new entry orders are blocked until
         # the mismatch is resolved. Exits are still allowed so positions can be closed.
         self._reconciliation_halted: Dict[str, bool] = {}
+        # 2026-10-01: First-mismatch timestamp per ticker.  Fill propagation is
+        # asynchronous (exchange REST -> fills ledger -> cache), so a divergent
+        # snapshot right after a fill is expected and transient — observed ~70s
+        # to converge live.  The halt latches only when divergence persists
+        # beyond MERID_RECON_HALT_GRACE_S (default 120s); a persistent real
+        # break still halts, one laggy propagation no longer freezes entries.
+        self._recon_first_mismatch_ts: Dict[str, float] = {}
 
         # Settled/finalized markets: the position is closed by settlement and should
         # not be rebuilt from the fills ledger.  Populated by ``on_market_settlement``
@@ -1310,12 +1317,37 @@ class KalshiPositionCache:
             exchange_signed_yes == ledger_signed_yes == cache_signed_yes
         )
         if not three_way_match:
-            self._reconciliation_halted[ticker] = True
+            now_ts = time.time()
+            first_ts = self._recon_first_mismatch_ts.get(ticker)
+            if first_ts is None:
+                first_ts = now_ts
+                self._recon_first_mismatch_ts[ticker] = first_ts
+            grace_s = float(os.getenv("MERID_RECON_HALT_GRACE_S", "120"))
+            elapsed = now_ts - first_ts
+            if elapsed >= grace_s:
+                if not self._reconciliation_halted.get(ticker):
+                    logger.critical(
+                        "[EXPOSURE-RECONCILIATION-HALT] ticker=%s divergence persisted "
+                        "%.0fs >= %.0fs (exchange=%d ledger=%d cache=%d) "
+                        "- halting new entries for this ticker.",
+                        ticker, elapsed, grace_s,
+                        exchange_signed_yes, ledger_signed_yes, cache_signed_yes,
+                    )
+                self._reconciliation_halted[ticker] = True
+            else:
+                logger.warning(
+                    "[EXPOSURE-RECONCILIATION-TRANSIENT] ticker=%s mismatch persisting "
+                    "%.0fs/%.0fs grace (exchange=%d ledger=%d cache=%d) - likely fill "
+                    "propagation lag; halt latches if it persists.",
+                    ticker, elapsed, grace_s,
+                    exchange_signed_yes, ledger_signed_yes, cache_signed_yes,
+                )
             status = "mismatch"
         else:
             if self._reconciliation_halted.get(ticker):
                 logger.warning("[EXPOSURE-RECONCILIATION] ticker=%s three-way exposure match; clearing halt", ticker)
             self._reconciliation_halted[ticker] = False
+            self._recon_first_mismatch_ts.pop(ticker, None)
 
         # 2026-08-13: Record ledger exposure for per-fill parity.  Only record
         # exchange exposure and timestamp when the source is an actual exchange
