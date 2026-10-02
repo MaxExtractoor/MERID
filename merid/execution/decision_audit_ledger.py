@@ -860,10 +860,22 @@ class DecisionAuditLedger:
                         _to_int((extra or {}).get("rest_age_ms")),
                     ),
                 )
-                conn.execute(
-                    "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
-                    (decision_id,),
-                )
+                if ticker and str(ticker).strip():
+                    conn.execute(
+                        "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
+                        (decision_id,),
+                    )
+                else:
+                    # No resolvable contract was bound to this rejection, so no
+                    # settlement can ever arrive — writing PENDING would park the
+                    # row in the orphan sweep forever (empty ticker yields a
+                    # /markets/ call that 301s every poll cycle).
+                    conn.execute(
+                        """INSERT INTO strategy_decision_outcomes
+                           (decision_id, outcome_status, unresolved_reason, unresolved_at)
+                           VALUES (?, 'UNRESOLVED', 'no_contract_at_decision', ?)""",
+                        (decision_id, now),
+                    )
                 self._append_decision_event_locked(
                     conn,
                     decision_id=decision_id,
@@ -1966,6 +1978,8 @@ class DecisionAuditLedger:
                     WHERE o.outcome_status = 'PENDING'
                       AND d.close_ts < ?
                       AND d.close_ts > ?
+                      AND d.ticker IS NOT NULL
+                      AND d.ticker != ''
                     GROUP BY d.ticker
                     ORDER BY close_ts DESC
                     LIMIT ?
