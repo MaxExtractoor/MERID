@@ -437,6 +437,7 @@ class TestOrderRouterFallbackMarketState:
         with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store), \
              patch("merid.risk.liquidity_fallback.get_liquidity_fallback_executor", return_value=fallback), \
              patch("merid.event_venues.kalshi.order_router.get_venue_gate", return_value=gate), \
+             patch("merid.event_venues.kalshi.order_router.can_submit_live_entry", return_value=True), \
              patch("merid.event_venues.kalshi.order_identity.OrderAttemptStore") as mock_store_cls, \
              patch("merid.governance.trading_circuit_breaker.get_trading_circuit_breaker", return_value=breaker), \
              patch("merid.event_venues.kalshi.position_cache.get_position_cache", return_value=position_cache), \

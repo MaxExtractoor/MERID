@@ -44,7 +44,11 @@ class TestV2FillSideActionDerivation:
 
     @pytest.mark.asyncio
     async def test_parse_buy_no_with_real_sell_raw(self, ledger):
-        """A raw SELL_NO (outcome_side=no, action=sell) produces long YES."""
+        """A book-form SELL_NO report on a BUY_NO intent canonicalizes through
+        the intent: the exchange reports the taker's action, so ``sell`` here
+        means the counterparty sold into our resting NO bid — we bought NO.
+        (2026-09-24 phantom-position fix: trusting the raw action produced
+        +qty/long-YES instead of -qty/long-NO.)"""
         _record_intent(ledger, side="BUY_NO", action="buy", client_order_id="coid-buy-no")
         raw = {
             "fill_id": "fill-buy-no-1",
@@ -61,10 +65,12 @@ class TestV2FillSideActionDerivation:
             "created_time": datetime.now(timezone.utc).isoformat(),
         }
         fill = ledger._parse_fill(raw, "http_poller")
-        # Canonical fields are the raw exchange report.
+        # The execution delta (sell/no -> +YES) disagrees with the intent delta
+        # (buy/no -> -YES), so the fill is book/counterparty-form: canonical
+        # side/action follow the recorded intent, not the reported action.
         assert fill.canonical_position_side == "no"
-        assert fill.canonical_position_action == "sell"
-        assert fill.canonical_yes_delta_cc == 100  # long YES
+        assert fill.canonical_position_action == "buy"
+        assert fill.canonical_yes_delta_cc == -100  # long NO
         assert fill.price_cents == 32
         assert fill.is_exit is False
 

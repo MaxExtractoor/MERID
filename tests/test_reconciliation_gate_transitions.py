@@ -19,6 +19,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Submodules are lazy — import them so patch("merid.<pkg>.<mod>....") resolves.
+import merid.diagnostics.loop_lag  # noqa: F401
+
 from core.execution_gate import GateState, check_execution_gate
 
 
@@ -60,8 +63,6 @@ def isolated_gate_env():
         "degraded": False,
         "critical": False,
     }
-    mgr = MagicMock()
-    mgr.get_feed_health.return_value = {"news": {"status": "ok"}}
 
     try:
         with patch("core.execution_gate._is_kalshi_demo_mode", return_value=False), patch(
@@ -86,9 +87,6 @@ def isolated_gate_env():
                 "down_count": 0,
                 "total": 0,
             },
-        ), patch(
-            "merid.signals.live_feeds.get_live_feed_manager",
-            return_value=mgr,
         ), patch(
             "merid.diagnostics.loop_lag.get_loop_lag_monitor",
             return_value=mock_monitor,
