@@ -441,6 +441,69 @@ class TestGlobalAllocator:
         assert allocator.per_asset_min_edge_pct["BTC"] == 5.0
         assert allocator.per_asset_min_edge_pct["ETH"] == 1.0
 
+    def test_bounded_lane_candidate_uses_lane_edge_bound(self):
+        """2026-10-02: a provisional-lane candidate is re-checked against the
+        lane's effective bound (which may be negative), not the generic
+        profile floor.  Without this, every negative-EV value-lane candidate
+        dies at the EDGE stage before reaching the router."""
+        allocator = GlobalAllocator(venue_cap_usd=1.00)
+
+        lane_candidate = OrderCandidate(
+            asset="SOL",
+            ticker="KXSOL15M-TEST",
+            side="yes",
+            action="buy",
+            price_cents=40,
+            count=1,
+            edge_pct=-3.0,  # net EV −3c, below the 2.5% profile floor
+            confidence=0.8,
+            model_prob=0.5,
+            agent_name="SOL_15M",
+            decision_lane="current_build_provisional",
+            provisional_cell_id="SOL_yes_p35t2",
+            effective_required_edge_cents=-4.0,  # lane bound admits >= -4c
+        )
+        plain_candidate = OrderCandidate(
+            asset="ETH",
+            ticker="KXETH15M-TEST",
+            side="yes",
+            action="buy",
+            price_cents=30,
+            count=1,
+            edge_pct=-3.0,  # same edge, no lane binding -> profile floor applies
+            confidence=0.8,
+            model_prob=0.55,
+            agent_name="ETH_15M",
+        )
+
+        chosen = allocator.allocate([lane_candidate, plain_candidate])
+
+        assert len(chosen) == 1
+        assert chosen[0].asset == "SOL"
+
+    def test_bounded_lane_candidate_still_rejects_below_lane_bound(self):
+        """A lane candidate whose edge is below its own bound still fails."""
+        allocator = GlobalAllocator(venue_cap_usd=1.00)
+
+        candidate = OrderCandidate(
+            asset="SOL",
+            ticker="KXSOL15M-TEST",
+            side="yes",
+            action="buy",
+            price_cents=40,
+            count=1,
+            edge_pct=-5.0,  # -5c, worse than the -4c lane bound
+            confidence=0.8,
+            model_prob=0.5,
+            agent_name="SOL_15M",
+            decision_lane="current_build_provisional",
+            provisional_cell_id="SOL_yes_p35t2",
+            effective_required_edge_cents=-4.0,
+        )
+
+        chosen = allocator.allocate([candidate])
+        assert len(chosen) == 0
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

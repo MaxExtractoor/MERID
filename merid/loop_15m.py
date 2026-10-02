@@ -4977,6 +4977,18 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             _q_owner = qgate.get("quote_owner", "NONE_UNTRUSTED")
             if _q_owner == "WS_FRESH_VERIFIED":
                 quote_owner_trusted = bool(qgate.get("ws_fresh"))
+                if not quote_owner_trusted and bool(
+                    qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
+                ):
+                    # 2026-10-02: quiet-book flap fix.  The owner latch stays
+                    # WS_FRESH_VERIFIED even when no delta has arrived inside
+                    # the 1.5s entry budget — on an idle book that can hold
+                    # for many seconds, silently locking every entry while a
+                    # fresh REST mirror is available.  Degrade to REST
+                    # trust instead; quote_fresh/quote_coherent still gate the
+                    # priced quote itself, so a genuinely stale book remains
+                    # fail-closed.
+                    quote_owner_trusted = True
             elif _q_owner == "REST_VERIFIED_DEGRADED":
                 quote_owner_trusted = bool(
                     qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
@@ -5090,6 +5102,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             blocker_summary = " ".join(
                 f"{blocker}={count}" for blocker, count in blocker_counts.most_common()
             )
+            self._entries_block_reason = f"all_markets_unready:{blocker_summary}"
             logger.warning(
                 "[15m-LOOP] ENTRY_DISABLED_ALL_MARKETS "
                 "aggregate_blockers=%s total_unready=%d",
@@ -5153,6 +5166,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         )
         portfolio_authoritative = False
         allow_new_entries = False
+        self._entries_block_reason = "reconciliation_halt_latch"
 
     # 2026-08-24: Re-log the final, per-ticker-derived allow_new_entries.  This
     # guarantees the audit line matches the actual return value used to decide
@@ -6308,12 +6322,25 @@ async def _run_loop(self) -> None:
                                 terminal_states = {"EXECUTED", "REJECTED", "BLOCKED_PARITY", "BLOCKED_EDGE_THRESHOLD", "BLOCKED_DUPLICATE", "BLOCKED_POSITION", "BLOCKED_RESTING_ORDER"}
                                 current_state = self._candidate_lifecycle_states.get(candidate_id, "RECEIVED")
                                 if current_state not in terminal_states:
+                                    _rj_detail = candidate.get("_reject_detail") or {}
+                                    _rj_reason = _rj_detail.get("router_reason") or _rj_detail.get("reasons") or _rj_detail.get("exception") or "Order submission failed or blocked"
                                     self._log_candidate_lifecycle_event(
                                         candidate_id=candidate_id,
                                         from_state="RECEIVED",
                                         to_state="REJECTED",
-                                        reason="Order submission failed or blocked",
-                                        context={"ticker": ticker}
+                                        reason=str(_rj_reason)[:120] if not isinstance(_rj_reason, str) else _rj_reason[:120],
+                                        context={
+                                            "ticker": ticker,
+                                            "side": candidate.get("side"),
+                                            "price_cents": candidate.get("approved_price_cents") or candidate.get("submitted_price_cents"),
+                                            "post_only": candidate.get("post_only"),
+                                            "decision_lane": candidate.get("decision_lane"),
+                                            "threshold_cell_id": candidate.get("threshold_cell_id"),
+                                            "provisional_cell_id": candidate.get("provisional_cell_id"),
+                                            "router_engaged": bool(candidate.get("_router_engaged")),
+                                            "exchange_order_id": candidate.get("order_id"),
+                                            **_rj_detail,
+                                        }
                                     )
                                 # 2026-09-30: threshold-cell funnel — an emitted
                                 # cell candidate that dies before the router must
@@ -8962,6 +8989,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Convert candidate dict to OrderIntent and route to order router.
     # Returns True if order was submitted, False if order was rejected/skipped.
     candidate.pop("_router_engaged", None)
+    # Furthest-stage marker: every return path updates this so the caller-side
+    # REJECTED lifecycle event names where the candidate actually died.
+    candidate["_reject_detail"] = {"stage": "candidate_validation"}
     try:
         from merid.event_venues.kalshi.order_router import (
             OrderIntent,
@@ -8971,7 +9001,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             exit_policy_to_dict,
         )
         from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput
-        
+
         ticker = candidate.get("ticker")
         if not ticker:
             logger.warning("[15M-LOOP] Candidate missing ticker, skipping")
@@ -9323,6 +9353,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             )
             return False
 
+        # Past policy resolution — failures from here are sizing/gate-check
+        # rejections (EV re-gate, maker-disabled, edge/parity) unless a more
+        # specific _reject_detail overwrote this marker.
+        candidate["_reject_detail"] = {"stage": "sizing_and_gate_checks"}
+
         # CRITICAL FIX: Consolidated sizing path - use count from unified_sizing
         # The count is already computed by compute_order_size in the main loop (line 1565)
         # This removes the dual sizing path inconsistency where _execute_candidate
@@ -9398,6 +9433,34 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     _exit_cost = getattr(trade_decision, "exit_cost_reserve_no", Decimal("0")) or Decimal("0")
                 _p_model = getattr(trade_decision, "p_selected", None)
                 if _p_model is not None and price_cents is not None and price_cents > 0 and count > 0:
+                    # 2026-10-02: bounded-lane EV re-gate must check the
+                    # submitted price against the *lane's* required edge, not
+                    # the generic min_dollar_ev=0 floor — otherwise every
+                    # shallow-negative-EV candidate a value lane intentionally
+                    # admitted dies silently here.  effective_required_edge_cents
+                    # is stamped on lane candidates (threshold_cell or
+                    # current_build_provisional) at candidate build time; for
+                    # a -4c cell the re-gate bound becomes -0.04 * count, so
+                    # the gate still rejects a price that drifted past the
+                    # lane's own bound.  Non-lane candidates keep the default.
+                    _lane_min_dollar_ev = None
+                    _lane_min_ev_tail = None
+                    _eff_edge_c = candidate.get("effective_required_edge_cents")
+                    if (
+                        candidate.get("threshold_cell_id") is not None
+                        or candidate.get("provisional_cell_id") is not None
+                    ) and _eff_edge_c is not None:
+                        try:
+                            _lane_min_dollar_ev = (
+                                Decimal(str(float(_eff_edge_c))) / Decimal("100")
+                            ) * Decimal(str(count))
+                            # Tail-ratio check is meaningless for a lane that
+                            # deliberately admits negative EV; keep a wide
+                            # sanity bound so absurd EV-vs-tail stays blocked.
+                            _lane_min_ev_tail = Decimal("-1")
+                        except Exception:
+                            _lane_min_dollar_ev = None
+                            _lane_min_ev_tail = None
                     ev_input = EVInput(
                         p_model=_p_model,
                         p_exec=Decimal(str(price_cents)) / Decimal("100"),
@@ -9408,10 +9471,20 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         uncertainty_reserve_per_contract=getattr(trade_decision, "uncertainty_reserve", Decimal("0")) or Decimal("0"),
                         ticker=ticker,
                         decision_id=str(candidate.get("decision_id") or ""),
+                        min_dollar_ev=_lane_min_dollar_ev,
+                        min_ev_to_tail_ratio=_lane_min_ev_tail,
                     )
                     ev_result = evaluate_executable_cost_ev(ev_input)
                     if not ev_result.allowed:
                         self._rejection_counters["ev_gate_rejected"] += 1
+                        candidate["_reject_detail"] = {
+                            "stage": "executable_cost_ev_gate",
+                            "reasons": list(ev_result.reasons),
+                            "submitted_price_cents": price_cents,
+                            "count": count,
+                            "net_ev": str(ev_result.net_ev),
+                            "min_dollar_ev": str(ev_result.min_dollar_ev),
+                        }
                         logger.error(
                             "[15M-LOOP] EV gate REJECTS submitted price=%dc count=%s for ticker=%s reasons=%s",
                             price_cents, count, ticker, ev_result.reasons,
@@ -10180,6 +10253,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         )
                 except Exception:
                     pass
+                candidate["_reject_detail"] = {
+                    "stage": "maker_disabled",
+                    "router_reason": "bounded_lane_maker_disabled_env",
+                    "decision_lane": _td_lane_for_coerce,
+                    "post_only": True,
+                }
                 return False
             else:
                 logger.warning(
@@ -11055,6 +11134,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # router runs it owns the attempt accounting (pre-wire release or
         # consumed reject) and the caller must not release again.
         candidate["_router_engaged"] = True
+        candidate["_reject_detail"] = {"stage": "router_call"}
         result = await route_order_async(intent)
 
         # Post-result accounting and audit log.  Risk/position exposure is recorded
@@ -11080,6 +11160,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         if result and result.status == "rejected":
             self._rejection_counters["router_rejected"] += 1
+            candidate["_reject_detail"] = {
+                "stage": "router_result",
+                "router_status": "rejected",
+                "router_reason": result.reason,
+                "latency_ms": result.latency_ms,
+                "exchange_order_id": getattr(result, "order_id", None),
+                "post_only": bool(resolved_post_only),
+                "execution_mode": resolved_execution_mode,
+                "submitted_price_cents": price_cents,
+                "count": count,
+            }
             logger.warning(
                 "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%s "
                 "reason=%s latency_ms=%s",
@@ -11095,6 +11186,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         if result and result.requires_recovery:
             self._rejection_counters["router_rejected"] += 1
+            candidate["_reject_detail"] = {
+                "stage": "router_result",
+                "router_status": str(result.status),
+                "router_reason": result.reason,
+                "requires_recovery": True,
+                "latency_ms": result.latency_ms,
+                "exchange_order_id": getattr(result, "order_id", None),
+                "post_only": bool(resolved_post_only),
+                "execution_mode": resolved_execution_mode,
+                "submitted_price_cents": price_cents,
+                "count": count,
+            }
             logger.warning(
                 "[ROUTER-REJECTED] trace_id=%s candidate_id=%s ticker=%s side=%s count=%s "
                 "reason=%s status=%s latency_ms=%s",
@@ -11111,6 +11214,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         if result and result.status == "unfilled_ioc":
             self._rejection_counters["other"] += 1
+            candidate["_reject_detail"] = {
+                "stage": "router_result",
+                "router_status": "unfilled_ioc",
+                "exchange_order_id": getattr(result, "order_id", None),
+                "post_only": bool(resolved_post_only),
+                "submitted_price_cents": price_cents,
+                "count": count,
+            }
             logger.info(
                 "[15M-LOOP-SIDE-AWARE] IOC order did not fill: ticker=%s side=%s count=%s status=%s order_id=%s",
                 ticker, kalshi_side, count, result.status, result.order_id
@@ -11163,10 +11274,21 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             logger.info("Order routed successfully: ticker=%s status=%s", ticker, result.status)
             return True
         self._rejection_counters["other"] += 1
+        candidate["_reject_detail"] = {
+            "stage": "router_result",
+            "router_status": getattr(result, "status", None) if result else "no_result",
+            "router_reason": getattr(result, "reason", None) if result else None,
+            "submitted_price_cents": price_cents,
+            "count": count,
+        }
         return False
-        
+
     except Exception as e:
         self._rejection_counters["router_exception"] += 1
+        candidate["_reject_detail"] = {
+            "stage": "execute_exception",
+            "exception": f"{type(e).__name__}: {e}",
+        }
         logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
         return False  # Execution failed - do not track as executed
 

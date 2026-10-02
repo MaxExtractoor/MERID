@@ -59,6 +59,53 @@ class TestExecutableCostEVGate:
         assert result.allowed is False
         assert any("net_ev_below_min_dollar" in r for r in result.reasons)
 
+    def test_lane_floor_allows_shallow_negative_ev(self, monkeypatch, tmp_path):
+        """Bounded-lane re-gate: the caller may pass the lane's own EV bound
+        as min_dollar_ev so a deliberately-admitted shallow-negative candidate
+        is re-checked against its lane floor, not a hard zero."""
+        monkeypatch.setenv("MERID_EV_GATE_MIN_DOLLAR_EV", "0.00")
+        monkeypatch.setenv("MERID_EV_GATE_MIN_EV_TO_TAIL_RATIO", "0.00")
+
+        # net_ev = (0.45 - 0.50) - (0.01 + 0.01) = -0.07 on 1 contract
+        result = evaluate_executable_cost_ev(
+            EVInput(
+                p_model=Decimal("0.45"),
+                p_exec=Decimal("0.50"),
+                qty_cc=100,
+                entry_fee_per_contract=Decimal("0.01"),
+                expected_exit_cost_per_contract=Decimal("0.01"),
+                quote_age_ms=5,
+                min_dollar_ev=Decimal("-0.10"),
+                min_ev_to_tail_ratio=Decimal("-1"),
+            )
+        )
+
+        assert result.allowed is True
+        assert result.net_ev == Decimal("-0.07")
+
+    def test_lane_floor_still_rejects_drifted_price(self, monkeypatch, tmp_path):
+        """The lane bound is a bound: a submitted price that drifted beyond
+        the lane floor still fails the re-gate."""
+        monkeypatch.setenv("MERID_EV_GATE_MIN_DOLLAR_EV", "0.00")
+        monkeypatch.setenv("MERID_EV_GATE_MIN_EV_TO_TAIL_RATIO", "0.00")
+
+        # net_ev = (0.43 - 0.50) - 0.02 = -0.09 < -0.04 lane floor
+        result = evaluate_executable_cost_ev(
+            EVInput(
+                p_model=Decimal("0.43"),
+                p_exec=Decimal("0.50"),
+                qty_cc=100,
+                entry_fee_per_contract=Decimal("0.01"),
+                expected_exit_cost_per_contract=Decimal("0.01"),
+                quote_age_ms=5,
+                min_dollar_ev=Decimal("-0.04"),
+                min_ev_to_tail_ratio=Decimal("-1"),
+            )
+        )
+
+        assert result.allowed is False
+        assert any("net_ev_below_min_dollar" in r for r in result.reasons)
+
     def test_stale_executable_price_rejects(self, monkeypatch, tmp_path):
         """The gate rejects when the executable price is stale; no midpoint fallback."""
         monkeypatch.setenv("MERID_EV_GATE_MIN_DOLLAR_EV", "0.00")

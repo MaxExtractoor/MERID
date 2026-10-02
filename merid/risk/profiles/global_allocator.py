@@ -76,6 +76,15 @@ class OrderCandidate:
     # an untrusted owner must never reach the allocator.
     quote_owner: str = "UNKNOWN"
     degraded_mode: bool = False
+    # 2026-10-02: bounded-lane identity + the lane's own required edge.  A
+    # current-build provisional or threshold-cell candidate was admitted on
+    # executable-price economics upstream; the EDGE stage must re-check
+    # against the lane bound (which may be negative for a value lane), not
+    # the profile's generic min_edge floor.
+    decision_lane: Optional[str] = None
+    threshold_cell_id: Optional[str] = None
+    provisional_cell_id: Optional[str] = None
+    effective_required_edge_cents: Optional[float] = None
 
     @property
     def notional_usd(self) -> float:
@@ -101,6 +110,25 @@ class OrderCandidate:
         Combines edge_pct and confidence.
         """
         return _to_edge_fraction(self.edge_pct) * self.confidence
+
+    @property
+    def knapsack_score(self) -> float:
+        """Objective value for the venue-cap knapsack.
+
+        Bounded-lane candidates score by margin over the lane's own
+        admission bound — a value lane may deliberately carry a negative
+        edge bound, and scoring such a pick by raw edge (negative) would
+        silently floor it out against the empty-portfolio bar of 0.
+        Non-lane candidates keep the raw edge*confidence score.
+        """
+        bound = self.effective_required_edge_cents
+        if bound is not None and (
+            self.decision_lane or self.threshold_cell_id or self.provisional_cell_id
+        ):
+            return (
+                _to_edge_fraction(self.edge_pct) - float(bound) / 100.0
+            ) * self.confidence
+        return self.edge_score
 
 
 @dataclass
@@ -450,6 +478,10 @@ class GlobalAllocator:
             working.append((c, d))
 
         # STAGE: EDGE
+        try:
+            from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES
+        except Exception:
+            BOUNDED_POST_ONLY_LANES = frozenset()
         edge_passed: List[Tuple[OrderCandidate, AllocationDecision]] = []
         for c, d in working:
             asset_min_edge = self.per_asset_min_edge_pct.get(c.asset, self.min_edge_pct)
@@ -466,6 +498,22 @@ class GlobalAllocator:
                 float(os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01"))
                 if _degraded else 0.0
             )
+            # 2026-10-02: bounded-lane candidates were admitted against the
+            # lane's own effective threshold on the executable price — a
+            # value lane may deliberately carry a negative bound.  Re-check
+            # against that bound (still plus the degraded reserve) instead of
+            # the generic profile floor; non-lane candidates are unchanged.
+            _lane_bound_cents = getattr(c, "effective_required_edge_cents", None)
+            _is_lane = bool(
+                getattr(c, "decision_lane", None) in BOUNDED_POST_ONLY_LANES
+                or getattr(c, "threshold_cell_id", None) is not None
+                or getattr(c, "provisional_cell_id", None) is not None
+            )
+            if _is_lane and _lane_bound_cents is not None:
+                _required_edge_frac = float(_lane_bound_cents) / 100.0 + (
+                    float(os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01"))
+                    if _degraded else 0.0
+                )
             if candidate_edge_frac >= _required_edge_frac:
                 d.stage_results["EDGE"] = "PASS"
                 edge_passed.append((c, d))
@@ -474,10 +522,12 @@ class GlobalAllocator:
                 _mark_terminal(d, "EDGE", REASON_EXPECTED_VALUE_BELOW_MINIMUM)
                 logger.info(
                     "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < required=%.3f%% "
-                    "(min=%.3f%% degraded=%s)",
+                    "(min=%.3f%% degraded=%s lane=%s lane_bound_cents=%s)",
                     c.asset, _to_edge_percent(c.edge_pct),
                     _to_edge_percent(_required_edge_frac),
                     _to_edge_percent(asset_min_edge), _degraded,
+                    getattr(c, "decision_lane", None),
+                    getattr(c, "effective_required_edge_cents", None),
                 )
                 # 2026-09-29: decomposed EV-floor record so a reject shows the
                 # exact reserve stack it failed against.  Reserves already
@@ -509,6 +559,10 @@ class GlobalAllocator:
                         "evidence_lcb_net_ev_cents": _cb.get("lcb_net_ev_cents"),
                         "quote_owner": getattr(c, "quote_owner", None),
                         "degraded_mode": _degraded,
+                        "decision_lane": getattr(c, "decision_lane", None),
+                        "lane_required_edge_cents": getattr(
+                            c, "effective_required_edge_cents", None
+                        ),
                         "decision": "REJECTED",
                     }, default=str),
                 )
@@ -712,7 +766,7 @@ class GlobalAllocator:
                 if not combo_valid:
                     continue
 
-                total_edge = sum(c.edge_score for c in combo)
+                total_edge = sum(c.knapsack_score for c in combo)
                 if total_edge > best_total_edge or (total_edge == best_total_edge and total_notional < best_total_notional):
                     best_combination = list(combo)
                     best_total_edge = total_edge

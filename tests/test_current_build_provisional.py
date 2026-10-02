@@ -47,6 +47,25 @@ def _isolate_lane(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_PROVISIONAL_LANE", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MAKER", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_EVIDENCE_OVERRIDE", raising=False)
+    monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
+    monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
+    for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        for _s in ("YES", "NO"):
+            monkeypatch.delenv(
+                f"MERID_PROVISIONAL_MIN_EV_C_{_a}_{_s}", raising=False
+            )
+    for _cap in (
+        "MERID_PROVISIONAL_DAILY_MAX_FILLS_PER_ASSET",
+        "MERID_PROVISIONAL_DAILY_MAX_FILLS_TOTAL",
+        "MERID_PROVISIONAL_DAILY_MAX_FILLS_YES",
+        "MERID_PROVISIONAL_DAILY_MAX_FILLS_NO",
+        "MERID_PROVISIONAL_DAILY_MAX_FILLS",
+        "MERID_PROVISIONAL_MAX_OPEN_ORDERS_TOTAL",
+        "MERID_PROVISIONAL_MAX_OPEN_ORDERS",
+        "MERID_PROVISIONAL_DAILY_MAX_SUBMISSIONS",
+        "MERID_PROVISIONAL_PER_CELL_MAX_SUBMISSIONS",
+    ):
+        monkeypatch.delenv(_cap, raising=False)
     monkeypatch.setenv(
         "MERID_PROVISIONAL_STATE_PATH", str(tmp_path / "cbp_state.json")
     )
@@ -111,7 +130,12 @@ def test_cell_grid_covers_approved_domain():
     for c in cbp.PROVISIONAL_CELLS:
         assert 20 <= c.price_min_cents and c.price_max_cents <= 90
         assert 120 <= c.tte_min_seconds and c.tte_max_seconds <= 600
-        assert c.min_net_ev_cents > 0
+        # Cell min-EV is baked from env overrides at import; the grid-level
+        # invariant is the hard clamp, not positivity — a deliberately
+        # configured value lane may carry a negative cell threshold.  The
+        # *defaults* themselves stay positive (checked env-independently).
+        assert c.min_net_ev_cents >= -10.0
+        assert cbp._DEFAULT_MIN_EV_CENTS[c.asset][c.side] > 0
         assert c.cell_id.startswith("cbp_")
 
 
@@ -199,6 +223,61 @@ def test_threshold_env_override(monkeypatch):
     assert cbp.provisional_min_ev_cents("BTC", "yes") == 4.0
     monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C", "1.75")
     assert cbp.provisional_min_ev_cents("ETH", "no") == 1.75
+
+
+def test_min_ev_floor_defaults_zero(monkeypatch):
+    """Without an explicit floor a negative env override clamps to 0 — the
+    lane cannot admit negative-EV candidates by default."""
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
+    assert cbp.provisional_min_ev_floor_cents() == 0.0
+    assert cbp.provisional_min_ev_cents("ETH", "yes") == 0.0
+
+
+def test_min_ev_floor_allows_bounded_negative(monkeypatch):
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", "-6.0")
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
+    assert cbp.provisional_min_ev_cents("ETH", "yes") == -4.0
+    # A deeper override clamps at the floor, never below it.
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_SOL_YES", "-9.0")
+    assert cbp.provisional_min_ev_cents("SOL", "yes") == -6.0
+    # Positive defaults are untouched by the floor.
+    assert cbp.provisional_min_ev_cents("BTC", "yes") == 2.5
+    assert cbp.provisional_min_ev_cents("BTC", "no") == 2.0
+
+
+def test_min_ev_floor_hard_clamp(monkeypatch):
+    """A misconfigured floor can never open the lane past -10c."""
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", "-50")
+    assert cbp.provisional_min_ev_floor_cents() == -10.0
+
+
+def test_admission_negative_ev_lane(monkeypatch):
+    """The value-lane contract: a cell floored at -4c admits a -3c candidate
+    and still rejects a -5c one — the lane's own bound is enforced, not
+    waived."""
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", "-6.0")
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
+    c = cbp.resolve_provisional_cell("ETH", "yes", 45.0, 200.0)
+    ok, r = cbp.provisional_admission_allowed(
+        c.cell_id, "SPARSE_MATCHED_INSUFFICIENT", False, -3.0, -4.0
+    )
+    assert ok and r is None
+    ok, r = cbp.provisional_admission_allowed(
+        c.cell_id, "SPARSE_MATCHED_INSUFFICIENT", False, -5.0, -4.0
+    )
+    assert not ok and r == "ev_below_provisional_threshold"
+
+
+def test_decompose_provisional_negative_floor(monkeypatch):
+    """The resolved edge threshold for a lane cell may be negative — the
+    formula 0.02 floor clamp applies to the formula path only."""
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", "-6.0")
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
+    d = _decomp("ETH", "yes", 45, tte=300.0)
+    assert d.cell_id is None
+    assert d.provisional_cell_id == "cbp_eth_yes_40_50_t120_300"
+    assert math.isclose(d.total, -0.04, abs_tol=1e-9)
+    assert math.isclose(d.provisional_min_ev_cents, -4.0, abs_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------

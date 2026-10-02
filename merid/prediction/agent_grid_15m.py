@@ -19754,6 +19754,18 @@ class LeanAgentGrid15m:
 
                         degraded_mode=_degraded_mode,
 
+                        decision_lane=candidate.get('decision_lane'),
+
+                        threshold_cell_id=candidate.get('threshold_cell_id'),
+
+                        provisional_cell_id=candidate.get('provisional_cell_id'),
+
+                        effective_required_edge_cents=(
+                            float(candidate['effective_required_edge_cents'])
+                            if candidate.get('effective_required_edge_cents') is not None
+                            else None
+                        ),
+
                     )
 
                     order_candidates.append(order_candidate)

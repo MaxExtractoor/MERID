@@ -999,7 +999,13 @@ def _decompose_dynamic_min_required_edge(
     if cell is not None:
         total = max(0.0, min(cell.min_net_ev_cents / 100.0, 0.15))
     elif prov_cell is not None:
-        total = max(0.0, min(_cbp.cell_min_ev_cents(prov_cell) / 100.0, 0.15))
+        # Provisional cells may carry a negative min-EV (env-bounded by
+        # MERID_PROVISIONAL_MIN_EV_FLOOR_C, default 0.0) — that admits
+        # shallow-negative-EV candidates into the capped bootstrap lane so
+        # its own fills can settle whether the cell is truly underpriced.
+        _pc_min = _cbp.cell_min_ev_cents(prov_cell) / 100.0
+        _pc_floor = _cbp.provisional_min_ev_floor_cents() / 100.0
+        total = max(_pc_floor, min(_pc_min, 0.15))
 
     return EdgeThresholdDecomposition(
         total=total,
@@ -3124,7 +3130,16 @@ def compute_trade_decision(
                         elif _ovr_via_cbp:
                             # Legacy evidence demoted to a monitoring label;
                             # the provisional lane admitted on current-build
-                            # economics alone.
+                            # economics alone.  Lift the side's evidence flag —
+                            # inside the provisional domain a legacy verdict
+                            # (static calibration floor or cell-policy block)
+                            # is a label, not a veto.
+                            if _side == "yes":
+                                yes_evidence_ok = True
+                                yes_evidence_reason = None
+                            else:
+                                no_evidence_ok = True
+                                no_evidence_reason = None
                             indicators[f"{_side}_evidence_override"] = (
                                 "current_build_provisional_lane"
                             )
@@ -3270,6 +3285,17 @@ def compute_trade_decision(
                         )
                         indicators[f"{_side}_admission_decision"] = "allowed"
                         indicators[f"{_side}_admission_reason"] = _ed.code.lower()
+                        # 2026-10-02: inside the provisional domain the static
+                        # calibration floor is a legacy verdict like the live
+                        # gate — a clean live pass lifts it (caps/state were
+                        # already verified when the cell id was assigned).
+                        if _d.provisional_cell_id is not None:
+                            if _side == "yes" and not yes_evidence_ok:
+                                yes_evidence_ok = True
+                                yes_evidence_reason = None
+                            elif _side == "no" and not no_evidence_ok:
+                                no_evidence_ok = True
+                                no_evidence_reason = None
             else:
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee
