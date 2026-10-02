@@ -828,3 +828,63 @@ def test_heartbeat_pure_pre_decision_cycle_reports_zero_side_ev(tmp_db: Path) ->
         assert row["decisions_persisted"] == 5
         assert row["side_ev_expected"] == 0
         assert row["side_ev_persisted"] == 0
+
+
+def test_pre_decision_rejection_blank_ticker_is_terminal(tmp_db: Path) -> None:
+    """A pre-decision rejection with no resolvable contract must not park a
+    PENDING outcome: the orphan sweep would call /markets/ (empty ticker)
+    every poll forever and the row can never receive a settlement."""
+    import time
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    assert ledger.record_pre_decision_rejection(
+        cycle_id="c3",
+        run_id="run_x",
+        ticker="",
+        asset="BTC",
+        reason="market_not_entry_ready",
+        decision_id="hb3_noticker",
+        candidate_id="hb3_noticker",
+    ) is True
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT outcome_status, unresolved_reason FROM strategy_decision_outcomes "
+            "WHERE decision_id = 'hb3_noticker'"
+        ).fetchone()
+        assert row["outcome_status"] == "UNRESOLVED"
+        assert row["unresolved_reason"] == "no_contract_at_decision"
+
+    # And the orphan sweep never surfaces it.
+    pending = ledger.pending_unsettled_tickers(now=time.time() + 3600)
+    assert all(t for t, _ in pending)
+
+
+def test_pending_unsettled_tickers_skips_blank_ticker(tmp_db: Path) -> None:
+    """Backstop: even a legacy blank-ticker PENDING row is excluded from the
+    sweep set so it cannot generate a doomed /markets/ lookup."""
+    import time
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    # Write via the API (produces UNRESOLVED under the new code) then flip to
+    # PENDING to simulate a legacy row written before the fix.
+    assert ledger.record_pre_decision_rejection(
+        cycle_id="c4",
+        run_id="run_x",
+        ticker="",
+        asset="BTC",
+        reason="market_not_entry_ready",
+        decision_id="legacy_blank",
+        candidate_id="legacy_blank",
+        seconds_to_expiry=300.0,
+    ) is True
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            "UPDATE strategy_decision_outcomes SET outcome_status='PENDING', "
+            "unresolved_reason=NULL, unresolved_at=NULL WHERE decision_id='legacy_blank'"
+        )
+        conn.commit()
+    pending = ledger.pending_unsettled_tickers(now=time.time() + 3600)
+    assert all(t and str(t).strip() for t, _ in pending)
