@@ -81,9 +81,10 @@ class Test15mMarketOrderExpiration:
         
         monitor.register_order(record)
         
-        # Should be overridden to 180s for 15m markets
+        # Should be overridden to the bounded 15m TTL (60s — stale resting
+        # entries must not persist inside a 15-minute window).
         assert record.max_hold_seconds == MAX_HOLD_SECONDS_15M
-        assert MAX_HOLD_SECONDS_15M == 180
+        assert MAX_HOLD_SECONDS_15M == 60
 
     def test_preserves_max_hold_time_for_non_15m_markets(self):
         """Test that non-15m markets keep their original max hold time."""
@@ -322,11 +323,13 @@ class TestRestingOrderMonitor:
         )
         monitor.register_order(record)
         
-        # Re-check (will cancel due to max hold exceeded or window resolution)
+        # Re-check: the stale-order sweeper runs before window resolution and
+        # cancels on age > max_hold (the 15m ticker is overridden to
+        # MAX_HOLD_SECONDS_15M at register time, so age=1000s trips it
+        # deterministically).
         result = await monitor._recheck_order(record)
         assert result.action == "cancel"
-        # In test environment, window resolution may fail before max hold check
-        assert result.reason in ("max_hold_time_exceeded", "window_not_allowed:outside_window")
+        assert result.reason.startswith("max_hold_exceeded")
     
     @pytest.mark.asyncio
     async def test_recheck_order_still_valid(self, monitor):
