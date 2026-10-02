@@ -38,6 +38,9 @@ STAGE_MODEL = "MODEL"
 _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     ("expired_or_no_time", "market_time"),
     ("final_minute_entry_disabled", "market_time"),
+    ("min_tte_entry_disabled", "market_time"),
+    ("tte_entry_cutoff", "market_time"),
+    ("bounded_domain_tte", "market_time"),
     ("settlement_lane_price_cap", "market_time"),
     ("invalid_executable_asks", "executable_quotes"),
     ("non_finite_", "executable_quotes"),
@@ -62,6 +65,7 @@ _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     ("low_conviction", "conviction"),
     ("conviction", "conviction"),
     ("throttle", "throttle"),
+    ("strip_same_side_", "throttle"),
     ("ct_lane", "countertrend_lane"),
     ("countertrend", "countertrend_lane"),
     ("bookflow", "book_flow"),
@@ -137,9 +141,9 @@ def _blocking_gate_names(reason: Optional[str], side: Optional[str]) -> set:
                 # the decision's best_side.
                 s = (
                     "yes"
-                    if r.endswith("_yes")
+                    if r.endswith("_yes") or r.endswith(":yes")
                     else "no"
-                    if r.endswith("_no")
+                    if r.endswith("_no") or r.endswith(":no")
                     else side
                 )
                 names.add(f"{s}_{gate}" if s else f"unknown_{gate}")
@@ -243,10 +247,15 @@ def evaluate_all_gates(
 
     # ── Layer-1 input gates (evaluated at the model boundary) ────────────
     seconds_to_expiry = _to_float(getattr(decision, "seconds_to_expiry", None))
-    tte_failed = reason in (
-        "expired_or_no_time",
-        "final_minute_entry_disabled",
-        "settlement_lane_price_cap",
+    tte_failed = bool(reason) and (
+        str(reason) in (
+            "expired_or_no_time",
+            "final_minute_entry_disabled",
+            "min_tte_entry_disabled",
+            "tte_entry_cutoff",
+            "settlement_lane_price_cap",
+        )
+        or str(reason).startswith("bounded_domain_tte")
     )
     _add(
         "market_time",
