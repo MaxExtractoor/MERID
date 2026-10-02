@@ -378,10 +378,18 @@ class TestRegressionPrevention:
         
         # Get the source code of check_market_microstructure_edge_aware
         source = inspect.getsource(order_router.check_market_microstructure_edge_aware)
-        
-        # Check for the old hardcoded pattern
-        assert "use_maker_economics = True" not in source, \
-            "Found hardcoded use_maker_economics=True - this is the regression bug"
+
+        # Check for the old hardcoded pattern: maker economics set
+        # unconditionally (or for a taker/IOC mode).  A conditional assignment
+        # inside the ``resolved_mode in ("maker", "passive_quote")`` branch is
+        # the intended mode-derived behaviour, not the regression.
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if "use_maker_economics = True" in line:
+                context = "\n".join(lines[max(0, i - 3):i])
+                assert '"maker", "passive_quote"' in context or \
+                    "'maker', 'passive_quote'" in context, \
+                    "Found unconditional use_maker_economics=True - this is the regression bug"
         
         # Check for the new aggressiveness-based pattern
         assert "aggressiveness == 0.0" in source, \

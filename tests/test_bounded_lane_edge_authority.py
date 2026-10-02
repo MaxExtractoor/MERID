@@ -88,6 +88,9 @@ class TestBoundedLaneMembership:
             "threshold_cell",
             "current_build_provisional",
             "trend_yes_hi",
+            # 2026-10-02: queue-priced maker lane — admitted on bid-side
+            # economics; stays inside the bounded post-only contract.
+            "maker_bid",
         }
 
 

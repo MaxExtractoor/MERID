@@ -814,6 +814,61 @@ def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float
 MERID_MACD_EDGE_WEIGHT = float(os.environ.get("MERID_MACD_EDGE_WEIGHT", "10.0"))
 MERID_MAX_EDGE_PCT = float(os.environ.get("MERID_MAX_EDGE_PCT", "15.0"))
 
+# 2026-10-02: queue-priced maker lane.  The taker and maker-fee decision
+# passes both price entry at the ask — a resting post-only buy actually
+# pays the own-side bid, so the only volume lever left in a "market rich
+# vs model" regime is bid-priced evaluation.  The lane is opt-in
+# (MERID_MAKER_BID_LANE_ENABLED) and deliberately conservative: an explicit
+# adverse-selection reserve is charged inside net_edge (resting fills
+# execute preferentially when the market moves through the limit), a
+# minimum spread is required (no queue value in a tight book), submissions
+# are daily-capped, and the bounded-lane contract keeps it 1-contract
+# post-only with the toxic-mid/edge-decay cancels already in place.
+MERID_MAKER_BID_LANE_ENABLED = os.environ.get(
+    "MERID_MAKER_BID_LANE_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes")
+MERID_MAKER_BID_ADV_SEL_CENTS = float(
+    os.environ.get("MERID_MAKER_BID_ADV_SEL_CENTS", "2.0")
+)
+MERID_MAKER_BID_MIN_SPREAD_CENTS = float(
+    os.environ.get("MERID_MAKER_BID_MIN_SPREAD_CENTS", "3.0")
+)
+MERID_MAKER_BID_DAILY_CAP = int(
+    os.environ.get("MERID_MAKER_BID_DAILY_CAP", "24")
+)
+MERID_MAKER_BID_DAILY_FILE = os.environ.get(
+    "MERID_MAKER_BID_DAILY_FILE", "data/maker_bid_lane.json"
+)
+
+
+def _maker_bid_daily_state() -> dict:
+    """Read the maker-bid lane's UTC-day submission counter."""
+    try:
+        with open(MERID_MAKER_BID_DAILY_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if state.get("date") == datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+            return state
+    except Exception:
+        pass
+    return {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0}
+
+
+def _maker_bid_under_daily_cap() -> bool:
+    return int(_maker_bid_daily_state().get("count", 0)) < MERID_MAKER_BID_DAILY_CAP
+
+
+def _record_maker_bid_submission() -> int:
+    """Increment and persist the lane's daily submission counter."""
+    state = _maker_bid_daily_state()
+    state["count"] = int(state.get("count", 0)) + 1
+    try:
+        Path(MERID_MAKER_BID_DAILY_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(MERID_MAKER_BID_DAILY_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+    return state["count"]
+
 
 def _fvg_edge_components(
     score: int,
@@ -8309,12 +8364,19 @@ class LeanAgent15m:
             p_yes: Optional[float],
             shadow_bachelier_only: bool = False,
             route: str = "t",
+            price_basis: str = "ask",
+            adv_sel_reserve: float = 0.0,
         ) -> TradeDecision:
             """Call compute_trade_decision with a specific fee and optional hybrid p.
 
             ``route`` is the evaluation-pass suffix of the deterministic
             decision_id (taker/maker/shadow passes of one candidate share the
             candidate_id prefix so the audit ledger groups them).
+
+            ``price_basis="bid"`` evaluates the queue-priced maker lane: the
+            executable entry is the own-side bid, and ``adv_sel_reserve``
+            (fractional) is charged as an explicit adverse-selection reserve
+            inside net edge.
             """
             indicators = {}
             if p_yes is not None:
@@ -8388,6 +8450,8 @@ class LeanAgent15m:
                 cfb_execution_eligible=getattr(cfb_observation, "execution_eligible", None),
                 directional_regime=_dir_regime,
                 feature_snapshot=self._feature_snapshot,
+                entry_price_basis=price_basis,
+                adverse_selection_reserve=adv_sel_reserve,
             )
             _record_decision_audit(
                 decision,
@@ -8484,6 +8548,12 @@ class LeanAgent15m:
                 execution_mode = "taker"
                 fee_cents = taker_fee_cents
             else:
+                # 2026-10-02: queue-priced maker pass.  The taker and
+                # maker-fee passes both price entry at the ASK; a resting
+                # post-only buy actually pays the own-side BID.  Evaluate
+                # edge at the bid with an explicit adverse-selection
+                # reserve — bounded (1-contract lane, daily cap, min spread)
+                # and only attempted when maker entries are enabled.
                 decision = decision_maker
                 liquidity_role = "taker"
                 aggressiveness = 1.0
@@ -8491,6 +8561,63 @@ class LeanAgent15m:
                 time_in_force = "ioc"
                 execution_mode = "taker"
                 fee_cents = taker_fee_cents
+                if MERID_MAKER_BID_LANE_ENABLED and not _maker_bid_under_daily_cap():
+                    try:
+                        decision.indicators["maker_bid_block"] = "daily_cap"
+                    except Exception:
+                        pass
+                if MERID_MAKER_BID_LANE_ENABLED and _maker_bid_under_daily_cap():
+                    decision_maker_bid = _call_trade_decision(
+                        maker_fee_cents, p_yes_model, route="maker_bid",
+                        price_basis="bid",
+                        adv_sel_reserve=MERID_MAKER_BID_ADV_SEL_CENTS / 100.0,
+                    )
+                    if decision_maker_bid.selected_outcome is not None:
+                        _mb_side = decision_maker_bid.selected_outcome
+                        _mb_spread = (
+                            (float(no_ask) - float(no_bid))
+                            if _mb_side == "no"
+                            else (float(yes_ask) - float(yes_bid))
+                        )
+                        if _mb_spread >= MERID_MAKER_BID_MIN_SPREAD_CENTS:
+                            decision = decision_maker_bid
+                            liquidity_role = "maker"
+                            aggressiveness = 0.0
+                            post_only = True
+                            time_in_force = "gtc"
+                            execution_mode = "maker"
+                            fee_cents = maker_fee_cents
+                            _n_mb = _record_maker_bid_submission()
+                            logger.info(
+                                "[MAKER-BID-LANE] asset=%s side=%s spread=%.1fc "
+                                "net_edge=%.2fc lane submissions today=%d",
+                                asset, _mb_side, _mb_spread,
+                                float(decision_maker_bid.net_edge or 0) * 100.0,
+                                _n_mb,
+                            )
+                        else:
+                            # Keep the failed ask-priced decision for the
+                            # reject record; note why the bid-priced pass
+                            # was not emitted.
+                            decision.indicators["maker_bid_block"] = (
+                                f"spread:{_mb_spread:.1f}c"
+                            )
+                            logger.info(
+                                "[MAKER-BID-LANE] asset=%s side=%s blocked "
+                                "spread=%.1fc < %.1fc",
+                                asset, _mb_side, _mb_spread,
+                                MERID_MAKER_BID_MIN_SPREAD_CENTS,
+                            )
+                    elif decision_maker_bid is not None:
+                        # Surface the bid-priced edge on the retained decision
+                        # so shadow/audit can see how close the queue pass came.
+                        for _k in ("yes_ev_net_cents", "no_ev_net_cents"):
+                            try:
+                                decision.indicators[f"maker_bid_{_k}"] = (
+                                    decision_maker_bid.indicators or {}
+                                ).get(_k)
+                            except Exception:
+                                pass
         else:
             decision = decision_taker
             liquidity_role = "taker"
