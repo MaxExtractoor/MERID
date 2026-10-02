@@ -18833,6 +18833,7 @@ class LeanAgentGrid15m:
         self,
         tick: int,
         allow_new_entries: bool = True,
+        entries_block_reason: Optional[str] = None,
         coinbase_velocity: Dict = None,
         feature_snapshot: Optional[Any] = None,
     ) -> list[Dict[str, Any]]:
@@ -20000,12 +20001,14 @@ class LeanAgentGrid15m:
                     event_type="RISK_REJECTED",
                     stage="RISK",
                     reason="ENTRIES_DISABLED",
+                    extra={"entries_block_reason": entries_block_reason} if entries_block_reason else None,
                 )
                 lifecycle_events.append({
                     "candidate_id": c.get("candidate_id"),
                     "from_state": "RECEIVED",
                     "to_state": "REJECTED",
                     "reason": "ENTRIES_DISABLED",
+                    "entries_block_reason": entries_block_reason,
                     "ticker": c.get("ticker"),
                     "asset": c.get("asset"),
                     "side": c.get("side"),
