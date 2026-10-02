@@ -75,6 +75,7 @@ Usage::
 from __future__ import annotations
 
 import os
+import json
 import random
 import threading
 import time
@@ -322,6 +323,9 @@ _SNAPSHOT_TIMEOUT_SECONDS = float(os.getenv("MERID_KALSHI_SNAPSHOT_TIMEOUT_SECON
 # exhausting the HTTP connection pool and starving unrelated calls (bankroll,
 # RTI) - observed in production on 2026-08-31.
 _RECOVERY_TRIGGER_MIN_INTERVAL_S = float(os.getenv("KALSHI_RECOVERY_TRIGGER_MIN_INTERVAL_S", "15.0"))
+# 2026-10-02: a recovery flight older than this is considered wedged and its
+# dedup slot is released — prevents a stuck coroutine from starving resync.
+_RECOVERY_INFLIGHT_STUCK_S = float(os.getenv("KALSHI_RECOVERY_INFLIGHT_STUCK_S", "45.0"))
 
 # ── Bridge-lag freshness budgets ────────────────────────────────────────────
 # A sequence-contiguous delta stream can still be execution-useless when
@@ -768,6 +772,16 @@ class KalshiMarketStateStore:
         self._last_overflow_log_ts: Dict[str, float] = {}
         self._overflow_log_suppressed: Dict[str, int] = {}
         self._last_pending_full_log_ts: Dict[str, float] = {}
+        # 2026-10-02: per-ticker derived book-state (spec vocabulary:
+        # UNINITIALIZED/SYNCING/HEALTHY/RESYNCING/DEGRADED_REST_ONLY/UNTRADEABLE).
+        # One BOOK_STATE_TRANSITION event per change, never per delta.
+        self._book_state_last: Dict[str, str] = {}
+        self._book_state_transition_total: Dict[str, int] = {}
+        # 2026-10-02: deduplicated resync coordinator — at most one recovery
+        # flight per ticker at a time (time-throttle alone allowed overlapping
+        # snapshot tasks 15s apart during sustained gap storms).
+        self._recovery_inflight_since: Dict[str, float] = {}
+        self._recovery_pending_tasks: Dict[str, int] = {}
         self._batch_worker_running = False
         self._batch_worker_thread: Optional[threading.Thread] = None
         # CRITICAL FIX: Increase batch size and reduce interval to handle extreme WS volume.
@@ -1472,6 +1486,7 @@ class KalshiMarketStateStore:
         state.invalidation_cause = reason
         state.executable = False
         state.recovery_required_source = "FULL_SNAPSHOT"
+        self._note_book_state(ticker, state, reason)
         self._set_snapshot_complete(ticker, False, reason)
         self._set_book_health(ticker, BookHealth.INVALID, reason)
         self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, reason)
@@ -1648,6 +1663,109 @@ class KalshiMarketStateStore:
         ):
             return "WS_FRESH_VERIFIED"
         return "NONE_UNTRUSTED"
+
+    # ── Per-ticker derived book state (2026-10-02) ────────────────────────
+    # The legacy fields (book_health, data_quality, transition, quote_owner)
+    # already carry the trust lifecycle; this folds them into the single
+    # submit-eligibility vocabulary consumers branch on:
+    #   UNINITIALIZED        - no book yet
+    #   HEALTHY              - WS-owned executable book (snapshot+contiguous seq)
+    #   RESYNCING            - invalidated, recovery scheduled/in-flight
+    #   DEGRADED_REST_ONLY   - executable book owned by fresh REST quote
+    #   UNTRADEABLE          - invalid/broken with no recovery owning the book
+    def _derive_book_state(self, state: "KalshiMarketState") -> str:
+        if state is None:
+            return "UNINITIALIZED"
+        qo = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
+        if (
+            qo == "REST_VERIFIED_DEGRADED"
+            and getattr(state, "executable", False)
+            and state.data_quality != "INVALID"
+            and state.transition != "CIRCUIT_BREAKER"
+        ):
+            return "DEGRADED_REST_ONLY"
+        if (
+            state.data_quality == "INVALID"
+            or state.transition == "RESYNC_REQUIRED"
+            or state.book_health in ("RESYNC_REQUESTED",)
+        ):
+            if getattr(state, "recovery_required_source", ""):
+                return "RESYNCING"
+            return "UNTRADEABLE"
+        if state.transition == "CIRCUIT_BREAKER" or state.book_health == "CIRCUIT_BREAKER":
+            return "UNTRADEABLE"
+        if qo == "NONE_UNTRUSTED" and not state.executable:
+            return "UNTRADEABLE"
+        if state.executable and qo in ("WS_FRESH_VERIFIED", "WS_QUOTE"):
+            return "HEALTHY"
+        if state.book_health == "NO_SNAPSHOT" or not getattr(state, "book_initialized", True):
+            return "UNINITIALIZED"
+        return "UNTRADEABLE"
+
+    def book_state(self, ticker: str) -> str:
+        """Public accessor: current derived book state for ``ticker``."""
+        try:
+            return self._derive_book_state(self._states.get(ticker))
+        except Exception:
+            return "UNINITIALIZED"
+
+    def _note_book_state(self, ticker: str, state: "KalshiMarketState", reason: str = "") -> None:
+        """Emit one BOOK_STATE_TRANSITION record when the derived state changes.
+
+        One event per transition, never per delta — the audit stream the
+        feed-health work is measured against (book_state_at_decision/submit).
+        """
+        try:
+            new = self._derive_book_state(state)
+            old = self._book_state_last.get(ticker)
+            if old == new:
+                return
+            self._book_state_last[ticker] = new
+            self._book_state_transition_total[ticker] = (
+                self._book_state_transition_total.get(ticker, 0) + 1
+            )
+            div = None
+            if (
+                getattr(state, "ws_rest_bid_diff_ticks", None) is not None
+                or getattr(state, "ws_rest_ask_diff_ticks", None) is not None
+            ):
+                div = max(
+                    state.ws_rest_bid_diff_ticks or 0,
+                    state.ws_rest_ask_diff_ticks or 0,
+                )
+            qd = 0
+            try:
+                queue = self._delta_queues.get(ticker)
+                qd = len(queue) if queue is not None else 0
+            except Exception:
+                pass
+            # WARNING level: this logger's INFO stream is filtered out of the
+            # console/full.log sinks; transitions are rare (one per change) so
+            # WARNING is appropriate for health-state observability.
+            logger.warning(
+                "[BOOK-STATE-TRANSITION] %s",
+                json.dumps(
+                    {
+                        "event": "book_state_transition",
+                        "ticker": ticker,
+                        "previous_state": old or "UNINITIALIZED",
+                        "next_state": new,
+                        "reason": reason or "state_transition",
+                        "book_health": getattr(state, "book_health", ""),
+                        "quote_owner": getattr(state, "quote_owner", ""),
+                        "data_quality": getattr(state, "data_quality", ""),
+                        "expected_sequence": getattr(state, "ws_last_seq", None),
+                        "book_gap_total": getattr(state, "book_gap_total", 0),
+                        "resync_attempt": getattr(state, "book_resync_total", 0),
+                        "buffered_delta_count": qd,
+                        "ws_rest_divergence_cents": div,
+                        "executable": bool(getattr(state, "executable", False)),
+                    },
+                    default=str,
+                ),
+            )
+        except Exception:
+            pass
 
     def _apply_delta_internal(self, ticker: str, msg: Dict[str, Any]) -> None:
         """Internal method to apply a delta message (called by batch worker).
@@ -1908,6 +2026,7 @@ class KalshiMarketStateStore:
         # REST-preferred block on divergence) is preserved.
         if state.quote_owner != "REST_VERIFIED_DEGRADED":
             state.quote_owner = self._derive_ws_quote_owner(state)
+        self._note_book_state(ticker, state, "ws_delta_apply")
 
         # Log raw book after delta (rate-limited to avoid spam)
         book = self._ob.get_book(ticker)
@@ -2082,11 +2201,23 @@ class KalshiMarketStateStore:
     def _maybe_trigger_book_recovery(self, ticker: str, reason: str) -> bool:
         """Schedule WS + REST snapshot recovery for ``ticker``, throttled.
 
-        Returns True if a recovery was scheduled.  At most one recovery is
-        scheduled per ticker per ``_RECOVERY_TRIGGER_MIN_INTERVAL_S`` so a
-        sustained delta burst cannot flood the event loop / REST pool.
+        Returns True if a recovery was scheduled.  At most one recovery
+        *flight* is in-flight per ticker at a time (2026-10-02 dedup
+        coordinator): repeated gaps/stale events/overflows while the previous
+        snapshot+REST pair is still running are deduplicated, and a task that
+        outlives ``_RECOVERY_INFLIGHT_STUCK_S`` releases the slot so a wedged
+        coroutine cannot starve recovery forever.  The legacy
+        ``_RECOVERY_TRIGGER_MIN_INTERVAL_S`` floor also applies so a
+        fast-completing flight cannot retrigger instantly.
         """
         now = time.monotonic()
+        inflight_since = self._recovery_inflight_since.get(ticker, 0.0)
+        if inflight_since and (now - inflight_since) < _RECOVERY_INFLIGHT_STUCK_S:
+            logger.debug(
+                "[BOOK-RECOVERY-DEDUPED] ticker=%s reason=%s inflight_age=%.1fs",
+                ticker, reason, now - inflight_since,
+            )
+            return False
         if now - self._last_recovery_trigger_ts.get(ticker, 0.0) < _RECOVERY_TRIGGER_MIN_INTERVAL_S:
             return False
         self._last_recovery_trigger_ts[ticker] = now
@@ -2102,9 +2233,26 @@ class KalshiMarketStateStore:
             )
             return False
         try:
-            asyncio.run_coroutine_threadsafe(self._trigger_snapshot_recovery(ticker), loop)
-            asyncio.run_coroutine_threadsafe(self._sync_invariant_violation_with_rest(ticker), loop)
+            self._recovery_inflight_since[ticker] = now
+            self._recovery_pending_tasks[ticker] = 2
+            _f1 = asyncio.run_coroutine_threadsafe(self._trigger_snapshot_recovery(ticker), loop)
+            _f2 = asyncio.run_coroutine_threadsafe(self._sync_invariant_violation_with_rest(ticker), loop)
+
+            def _flight_done(_fut, _t=ticker):
+                try:
+                    remaining = self._recovery_pending_tasks.get(_t, 0) - 1
+                    self._recovery_pending_tasks[_t] = max(0, remaining)
+                    if remaining <= 0:
+                        self._recovery_inflight_since.pop(_t, None)
+                        self._recovery_pending_tasks.pop(_t, None)
+                except Exception:
+                    pass
+
+            _f1.add_done_callback(_flight_done)
+            _f2.add_done_callback(_flight_done)
         except RuntimeError as e:
+            self._recovery_inflight_since.pop(ticker, None)
+            self._recovery_pending_tasks.pop(ticker, None)
             logger.warning("[BOOK-RECOVERY-THROTTLED] Loop closed while scheduling recovery for %s: %s", ticker, e)
             return False
         logger.info("[BOOK-RECOVERY-TRIGGERED] ticker=%s reason=%s", ticker, reason)
@@ -3447,6 +3595,7 @@ class KalshiMarketStateStore:
                     and state.quote_owner != "REST_VERIFIED_DEGRADED"
                 ):
                     state.quote_owner = self._derive_ws_quote_owner(state)
+                self._note_book_state(ticker, state, f"ws_orderbook_apply:{via}")
 
                 # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
                 # This aligns with the data_source being WS-based
@@ -3518,6 +3667,7 @@ class KalshiMarketStateStore:
                     )
 
                 # CRITICAL FIX: Return the updated state after snapshot application
+                self._note_book_state(ticker, state, f"apply_orderbook_end:{via}")
                 return state
         else:
             return None
@@ -3736,6 +3886,7 @@ class KalshiMarketStateStore:
         # This prevents deadlock when catalog refresh thread calls apply_rest_market
         # Callbacks will be notified by WS bridge updates instead
         logger.info("[APPLY-REST-MARKET] EXIT ticker=%s (skipping callback notification for catalog feed)", ticker)
+        self._note_book_state(ticker, state, "apply_rest_market_end")
         return state
 
     # ── Quote path (from WS QuoteEvent) ─────────────────────────────────
@@ -5653,6 +5804,7 @@ class KalshiMarketStateStore:
             "[BOOK-HEALTH] ticker=%s old=%s new=%s reason=%s",
             ticker, old, new, reason or "state_transition",
         )
+        self._note_book_state(ticker, state, reason or "book_health:" + new)
 
     def _set_snapshot_complete(
         self,
