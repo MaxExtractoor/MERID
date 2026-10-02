@@ -33,11 +33,15 @@ class TestConfidenceCalculationStandardization:
         """Load the production profile."""
         return Crypto15mProfileAdapter()
     
-    def test_profile_confidence_threshold_is_0_65(self, profile_adapter):
-        """Test that profile YAML confidence threshold is 0.65."""
+    def test_profile_confidence_threshold_is_0_50(self, profile_adapter):
+        """Profile YAML confidence threshold is 0.50.
+
+        Deliberately lowered from 0.65 to 0.50 in 8fd416e3 ("Unblock live
+        entries") to match signal generation.
+        """
         profile = profile_adapter.profile
-        assert profile.confidence_min_confidence_threshold == 0.65, \
-            f"Profile confidence threshold should be 0.65, got {profile.confidence_min_confidence_threshold}"
+        assert profile.confidence_min_confidence_threshold == 0.50, \
+            f"Profile confidence threshold should be 0.50, got {profile.confidence_min_confidence_threshold}"
     
     def test_confidence_formula_distance_from_neutral(self):
         """Test that confidence = abs(model_prob - 0.5) * 2."""
@@ -201,10 +205,11 @@ class TestConfidenceThresholdConsistency:
         return Crypto15mProfileAdapter()
     
     def test_profile_yaml_confidence_threshold(self, profile_adapter):
-        """Test that profile YAML has confidence threshold of 0.65."""
+        """Profile YAML confidence threshold is 0.50 (lowered from 0.65 in
+        8fd416e3 to unblock live entries)."""
         profile = profile_adapter.profile
-        assert profile.confidence_min_confidence_threshold == 0.65, \
-            f"Profile confidence threshold should be 0.65, got {profile.confidence_min_confidence_threshold}"
+        assert profile.confidence_min_confidence_threshold == 0.50, \
+            f"Profile confidence threshold should be 0.50, got {profile.confidence_min_confidence_threshold}"
     
     def test_profile_yaml_documents_calculation_method(self, profile_adapter):
         """Test that profile YAML documents the confidence calculation method."""

@@ -511,6 +511,9 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     "threshold_cell",
     "current_build_provisional",
     "trend_yes_hi",
+    # 2026-10-02: queue-priced maker lane — admitted on bid-side economics
+    # with an explicit adverse-selection reserve; stays 1-contract post-only.
+    "maker_bid",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -1691,7 +1694,8 @@ class EdgeBreakdown:
     Every field is in fractional units (0.0-1.0) so that:
 
         gross_edge = p_selected - executable_entry_price
-        net_edge   = gross_edge - entry_fee - exit_cost_reserve - model_risk_reserve
+        net_edge   = gross_edge - entry_fee - exit_cost_reserve
+                     - model_risk_reserve - adverse_selection_reserve
 
     No hidden constants are permitted.  If a cost cannot be explained, the
     decision must be ``no_trade``.
@@ -1707,6 +1711,7 @@ class EdgeBreakdown:
     model_risk_reserve: float
     gross_edge: float
     net_edge: float
+    adverse_selection_reserve: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1976,11 +1981,17 @@ def compute_edge(
     entry_fee: float,
     exit_cost_reserve: float,
     model_risk_reserve: float,
+    adverse_selection_reserve: float = 0.0,
 ) -> EdgeBreakdown:
     """Compute a fully explained net edge for one side.
 
     ``p_yes`` is the model probability of YES.  The selected side's probability
     is derived from it so that ``p_yes + p_no == 1`` is invariant.
+
+    ``adverse_selection_reserve`` is an explicit haircut for resting (maker)
+    fills: a queue-priced order executes preferentially when the market moves
+    through its price, so the conditional fill is worth less than the quoted
+    edge.  Zero by default — only the maker-bid lane carries it.
     """
     if not (0.0 <= p_yes <= 1.0):
         raise ValueError(f"p_yes must be in [0,1]: {p_yes}")
@@ -1993,7 +2004,13 @@ def compute_edge(
     p_selected = p_yes if selected_side == "yes" else p_no
     p_opposite = p_no if selected_side == "yes" else p_yes
     gross_edge = p_selected - entry_price
-    net_edge = gross_edge - entry_fee - exit_cost_reserve - model_risk_reserve
+    net_edge = (
+        gross_edge
+        - entry_fee
+        - exit_cost_reserve
+        - model_risk_reserve
+        - adverse_selection_reserve
+    )
 
     return EdgeBreakdown(
         p_yes=p_yes,
@@ -2007,6 +2024,7 @@ def compute_edge(
         model_risk_reserve=model_risk_reserve,
         gross_edge=gross_edge,
         net_edge=net_edge,
+        adverse_selection_reserve=adverse_selection_reserve,
     )
 
 
@@ -2069,12 +2087,18 @@ def _compute_confidence(
     book_execution_max_age_ms: int = 1000,
     rti_book_skew_max_ms: int = 1500,
     settlement_lane: bool = False,
+    entry_price_basis: str = "ask",
 ) -> ConfidenceResult:
     """Derive confidence from observable uncertainty sources.
 
     Confidence is not a magic number.  It is produced only when every trust
     input is present and within bounds.  Missing or degraded inputs produce
     ``valid=False`` and block entry.
+
+    2026-10-02: ``entry_price_basis="bid"`` demotes the >5c-spread hard
+    blocks to non-blocking.  A resting post-only order captures the spread
+    instead of paying it; its fill-time pickoff cost is charged explicitly
+    through the adverse-selection reserve in net edge and the EV gate.
     """
     reasons: List[str] = []
 
@@ -2107,12 +2131,15 @@ def _compute_confidence(
         reasons.append("orderbook_sequence_gap")
 
     # Spread and depth checks: a wide spread or thin book reduces confidence.
+    # Under the maker (bid) basis a wide own-side spread is the opportunity
+    # being captured, not a cost — only a taker entry crosses it.
     yes_spread = yes_ask_cents - yes_bid_cents
     no_spread = no_ask_cents - no_bid_cents
-    if yes_bid_cents > 0 and yes_ask_cents > 0 and yes_spread > 5.0:
-        reasons.append(f"yes_spread={yes_spread:.1f}c")
-    if no_bid_cents > 0 and no_ask_cents > 0 and no_spread > 5.0:
-        reasons.append(f"no_spread={no_spread:.1f}c")
+    if entry_price_basis != "bid":
+        if yes_bid_cents > 0 and yes_ask_cents > 0 and yes_spread > 5.0:
+            reasons.append(f"yes_spread={yes_spread:.1f}c")
+        if no_bid_cents > 0 and no_ask_cents > 0 and no_spread > 5.0:
+            reasons.append(f"no_spread={no_spread:.1f}c")
     if yes_depth_cc < 100.0 and no_depth_cc < 100.0:
         reasons.append(
             f"no_executable_depth:yes={yes_depth_cc:.0f},no={no_depth_cc:.0f}"
@@ -2394,6 +2421,8 @@ def compute_trade_decision(
     build_sha: Optional[str] = None,
     directional_regime: Optional[Any] = None,
     feature_snapshot: Optional[Any] = None,
+    entry_price_basis: str = "ask",
+    adverse_selection_reserve: float = 0.0,
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
 
@@ -2435,8 +2464,13 @@ def compute_trade_decision(
     indicators.setdefault("annualized_vol_requested", float(annualized_vol))
     # Executable quotes are stamped up-front so every downstream no-trade
     # (including Layer-1/2 gates) carries the prices that were evaluated.
-    _yes_entry_c = yes_ask_cents if yes_ask_cents > 0 else (100.0 - no_bid_cents)
-    _no_entry_c = no_ask_cents if no_ask_cents > 0 else (100.0 - yes_bid_cents)
+    # Under the bid basis the evaluated entry is the own-side bid.
+    if entry_price_basis == "bid":
+        _yes_entry_c = yes_bid_cents if yes_bid_cents > 0 else 100.0
+        _no_entry_c = no_bid_cents if no_bid_cents > 0 else 100.0
+    else:
+        _yes_entry_c = yes_ask_cents if yes_ask_cents > 0 else (100.0 - no_bid_cents)
+        _no_entry_c = no_ask_cents if no_ask_cents > 0 else (100.0 - yes_bid_cents)
     indicators.update({
         "yes_bid_cents": yes_bid_cents,
         "yes_ask_cents": yes_ask_cents,
@@ -2556,12 +2590,28 @@ def compute_trade_decision(
 
     # Kalshi duality: YES ask = 100 - NO bid; NO ask = 100 - YES bid.
     # Prefer the explicit ask if present; otherwise derive it.
-    yes_entry = yes_ask_cents / 100.0
-    no_entry = no_ask_cents / 100.0
-    if yes_ask_cents <= 0 and no_bid_cents > 0:
-        yes_entry = (100.0 - no_bid_cents) / 100.0
-    if no_ask_cents <= 0 and yes_bid_cents > 0:
-        no_entry = (100.0 - yes_bid_cents) / 100.0
+    #
+    # 2026-10-02: ``entry_price_basis="bid"`` evaluates queue-priced maker
+    # economics — a resting post-only buy actually pays the own-side BID,
+    # not the ask.  Pricing the maker pass at the ask systematically
+    # understated resting-order edge by the full spread and left the maker
+    # lane unable to admit anything the taker lane had not already cleared.
+    # A side with no bid cannot host a resting order: charge it 100% entry
+    # so it fails the edge gate naturally instead of being silently priced.
+    if entry_price_basis == "bid":
+        yes_entry = (yes_bid_cents / 100.0) if yes_bid_cents > 0 else 1.0
+        no_entry = (no_bid_cents / 100.0) if no_bid_cents > 0 else 1.0
+    else:
+        yes_entry = yes_ask_cents / 100.0
+        no_entry = no_ask_cents / 100.0
+        if yes_ask_cents <= 0 and no_bid_cents > 0:
+            yes_entry = (100.0 - no_bid_cents) / 100.0
+        if no_ask_cents <= 0 and yes_bid_cents > 0:
+            no_entry = (100.0 - yes_bid_cents) / 100.0
+    indicators["entry_price_basis"] = entry_price_basis
+    indicators["adverse_selection_reserve_cents"] = (
+        float(adverse_selection_reserve) * 100.0
+    )
 
     # Validate executable asks are inside [0,1]; a bad quote is a no-trade.
     if not (0.0 <= yes_entry <= 1.0 and 0.0 <= no_entry <= 1.0):
@@ -2920,6 +2970,7 @@ def compute_trade_decision(
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_yes,
         model_risk_reserve=model_risk_reserve,
+        adverse_selection_reserve=adverse_selection_reserve,
     )
     no_breakdown = compute_edge(
         p_yes=p_yes_for_no,
@@ -2927,6 +2978,7 @@ def compute_trade_decision(
         entry_price=no_entry,
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_no,
+        adverse_selection_reserve=adverse_selection_reserve,
         model_risk_reserve=model_risk_reserve,
     )
 
@@ -3411,6 +3463,7 @@ def compute_trade_decision(
         book_initialized=book_initialized,
         cfb_execution_eligible=cfb_execution_eligible,
         settlement_lane=settlement_lane,
+        entry_price_basis=entry_price_basis,
     )
 
     # Selection: prefer the side with the higher *qualifying* net edge.
@@ -4241,6 +4294,13 @@ def compute_trade_decision(
             and not _sel_thr.provisional_cap_exhausted
         ):
             indicators["decision_lane"] = "evidence_cell_escape"
+
+        # 2026-10-02: a bid-priced (queue-maker) decision is its own lane —
+        # it was admitted on resting economics the ask-priced passes never
+        # evaluated, so it must carry the bounded post-only contract.  Cell
+        # ids are kept as secondary indicators for research joins.
+        if entry_price_basis == "bid":
+            indicators["decision_lane"] = "maker_bid"
 
         if _sel_thr.cell_id is not None:
             indicators["threshold_cell_id"] = _sel_thr.cell_id
