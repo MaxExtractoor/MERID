@@ -15,6 +15,7 @@ Key features:
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -178,15 +179,28 @@ class RestingOrderMonitor:
     Primary key is (venue, kalshi_order_id) - all state comes from Kalshi portfolio view.
     """
     
-    def __init__(self, recheck_interval_seconds: int = 60, poll_interval_seconds: int = 30):
+    def __init__(self, recheck_interval_seconds: int = None, poll_interval_seconds: int = None):
         """Initialize the resting order monitor.
-        
+
         Args:
-            recheck_interval_seconds: How often to re-check resting orders against signals (default 60s)
-            poll_interval_seconds: How often to poll Kalshi portfolio for status (default 30s)
+            recheck_interval_seconds: How often to re-check resting orders against
+                signals (default 60s; env MERID_RESTING_RECHECK_SECONDS).
+                2026-10-02: 60s is far too coarse for 15-minute binaries — the
+                toxic-mid/stale-price cancel must run at seconds cadence to act
+                inside a resting order's typical fill window.
+            poll_interval_seconds: How often to poll Kalshi portfolio for status
+                (default 30s; env MERID_RESTING_POLL_SECONDS).
         """
-        self.recheck_interval = recheck_interval_seconds
-        self.poll_interval = poll_interval_seconds
+        self.recheck_interval = int(
+            recheck_interval_seconds
+            if recheck_interval_seconds is not None
+            else os.environ.get("MERID_RESTING_RECHECK_SECONDS", "60")
+        )
+        self.poll_interval = int(
+            poll_interval_seconds
+            if poll_interval_seconds is not None
+            else os.environ.get("MERID_RESTING_POLL_SECONDS", "30")
+        )
         # Primary key is (venue, kalshi_order_id)
         self._resting_orders: Dict[str, RestingOrderRecord] = {}  # kalshi_order_id -> record
         # Secondary index for intent_id lookup

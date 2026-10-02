@@ -1028,6 +1028,34 @@ class PositionMonitor:
                     if old_value is not None:
                         setattr(base, field, old_value)
 
+            # CRITICAL FIX (2026-10-02): An equal-trust upsert (e.g. a periodic
+            # REST sync that cannot see intent-derived risk params) must never
+            # strip provenance the existing record already carries.  The
+            # old_rank > new_rank copy-back above is unreachable on ties
+            # (source=="new" requires new_rank >= old_rank), which let a
+            # REST-synced record wipe stop_loss/take_profit and silently
+            # disabled the position's exit protection mid-flight.
+            if source == "new":
+                _paired_fields = {
+                    "stop_loss_price_cents", "stop_loss_enabled",
+                    "take_profit_price_cents", "take_profit_r_multiple",
+                }
+                for field in provenance_fields - _paired_fields:
+                    new_value = getattr(base, field, None)
+                    old_value = getattr(existing, field, None)
+                    if new_value is None and old_value is not None:
+                        setattr(base, field, old_value)
+                # SL/TP prices inherit as a pair with their enable flag /
+                # R-multiple so a bare REST record cannot leave a disabled
+                # flag orphaned from its price.
+                if base.stop_loss_price_cents is None and existing.stop_loss_price_cents is not None:
+                    base.stop_loss_price_cents = existing.stop_loss_price_cents
+                    base.stop_loss_enabled = existing.stop_loss_enabled
+                if base.take_profit_price_cents is None and existing.take_profit_price_cents is not None:
+                    base.take_profit_price_cents = existing.take_profit_price_cents
+                    if base.take_profit_r_multiple is None:
+                        base.take_profit_r_multiple = existing.take_profit_r_multiple
+
             # Preserve runtime state from the existing record.
             if source == "new":
                 for field in runtime_fields:
@@ -3329,7 +3357,7 @@ class PositionMonitor:
                 # Continue evaluating candidates; the central resolver will choose the final exit.
         logger.debug(
             "[POSITION-MONITOR] Checking position=%s market=%s side=%s entry=%dc current=%dc pnl=%dc R=%.2f "
-            "tp=%dc sl=%dc trailing=%s",
+            "tp=%s sl=%s trailing=%s",
             position.position_id[:8],
             position.market_id,
             position.side.value,
@@ -4624,12 +4652,34 @@ class PositionMonitor:
             return False, "stale-book"
 
         if snapshot is not None and not snapshot.has_bid_size:
+            # CRITICAL FIX (2026-10-02): A missing depth annotation must not
+            # suppress the catastrophic floor.  During a liquidation cascade the
+            # top-of-book bid can lose its size field while a real executable
+            # bid still exists; the XRP 2026-10-02 loss stalled on exactly this
+            # one poll before the stop was armed downstream.  Soft/edge stops
+            # still require displayed size; the hard floor proceeds and the
+            # submission layer validates executability itself.
+            _hard_floor = position.hard_stop_price_cents
+            if _hard_floor is None and position.stop_loss_price_cents is not None:
+                _hard_floor = position.stop_loss_price_cents - HARD_STOP_EXTRA_BUFFER_CENTS
+            _hard_floor_breached = _hard_floor is not None and (
+                position.hard_stop_confirmed
+                or current_price_cents <= _hard_floor
+            )
+            if not _hard_floor_breached:
+                logger.warning(
+                    "[STOP-LOSS-GUARD] position=%s price=%dc: no displayed bid size, converting to StopCandidate",
+                    position.position_id[:8],
+                    current_price_cents,
+                )
+                return False, "no-bid-size"
             logger.warning(
-                "[STOP-LOSS-GUARD] position=%s price=%dc: no displayed bid size, converting to StopCandidate",
+                "[STOP-LOSS-GUARD] position=%s price=%dc hard=%dc: bid size missing but "
+                "price is through the catastrophic floor - evaluating hard stop",
                 position.position_id[:8],
                 current_price_cents,
+                _hard_floor,
             )
-            return False, "no-bid-size"
 
         # Build the signed-YES position from the monitor record (used as the
         # "system" position for the candidate; submission re-fetches exchange).
@@ -4683,7 +4733,7 @@ class PositionMonitor:
         own_ask = snapshot.own_side_ask_cents if snapshot is not None else current_price_cents
         logger.info(
             "[STOP-LOSS-BOOK-STATE] position=%s side=%s entry=%dc bid=%dc ask=%dc "
-            "executable_exit=%dc fair=%dc sl=%dc hard=%dc time_held=%.2fs",
+            "executable_exit=%dc fair=%dc sl=%s hard=%s time_held=%.2fs",
             position.position_id[:8],
             position.side.value,
             position.avg_entry_price_cents,

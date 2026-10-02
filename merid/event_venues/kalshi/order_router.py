@@ -15315,8 +15315,13 @@ async def _route_live(
             )
 
         # PRODUCTION FIX: Register TP targets with position cache for fill-time lookup
+        # 2026-10-02: also register when the intent carries only an SL — the
+        # TP-only gate silently dropped stop-loss params for SL-only intents,
+        # leaving the CachedPosition without risk params for REST syncs.
         if intent.client_tag and (
-            intent.take_profit_price_cents or intent.take_profit_r_multiple
+            intent.take_profit_price_cents
+            or intent.take_profit_r_multiple
+            or intent.stop_loss_price_cents is not None
         ):
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
