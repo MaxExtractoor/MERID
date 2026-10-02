@@ -113,6 +113,8 @@ function Write-StartupFingerprint {
     Write-Host "[start_15m] MERID_BANKROLL_MAX_DRAWDOWN_PCT=$env:MERID_BANKROLL_MAX_DRAWDOWN_PCT" -ForegroundColor Green
     Write-Host "[start_15m] MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS=$env:MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS" -ForegroundColor Green
     Write-Host "[start_15m] MERID_EXECUTION_DECISION_MAX_AGE_MS=$env:MERID_EXECUTION_DECISION_MAX_AGE_MS" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_ASR_COUNTERTREND_MIN_MARKOUTS=$env:MERID_ASR_COUNTERTREND_MIN_MARKOUTS" -ForegroundColor Green
+    Write-Host "[start_15m] MERID_TREND_YES_HI_ENABLED=$env:MERID_TREND_YES_HI_ENABLED" -ForegroundColor Green
     Write-Host "[start_15m] MERID_MANUAL_EMERGENCY_TOKEN=$manualToken" -ForegroundColor Green
     Write-Host "[start_15m] MERID_BREAKER_RELEASE_TOKEN=$breakerToken" -ForegroundColor Green
     Write-Host "[start_15m] legacy_exchange_credentials=$($legacyPresent -join ', ')" -ForegroundColor $(if ($legacyPresent.Count -gt 0) { "Red" } else { "Green" })

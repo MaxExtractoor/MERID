@@ -753,3 +753,78 @@ def test_reconcile_fill_outcomes_heals_settled_rows(
         assert row["actual_fill_price_cents"] == 54
         assert row["realized_net_pnl_cents"] == -54.0
         assert row["fill_id"] == "fill_heal_1"
+
+
+def test_heartbeat_side_ev_expected_counts_only_model_decisions(tmp_db: Path) -> None:
+    """side_ev_expected must be 2 per full trade decision, not 2 per persisted
+    row — pre-decision rejections legitimately write no side-EV rows, so the
+    old persisted*2 derivation reported false write gaps."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "hb_model_1"
+    assert ledger.record_trade_decision(dec, cycle_id="c1") is True
+    assert ledger.record_pre_decision_rejection(
+        cycle_id="c1",
+        run_id="run_x",
+        ticker="KXBTC15M-T",
+        asset="BTC",
+        reason="market_not_entry_ready",
+        decision_id="hb_pre_1",
+        candidate_id="hb_pre_1",
+    ) is True
+
+    ledger.log_cycle_heartbeat("c1", tick=1, assets_evaluated=5)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT decisions_expected, decisions_persisted, side_ev_expected, "
+            "side_ev_persisted FROM decision_audit_heartbeats WHERE cycle_id = ?",
+            ("c1",),
+        ).fetchone()
+        assert row["decisions_persisted"] == 2
+        assert row["side_ev_expected"] == 2
+        assert row["side_ev_persisted"] == 2
+
+        # Physical truth matches the metric: model decision has 2 side_ev
+        # rows, pre-decision rejection has none.
+        ev = conn.execute(
+            "SELECT COUNT(*) FROM strategy_decision_side_ev WHERE decision_id = 'hb_model_1'"
+        ).fetchone()[0]
+        assert ev == 2
+        ev_pre = conn.execute(
+            "SELECT COUNT(*) FROM strategy_decision_side_ev WHERE decision_id = 'hb_pre_1'"
+        ).fetchone()[0]
+        assert ev_pre == 0
+
+
+def test_heartbeat_pure_pre_decision_cycle_reports_zero_side_ev(tmp_db: Path) -> None:
+    """A cycle of only pre-decision rejections reports side_ev 0/0, not 0/10."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    for i in range(5):
+        assert ledger.record_pre_decision_rejection(
+            cycle_id="c2",
+            run_id="run_x",
+            ticker=f"KXBTC15M-T{i}",
+            asset="BTC",
+            reason="market_not_entry_ready",
+            decision_id=f"hb2_pre_{i}",
+            candidate_id=f"hb2_pre_{i}",
+        ) is True
+
+    ledger.log_cycle_heartbeat("c2", tick=2, assets_evaluated=5)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT decisions_persisted, side_ev_expected, side_ev_persisted "
+            "FROM decision_audit_heartbeats WHERE cycle_id = ?",
+            ("c2",),
+        ).fetchone()
+        assert row["decisions_persisted"] == 5
+        assert row["side_ev_expected"] == 0
+        assert row["side_ev_persisted"] == 0
