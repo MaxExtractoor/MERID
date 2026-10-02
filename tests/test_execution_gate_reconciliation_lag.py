@@ -97,6 +97,17 @@ class TestExecutionGateReconciliation:
             mock_rc._kill_details = None
             with patch("merid.reconciliation.has_critical_discrepancies", return_value=False), patch(
                 "merid.reconciliation.get_last_discrepancies", return_value=[]
+            ), patch(
+                # Critical deps (market_catalog) are uninitialized outside
+                # startup; the gate must reflect reconciliation alone here.
+                "core.dependency_health.check_all_dependencies",
+                return_value={
+                    "any_critical_down": False,
+                    "degraded_count": 0,
+                    "dependencies": [],
+                    "down_count": 0,
+                    "total": 0,
+                },
             ):
                 status = check_execution_gate()
 
