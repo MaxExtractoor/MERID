@@ -654,6 +654,7 @@ class DecisionAuditLedger:
                 persisted=1,
                 snapshots=1,
                 side_ev=2,
+                side_ev_expected=2,
                 latency_ms=latency_ms,
             )
             return True
@@ -665,6 +666,7 @@ class DecisionAuditLedger:
                 persisted=0,
                 snapshots=0,
                 side_ev=0,
+                side_ev_expected=2,
                 latency_ms=latency_ms,
                 is_error=True,
             )
@@ -2078,6 +2080,7 @@ class DecisionAuditLedger:
         snapshots: int,
         side_ev: int,
         latency_ms: float,
+        side_ev_expected: int = 0,
         is_error: bool = False,
     ) -> None:
         """Increment per-cycle write counters for the trading loop heartbeat."""
@@ -2091,6 +2094,7 @@ class DecisionAuditLedger:
                     "persisted": 0,
                     "snapshots": 0,
                     "side_ev": 0,
+                    "side_ev_expected": 0,
                     "latency_ms": 0.0,
                     "error_count": 0,
                 },
@@ -2099,6 +2103,7 @@ class DecisionAuditLedger:
             stats["persisted"] += persisted
             stats["snapshots"] += snapshots
             stats["side_ev"] += side_ev
+            stats["side_ev_expected"] += side_ev_expected
             stats["latency_ms"] += latency_ms
             if is_error:
                 stats["error_count"] += 1
@@ -2123,13 +2128,17 @@ class DecisionAuditLedger:
                 "persisted": 0,
                 "snapshots": 0,
                 "side_ev": 0,
+                "side_ev_expected": 0,
                 "latency_ms": 0.0,
                 "error_count": 0,
             }
         decisions_expected = stats["expected"]
         decisions_persisted = stats["persisted"]
         snapshots_persisted = stats["snapshots"]
-        side_ev_expected = decisions_persisted * 2
+        # Only full trade decisions emit side-EV rows (2 per decision);
+        # pre-decision rejections persist a decision row with no side-EV, so
+        # deriving expectation from persisted count overstates it.
+        side_ev_expected = stats["side_ev_expected"]
         side_ev_persisted = stats["side_ev"]
         ledger_write_latency_ms = stats["latency_ms"]
         ledger_error_count = stats["error_count"]

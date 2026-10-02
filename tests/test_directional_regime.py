@@ -321,7 +321,11 @@ def test_throttle_disabled_no_blocks(throttle_path, monkeypatch):
 
 # ------------------------------------------------------- countertrend lane ----
 
-def test_countertrend_lane_cold_start(regime_state, throttle_path):
+def test_countertrend_lane_cold_start(regime_state, throttle_path, monkeypatch):
+    # Pin the floor explicitly: production .env may set
+    # MERID_ASR_COUNTERTREND_MIN_MARKOUTS=0 (cold-start deadlock fix), and this
+    # test asserts the positive-floor path regardless of operator config.
+    monkeypatch.setenv("MERID_ASR_COUNTERTREND_MIN_MARKOUTS", "20")
     reg = _drive(_snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001))
     blk = dr.countertrend_lane_block("XRP", "no", reg)
     assert blk and blk.startswith("countertrend_lane_cold_start")
@@ -330,6 +334,31 @@ def test_countertrend_lane_cold_start(regime_state, throttle_path):
 def test_countertrend_lane_neutral_no_block(regime_state, throttle_path):
     reg = _drive(_snap_all(0.0))
     assert dr.countertrend_lane_block("XRP", "no", reg) is None
+
+
+def test_countertrend_lane_min_markouts_zero_opens(regime_state, throttle_path, monkeypatch):
+    """MIN_MARKOUTS=0 opens the cold-start lane even with n=0 samples.
+
+    Markouts only accrue from orders the lane admits, so a positive floor
+    can never be satisfied during the regime it gates.  Zero is the
+    deadlock-breaking configuration; every other gate still applies.
+    """
+    monkeypatch.setenv("MERID_ASR_COUNTERTREND_MIN_MARKOUTS", "0")
+    reg = _drive(_snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001))
+    assert reg is not None and reg.label == "RALLY_CONFIRMED"
+    assert dr.countertrend_lane_block("XRP", "no", reg) is None
+
+    # A positive floor still gates the symmetric countertrend lane: fresh
+    # selloff state -> countertrend YES with zero samples stays cold-start
+    # blocked when the env floor is restored.
+    monkeypatch.setenv("MERID_ASR_COUNTERTREND_MIN_MARKOUTS", "20")
+    if os.path.exists(regime_state):
+        os.remove(regime_state)
+    dr._regime_cache = (0.0, {})
+    reg_sell = _drive(_snap_map(BTC=-0.001, ETH=-0.002, SOL=-0.001, XRP=-0.0005, DOGE=0.001))
+    assert reg_sell is not None and reg_sell.label == "SELL_OFF_CONFIRMED"
+    blk = dr.countertrend_lane_block("XRP", "yes", reg_sell)
+    assert blk and blk.startswith("countertrend_lane_cold_start")
 
 
 # ------------------------------------------------- graded lane machine ----
