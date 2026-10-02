@@ -2883,6 +2883,15 @@ def _emit_execution_stage_latency(
             "caller_resolution_ms": _exec_delta_ms(
                 intent, "caller_resolution_start", "caller_resolution_end"
             ),
+            # 2026-10-02: book-quality audit fields — which quote source the
+            # submit decision relied on, the derived per-ticker book state,
+            # and the WS/REST divergence observed at the alignment gate.
+            "submit_quote_source": getattr(intent, "_submit_quote_source", "")
+            or getattr(intent, "_book_source_at_refresh", ""),
+            "book_state_at_submit": getattr(intent, "_book_state_at_submit", ""),
+            "ws_rest_divergence_cents": getattr(
+                intent, "_ws_rest_divergence_cents", None
+            ),
         }
         logger.info("EXECUTION-STAGE-LATENCY %s", json.dumps(fields, default=str))
     except Exception:
@@ -3927,6 +3936,45 @@ def _canonical_yes_book_from_port(ob_result: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _rest_cache_book_from_store(ticker: str) -> Optional[Dict[str, Any]]:
+    """Fresh cached REST BBO from the market-state store.
+
+    2026-10-02: ``_port.get_orderbook`` (ad-hoc REST fetch) times out under
+    load even while the REST polling path keeps ``state.last_rest_*`` fresh
+    (observed rest_age ~1ms during live rejects).  A cached REST quote newer
+    than the age bound is the same ground truth — use it instead of failing
+    ``no_fresh_book``.  Book is tagged ``source=rest_store_cache`` for audit.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        st = get_kalshi_market_state_store().get(ticker)
+    except Exception:
+        return None
+    if st is None:
+        return None
+    bid = getattr(st, "last_rest_bid_cents", None)
+    ask = getattr(st, "last_rest_ask_cents", None)
+    upd = getattr(st, "last_rest_quote_update_ts", 0.0) or 0.0
+    if bid is None or ask is None or upd <= 0:
+        return None
+    if not (1 <= bid < ask <= 99):
+        return None
+    max_age_s = float(os.environ.get("MERID_REVALIDATE_REST_CACHE_MAX_AGE_S", "2.0"))
+    age_s = _time.monotonic() - upd
+    if age_s > max_age_s:
+        return None
+    return {
+        "yes_bid_cents": int(bid),
+        "yes_ask_cents": int(ask),
+        "no_bid_cents": 100 - int(ask),
+        "no_ask_cents": 100 - int(bid),
+        "timestamp": replay_time() - age_s,
+        "raw_yes_levels": 0,
+        "raw_no_levels": 0,
+        "source": "rest_store_cache",
+    }
+
+
 def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Dict[str, int]:
     """Return (bid, ask) in the outcome space of the requested side."""
     normalized_side = (side or "").strip().lower()
@@ -4656,6 +4704,19 @@ async def _revalidate_entry_economics(
         _ob = None
     _book = _canonical_yes_book_from_port(_ob)
     if _book is None:
+        # 2026-10-02: the ad-hoc REST fetch timed out/failed — fall back to
+        # the market-state store's cached REST quote when it is fresh enough
+        # to verify a submit (bounded by MERID_REVALIDATE_REST_CACHE_MAX_AGE_S).
+        # The REST poll is the same ground truth the fetch would have hit.
+        _book = _rest_cache_book_from_store(getattr(intent, "ticker", "") or "")
+        if _book is not None:
+            setattr(intent, "_book_source_at_refresh", "rest_store_cache")
+            logger.info(
+                "[REVALIDATE-BOOK-FALLBACK] ticker=%s source=rest_store_cache "
+                "yes_bbo=%s/%s - ad-hoc fetch failed; cached REST quote fresh",
+                intent.ticker, _book["yes_bid_cents"], _book["yes_ask_cents"],
+            )
+    if _book is None:
         return _rej("stale_decision_refresh_failed:no_fresh_book")
     _side_book = _side_aware_book_for_intent(_book, intent.side)
     _action = (getattr(intent, "action", "") or "").lower()
@@ -5220,6 +5281,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         ws_state = market_state_store.get(intent.ticker) if market_state_store else None
 
         if not (ws_state and ws_state.best_bid_cents is not None and ws_state.best_ask_cents is not None):
+            setattr(intent, "_submit_quote_source", "ws_only")
             logger.info(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=WS_ONLY_NO_CROSSFEED decision=ALLOW "
                 "reason=no_ws_bid_ask ws_state=%s",
@@ -5414,6 +5476,17 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         bid_divergence_cents = abs(ws_book["bid_cents"] - rest_book_side["bid_cents"])
         ask_divergence_cents = abs(ws_book["ask_cents"] - rest_book_side["ask_cents"])
         max_divergence_cents = max(bid_divergence_cents, ask_divergence_cents)
+        # 2026-10-02: record book-quality context on the intent so the
+        # EXECUTION-STAGE-LATENCY / lifecycle audit rows carry it.
+        setattr(intent, "_ws_rest_divergence_cents", max_divergence_cents)
+        try:
+            setattr(
+                intent,
+                "_book_state_at_submit",
+                market_state_store.book_state(intent.ticker) if market_state_store else "",
+            )
+        except Exception:
+            pass
 
         # 2026-09-29: time-alignment bracket.  The REST fetch spans
         # [ws_snapshot → now]; if the authoritative WS BBO did not move across
@@ -5811,6 +5884,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                         intent.ticker, old_px, intent.price_cents,
                         rest_book_side["ask_cents"], _epc, _align_class,
                     )
+                setattr(intent, "_submit_quote_source", "ws")
                 logger.info(
                     "EXECUTION-QUOTE-MODE ticker=%s mode=WS_TRUSTED_REST_DIFFERENT decision=ALLOW "
                     "reason=%s max_divergence=%dc ws_age_ms=%.0f rest_age_ms=%.0f "
@@ -5860,6 +5934,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                     intent.ticker, max_divergence_cents,
                 )
                 return None
+            setattr(intent, "_submit_quote_source", "ws_blocked")
             logger.warning(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=EDGE_LOST decision=BLOCKED "
                 "reason=edge_lost_at_submit align_class=%s max_divergence=%dc "
@@ -5877,6 +5952,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         # 4) WS not authoritative (e.g. rest-owned degraded intent): judge on
         #    the fresh REST pull — the only available executable reference.
         if rest_age_ms <= max_rest_age_ms and rest_marketable:
+            setattr(intent, "_submit_quote_source", "rest")
             logger.warning(
                 "EXECUTION-QUOTE-MODE ticker=%s mode=REST_AUTHORITATIVE decision=ALLOW "
                 "reason=rest_owned_divergent ws_age_ms=%.0f rest_age_ms=%.0f "
