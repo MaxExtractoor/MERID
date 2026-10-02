@@ -244,12 +244,15 @@ _OPERATIONAL_TRIGGER_REASONS = frozenset({
     "TIME_STOP",
     "MODEL_INVALIDATION",
     "SIGNAL_REVERSAL",
+    # 2026-10-02: the catastrophic price floor is mechanical hard-risk control,
+    # not model discretion — it must fire regardless of the EV-gate flag state.
+    # Normal (soft) stop-loss and loss-cut triggers stay discretionary below.
+    "HARD_STOP",
 })
 _DISCRETIONARY_TRIGGER_REASONS = frozenset({
     # Flat stop losses stay gated while the operator observes the other exits.
     "POSITION_MONITOR_STOP",
     "STOP_LOSS",
-    "HARD_STOP",
     "SOFT_STOP",
     "LOSS_CUT",
     "LOSS_CUT_40PCT",

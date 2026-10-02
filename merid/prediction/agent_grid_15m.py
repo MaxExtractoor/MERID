@@ -8556,24 +8556,48 @@ class LeanAgent15m:
             decision.selected_outcome is not None
             and _decision_lane in BOUNDED_POST_ONLY_LANES
         ):
+            # 2026-10-02: bounded lanes keep their caps and 1-contract sizing,
+            # but the execution style now follows the economics the candidate
+            # was *admitted under*.  A candidate whose ev_net cleared the gate
+            # at the taker fee was proven profitable at the ask — forcing it
+            # to rest post-only silently changed its execution to economics
+            # the admission never evaluated, and resting orders repeatedly
+            # expired unfilled while the move played out (observed +9/+19.5/
+            # +8.5c foregone markouts on 2026-10-02).  Taker-evaluated
+            # bounded intents now cross as a marketable IOC at the ask;
+            # maker-evaluated ones still rest post-only.  Kill switch:
+            # MERID_BOUNDED_TAKER_CROSS=0 restores unconditional post-only.
+            _bounded_taker_cross = os.environ.get(
+                "MERID_BOUNDED_TAKER_CROSS", "1"
+            ).strip().lower() in ("1", "true", "yes")
+            _cross_as_taker = _bounded_taker_cross and liquidity_role == "taker"
             logger.info(
                 "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s lane=%s "
-                "liquidity_role=%s -> maker post_only=%s tif=%s fee_cents=%.3f",
+                "liquidity_role=%s -> %s post_only=%s tif=%s fee_cents=%.3f",
                 asset,
                 decision.selected_outcome,
                 int(round(float(decision.selected_outcome_price) * 100.0)) if decision.selected_outcome_price is not None else None,
                 _decision_lane,
                 liquidity_role,
-                True,
-                "gtc",
-                fee_cents,
+                ("taker" if _cross_as_taker else "maker"),
+                (False if _cross_as_taker else True),
+                ("ioc" if _cross_as_taker else "gtc"),
+                (taker_fee_cents if _cross_as_taker else maker_fee_cents),
             )
-            liquidity_role = "maker"
-            execution_mode = "maker"
-            post_only = True
-            time_in_force = "gtc"
-            aggressiveness = 0.0
-            fee_cents = maker_fee_cents
+            if _cross_as_taker:
+                liquidity_role = "taker"
+                execution_mode = "taker"
+                post_only = False
+                time_in_force = "ioc"
+                aggressiveness = 1.0
+                fee_cents = taker_fee_cents
+            else:
+                liquidity_role = "maker"
+                execution_mode = "maker"
+                post_only = True
+                time_in_force = "gtc"
+                aggressiveness = 0.0
+                fee_cents = maker_fee_cents
             if _decision_lane == "evidence_cell_escape":
                 try:
                     from merid.prediction import evidence_policy as _ep
@@ -8631,7 +8655,7 @@ class LeanAgent15m:
                         ),
                         book_source=_quote_owner,
                         book_age_ms=_book_age_ms,
-                        post_only=True,
+                        post_only=post_only,
                         submitted=False,
                         submissions_today=_n,
                         funnel=_tc.funnel_counters().get("funnel"),
@@ -8696,7 +8720,7 @@ class LeanAgent15m:
                         legacy_risk_label=decision.indicators.get(
                             f"{_sel_key}_legacy_risk_label"
                         ),
-                        post_only=True,
+                        post_only=post_only,
                         submitted=False,
                         submissions_today=_n,
                         funnel=_cbp.provisional_funnel_counters().get("funnel"),
@@ -8726,7 +8750,7 @@ class LeanAgent15m:
                         ),
                         decision_ev_cents=_ev_c,
                         required_ev_cents=_prov_req,
-                        post_only=True,
+                        post_only=post_only,
                         filled=False,
                         legacy_risk_label=decision.indicators.get(
                             f"{_sel_key}_legacy_risk_label"
