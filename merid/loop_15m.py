@@ -4616,6 +4616,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     from merid.event_venues.kalshi.kalshi_config import KALSHI_READY
     from merid.event_venues.kalshi.market_catalog import get_market_catalog
 
+    self._entries_block_reason = None
     live_bankroll_valid = cycle_bankroll is not None and cycle_bankroll > 0
     infra_ready = KALSHI_READY and live_bankroll_valid
     markets_expected = markets_expected_now()
@@ -4750,7 +4751,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     except Exception as e:
         logger.warning("[15m-LOOP] Failed to compute allow_new_entries: %s", e)
 
-    _, _, _, allow_new_entries = compute_loop_state(
+    loop_state, execution_mode, _, allow_new_entries = compute_loop_state(
         infra_ready=infra_ready,
         markets_expected=markets_expected,
         markets_present=markets_present,
@@ -4758,6 +4759,11 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         md_fresh_count=md_fresh_count,
         spot_fresh_count=spot_fresh_count,
     )
+
+    # Track the first gate that closed entries so ENTRIES_DISABLED lifecycle
+    # events can carry the cause (loop_state / ws / portfolio / bankroll /
+    # runtime-state / observe-only).
+    self._entries_block_reason = None if allow_new_entries else f"loop_state:{loop_state}/{execution_mode}"
 
     # P0 FIX: hard entry gate on WS bridge pipeline backpressure.
     # A market cannot be considered fresh for new entries while its public
@@ -4809,6 +4815,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                         ws_queue_size, ws_queue_age_s, ws_queue_max_age_s,
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = "ws_queue_stale"
                 elif ws_first_event_ts > 0.0 and ws_time_since_last_event > 5.0:
                     # Only declare the forwarder stalled after the first event
                     # has been seen; during startup the last_event clock may
@@ -4818,11 +4825,13 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                         ws_time_since_last_event,
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = "ws_forwarder_stalled"
                 elif not ws_healthy and ws_first_event_ts > 0.0:
                     logger.warning(
                         "[15m-LOOP] ENTRY_BLOCKED: WS forwarder not healthy",
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = "ws_forwarder_unhealthy"
         except Exception as e:
             logger.warning("[15m-LOOP] WS bridge health check failed: %s", e)
 
@@ -4845,6 +4854,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                         portfolio_age_ms,
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = "portfolio_not_authoritative"
                 elif portfolio_age_ms > 300000:
                     # P0 FIX: The canonical portfolio reconciler runs every 60s. A 10s
                     # threshold caused constant false-positive entry blocks. 300s gives
@@ -4854,6 +4864,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                         portfolio_age_ms,
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = "portfolio_stale"
         except Exception as e:
             logger.warning("[15m-LOOP] Portfolio authority check failed: %s", e)
 
@@ -4875,6 +4886,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                         bankroll_drawdown_pct,
                     )
                     allow_new_entries = False
+                    self._entries_block_reason = f"bankroll_breaker:{bankroll_circuit_state}"
         except Exception as e:
             logger.warning("[15m-LOOP] Bankroll breaker check failed: %s", e)
 
@@ -4888,12 +4900,14 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 "unknown",
             )
             allow_new_entries = False
+            self._entries_block_reason = "live_runtime_state_not_enabled"
 
     # 2026-09-08: P0 observe-only mode.  No new entries are permitted while
     # the deployment is collecting data and verifying the stack.
     if allow_new_entries and is_observe_only():
         logger.info("[15m-LOOP] observe-only mode: allowing data capture, blocking new entries")
         allow_new_entries = False
+        self._entries_block_reason = "observe_only"
 
     logger.info(
         "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s "
@@ -8707,6 +8721,7 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 self.agent_grid.run_cycle(
                     tick,
                     allow_new_entries=allow_new_entries,
+                    entries_block_reason=getattr(self, "_entries_block_reason", None),
                     coinbase_velocity=coinbase_velocity,
                     feature_snapshot=feature_snapshot,
                 ),
