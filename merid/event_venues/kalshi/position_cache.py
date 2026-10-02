@@ -3069,6 +3069,28 @@ class KalshiPositionCache:
                         market_id, fill_id,
                     )
 
+                # 2026-10-02: Exchange fill timestamp (KalshiFill.created_time).
+                # HTTP-polled fills are discovered ~10-15s after execution;
+                # anchoring entry_fill_timestamp to ingest time restarted the
+                # monitor's stop-loss arming clock on an already-aged position.
+                _fill_created_at = None
+                if fill_record is not None:
+                    _raw_ct = getattr(fill_record, "created_time", None)
+                    if isinstance(_raw_ct, datetime):
+                        _fill_created_at = (
+                            _raw_ct if _raw_ct.tzinfo is not None
+                            else _raw_ct.replace(tzinfo=timezone.utc)
+                        )
+                    elif isinstance(_raw_ct, str):
+                        try:
+                            _fill_created_at = datetime.fromisoformat(
+                                _raw_ct.replace("Z", "+00:00")
+                            )
+                            if _fill_created_at.tzinfo is None:
+                                _fill_created_at = _fill_created_at.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            _fill_created_at = None
+
                 new_position = CachedPosition(
                     market_id=market_id,
                     agent_id=position_agent_id,  # Composite key component
@@ -3099,7 +3121,11 @@ class KalshiPositionCache:
                     basis_state="FILL_ONLY" if position_side_price and position_side_price > 0 else "UNKNOWN",
                     basis_version=1,
                     basis_sources=[f"fill:{fill_id}"] if fill_id else ["fill:unknown"],
-                    entry_fill_timestamp=datetime.now(timezone.utc),
+                    # CRITICAL FIX (2026-10-02): Anchor to the exchange's fill
+                    # created_time, not ingest time.  HTTP-polled fills arrive
+                    # ~10-15s late; using ingest time restarted the stop-loss
+                    # arming clock on an already-aged position.
+                    entry_fill_timestamp=_fill_created_at or datetime.now(timezone.utc),
                     entry_book_timestamp=entry_book_timestamp,
                     entry_book_sequence=entry_book_sequence,
                     entry_book_source=entry_book_source,
@@ -5862,7 +5888,15 @@ class KalshiPositionCache:
                                 ),
                                 avg_entry_price_cents=cached_pos.avg_price_cents,
                                 take_profit_price_cents=tp_price,
-                                stop_loss_enabled=sl_price is not None,
+                                # CRITICAL FIX (2026-10-02): Preserve the cached
+                                # stop_loss_enabled flag instead of deriving it
+                                # from sl_price.  REST syncs cannot see intent
+                                # risk params, so a missing sl_price is "unknown"
+                                # not "disabled".  Setting enabled=False here
+                                # also blocked Position.__post_init__ from
+                                # deriving the fallback protective stop, which
+                                # let a REST sync permanently disarm a live stop.
+                                stop_loss_enabled=cached_pos.stop_loss_enabled,
                                 stop_loss_price_cents=sl_price,
                                 risk_params_state=("original_persisted" if is_original else cached_risk_state),
                                 risk_params_schema_version=(schema_version if is_original else schema_version),

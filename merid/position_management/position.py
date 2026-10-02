@@ -402,7 +402,7 @@ class Position:
             # Trust only version-2 records with an immutable entry linkage.
             if self.risk_params_schema_version < 2 or not has_entry_linkage:
                 logger.warning(
-                    "[POSITION-PROVENANCE-GUARD] position=%s sl=%dc - ORIGINAL_PERSISTED without "
+                    "[POSITION-PROVENANCE-GUARD] position=%s sl=%s - ORIGINAL_PERSISTED without "
                     "schema >= 2 or entry linkage; downgrading to UNKNOWN and disabling SL",
                     self.position_id[:8], self.stop_loss_price_cents,
                 )
