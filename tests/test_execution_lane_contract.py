@@ -8,7 +8,8 @@ asset: BTC, ETH, SOL, XRP, DOGE.
     aggressiveness recompute -> post_only=False on a lane that requires
     post-only),
   * a pre-wire stale-decision rejection releases the cell submission
-    reservation AND counts toward router-reject suspension bookkeeping,
+    reservation and completes lifecycle bookkeeping without feeding the
+    suspension counters (data-freshness rejects are no-suspend),
   * a decision older than the 3.5s ceiling can never reach the wire,
   * the cell lifecycle emits the complete terminal sequence for every
     pre-wire rejection.
@@ -45,6 +46,9 @@ def _isolate_lane_state(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "MERID_THRESHOLD_CELL_LIFECYCLE_PATH", str(tmp_path / "lifecycle.jsonl")
     )
+    # Pin the stale-decision ceiling to the contract default — the live .env
+    # relaxes it and would mask the 3.5s gate these tests assert.
+    monkeypatch.setenv("MERID_EXECUTION_DECISION_MAX_AGE_MS", "3500")
     reset_cell_state_cache()
 
 
@@ -184,9 +188,12 @@ def test_stale_pre_wire_rejection_releases_reservation_and_records_reject(asset)
     # Reservation released — the slot is not burned by a no-wire attempt.
     assert st["submissions"][cell] == 0
     assert _tc.cell_submissions_today() == 0
-    # Router reject counted toward the suspension rules.
-    assert st["router_rejects"][cell] == 1
-    assert st["router_consecutive_rejects"][cell] == 1
+    # Data-freshness rejects (STALE_DECISION* is a no-suspend prefix) do NOT
+    # feed the suspension counters — a stale book is not the lane's fault —
+    # but the funnel still records the router rejection.
+    assert cell not in (st.get("router_rejects") or {})
+    assert cell not in (st.get("router_consecutive_rejects") or {})
+    assert st["funnel_by_cell"][cell]["router_rejected"] == 1
     # Idempotent: a second release attempt must not double-decrement.
     assert (
         release_cell_submission_reservation(

@@ -3105,6 +3105,54 @@ class ExecutionPolicy:
     max_order_lifetime_s: int = 60
 
 
+def resolve_bounded_lane_execution_policy(
+    decision_lane: Optional[str],
+    post_only: bool,
+) -> Optional[ExecutionPolicy]:
+    """The immutable ExecutionPolicy for a bounded-lane intent.
+
+    The lane contract must mirror the posture the decision layer actually
+    emitted.  Bounded lanes deliberately emit taker/IOC intents under
+    ``MERID_BOUNDED_TAKER_CROSS`` when a candidate was admitted on taker
+    economics — stamping an unconditional post-only contract on those
+    intents self-rejected them pre-wire (PRE_WIRE_POST_ONLY_UNAVAILABLE,
+    ~21 rejects vs ~10 intents on 2026-10-03).  A taker-posture intent gets
+    the equally-immutable taker contract; maker-posture intents keep the
+    post-only contract the lanes were designed around.
+    """
+    if decision_lane not in ("threshold_cell", "current_build_provisional"):
+        return None
+    if not post_only:
+        return ExecutionPolicy(
+            lane=str(decision_lane),
+            required_post_only=False,
+            required_liquidity_role="taker",
+            allow_taker_fallback=False,
+            max_reprice_attempts=0,
+            max_order_lifetime_s=10,
+        )
+    if decision_lane == "threshold_cell":
+        return ExecutionPolicy(
+            lane="threshold_cell",
+            required_post_only=True,
+            required_liquidity_role="maker",
+            allow_taker_fallback=False,
+            max_reprice_attempts=1,
+            max_order_lifetime_s=60,
+        )
+    # current_build_provisional: same immutable post-only maker contract,
+    # 45s resting life — a current-build measurement order that cannot
+    # touch inside one reprice window is evidence, not a chased taker fill.
+    return ExecutionPolicy(
+        lane="current_build_provisional",
+        required_post_only=True,
+        required_liquidity_role="maker",
+        allow_taker_fallback=False,
+        max_reprice_attempts=1,
+        max_order_lifetime_s=45,
+    )
+
+
 @dataclass
 class OrderIntent:
     """Typed order intent for Kalshi markets.
