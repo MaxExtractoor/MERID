@@ -49,6 +49,7 @@ def _isolate_lane(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_PROVISIONAL_EVIDENCE_OVERRIDE", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
+    monkeypatch.delenv("MERID_CBP_MID_BAND_RELIEF_NO_CENTS", raising=False)
     for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
         for _s in ("YES", "NO"):
             monkeypatch.delenv(
@@ -552,10 +553,13 @@ def test_post_only_breach_suspends_immediately():
         fill_price_cents=46.0, limit_price_cents=45.0, action="buy",
     )
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
-    # Structural breach escalates to the side-level throttle (manual review).
+    # Structural breach escalates to the asset-side throttle — parked for the
+    # breached asset only; the rest of the side keeps trading.
     from merid.prediction import directional_regime as _dr
-    blk = _dr.side_throttle_block("no")
+    blk = _dr.side_throttle_block("no", asset="DOGE")
     assert blk and "catastrophic" in blk
+    assert _dr.side_throttle_block("no") is None
+    assert _dr.side_throttle_block("no", asset="BTC") is None
 
 
 def test_invariant_violation_suspends_immediately():
@@ -563,8 +567,9 @@ def test_invariant_violation_suspends_immediately():
     cbp.record_provisional_invariant_violation(c.cell_id, "side_mismatch")
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
     from merid.prediction import directional_regime as _dr
-    blk = _dr.side_throttle_block("no")
+    blk = _dr.side_throttle_block("no", asset="DOGE")
     assert blk and "catastrophic" in blk
+    assert _dr.side_throttle_block("no") is None
 
 
 def test_consecutive_router_rejects_suspend():

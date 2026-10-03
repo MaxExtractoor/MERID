@@ -227,6 +227,12 @@ def test_bookflow_missing_slice_no_block():
 def throttle_path(tmp_path, monkeypatch):
     p = tmp_path / "throttle.json"
     monkeypatch.setenv("MERID_DIRECTIONAL_THROTTLE_PATH", str(p))
+    # Pin lane-config knobs: production .env may relax them (2026-10-03
+    # throughput audit); these tests assert the code defaults regardless
+    # of operator configuration.
+    monkeypatch.delenv("MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE", raising=False)
+    monkeypatch.delenv("MERID_SIDE_CATASTROPHE_SCOPE", raising=False)
+    monkeypatch.delenv("MERID_SIDE_CATASTROPHE_TTL_S", raising=False)
     dr._throttle_cache = (0.0, {})
     yield str(p)
     dr._throttle_cache = (0.0, {})
@@ -404,7 +410,8 @@ def test_record_side_catastrophe_manual_review(throttle_path):
 
 # --------------------------------------------------- trend-yes-hi lane ----
 
-def test_trend_yes_hi_disabled_by_default(regime_state):
+def test_trend_yes_hi_disabled_by_default(regime_state, monkeypatch):
+    monkeypatch.delenv("MERID_TREND_YES_HI_ENABLED", raising=False)
     reg = _drive(_snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001))
     assert dr.trend_yes_hi_enabled() is False
     assert dr.trend_yes_hi_reachable(92.0, 200.0) is False

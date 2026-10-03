@@ -8999,6 +8999,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             resolve_exit_policy,
             route_order_async,
             exit_policy_to_dict,
+            resolve_bounded_lane_execution_policy,
         )
         from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput
 
@@ -10451,39 +10452,35 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # within this contract but must never downgrade it to marketable/taker.
         try:
             _lane = candidate.get("decision_lane")
-            if _lane == "threshold_cell":
-                from merid.event_venues.kalshi.order_router import ExecutionPolicy
-                intent.execution_policy = ExecutionPolicy(
-                    lane="threshold_cell",
-                    required_post_only=True,
-                    required_liquidity_role="maker",
-                    allow_taker_fallback=False,
-                    max_reprice_attempts=1,
-                    max_order_lifetime_s=60,
+            # 2026-10-03: contract mirrors the emitted posture — taker/IOC
+            # intents (MERID_BOUNDED_TAKER_CROSS) get the taker contract,
+            # maker intents keep the post-only contract.  Previously every
+            # bounded-lane intent was stamped post-only and taker-evaluated
+            # candidates died pre-wire (PRE_WIRE_POST_ONLY_UNAVAILABLE).
+            intent.execution_policy = (
+                resolve_bounded_lane_execution_policy(
+                    _lane, bool(getattr(intent, "post_only", True))
                 )
-            elif _lane == "current_build_provisional":
-                # Same immutable post-only maker contract, 45s resting life —
-                # a current-build measurement order that cannot touch inside
-                # one reprice window is evidence, not a chased taker fill.
-                from merid.event_venues.kalshi.order_router import ExecutionPolicy
-                intent.execution_policy = ExecutionPolicy(
-                    lane="current_build_provisional",
-                    required_post_only=True,
-                    required_liquidity_role="maker",
-                    allow_taker_fallback=False,
-                    max_reprice_attempts=1,
-                    max_order_lifetime_s=45,
+            )
+            if _lane == "current_build_provisional" and intent.provisional_cell_id is not None:
+                from merid.prediction import (
+                    current_build_provisional as _cbp,
                 )
-                if intent.provisional_cell_id is not None:
-                    from merid.prediction import (
-                        current_build_provisional as _cbp,
-                    )
-                    intent.exec_stage_marks_ns[
-                        "policy_stamped"
-                    ] = time.monotonic_ns()
-                    intent.exec_stage_marks_ns[
-                        "policy_max_rest_ms"
-                    ] = int(_cbp.provisional_max_order_lifetime_s() * 1000)
+                intent.exec_stage_marks_ns[
+                    "policy_stamped"
+                ] = time.monotonic_ns()
+                _pol_life = getattr(
+                    getattr(intent, "execution_policy", None),
+                    "max_order_lifetime_s",
+                    None,
+                )
+                intent.exec_stage_marks_ns[
+                    "policy_max_rest_ms"
+                ] = int(
+                    (_pol_life
+                     if _pol_life is not None
+                     else _cbp.provisional_max_order_lifetime_s()) * 1000
+                )
             intent.admission_owner = (
                 candidate.get("admission_owner") or _lane or "formula"
             )

@@ -536,6 +536,28 @@ def _strip_ev_margin_cents() -> float:
     return _env_float("MERID_STRIP_CONC_EV_MARGIN_CENTS", 3.0)
 
 
+def _strip_max_open_same_side() -> int:
+    """Max concurrent still-open same-side entries per 15-min strip.
+
+    Default 1 = legacy behaviour (a second entry needs the first closed AND
+    a better EV).  Values >1 permit bounded concurrent stacking across
+    assets when the new candidate still clears the EV ladder.
+    """
+    return max(1, _env_int("MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE", 1))
+
+
+def _catastrophe_scope() -> str:
+    """``asset`` = park only the offending ``{asset}:{side}`` lane;
+    ``side`` = legacy whole-side stop."""
+    v = os.environ.get("MERID_SIDE_CATASTROPHE_SCOPE", "asset").strip().lower()
+    return "side" if v == "side" else "asset"
+
+
+def _catastrophe_ttl_s() -> float:
+    """Suspension TTL after a catastrophe; <=0 = until manual review."""
+    return _env_float("MERID_SIDE_CATASTROPHE_TTL_S", 21600.0)
+
+
 def _caution_ttl_s() -> float:
     return _env_float("MERID_SIDE_THROTTLE_CAUTION_S", 3600.0)
 
@@ -750,6 +772,13 @@ def release_side(side: str, ts: Optional[float] = None) -> None:
         st = _load_throttle_state(force=True)
         (st.get("suspensions") or {}).pop(side, None)
         (st.get("cautions") or {}).pop(side, None)
+        # Clear any asset-scoped suspensions for this side too — an operator
+        # release covers the whole side surface.
+        for _k in [
+            k for k in (st.get("suspensions") or {})
+            if k.endswith(f":{side}")
+        ]:
+            st["suspensions"].pop(_k, None)
         st.setdefault("released_at", {})[side] = ts
         _save_throttle_state(st)
     logger.warning(
@@ -768,46 +797,84 @@ def record_side_catastrophe(
     side: Optional[str],
     reason: str,
     ts: Optional[float] = None,
+    asset: Optional[str] = None,
 ) -> None:
-    """Immediate manual-review stop on catastrophic execution evidence.
+    """Immediate stop on catastrophic execution evidence.
 
     Reserved for structural breaches, not performance: wrong-side mapping,
     post-only order filling as taker, fill-time EV <= 0, or a 5s markout at
     or beyond ``MERID_SIDE_CATASTROPHE_M5_CENTS`` (default -5.0c).  These are
-    integrity failures — the side stops until an operator reviews, rather
-    than earning a graded caution.
+    integrity failures — the lane stops rather than earning a graded
+    caution.
+
+    Scope (``MERID_SIDE_CATASTROPHE_SCOPE``, default ``asset``): when the
+    caller supplies ``asset`` the suspension parks only the
+    ``"{asset}:{side}"`` key — a single-cell breach in SOL does not veto
+    BTC/ETH/XRP/DOGE on the same side (2026-10-03: one SOL-YES markout
+    suspended all YES flow ~19h).  Asset-scoped stops auto-release after
+    ``MERID_SIDE_CATASTROPHE_TTL_S`` (default 21600s; ``<=0`` = until
+    release).  A whole-side suspension (no asset context, or
+    ``MERID_SIDE_CATASTROPHE_SCOPE=side``) stays manual-review — an
+    unattributed breach is exactly the case that must not auto-heal.
     """
     if not throttle_enabled() or side not in ("yes", "no"):
         return
     ts = float(ts or time.time())
+    scope_key = side
+    until = None
+    if asset and _catastrophe_scope() == "asset":
+        scope_key = f"{str(asset).lower()}:{side}"
+        ttl = _catastrophe_ttl_s()
+        if ttl > 0:
+            until = ts + ttl
     with _THROTTLE_LOCK:
         st = _load_throttle_state(force=True)
-        st["suspensions"][side] = {
-            "until": None,
+        st["suspensions"][scope_key] = {
+            "until": until,
             "reason": f"catastrophic:{str(reason)[:120]}",
             "triggered_at": ts,
         }
         _save_throttle_state(st)
     logger.warning(
-        "[SIDE-THROTTLE] side=%s CATASTROPHE -> manual review (%s)",
-        side, reason,
+        "[SIDE-THROTTLE] scope=%s CATASTROPHE -> %s (%s)",
+        scope_key,
+        (f"suspended {ttl:.0f}s" if until is not None else "manual review"),
+        reason,
     )
 
 
-def side_throttle_block(side: str, now: Optional[float] = None) -> Optional[str]:
-    """Return the active suspension reason for ``side``, if any."""
+def _suspension_keys(side: str, asset: Optional[str] = None) -> List[str]:
+    keys = [side]
+    if asset:
+        keys.append(f"{str(asset).lower()}:{side}")
+    return keys
+
+
+def side_throttle_block(
+    side: str,
+    now: Optional[float] = None,
+    asset: Optional[str] = None,
+) -> Optional[str]:
+    """Return the active suspension reason for ``side``, if any.
+
+    Checks the whole-side key plus the scoped ``"{asset}:{side}"`` key when
+    ``asset`` is supplied — an asset-scoped catastrophe blocks only its own
+    lane.
+    """
     if not throttle_enabled() or side not in ("yes", "no"):
         return None
     now = float(now or time.time())
     st = _load_throttle_state()
-    sus = (st.get("suspensions") or {}).get(side)
-    if not sus:
-        return None
-    until = sus.get("until")
-    if until is None:
-        return f"side_suspended_manual_review:{sus.get('reason')}"
-    if now < float(until):
-        return f"side_suspended:{sus.get('reason')}"
+    susp = st.get("suspensions") or {}
+    for key in _suspension_keys(side, asset):
+        sus = susp.get(key)
+        if not sus:
+            continue
+        until = sus.get("until")
+        if until is None:
+            return f"side_suspended_manual_review:{sus.get('reason')}"
+        if now < float(until):
+            return f"side_suspended:{sus.get('reason')}"
     return None
 
 
@@ -831,17 +898,26 @@ def side_caution_margin_cents(side: str, now: Optional[float] = None) -> float:
     return _caution_ev_margin_cents()
 
 
-def side_lane_state(side: str, now: Optional[float] = None) -> str:
+def side_lane_state(
+    side: str,
+    now: Optional[float] = None,
+    asset: Optional[str] = None,
+) -> str:
     """Graded lane level for telemetry: OPEN | CAUTION | SUSPENDED | MANUAL_REVIEW."""
     if side not in ("yes", "no"):
         return "OPEN"
     now = float(now or time.time())
     st = _load_throttle_state()
-    sus = (st.get("suspensions") or {}).get(side)
-    if sus:
-        return "MANUAL_REVIEW" if sus.get("until") is None else (
-            "SUSPENDED" if now < float(sus["until"]) else "OPEN"
-        )
+    susp = st.get("suspensions") or {}
+    for key in _suspension_keys(side, asset):
+        sus = susp.get(key)
+        if not sus:
+            continue
+        until = sus.get("until")
+        if until is None:
+            return "MANUAL_REVIEW"
+        if now < float(until):
+            return "SUSPENDED"
     if side_caution_margin_cents(side, now) > 0.0:
         return "CAUTION"
     return "OPEN"
@@ -858,9 +934,11 @@ def strip_concentration_block(
 ) -> Optional[str]:
     """One same-directional entry across all five assets per 15-minute strip.
 
-    A second same-side entry in the strip is permitted only when every prior
-    same-side entry has been derisked/closed AND the new candidate's net EV
-    exceeds the best prior entry's by ``MERID_STRIP_CONC_EV_MARGIN_CENTS``.
+    Additional same-side entries are permitted while fewer than
+    ``MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE`` (default 1) prior entries remain
+    open — the new candidate must still beat the best prior entry's net EV
+    by ``MERID_STRIP_CONC_EV_MARGIN_CENTS``.  Once all priors are closed the
+    same EV ladder applies to re-entry.
     """
     if not throttle_enabled() or side not in ("yes", "no"):
         return None
@@ -870,11 +948,11 @@ def strip_concentration_block(
     same = [e for e in entries if e.get("side") == side]
     if not same:
         return None
-    all_closed = all(not e.get("open", True) for e in same)
-    if not all_closed:
-        return f"strip_same_side_open:{side}"
+    open_same = [e for e in same if e.get("open", True)]
     margin = _strip_ev_margin_cents()
     best_prior = max(float(e.get("ev") or 0.0) for e in same)
+    if open_same and len(open_same) >= _strip_max_open_same_side():
+        return f"strip_same_side_open:{side}"
     if ev_cents is None or float(ev_cents) < best_prior + margin:
         return f"strip_same_side_ev:{side}"
     return None

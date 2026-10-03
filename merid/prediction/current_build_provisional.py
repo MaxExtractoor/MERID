@@ -315,9 +315,29 @@ def provisional_cell_for_id(cell_id: Optional[str]) -> Optional[ProvisionalCell]
     return _CBP_BY_ID.get(cell_id) if cell_id else None
 
 
+def provisional_mid_band_no_relief_cents(cell: ProvisionalCell) -> float:
+    """NO-side mid-band (50-89c) threshold relief.
+
+    ``MERID_CBP_MID_BAND_RELIEF_NO_CENTS`` (default 0) subtracts this many
+    cents from the cell's min net EV.  Mirrors the formula path's
+    ``MERID_EDGE_MID_BAND_RELIEF_CENTS`` — the 50-89c held-price cohort was
+    the only counterfactually profitable near-miss band in the 2026-10-02
+    audit; <35c tails stay untouched.  Never applied to YES.
+    """
+    if cell.side != "no":
+        return 0.0
+    if not (cell.price_min_cents >= 50 and cell.price_max_cents <= 90):
+        return 0.0
+    return max(0.0, _env_float("MERID_CBP_MID_BAND_RELIEF_NO_CENTS", 0.0))
+
+
 def cell_min_ev_cents(cell: ProvisionalCell) -> float:
     """The cell's live min net EV — env overrides apply even post-import."""
-    return provisional_min_ev_cents(cell.asset, cell.side)
+    return max(
+        provisional_min_ev_floor_cents(),
+        provisional_min_ev_cents(cell.asset, cell.side)
+        - provisional_mid_band_no_relief_cents(cell),
+    )
 
 
 def price_band_label(cell: ProvisionalCell) -> str:
@@ -698,11 +718,12 @@ def _notify_side_catastrophe(cell_id: str, reason: str) -> None:
     try:
         parts = str(cell_id).split("_")
         side = parts[2].lower() if len(parts) >= 3 else ""
+        asset = parts[1].lower() if len(parts) >= 2 else None
         if side not in ("yes", "no"):
             return
         from merid.prediction import directional_regime as _dr
 
-        _dr.record_side_catastrophe(side, f"{cell_id}:{reason}")
+        _dr.record_side_catastrophe(side, f"{cell_id}:{reason}", asset=asset)
     except Exception:
         pass
 

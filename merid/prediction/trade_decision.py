@@ -3515,8 +3515,8 @@ def compute_trade_decision(
     indicators["no_min_edge"] = no_min_edge
     indicators["yes_caution_ev_margin_cents"] = _yes_caution_c
     indicators["no_caution_ev_margin_cents"] = _no_caution_c
-    indicators["yes_lane_state"] = _dr.side_lane_state("yes", now.timestamp())
-    indicators["no_lane_state"] = _dr.side_lane_state("no", now.timestamp())
+    indicators["yes_lane_state"] = _dr.side_lane_state("yes", now.timestamp(), asset=asset)
+    indicators["no_lane_state"] = _dr.side_lane_state("no", now.timestamp(), asset=asset)
 
     # Trend-aligned high-price YES lane (91-94c): armed only via
     # MERID_TREND_YES_HI_ENABLED.  ``_yes_hi_price`` is flag-independent —
@@ -3545,10 +3545,10 @@ def compute_trade_decision(
     _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
     _yes_conv_block = _dr.conviction_block_reason(asset, float(yes_breakdown.p_selected))
     _no_conv_block = _dr.conviction_block_reason(asset, float(no_breakdown.p_selected))
-    _yes_throttle_block = _dr.side_throttle_block("yes", now.timestamp()) or _dr.strip_concentration_block(
+    _yes_throttle_block = _dr.side_throttle_block("yes", now.timestamp(), asset=asset) or _dr.strip_concentration_block(
         "yes", float(yes_breakdown.net_edge) * 100.0, ts=now.timestamp()
     )
-    _no_throttle_block = _dr.side_throttle_block("no", now.timestamp()) or _dr.strip_concentration_block(
+    _no_throttle_block = _dr.side_throttle_block("no", now.timestamp(), asset=asset) or _dr.strip_concentration_block(
         "no", float(no_breakdown.net_edge) * 100.0, ts=now.timestamp()
     )
     _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg)
