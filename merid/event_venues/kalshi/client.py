@@ -2212,9 +2212,12 @@ class KalshiVenueClient(EventVenueClient):
                 "agent_grid",
                 "merid.prediction.agent_grid_15m",
                 "position_monitor_exit",
+                "position_monitor_exit_retry",
                 "market_maker_15m",
                 "resting_bracket_take_profit",
                 "resting_bracket_stop_loss",
+                "stop_candidate",
+                "stop_candidate_reducer",
             })
             _is_manual = True
             if hasattr(order, "source") and getattr(order, "source") in _allowed_sources:
@@ -2765,9 +2768,12 @@ class KalshiVenueClient(EventVenueClient):
                 "agent_grid",
                 "merid.prediction.agent_grid_15m",
                 "position_monitor_exit",
+                "position_monitor_exit_retry",
                 "market_maker_15m",
                 "resting_bracket_take_profit",
                 "resting_bracket_stop_loss",
+                "stop_candidate",
+                "stop_candidate_reducer",
             })
             _is_manual = True
             if hasattr(order, "source") and getattr(order, "source") in _allowed_sources:
