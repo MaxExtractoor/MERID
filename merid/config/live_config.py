@@ -515,6 +515,7 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_PI_STAR_",
     "MERID_ASR_",        # adverse-selection admission tunables (countertrend markout floor)
     "MERID_PROVISIONAL_",  # current-build provisional lane caps/thresholds (bounded admission tunables)
+    "MERID_EMPIRICAL_",   # empirical price-calibration overlay mode/path/age knobs (bounded admission policy)
     "MERID_TRADE_DECISION_ALLOW_HYBRID_",
     "MERID_MIN_REGIME_POSTERIOR",
     "TRADING_ENABLED",

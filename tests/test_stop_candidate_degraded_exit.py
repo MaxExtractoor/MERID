@@ -359,6 +359,20 @@ def test_close_for_ticker_on_flat(tmp_path):
     assert [r.ticker for r in t.open_records()] == ["KXB"]
 
 
+def test_normalize_never_expands_loss_envelope():
+    """Tick normalization is a one-way ratchet: for a reduce-only sell the
+    limit is a minimum acceptable price, so sub-cent residue must round up
+    (tighter), never down past the computed bound."""
+    assert sc._normalize_venue_limit(15.4, "no") == 16
+    assert sc._normalize_venue_limit(15.4, "yes") == 16
+    assert sc._normalize_venue_limit(15.0, "no") == 15
+    assert sc._normalize_venue_limit(0.2, "no") == 1      # venue floor
+    assert sc._normalize_venue_limit(99.6, "no") == 99    # venue ceiling
+    for raw in (1.0, 5.5, 22.3, 50.0, 80.9, 98.99):
+        for side in ("yes", "no"):
+            assert sc._normalize_venue_limit(raw, side) >= int(raw)
+
+
 def test_no_branch_on_other_rejections(monkeypatch, tmp_path):
     """Non-executable is the only residual trigger; other rejects stay
     terminal so their different recovery semantics are not conflated."""
