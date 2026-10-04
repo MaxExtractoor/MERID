@@ -196,7 +196,7 @@ def test_rest_poll_claims_quote_when_ws_stale(store):
 
 
 def test_ws_deltas_require_parity_streak_to_reclaim_from_rest(store):
-    """WS reclaims ownership only after MERID_WS_PROMOTE_STREAK in-parity deltas."""
+    """WS reclaims only after PROMOTE_STREAK in-parity deltas held MIN_S seconds."""
     from merid.event_venues.kalshi import market_state as ms_mod
 
     ticker = "KXBTC15M-TEST-H4"
@@ -218,10 +218,53 @@ def test_ws_deltas_require_parity_streak_to_reclaim_from_rest(store):
         assert st.best_bid_cents == 60
         assert st.best_ask_cents == 61
 
+    # Streak alone is not enough: parity must also be sustained for
+    # MERID_WS_PROMOTE_MIN_S before WS reclaims the quote.
+    _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
+    assert store._ws_promote_streak[ticker] == needed
+    assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+
+    # Simulate the parity window having been held long enough.
+    store._ws_parity_since[ticker] = time.monotonic() - (ms_mod._WS_PROMOTE_MIN_S + 0.1)
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
     assert st.quote_owner == "WS_FRESH_VERIFIED"
     assert st.degraded_mode is False
     assert store.book_state(ticker) == "HEALTHY"
+
+
+def test_stale_rest_does_not_release_latch(store):
+    """A REST quote aged past its TTL must not release ownership to a
+    divergent delta — that is exactly the per-delta flap this fix removes."""
+    from merid.event_venues.kalshi import market_state as ms_mod
+
+    ticker = "KXBTC15M-TEST-H7"
+    st = _seed_ws_verified(store, ticker)
+
+    _rest_poll(store, ticker, yes_bid=0.60, no_bid=0.39)
+    assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+
+    # REST ages past the BBO budget (e.g. a delayed poll cycle).
+    st.last_rest_quote_update_ts = time.monotonic() - 5.0
+
+    # Divergent-but-valid delta-derived book (50/51): streak resets, REST keeps
+    # the quote — coherence reports REST_STALE rather than promoting a
+    # disagreeing WS book.
+    _drive_ws_delta(store, ticker, side="yes", price_cents=50, size_delta=10)
+    _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=-10)
+    _drive_ws_delta(store, ticker, side="no", price_cents=49, size_delta=10)
+    assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+    assert store._ws_promote_streak.get(ticker, 0) == 0
+
+    # But a stale REST reference does not trap ownership forever: sustained
+    # in-parity deltas still promote back to WS (dead-poller escape hatch).
+    _drive_ws_delta(store, ticker, side="no", price_cents=49, size_delta=-10)
+    _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=10)
+    for i in range(ms_mod._WS_PROMOTE_STREAK - 1):
+        _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
+        assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+    store._ws_parity_since[ticker] = time.monotonic() - (ms_mod._WS_PROMOTE_MIN_S + 0.1)
+    _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
+    assert st.quote_owner == "WS_FRESH_VERIFIED"
 
 
 def test_divergent_delta_resets_promote_streak(store):
@@ -258,6 +301,8 @@ def test_divergent_delta_resets_promote_streak(store):
     for i in range(ms_mod._WS_PROMOTE_STREAK - 2):
         _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
         assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+    # Parity streak rebuilt; simulate the held window, then promote.
+    store._ws_parity_since[ticker] = time.monotonic() - (ms_mod._WS_PROMOTE_MIN_S + 0.1)
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
     assert st.quote_owner == "WS_FRESH_VERIFIED"
 
