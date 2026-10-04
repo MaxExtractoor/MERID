@@ -9130,9 +9130,11 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             # Extract parameters for dynamic spread model
                             mid_price_cents = (intent.yes_bid_cents + intent.yes_ask_cents) / 2.0 if intent.yes_bid_cents and intent.yes_ask_cents else 50.0
                             inventory = getattr(intent, 'inventory', 0)  # Default to 0 if not available
-                            time_to_expiry = getattr(intent, 'seconds_to_expiry', 900)
+                            time_to_expiry = getattr(intent, 'time_to_expiry_seconds', None)
                             if time_to_expiry is None:
-                                time_to_expiry = getattr(state, 'seconds_to_expiry', 900) if state else 900
+                                time_to_expiry = getattr(state, 'seconds_to_expiry', None) if state else None
+                            if time_to_expiry is None:
+                                time_to_expiry = 900
 
                             # Determine order side (maker or taker)
                             order_side = getattr(intent, 'aggressiveness', 'taker')  # Default to taker
