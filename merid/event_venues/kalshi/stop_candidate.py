@@ -971,8 +971,15 @@ def _residual_policy_version(candidate: StopCandidate) -> Dict[str, Any]:
 def _normalize_venue_limit(raw_cents: float, side: str) -> int:
     """Normalize a computed limit to venue tick bounds.  Kalshi 15m binaries
     price in whole cents on [1, 99]; the degraded bound can never expand the
-    permitted loss envelope past the executable range."""
-    return max(1, min(99, int(round(raw_cents))))
+    permitted loss envelope past the executable range.  ``side`` is the held
+    outcome side (``yes``/``no``); the residual exit is always a reduce-only
+    *sell* of that side, so the limit is a minimum acceptable price and any
+    sub-cent residue must round *up* (a tighter bound).  A plain ``round()``
+    could accept a fill up to ~0.5c/contract worse than the computed
+    envelope."""
+    import math
+    del side  # kept for call-site readability; both held sides sell.
+    return max(1, min(99, int(math.ceil(float(raw_cents) - 1e-9))))
 
 
 async def _maybe_degraded_stop_exit(
