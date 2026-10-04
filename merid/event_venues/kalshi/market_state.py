@@ -342,6 +342,9 @@ _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
 # 2026-10-04: consecutive in-parity WS deltas required to reclaim quote
 # ownership from REST_VERIFIED_DEGRADED (promotion hysteresis).
 _WS_PROMOTE_STREAK = int(os.getenv("MERID_WS_PROMOTE_STREAK", "5"))
+# …and the minimum sustained parity window (seconds).  Event count alone is
+# not enough hysteresis — a fast tape can deliver 5 deltas in <1s.
+_WS_PROMOTE_MIN_S = float(os.getenv("MERID_WS_PROMOTE_MIN_S", "1.5"))
 
 # Guarded Prometheus metrics for the book pipeline.  All updates are wrapped
 # in try/except — metrics must never block or crash the book hot path.
@@ -777,10 +780,12 @@ class KalshiMarketStateStore:
         self._last_pending_full_log_ts: Dict[str, float] = {}
         # 2026-10-04: owner-latch hysteresis.  REST ownership is released back
         # to WS only after ``MERID_WS_PROMOTE_STREAK`` consecutive deltas arrive
-        # in-parity with a fresh REST BBO — a single lucky delta must not flip
-        # the effective quote's owner (observed: HEALTHY<->DEGRADED_REST_ONLY
-        # multiple times per second as REST polls and lagged deltas interleaved).
+        # in-parity with the REST BBO over ``MERID_WS_PROMOTE_MIN_S`` seconds —
+        # a single lucky delta must not flip the effective quote's owner
+        # (observed: HEALTHY<->DEGRADED_REST_ONLY multiple times per second as
+        # REST polls and lagged deltas interleaved).
         self._ws_promote_streak: Dict[str, int] = {}
+        self._ws_parity_since: Dict[str, float] = {}
         # 2026-10-02: per-ticker derived book-state (spec vocabulary:
         # UNINITIALIZED/SYNCING/HEALTHY/RESYNCING/DEGRADED_REST_ONLY/UNTRADEABLE).
         # One BOOK_STATE_TRANSITION event per change, never per delta.
@@ -1808,6 +1813,11 @@ class KalshiMarketStateStore:
                 round((_now_mono - state.last_rest_quote_update_ts) * 1000.0, 1)
                 if getattr(state, "last_rest_quote_update_ts", 0.0) > 0 else None
             )
+            _parity_since = self._ws_parity_since.get(ticker)
+            _parity_ms = (
+                round((_now_mono - _parity_since) * 1000.0, 1)
+                if _parity_since else None
+            )
             logger.warning(
                 "[BOOK-STATE-TRANSITION] %s",
                 json.dumps(
@@ -1832,6 +1842,7 @@ class KalshiMarketStateStore:
                         "rest_age_ms": _rest_age_ms,
                         "ws_event_age_ms": getattr(state, "ws_last_event_age_ms", None),
                         "ws_promote_streak": self._ws_promote_streak.get(ticker, 0),
+                        "ws_parity_ms": _parity_ms,
                         "executable": bool(getattr(state, "executable", False)),
                     },
                     default=str,
@@ -6617,28 +6628,49 @@ class KalshiMarketStateStore:
                 state.quote_owner = "REST_VERIFIED_DEGRADED"
                 state.degraded_mode = True
                 self._ws_promote_streak[ticker] = 0
+                self._ws_parity_since.pop(ticker, None)
             elif (
                 _owner_pre_delta == "REST_VERIFIED_DEGRADED"
-                and rest_age_s <= rest_pref_max_age_s
                 and state.last_rest_bid_cents is not None
                 and state.last_rest_ask_cents is not None
             ):
                 # 2026-10-04 (owner-latch hysteresis): REST held the quote.
                 # WS reclaims it only after _WS_PROMOTE_STREAK consecutive
-                # deltas arrive verified AND in parity with the still-fresh
-                # REST BBO — killing the per-delta REST<->WS owner flap that
-                # made decision-time quote ownership a coin flip.  While the
-                # streak builds (or while WS is unverified), the REST BBO stays
-                # the effective quote so owner and quote content agree.
-                _streak = self._ws_promote_streak.get(ticker, 0) + 1
+                # verified, in-parity deltas sustained over _WS_PROMOTE_MIN_S
+                # seconds — killing the per-delta REST<->WS owner flap that
+                # made decision-time quote ownership a coin flip.  No REST-age
+                # gate here: a stale REST BBO is still the last verified
+                # reference, so an aged-out REST quote must NOT release the
+                # latch (observed 2026-10-04: a divergent delta promoted the
+                # instant rest_age crossed the 3.0s TTL).  While the streak
+                # builds the REST BBO stays the effective quote so owner and
+                # quote content agree; REST staleness is then a freshness
+                # problem (REST_STALE at the coherence gate), not an ownership
+                # problem.
+                _parity_delta = ws_two_sided and not ws_divergent
+                if _parity_delta:
+                    _streak = self._ws_promote_streak.get(ticker, 0) + 1
+                    if _streak <= 1:
+                        self._ws_parity_since[ticker] = now
+                    _parity_held_s = now - self._ws_parity_since.get(ticker, now)
+                else:
+                    # Divergent or one-sided vs the last REST reference:
+                    # restart the streak.  REST keeps the effective quote —
+                    # if REST is stale the coherence gate reports REST_STALE
+                    # (fail-closed) rather than promoting a disagreeing WS.
+                    _streak = 0
+                    _parity_held_s = 0.0
+                    self._ws_parity_since.pop(ticker, None)
                 _ws_reclaimed = (
                     state.quote_owner == "WS_FRESH_VERIFIED"
                     and _streak >= _WS_PROMOTE_STREAK
+                    and _parity_held_s >= _WS_PROMOTE_MIN_S
                 )
-                if _ws_reclaimed:
-                    self._ws_promote_streak.pop(ticker, None)
-                else:
-                    self._ws_promote_streak[ticker] = _streak
+                # Keep the streak value in the map even on promotion so the
+                # transition record can show what the promote was built on;
+                # the else-branch clears it on the next WS-owned delta.
+                self._ws_promote_streak[ticker] = _streak
+                if not _ws_reclaimed:
                     state.best_bid_cents = state.last_rest_bid_cents
                     state.best_ask_cents = state.last_rest_ask_cents
                     if state.last_rest_yes_bids is not None:
@@ -6649,6 +6681,7 @@ class KalshiMarketStateStore:
                     state.degraded_mode = True
             else:
                 self._ws_promote_streak.pop(ticker, None)
+                self._ws_parity_since.pop(ticker, None)
                 if state.best_bid_cents is None or state.best_ask_cents is None:
                     # No usable effective quote from any trusted owner.
                     state.quote_owner = "NONE_UNTRUSTED"
@@ -6698,6 +6731,7 @@ class KalshiMarketStateStore:
                 state.quote_owner = "REST_VERIFIED_DEGRADED"
                 state.degraded_mode = True
                 self._ws_promote_streak[ticker] = 0
+                self._ws_parity_since.pop(ticker, None)
 
         # Ticker quote fallback: the orderbook_delta stream is one-sided, so the
         # local ladder can become crossed or one-sided if the opposite tape lags.
