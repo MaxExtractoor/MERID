@@ -3607,6 +3607,25 @@ def compute_trade_decision(
     # BTC/asset momentum, p>=0.94, net EV>=3c, TTE 120-300s, no recent adverse
     # m5 in the lane).  Integrity gates — depth, tail guard, evidence,
     # throttle, book-flow — wrap both paths.
+    # 2026-10-04: a provisional cell with a NEGATIVE min-EV floor admits
+    # shallow-negative-EV candidates as bounded evidence buys (env-bounded
+    # by MERID_PROVISIONAL_MIN_EV_FLOOR_C / per-side overrides).  The
+    # ``p_selected > cost_basis`` gate is the positive-EV requirement stated
+    # a second time — applied unconditionally it makes every negative floor
+    # unreachable by construction (~95 floor-clearing rescued candidates
+    # vetoed in one run under no_positive_executable_edge).  Inside a
+    # negative-floor provisional domain the cell floor is the sole economics
+    # gate; depth/tail/evidence/throttle/bookflow/regime/conviction/
+    # countertrend and the lane's own caps still apply unchanged.
+    _yes_cbp_neg_floor = (
+        _yes_edge_thr.provisional_cell_id is not None and yes_min_edge < 0.0
+    )
+    _no_cbp_neg_floor = (
+        _no_edge_thr.provisional_cell_id is not None and no_min_edge < 0.0
+    )
+    indicators["yes_cbp_neg_floor_p_bypass"] = bool(_yes_cbp_neg_floor)
+    indicators["no_cbp_neg_floor_p_bypass"] = bool(_no_cbp_neg_floor)
+
     yes_qualifies = (
         yes_depth_ok
         and not tail_guard_violation_yes
@@ -3618,7 +3637,10 @@ def compute_trade_decision(
             or (
                 not _yes_hi_price
                 and yes_breakdown.net_edge >= yes_min_edge
-                and yes_breakdown.p_selected > yes_min_p
+                and (
+                    _yes_cbp_neg_floor
+                    or yes_breakdown.p_selected > yes_min_p
+                )
                 and _yes_regime_block is None
                 and _yes_conv_block is None
                 and _yes_ct_lane_block is None
@@ -3628,7 +3650,10 @@ def compute_trade_decision(
     no_qualifies = (
         no_depth_ok
         and no_breakdown.net_edge >= no_min_edge
-        and no_breakdown.p_selected > no_min_p
+        and (
+            _no_cbp_neg_floor
+            or no_breakdown.p_selected > no_min_p
+        )
         and not tail_guard_violation_no
         and no_evidence_ok
         and _no_regime_block is None
@@ -3665,11 +3690,20 @@ def compute_trade_decision(
         # 2026-09-30: economics first — a side that never had positive
         # executable EV is an EV rejection, not an evidence-policy block.
         # Evidence only owns the terminal code when the economics cleared.
-        if bd.net_edge <= 0:
+        # 2026-10-04: a NEGATIVE min_edge means the side lives in a
+        # bounded evidence-buying lane — non-positive EV is the domain,
+        # not the failure.  The honest labels are edge_below_lane_floor
+        # (missed the lane's own bound) and the structural gates; the
+        # positive-EV / cost-basis labels only apply on >=0 floors.
+        if min_edge_s >= 0.0 and bd.net_edge <= 0:
             return f"no_positive_executable_edge_{side}"
         if bd.net_edge < min_edge_s:
-            return f"edge_below_threshold_{side}"
-        if bd.p_selected <= min_p_s:
+            return (
+                f"edge_below_lane_floor_{side}"
+                if min_edge_s < 0.0
+                else f"edge_below_threshold_{side}"
+            )
+        if min_edge_s >= 0.0 and bd.p_selected <= min_p_s:
             return f"cost_basis_{side}"
         # 91-94c YES window: the lane owns the terminal reason — the strict
         # gate's specific failure when armed, or `trend_yes_hi_disabled` when
@@ -3760,13 +3794,18 @@ def compute_trade_decision(
             best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
             best_min_p = yes_min_p if best_side == "yes" else no_min_p
             best_evidence_ok = yes_evidence_ok if best_side == "yes" else no_evidence_ok
-            if best_net_edge <= 0:
+            if best_net_edge <= 0 and best_threshold >= 0:
                 # 2026-09-30: both legs uneconomic is an EV rejection, not an
                 # evidence-policy veto.  Label it honestly so the funnel can
                 # separate "no edge right now" from "historically censored".
+                # 2026-10-04: a negative floor means the lane admits
+                # non-positive EV — the EV-zero label would mask whichever
+                # structural gate or lane floor actually vetoed.
                 no_trade_reason = "no_positive_executable_edge"
             elif best_net_edge < best_threshold:
-                if best_side == "yes":
+                if best_threshold < 0:
+                    no_trade_reason = f"{best_side}_edge_below_lane_floor"
+                elif best_side == "yes":
                     no_trade_reason = "yes_edge_below_threshold"
                 else:
                     no_trade_reason = "no_edge_below_threshold"
@@ -3775,7 +3814,10 @@ def compute_trade_decision(
                 # absorb a contract — label it a liquidity rejection.
                 no_trade_reason = f"insufficient_depth_{best_side}"
             elif (
-                (yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected)
+                best_threshold >= 0
+                and (
+                    yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
+                )
                 <= best_min_p
             ):
                 # p_selected does not clear the side-aware positive-EV floor
@@ -4186,6 +4228,25 @@ def compute_trade_decision(
             else Decimal(str(no_breakdown.exit_cost_reserve))
         )
 
+        # Bounded-lane floors: provisional cells may carry a configured
+        # negative EV floor (evidence-buying lanes).  The gate defaults to
+        # min_dollar_ev=0.0, which would veto every candidate those lanes
+        # exist to admit, so the selected side's floor is passed through
+        # when it is negative.  Positive thresholds keep the gate's
+        # canonical "> 0 net EV" sanity check — the qualification layer
+        # already enforced the side's positive threshold.
+        _side_min_edge = (
+            yes_min_edge if selected_outcome == "yes" else no_min_edge
+        )
+        _ev_gate_min_dollar = (
+            Decimal(str(_side_min_edge)) if float(_side_min_edge) < 0.0 else None
+        )
+        # A negative dollar floor makes the EV/tail ratio check vacuous —
+        # the ratio is negative for every candidate the lane exists to
+        # admit, and the dollar floor already bounds the spend.
+        _ev_gate_min_ratio = (
+            Decimal("-1") if _ev_gate_min_dollar is not None else None
+        )
         ev_input = EVInput(
             p_model=p_selected,
             p_exec=selected_outcome_price,
@@ -4197,6 +4258,8 @@ def compute_trade_decision(
             quote_age_ms=quote_age_ms,
             ticker=ticker,
             decision_id=decision_id,
+            min_dollar_ev=_ev_gate_min_dollar,
+            min_ev_to_tail_ratio=_ev_gate_min_ratio,
         )
         ev_result = evaluate_executable_cost_ev(ev_input)
         ev_gate_allowed = ev_result.allowed
