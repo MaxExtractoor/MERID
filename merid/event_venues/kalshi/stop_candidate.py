@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -148,6 +149,36 @@ STOP_EDGE_HYSTERESIS_CENTS = _env_int("MERID_STOP_EDGE_HYSTERESIS_CENTS", 1)
 STOP_EDGE_TOTAL_EXIT_COST_CENTS = _env_int(
     "MERID_STOP_EDGE_TOTAL_EXIT_COST_CENTS", 2
 )
+
+# ── Degraded-exit reevaluation (2026-10-04) ──────────────────────────────────
+# A rejected protective exit must not be the terminal state of a protective
+# exit.  When the execution firewall refuses a stop IOC because the stated
+# limit cannot fill at available depth (``limit_not_executable``), the
+# position is still live binary tail risk.  The residual branch reevaluates
+# hold-vs-exit against the *actual* depth-weighted VWAP and either submits
+# one bounded degraded IOC or durably records an explicit hold-to-settlement
+# decision.  Submission stays env-gated; the decision event is always
+# recorded so observe-only mode still produces replayable telemetry.
+STOP_DEGRADED_RESIDUAL_SLIP_CENTS = _env_int(
+    "MERID_STOP_DEGRADED_RESIDUAL_SLIP_C", 2
+)
+
+
+def degraded_exit_enabled() -> bool:
+    return _env_bool("MERID_STOP_DEGRADED_EXIT_ENABLED", False)
+
+
+_NON_EXECUTABLE_VWAP_RE = re.compile(r"vwap=(\d+)")
+
+
+def parse_non_executable_vwap_cents(reason: Any) -> Optional[int]:
+    """Return the firewall's depth-weighted VWAP from a
+    ``limit_not_executable`` rejection reason, else None."""
+    r = str(reason or "").lower()
+    if "limit_not_executable" not in r:
+        return None
+    m = _NON_EXECUTABLE_VWAP_RE.search(r)
+    return int(m.group(1)) if m else None
 
 # Settlement-aware phase constants (seconds).
 SETTLEMENT_CLOSE_BUFFER_SECONDS = _env_int(
@@ -301,6 +332,48 @@ class StopCandidateLedger:
             fill_price_cents,
             realized_slippage_cents,
         )
+
+    def record_residual_decision(
+        self, candidate: StopCandidate, record: Dict[str, Any]
+    ) -> None:
+        """Persist a post-rejection residual-exposure decision.
+
+        Every rejected protective exit ends in exactly one durable state:
+        ``DEGRADED_EXIT_APPROVED`` (submitted / observe-only), or
+        ``HOLD_TO_SETTLEMENT_APPROVED`` / ``RESIDUAL_RISK_BREACH``.  The
+        record keeps the trigger, fair value, executable VWAP, both price
+        bounds, and the submitted limit so stop-to-settlement counterfactuals
+        can score the decision ex post.
+        """
+        entry = {
+            "record_type": "residual_decision",
+            "candidate_id": candidate.candidate_id,
+            "recorded_at": time.time(),
+            **record,
+        }
+        self._submissions.append(entry)
+        log = logger.warning
+        if record.get("decision") == "RESIDUAL_RISK_BREACH":
+            log = logger.critical
+        log(
+            "[STOP-RESIDUAL-%s] candidate=%s ticker=%s trigger=%s "
+            "fair=%sc vwap=%sc basis=%s",
+            record.get("decision", "UNKNOWN"),
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            record.get("fair_value_cents"),
+            record.get("degraded_vwap_cents"),
+            record.get("basis"),
+        )
+        try:
+            log_dir = Path(__file__).resolve().parents[3] / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "stop_candidates.jsonl"
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception as exc:
+            logger.debug("[STOP-CANDIDATE] failed to persist residual decision: %s", exc)
 
     def recent(self, n: int = 100) -> List[StopCandidate]:
         return self._candidates[-n:]
@@ -844,6 +917,132 @@ def build_stop_candidate(
 
 # ── Submission ────────────────────────────────────────────────────────────────
 
+async def _maybe_degraded_stop_exit(
+    candidate: StopCandidate,
+    primary_result: Any,
+    *,
+    held_side: str,
+    held_contracts: int,
+) -> None:
+    """Residual-exposure branch for a non-executable protective exit.
+
+    Runs after the primary stop IOC is rejected with ``limit_not_executable``.
+    Compares depth-weighted liquidation proceeds (firewall VWAP, net of exit
+    costs) against holding to settlement at the model's fair value:
+
+        exit approved  <=>  fair + exit_costs + hysteresis <= degraded_vwap
+                           <=>  V_exit > V_hold - C_carry
+
+    When approved, one bounded degraded IOC is submitted at
+    ``min(vwap, fresh_bid) - residual_slip`` under a fresh ``dg1`` client
+    order id (the original coid was consumed by the venue).  When not
+    approved, or when the fair-value basis is missing, an explicit
+    HOLD_TO_SETTLEMENT / RESIDUAL_RISK_BREACH decision is persisted so the
+    residual position is never silently carried to expiry.  Automatic
+    submission remains env-gated; observe-only mode still records the
+    decision it would have taken.
+    """
+    vwap_cents = parse_non_executable_vwap_cents(
+        getattr(primary_result, "reason", None)
+    )
+    if vwap_cents is None or held_contracts <= 0:
+        return
+
+    fair = candidate.fair_value_cents
+    record: Dict[str, Any] = {
+        "ticker": candidate.market_ticker,
+        "trigger_reason": candidate.trigger_reason,
+        "held_contracts": held_contracts,
+        "fair_value_cents": fair,
+        "degraded_vwap_cents": vwap_cents,
+        "primary_reject_reason": str(getattr(primary_result, "reason", "") or ""),
+        "submitted_limit_cents": getattr(primary_result, "price_cents", None),
+        "degraded_exit_enabled": degraded_exit_enabled(),
+        "seconds_to_expiry": candidate.seconds_to_expiry,
+    }
+
+    if fair is None:
+        # Price-triggered stops carry no model basis; without fair value the
+        # hold-vs-exit comparison is impossible — surface the residual risk
+        # instead of silently holding to settlement.
+        record["decision"] = "RESIDUAL_RISK_BREACH"
+        record["basis"] = "no_fair_value"
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
+
+    exit_ok = evaluate_edge_stop(
+        fair,
+        vwap_cents,
+        candidate.total_exit_cost_cents,
+        candidate.hysteresis_cents,
+    )
+    if not exit_ok:
+        record["decision"] = "HOLD_TO_SETTLEMENT_APPROVED"
+        record["basis"] = "fair_above_degraded_exit_value"
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
+
+    # Degraded exit is economically justified.  Re-fetch the executable bid so
+    # the submitted limit prices off the freshest book, not the stale trigger.
+    kalshi2, unified2 = _get_market_state(candidate.market_ticker)
+    fresh_bid = _get_executable_exit_cents(unified2 or kalshi2, held_side)
+    record["fresh_bid_cents"] = fresh_bid
+    if fresh_bid is None or not (1 <= fresh_bid <= 99):
+        record["decision"] = "RESIDUAL_RISK_BREACH"
+        record["basis"] = "no_executable_depth"
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
+
+    degraded_limit = max(
+        1, min(vwap_cents, fresh_bid) - STOP_DEGRADED_RESIDUAL_SLIP_CENTS
+    )
+    record["degraded_limit_cents"] = degraded_limit
+
+    if not degraded_exit_enabled():
+        record["decision"] = "DEGRADED_EXIT_APPROVED"
+        record["basis"] = "observe_only_submission_disabled"
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
+
+    from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+
+    kalshi_side = to_kalshi_side(held_side, "sell")
+    intent = OrderIntent(
+        ticker=candidate.market_ticker,
+        side=held_side,
+        action="sell",
+        price_cents=degraded_limit,
+        count=held_contracts,
+        order_type="limit",
+        time_in_force="ioc",
+        source="stop_candidate_degraded",
+        agent_id="stop_candidate",
+        # Distinct identity per candidate so venue dedup cannot conflate the
+        # degraded retry with the consumed primary coid.
+        intent_id=f"stop_candidate:{candidate.candidate_id}:dg1",
+        client_order_id=f"stopcand_{candidate.candidate_id}dg1"[:64],
+        kalshi_side=kalshi_side,
+        reduce_only=True,
+        entry_or_exit="exit",
+        exit_reason=_STOP_TRIGGER_TO_EXIT_REASON.get(
+            candidate.trigger_reason, "STOP_LOSS"
+        ),
+        exit_policy_id=f"stop_candidate:{candidate.candidate_id}:degraded",
+        reason=(
+            f"degraded_stop_exit:{candidate.trigger_reason}:{candidate.candidate_id}"
+        ),
+        rationale=(
+            f"degraded_exit:vwap={vwap_cents}:fair={fair}:{candidate.candidate_id}"
+        ),
+        snapshot_age_ms=float(candidate.quote_age_ms or 0),
+    )
+    result = await route_order_async(intent)
+    record["decision"] = "DEGRADED_EXIT_APPROVED"
+    record["basis"] = "degraded_ioc_submitted"
+    record["result"] = _serialize_result(result)
+    get_stop_candidate_ledger().record_residual_decision(candidate, record)
+
+
 async def maybe_submit_stop_candidate(
     candidate: StopCandidate,
     *,
@@ -1202,6 +1401,24 @@ async def maybe_submit_stop_candidate(
         submitted_price_cents=exit_price,
         reference_bid_cents=exit_bid,
     )
+    # 8. Residual-exposure branch: a non-executable protective exit is not a
+    #    terminal state — reevaluate hold-vs-exit at the firewall's actual
+    #    depth VWAP and record an explicit downstream decision.
+    try:
+        await _maybe_degraded_stop_exit(
+            candidate,
+            result,
+            held_side=held_side,
+            held_contracts=held_contracts,
+        )
+    except Exception as exc:
+        logger.critical(
+            "[STOP-DEGRADED-ERROR] candidate=%s ticker=%s error=%s",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            exc,
+            exc_info=True,
+        )
     return result
 
 
