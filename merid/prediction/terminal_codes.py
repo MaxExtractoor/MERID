@@ -19,6 +19,9 @@ Precedence (first true blocker wins):
     EDGE_BELOW_DYNAMIC_THRESHOLD  positive EV but below the dynamic required
                             edge (includes soft-penalty/challenge elevated
                             reserves the model edge could not clear)
+    LOW_CONVICTION          economics cleared but |p_sel - 0.5| < the
+                            per-asset conviction floor — a structural risk
+                            veto, not an economics failure
     ALLOCATION_NOT_SELECTED candidate qualified but the top-3 allocator passed
     ENTRY_LIFECYCLE_INVALID missing protective exit / lifecycle invalid
     EXECUTION_REJECT        stale decision, passivity, or venue reject
@@ -46,6 +49,7 @@ class TerminalCode(str, Enum):
     NO_POSITIVE_EXECUTABLE_EDGE = "NO_POSITIVE_EXECUTABLE_EDGE"
     EVIDENCE_HARD_BLOCK = "EVIDENCE_HARD_BLOCK"
     EDGE_BELOW_DYNAMIC_THRESHOLD = "EDGE_BELOW_DYNAMIC_THRESHOLD"
+    LOW_CONVICTION = "LOW_CONVICTION"
     ALLOCATION_NOT_SELECTED = "ALLOCATION_NOT_SELECTED"
     ENTRY_LIFECYCLE_INVALID = "ENTRY_LIFECYCLE_INVALID"
     EXECUTION_REJECT = "EXECUTION_REJECT"
@@ -75,6 +79,7 @@ class DecisionSignals:
     any_eligible_side_has_positive_net_ev: bool = False
     selected_side_evidence_hard_block: bool = False
     selected_side_clears_dynamic_threshold: bool = False
+    selected_side_clears_conviction: bool = True
     allocator_selected: bool = False
 
 
@@ -102,6 +107,8 @@ def resolve_terminal_code(state: DecisionSignals) -> TerminalCode:
         return TerminalCode.EVIDENCE_HARD_BLOCK
     if not state.selected_side_clears_dynamic_threshold:
         return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD
+    if not state.selected_side_clears_conviction:
+        return TerminalCode.LOW_CONVICTION
     if not state.allocator_selected:
         return TerminalCode.ALLOCATION_NOT_SELECTED
     return TerminalCode.CANDIDATE_EMITTED
@@ -192,11 +199,13 @@ def canonical_terminal_code(
     if "edge_below_lane_floor" in rl:
         return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
 
-    # Structural safety-gate vetoes that carry no dedicated canonical code.
-    # UNCLASSIFIED preserves the raw gate name; the old economics fallback
-    # relabelled conviction-vetoed lane candidates as EV failures.
+    # 2026-10-04: structural conviction veto — the candidate cleared its
+    # economics (lane floor or positive edge) but |p_sel - 0.5| fell below
+    # the per-asset conviction floor.  Dedicated canonical code so funnel
+    # aggregation does not have to parse raw reason strings; previously the
+    # economics fallback relabelled these as EV failures.
     if rl.startswith("low_conviction"):
-        return TerminalCode.UNCLASSIFIED.value
+        return TerminalCode.LOW_CONVICTION.value
 
     if "edge_below_threshold" in rl or rl in (
         "insufficient_edge",
