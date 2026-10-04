@@ -237,13 +237,74 @@ class ResidualExitTracker:
 
     def may_attempt_degraded(self, rec: ResidualRecord) -> Tuple[bool, str]:
         """Idempotency + attempt budget gate for the degraded IOC."""
-        if rec.status in (ResidualStatus.SETTLED, ResidualStatus.CLOSED):
+        if rec.status in (ResidualStatus.SETTLED.value, ResidualStatus.CLOSED.value):
             return False, "residual_closed"
-        if rec.status == ResidualStatus.DEGRADED_EXIT_SUBMITTED:
+        if rec.status == ResidualStatus.DEGRADED_EXIT_SUBMITTED.value:
             return False, "degraded_already_submitted"
         if rec.degraded_attempt_number >= DEGRADED_MAX_ATTEMPTS:
             return False, "degraded_attempt_budget_exhausted"
         return True, "ok"
+
+    def claim_degraded_attempt(
+        self,
+        rec: ResidualRecord,
+        *,
+        client_order_id_prefix: str,
+        limit_cents: int,
+    ) -> Tuple[bool, str, Optional[str]]:
+        """Atomically check the budget and claim the next attempt (the
+        execution lease).  The claim is persisted BEFORE the order is routed,
+        so a concurrent cycle or a crash-restart mid-submission sees the
+        attempt as consumed and cannot emit a duplicate degraded intent.
+
+        Returns (claimed, reason, client_order_id).
+        """
+        with self._lock:
+            ok, reason = self.may_attempt_degraded(rec)
+            if not ok:
+                return False, reason, None
+            rec.degraded_attempt_number += 1
+            coid = f"{client_order_id_prefix}dg{rec.degraded_attempt_number}"[:64]
+            rec.degraded_client_order_ids.append(coid)
+            now = time.time()
+            rec.status = ResidualStatus.DEGRADED_EXIT_SUBMITTED.value
+            rec.decision_reason = "degraded_ioc_claimed"
+            rec.selected_degraded_limit_cents = limit_cents
+            rec.last_evaluated_at = now
+            rec.history.append(
+                {"at": now, "event": "degraded_claimed", "coid": coid}
+            )
+            self._persist_locked()
+            return True, "ok", coid
+
+    def close_for_ticker(
+        self,
+        ticker: str,
+        status: ResidualStatus = ResidualStatus.CLOSED,
+        *,
+        reason: str = "exchange_position_flat",
+    ) -> int:
+        """Close every open residual on ``ticker`` (position flat or market
+        settled).  Returns the number of records transitioned."""
+        n = 0
+        with self._lock:
+            now = time.time()
+            for rec in self._records.values():
+                if rec.ticker != ticker or rec.status in _TERMINAL_STATUSES:
+                    continue
+                rec.status = status.value
+                rec.decision_reason = reason
+                rec.remaining_quantity_cc = 0
+                rec.last_evaluated_at = now
+                rec.history.append({"at": now, "event": status.value, "reason": reason})
+                n += 1
+            if n:
+                self._persist_locked()
+        return n
+
+    def open_records(self) -> List[ResidualRecord]:
+        with self._lock:
+            return [r for r in self._records.values() if r.status not in _TERMINAL_STATUSES]
 
     def transition(
         self,
@@ -266,23 +327,6 @@ class ResidualExitTracker:
             )
             self._persist_locked()
             return rec
-
-    def record_degraded_submission(
-        self,
-        rec: ResidualRecord,
-        *,
-        client_order_id: str,
-        limit_cents: int,
-    ) -> ResidualRecord:
-        with self._lock:
-            rec.degraded_attempt_number += 1
-            rec.degraded_client_order_ids.append(client_order_id)
-        return self.transition(
-            rec,
-            ResidualStatus.DEGRADED_EXIT_SUBMITTED,
-            reason="degraded_ioc_submitted",
-            selected_degraded_limit_cents=limit_cents,
-        )
 
 
 _tracker: Optional[ResidualExitTracker] = None

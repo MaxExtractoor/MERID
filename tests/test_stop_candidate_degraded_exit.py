@@ -166,7 +166,9 @@ def test_degraded_submit_uses_fresh_dg_coid(monkeypatch, tmp_path):
 
     async def _fake_route(intent):
         captured["intent"] = intent
-        return types.SimpleNamespace(status="filled", avg_fill_price_cents=17)
+        return types.SimpleNamespace(
+            status="filled", fill={"count": 3}, submission_certainty="ack_received"
+        )
 
     from merid.event_venues.kalshi import order_router
 
@@ -230,6 +232,131 @@ def test_new_position_epoch_gets_fresh_residual(monkeypatch, tmp_path):
     _run(cand, _reject_result())   # epoch fill-ep-2 -> allowed again
     assert ledger.records[1]["decision"] == "DEGRADED_EXIT_APPROVED"
     assert len(tracker._records) == 2
+
+
+def _route_returning(monkeypatch, result, calls=None):
+    from merid.event_venues.kalshi import order_router
+
+    async def _fake_route(intent):
+        if calls is not None:
+            calls.append(intent)
+        return result
+
+    monkeypatch.setattr(order_router, "route_order_async", _fake_route)
+
+
+def test_full_fill_closes_residual(monkeypatch, tmp_path):
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+    _route_returning(monkeypatch, types.SimpleNamespace(
+        status="filled", fill={"count": 3}, submission_certainty="ack_received"))
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.CLOSED.value
+    assert res.remaining_quantity_cc == 0
+
+
+def test_partial_fill_tracks_remaining_and_blocks_reattempt(monkeypatch, tmp_path):
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+    calls = []
+    _route_returning(monkeypatch, types.SimpleNamespace(
+        status="partial", fill={"count": 1}, submission_certainty="ack_received"), calls)
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.PARTIALLY_FILLED.value
+    assert res.remaining_quantity_cc == 200
+    assert res.venue_acknowledged_quantity == 100
+    # Next cycle on the same epoch: budget spent -> explicit breach, no order.
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    assert len(calls) == 1
+    assert ledger.records[-1]["decision"] == "RESIDUAL_RISK_BREACH"
+
+
+def test_ambiguous_ack_holds_lease_no_second_order(monkeypatch, tmp_path):
+    """Delayed/ambiguous venue outcome: the system must not issue a second
+    order on top of an unconfirmed one."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+    calls = []
+    _route_returning(monkeypatch, types.SimpleNamespace(
+        status="unknown", fill=None, submission_certainty="in_flight"), calls)
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.DEGRADED_EXIT_SUBMITTED.value
+    assert ledger.records[0]["basis"] == "degraded_ioc_ambiguous_awaiting_reconciliation"
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    assert len(calls) == 1
+    assert ledger.records[1]["decision"] == "DEGRADED_EXIT_PENDING_RECONCILIATION"
+
+
+def test_unfilled_ioc_is_risk_breach(monkeypatch, tmp_path):
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+    _route_returning(monkeypatch, types.SimpleNamespace(
+        status="unfilled_ioc", fill={"count": 0}, submission_certainty="ack_received"))
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.RISK_BREACH.value
+    assert ledger.records[0]["basis"].startswith("degraded_ioc_unfilled")
+
+
+def test_settlement_crossed_before_submit(monkeypatch, tmp_path):
+    """Remaining time crosses the close window between evaluation and
+    submission -> hold under explicit policy, no order."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+    calls = []
+    _route_returning(monkeypatch, types.SimpleNamespace(status="filled", fill={"count": 3}), calls)
+    real_get = tracker.get_or_create
+
+    def _get_with_near_deadline(*a, **kw):
+        rec = real_get(*a, **kw)
+        rec.settlement_deadline = sc.time.time() + 5  # inside close buffer
+        return rec
+
+    monkeypatch.setattr(tracker, "get_or_create", _get_with_near_deadline)
+    _run(_candidate(fair_value_cents=10, seconds_to_expiry=400.0), _reject_result())
+    assert calls == []
+    assert ledger.records[0]["basis"] == "settlement_close_window_at_submit"
+
+
+def test_flag_off_never_routes(monkeypatch, tmp_path):
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: False)
+    calls = []
+    _route_returning(monkeypatch, types.SimpleNamespace(status="filled", fill={"count": 3}), calls)
+    _run(_candidate(fair_value_cents=10), _reject_result())
+    assert calls == []
+    assert ledger.records[0]["basis"] == "observe_only_submission_disabled"
+
+
+def test_restart_recovery_preserves_claim(tmp_path):
+    """A claim persisted before routing survives a crash/restart: the
+    reloaded tracker refuses a second degraded attempt."""
+    path = tmp_path / "residuals.json"
+    t1 = ResidualExitTracker(path)
+    rec = t1.get_or_create("KXT", "no", "ep1", trigger_id="c1",
+                           trigger_reason="HARD_STOP", quantity_cc=300)
+    ok, _, coid = t1.claim_degraded_attempt(rec, client_order_id_prefix="stopcand_c1",
+                                            limit_cents=16)
+    assert ok and coid == "stopcand_c1dg1"
+    t2 = ResidualExitTracker(path)  # simulated restart
+    rec2 = t2.get_or_create("KXT", "no", "ep1", trigger_id="c2",
+                            trigger_reason="HARD_STOP", quantity_cc=300)
+    assert rec2.degraded_attempt_number == 1
+    ok2, reason, _ = t2.claim_degraded_attempt(rec2, client_order_id_prefix="stopcand_c2",
+                                               limit_cents=16)
+    assert not ok2
+    assert reason == "degraded_already_submitted"
+
+
+def test_close_for_ticker_on_flat(tmp_path):
+    t = ResidualExitTracker(tmp_path / "r.json")
+    t.get_or_create("KXA", "no", "ep1", trigger_id="c", trigger_reason="HARD_STOP", quantity_cc=100)
+    t.get_or_create("KXB", "yes", "ep2", trigger_id="d", trigger_reason="HARD_STOP", quantity_cc=100)
+    assert t.close_for_ticker("KXA") == 1
+    assert [r.ticker for r in t.open_records()] == ["KXB"]
 
 
 def test_no_branch_on_other_rejections(monkeypatch, tmp_path):

@@ -1022,9 +1022,12 @@ async def _maybe_degraded_stop_exit(
             else None
         ),
     )
-    tracker.transition(
-        residual, ResidualStatus.REEVALUATING, reason="post_reject_reeval"
-    )
+    # A held execution lease (degraded IOC awaiting reconciliation) must not
+    # be overwritten by a re-entry evaluation.
+    if residual.status != ResidualStatus.DEGRADED_EXIT_SUBMITTED.value:
+        tracker.transition(
+            residual, ResidualStatus.REEVALUATING, reason="post_reject_reeval"
+        )
 
     fair = candidate.fair_value_cents
     enabled = degraded_exit_enabled()
@@ -1041,6 +1044,15 @@ async def _maybe_degraded_stop_exit(
         "seconds_to_expiry": candidate.seconds_to_expiry,
         "policy": _residual_policy_version(candidate),
     }
+
+    if residual.status == ResidualStatus.DEGRADED_EXIT_SUBMITTED.value:
+        # A prior degraded IOC is still awaiting venue acknowledgement /
+        # position reconciliation.  Never issue or relabel on top of an
+        # unconfirmed order — record and wait for reconciliation.
+        record["decision"] = "DEGRADED_EXIT_PENDING_RECONCILIATION"
+        record["basis"] = "degraded_already_submitted"
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
 
     def _finish(decision: str, basis: str, status: ResidualStatus) -> None:
         record["decision"] = decision
@@ -1147,10 +1159,33 @@ async def _maybe_degraded_stop_exit(
         )
         return
 
+    # Last-moment settlement re-check: remaining time may have crossed the
+    # close window while this evaluation ran.
+    if residual.settlement_deadline is not None and (
+        residual.settlement_deadline - time.time() <= SETTLEMENT_CLOSE_BUFFER_SECONDS
+    ):
+        _finish(
+            "HOLD_TO_SETTLEMENT_APPROVED",
+            "settlement_close_window_at_submit",
+            ResidualStatus.HOLD_APPROVED,
+        )
+        return
+
+    # Execution lease: claim the attempt durably BEFORE routing so a
+    # concurrent cycle or a crash-restart cannot emit a duplicate intent.
+    claimed, claim_reason, coid = tracker.claim_degraded_attempt(
+        residual,
+        client_order_id_prefix=f"stopcand_{candidate.candidate_id}",
+        limit_cents=degraded_limit,
+    )
+    if not claimed:
+        _finish("RESIDUAL_RISK_BREACH", claim_reason, ResidualStatus.RISK_BREACH)
+        return
+
     from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
     kalshi_side = to_kalshi_side(held_side, "sell")
-    attempt_no = residual.degraded_attempt_number + 1
+    attempt_no = residual.degraded_attempt_number
     intent = OrderIntent(
         ticker=candidate.market_ticker,
         side=held_side,
@@ -1166,9 +1201,7 @@ async def _maybe_degraded_stop_exit(
         intent_id=(
             f"stop_candidate:{candidate.candidate_id}:dg{attempt_no}"
         ),
-        client_order_id=(
-            f"stopcand_{candidate.candidate_id}dg{attempt_no}"[:64]
-        ),
+        client_order_id=coid,
         kalshi_side=kalshi_side,
         reduce_only=True,
         entry_or_exit="exit",
@@ -1196,32 +1229,56 @@ async def _maybe_degraded_stop_exit(
         degraded_limit,
         held_contracts,
     )
-    tracker.record_degraded_submission(
-        residual,
-        client_order_id=intent.client_order_id,
-        limit_cents=degraded_limit,
-    )
     result = await route_order_async(intent)
     record["decision"] = "DEGRADED_EXIT_APPROVED"
     record["basis"] = "degraded_ioc_submitted"
     record["result"] = _serialize_result(result)
-    filled_cc = 0
-    for attr in ("filled_count", "count_filled", "filled_cc"):
-        v = getattr(result, attr, None)
+
+    fill = getattr(result, "fill", None) or {}
+    filled_contracts = 0
+    for k in ("filled_count", "count"):
+        v = fill.get(k) if isinstance(fill, dict) else None
         if v is not None:
             try:
-                filled_cc = int(v) * 100
+                filled_contracts = int(v)
                 break
             except (TypeError, ValueError):
                 pass
-    if 0 < filled_cc < held_contracts * 100:
+    certainty = str(getattr(result, "submission_certainty", "") or "")
+    status = str(getattr(result, "status", "") or "").lower()
+    record["filled_contracts"] = filled_contracts
+    record["submission_certainty"] = certainty
+
+    if status == "unknown" or certainty in ("in_flight", "unknown"):
+        # Ambiguous outcome: the lease stays held (DEGRADED_EXIT_SUBMITTED)
+        # so no further degraded order can be issued until reconciliation
+        # observes the true position.
+        record["basis"] = "degraded_ioc_ambiguous_awaiting_reconciliation"
+    elif filled_contracts >= held_contracts:
+        tracker.transition(
+            residual,
+            ResidualStatus.CLOSED,
+            reason="degraded_ioc_filled",
+            remaining_quantity_cc=0,
+            venue_acknowledged_quantity=filled_contracts * 100,
+        )
+    elif filled_contracts > 0:
         tracker.transition(
             residual,
             ResidualStatus.PARTIALLY_FILLED,
             reason="partial_degraded_fill",
-            remaining_quantity_cc=held_contracts * 100 - filled_cc,
-            venue_acknowledged_quantity=filled_cc,
+            remaining_quantity_cc=(held_contracts - filled_contracts) * 100,
+            venue_acknowledged_quantity=filled_contracts * 100,
         )
+    else:
+        # Venue processed the IOC with zero execution (or rejected it): the
+        # attempt is spent; the residual is unprotected live risk.
+        tracker.transition(
+            residual,
+            ResidualStatus.RISK_BREACH,
+            reason=f"degraded_ioc_unfilled:{status}",
+        )
+        record["basis"] = f"degraded_ioc_unfilled:{status}"
     get_stop_candidate_ledger().record_residual_decision(candidate, record)
 
 
@@ -1329,6 +1386,14 @@ async def maybe_submit_stop_candidate(
     # 2. Reconcile against the candidate.
     if exchange_position_cc == 0:
         record_stop_candidate(candidate)
+        # Position is flat on the venue — any residual workflow on this
+        # ticker has ended (exited, filled elsewhere, or settled).
+        try:
+            from merid.event_venues.kalshi.residual_exit import get_residual_exit_tracker
+
+            get_residual_exit_tracker().close_for_ticker(candidate.market_ticker)
+        except Exception as exc:
+            logger.debug("[STOP-CANDIDATE] residual close failed: %s", exc)
         return OrderResult(
             status="rejected",
             mode=TradingMode.PAPER,
