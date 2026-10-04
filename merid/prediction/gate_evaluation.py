@@ -396,7 +396,14 @@ def evaluate_all_gates(
             threshold={},
         )
 
-        pev_eval = net_edge_cents is not None
+        # 2026-10-04: negative-floor provisional lanes admit non-positive EV
+        # by design — the {side}_positive_ev and {side}_cost_basis checks are
+        # the positive-EV requirement restated and do not apply when the
+        # decision armed the negative-floor bypass.  Leaving them evaluated
+        # would let a hardcoded 0.0 floor mask the real structural gate
+        # (e.g. low_conviction) that actually vetoed the candidate.
+        neg_floor_bypass = bool(ind.get(f"{side}_cbp_neg_floor_p_bypass"))
+        pev_eval = net_edge_cents is not None and not neg_floor_bypass
         _add(
             f"{side}_positive_ev",
             "NO_POSITIVE_EXECUTABLE_EDGE",
@@ -424,7 +431,10 @@ def evaluate_all_gates(
             threshold={"min_net_edge_cents": min_edge_cents},
         )
 
-        cb_eval = p_selected is not None and min_p is not None
+        cb_eval = (
+            p_selected is not None and min_p is not None
+            and not neg_floor_bypass
+        )
         _add(
             f"{side}_cost_basis",
             "NO_POSITIVE_EXECUTABLE_EDGE",

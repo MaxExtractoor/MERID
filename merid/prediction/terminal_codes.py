@@ -186,6 +186,18 @@ def canonical_terminal_code(
         or rl.startswith("no_positive_executable_edge")
     ):
         return TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+    # 2026-10-04: bounded-lane floor miss — the lane's configured (possibly
+    # negative) floor IS the dynamic required edge for that side, so a miss
+    # canonicalizes to the same threshold code rather than an EV label.
+    if "edge_below_lane_floor" in rl:
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+
+    # Structural safety-gate vetoes that carry no dedicated canonical code.
+    # UNCLASSIFIED preserves the raw gate name; the old economics fallback
+    # relabelled conviction-vetoed lane candidates as EV failures.
+    if rl.startswith("low_conviction"):
+        return TerminalCode.UNCLASSIFIED.value
+
     if "edge_below_threshold" in rl or rl in (
         "insufficient_edge",
         "ev_extreme_price",
