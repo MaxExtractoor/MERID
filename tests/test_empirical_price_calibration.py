@@ -135,3 +135,86 @@ def test_live_never_lowers_a_higher_model_probability(monkeypatch, tmp_path, _ne
     d = _decision()
     assert d.indicators["no_epc_applied"] is False
     assert d.indicators["p_no_for_no_pre_cap"] > 0.30
+
+
+# ---- price-adjusted empirical LCB gates -----------------------------------
+
+def _tail_decision(*, adj_lcb, applied=True, price=0.81, net_edge=0.015,
+                   model_risk=0.02, seconds=240):
+    """Minimal selected-NO decision at a tail price for the bounded-domain gate."""
+    from decimal import Decimal
+    from datetime import datetime, timezone
+    from merid.prediction.trade_decision import EdgeBreakdown, TradeDecision
+    bd = EdgeBreakdown(
+        p_yes=1.0 - price, p_no=price, selected_side="no",
+        p_selected=0.86, p_opposite=0.14,
+        executable_entry_price=price, entry_fee=0.015,
+        exit_cost_reserve=0.02, model_risk_reserve=model_risk,
+        gross_edge=0.86 - price, net_edge=net_edge,
+    )
+    return TradeDecision(
+        run_id="epc", decision_id="epc_tail", ticker="KXETH15M-EPC",
+        asset="ETH", timestamp_utc=datetime.now(timezone.utc),
+        p_yes_raw=Decimal("0.2"), p_yes_calibrated=Decimal("0.2"),
+        p_yes_uncertainty=Decimal("0"), p_no_calibrated=Decimal("0.8"),
+        data_state="healthy", regime_label="normal",
+        selected_outcome="no", selected_action="buy",
+        seconds_to_expiry=Decimal(str(seconds)),
+        no_edge_breakdown=bd, edge_breakdown=bd,
+        indicators={
+            "epc_mode": "live" if applied else "shadow",
+            "no_epc_applied": applied,
+            "no_epc_cell": "epc_no_80_89_m6",
+            "no_epc_adj_lcb_cents": adj_lcb,
+        },
+    )
+
+
+def _thr(total=0.02):
+    from merid.prediction.trade_decision import EdgeThresholdDecomposition
+    return EdgeThresholdDecomposition(
+        total=total, base_floor=total, global_floor=total, asset_base=0.0,
+        convexity=0.0, flb_premium=0.0, clamped_floor=False,
+        clamped_ceiling=False,
+    )
+
+
+def test_tail_lcb_gate_accepts_price_adjusted_epc_lcb():
+    from merid.prediction.trade_decision import apply_bounded_live_domain_gate
+    # Model LCB = (0.015 - 0.02)*100 = -0.5c — below the 2.0c required edge.
+    # Cell epc_no_80_89_m6 LCB 1.53c, held 81c vs avg 84.8c -> adj 5.33c.
+    d = _tail_decision(adj_lcb=5.33)
+    out = apply_bounded_live_domain_gate(d, no_threshold=_thr(0.02))
+    assert out.selected_outcome == "no"
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["epc_lcb_cents"] == pytest.approx(5.33)
+    assert rec["epc_cell"] == "epc_no_80_89_m6"
+
+
+def test_tail_lcb_gate_rejects_entry_priced_above_cell_average():
+    from merid.prediction.trade_decision import apply_bounded_live_domain_gate
+    # Same cell LCB but held 88c vs avg 84.8c -> adj -1.67c: no rescue.
+    d = _tail_decision(adj_lcb=-1.67, price=0.88)
+    out = apply_bounded_live_domain_gate(d, no_threshold=_thr(0.02))
+    assert out.selected_outcome is None
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["gate"] == "tail_lcb" and rec["epc_lcb_cents"] is None
+
+
+def test_tail_lcb_gate_shadow_mode_never_substitutes_epc_lcb():
+    from merid.prediction.trade_decision import apply_bounded_live_domain_gate
+    d = _tail_decision(adj_lcb=9.9, applied=False)
+    out = apply_bounded_live_domain_gate(d, no_threshold=_thr(0.02))
+    assert out.selected_outcome is None
+    assert out.indicators["bounded_domain_gate"]["epc_lcb_cents"] is None
+
+
+def test_adj_lcb_indicator_and_eff_edge_recorded(monkeypatch, _neutral):
+    monkeypatch.setenv("MERID_EMPIRICAL_CAL_MODE", "live")
+    d = _decision()
+    ind = d.indicators
+    # cell: edge_lcb 2.1c, avg_price 64c; held 64c -> adj 2.1c
+    assert ind["no_epc_adj_lcb_cents"] == pytest.approx(2.1)
+    # effective edge = max(reserve-stacked net, adj_lcb) in cents
+    exp = max(float(d.no_edge_breakdown.net_edge) * 100.0, 2.1)
+    assert ind["no_epc_eff_edge_cents"] == pytest.approx(exp)
