@@ -142,8 +142,17 @@ def canonical_terminal_code(
         or rl.startswith("min_tte")
         or rl.startswith("final_minute")
         or "time_to_expiry" in rl
+        or rl.startswith("bounded_domain_tte")
+        or rl.startswith("bounded_domain_max_tte")
     ):
         return TerminalCode.TTE_ENTRY_CUTOFF.value
+    # Bounded live-domain downgrades that are not TTE: a tail-LCB breach is a
+    # calibration-domain hard veto (evidence adequacy), any other
+    # bounded_domain_* veto is a structural domain guard.
+    if rl.startswith("bounded_domain_tail_lcb") or rl.startswith("tail_lcb_gate"):
+        return TerminalCode.EVIDENCE_HARD_BLOCK.value
+    if rl.startswith("bounded_domain"):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
 
     if "price_band_both_sides_disabled" in rl:
         # The regime reject is conflated: a side still in-band without the
@@ -190,7 +199,13 @@ def canonical_terminal_code(
     ):
         return TerminalCode.EVIDENCE_HARD_BLOCK.value
 
-    if "insufficient_depth" in rl or rl.startswith("fill_or_depth"):
+    if (
+        "insufficient_depth" in rl
+        or rl.startswith("fill_or_depth")
+        or rl.startswith("missing_executable_price")
+        or rl.startswith("non_positive_quantity")
+        or rl.startswith("quantity_less_than_one_contract")
+    ):
         return TerminalCode.SIDE_NOT_LIQUID.value
 
     if (
@@ -200,6 +215,15 @@ def canonical_terminal_code(
         or rl.startswith("no_positive_executable_edge")
     ):
         return TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+    if rl.startswith("stale_executable_price"):
+        # A stale quote is a data-integrity failure, not an economics failure.
+        return TerminalCode.BOOK_NOT_TRUSTED.value
+    if rl.startswith("net_ev_below_min_dollar"):
+        # Positive net EV that did not reach the candidate's admission bound —
+        # a threshold miss, not a non-positive-EV rejection.
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    if rl.startswith("ev_to_tail_ratio_below_min"):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
     # 2026-10-04: bounded-lane floor miss — the lane's configured (possibly
     # negative) floor IS the dynamic required edge for that side, so a miss
     # canonicalizes to the same threshold code rather than an EV label.
