@@ -545,6 +545,50 @@ MERID_TAIL_LCB_MIN_PRICE_CENTS = int(
     os.environ.get("MERID_TAIL_LCB_MIN_PRICE_CENTS", "70")
 )
 
+# 2026-10-04 (counterfactual audit): marginal-band edge rescue.  The settled
+# counterfactual join over logs/rejected_candidates.jsonl shows candidates
+# whose net edge fell <=1c short of the stacked dynamic threshold were
+# net-profitable ONLY inside the 50-89c executable-price band
+# (n=6,268, 76.8% counterfactual win rate, +3.75c/contract net of fees;
+# <50c: +0.50c; 90c+: -3.76c — the >89c tail stays hard-gated).  The slack
+# relaxes ONLY the edge-threshold leg of qualification: depth, tail-guard,
+# evidence, regime, conviction, throttle, countertrend and bookflow vetoes
+# are unchanged, and p_selected must still clear its cost-basis floor.
+# Rescued decisions carry a per-side indicator so routing can prefer the
+# ask-priced (taker) realization the counterfactual actually measured.
+MERID_MARGINAL_BAND_ENABLED = os.environ.get(
+    "MERID_MARGINAL_BAND_RESCUE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_MARGINAL_BAND_SLACK = float(
+    os.environ.get("MERID_MARGINAL_BAND_SLACK_CENTS", "1.0")
+) / 100.0
+MERID_MARGINAL_BAND_MIN_CENTS = int(
+    os.environ.get("MERID_MARGINAL_BAND_MIN_CENTS", "50")
+)
+MERID_MARGINAL_BAND_MAX_CENTS = int(
+    os.environ.get("MERID_MARGINAL_BAND_MAX_CENTS", "89")
+)
+
+
+def _marginal_band_slack(entry_price_cents: Optional[float]) -> float:
+    """Edge-threshold slack (probability units) for the profitable near-miss
+    band.  Zero outside [50, 89]c — the 90c+ tail cohort lost money even at
+    86.8% counterfactual win rate (fee + asymmetric payout), and sub-50c
+    near-misses are only +0.50c/trade — not worth the added flow."""
+    if not MERID_MARGINAL_BAND_ENABLED or entry_price_cents is None:
+        return 0.0
+    try:
+        p = float(entry_price_cents)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(p):
+        return 0.0
+    # Upper bound is exclusive-ish: executable_entry_price*100 is a float that
+    # can carry epsilon above an integer-cent ask, so admit [MIN, MAX+1).
+    if MERID_MARGINAL_BAND_MIN_CENTS <= p < MERID_MARGINAL_BAND_MAX_CENTS + 1.0:
+        return MERID_MARGINAL_BAND_SLACK
+    return 0.0
+
 
 # In-memory and persisted daily canary attempt accounting.
 _cheap_tail_canary_daily_lock = threading.RLock()
@@ -1323,6 +1367,58 @@ def _downgrade_live_selection(
     )
 
 
+def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
+    """Emit a settlement-counterfactual record for a bounded-domain veto.
+
+    These downgrades previously produced no counterfactual row, so the TTE
+    ceiling and tail-LCB gate had zero outcome feedback.  All values are the
+    pre-downgrade selection economics, exactly what would have traded.
+    """
+    try:
+        sel = str(decision.selected_outcome or "").lower()
+        breakdown = decision.edge_breakdown or (
+            decision.yes_edge_breakdown
+            if sel == "yes"
+            else decision.no_edge_breakdown
+        )
+        _ind = decision.indicators or {}
+        log_rejected_candidate(
+            reason=reason,
+            run_id=str(decision.run_id or ""),
+            decision_id=str(decision.decision_id or ""),
+            asset=str(decision.asset or ""),
+            ticker=decision.ticker,
+            side=sel or None,
+            model_p_selected=(
+                float(breakdown.p_selected) if breakdown is not None else None
+            ),
+            held_price_cents=(
+                float(breakdown.executable_entry_price) * 100.0
+                if breakdown is not None
+                else None
+            ),
+            gross_edge=(
+                float(breakdown.gross_edge) if breakdown is not None else None
+            ),
+            net_edge=(
+                float(breakdown.net_edge) if breakdown is not None else None
+            ),
+            edge_threshold=_ind.get(f"{sel}_effective_required_edge_cents"),
+            tte_seconds=(
+                float(decision.seconds_to_expiry)
+                if decision.seconds_to_expiry is not None
+                else None
+            ),
+            fee_cents=(
+                float(breakdown.entry_fee) * 100.0
+                if breakdown is not None
+                else None
+            ),
+        )
+    except Exception:
+        pass
+
+
 def apply_bounded_live_domain_gate(
     decision: TradeDecision,
     *,
@@ -1361,11 +1457,11 @@ def apply_bounded_live_domain_gate(
             "max_tte_s": MERID_LIVE_ENTRY_MAX_TTE_S,
             "would_enter_at_prior": True,
         }
-        return _downgrade_live_selection(
-            decision,
-            f"bounded_domain_tte:{tte:.0f}s>{MERID_LIVE_ENTRY_MAX_TTE_S:.0f}s",
-            record,
+        _reason = (
+            f"bounded_domain_tte:{tte:.0f}s>{MERID_LIVE_ENTRY_MAX_TTE_S:.0f}s"
         )
+        _log_bounded_domain_reject(decision, _reason)
+        return _downgrade_live_selection(decision, _reason, record)
 
     breakdown = decision.edge_breakdown or (
         decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
@@ -1405,14 +1501,12 @@ def apply_bounded_live_domain_gate(
         "would_enter_at_prior": True,
     }
     if lcb_cents < required_cents - 1e-9:
-        return _downgrade_live_selection(
-            decision,
-            (
-                f"tail_lcb_gate:lcb={lcb_cents:.2f}c"
-                f"<required={required_cents:.2f}c@{price_cents}c"
-            ),
-            record,
+        _reason = (
+            f"tail_lcb_gate:lcb={lcb_cents:.2f}c"
+            f"<required={required_cents:.2f}c@{price_cents}c"
         )
+        _log_bounded_domain_reject(decision, _reason)
+        return _downgrade_live_selection(decision, _reason, record)
 
     record["would_enter_at_prior"] = True
     record["passed"] = True
@@ -2439,6 +2533,7 @@ def compute_trade_decision(
     feature_snapshot: Optional[Any] = None,
     entry_price_basis: str = "ask",
     adverse_selection_reserve: float = 0.0,
+    route: str = "taker",
 ) -> TradeDecision:
     """Compute a calibrated, cost-aware trade decision for a 15m binary market.
 
@@ -3612,8 +3707,20 @@ def compute_trade_decision(
     )
     _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg)
     _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg)
-    _yes_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "yes")
-    _no_bookflow_block = _dr.bookflow_block_reason(feature_snapshot, asset, "no")
+    # 2026-10-04: the book-flow confirmation gate exists to protect RESTING
+    # (passive) entries from being picked off into adverse flow — an IOC
+    # taker pays the ask once and never rests in the book, so the veto does
+    # not apply to taker evaluations.  Counterfactual evidence agrees:
+    # bookflow_* vetoes blocked 134 winners vs 74 losers at imb>=0.20.
+    _bookflow_applies = route != "taker"
+    _yes_bookflow_block = (
+        _dr.bookflow_block_reason(feature_snapshot, asset, "yes")
+        if _bookflow_applies else None
+    )
+    _no_bookflow_block = (
+        _dr.bookflow_block_reason(feature_snapshot, asset, "no")
+        if _bookflow_applies else None
+    )
     # 91-94c YES window: the lane's strict-gate failure (armed) or the
     # reserved-window price with the lane off both own the terminal reason.
     _yes_lane_terminal = (
@@ -3705,6 +3812,57 @@ def compute_trade_decision(
     indicators["yes_epc_eff_edge_cents"] = _yes_eff_edge * 100.0
     indicators["no_epc_eff_edge_cents"] = _no_eff_edge * 100.0
 
+    # 2026-10-04: marginal-band rescue slack.  Only positive thresholds in the
+    # 50-89c executable band relax; bounded negative-floor lanes keep their own
+    # edge bound, and >89c/<50c near-misses are counterfactually unprofitable.
+    # Taker-route evaluations only: the counterfactual was measured on ask-price
+    # fills; a resting-bid (maker) fill is a different, adverse-selected
+    # distribution and must not inherit the slack.
+    _mb_on_route = route == "taker"
+    _mb_yes_slack = (
+        _marginal_band_slack(float(yes_breakdown.executable_entry_price) * 100.0)
+        if (_mb_on_route and yes_min_edge > 0.0)
+        else 0.0
+    )
+    _mb_no_slack = (
+        _marginal_band_slack(float(no_breakdown.executable_entry_price) * 100.0)
+        if (_mb_on_route and no_min_edge > 0.0)
+        else 0.0
+    )
+    _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
+    _no_edge_eff_bound = no_min_edge - _mb_no_slack
+    # A "rescued" side is one that would have failed without the slack —
+    # stamped so routing can realize the ask-priced fill the counterfactual
+    # measured, and so the rescue lane has its own outcome cohort.
+    _yes_mb_rescued = (
+        _mb_yes_slack > 0.0
+        and _yes_eff_edge >= _yes_edge_eff_bound
+        and _yes_eff_edge < yes_min_edge
+    )
+    _no_mb_rescued = (
+        _mb_no_slack > 0.0
+        and _no_eff_edge >= _no_edge_eff_bound
+        and _no_eff_edge < no_min_edge
+    )
+    if _mb_yes_slack > 0.0 or _mb_no_slack > 0.0:
+        indicators["marginal_band"] = {
+            "enabled": True,
+            "slack_cents": MERID_MARGINAL_BAND_SLACK * 100.0,
+            "yes_rescued": bool(_yes_mb_rescued),
+            "no_rescued": bool(_no_mb_rescued),
+        }
+    # A rescued side's admission bound IS the slackened threshold — every
+    # downstream re-gate (loop lane-EV floor, router stale-decision check)
+    # must compare against it, not the un-slackened policy threshold.
+    if _yes_mb_rescued:
+        indicators["yes_effective_required_edge_cents"] = (
+            _yes_edge_eff_bound * 100.0
+        )
+    if _no_mb_rescued:
+        indicators["no_effective_required_edge_cents"] = (
+            _no_edge_eff_bound * 100.0
+        )
+
     yes_qualifies = (
         yes_depth_ok
         and not tail_guard_violation_yes
@@ -3715,7 +3873,7 @@ def compute_trade_decision(
             _yes_trend_hi_qualifies
             or (
                 not _yes_hi_price
-                and _yes_eff_edge >= yes_min_edge
+                and _yes_eff_edge >= _yes_edge_eff_bound
                 and (
                     _yes_cbp_neg_floor
                     or yes_breakdown.p_selected > yes_min_p
@@ -3728,7 +3886,7 @@ def compute_trade_decision(
     )
     no_qualifies = (
         no_depth_ok
-        and _no_eff_edge >= no_min_edge
+        and _no_eff_edge >= _no_edge_eff_bound
         and (
             _no_cbp_neg_floor
             or no_breakdown.p_selected > no_min_p
@@ -4473,6 +4631,26 @@ def compute_trade_decision(
             _v = indicators.get(f"{selected_outcome}_{_f}")
             if _v is not None:
                 indicators[_f] = _v
+
+        # Marginal-band rescue: the selected side cleared the edge leg only
+        # through the 50-89c near-miss slack.  Routing must realize the
+        # ask-priced fill the counterfactual measured — a resting bid fill is
+        # a different, adverse-selected distribution — so downstream prefers
+        # taker/IOC for rescued candidates regardless of maker preference.
+        if (selected_outcome == "yes" and _yes_mb_rescued) or (
+            selected_outcome == "no" and _no_mb_rescued
+        ):
+            indicators["marginal_band_rescue"] = True
+            # The admission bound carried downstream (intent.min_required_edge
+            # → router stale-decision revalidation; edge_threshold audit field)
+            # is the slackened bound the side actually cleared — otherwise
+            # every rescued intent dies at submit-time as "edge decayed".
+            selected_threshold = (
+                selected_threshold - MERID_MARGINAL_BAND_SLACK
+            )
+            indicators["marginal_band_admission_bound_cents"] = (
+                float(selected_threshold) * 100.0
+            )
 
     decision = TradeDecision(
         run_id=run_id,

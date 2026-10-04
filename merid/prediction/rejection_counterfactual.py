@@ -59,6 +59,23 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "trend_yes_hi",
     "yes_edge_below_lane_floor",
     "no_edge_below_lane_floor",
+    # 2026-10-04: close the remaining outcome blind spots.
+    #   bounded_domain_*  — TTE-ceiling downgrades (never previously logged)
+    #   tail_lcb_gate     — high-price LCB downgrades (never previously logged)
+    #   no_positive_executable_edge — the largest volume rejection class
+    #   net_ev_below_min_dollar — flat $0.03/order floor rejects
+    #   market_unavailable / book_not_trusted / no_eligible_price_band /
+    #   tte_entry_cutoff — funnel kills upstream of qualification
+    "bounded_domain_",
+    "tail_lcb_gate",
+    "no_positive_executable_edge",
+    "net_ev_below_min_dollar",
+    "market_unavailable",
+    "book_not_trusted",
+    "no_eligible_price_band",
+    "tte_entry_cutoff",
+    "structural_risk_veto",
+    "edge_below_dynamic_threshold",
 )
 
 
