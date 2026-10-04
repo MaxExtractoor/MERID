@@ -13114,9 +13114,17 @@ class LeanAgent15m:
         # FEE-AWARE REGIME CLASSIFICATION (2026-09-20): Replace static 10c-75c range with regime system
         from merid.event_venues.kalshi.market_regime import classify_market_regime
         
-        # Classify regime for both YES and NO executable prices
-        yes_regime = classify_market_regime(yes_price_cents, int(seconds_to_expiry))
-        no_regime = classify_market_regime(no_price_cents, int(seconds_to_expiry))
+        # Classify regime for both YES and NO executable prices.
+        # A 0/None price means the side has no quote at all — skip the
+        # classifier rather than emit an invalid-input warning per cycle.
+        yes_regime = (
+            classify_market_regime(yes_price_cents, int(seconds_to_expiry))
+            if yes_price_cents and 1 <= yes_price_cents <= 99 else None
+        )
+        no_regime = (
+            classify_market_regime(no_price_cents, int(seconds_to_expiry))
+            if no_price_cents and 1 <= no_price_cents <= 99 else None
+        )
 
         # 2026-10-01 (post_drawdown epoch): dormant research lane — a
         # trend-aligned high-price YES ask (91-94c) may bypass the
@@ -13186,8 +13194,14 @@ class LeanAgent15m:
             # Distinguish tail-price exclusion from the regime TTE floor:
             # reclassify without the time bound — a side that still resolves
             # to a regime was rejected on time, not on price band.
-            _yes_regime_no_tte = classify_market_regime(yes_price_cents, None)
-            _no_regime_no_tte = classify_market_regime(no_price_cents, None)
+            _yes_regime_no_tte = (
+                classify_market_regime(yes_price_cents, None)
+                if yes_price_cents and 1 <= yes_price_cents <= 99 else None
+            )
+            _no_regime_no_tte = (
+                classify_market_regime(no_price_cents, None)
+                if no_price_cents and 1 <= no_price_cents <= 99 else None
+            )
             _regime_reject_cause = (
                 "tte_floor" if (_yes_regime_no_tte or _no_regime_no_tte)
                 else "price_band"
