@@ -782,7 +782,10 @@ def test_decision_provisional_lane_stamp_on_selection():
 
 
 def test_decision_outside_domain_keeps_formula():
-    d = _decision(p_yes_model=0.50, seconds_to_expiry=90.0)
+    # TTE >600s is outside the provisional domain on the high side; the
+    # <120s side is unreachable since MERID_ENTRY_MIN_SECONDS_TO_EXPIRY
+    # (180s) exits before threshold decomposition.
+    d = _decision(p_yes_model=0.50, seconds_to_expiry=700.0)
     ind = d.indicators
     assert ind["yes_threshold_source"] == "formula"
     assert ind["yes_thr_prov_cell_id"] is None
@@ -1042,13 +1045,17 @@ def test_domain_gate_tail_lcb_ignores_mid_band():
     assert "bounded_domain_gate" not in (out.indicators or {})
 
 
-def test_domain_gate_end_to_end_tte_ceiling():
+def test_domain_gate_end_to_end_tte_ceiling(monkeypatch):
     """compute_trade_decision itself must veto a >600s live selection.
 
     Mirrors the XRP-2045 loss: XRP NO at ~77c executable, model ~0.82,
     TTE 823s — inside the formula lane's old window, outside the bounded
     live domain.
     """
+    # .env sets MERID_ANCHOR_VOL_TO_MARKET=1 — market-implied vol flattens
+    # the deep-OTM Bachelier p this scenario relies on (p_no must stay
+    # high enough for a +EV NO selection to reach the domain gate).
+    monkeypatch.setattr(_td, "MERID_ANCHOR_VOL_TO_MARKET", False)
     d = _decision(
         asset="XRP",
         spot_price=1.4863, strike_price=1.4886,
@@ -1300,3 +1307,76 @@ def test_audit_side_row_carries_adverse_selection():
         decision, "no", decision.indicators, None, None
     )
     assert row["adverse_selection_haircut_cents"] == pytest.approx(1.5)
+
+# ---------------------------------------------------------------------------
+# negative-floor provisional lane: the -4c evidence-buying bound must be
+# reachable end-to-end (2026-10-04 audit: p_selected > min_p, the EV gate's
+# min_dollar_ev=0 default, and its ev/tail floor were three positive-EV
+# vetoes that made every negative floor dead code).
+# ---------------------------------------------------------------------------
+
+
+def _eth_yes_decision(monkeypatch, p, *, floor="-6.0", cell_ev="-4.0"):
+    monkeypatch.setattr(_td, "MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", floor)
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", cell_ev)
+    return _decision(
+        asset="ETH",
+        spot_price=100.0,
+        strike_price=100.0,
+        p_yes_model=p,
+        yes_bid_cents=40.0,
+        yes_ask_cents=42.0,
+        no_bid_cents=58.0,
+        no_ask_cents=60.0,
+    )
+
+
+def test_negative_floor_lane_emits_shallow_negative_ev(monkeypatch):
+    """A candidate inside the configured -4c floor must emit on the lane."""
+    emitted = []
+    for p in (0.40, 0.42, 0.44, 0.46, 0.48, 0.50):
+        d = _eth_yes_decision(monkeypatch, p)
+        ind = d.indicators
+        # Every emitted YES trade on this cell must respect the floor.
+        if d.selected_outcome == "yes":
+            emitted.append(d)
+            assert ind["decision_lane"] == "current_build_provisional"
+            assert ind["provisional_cell_id"] == "cbp_eth_yes_40_50_t120_300"
+            assert ind["yes_cbp_neg_floor_p_bypass"] is True
+            assert ind["yes_min_edge"] == pytest.approx(-0.04)
+            assert ind["yes_ev_net_cents"] >= -4.0 - 1e-6
+    assert emitted, "no p in the sweep produced an in-floor emission"
+
+
+def test_negative_floor_lane_still_rejects_below_floor(monkeypatch):
+    """Candidates below the -4c floor must still be rejected."""
+    rejected_below = 0
+    for p in (0.25, 0.28, 0.30, 0.32, 0.35):
+        d = _eth_yes_decision(monkeypatch, p)
+        ind = d.indicators
+        if ind["yes_ev_net_cents"] < -4.0 - 1e-6:
+            rejected_below += 1
+            assert d.selected_outcome != "yes"
+    assert rejected_below, "sweep never produced a below-floor candidate"
+
+
+def test_positive_floor_cells_keep_positive_ev_requirement(monkeypatch):
+    """DOGE YES keeps its default +3c floor: no negative-EV emissions."""
+    monkeypatch.setattr(_td, "MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    for p in (0.40, 0.42, 0.44, 0.46, 0.48):
+        d = _decision(asset="DOGE", p_yes_model=p)
+        if d.selected_outcome == "yes":
+            assert d.indicators["yes_cbp_neg_floor_p_bypass"] is not True
+            assert d.indicators["yes_ev_net_cents"] > 0.0
+
+
+def test_formula_path_unchanged_by_bypass(monkeypatch):
+    """TTE outside the provisional domain keeps formula economics."""
+    monkeypatch.setattr(_td, "MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", "-6.0")
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
+    d = _decision(asset="ETH", p_yes_model=0.45, seconds_to_expiry=700.0)
+    ind = d.indicators
+    assert ind["yes_threshold_source"] == "formula"
+    assert ind["yes_cbp_neg_floor_p_bypass"] is False

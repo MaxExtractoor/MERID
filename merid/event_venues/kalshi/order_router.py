@@ -1105,6 +1105,16 @@ def check_market_microstructure_edge_aware(
     return True, "ok"
 
 
+# Order statuses that mean the order can never rest or fill again.  A
+# duplicate client_order_id lookup resolving to one of these must be
+# treated as a rejection, not "confirmed resting" (2026-10-04: a
+# post-only-cross order was created-then-auto-canceled venue-side and
+# the duplicate handler recorded submitted_live for a dead order).
+TERMINAL_ORDER_STATUSES = frozenset(
+    {"canceled", "cancelled", "expired", "rejected"}
+)
+
+
 def track_resting_order(order: RestingOrder) -> None:
     """Add a resting order to the tracking map."""
     with _resting_orders_lock:
@@ -16455,8 +16465,13 @@ async def _route_live(
         # between our last BBO read and order arrival; repricing to a strictly
         # passive price at a freshly fetched BBO is always price-improving for
         # the held side, so the retry is bounded, EV-safe, and happens exactly
-        # once.  Same client_order_id is reused — the rejected order never
-        # existed on the venue, and the identity chain stays intact.
+        # once.
+        # 2026-10-04: the retry must carry a fresh wire client_order_id.
+        # Observed live: submit@32c -> 400 post-only cross, retry with the
+        # same coid -> 409 duplicate carrying order_id status=canceled — the
+        # rejected order DID register the coid venue-side (created then
+        # auto-canceled), so reusing it guarantees a 409.  The intent-level
+        # coid stays canonical; only the wire id gets the ``r1`` suffix.
         _po_err_lower = str(getattr(placed_res, "error", "") or "").lower()
         if (
             placed_res is not None
@@ -16491,6 +16506,21 @@ async def _route_live(
                             expiration_ts=resolved_tif.expiration_time,
                             post_only=effective_post_only,
                         )
+                        # Fresh wire coid for the retry (see header note) —
+                        # the rejected order already consumed the original.
+                        _rt_coid = f"{intent.client_order_id}r1"
+                        create_request.client_order_id = _rt_coid
+                        if getattr(create_request, "idempotency_key", None):
+                            create_request.idempotency_key = (
+                                f"{create_request.idempotency_key}r1"
+                            )
+                        try:
+                            create_request.metadata[
+                                "reprice_of_client_order_id"
+                            ] = getattr(intent, "client_order_id", None)
+                            create_request.metadata["client_order_id"] = _rt_coid
+                        except Exception:
+                            pass
                         _rt_old_res = placed_res
                         placed_res = await port.create_order(create_request)
                         latency = (_time.monotonic() - t0) * 1000
@@ -16887,6 +16917,32 @@ async def _route_live(
                 # Query Kalshi (via the port) to reconcile actual exchange state
                 order_data = await port.get_order(client_order_id=_wire_coid)
                 if order_data is not None:
+                    # 2026-10-04: honor the venue status, not just existence.
+                    # A duplicate coid can resolve to a TERMINAL order
+                    # (observed live: post-only-cross order created-then-
+                    # auto-canceled -> status=canceled).  Treating it as
+                    # "confirmed resting" recorded submitted_live for a dead
+                    # order and hid the real rejection.
+                    _dup_status = str(getattr(order_data, "status", "") or "").lower()
+                    if _dup_status in TERMINAL_ORDER_STATUSES:
+                        logger.warning(
+                            "[KALSHI_DUPLICATE_TERMINAL] ticker=%s order_id=%s status=%s — "
+                            "order is terminal, not resting",
+                            intent.ticker,
+                            order_data.order_id,
+                            order_data.status,
+                        )
+                        _release_allocated_slot(intent)
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason=f"duplicate_order_terminal:{_dup_status}",
+                            latency_ms=round(latency, 2),
+                            submission_attempted=True,
+                            exchange_request_sent=True,
+                            exchange_ack_received=True,
+                            submission_certainty="rejected",
+                        )
                     logger.info(
                         "[KALSHI_DUPLICATE_LOOKUP] ticker=%s order_id=%s status=%s — confirmed resting",
                         intent.ticker,
