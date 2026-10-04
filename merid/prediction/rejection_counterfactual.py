@@ -48,6 +48,17 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "live_evidence_",
     "evidence_",
     "market_fade_blocked_",
+    # 2026-10-04: structural strategy gates.  These veto candidates whose
+    # economics already cleared, so they are the gates most in need of a
+    # settlement counterfactual — previously they were a blind spot.
+    "countertrend_",
+    "bookflow_",
+    "low_conviction",
+    "strip_same_side_",
+    "side_suspended",
+    "trend_yes_hi",
+    "yes_edge_below_lane_floor",
+    "no_edge_below_lane_floor",
 )
 
 
