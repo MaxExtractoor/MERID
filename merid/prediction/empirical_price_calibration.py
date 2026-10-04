@@ -131,10 +131,15 @@ def lookup(side: str, held_price_cents: float, seconds_to_expiry: float) -> Opti
     c = cells.get((side, int(px // 10) * 10, int(tte // 60)))
     if c is None:
         return None
+    # The mispricing is an additive uplift over price (win_rate - price is
+    # ~flat inside a 10c bucket), so the cell's shrunk uplift is applied to
+    # the actual held price rather than publishing the bucket-average p.
+    uplift = float(c["p_shrunk"]) - float(c["avg_price_c"]) / 100.0
+    p = max(0.01, min(0.99, px / 100.0 + uplift))
     return CellEstimate(
         cell_id=str(c["cell_id"]),
         side=side,
-        p=float(c["p_shrunk"]),
+        p=p,
         n=int(c["n"]),
         edge_c=float(c["edge_c"]),
         edge_lcb_c=float(c["edge_lcb_c"]),
