@@ -917,6 +917,64 @@ def build_stop_candidate(
 
 # ── Submission ────────────────────────────────────────────────────────────────
 
+def _resolve_position_epoch(ticker: str) -> Optional[str]:
+    """Best-effort position-epoch identity: entry fill/order id when the
+    local position cache can link it.  Falls back to None (the tracker then
+    keys on ticker+side, which still dedupes retries of the same exposure)."""
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        cache = get_position_cache()
+        if cache is None:
+            return None
+        pos = cache.get_position(ticker)
+        if pos is None:
+            return None
+        return (
+            getattr(pos, "entry_fill_id", None)
+            or getattr(pos, "entry_order_id", None)
+            or getattr(pos, "client_order_id", None)
+        )
+    except Exception:
+        return None
+
+
+def _residual_policy_version(candidate: StopCandidate) -> Dict[str, Any]:
+    """Version every input to the degraded-exit decision so counterfactual
+    comparisons stay honest across later knob changes."""
+    from merid.event_venues.kalshi.residual_exit import (
+        DEGRADED_MAX_ATTEMPTS,
+        DEGRADED_MAX_VWAP_DIVERGENCE_CENTS,
+    )
+
+    return {
+        "code": "residual_exit_v1",
+        "stop_max_slippage_c": STOP_MAX_SLIPPAGE_CENTS,
+        "degraded_residual_slip_c": STOP_DEGRADED_RESIDUAL_SLIP_CENTS,
+        "degraded_max_attempts": DEGRADED_MAX_ATTEMPTS,
+        "degraded_max_vwap_divergence_c": DEGRADED_MAX_VWAP_DIVERGENCE_CENTS,
+        "edge_exit_cost_c": (
+            candidate.total_exit_cost_cents
+            if candidate.total_exit_cost_cents is not None
+            else STOP_EDGE_TOTAL_EXIT_COST_CENTS
+        ),
+        "edge_hysteresis_c": (
+            candidate.hysteresis_cents
+            if candidate.hysteresis_cents is not None
+            else STOP_EDGE_HYSTERESIS_CENTS
+        ),
+        "degraded_live_enabled": degraded_exit_enabled(),
+        "stop_submission_enabled": stop_submission_enabled(),
+    }
+
+
+def _normalize_venue_limit(raw_cents: float, side: str) -> int:
+    """Normalize a computed limit to venue tick bounds.  Kalshi 15m binaries
+    price in whole cents on [1, 99]; the degraded bound can never expand the
+    permitted loss envelope past the executable range."""
+    return max(1, min(99, int(round(raw_cents))))
+
+
 async def _maybe_degraded_stop_exit(
     candidate: StopCandidate,
     primary_result: Any,
@@ -926,87 +984,173 @@ async def _maybe_degraded_stop_exit(
 ) -> None:
     """Residual-exposure branch for a non-executable protective exit.
 
-    Runs after the primary stop IOC is rejected with ``limit_not_executable``.
-    Compares depth-weighted liquidation proceeds (firewall VWAP, net of exit
-    costs) against holding to settlement at the model's fair value:
+    A ``limit_not_executable`` rejection is not a terminal state — but a
+    decision must be *possible*, not just attempted.  HOLD_APPROVED is
+    reserved for the positive case ``fair + costs + hyst <= vwap`` failing;
+    missing/unsafe inputs resolve to RESIDUAL_EXIT_DATA_UNAVAILABLE so the
+    dashboard never counts a could-not-decide as a chose-to-hold.
 
-        exit approved  <=>  fair + exit_costs + hysteresis <= degraded_vwap
-                           <=>  V_exit > V_hold - C_carry
-
-    When approved, one bounded degraded IOC is submitted at
-    ``min(vwap, fresh_bid) - residual_slip`` under a fresh ``dg1`` client
-    order id (the original coid was consumed by the venue).  When not
-    approved, or when the fair-value basis is missing, an explicit
-    HOLD_TO_SETTLEMENT / RESIDUAL_RISK_BREACH decision is persisted so the
-    residual position is never silently carried to expiry.  Automatic
-    submission remains env-gated; observe-only mode still records the
-    decision it would have taken.
+    The durable ResidualExitTracker record (ticker:side:epoch) carries
+    idempotency: repeated monitor cycles join the same residual, the
+    degraded attempt budget is enforced, and exactly one ``dgN`` IOC can
+    ever be live per residual.
     """
-    vwap_cents = parse_non_executable_vwap_cents(
-        getattr(primary_result, "reason", None)
-    )
-    if vwap_cents is None or held_contracts <= 0:
+    reason_str = str(getattr(primary_result, "reason", "") or "")
+    is_non_exec = "limit_not_executable" in reason_str.lower()
+    vwap_cents = parse_non_executable_vwap_cents(reason_str)
+    if not is_non_exec or held_contracts <= 0:
         return
 
+    from merid.event_venues.kalshi.residual_exit import (
+        DEGRADED_MAX_VWAP_DIVERGENCE_CENTS,
+        ResidualStatus,
+        get_residual_exit_tracker,
+    )
+
+    tracker = get_residual_exit_tracker()
+    residual = tracker.get_or_create(
+        candidate.market_ticker,
+        held_side,
+        _resolve_position_epoch(candidate.market_ticker)
+        or f"unlinked:{candidate.candidate_id}",
+        trigger_id=candidate.candidate_id,
+        trigger_reason=candidate.trigger_reason,
+        quantity_cc=held_contracts * 100,
+        settlement_deadline=(
+            time.time() + candidate.seconds_to_expiry
+            if candidate.seconds_to_expiry is not None
+            else None
+        ),
+    )
+    tracker.transition(
+        residual, ResidualStatus.REEVALUATING, reason="post_reject_reeval"
+    )
+
     fair = candidate.fair_value_cents
+    enabled = degraded_exit_enabled()
     record: Dict[str, Any] = {
         "ticker": candidate.market_ticker,
+        "residual_id": residual.residual_id,
         "trigger_reason": candidate.trigger_reason,
         "held_contracts": held_contracts,
         "fair_value_cents": fair,
         "degraded_vwap_cents": vwap_cents,
-        "primary_reject_reason": str(getattr(primary_result, "reason", "") or ""),
+        "primary_reject_reason": reason_str,
         "submitted_limit_cents": getattr(primary_result, "price_cents", None),
-        "degraded_exit_enabled": degraded_exit_enabled(),
+        "degraded_exit_enabled": enabled,
         "seconds_to_expiry": candidate.seconds_to_expiry,
+        "policy": _residual_policy_version(candidate),
     }
 
-    if fair is None:
-        # Price-triggered stops carry no model basis; without fair value the
-        # hold-vs-exit comparison is impossible — surface the residual risk
-        # instead of silently holding to settlement.
-        record["decision"] = "RESIDUAL_RISK_BREACH"
-        record["basis"] = "no_fair_value"
+    def _finish(decision: str, basis: str, status: ResidualStatus) -> None:
+        record["decision"] = decision
+        record["basis"] = basis
+        tracker.transition(
+            residual, status, reason=basis,
+            model_fair_value_cents=fair,
+            firewall_vwap_cents=vwap_cents,
+            normal_stop_limit_cents=getattr(primary_result, "price_cents", None),
+            fresh_bid_cents=record.get("fresh_bid_cents"),
+            selected_degraded_limit_cents=record.get("degraded_limit_cents"),
+            policy=record["policy"],
+        )
         get_stop_candidate_ledger().record_residual_decision(candidate, record)
+
+    # 1. Could-not-decide cases first — a hold label must mean the system
+    #    positively concluded hold > exit, never "inputs were untrustworthy".
+    if vwap_cents is None or not (1 <= vwap_cents <= 99):
+        _finish(
+            "RESIDUAL_EXIT_DATA_UNAVAILABLE",
+            "firewall_vwap_missing_or_out_of_range",
+            ResidualStatus.DATA_UNAVAILABLE,
+        )
         return
 
-    exit_ok = evaluate_edge_stop(
+    if fair is None:
+        _finish(
+            "RESIDUAL_EXIT_DATA_UNAVAILABLE",
+            "no_fair_value",
+            ResidualStatus.DATA_UNAVAILABLE,
+        )
+        return
+
+    # 2. Settlement boundary — no new order attempts inside the close
+    #    window; the residual rides to settlement under explicit policy.
+    if (
+        candidate.seconds_to_expiry is not None
+        and candidate.seconds_to_expiry <= SETTLEMENT_CLOSE_BUFFER_SECONDS
+    ):
+        _finish(
+            "HOLD_TO_SETTLEMENT_APPROVED",
+            "settlement_close_window",
+            ResidualStatus.HOLD_APPROVED,
+        )
+        return
+
+    # 3. Genuine hold decision: model fair value still above the
+    #    depth-weighted exit proceeds net of costs and hysteresis.
+    if not evaluate_edge_stop(
         fair,
         vwap_cents,
         candidate.total_exit_cost_cents,
         candidate.hysteresis_cents,
-    )
-    if not exit_ok:
-        record["decision"] = "HOLD_TO_SETTLEMENT_APPROVED"
-        record["basis"] = "fair_above_degraded_exit_value"
-        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+    ):
+        _finish(
+            "HOLD_TO_SETTLEMENT_APPROVED",
+            "fair_above_degraded_exit_value",
+            ResidualStatus.HOLD_APPROVED,
+        )
         return
 
-    # Degraded exit is economically justified.  Re-fetch the executable bid so
-    # the submitted limit prices off the freshest book, not the stale trigger.
+    # 4. Degraded exit is economically justified — verify the book is still
+    #    describable before spending the attempt budget.
     kalshi2, unified2 = _get_market_state(candidate.market_ticker)
     fresh_bid = _get_executable_exit_cents(unified2 or kalshi2, held_side)
     record["fresh_bid_cents"] = fresh_bid
     if fresh_bid is None or not (1 <= fresh_bid <= 99):
-        record["decision"] = "RESIDUAL_RISK_BREACH"
-        record["basis"] = "no_executable_depth"
-        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        _finish(
+            "RESIDUAL_EXIT_DATA_UNAVAILABLE",
+            "no_executable_depth",
+            ResidualStatus.DATA_UNAVAILABLE,
+        )
         return
 
-    degraded_limit = max(
-        1, min(vwap_cents, fresh_bid) - STOP_DEGRADED_RESIDUAL_SLIP_CENTS
-    )
+    if abs(fresh_bid - vwap_cents) > DEGRADED_MAX_VWAP_DIVERGENCE_CENTS:
+        # The rejection-time VWAP no longer describes the live book — the
+        # comparison just made is stale evidence, not a decision input.
+        _finish(
+            "RESIDUAL_EXIT_DATA_UNAVAILABLE",
+            "vwap_stale_vs_fresh_book",
+            ResidualStatus.DATA_UNAVAILABLE,
+        )
+        return
+
+    allowed, gate = tracker.may_attempt_degraded(residual)
+    if not allowed:
+        _finish(
+            "RESIDUAL_RISK_BREACH",
+            gate,
+            ResidualStatus.RISK_BREACH,
+        )
+        return
+
+    raw_limit = min(vwap_cents, fresh_bid) - STOP_DEGRADED_RESIDUAL_SLIP_CENTS
+    degraded_limit = _normalize_venue_limit(raw_limit, held_side)
+    record["degraded_limit_raw"] = raw_limit
     record["degraded_limit_cents"] = degraded_limit
 
-    if not degraded_exit_enabled():
-        record["decision"] = "DEGRADED_EXIT_APPROVED"
-        record["basis"] = "observe_only_submission_disabled"
-        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+    if not enabled:
+        _finish(
+            "DEGRADED_EXIT_APPROVED",
+            "observe_only_submission_disabled",
+            ResidualStatus.DEGRADED_EXIT_SIMULATED,
+        )
         return
 
     from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
     kalshi_side = to_kalshi_side(held_side, "sell")
+    attempt_no = residual.degraded_attempt_number + 1
     intent = OrderIntent(
         ticker=candidate.market_ticker,
         side=held_side,
@@ -1017,10 +1161,14 @@ async def _maybe_degraded_stop_exit(
         time_in_force="ioc",
         source="stop_candidate_degraded",
         agent_id="stop_candidate",
-        # Distinct identity per candidate so venue dedup cannot conflate the
-        # degraded retry with the consumed primary coid.
-        intent_id=f"stop_candidate:{candidate.candidate_id}:dg1",
-        client_order_id=f"stopcand_{candidate.candidate_id}dg1"[:64],
+        # Distinct identity per attempt — venue-consumed coids cannot repeat,
+        # and the residual tracker caps attempt_number at the budget.
+        intent_id=(
+            f"stop_candidate:{candidate.candidate_id}:dg{attempt_no}"
+        ),
+        client_order_id=(
+            f"stopcand_{candidate.candidate_id}dg{attempt_no}"[:64]
+        ),
         kalshi_side=kalshi_side,
         reduce_only=True,
         entry_or_exit="exit",
@@ -1036,10 +1184,44 @@ async def _maybe_degraded_stop_exit(
         ),
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
     )
+    logger.info(
+        "[STOP-DEGRADED-SUBMIT] candidate=%s ticker=%s attempt=%d "
+        "vwap=%dc fresh_bid=%dc raw_limit=%.1f limit=%dc qty=%d",
+        candidate.candidate_id,
+        candidate.market_ticker,
+        attempt_no,
+        vwap_cents,
+        fresh_bid,
+        raw_limit,
+        degraded_limit,
+        held_contracts,
+    )
+    tracker.record_degraded_submission(
+        residual,
+        client_order_id=intent.client_order_id,
+        limit_cents=degraded_limit,
+    )
     result = await route_order_async(intent)
     record["decision"] = "DEGRADED_EXIT_APPROVED"
     record["basis"] = "degraded_ioc_submitted"
     record["result"] = _serialize_result(result)
+    filled_cc = 0
+    for attr in ("filled_count", "count_filled", "filled_cc"):
+        v = getattr(result, attr, None)
+        if v is not None:
+            try:
+                filled_cc = int(v) * 100
+                break
+            except (TypeError, ValueError):
+                pass
+    if 0 < filled_cc < held_contracts * 100:
+        tracker.transition(
+            residual,
+            ResidualStatus.PARTIALLY_FILLED,
+            reason="partial_degraded_fill",
+            remaining_quantity_cc=held_contracts * 100 - filled_cc,
+            venue_acknowledged_quantity=filled_cc,
+        )
     get_stop_candidate_ledger().record_residual_decision(candidate, record)
 
 

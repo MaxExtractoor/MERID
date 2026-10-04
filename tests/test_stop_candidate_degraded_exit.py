@@ -2,14 +2,19 @@
 
 2026-10-04: when the execution firewall rejects a stop IOC with
 ``limit_not_executable``, the position must end in an explicit durable
-state — degraded exit (bounded IOC at the real depth VWAP) or recorded
-hold-to-settlement — never a silent carry to expiry.
+state — a genuine hold decision, a bounded degraded IOC, or an explicit
+could-not-decide/risk-breach — never a silent carry to expiry.  The
+ResidualExitTracker owns idempotency across monitor cycles.
 """
 
 import asyncio
 import types
 
 import merid.event_venues.kalshi.stop_candidate as sc
+from merid.event_venues.kalshi.residual_exit import (
+    ResidualExitTracker,
+    ResidualStatus,
+)
 
 
 def _candidate(**kw):
@@ -26,13 +31,13 @@ def _candidate(**kw):
 
 
 def _reject_result(vwap=18, limit=22):
+    reason = "firewall:firewall_rejected:limit_not_executable:"
+    if vwap is not None:
+        reason += f"limit={limit}:vwap={vwap}"
+    else:
+        reason += f"limit={limit}:vwap=unknown"
     return types.SimpleNamespace(
-        status="rejected",
-        reason=(
-            "firewall:firewall_rejected:limit_not_executable:"
-            f"limit={limit}:vwap={vwap}"
-        ),
-        price_cents=limit,
+        status="rejected", reason=reason, price_cents=limit,
     )
 
 
@@ -44,10 +49,26 @@ class _FakeLedger:
         self.records.append(record)
 
 
-def _patch_ledger(monkeypatch):
+def _patch_env(monkeypatch, tmp_path):
     ledger = _FakeLedger()
+    tracker = ResidualExitTracker(tmp_path / "residuals.json")
     monkeypatch.setattr(sc, "get_stop_candidate_ledger", lambda: ledger)
-    return ledger
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.residual_exit.get_residual_exit_tracker",
+        lambda path=None: tracker,
+    )
+    monkeypatch.setattr(sc, "_resolve_position_epoch", lambda t: "fill-ep-1")
+    monkeypatch.setattr(sc, "_get_market_state", lambda t: (None, None))
+    monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: 18)
+    return ledger, tracker
+
+
+def _run(cand, result, **kw):
+    return asyncio.run(
+        sc._maybe_degraded_stop_exit(
+            cand, result, held_side="no", held_contracts=3, **kw
+        )
+    )
 
 
 def test_parse_non_executable_vwap():
@@ -61,75 +82,84 @@ def test_parse_non_executable_vwap():
     assert sc.parse_non_executable_vwap_cents(None) is None
 
 
-def test_hold_to_settlement_when_fair_above_degraded(monkeypatch):
-    """Fair value still above the degraded exit proceeds -> explicit hold."""
-    ledger = _patch_ledger(monkeypatch)
+def test_hold_to_settlement_when_fair_above_degraded(monkeypatch, tmp_path):
+    """Fair value still above the degraded exit proceeds -> genuine hold."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
     cand = _candidate(fair_value_cents=25)  # 25 + costs(2) + hyst(1) > vwap 18
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, _reject_result(), held_side="no", held_contracts=3
-        )
-    )
-    assert len(ledger.records) == 1
-    rec = ledger.records[0]
-    assert rec["decision"] == "HOLD_TO_SETTLEMENT_APPROVED"
-    assert rec["basis"] == "fair_above_degraded_exit_value"
-    assert rec["degraded_vwap_cents"] == 18
+    _run(cand, _reject_result())
+    assert ledger.records[0]["decision"] == "HOLD_TO_SETTLEMENT_APPROVED"
+    assert ledger.records[0]["basis"] == "fair_above_degraded_exit_value"
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.HOLD_APPROVED.value
 
 
-def test_residual_risk_breach_without_fair_value(monkeypatch):
-    """Price-triggered stops with no model basis must escalate, not hold."""
-    ledger = _patch_ledger(monkeypatch)
+def test_data_unavailable_without_fair_value(monkeypatch, tmp_path):
+    """No model basis is could-not-decide — not a positive hold."""
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
     cand = _candidate(fair_value_cents=None)
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, _reject_result(), held_side="no", held_contracts=3
-        )
-    )
-    assert ledger.records[0]["decision"] == "RESIDUAL_RISK_BREACH"
-    assert ledger.records[0]["basis"] == "no_fair_value"
+    _run(cand, _reject_result())
+    rec = ledger.records[0]
+    assert rec["decision"] == "RESIDUAL_EXIT_DATA_UNAVAILABLE"
+    assert rec["basis"] == "no_fair_value"
 
 
-def test_degraded_approved_observe_only(monkeypatch):
-    """Approved but env-gated off -> recorded decision, no order."""
-    ledger = _patch_ledger(monkeypatch)
+def test_data_unavailable_malformed_vwap(monkeypatch, tmp_path):
+    """limit_not_executable with an unparsable/zero VWAP must still produce
+    a durable could-not-decide record — never a silent skip."""
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
+    cand = _candidate(fair_value_cents=10)
+    _run(cand, _reject_result(vwap=None))
+    assert ledger.records[0]["decision"] == "RESIDUAL_EXIT_DATA_UNAVAILABLE"
+    _run(cand, _reject_result(vwap=0))
+    assert ledger.records[1]["decision"] == "RESIDUAL_EXIT_DATA_UNAVAILABLE"
+
+
+def test_data_unavailable_vwap_diverged_from_book(monkeypatch, tmp_path):
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: 40)
+    cand = _candidate(fair_value_cents=10)
+    _run(cand, _reject_result(vwap=18))  # fresh bid 40 vs vwap 18: stale
+    assert ledger.records[0]["decision"] == "RESIDUAL_EXIT_DATA_UNAVAILABLE"
+    assert ledger.records[0]["basis"] == "vwap_stale_vs_fresh_book"
+
+
+def test_data_unavailable_no_depth(monkeypatch, tmp_path):
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: None)
+    cand = _candidate(fair_value_cents=10)
+    _run(cand, _reject_result())
+    assert ledger.records[0]["decision"] == "RESIDUAL_EXIT_DATA_UNAVAILABLE"
+    assert ledger.records[0]["basis"] == "no_executable_depth"
+
+
+def test_hold_near_settlement_window(monkeypatch, tmp_path):
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
+    cand = _candidate(fair_value_cents=10, seconds_to_expiry=30.0)
+    _run(cand, _reject_result())
+    assert ledger.records[0]["decision"] == "HOLD_TO_SETTLEMENT_APPROVED"
+    assert ledger.records[0]["basis"] == "settlement_close_window"
+
+
+def test_degraded_simulated_observe_only(monkeypatch, tmp_path):
+    """Approved but env-gated off -> simulated decision, no order."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
     monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: False)
-    monkeypatch.setattr(sc, "_get_market_state", lambda t: (None, None))
-    monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: 18)
     cand = _candidate(fair_value_cents=10)  # 10 + 3 <= 18 -> exit justified
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, _reject_result(), held_side="no", held_contracts=3
-        )
-    )
+    _run(cand, _reject_result())
     rec = ledger.records[0]
     assert rec["decision"] == "DEGRADED_EXIT_APPROVED"
     assert rec["basis"] == "observe_only_submission_disabled"
     assert rec["degraded_limit_cents"] == 16  # min(18,18) - 2c residual slip
+    assert rec["policy"]["code"] == "residual_exit_v1"
+    res = next(iter(tracker._records.values()))
+    assert res.status == ResidualStatus.DEGRADED_EXIT_SIMULATED.value
 
 
-def test_degraded_breach_when_depth_gone(monkeypatch):
-    ledger = _patch_ledger(monkeypatch)
+def test_degraded_submit_uses_fresh_dg_coid(monkeypatch, tmp_path):
+    """The degraded IOC carries a fresh ``dg1`` coid — the primary coid was
+    consumed by the venue even though it was rejected."""
+    ledger, _ = _patch_env(monkeypatch, tmp_path)
     monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
-    monkeypatch.setattr(sc, "_get_market_state", lambda t: (None, None))
-    monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: None)
-    cand = _candidate(fair_value_cents=10)
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, _reject_result(), held_side="no", held_contracts=3
-        )
-    )
-    rec = ledger.records[0]
-    assert rec["decision"] == "RESIDUAL_RISK_BREACH"
-    assert rec["basis"] == "no_executable_depth"
-
-
-def test_degraded_submit_uses_fresh_dg_coid(monkeypatch):
-    """The degraded IOC must carry a fresh ``dg1`` client order id — the
-    primary coid was consumed by the venue even though it was rejected."""
-    ledger = _patch_ledger(monkeypatch)
-    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
-    monkeypatch.setattr(sc, "_get_market_state", lambda t: (None, None))
     monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: 17)
 
     captured = {}
@@ -142,11 +172,7 @@ def test_degraded_submit_uses_fresh_dg_coid(monkeypatch):
 
     monkeypatch.setattr(order_router, "route_order_async", _fake_route)
     cand = _candidate(fair_value_cents=10)
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, _reject_result(), held_side="no", held_contracts=3
-        )
-    )
+    _run(cand, _reject_result())
     intent = captured["intent"]
     assert intent.client_order_id.endswith("dg1")
     assert intent.intent_id.endswith(":dg1")
@@ -154,26 +180,66 @@ def test_degraded_submit_uses_fresh_dg_coid(monkeypatch):
     assert intent.price_cents == 15
     assert intent.time_in_force == "ioc"
     assert intent.reduce_only is True
-    assert intent.action == "sell"
-    assert intent.side == "no"
-    assert intent.count == 3
+    assert intent.action == "sell" and intent.side == "no" and intent.count == 3
     rec = ledger.records[0]
     assert rec["decision"] == "DEGRADED_EXIT_APPROVED"
     assert rec["basis"] == "degraded_ioc_submitted"
-    assert rec["result"]["status"] == "filled"
 
 
-def test_no_branch_on_other_rejections(monkeypatch):
+def test_residual_idempotency_blocks_second_attempt(monkeypatch, tmp_path):
+    """A second monitor cycle on the same position epoch cannot emit a
+    second degraded IOC — the attempt budget is durable."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+
+    calls = []
+
+    async def _fake_route(intent):
+        calls.append(intent)
+        return types.SimpleNamespace(status="rejected", reason="expired")
+
+    from merid.event_venues.kalshi import order_router
+
+    monkeypatch.setattr(order_router, "route_order_async", _fake_route)
+    cand = _candidate(fair_value_cents=10)
+    _run(cand, _reject_result())          # cycle 1: dg1 submitted
+    _run(_candidate(fair_value_cents=10), _reject_result())  # cycle 2
+    assert len(calls) == 1
+    assert ledger.records[1]["decision"] == "RESIDUAL_RISK_BREACH"
+    assert ledger.records[1]["basis"] == "degraded_attempt_budget_exhausted"
+    res = next(iter(tracker._records.values()))
+    assert res.degraded_attempt_number == 1
+    assert len(res.degraded_client_order_ids) == 1
+
+
+def test_new_position_epoch_gets_fresh_residual(monkeypatch, tmp_path):
+    """A new entry after the old one closed is a new epoch -> independent
+    workflow with its own attempt budget."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sc, "degraded_exit_enabled", lambda: True)
+
+    async def _fake_route(intent):
+        return types.SimpleNamespace(status="rejected", reason="expired")
+
+    from merid.event_venues.kalshi import order_router
+
+    monkeypatch.setattr(order_router, "route_order_async", _fake_route)
+    cand = _candidate(fair_value_cents=10)
+    _run(cand, _reject_result())   # epoch fill-ep-1
+    monkeypatch.setattr(sc, "_resolve_position_epoch", lambda t: "fill-ep-2")
+    _run(cand, _reject_result())   # epoch fill-ep-2 -> allowed again
+    assert ledger.records[1]["decision"] == "DEGRADED_EXIT_APPROVED"
+    assert len(tracker._records) == 2
+
+
+def test_no_branch_on_other_rejections(monkeypatch, tmp_path):
     """Non-executable is the only residual trigger; other rejects stay
-    terminal so their (different) recovery semantics are not conflated."""
-    ledger = _patch_ledger(monkeypatch)
+    terminal so their different recovery semantics are not conflated."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
     cand = _candidate(fair_value_cents=10)
     other = types.SimpleNamespace(
         status="rejected", reason="firewall:firewall_rejected:stale_book"
     )
-    asyncio.run(
-        sc._maybe_degraded_stop_exit(
-            cand, other, held_side="no", held_contracts=3
-        )
-    )
+    _run(cand, other)
     assert ledger.records == []
+    assert tracker._records == {}
