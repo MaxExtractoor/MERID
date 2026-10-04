@@ -35,6 +35,7 @@ from merid.prediction.threshold_cells import (
     resolve_threshold_cell,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
+from merid.prediction import empirical_price_calibration as _epc
 from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
@@ -2750,6 +2751,42 @@ def compute_trade_decision(
         p_no_for_no = 1.0 - p_yes_for_yes
     else:
         indicators["walkforward_cal_applied"] = False
+
+    # 2026-10-04: empirical price-calibration overlay (favorite-longshot).
+    # The market anchor above assumes the book is calibrated; the settled
+    # record says it is not in specific (side, price, TTE) cells.  In a
+    # validated cell the shrunk empirical win rate replaces the side's
+    # probability (live mode, upward only — the cells are validated as
+    # under-priced).  The tail caps and deviation guard below still bind.
+    _epc_mode = _epc.mode()
+    indicators["epc_mode"] = _epc_mode
+    if _epc_mode != "off":
+        for _epc_side, _epc_entry in (("yes", yes_entry), ("no", no_entry)):
+            _epc_est = _epc.lookup(_epc_side, float(_epc_entry) * 100.0, float(seconds_to_expiry))
+            if _epc_est is None:
+                continue
+            _epc_cur = p_yes_for_yes if _epc_side == "yes" else p_no_for_no
+            indicators[f"{_epc_side}_epc_cell"] = _epc_est.cell_id
+            indicators[f"{_epc_side}_epc_p"] = _epc_est.p
+            indicators[f"{_epc_side}_epc_p_model"] = _epc_cur
+            indicators[f"{_epc_side}_epc_cell_n"] = _epc_est.n
+            indicators[f"{_epc_side}_epc_cell_edge_lcb_c"] = _epc_est.edge_lcb_c
+            _epc_apply = _epc_mode == "live" and _epc_est.p > _epc_cur
+            indicators[f"{_epc_side}_epc_applied"] = _epc_apply
+            if _epc_apply:
+                if _epc_side == "no":
+                    p_no_for_no = _epc_est.p
+                    p_yes_for_yes = min(p_yes_for_yes, 1.0 - _epc_est.p)
+                else:
+                    p_yes_for_yes = _epc_est.p
+                    p_no_for_no = min(p_no_for_no, 1.0 - _epc_est.p)
+            _epc.log_observation(
+                ticker=ticker, asset=asset, side=_epc_side, mode=_epc_mode,
+                held_price_cents=float(_epc_entry) * 100.0,
+                seconds_to_expiry=float(seconds_to_expiry), est=_epc_est,
+                p_model=float(_epc_cur), applied=_epc_apply,
+                fee_cents=float(fee_per_contract_cents) if fee_per_contract_cents is not None else None,
+            )
 
     # YES-held curve: calibrate p_yes when the artifact has support at the held
     # price.  2026-09-25: extended from tail-only (<35c) to the full fitted
