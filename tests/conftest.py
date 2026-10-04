@@ -15,6 +15,14 @@ _os.environ["MERID_ALLOW_CT_SCRIPT_BYPASS"] = "false"
 _os.environ["ALLOW_DEPRECATED_RISK_GUARDS"] = "1"
 _os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "false"
 _os.environ["MERID_CFB_RTI_SHADOW_TELEMETRY"] = "0"
+# 2026-10-04: the empirical price-calibration overlay defaults to shadow and
+# appends to logs/; tests must neither depend on the production artifact nor
+# write production telemetry.  EPC tests opt in explicitly.
+_os.environ["MERID_EMPIRICAL_CAL_MODE"] = "off"
+_os.environ.setdefault(
+    "MERID_EMPIRICAL_CAL_LOG_PATH",
+    _os.path.join(__import__("tempfile").gettempdir(), "merid_test_epc_obs.jsonl"),
+)
 # 2026-08-24: Force unit tests to run in mock/preview mode so legacy live-mode
 # transitions in setUp/tearDown do not throw, and decision-provenance/shared-risk
 # guards that require full production stack are not enforced.

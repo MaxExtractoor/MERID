@@ -47,7 +47,8 @@ for line in open("logs/rejected_candidates.jsonl", "r", errors="replace"):
     c = cells.get((side, int(float(px) // 10) * 10, int(float(tte) // 60)))
     if c is None:
         continue
-    ev = 100.0 * c["p_shrunk"] - float(px) - FEE
+    # Same uplift-over-price model as the live lookup.
+    ev = 100.0 * (c["p_shrunk"] - c["avg_price_c"] / 100.0) - FEE
     if ev < args.min_ev:
         continue
     rows.append((ts, t, side, float(px), c["cell_id"], ev))
