@@ -1382,11 +1382,26 @@ def apply_bounded_live_domain_gate(
     lcb_cents = (
         float(breakdown.net_edge) - float(breakdown.model_risk_reserve)
     ) * 100.0
+    # 2026-10-04 (EPC): when a validated empirical cell supplied the
+    # probability, the model-side risk reserve double-charges estimation
+    # uncertainty the cell's walk-forward LCB already encodes.  The gate
+    # then takes the better of the model LCB and the price-adjusted
+    # empirical LCB (fee-net, half-sample-stable) — still bounded by the
+    # required edge.
+    _ind = decision.indicators or {}
+    _epc_lcb_used = None
+    if _ind.get(f"{sel}_epc_applied"):
+        _epc_lcb = _ind.get(f"{sel}_epc_adj_lcb_cents")
+        if _epc_lcb is not None and float(_epc_lcb) > lcb_cents:
+            lcb_cents = float(_epc_lcb)
+            _epc_lcb_used = float(_epc_lcb)
     record = {
         "gate": "tail_lcb",
         "price_cents": price_cents,
         "lcb_cents": round(lcb_cents, 3),
         "required_cents": round(required_cents, 3),
+        "epc_lcb_cents": _epc_lcb_used,
+        "epc_cell": _ind.get(f"{sel}_epc_cell"),
         "would_enter_at_prior": True,
     }
     if lcb_cents < required_cents - 1e-9:
@@ -2771,6 +2786,13 @@ def compute_trade_decision(
             indicators[f"{_epc_side}_epc_p_model"] = _epc_cur
             indicators[f"{_epc_side}_epc_cell_n"] = _epc_est.n
             indicators[f"{_epc_side}_epc_cell_edge_lcb_c"] = _epc_est.edge_lcb_c
+            # Price-adjusted empirical LCB: the cell's walk-forward-validated
+            # lower-bound edge is measured at the cell's average fill price;
+            # entering above that average reduces realized edge cent-for-cent.
+            indicators[f"{_epc_side}_epc_adj_lcb_cents"] = (
+                _epc_est.edge_lcb_c
+                - (float(_epc_entry) * 100.0 - _epc_est.avg_price_c)
+            )
             _epc_apply = _epc_mode == "live" and _epc_est.p > _epc_cur
             indicators[f"{_epc_side}_epc_applied"] = _epc_apply
             if _epc_apply:
@@ -3663,6 +3685,26 @@ def compute_trade_decision(
     indicators["yes_cbp_neg_floor_p_bypass"] = bool(_yes_cbp_neg_floor)
     indicators["no_cbp_neg_floor_p_bypass"] = bool(_no_cbp_neg_floor)
 
+    # 2026-10-04 (EPC double-count fix): when a validated empirical cell
+    # supplied the side's probability, the reserve-stacked net_edge still
+    # carries the model's own FLB/uncertainty charges — uncertainty the
+    # cell's walk-forward LCB already encodes.  The economics leg accepts
+    # max(reserve-stacked edge, price-adjusted empirical LCB): the cell's
+    # conservative bound may satisfy the threshold but never clears a bar
+    # it doesn't reach.
+    def _epc_eff_edge(side: str, bd: EdgeBreakdown) -> float:
+        if not indicators.get(f"{side}_epc_applied"):
+            return float(bd.net_edge)
+        _lcb = indicators.get(f"{side}_epc_adj_lcb_cents")
+        if _lcb is None:
+            return float(bd.net_edge)
+        return max(float(bd.net_edge), float(_lcb) / 100.0)
+
+    _yes_eff_edge = _epc_eff_edge("yes", yes_breakdown)
+    _no_eff_edge = _epc_eff_edge("no", no_breakdown)
+    indicators["yes_epc_eff_edge_cents"] = _yes_eff_edge * 100.0
+    indicators["no_epc_eff_edge_cents"] = _no_eff_edge * 100.0
+
     yes_qualifies = (
         yes_depth_ok
         and not tail_guard_violation_yes
@@ -3673,7 +3715,7 @@ def compute_trade_decision(
             _yes_trend_hi_qualifies
             or (
                 not _yes_hi_price
-                and yes_breakdown.net_edge >= yes_min_edge
+                and _yes_eff_edge >= yes_min_edge
                 and (
                     _yes_cbp_neg_floor
                     or yes_breakdown.p_selected > yes_min_p
@@ -3686,7 +3728,7 @@ def compute_trade_decision(
     )
     no_qualifies = (
         no_depth_ok
-        and no_breakdown.net_edge >= no_min_edge
+        and _no_eff_edge >= no_min_edge
         and (
             _no_cbp_neg_floor
             or no_breakdown.p_selected > no_min_p
@@ -3719,7 +3761,9 @@ def compute_trade_decision(
         bookflow_block_s: Optional[str] = None,
         hi_price_applies_s: bool = False,
         trend_hi_block_s: Optional[str] = None,
+        eff_edge_s: Optional[float] = None,
     ) -> Optional[str]:
+        _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         if not depth_ok_s:
             return f"insufficient_depth_{side}"
         if tail_violation_s:
@@ -3732,9 +3776,9 @@ def compute_trade_decision(
         # not the failure.  The honest labels are edge_below_lane_floor
         # (missed the lane's own bound) and the structural gates; the
         # positive-EV / cost-basis labels only apply on >=0 floors.
-        if min_edge_s >= 0.0 and bd.net_edge <= 0:
+        if min_edge_s >= 0.0 and _edge_s <= 0:
             return f"no_positive_executable_edge_{side}"
-        if bd.net_edge < min_edge_s:
+        if _edge_s < min_edge_s:
             return (
                 f"edge_below_lane_floor_{side}"
                 if min_edge_s < 0.0
@@ -3797,6 +3841,7 @@ def compute_trade_decision(
             bookflow_block_s=_yes_bookflow_block,
             hi_price_applies_s=_yes_hi_price,
             trend_hi_block_s=_yes_trend_hi_block,
+            eff_edge_s=_yes_eff_edge,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -3806,6 +3851,7 @@ def compute_trade_decision(
             throttle_block_s=_no_throttle_block,
             ct_lane_block_s=_no_ct_lane_block,
             bookflow_block_s=_no_bookflow_block,
+            eff_edge_s=_no_eff_edge,
         ),
     })
 

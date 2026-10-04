@@ -609,6 +609,35 @@ def build_asset_record(
         "no_thr_cell_block_reason": _first_str(
             _resolve(candidate, decision, ["no_thr_cell_block_reason"], ["no_thr_cell_block_reason"])
         ),
+        # Empirical price-calibration overlay: cell provenance, mode, and the
+        # price-adjusted LCB used by the economics/tail gates (2026-10-04).
+        "epc_mode": _first_str(
+            _resolve(candidate, decision, ["epc_mode"], ["epc_mode"])
+        ),
+        "yes_epc_applied": _first_bool(
+            _resolve(candidate, decision, ["yes_epc_applied"], ["yes_epc_applied"])
+        ),
+        "no_epc_applied": _first_bool(
+            _resolve(candidate, decision, ["no_epc_applied"], ["no_epc_applied"])
+        ),
+        "yes_epc_cell": _first_str(
+            _resolve(candidate, decision, ["yes_epc_cell"], ["yes_epc_cell"])
+        ),
+        "no_epc_cell": _first_str(
+            _resolve(candidate, decision, ["no_epc_cell"], ["no_epc_cell"])
+        ),
+        "yes_epc_adj_lcb_cents": _first_float(
+            _resolve(candidate, decision, ["yes_epc_adj_lcb_cents"], ["yes_epc_adj_lcb_cents"])
+        ),
+        "no_epc_adj_lcb_cents": _first_float(
+            _resolve(candidate, decision, ["no_epc_adj_lcb_cents"], ["no_epc_adj_lcb_cents"])
+        ),
+        "yes_epc_eff_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_epc_eff_edge_cents"], ["yes_epc_eff_edge_cents"])
+        ),
+        "no_epc_eff_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_epc_eff_edge_cents"], ["no_epc_eff_edge_cents"])
+        ),
         "yes_eligible": _first_bool(
             _resolve(candidate, decision, ["yes_eligible", "yes_qualifies"], ["yes_eligible", "yes_qualifies"])
         ),

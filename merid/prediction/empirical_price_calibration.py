@@ -197,6 +197,11 @@ def log_observation(
             "p_empirical": round(est.p, 5),
             "ev_model_c": round(100.0 * p_model - held_price_cents - fee, 3),
             "ev_empirical_c": round(100.0 * est.p - held_price_cents - fee, 3),
+            "cell_edge_lcb_c": round(est.edge_lcb_c, 3),
+            "cell_avg_price_c": round(est.avg_price_c, 3),
+            "adj_lcb_c": round(
+                est.edge_lcb_c - (held_price_cents - est.avg_price_c), 3
+            ),
             "applied": applied,
         }
         path = _obs_path()

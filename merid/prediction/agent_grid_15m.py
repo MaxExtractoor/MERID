@@ -10808,6 +10808,17 @@ class LeanAgent15m:
                 "no_thr_cell_miss_reason": _ind.get("no_thr_cell_miss_reason"),
                 "yes_thr_cell_block_reason": _ind.get("yes_thr_cell_block_reason"),
                 "no_thr_cell_block_reason": _ind.get("no_thr_cell_block_reason"),
+                # EPC overlay: cell provenance + the gate input used on the
+                # economics leg (price-adjusted empirical LCB).
+                "yes_epc_applied": _ind.get("yes_epc_applied"),
+                "no_epc_applied": _ind.get("no_epc_applied"),
+                "yes_epc_cell": _ind.get("yes_epc_cell"),
+                "no_epc_cell": _ind.get("no_epc_cell"),
+                "yes_epc_adj_lcb_cents": _ind.get("yes_epc_adj_lcb_cents"),
+                "no_epc_adj_lcb_cents": _ind.get("no_epc_adj_lcb_cents"),
+                "yes_epc_eff_edge_cents": _ind.get("yes_epc_eff_edge_cents"),
+                "no_epc_eff_edge_cents": _ind.get("no_epc_eff_edge_cents"),
+                "epc_mode": _ind.get("epc_mode"),
                 "yes_thr_prov_cell_id": _ind.get("yes_thr_prov_cell_id"),
                 "no_thr_prov_cell_id": _ind.get("no_thr_prov_cell_id"),
                 "yes_prov_required_edge_cents": _ind.get("yes_provisional_required_edge_cents"),
