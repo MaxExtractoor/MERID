@@ -549,3 +549,38 @@ caps, suspension rules, evidence store, promotion report, decision-level
 lane stamping, bounded-domain gate, fill-space normalization,
 adverse-selection reserve, promotion-review trigger,
 audit provenance columns).
+
+## Empirical price-calibration overlay (2026-10-04)
+
+Signal-quality finding: the Bachelier model is shrunk toward the market mid
+(`MERID_MARKET_ANCHOR_*`) and adds ~no information beyond price (Brier
+0.2170 vs market 0.2177). The book itself is mis-calibrated: NO-side
+favorites held 50-89c with 3-7 min to expiry win more often than price
+implies (walk-forward over 4 splits: +6.1c to +9.2c/trade OOS, all 95%
+lower bounds > 0). YES-side cells fail OOS and are excluded.
+
+- Module: `merid/prediction/empirical_price_calibration.py`; artifact
+  `data/empirical_price_calibration.json` (fail-closed if missing,
+  bad schema, or older than `MERID_EMPIRICAL_CAL_MAX_AGE_DAYS`=14).
+- Mode: `MERID_EMPIRICAL_CAL_MODE` = off | shadow (default) | live.
+  Live raises the matched side's p to price + shrunk cell uplift (upward
+  only); every downstream gate still applies.
+- Refit (weekly, artifact goes stale after 14 days):
+  `scripts/fit_empirical_price_calibration.py`
+- Validate before refit goes live: fit with `--end <split> --out <tmp>`
+  then `scripts/eval_empirical_price_calibration.py --artifact <tmp>
+  --start <split>`; require a positive 95% lower bound.
+- Forward scoring: `logs/empirical_cal_observations.jsonl` (one row per
+  ticker/side/TTE-minute) joined to `logs/settlement_outcomes.jsonl`.
+- Other audit tools: `scripts/signal_quality_audit.py`,
+  `scripts/market_calibration_audit.py`,
+  `scripts/stop_settlement_counterfactual.py`.
+
+## Test-running notes
+
+- With the live server running, full-conftest pytest runs can hang on
+  shared state; use `--noconftest` for targeted suites (EPC, terminal
+  codes, residual-exit, provisional, router tests all self-isolate).
+- Structural gates (countertrend/bookflow/conviction/throttle) are now
+  counterfactual-logged to `logs/rejected_candidates.jsonl` and map to
+  terminal codes `LOW_CONVICTION` / `STRUCTURAL_RISK_VETO`.
