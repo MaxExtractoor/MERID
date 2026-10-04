@@ -94,6 +94,7 @@ def test_resolve_terminal_code_precedence_order():
         any_eligible_side_has_positive_net_ev=True,
         selected_side_evidence_hard_block=False,
         selected_side_clears_dynamic_threshold=True,
+        selected_side_clears_conviction=True,
         allocator_selected=True,
     )
     assert resolve_terminal_code(DecisionSignals(**base)) == TerminalCode.CANDIDATE_EMITTED
@@ -126,6 +127,9 @@ def test_resolve_terminal_code_precedence_order():
     assert resolve_terminal_code(
         DecisionSignals(**{**base, "selected_side_clears_dynamic_threshold": False})
     ) == TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD
+    assert resolve_terminal_code(
+        DecisionSignals(**{**base, "selected_side_clears_conviction": False})
+    ) == TerminalCode.LOW_CONVICTION
     assert resolve_terminal_code(
         DecisionSignals(**{**base, "allocator_selected": False})
     ) == TerminalCode.ALLOCATION_NOT_SELECTED
@@ -167,6 +171,25 @@ def test_hard_evidence_reason_maps_to_hard_block():
         assert canonical_terminal_code(raw, 5.0) == (
             TerminalCode.EVIDENCE_HARD_BLOCK.value
         ), raw
+
+
+def test_conviction_and_lane_floor_reasons_map_canonical():
+    # Structural conviction veto must not collapse into an EV label — the
+    # candidate cleared its economics and failed directional certainty.
+    assert canonical_terminal_code("low_conviction_yes", -1.4) == (
+        TerminalCode.LOW_CONVICTION.value
+    )
+    assert canonical_terminal_code("low_conviction_no", 2.0) == (
+        TerminalCode.LOW_CONVICTION.value
+    )
+    # A bounded-lane floor miss is a threshold failure on the lane's own
+    # (possibly negative) required edge, not a positive-EV failure.
+    assert canonical_terminal_code("yes_edge_below_lane_floor", -4.6) == (
+        TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    )
+    assert canonical_terminal_code("no_edge_below_lane_floor", -5.1) == (
+        TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    )
 
 
 # --------------------------------------------------------------------------
