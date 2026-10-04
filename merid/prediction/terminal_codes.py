@@ -22,6 +22,9 @@ Precedence (first true blocker wins):
     LOW_CONVICTION          economics cleared but |p_sel - 0.5| < the
                             per-asset conviction floor — a structural risk
                             veto, not an economics failure
+    STRUCTURAL_RISK_VETO    economics cleared but a strategy-structure gate
+                            (countertrend regime, book-flow pressure, side
+                            throttle/suspension, trend-hi lane) vetoed it
     ALLOCATION_NOT_SELECTED candidate qualified but the top-3 allocator passed
     ENTRY_LIFECYCLE_INVALID missing protective exit / lifecycle invalid
     EXECUTION_REJECT        stale decision, passivity, or venue reject
@@ -50,6 +53,7 @@ class TerminalCode(str, Enum):
     EVIDENCE_HARD_BLOCK = "EVIDENCE_HARD_BLOCK"
     EDGE_BELOW_DYNAMIC_THRESHOLD = "EDGE_BELOW_DYNAMIC_THRESHOLD"
     LOW_CONVICTION = "LOW_CONVICTION"
+    STRUCTURAL_RISK_VETO = "STRUCTURAL_RISK_VETO"
     ALLOCATION_NOT_SELECTED = "ALLOCATION_NOT_SELECTED"
     ENTRY_LIFECYCLE_INVALID = "ENTRY_LIFECYCLE_INVALID"
     EXECUTION_REJECT = "EXECUTION_REJECT"
@@ -80,6 +84,7 @@ class DecisionSignals:
     selected_side_evidence_hard_block: bool = False
     selected_side_clears_dynamic_threshold: bool = False
     selected_side_clears_conviction: bool = True
+    selected_side_clears_structural_gates: bool = True
     allocator_selected: bool = False
 
 
@@ -109,6 +114,8 @@ def resolve_terminal_code(state: DecisionSignals) -> TerminalCode:
         return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD
     if not state.selected_side_clears_conviction:
         return TerminalCode.LOW_CONVICTION
+    if not state.selected_side_clears_structural_gates:
+        return TerminalCode.STRUCTURAL_RISK_VETO
     if not state.allocator_selected:
         return TerminalCode.ALLOCATION_NOT_SELECTED
     return TerminalCode.CANDIDATE_EMITTED
@@ -206,6 +213,16 @@ def canonical_terminal_code(
     # economics fallback relabelled these as EV failures.
     if rl.startswith("low_conviction"):
         return TerminalCode.LOW_CONVICTION.value
+    if (
+        rl.startswith("countertrend_")
+        or rl.startswith("bookflow_")
+        or rl.startswith("strip_same_side_")
+        or rl.startswith("side_suspended")
+        or rl.startswith("side_throttle")
+        or rl.startswith("trend_yes_hi")
+        or rl.startswith("regime_block")
+    ):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
 
     if "edge_below_threshold" in rl or rl in (
         "insufficient_edge",

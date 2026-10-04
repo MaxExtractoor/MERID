@@ -457,14 +457,14 @@ def evaluate_all_gates(
         )
 
         # 2026-10-04: structural safety vetoes are not evidence blocks —
-        # conviction has a dedicated canonical code; the rest resolve to the
-        # honest compatibility bucket instead of a fake evidence veto.
+        # conviction and the strategy-structure gates have dedicated
+        # canonical codes instead of a fake evidence veto.
         for key, gate_suffix, code in (
-            (f"{side}_regime_block", "regime", "UNCLASSIFIED"),
+            (f"{side}_regime_block", "regime", "STRUCTURAL_RISK_VETO"),
             (f"{side}_conviction_block", "conviction", "LOW_CONVICTION"),
-            (f"{side}_throttle_block", "throttle", "UNCLASSIFIED"),
-            (f"{side}_ct_lane_block", "countertrend_lane", "UNCLASSIFIED"),
-            (f"{side}_bookflow_block", "book_flow", "UNCLASSIFIED"),
+            (f"{side}_throttle_block", "throttle", "STRUCTURAL_RISK_VETO"),
+            (f"{side}_ct_lane_block", "countertrend_lane", "STRUCTURAL_RISK_VETO"),
+            (f"{side}_bookflow_block", "book_flow", "STRUCTURAL_RISK_VETO"),
         ):
             beval, bpass, breason = _block_gate(ind, key)
             _add(
@@ -483,7 +483,7 @@ def evaluate_all_gates(
             hi_applies = _to_bool(ind.get("yes_trend_hi_price"))
             _add(
                 "yes_trend_hi_lane",
-                "UNCLASSIFIED",
+                "STRUCTURAL_RISK_VETO",
                 STAGE_MODEL,
                 evaluated=beval or hi_applies is not None,
                 passed=(bpass if beval else True),

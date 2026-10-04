@@ -95,6 +95,7 @@ def test_resolve_terminal_code_precedence_order():
         selected_side_evidence_hard_block=False,
         selected_side_clears_dynamic_threshold=True,
         selected_side_clears_conviction=True,
+        selected_side_clears_structural_gates=True,
         allocator_selected=True,
     )
     assert resolve_terminal_code(DecisionSignals(**base)) == TerminalCode.CANDIDATE_EMITTED
@@ -130,6 +131,9 @@ def test_resolve_terminal_code_precedence_order():
     assert resolve_terminal_code(
         DecisionSignals(**{**base, "selected_side_clears_conviction": False})
     ) == TerminalCode.LOW_CONVICTION
+    assert resolve_terminal_code(
+        DecisionSignals(**{**base, "selected_side_clears_structural_gates": False})
+    ) == TerminalCode.STRUCTURAL_RISK_VETO
     assert resolve_terminal_code(
         DecisionSignals(**{**base, "allocator_selected": False})
     ) == TerminalCode.ALLOCATION_NOT_SELECTED
@@ -190,6 +194,39 @@ def test_conviction_and_lane_floor_reasons_map_canonical():
     assert canonical_terminal_code("no_edge_below_lane_floor", -5.1) == (
         TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
     )
+
+
+def test_structural_gate_reasons_map_to_structural_veto():
+    # Observed live 2026-10-04: these vetoed positive-EV, threshold-clearing
+    # candidates but were reported as EDGE_BELOW_DYNAMIC_THRESHOLD via the
+    # economics fallback.
+    for raw in (
+        "countertrend_no_rally_regime",
+        "countertrend_yes_selloff_regime",
+        "countertrend_lane_cold_start(n=3)",
+        "bookflow_yes_pressure",
+        "bookflow_no_pressure",
+        "strip_same_side_open:no",
+        "side_suspended:loss_streak",
+        "trend_yes_hi_breadth",
+    ):
+        assert canonical_terminal_code(raw, 5.0) == (
+            TerminalCode.STRUCTURAL_RISK_VETO.value
+        ), raw
+
+
+def test_structural_gate_reasons_are_counterfactual_logged():
+    from merid.prediction.rejection_counterfactual import should_log
+
+    for raw in (
+        "countertrend_no_rally_regime",
+        "bookflow_yes_pressure",
+        "low_conviction_no",
+        "yes_edge_below_lane_floor",
+        "market_fade_blocked_no",
+    ):
+        assert should_log(raw), raw
+    assert not should_log("no market available from market state store")
 
 
 # --------------------------------------------------------------------------
