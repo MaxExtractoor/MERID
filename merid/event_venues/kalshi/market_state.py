@@ -339,6 +339,9 @@ _BOOK_MAX_UPSTREAM_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_UPSTREAM_WAIT_MS",
 # Raw WS-vs-REST parity tolerance (ticks/cents).  Measured on the raw
 # delta-derived BBO, never on a REST-substituted effective quote.
 _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
+# 2026-10-04: consecutive in-parity WS deltas required to reclaim quote
+# ownership from REST_VERIFIED_DEGRADED (promotion hysteresis).
+_WS_PROMOTE_STREAK = int(os.getenv("MERID_WS_PROMOTE_STREAK", "5"))
 
 # Guarded Prometheus metrics for the book pipeline.  All updates are wrapped
 # in try/except — metrics must never block or crash the book hot path.
@@ -772,6 +775,12 @@ class KalshiMarketStateStore:
         self._last_overflow_log_ts: Dict[str, float] = {}
         self._overflow_log_suppressed: Dict[str, int] = {}
         self._last_pending_full_log_ts: Dict[str, float] = {}
+        # 2026-10-04: owner-latch hysteresis.  REST ownership is released back
+        # to WS only after ``MERID_WS_PROMOTE_STREAK`` consecutive deltas arrive
+        # in-parity with a fresh REST BBO — a single lucky delta must not flip
+        # the effective quote's owner (observed: HEALTHY<->DEGRADED_REST_ONLY
+        # multiple times per second as REST polls and lagged deltas interleaved).
+        self._ws_promote_streak: Dict[str, int] = {}
         # 2026-10-02: per-ticker derived book-state (spec vocabulary:
         # UNINITIALIZED/SYNCING/HEALTHY/RESYNCING/DEGRADED_REST_ONLY/UNTRADEABLE).
         # One BOOK_STATE_TRANSITION event per change, never per delta.
@@ -1709,6 +1718,54 @@ class KalshiMarketStateStore:
         except Exception:
             return "UNINITIALIZED"
 
+    def _book_state_root_cause(
+        self, state: "KalshiMarketState", old: str, new: str, reason: str
+    ) -> str:
+        """Classify *why* a book-state transition happened.
+
+        Distinguishes transport gaps from consumer stalls from parity-driven
+        REST takeover so a correlated multi-ticker degradation points at the
+        shared dependency instead of a generic "book degraded".
+        """
+        try:
+            qo = getattr(state, "quote_owner", "") or ""
+            reason = reason or ""
+            if new == "DEGRADED_REST_ONLY":
+                div = max(
+                    getattr(state, "ws_rest_bid_diff_ticks", None) or 0,
+                    getattr(state, "ws_rest_ask_diff_ticks", None) or 0,
+                )
+                if div and div > int(
+                    os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3")
+                ):
+                    return "ws_rest_divergence"
+                if "rest_polling" in reason or "rest" in reason:
+                    return "rest_quote_fresher_than_ws"
+                return "ws_lagged_or_unverified"
+            if new == "HEALTHY":
+                return "ws_verified"
+            if new == "RESYNCING":
+                return getattr(state, "recovery_required_source", "") or "resync"
+            if new == "UNTRADEABLE":
+                if getattr(state, "transition", "") == "CIRCUIT_BREAKER" or (
+                    getattr(state, "book_health", "") == "CIRCUIT_BREAKER"
+                ):
+                    return "circuit_breaker"
+                if getattr(state, "data_quality", "") == "INVALID":
+                    return "invalid_book"
+                if getattr(state, "transition", "") == "RESYNC_REQUIRED":
+                    return "resync_required"
+                if qo == "NONE_UNTRUSTED":
+                    return "no_trusted_quote"
+                return "untradeable"
+            if new == "UNINITIALIZED":
+                if getattr(state, "book_health", "") == "NO_SNAPSHOT":
+                    return "snapshot_missing"
+                return "no_book"
+            return "state_transition"
+        except Exception:
+            return "state_transition"
+
     def _note_book_state(self, ticker: str, state: "KalshiMarketState", reason: str = "") -> None:
         """Emit one BOOK_STATE_TRANSITION record when the derived state changes.
 
@@ -1739,9 +1796,18 @@ class KalshiMarketStateStore:
                 qd = len(queue) if queue is not None else 0
             except Exception:
                 pass
-            # WARNING level: this logger's INFO stream is filtered out of the
-            # console/full.log sinks; transitions are rare (one per change) so
-            # WARNING is appropriate for health-state observability.
+            # 2026-10-04: root-cause + per-feed ages so a correlated
+            # multi-ticker degradation is attributable to transport (wire),
+            # consumer (queue), parity, or lifecycle — not just "degraded".
+            _now_mono = time.monotonic()
+            _ws_age_ms = (
+                round((_now_mono - state.last_ws_update_ts) * 1000.0, 1)
+                if getattr(state, "last_ws_update_ts", 0.0) > 0 else None
+            )
+            _rest_age_ms = (
+                round((_now_mono - state.last_rest_quote_update_ts) * 1000.0, 1)
+                if getattr(state, "last_rest_quote_update_ts", 0.0) > 0 else None
+            )
             logger.warning(
                 "[BOOK-STATE-TRANSITION] %s",
                 json.dumps(
@@ -1751,6 +1817,9 @@ class KalshiMarketStateStore:
                         "previous_state": old or "UNINITIALIZED",
                         "next_state": new,
                         "reason": reason or "state_transition",
+                        "root_cause": self._book_state_root_cause(
+                            state, old or "UNINITIALIZED", new, reason
+                        ),
                         "book_health": getattr(state, "book_health", ""),
                         "quote_owner": getattr(state, "quote_owner", ""),
                         "data_quality": getattr(state, "data_quality", ""),
@@ -1759,6 +1828,10 @@ class KalshiMarketStateStore:
                         "resync_attempt": getattr(state, "book_resync_total", 0),
                         "buffered_delta_count": qd,
                         "ws_rest_divergence_cents": div,
+                        "ws_age_ms": _ws_age_ms,
+                        "rest_age_ms": _rest_age_ms,
+                        "ws_event_age_ms": getattr(state, "ws_last_event_age_ms", None),
+                        "ws_promote_streak": self._ws_promote_streak.get(ticker, 0),
                         "executable": bool(getattr(state, "executable", False)),
                     },
                     default=str,
@@ -6432,6 +6505,11 @@ class KalshiMarketStateStore:
             state.last_ws_ask_cents = state.best_ask_cents
             state.last_ws_update_ts = now
             state.degraded_mode = False
+            # 2026-10-04 (owner-latch hysteresis): capture the pre-delta owner
+            # before the provisional WS verdict below.  A REST-owned quote is
+            # only released after a sustained in-parity WS streak; one lucky
+            # delta must not flip the effective quote's owner.
+            _owner_pre_delta = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
             # Canonical owner vocabulary: WS_FRESH_VERIFIED only when the WS
             # book is snapshot-complete, live-sequence-confirmed, and clean;
             # anything else means the effective quote is not yet trusted.
@@ -6538,9 +6616,42 @@ class KalshiMarketStateStore:
                 # apply the degraded-execution policy to this owner.
                 state.quote_owner = "REST_VERIFIED_DEGRADED"
                 state.degraded_mode = True
-            elif state.best_bid_cents is None or state.best_ask_cents is None:
-                # No usable effective quote from any trusted owner.
-                state.quote_owner = "NONE_UNTRUSTED"
+                self._ws_promote_streak[ticker] = 0
+            elif (
+                _owner_pre_delta == "REST_VERIFIED_DEGRADED"
+                and rest_age_s <= rest_pref_max_age_s
+                and state.last_rest_bid_cents is not None
+                and state.last_rest_ask_cents is not None
+            ):
+                # 2026-10-04 (owner-latch hysteresis): REST held the quote.
+                # WS reclaims it only after _WS_PROMOTE_STREAK consecutive
+                # deltas arrive verified AND in parity with the still-fresh
+                # REST BBO — killing the per-delta REST<->WS owner flap that
+                # made decision-time quote ownership a coin flip.  While the
+                # streak builds (or while WS is unverified), the REST BBO stays
+                # the effective quote so owner and quote content agree.
+                _streak = self._ws_promote_streak.get(ticker, 0) + 1
+                _ws_reclaimed = (
+                    state.quote_owner == "WS_FRESH_VERIFIED"
+                    and _streak >= _WS_PROMOTE_STREAK
+                )
+                if _ws_reclaimed:
+                    self._ws_promote_streak.pop(ticker, None)
+                else:
+                    self._ws_promote_streak[ticker] = _streak
+                    state.best_bid_cents = state.last_rest_bid_cents
+                    state.best_ask_cents = state.last_rest_ask_cents
+                    if state.last_rest_yes_bids is not None:
+                        state.yes_bids = list(state.last_rest_yes_bids)
+                    if state.last_rest_no_bids is not None:
+                        state.no_bids = list(state.last_rest_no_bids)
+                    state.quote_owner = "REST_VERIFIED_DEGRADED"
+                    state.degraded_mode = True
+            else:
+                self._ws_promote_streak.pop(ticker, None)
+                if state.best_bid_cents is None or state.best_ask_cents is None:
+                    # No usable effective quote from any trusted owner.
+                    state.quote_owner = "NONE_UNTRUSTED"
         elif via.startswith("rest") or via == "ws_fallback" or via == "subscribe_fallback" or via == "rest_polling" or via == "ws_subscribe_bootstrap":
             state.last_rest_bid_cents = state.best_bid_cents
             state.last_rest_ask_cents = state.best_ask_cents
@@ -6553,9 +6664,40 @@ class KalshiMarketStateStore:
             state.last_rest_quote_update_ts = now
             # Keep the legacy REST freshness marker for transport/health consumers.
             state.last_rest_update_ts = now
-            # REST owns the effective quote → degraded operating mode.
-            state.quote_owner = "REST_VERIFIED_DEGRADED"
-            state.degraded_mode = True
+            # 2026-10-04 (owner-latch hysteresis): a REST apply is a freshness
+            # monitor first.  It claims quote ownership only when the WS book is
+            # unproven/stale or provably divergent vs this fresh REST quote —
+            # otherwise the ~2s poll cadence demotes a healthy WS book on every
+            # pass and the owner flips per-delta.
+            _ws_entry_age_s = (
+                float(os.getenv("MERID_WS_ENTRY_MAX_AGE_MS", "1500")) / 1000.0
+            )
+            _ws_verified_now = (
+                bool(getattr(state, "snapshot_complete", False))
+                and bool(getattr(state, "live_sequence_confirmed", False))
+                and state.data_quality == "GOOD"
+                and state.last_ws_update_ts > 0
+                and (now - state.last_ws_update_ts) <= _ws_entry_age_s
+            )
+            _ws_divergent_now = (
+                state.last_ws_bid_cents is not None
+                and state.last_ws_ask_cents is not None
+                and state.best_bid_cents is not None
+                and state.best_ask_cents is not None
+                and max(
+                    abs(state.last_ws_bid_cents - state.best_bid_cents),
+                    abs(state.last_ws_ask_cents - state.best_ask_cents),
+                ) > int(os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3"))
+            )
+            if _ws_verified_now and not _ws_divergent_now:
+                # WS book healthy and in parity — REST refreshed its markers
+                # but does not take the effective quote.
+                state.degraded_mode = False
+            else:
+                # REST owns the effective quote → degraded operating mode.
+                state.quote_owner = "REST_VERIFIED_DEGRADED"
+                state.degraded_mode = True
+                self._ws_promote_streak[ticker] = 0
 
         # Ticker quote fallback: the orderbook_delta stream is one-sided, so the
         # local ladder can become crossed or one-sided if the opposite tape lags.
