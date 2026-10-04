@@ -9067,6 +9067,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 candidate["legacy_risk_label"] = _td_ind.get(f"{_sel_key}_legacy_risk_label")
                 candidate["provisional_price_bucket"] = _td_ind.get("provisional_price_bucket")
                 candidate["provisional_tte_bucket"] = _td_ind.get("provisional_tte_bucket")
+            # 2026-10-04: marginal-band rescues need their admission bound even
+            # when no cell lane owns them — otherwise the generic $0.03 dollar
+            # floor below re-kills what the rescue just admitted.  The
+            # effective_required_edge_cents indicator is already slack-adjusted
+            # for a rescued side.  Propagate it for EVERY selected decision,
+            # not just lane-owned ones — the submit-time EV re-gate should
+            # compare against the bound the candidate was actually admitted
+            # on, not a flat floor that silently shadows sub-3c thresholds.
+            if _td_ind.get("marginal_band_rescue"):
+                candidate["marginal_band_rescue"] = True
+            _sel_key = str(
+                getattr(trade_decision, "selected_outcome", "") or ""
+            ).lower()
+            _eff_bound = _td_ind.get(f"{_sel_key}_effective_required_edge_cents")
+            if _eff_bound is not None:
+                candidate["effective_required_edge_cents"] = _eff_bound
         elif candidate.get("selected_outcome_price"):
             approved_price_cents = int(candidate["selected_outcome_price"])
             candidate["approved_price_cents"] = approved_price_cents
@@ -9450,6 +9466,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     if (
                         candidate.get("threshold_cell_id") is not None
                         or candidate.get("provisional_cell_id") is not None
+                        or candidate.get("marginal_band_rescue")
                     ) and _eff_edge_c is not None:
                         try:
                             _lane_min_dollar_ev = (

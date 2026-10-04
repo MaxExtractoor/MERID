@@ -8452,6 +8452,7 @@ class LeanAgent15m:
                 feature_snapshot=self._feature_snapshot,
                 entry_price_basis=price_basis,
                 adverse_selection_reserve=adv_sel_reserve,
+                route=route,
             )
             _record_decision_audit(
                 decision,
@@ -8507,11 +8508,20 @@ class LeanAgent15m:
             decision_taker.gross_edge is not None
             and float(decision_taker.gross_edge) >= taker_edge_threshold
         )
+        # 2026-10-04: a marginal-band-rescued selection only clears the edge leg
+        # via the 50-89c near-miss slack.  The counterfactual that justified the
+        # slack measured fills at the held (ask) price — a resting bid fill is a
+        # different, adverse-selected distribution — so rescued candidates route
+        # taker/IOC even when maker is the default lane.
+        _taker_rescued = bool(
+            decision_taker.selected_outcome is not None
+            and (decision_taker.indicators or {}).get("marginal_band_rescue")
+        )
 
         if maker_entries_enabled:
             use_taker = (
                 decision_taker.selected_outcome is not None
-                and (is_late or is_high_edge)
+                and (is_late or is_high_edge or _taker_rescued)
             )
         else:
             # Maker lane disabled: the taker EV gate is the sole arbiter — if
