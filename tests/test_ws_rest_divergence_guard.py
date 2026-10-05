@@ -670,6 +670,152 @@ async def test_entry_still_blocked_on_no_fresh_feed():
 
 
 @pytest.mark.asyncio
+async def test_ws_resyncing_fresh_rest_marketable_allows():
+    """2026-10-05 relax (KALSHI-015): an entry emitted on a healthy WS book
+    must not die on the authority label when the WS resyncs during routing —
+    a fresh REST pull IS verified exchange truth, and the order's own limit
+    price caps the worst-case fill.  Reproduces the KXBTC15M-…1815 loss:
+    BUY_NO intent with +4.3c claimed EV rejected ws_resyncing while REST was
+    <500ms stale.  Only the no-fresh-feed case stays blocked."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    # REST NO ask = 30c; BUY_NO at 30c is marketable on REST.
+    intent = _make_intent(price_cents=30)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is None
+    assert getattr(intent, "_submit_quote_source", None) == "rest"
+
+
+@pytest.mark.asyncio
+async def test_ws_resyncing_fresh_rest_not_marketable_rejects():
+    """The fallback still fails closed on price: if the fresh REST ask is
+    above the order's limit the order is not marketable on the only trusted
+    book and must be rejected — the limit never gets lifted past the edge."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74)
+
+    # REST NO ask = 30c; BUY_NO at 25c cannot fill.
+    intent = _make_intent(price_cents=25)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert result.reason.startswith("edge_lost_at_submit:not_marketable")
+
+
+@pytest.mark.asyncio
+async def test_ws_resyncing_rest_unavailable_still_rejects():
+    """No fresh feed at all remains a hard reject: WS resyncing AND the REST
+    pull failed — nothing trustworthy to judge the order on."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    port = _make_port(success=False)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(price_cents=30), port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert result.reason == "ws_resyncing:ws_not_authoritative"
+
+
+@pytest.mark.asyncio
+async def test_ws_resyncing_stale_rest_still_rejects():
+    """A REST pull older than max_rest_age_ms does not qualify as fresh
+    exchange truth — resync + stale REST still rejects."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    port = _make_port(rest_yes_bid=70, rest_yes_ask=74, timestamp=time.time() - 60.0)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(price_cents=30), port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert result.reason == "ws_resyncing:ws_not_authoritative"
+
+
+@pytest.mark.asyncio
+async def test_ws_resyncing_inconsistent_rest_book_rejects():
+    """Fresh but internally inconsistent REST book (crossed) must not
+    authorize an entry — integrity invariants still apply on the fallback leg."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    # Crossed REST book: yes bid > yes ask.
+    port = _make_port(rest_yes_bid=76, rest_yes_ask=70)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            _make_intent(price_cents=30), port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+    assert "rest_book_inconsistent" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_ws_resyncing_fresh_rest_hard_divergence_rejects():
+    """A fresh REST pull that disagrees with the WS book beyond the hard
+    limit is an integrity failure, not a fallback opportunity — the
+    comparable-divergence machinery still vetoes."""
+    state = _make_ws_state(
+        snapshot_complete=False,
+        live_sequence_confirmed=False,
+        book_health=BookHealth.RESYNC_REQUESTED,
+    )
+    store = _make_market_state_store(state)
+    # WS NO side is 20/21; REST YES 40/41 -> NO side 59/60 -> ~39c divergence.
+    port = _make_port(rest_yes_bid=40, rest_yes_ask=41)
+
+    intent = _make_intent(price_cents=60)
+
+    with patch("merid.event_venues.kalshi.market_state.get_kalshi_market_state_store", return_value=store):
+        result = await _ws_rest_divergence_guard(
+            intent, port, TradingMode.LIVE, time.monotonic()
+        )
+
+    assert result is not None
+    assert result.status == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_reduce_only_exit_bypasses_hard_divergence():
     """Hard-limit feed divergence is an integrity failure for entries, but a
     reduce-only exit is limit-bounded and only shrinks exposure — it proceeds."""
@@ -908,7 +1054,13 @@ async def test_locked_fresh_ws_reprices_within_both_caps(side, ask, ws_age_s, al
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_ws_cannot_authorize_reprice():
+async def test_unconfirmed_ws_repriced_on_agreeing_fresh_rest():
+    """2026-10-05 relax: an unconfirmed WS no longer vetoes a reprice when the
+    fresh REST pull agrees exactly (0c divergence, internally consistent).
+    The REST leg is verified exchange truth; the bounded reprice stays inside
+    the edge budget and the chase cap — the order's own limit is the price
+    protection.  An agreeing, diverging, or stale REST leg would still gate
+    this through the normal consistency/marketability checks."""
     store = _make_market_state_store(_make_ws_state(53, 54, live_sequence_confirmed=False))
     intent = _make_intent(side="yes", price_cents=50)
     intent.selected_outcome_price_cents = 50
@@ -917,6 +1069,6 @@ async def test_unconfirmed_ws_cannot_authorize_reprice():
         result = await _ws_rest_divergence_guard(
             intent, _make_port(53, 54), TradingMode.LIVE, time.monotonic()
         )
-    assert result is not None
-    assert result.status == "rejected"
-    assert intent.price_cents == 50
+    assert result is None
+    # Repriced up to, but never past, selected price + chase cap (50+5).
+    assert 54 <= intent.price_cents <= 55

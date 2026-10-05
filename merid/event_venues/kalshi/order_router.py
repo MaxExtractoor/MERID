@@ -5428,28 +5428,35 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
         rest_usable = rest_book is not None and rest_age_ms <= max_rest_age_ms
         _is_exit = _is_exit_order(intent)
         if not ws_authoritative and not _is_exit:
-            # Degraded-execution policy: when the decision was bound to a
-            # REST_VERIFIED_DEGRADED owner (WS leg unhealthy but REST owned
-            # the effective quote at decision time), the order may route on
-            # the REST leg — the fresh REST pull above and the marketability
-            # checks below still fail closed.
-            _rest_owned_intent = (
-                (getattr(intent, "quote_owner", "") or "") == "REST_VERIFIED_DEGRADED"
-                and os.getenv("MERID_REST_DEGRADED_ENTRY_ENABLED", "1").lower()
+            # Degraded-execution policy (2026-10-05 relax): any entry intent may
+            # be judged on a fresh REST pull — a <500ms REST book IS verified
+            # exchange truth, and a marketable order's own limit caps the
+            # worst-case fill.  The decision-time quote owner no longer gates
+            # this: a candidate emitted on a healthy WS that resyncs during
+            # routing should not die when REST was just verified fresh.
+            # Downstream still fails closed: REST internal consistency, hard
+            # divergence limits, marketability at the limit price, bounded
+            # reprice, and the favorable-drift check all apply.  When no fresh
+            # REST exists there is nothing trustworthy to judge on -> reject.
+            _rest_degraded_enabled = (
+                os.getenv("MERID_REST_DEGRADED_ENTRY_ENABLED", "1").lower()
                 in ("1", "true", "yes")
             )
-            if not _rest_owned_intent:
+            if not (_rest_degraded_enabled and rest_usable):
                 return OrderResult(
                     status="rejected", mode=mode,
                     reason="ws_resyncing:ws_not_authoritative",
                     latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                 )
             logger.warning(
-                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_DEGRADED_EVAL "
-                "decision=CONTINUE reason=rest_owned_intent ws_age_ms=%.0f "
-                "rest_age_ms=%.0f — degraded entry authorized by decision "
-                "owner; fresh REST pull + marketability still enforced",
-                intent.ticker, ws_age_ms, rest_age_ms,
+                "EXECUTION-QUOTE-MODE ticker=%s mode=REST_FALLBACK_EVAL "
+                "decision=CONTINUE reason=%s ws_age_ms=%.0f "
+                "rest_age_ms=%.0f — fresh REST pull adjudicates; "
+                "consistency/divergence/marketability still enforced",
+                intent.ticker,
+                ("rest_owned_intent" if getattr(intent, "quote_owner", "") == "REST_VERIFIED_DEGRADED"
+                 else "ws_resync_rest_usable"),
+                ws_age_ms, rest_age_ms,
             )
 
         # If REST is unusable, WS is primary by default.  Allow only when the
