@@ -8108,8 +8108,14 @@ class LeanAgent15m:
         if no_ask <= 0 and yes_bid > 0:
             no_ask = 100.0 - yes_bid
 
-        yes_depth_cc = float(getattr(market_state, "min_depth_yes", 0) or 0) * 100.0
-        no_depth_cc = float(getattr(market_state, "min_depth_no", 0) or 0) * 100.0
+        # Entry depth is the size the buy order consumes: the side's ASK.
+        # In the binary book the YES ask shares the NO-bid ladder
+        # (min_depth_no) and the NO ask shares the YES-bid ladder
+        # (min_depth_yes) — see KalshiMarketState.yes_ask_size/no_ask_size.
+        # 2026-10-05: these were swapped (bid-side sizes), so the depth gate
+        # judged each entry on the half of the book it never trades against.
+        yes_depth_cc = float(getattr(market_state, "min_depth_no", 0) or 0) * 100.0
+        no_depth_cc = float(getattr(market_state, "min_depth_yes", 0) or 0) * 100.0
 
         # Approximate annualized volatility by asset.  A realized-vol estimator
         # can replace these constants when external spot history is available.
