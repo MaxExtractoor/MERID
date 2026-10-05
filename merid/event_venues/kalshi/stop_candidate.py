@@ -750,6 +750,44 @@ def _model_fair_value_max_age_s() -> float:
         return 120.0
 
 
+def _get_model_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
+    """Return *model-derived* fair value in the held contract's price space.
+
+    Like ``_get_fair_value_cents`` but deliberately skips the ``implied_prob``
+    fallback: implied probability is market-derived, so anchoring a
+    sell-vs-hold comparison to it is tautological (bid ~= implied implies the
+    "overpay" threshold is unreachable or arbitrary).  Only genuinely
+    independent model outputs (``model_fair_prob``, ``external_fair_value``)
+    are valid fair anchors for take-profit and edge-realization gates.
+    """
+    unified = state
+    if hasattr(unified, "model_fair_prob") and unified.model_fair_prob is not None:
+        try:
+            prob_ts = float(getattr(unified, "model_fair_prob_ts", 0.0) or 0.0)
+            age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
+            if age_s <= _model_fair_value_max_age_s():
+                yes_fair = int(round(float(unified.model_fair_prob) * 100))
+                if 1 <= yes_fair <= 99:
+                    if held_contract == "yes":
+                        return yes_fair
+                    return 100 - yes_fair
+        except Exception:
+            pass
+
+    if hasattr(unified, "external_fair_value") and unified.external_fair_value is not None:
+        try:
+            yes_fair = int(round(float(unified.external_fair_value) * 100))
+            if not 1 <= yes_fair <= 99:
+                return None
+            if held_contract == "yes":
+                return yes_fair
+            return 100 - yes_fair
+        except Exception:
+            pass
+
+    return None
+
+
 def _get_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
     """Return model fair value in the held contract's price space."""
     # The active model's P(YES), published by the agent decision path, is the

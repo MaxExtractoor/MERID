@@ -3581,6 +3581,7 @@ _SAFETY_EXIT_REASONS: set[str] = {
     "stop_loss",
     "settlement_guard",
     "auto_exit_99c",
+    "hard_profit_lock",
     "market_expired",
     "expiry_liquidation",
     "time_exit",

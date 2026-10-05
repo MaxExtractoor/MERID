@@ -133,6 +133,7 @@ EXIT_REASON_CANONICAL_MAP: Dict[str, str] = {
     "model_invalidation": "model_invalidation",
     "model_invalidation_loss_exit": "model_invalidation",
     "auto_exit_99c": "expiry_liquidation",
+    "hard_profit_lock": "hard_profit_lock",
     "settlement_guard": "expiry_liquidation",
     "ratchet_floor": "take_profit",
     "loss_cut_40pct": "stop_loss",
@@ -212,6 +213,7 @@ _EMERGENCY_CANONICAL_REASONS = frozenset({
     "expiry_liquidation",
     "emergency",
     "hard_risk",
+    "hard_profit_lock",
 })
 
 # Raw trigger-reason strings used by the StopCandidate path.  They classify a
@@ -223,6 +225,7 @@ _OPERATIONAL_TRIGGER_REASONS = frozenset({
     "SETTLEMENT_GUARD",
     "EXPIRY_LIQUIDATION",
     "AUTO_EXIT_99C",
+    "HARD_PROFIT_LOCK",
     "RECONCILIATION",
     "MANUAL",
     "MARKET_CLOSED",
