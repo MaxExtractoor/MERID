@@ -4586,6 +4586,31 @@ def compute_trade_decision(
             if _gates_ok:
                 _canary_side = _cs
                 _canary_edge = _ce
+            else:
+                _gate_fails = [
+                    n for n, ok in (
+                        ("depth", yes_depth_ok if _cs == "yes" else no_depth_ok),
+                        ("tail", not tail_guard_violation_yes if _cs == "yes" else not tail_guard_violation_no),
+                        ("evidence", yes_evidence_ok if _cs == "yes" else no_evidence_ok),
+                        ("regime", _yes_regime_ok if _cs == "yes" else _no_regime_ok),
+                        ("conviction", _yes_conv_block is None if _cs == "yes" else _no_conv_block is None),
+                        ("throttle", _yes_throttle_block is None if _cs == "yes" else _no_throttle_block is None),
+                        ("ct_lane", _yes_ct_lane_block is None if _cs == "yes" else _no_ct_lane_block is None),
+                        ("bookflow", _yes_bookflow_block is None if _cs == "yes" else _no_bookflow_block is None),
+                        ("hi_price", not _yes_hi_price if _cs == "yes" else True),
+                        ("cost_basis", (
+                            (_yes_cbp_neg_floor or yes_breakdown.p_selected > yes_min_p)
+                            if _cs == "yes" else
+                            (_no_cbp_neg_floor or no_breakdown.p_selected > no_min_p)
+                        )),
+                    ) if not ok
+                ]
+                indicators["canary_taker_blocked"] = {
+                    "side": _cs,
+                    "gate_ev_cents": _ce * 100.0,
+                    "failed_gates": _gate_fails,
+                    "quote_owner": indicators.get("quote_owner"),
+                }
         if _canary_side is not None:
             indicators["canary_taker"] = {
                 "side": _canary_side,
@@ -4596,6 +4621,28 @@ def compute_trade_decision(
                 ) * 100.0,
                 "canary_floor_cents": MERID_CANARY_MIN_EDGE * 100.0,
                 "quote_owner": indicators.get("quote_owner"),
+            }
+    elif (
+        # Edge in the canary window but the quote isn't WS-verified — stamp
+        # the blocker so the lane's starvation is measurable, not silent.
+        MERID_CANARY_LANE_ENABLED
+        and route == "taker"
+        and not yes_qualifies
+        and not no_qualifies
+        and best_side is not None
+    ):
+        _ce2 = _yes_eff_edge if best_side == "yes" else _no_eff_edge
+        _cb2 = (
+            _yes_edge_eff_bound if best_side == "yes"
+            else _no_edge_eff_bound
+        )
+        if _cb2 >= 0.0 and MERID_CANARY_MIN_EDGE <= _ce2 < _cb2:
+            indicators["canary_taker_blocked"] = {
+                "side": best_side,
+                "gate_ev_cents": _ce2 * 100.0,
+                "failed_gates": ["quote_not_ws_verified"],
+                "quote_owner": indicators.get("quote_owner"),
+                "degraded": bool(indicators.get("quote_degraded_mode")),
             }
 
     if yes_qualifies and no_qualifies:
@@ -4756,6 +4803,17 @@ def compute_trade_decision(
                 risk_reserve_cents=float(_rej_bd.model_risk_reserve) * 100.0,
                 exit_cost_reserve_cents=float(_rej_bd.exit_cost_reserve) * 100.0,
                 adverse_selection_reserve_cents=float(_rej_bd.adverse_selection_reserve) * 100.0,
+                # Quote provenance bound to the rejection so a canary-eligible
+                # pass can be told apart from a degraded-quote denial.
+                quote_state=indicators.get("quote_owner"),
+                quote_age_ms=(
+                    float(quote_age_ms) if quote_age_ms is not None else None
+                ),
+                book_sequence=(
+                    int(book_sequence_confirmed)
+                    if book_sequence_confirmed is not None
+                    else None
+                ),
             )
 
     # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
