@@ -515,6 +515,10 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # 2026-10-02: queue-priced maker lane — admitted on bid-side economics
     # with an explicit adverse-selection reserve; stays 1-contract post-only.
     "maker_bid",
+    # 2026-10-05 (Experiment A): empirical marginal-maker lane — bounded
+    # δ-slack below the active maker bound, bid-priced, 1-contract post-only,
+    # short resting life.  Cohort measured separately vs current policy.
+    "empirical_marginal_maker",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -587,6 +591,159 @@ def _marginal_band_slack(entry_price_cents: Optional[float]) -> float:
     # can carry epsilon above an integer-cent ask, so admit [MIN, MAX+1).
     if MERID_MARGINAL_BAND_MIN_CENTS <= p < MERID_MARGINAL_BAND_MAX_CENTS + 1.0:
         return MERID_MARGINAL_BAND_SLACK
+    return 0.0
+
+
+# 2026-10-05 (SOL post-mortem): evidence_escape admission narrowing.  The
+# lane is a discretionary override over thin evidence — its fills include the
+# knife-edge 206s-TTE SOL NO@52 loss where the book went one-sided and the
+# position never saw a salvageable exit.  Escape admissions now carry their
+# own vetoes on top of the escape budget:
+#   * no BTC/SOL/DOGE admission in the 120-240s TTE window — the realized
+#     toxic maker cohort (-461c over 31 fills, -15c/fill, 2026-10 audit);
+#   * knife-edge buffer: inside the 40-60c price band the spot must sit at
+#     least K * sigma*sqrt(TTE) from the strike, else the contract is a pure
+#     gamma coin-flip the evidence lane has no basis to override;
+#   * mid-band extra margin: 40-60c escape admissions require net EV >=
+#     required_edge + MERID_ESCAPE_MID_EXTRA_CENTS;
+#   * one-sided bookflow veto: opposing-side book pressure above the shared
+#     imbalance block (applied on every route — resting OR crossing into a
+#     one-sided book is the same pick-off signature);
+#   * counter-move veto: the trailing 60s underlying return must not
+#     contradict the selected side beyond MERID_ESCAPE_COUNTER_BPS.
+# Every veto is env-gated and degrades open on missing inputs (the evidence
+# gate itself remains the hard block).
+MERID_ESCAPE_LATE_ASSETS = frozenset(
+    a.strip().upper()
+    for a in os.environ.get("MERID_ESCAPE_LATE_ASSETS", "BTC,SOL,DOGE").split(",")
+    if a.strip()
+)
+MERID_ESCAPE_LATE_TTE_LO_S = float(
+    os.environ.get("MERID_ESCAPE_LATE_TTE_LO_S", "120")
+)
+MERID_ESCAPE_LATE_TTE_HI_S = float(
+    os.environ.get("MERID_ESCAPE_LATE_TTE_HI_S", "240")
+)
+MERID_ESCAPE_KNIFE_LO_C = float(os.environ.get("MERID_ESCAPE_KNIFE_LO_C", "40"))
+MERID_ESCAPE_KNIFE_HI_C = float(os.environ.get("MERID_ESCAPE_KNIFE_HI_C", "60"))
+MERID_ESCAPE_KNIFE_K = float(os.environ.get("MERID_ESCAPE_KNIFE_K", "0.5"))
+MERID_ESCAPE_MID_EXTRA_C = float(
+    os.environ.get("MERID_ESCAPE_MID_EXTRA_CENTS", "1.0")
+)
+MERID_ESCAPE_BOOKFLOW_VETO = os.environ.get(
+    "MERID_ESCAPE_BOOKFLOW_VETO", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_ESCAPE_COUNTER_BPS = float(
+    os.environ.get("MERID_ESCAPE_COUNTER_BPS", "10.0")
+)
+
+
+def _evidence_escape_veto_reason(
+    *,
+    asset: str,
+    side: str,
+    price_cents: float,
+    net_ev_cents: float,
+    required_edge_cents: float,
+    seconds_to_expiry: Optional[float],
+    spot_price: Optional[float],
+    strike_price: Optional[float],
+    annualized_vol: Optional[float],
+    feature_snapshot: Any,
+    dir_regime: Any,
+) -> Optional[str]:
+    """Additional vetoes for evidence_escape admissions (see block above).
+
+    Returns a snake_case reason stem (``evidence_escape_<cause>``) or None
+    when the escape admission is clean.  Fail-open on missing inputs — each
+    check only fires on data it can actually evaluate.
+    """
+    tte = float(seconds_to_expiry or 0.0)
+    # Late-window maker/taker cohort veto — the realized -15c/fill bucket.
+    if (
+        asset.upper() in MERID_ESCAPE_LATE_ASSETS
+        and MERID_ESCAPE_LATE_TTE_LO_S <= tte <= MERID_ESCAPE_LATE_TTE_HI_S
+    ):
+        return "evidence_escape_late_window"
+    _px = float(price_cents or 0.0)
+    if MERID_ESCAPE_KNIFE_LO_C <= _px <= MERID_ESCAPE_KNIFE_HI_C:
+        # Mid-band extra margin: knife-edge prices carry the most model risk.
+        if net_ev_cents < required_edge_cents + MERID_ESCAPE_MID_EXTRA_C:
+            return "evidence_escape_mid_band_margin"
+        # Distance-to-strike buffer normalized by sigma*sqrt(TTE).
+        try:
+            if (
+                spot_price is not None
+                and strike_price is not None
+                and spot_price > 0
+                and strike_price > 0
+                and annualized_vol is not None
+                and float(annualized_vol) > 0
+                and tte > 0
+            ):
+                move = abs(math.log(float(spot_price) / float(strike_price)))
+                sigma_t = float(annualized_vol) * math.sqrt(tte / 31557600.0)
+                if sigma_t > 0 and move < MERID_ESCAPE_KNIFE_K * sigma_t:
+                    return "evidence_escape_knife_edge"
+        except (TypeError, ValueError):
+            pass
+    # One-sided book pressure opposite the held side.
+    if MERID_ESCAPE_BOOKFLOW_VETO:
+        try:
+            from merid.prediction import directional_regime as _dreg
+
+            _bf = _dreg.bookflow_block_reason(feature_snapshot, asset, side)
+        except Exception:
+            _bf = None
+        if _bf is not None:
+            return "evidence_escape_bookflow"
+    # Trailing-60s underlying move contradicts the held side.
+    try:
+        _r60 = None
+        if dir_regime is not None:
+            _r60 = (getattr(dir_regime, "asset_r60", None) or {}).get(
+                str(asset).upper()
+            )
+        if _r60 is not None and math.isfinite(float(_r60)):
+            tol = MERID_ESCAPE_COUNTER_BPS / 10000.0
+            if side == "no" and float(_r60) > tol:
+                return "evidence_escape_counter_move"
+            if side == "yes" and float(_r60) < -tol:
+                return "evidence_escape_counter_move"
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+# ── Experiment A: empirical_marginal_maker lane (2026-10-05) ───────────────
+# The controlled minimum-opportunity experiment: a bounded δ-slack below the
+# active maker requirement, evaluated at the BID (truly non-marketable),
+# inside a declared admission domain (50-89c entry, 240-600s TTE).  The
+# domain itself encodes the exclusions: TTE<240s keeps the lane out of the
+# toxic 2-4min passive-maker bucket, and evidence-escape-owned sides are
+# denied the slack per-side below.  Route "empirical_marginal_maker" only —
+# never widened into the generic taker marginal band.
+# δ in edge units (probability/dollars, same convention as
+# MERID_MARGINAL_BAND_SLACK — 0.005 = 0.5¢ of edge).
+EMM_SLACK = float(os.environ.get("MERID_EMM_SLACK", "0.005"))
+EMM_PRICE_LO_CENTS = float(os.environ.get("MERID_EMM_PRICE_LO_CENTS", "50"))
+EMM_PRICE_HI_CENTS = float(os.environ.get("MERID_EMM_PRICE_HI_CENTS", "90"))
+EMM_TTE_LO_SECONDS = int(os.environ.get("MERID_EMM_TTE_LO_SECONDS", "240"))
+EMM_TTE_HI_SECONDS = int(os.environ.get("MERID_EMM_TTE_HI_SECONDS", "600"))
+
+
+def _marginal_maker_slack(
+    entry_price_cents: float, seconds_to_expiry: Optional[float]
+) -> float:
+    """Bounded marginal-maker slack: δ inside the declared admission domain,
+    zero outside — the near-miss cohort is measured, not widened."""
+    if seconds_to_expiry is None:
+        return 0.0
+    if (
+        EMM_PRICE_LO_CENTS <= entry_price_cents < EMM_PRICE_HI_CENTS
+        and EMM_TTE_LO_SECONDS <= float(seconds_to_expiry) <= EMM_TTE_HI_SECONDS
+    ):
+        return EMM_SLACK
     return 0.0
 
 
@@ -3514,20 +3671,56 @@ def compute_trade_decision(
                         # Evidence passed cleanly — name the owner so the
                         # admission lineage is explicit either way.
                         _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
-                        indicators[f"{_side}_admission_owner"] = (
-                            "threshold_cell" if _d.cell_id is not None
-                            else "current_build_provisional"
-                            if _d.provisional_cell_id is not None
-                            else "evidence_escape" if _ed.escape_required
-                            else "formula"
-                        )
-                        indicators[f"{_side}_admission_decision"] = "allowed"
-                        indicators[f"{_side}_admission_reason"] = _ed.code.lower()
+                        _escape_veto = None
+                        if _ed.escape_required:
+                            _escape_veto = _evidence_escape_veto_reason(
+                                asset=asset,
+                                side=_side,
+                                price_cents=float(_px),
+                                net_ev_cents=float(_ne_c),
+                                required_edge_cents=float(_d.total) * 100.0,
+                                seconds_to_expiry=seconds_to_expiry,
+                                spot_price=spot_price,
+                                strike_price=strike_price,
+                                annualized_vol=resolved_vol,
+                                feature_snapshot=feature_snapshot,
+                                dir_regime=directional_regime,
+                            )
+                        if _escape_veto is not None:
+                            indicators[f"{_side}_admission_owner"] = (
+                                "evidence_escape"
+                            )
+                            indicators[f"{_side}_admission_decision"] = (
+                                "blocked"
+                            )
+                            indicators[f"{_side}_admission_reason"] = (
+                                _escape_veto
+                            )
+                            if _side == "yes" and yes_evidence_ok:
+                                yes_evidence_ok = False
+                                yes_evidence_reason = f"{_escape_veto}_yes"
+                                indicators[yes_evidence_reason] = _ed.detail()
+                            elif _side == "no" and no_evidence_ok:
+                                no_evidence_ok = False
+                                no_evidence_reason = f"{_escape_veto}_no"
+                                indicators[no_evidence_reason] = _ed.detail()
+                        else:
+                            indicators[f"{_side}_admission_owner"] = (
+                                "threshold_cell" if _d.cell_id is not None
+                                else "current_build_provisional"
+                                if _d.provisional_cell_id is not None
+                                else "evidence_escape" if _ed.escape_required
+                                else "formula"
+                            )
+                            indicators[f"{_side}_admission_decision"] = "allowed"
+                            indicators[f"{_side}_admission_reason"] = _ed.code.lower()
                         # 2026-10-02: inside the provisional domain the static
                         # calibration floor is a legacy verdict like the live
                         # gate — a clean live pass lifts it (caps/state were
                         # already verified when the cell id was assigned).
-                        if _d.provisional_cell_id is not None:
+                        # An evidence_escape veto above is final — the lift
+                        # must not re-admit a side the escape vetoes denied.
+                        if _d.provisional_cell_id is not None and _escape_veto is None:
                             if _side == "yes" and not yes_evidence_ok:
                                 yes_evidence_ok = True
                                 yes_evidence_reason = None
@@ -3819,6 +4012,11 @@ def compute_trade_decision(
     # fills; a resting-bid (maker) fill is a different, adverse-selected
     # distribution and must not inherit the slack.
     _mb_on_route = route == "taker"
+    # Experiment A: the empirical_marginal_maker route gets its own bounded
+    # slack — δ=0.5c, bid-priced (non-marketable) entry, inside the declared
+    # 4-10min / 50-89c domain, and denied to evidence-escape-owned sides
+    # (an escape override already consumed the side's evidence budget).
+    _emm_on_route = route == "empirical_marginal_maker"
     _mb_yes_slack = (
         _marginal_band_slack(float(yes_breakdown.executable_entry_price) * 100.0)
         if (_mb_on_route and yes_min_edge > 0.0)
@@ -3829,6 +4027,23 @@ def compute_trade_decision(
         if (_mb_on_route and no_min_edge > 0.0)
         else 0.0
     )
+    if _emm_on_route:
+        if (
+            yes_min_edge > 0.0
+            and indicators.get("yes_admission_owner") != "evidence_escape"
+        ):
+            _mb_yes_slack = _marginal_maker_slack(
+                float(yes_breakdown.executable_entry_price) * 100.0,
+                seconds_to_expiry,
+            )
+        if (
+            no_min_edge > 0.0
+            and indicators.get("no_admission_owner") != "evidence_escape"
+        ):
+            _mb_no_slack = _marginal_maker_slack(
+                float(no_breakdown.executable_entry_price) * 100.0,
+                seconds_to_expiry,
+            )
     _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
     _no_edge_eff_bound = no_min_edge - _mb_no_slack
     # A "rescued" side is one that would have failed without the slack —
@@ -3847,7 +4062,12 @@ def compute_trade_decision(
     if _mb_yes_slack > 0.0 or _mb_no_slack > 0.0:
         indicators["marginal_band"] = {
             "enabled": True,
-            "slack_cents": MERID_MARGINAL_BAND_SLACK * 100.0,
+            "route": route,
+            "slack_cents": (
+                EMM_SLACK if _emm_on_route else MERID_MARGINAL_BAND_SLACK
+            ) * 100.0,
+            "yes_slack_cents": _mb_yes_slack * 100.0,
+            "no_slack_cents": _mb_no_slack * 100.0,
             "yes_rescued": bool(_yes_mb_rescued),
             "no_rescued": bool(_no_mb_rescued),
         }
@@ -3862,6 +4082,104 @@ def compute_trade_decision(
         indicators["no_effective_required_edge_cents"] = (
             _no_edge_eff_bound * 100.0
         )
+
+    # 2026-10-05 (post-audit): restamp the enforced edge-bound surface AFTER
+    # every mutation is complete.  The decomposition stamps at ~3195 and the
+    # best-side stamps at ~3590 predate the CAUTION-margin bump (3664) and the
+    # marginal-band slack (3832) — observed live: effective_required_edge=2.0c
+    # recorded while 4.0c was actually enforced, so rejects read as
+    # "shortfall 0.0" against the true bound.  Fields below are the
+    # post-mutation truth the gate applied:
+    #   *_route_required_edge_cents   post-caution policy bound for this route
+    #   *_effective_gate_edge_cents   the bound actually compared (post-slack)
+    #   *_gate_ev_cents               the quantity compared (EPC-LCB adjusted)
+    #   *_true_shortfall_cents        max(0, gate_bound - gate_ev)
+    for _pfx, _bd, _bnd, _eff in (
+        ("yes", yes_breakdown, _yes_edge_eff_bound, _yes_eff_edge),
+        ("no", no_breakdown, _no_edge_eff_bound, _no_eff_edge),
+    ):
+        _min_e = yes_min_edge if _pfx == "yes" else no_min_edge
+        _rescued = _yes_mb_rescued if _pfx == "yes" else _no_mb_rescued
+        # effective_required_edge is the admission bound downstream re-gates
+        # must keep comparing against: slackened iff this side was rescued,
+        # else the full post-caution route bound.  The gate-comparison bound
+        # (always slack-adjusted) is exposed separately as *_gate_edge.
+        indicators[f"{_pfx}_effective_required_edge_cents"] = (
+            _bnd if _rescued else _min_e
+        ) * 100.0
+        indicators[f"{_pfx}_route_required_edge_cents"] = _min_e * 100.0
+        indicators[f"{_pfx}_effective_gate_edge_cents"] = _bnd * 100.0
+        indicators[f"{_pfx}_gate_ev_cents"] = _eff * 100.0
+        indicators[f"{_pfx}_true_shortfall_cents"] = max(
+            0.0, (_bnd - _eff) * 100.0
+        )
+        indicators[f"{_pfx}_fee_reserve_cents"] = float(_bd.entry_fee) * 100.0
+        indicators[f"{_pfx}_impact_reserve_cents"] = (
+            float(_bd.exit_cost_reserve) * 100.0
+        )
+        indicators[f"{_pfx}_model_uncertainty_reserve_cents"] = (
+            float(_bd.model_risk_reserve) * 100.0
+        )
+        indicators[f"{_pfx}_adverse_selection_reserve_cents"] = (
+            float(_bd.adverse_selection_reserve) * 100.0
+        )
+    indicators["order_route"] = route
+    indicators["entry_price_basis"] = entry_price_basis
+    if best_side is not None:
+        _gb = _yes_edge_eff_bound if best_side == "yes" else _no_edge_eff_bound
+        _ge = _yes_eff_edge if best_side == "yes" else _no_eff_edge
+        _gbd = yes_breakdown if best_side == "yes" else no_breakdown
+        indicators["best_required_edge_cents"] = _gb * 100.0
+        indicators["effective_gate_edge_cents"] = _gb * 100.0
+        indicators["edge_shortfall_cents"] = max(0.0, (_gb - _ge) * 100.0)
+        indicators["true_shortfall_to_active_requirement_cents"] = indicators[
+            "edge_shortfall_cents"
+        ]
+        _sbid, _sask = (
+            (yes_bid_cents, yes_ask_cents)
+            if best_side == "yes"
+            else (no_bid_cents, no_ask_cents)
+        )
+        indicators["selected_side_best_bid_cents"] = _sbid
+        indicators["selected_side_best_ask_cents"] = _sask
+        _entry_px_c = float(_gbd.executable_entry_price) * 100.0
+        indicators["order_would_cross"] = bool(
+            _sask is not None and _entry_px_c >= float(_sask)
+        )
+        # Which bound owned this side's requirement — deterministic reject
+        # attribution (cell override > caution margin > floor clamp > formula)
+        # so a threshold reject never needs reverse-engineering.
+        _sel_d = _yes_edge_thr if best_side == "yes" else _no_edge_thr
+        _min_e_sel = yes_min_edge if best_side == "yes" else no_min_edge
+        _best_rescued = (
+            _yes_mb_rescued if best_side == "yes" else _no_mb_rescued
+        )
+        if _best_rescued:
+            _bsrc = (
+                "empirical_marginal_maker" if _emm_on_route
+                else "marginal_band_rescue"
+            )
+        elif _sel_d.cell_id is not None:
+            _bsrc = "threshold_cell"
+        elif _sel_d.provisional_cell_id is not None:
+            _bsrc = "provisional_cell"
+        elif _min_e_sel > float(_sel_d.total) + 1e-9:
+            _bsrc = "caution_margin"
+        elif _sel_d.clamped_floor:
+            _bsrc = "base_floor"
+        else:
+            _bsrc = "dynamic_formula"
+        indicators["edge_gate_bound_source"] = _bsrc
+        if _ge < _gb:
+            indicators["reject_reason_code"] = (
+                "NO_EDGE_BASE_FLOOR"
+                if _bsrc == "base_floor"
+                else (
+                    "NO_EDGE_CAUTION_MARGIN"
+                    if _bsrc == "caution_margin"
+                    else "NO_EDGE_DYNAMIC_THRESHOLD"
+                )
+            )
 
     yes_qualifies = (
         yes_depth_ok
@@ -4602,9 +4920,16 @@ def compute_trade_decision(
         # 2026-10-02: a bid-priced (queue-maker) decision is its own lane —
         # it was admitted on resting economics the ask-priced passes never
         # evaluated, so it must carry the bounded post-only contract.  Cell
-        # ids are kept as secondary indicators for research joins.
+        # ids are kept as secondary indicators for research joins.  The
+        # empirical_marginal_maker route gets its own lane id so its cohort
+        # (bounded δ-slack admissions) stays separable from full-bound
+        # maker_bid fills in the outcome joins.
         if entry_price_basis == "bid":
-            indicators["decision_lane"] = "maker_bid"
+            indicators["decision_lane"] = (
+                "empirical_marginal_maker"
+                if route == "empirical_marginal_maker"
+                else "maker_bid"
+            )
 
         if _sel_thr.cell_id is not None:
             indicators["threshold_cell_id"] = _sel_thr.cell_id
@@ -4641,13 +4966,16 @@ def compute_trade_decision(
             selected_outcome == "no" and _no_mb_rescued
         ):
             indicators["marginal_band_rescue"] = True
+            if _emm_on_route:
+                indicators["empirical_marginal_maker"] = True
             # The admission bound carried downstream (intent.min_required_edge
             # → router stale-decision revalidation; edge_threshold audit field)
             # is the slackened bound the side actually cleared — otherwise
             # every rescued intent dies at submit-time as "edge decayed".
-            selected_threshold = (
-                selected_threshold - MERID_MARGINAL_BAND_SLACK
+            _sel_slack = (
+                _mb_yes_slack if selected_outcome == "yes" else _mb_no_slack
             )
+            selected_threshold = selected_threshold - _sel_slack
             indicators["marginal_band_admission_bound_cents"] = (
                 float(selected_threshold) * 100.0
             )

@@ -244,6 +244,9 @@ def test_spread_not_double_charged_in_edge_threshold(monkeypatch):
 
 def test_convexity_halved_on_favorites(monkeypatch):
     """Held >=50c uses half the p*(1-p) adverse-selection reserve."""
+    # Isolate the convexity term: the 50-89c mid-band relief (default 1.5c)
+    # would otherwise subtract past the hard floor and mask the halving.
+    monkeypatch.setattr(td, "MERID_EDGE_MID_BAND_RELIEF_CENTS", 0.0)
     fav = _compute_dynamic_min_required_edge(
         asset="BTC", price_cents=60, side="yes",
         yes_bid_cents=59.0, yes_ask_cents=61.0,

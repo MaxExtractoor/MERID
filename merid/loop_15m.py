@@ -10210,6 +10210,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         _other_maker_ok = bool(
                             getattr(_tdm, "MERID_CHEAP_TAIL_CANARY_ENABLED", False)
                         )
+                    elif _td_lane_for_coerce == "empirical_marginal_maker":
+                        _other_maker_ok = os.environ.get(
+                            "MERID_EMM_LANE_ENABLED", "0"
+                        ).strip().lower() in ("1", "true", "yes")
                 except Exception:
                     _other_maker_ok = False
             if (

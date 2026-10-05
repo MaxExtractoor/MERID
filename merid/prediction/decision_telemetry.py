@@ -493,6 +493,98 @@ def build_asset_record(
         "edge_shortfall_cents": _first_float(
             _resolve(candidate, decision, ["edge_shortfall_cents"], ["edge_shortfall_cents"])
         ),
+        # Post-mutation enforced-bound surface (2026-10-05): the bound the gate
+        # actually applied (post-caution, post-slack), the EV actually compared,
+        # the true per-side shortfall, the binding component, and the route /
+        # price-basis / crossing state of the evaluated order.  Stamped by
+        # compute_trade_decision after every bound mutation completes.
+        "yes_route_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_route_required_edge_cents"], ["yes_route_required_edge_cents"])
+        ),
+        "no_route_required_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_route_required_edge_cents"], ["no_route_required_edge_cents"])
+        ),
+        "yes_effective_gate_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_effective_gate_edge_cents"], ["yes_effective_gate_edge_cents"])
+        ),
+        "no_effective_gate_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_effective_gate_edge_cents"], ["no_effective_gate_edge_cents"])
+        ),
+        "yes_gate_ev_cents": _first_float(
+            _resolve(candidate, decision, ["yes_gate_ev_cents"], ["yes_gate_ev_cents"])
+        ),
+        "no_gate_ev_cents": _first_float(
+            _resolve(candidate, decision, ["no_gate_ev_cents"], ["no_gate_ev_cents"])
+        ),
+        "yes_true_shortfall_cents": _first_float(
+            _resolve(candidate, decision, ["yes_true_shortfall_cents"], ["yes_true_shortfall_cents"])
+        ),
+        "no_true_shortfall_cents": _first_float(
+            _resolve(candidate, decision, ["no_true_shortfall_cents"], ["no_true_shortfall_cents"])
+        ),
+        "yes_fee_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_fee_reserve_cents"], ["yes_fee_reserve_cents"])
+        ),
+        "no_fee_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_fee_reserve_cents"], ["no_fee_reserve_cents"])
+        ),
+        "yes_impact_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_impact_reserve_cents"], ["yes_impact_reserve_cents"])
+        ),
+        "no_impact_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_impact_reserve_cents"], ["no_impact_reserve_cents"])
+        ),
+        "yes_model_uncertainty_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_model_uncertainty_reserve_cents"], ["yes_model_uncertainty_reserve_cents"])
+        ),
+        "no_model_uncertainty_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_model_uncertainty_reserve_cents"], ["no_model_uncertainty_reserve_cents"])
+        ),
+        "yes_adverse_selection_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_adverse_selection_reserve_cents"], ["yes_adverse_selection_reserve_cents"])
+        ),
+        "no_adverse_selection_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_adverse_selection_reserve_cents"], ["no_adverse_selection_reserve_cents"])
+        ),
+        "order_route": _first_str(
+            _resolve(candidate, decision, ["order_route"], ["order_route"])
+        ),
+        "entry_price_basis": _first_str(
+            _resolve(candidate, decision, ["entry_price_basis"], ["entry_price_basis"])
+        ),
+        "order_would_cross": _resolve(
+            candidate, decision, ["order_would_cross"], ["order_would_cross"]
+        ),
+        "selected_side_best_bid_cents": _first_float(
+            _resolve(candidate, decision, ["selected_side_best_bid_cents"], ["selected_side_best_bid_cents"])
+        ),
+        "selected_side_best_ask_cents": _first_float(
+            _resolve(candidate, decision, ["selected_side_best_ask_cents"], ["selected_side_best_ask_cents"])
+        ),
+        "effective_gate_edge_cents": _first_float(
+            _resolve(candidate, decision, ["effective_gate_edge_cents"], ["effective_gate_edge_cents"])
+        ),
+        "true_shortfall_to_active_requirement_cents": _first_float(
+            _resolve(candidate, decision, ["true_shortfall_to_active_requirement_cents"], ["true_shortfall_to_active_requirement_cents"])
+        ),
+        "edge_gate_bound_source": _first_str(
+            _resolve(candidate, decision, ["edge_gate_bound_source"], ["edge_gate_bound_source"])
+        ),
+        "reject_reason_code": _first_str(
+            _resolve(candidate, decision, ["reject_reason_code"], ["reject_reason_code"])
+        ),
+        # Marginal-band rescue attribution: whether the selection cleared the
+        # edge leg only through a bounded slack lane, and which lane owned it
+        # (taker marginal band vs the empirical_marginal_maker experiment).
+        "marginal_band_rescue": _first_bool(
+            _resolve(candidate, decision, ["marginal_band_rescue"], ["marginal_band_rescue"])
+        ),
+        "empirical_marginal_maker": _first_bool(
+            _resolve(candidate, decision, ["empirical_marginal_maker"], ["empirical_marginal_maker"])
+        ),
+        "marginal_band": _resolve(
+            candidate, decision, ["marginal_band"], ["marginal_band"]
+        ),
         # Conditional threshold-cell policy (2026-09-30): which cell, if any,
         # supplied the side's required edge; and the lane stamp when the
         # selected side was cell-admitted.
