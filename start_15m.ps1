@@ -202,13 +202,19 @@ Write-Host "[start_15m] MERID_SINGLE_USER_OPERATOR=$($env:MERID_SINGLE_USER_OPER
 $env:MERID_KALSHI_WS_CLIENT = "ws"
 Write-Host "[start_15m] MERID_KALSHI_WS_CLIENT=$($env:MERID_KALSHI_WS_CLIENT)" -ForegroundColor Cyan
 
-# 1.4 Operator directive (2026-09-27): disable the automatic exit policy
-# (take-profit/stop/trailing/time/edge exits — positions hold to settlement;
-# reduce-only capability is unaffected) and the unified-sizing daily/weekly
-# loss cap (profile already sets guardrails.daily_loss_enabled=false).
-$env:MERID_DISABLE_EXIT_POLICY = "1"
+# 1.4 Operator directive UPDATED (2026-10-05): the automatic exit policy is
+# REQUIRED.  Incident forensics showed MERID_DISABLE_EXIT_POLICY=1 suppressed
+# trail + 99c triggers on a realizable 92-99c executable bid and the contract
+# settled at zero — the kill-switch converts profitable marks into
+# all-or-nothing settlement exposure.  It must never be set in the live
+# startup path again; the unified-sizing daily/weekly loss cap remains
+# disabled per the earlier directive (profile already sets
+# guardrails.daily_loss_enabled=false).
+Remove-Item Env:MERID_DISABLE_EXIT_POLICY -ErrorAction SilentlyContinue
 $env:MERID_DISABLE_LOSS_CAP = "1"
-Write-Host "[start_15m] MERID_DISABLE_EXIT_POLICY=$($env:MERID_DISABLE_EXIT_POLICY) MERID_DISABLE_LOSS_CAP=$($env:MERID_DISABLE_LOSS_CAP)" -ForegroundColor Yellow
+$env:MERID_HARD_PROFIT_LOCK_ENABLED = "1"
+$env:MERID_HARD_PROFIT_LOCK_CENTS = "90"
+Write-Host "[start_15m] MERID_DISABLE_EXIT_POLICY=(unset) MERID_DISABLE_LOSS_CAP=$($env:MERID_DISABLE_LOSS_CAP) HARD_PROFIT_LOCK=$($env:MERID_HARD_PROFIT_LOCK_ENABLED)@$($env:MERID_HARD_PROFIT_LOCK_CENTS)c" -ForegroundColor Yellow
 
 $env:MERID_ENTRY_MAKER_ENABLED = "1"
 Write-Host "[start_15m] MERID_ENTRY_MAKER_ENABLED=$($env:MERID_ENTRY_MAKER_ENABLED) execution_roles=maker+taker (selected by fee-aware strategy)" -ForegroundColor Cyan

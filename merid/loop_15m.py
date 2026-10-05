@@ -551,6 +551,7 @@ def _map_exit_reason_to_intent_contract(exit_reason_str: str) -> "ExitReason":
         "take_profit": ExitReason.EXIT_TP,
         "stop_loss": ExitReason.EXIT_SL,
         "auto_exit_99c": ExitReason.EXIT_99C,
+        "hard_profit_lock": ExitReason.EXIT_HARD_PROFIT_LOCK,
         "manual": ExitReason.EXIT_MANUAL,
         "time_stop": ExitReason.EXIT_EXPIRY,
         "risk": ExitReason.EXIT_RISK_LIMIT,

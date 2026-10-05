@@ -74,6 +74,7 @@ class ExitReason(str, Enum):
     EXIT_TP = "exit_tp"  # Take profit
     EXIT_SL = "exit_sl"  # Stop loss
     EXIT_99C = "exit_99c"  # Cash out at 99c
+    EXIT_HARD_PROFIT_LOCK = "exit_hard_profit_lock"  # Deterministic profit lock (executable bid >= lock threshold)
     EXIT_MANUAL = "exit_manual"  # Manual close
     EXIT_EXPIRY = "exit_expiry"  # Market closing
     EXIT_RISK_LIMIT = "exit_risk_limit"  # Risk limit triggered

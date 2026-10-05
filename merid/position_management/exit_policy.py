@@ -76,6 +76,7 @@ class ExitReason(str, Enum):
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     AUTO_EXIT_99C = "auto_exit_99c"  # Cash out at 99c (near-settlement)
+    HARD_PROFIT_LOCK = "hard_profit_lock"  # 2026-10-05: deterministic profit lock at executable held-side bid >= lock threshold (default 90c); risk-control rule, not model TP
     EXTREME_PROFIT = "extreme_profit"  # Deprecated - use AUTO_EXIT_99C
     DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"
     RATCHET_TRIM = "ratchet_trim"
@@ -106,6 +107,7 @@ _QUARANTINE_ALLOWED_EXIT_REASONS = {
     ExitReason.STOP_LOSS,
     ExitReason.SETTLEMENT_GUARD,
     ExitReason.AUTO_EXIT_99C,
+    ExitReason.HARD_PROFIT_LOCK,
     ExitReason.MARKET_EXPIRED,
 }
 

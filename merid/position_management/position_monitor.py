@@ -40,6 +40,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     _book_age_ms,
     _get_executable_exit_cents,
     _get_fair_value_cents,
+    _get_model_fair_value_cents,
     build_stop_candidate,
     evaluate_edge_stop,
     maybe_submit_stop_candidate_sync,
@@ -137,6 +138,7 @@ _FORCE_RECONCILE_EXIT_REASONS = {
     ExitReason.MODEL_INVALIDATION_LOSS_EXIT,
     ExitReason.CONTINUATION_STOP,
     ExitReason.TIME_STOP,
+    ExitReason.HARD_PROFIT_LOCK,
     ExitReason.STOP_LOSS,
     ExitReason.AUTO_EXIT_99C,
     ExitReason.MARKET_EXPIRED,
@@ -597,6 +599,51 @@ MIN_EXIT_HOLD_SECONDS = float(os.getenv("MERID_MIN_EXIT_HOLD_SECONDS", "2.0"))  
 # prevent a spread-only fill from immediately stopping itself out.
 MIN_STOP_ARM_SECONDS = float(os.getenv("MERID_MIN_STOP_ARM_SECONDS", "5.0"))
 EXIT_PRICE_MAX_AGE_MS = float(os.getenv("MERID_EXIT_PRICE_MAX_AGE_MS", "10000.0"))  # 10s default
+
+
+# 2026-10-05: HARD_PROFIT_LOCK — deterministic risk-control profit lock.
+# When the executable held-side bid reaches the lock threshold the position must
+# emit a reducing exit intent immediately.  This is NOT a discretionary
+# sell-vs-hold decision: a binary contract quoted 90c+ on an executable bid can
+# still settle at zero, so the lock exists to cap catastrophic giveback, not to
+# maximize per-trade EV.  It therefore bypasses the ordinary take-profit
+# overpay floor and the loss-exit EV gate, is exempt from the
+# MERID_DISABLE_EXIT_POLICY kill-switch, and is allowed for quarantined
+# (untrusted-provenance) positions.  It still flows through the canonical
+# _emit_exit_intent -> exit_intent_callback -> reduce-only IOC -> durable
+# ExitOrderAttempt lifecycle like every other exit.
+def _hard_profit_lock_enabled() -> bool:
+    """Live read so tests/hot-reload can toggle the hard profit lock."""
+    return os.getenv("MERID_HARD_PROFIT_LOCK_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _hard_profit_lock_threshold_cents() -> int:
+    """Executable held-side bid threshold for the hard profit lock (default 90c)."""
+    try:
+        return int(os.getenv("MERID_HARD_PROFIT_LOCK_CENTS", "90"))
+    except Exception:
+        return 90
+
+
+def _p0_exit_alert(alert: str, position: "Position", detail: str = "") -> None:
+    """P0 alert for profit-lock invariant violations.
+
+    Emitted when the lock condition exists but cannot complete its pipeline
+    (untrusted quote, suppressed intent, etc.) — the failure mode where a
+    realizable 90c+ exit silently vanishes must never be quiet.
+    """
+    try:
+        logger.critical(
+            "[P0-EXIT-ALERT] %s position=%s market=%s %s",
+            alert,
+            (getattr(position, "position_id", "") or "")[:16],
+            getattr(position, "market_id", None),
+            detail,
+        )
+    except Exception:
+        pass
 
 
 # 2026-09-27 operator kill switch: MERID_DISABLE_EXIT_POLICY=1 suppresses every
@@ -1140,6 +1187,13 @@ class PositionMonitor:
             )
             return
 
+        # 2026-10-05 P0 audit: capture whether an exit attempt exists BEFORE the
+        # in-flight registry is popped below.  A position that saw an executable
+        # lock-level bid and settles/removes with no trigger and no intent is
+        # the silent-miss failure mode — alert loudly.  The per-cycle eval log
+        # holds the per-quote detail.
+        _exit_attempted = self._exit_intent_in_flight.get(resolved_id) is not None
+
         with self._lock:
             position = self._open_positions.pop(resolved_id, None)
             if position is None:
@@ -1161,6 +1215,27 @@ class PositionMonitor:
             position.exit_reason or "none",
             position.exit_price_cents if position.exit_price_cents is not None else "N/A",
         )
+
+        # 2026-10-05 P0 audit: settled/removed with a lock-level peak bid and
+        # neither an exit trigger nor a recorded intent = missed profit lock.
+        try:
+            _peak = int(getattr(position, "high_watermark_cents", 0) or 0)
+            if (
+                _hard_profit_lock_enabled()
+                and _peak >= _hard_profit_lock_threshold_cents()
+                and not _exit_attempted
+                and not (position.exit_reason or position.exit_triggered)
+            ):
+                _p0_exit_alert(
+                    "SETTLED_AFTER_LOCK_LEVEL_BID_NO_EXIT",
+                    position,
+                    f"peak_bid={_peak}c threshold={_hard_profit_lock_threshold_cents()}c "
+                    f"exit_reason={position.exit_reason} "
+                    f"exit_triggered={position.exit_triggered} "
+                    f"exit_price={position.exit_price_cents}",
+                )
+        except Exception:
+            pass
 
         # 2026-09-24: feed the re-entry guard so a closed market cannot be
         # re-entered in the same window and a realized loss cools the asset.
@@ -3273,7 +3348,14 @@ class PositionMonitor:
             _kalshi_state = _state_store.get(position.market_id)
             _state = _unified_state or _kalshi_state
             if _state is not None:
-                _fair_value_cents = _get_fair_value_cents(_state, position.side.value)
+                # 2026-10-05: use MODEL fair only.  The implied_prob fallback
+                # in _get_fair_value_cents is market-derived, so anchoring the
+                # edge-realization and TP-overpay floors to it is tautological:
+                # when entry_model_probability is absent the floor becomes
+                # ~bid+cost and TP can never trigger (incident: fair=96
+                # floor=98 on a 96c bid).  Model-only fair means "no model =>
+                # no discretionary overpay gate" — static TP governs instead.
+                _fair_value_cents = _get_model_fair_value_cents(_state, position.side.value)
         except Exception as _fair_err:
             logger.debug("[POSITION-MONITOR] Could not fetch fair value for edge-realization: %s", _fair_err)
 
@@ -3392,6 +3474,108 @@ class PositionMonitor:
         # Note: bid/ask not available in current _check_position signature, using mid price
         # Future enhancement: pass bid/ask from market state to improve accuracy
 
+        # HARD_PROFIT_LOCK (2026-10-05): deterministic risk-control profit lock.
+        # Trigger: executable held-side bid >= lock threshold (default 90c).
+        # This is evaluated on snapshot.own_side_bid_cents — the price we can
+        # actually sell into — never the mid, last trade, or a reciprocal leg.
+        # It is intentionally outside the candidate resolver and the
+        # TP/overpay/EV gates: it caps catastrophic giveback of a large
+        # executable mark, it does not decide sell-vs-hold.  The intent still
+        # flows through _emit_exit_intent -> callback -> reduce-only IOC ->
+        # durable ExitOrderAttempt, so the whole lifecycle stays auditable.
+        if _hard_profit_lock_enabled() and not position.exit_triggered:
+            _lock_threshold = _hard_profit_lock_threshold_cents()
+            _lock_bid = snapshot.own_side_bid_cents if snapshot is not None else None
+            if _lock_bid is not None and _lock_bid >= _lock_threshold:
+                _quote_trusted = (
+                    snapshot is not None
+                    and bool(getattr(snapshot, "executable", False))
+                    and getattr(snapshot, "data_quality", None) == "GOOD"
+                    and snapshot.is_fresh(EXIT_PRICE_MAX_AGE_MS)
+                )
+                _lock_qty = int(position.size) if position.size else 0
+                _lock_depth = (
+                    snapshot.min_depth_own_side
+                    if snapshot is not None and getattr(snapshot, "has_bid_size", False)
+                    else None
+                )
+                _lock_depth_sufficient = (_lock_depth is None) or (
+                    _lock_depth >= max(1, _lock_qty)
+                )
+                if not _quote_trusted:
+                    # The bid reads >= lock but the quote cannot be trusted for a
+                    # marketable sell.  Emit a durable BLOCKED eval plus a P0
+                    # alert — the invariant "executable bid >= lock without a
+                    # lock trigger" must never be silent.
+                    _p0_exit_alert(
+                        "HARD_PROFIT_LOCK_BLOCKED_UNTRUSTED_QUOTE",
+                        position,
+                        f"bid={_lock_bid}c threshold={_lock_threshold}c "
+                        f"executable={getattr(snapshot, 'executable', None)} "
+                        f"quality={getattr(snapshot, 'data_quality', None)} "
+                        f"age_ms={getattr(snapshot, 'book_age_ms', None)}",
+                    )
+                    self._log_exit_eval(
+                        position=position,
+                        snapshot=snapshot,
+                        decision="EXIT_BLOCKED",
+                        reason_code="TP_QUOTE_NOT_TRUSTED",
+                        target_hit=False,
+                        exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                    )
+                    return ExitDecision(
+                        reason=ExitReason.HARD_PROFIT_LOCK,
+                        priority=get_priority_for_reason(ExitReason.HARD_PROFIT_LOCK),
+                        source_layer=ExitSourceLayer.POSITION_LEVEL,
+                        exit_price_cents=_lock_bid,
+                        metadata={
+                            "trigger_family": "HARD_PROFIT_LOCK",
+                            "trigger_reason": "EXECUTABLE_BID_AT_OR_ABOVE_LOCK",
+                            "decision": "BLOCKED",
+                            "block_reason": "TP_QUOTE_NOT_TRUSTED",
+                        },
+                    )
+                logger.warning(
+                    "[POSITION-MONITOR] HARD-PROFIT-LOCK triggered: position=%s market=%s "
+                    "side=%s bid=%dc threshold=%dc depth=%s qty=%s depth_sufficient=%s "
+                    "- locking profit at executable held-side bid",
+                    position.position_id[:8],
+                    position.market_id,
+                    position.side.value,
+                    _lock_bid,
+                    _lock_threshold,
+                    _lock_depth,
+                    _lock_qty,
+                    _lock_depth_sufficient,
+                )
+                if not _lock_depth_sufficient:
+                    _p0_exit_alert(
+                        "HARD_PROFIT_LOCK_INSUFFICIENT_DEPTH",
+                        position,
+                        f"bid={_lock_bid}c min_depth={_lock_depth} qty={_lock_qty} - "
+                        "submitting IOC anyway; venue takes available depth, residual re-evaluates next tick",
+                    )
+                await self._emit_exit_intent(
+                    position,
+                    ExitReason.HARD_PROFIT_LOCK,
+                    _lock_bid,
+                    snapshot=snapshot,
+                )
+                return ExitDecision(
+                    reason=ExitReason.HARD_PROFIT_LOCK,
+                    priority=get_priority_for_reason(ExitReason.HARD_PROFIT_LOCK),
+                    source_layer=ExitSourceLayer.POSITION_LEVEL,
+                    exit_price_cents=_lock_bid,
+                    metadata={
+                        "trigger_family": "HARD_PROFIT_LOCK",
+                        "trigger_reason": "EXECUTABLE_BID_AT_OR_ABOVE_LOCK",
+                        "lock_threshold_cents": _lock_threshold,
+                        "held_side_executable_bid_cents": _lock_bid,
+                        "available_exit_depth": _lock_depth,
+                        "depth_sufficient": _lock_depth_sufficient,
+                    },
+                )
+
         # AUTO_EXIT_99C: Cash out at 99c (near-settlement) - highest priority after RISK
         # Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not
         # Selling early at 99c locks in almost all of the payoff
@@ -3414,7 +3598,7 @@ class PositionMonitor:
             seconds_to_expiry = getattr(state, 'seconds_to_expiry', None) if state else None
 
             # AUDIT: Idempotency - generate dedupe key for this trigger
-            dedupe_key = f"{position.position_id[:8]}:auto_exit_99c:{poll_count}"
+            dedupe_key = f"{position.position_id}:auto_exit_99c:{poll_count}"
 
             # AUDIT: Venue-side semantics - verify 99c exit is executable
             # Kalshi accepts SELL_YES at 99c and SELL_NO at 1c for near-settlement exits
@@ -3576,7 +3760,7 @@ class PositionMonitor:
                         if current_price_cents >= position.dynamic_tp_target_cents:
                             # position.dynamic_tp_triggered will be set if this candidate wins.
                             # AUDIT: Idempotency - generate dedupe key for this trigger
-                            dedupe_key = f"{position.position_id[:8]}:dynamic_tp:{poll_count}"
+                            dedupe_key = f"{position.position_id}:dynamic_tp:{poll_count}"
                             # AUDIT: Log trigger evaluation
                             logger.info(
                                 "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=dynamic_tp price=%dc target=%dc side=%s size=%s trigger=true dedupe_key=%s",
@@ -3745,7 +3929,7 @@ class PositionMonitor:
         sl_triggered, sl_kind = self._evaluate_stop_loss(position, current_price_cents, snapshot)
         if sl_triggered:
             # AUDIT: Idempotency - generate dedupe key for this trigger
-            dedupe_key = f"{position.position_id[:8]}:stop_loss:{poll_count}"
+            dedupe_key = f"{position.position_id}:stop_loss:{poll_count}"
             # AUDIT: Log trigger evaluation
             logger.info(
                 "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=stop_loss price=%dc sl=%dc side=%s size=%s kind=%s trigger=true dedupe_key=%s",
@@ -3805,7 +3989,7 @@ class PositionMonitor:
                         current_price_cents,
                         position.take_profit_price_cents,
                         _gate_fair_cents,
-                        "thesis" if _thesis_fair_cents is not None else "live",
+                        "thesis" if _thesis_fair_cents is not None else "model",
                         _overpay_floor,
                         _exit_cost_cents,
                     )
@@ -3813,7 +3997,7 @@ class PositionMonitor:
                 pass
             else:
                 # AUDIT: Idempotency - generate dedupe key for this trigger
-                dedupe_key = f"{position.position_id[:8]}:take_profit:{poll_count}"
+                dedupe_key = f"{position.position_id}:take_profit:{poll_count}"
                 # AUDIT: Log trigger evaluation
                 logger.info(
                     "[EXIT-TRIGGER-AUDIT] position=%s market=%s reason=take_profit price=%dc tp=%dc side=%s size=%s trigger=true dedupe_key=%s",
@@ -4521,7 +4705,7 @@ class PositionMonitor:
             return winning
 
         # No exit candidate won.
-        reason_code = policy.reason.value if policy.reason else "NO_TRIGGER"
+        reason_code = policy.reason.value if policy.reason else "TP_NOT_REACHED"
         self._log_exit_eval(
             position=position,
             snapshot=snapshot,
@@ -5241,15 +5425,47 @@ class PositionMonitor:
 
             entry_gate = self._entry_gate_context
 
+            # 2026-10-05: hard-profit-lock observability fields.  Every eval
+            # records the lock verdict so a missing trigger is provable from
+            # logs alone (held-side executable bid vs threshold), not inferred.
+            _lock_threshold = _hard_profit_lock_threshold_cents()
+            _own_bid = snapshot.own_side_bid_cents if snapshot is not None else None
+            _own_ask = snapshot.own_side_ask_cents if snapshot is not None else None
+            _avail_depth = (
+                snapshot.min_depth_own_side
+                if snapshot is not None and getattr(snapshot, "has_bid_size", False)
+                else None
+            )
+            _peak_bid = int(getattr(position, "high_watermark_cents", 0) or 0)
+            _lock_enabled = _hard_profit_lock_enabled()
+            _lock_eligible = bool(
+                _lock_enabled and _own_bid is not None and _own_bid >= _lock_threshold
+            )
+            _trigger_family = None
+            _trigger_reason = None
+            if exit_reason == ExitReason.HARD_PROFIT_LOCK:
+                _trigger_family = "HARD_PROFIT_LOCK"
+                _trigger_reason = "EXECUTABLE_BID_AT_OR_ABOVE_LOCK"
+            elif exit_reason is not None:
+                _trigger_family = "ORDINARY_EXIT"
+                _trigger_reason = exit_reason.value
+
             payload = {
                 "event": "EXIT_EVAL",
                 "asset": self._asset_from_ticker(position.market_id),
                 "ticker": position.market_id,
-                "position_id": position.position_id[:16],
+                "position_id": position.position_id,
+                "held_outcome_side": position.side.value,
                 "position_side": position.side.value,
                 "position_qty_fp": str(position.size) if position.size is not None else "0",
+                "remaining_quantity": int(position.size) if position.size else 0,
                 "avg_entry_price_cents": position.avg_entry_price_cents,
+                "entry_vwap_cents": position.entry_fill_price_cents or position.avg_entry_price_cents,
                 "executable_close_price_cents": executable_close_price,
+                "held_side_best_bid_cents": _own_bid,
+                "held_side_best_ask_cents": _own_ask,
+                "executable_exit_vwap_cents": _own_bid,
+                "available_exit_depth": _avail_depth,
                 "take_profit_price_cents": (
                     position.take_profit_price_cents
                     if position.take_profit_price_cents is not None
@@ -5265,10 +5481,25 @@ class PositionMonitor:
                 "decision": decision,
                 "reason_code": reason_code,
                 "exit_reason": exit_reason.value if exit_reason is not None else None,
+                "trigger_family": _trigger_family,
+                "trigger_reason": _trigger_reason,
                 "book_valid": book_valid,
                 "book_age_ms": book_age_ms,
+                "quote_age_ms": book_age_ms,
+                "book_sequence": snapshot.book_sequence if snapshot is not None else None,
+                "quote_snapshot_id": snapshot.snapshot_id if snapshot is not None else None,
+                "seconds_to_expiry": snapshot.seconds_to_expiry if snapshot is not None else None,
+                "peak_executable_bid_cents": _peak_bid or None,
+                "drawdown_from_peak_cents": (
+                    (_peak_bid - _own_bid) if (_peak_bid and _own_bid is not None) else None
+                ),
+                "hard_profit_lock_threshold_cents": _lock_threshold,
+                "hard_profit_lock_enabled": _lock_enabled,
+                "hard_profit_lock_eligible": _lock_eligible,
                 "data_source": snapshot.data_source if snapshot is not None else None,
                 "data_quality": snapshot.data_quality if snapshot is not None else None,
+                "policy_version": os.environ.get("MERID_EXIT_POLICY_VERSION", "2026-10-05"),
+                "code_sha": os.environ.get("MERID_BUILD_SHA"),
                 "allow_new_entries": entry_gate.get("allow_new_entries"),
                 "ws_queue_size": entry_gate.get("ws_queue_size"),
                 "ws_lag_ms": entry_gate.get("ws_lag_ms"),
@@ -5305,9 +5536,20 @@ class PositionMonitor:
             bypass_in_flight_check: If True, skip the in-flight check (for expired markets)
             snapshot: Optional ExitPriceSnapshot used for the trigger
         """
-        if _exit_policy_disabled():
+        if _exit_policy_disabled() and exit_reason != ExitReason.HARD_PROFIT_LOCK:
             _log_exit_policy_suppressed(position, exit_reason, exit_price_cents, contracts_to_close)
             return
+        if _exit_policy_disabled():
+            # HARD_PROFIT_LOCK is a risk-control rule, not a discretionary exit:
+            # it is explicitly exempt from the hold-to-settlement kill-switch so
+            # a realizable >=90c exit cannot silently vanish again.
+            logger.warning(
+                "[EXIT-POLICY-DISABLED-BYPASS] hard_profit_lock emits despite "
+                "MERID_DISABLE_EXIT_POLICY=1: position=%s market=%s price=%dc",
+                position.position_id[:8],
+                position.market_id,
+                exit_price_cents,
+            )
         # CRITICAL FIX (2026-08-30): Use the executable bid for sell-side exits.
         # The monitor's current_price_cents is often the mid or ask; a SELL IOC
         # must be placed at the own-side bid to be marketable.  Repricing here
@@ -5696,6 +5938,14 @@ class PositionMonitor:
                             "reconcile; dropping forced %s",
                             position.position_id[:8], existing_reason, exit_reason.value
                         )
+                        if exit_reason == ExitReason.HARD_PROFIT_LOCK:
+                            _p0_exit_alert(
+                                "HARD_PROFIT_LOCK_TRIGGER_NO_INTENT",
+                                position,
+                                f"existing_reason={existing_reason} "
+                                f"client_order_id={existing_client_order_id} - "
+                                "lock trigger suppressed by unresolved in-flight exit",
+                            )
                         return
                 else:
                     logger.warning(
@@ -5739,6 +5989,12 @@ class PositionMonitor:
                 "[POSITION-MONITOR] No exit intent callback registered - exit order will NOT be placed for position=%s",
                 position.position_id[:8],
             )
+            if exit_reason == ExitReason.HARD_PROFIT_LOCK:
+                _p0_exit_alert(
+                    "HARD_PROFIT_LOCK_TRIGGER_NO_INTENT",
+                    position,
+                    "no exit intent callback registered - lock trigger cannot reach execution",
+                )
 
         # 2026-08-11 CRITICAL FIX: Do not remove or mark the position as terminal
         # until the exit order is actually accepted and filled by the venue (or REST

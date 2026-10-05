@@ -1317,7 +1317,7 @@ class KalshiPositionCache:
             exchange_signed_yes == ledger_signed_yes == cache_signed_yes
         )
         if not three_way_match:
-            now_ts = time.time()
+            now_ts = _time.time()
             first_ts = self._recon_first_mismatch_ts.get(ticker)
             if first_ts is None:
                 first_ts = now_ts

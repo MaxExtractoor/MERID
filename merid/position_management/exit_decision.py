@@ -48,6 +48,7 @@ class ExitPriority(int, Enum):
     22. LOSS_CAP (break-even loss cap) - 56
     """
     AUTO_EXIT_99C = 95
+    HARD_PROFIT_LOCK = 96  # 2026-10-05: deterministic profit lock; above 99c cash-out, below RISK
     RISK = 100
     EXTREME_PROFIT = 90
     STALE_DATA = 85
@@ -127,6 +128,7 @@ def get_priority_for_reason(reason: ExitReason) -> ExitPriority:
     priority_map = {
         ExitReason.RISK: ExitPriority.RISK,
         ExitReason.AUTO_EXIT_99C: ExitPriority.AUTO_EXIT_99C,
+        ExitReason.HARD_PROFIT_LOCK: ExitPriority.HARD_PROFIT_LOCK,
         ExitReason.EXTREME_PROFIT: ExitPriority.EXTREME_PROFIT,
         ExitReason.STALE_DATA: ExitPriority.STALE_DATA,
         ExitReason.DYNAMIC_TAKE_PROFIT: ExitPriority.DYNAMIC_TAKE_PROFIT,
