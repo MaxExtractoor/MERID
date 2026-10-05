@@ -384,3 +384,129 @@ class TestFetchFreshSignedYesExposure:
 
         assert signed is None
         assert side is None
+
+
+class TestEntryIdempotencyTerminalRelease:
+    """2026-10-05: venue-terminal expiry of an unfilled resting entry must
+    release the canonical dedupe record (previously it stayed "submitted" for
+    the 900s TTL -> one-shot-per-window), and the bounded re-quote budget
+    caps re-entries at MERID_ENTRY_MAX_REQUOTES_PER_KEY per key."""
+
+    def _canonical(self, coid: str, intent_id: str):
+        from merid.event_venues.kalshi.order_intent_contract import normalize_order
+
+        intent = _make_intent(
+            side="yes", action="buy", count=1,
+            client_order_id=coid, intent_id=intent_id,
+        )
+        return normalize_order(intent, exchange_position_cc=0)
+
+    @pytest.fixture(autouse=True)
+    def _dedup_on(self, monkeypatch):
+        # conftest's _legacy_entry_guard_bypass forces the idempotency gate
+        # OFF for legacy tests; this class exercises the gate itself.
+        monkeypatch.setenv("MERID_ENTRY_IDEMPOTENCY_ENABLED", "1")
+        yield
+
+    def setup_method(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            clear_entry_idempotency_registry,
+        )
+
+        clear_entry_idempotency_registry()
+        os.environ.pop("MERID_ENTRY_MAX_REQUOTES_PER_KEY", None)
+
+    def teardown_method(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            clear_entry_idempotency_registry,
+        )
+
+        clear_entry_idempotency_registry()
+        os.environ.pop("MERID_ENTRY_MAX_REQUOTES_PER_KEY", None)
+
+    def test_submitted_record_blocks_fresh_intent(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _enforce_entry_idempotency,
+            mark_entry_idempotency_submitted,
+        )
+
+        c1 = self._canonical("coid-1", "intent-1")
+        _enforce_entry_idempotency(c1)
+        mark_entry_idempotency_submitted("KXBTC15M-TEST", "yes", "coid-1", "ord-1")
+
+        with pytest.raises(OrderIntentValidationError, match="duplicate_entry"):
+            _enforce_entry_idempotency(self._canonical("coid-2", "intent-2"))
+
+    def test_terminal_release_frees_slot_once(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _enforce_entry_idempotency,
+            mark_entry_idempotency_submitted,
+            release_entry_idempotency,
+        )
+
+        c1 = self._canonical("coid-1", "intent-1")
+        _enforce_entry_idempotency(c1)
+        mark_entry_idempotency_submitted("KXBTC15M-TEST", "yes", "coid-1", "ord-1")
+
+        # Venue-authoritative terminal (expired/canceled, no fills) releases.
+        assert release_entry_idempotency("KXBTC15M-TEST", "yes") is True
+
+        # One bounded re-quote is admitted (full gates re-run upstream).
+        _enforce_entry_idempotency(self._canonical("coid-2", "intent-2"))
+
+    def test_requote_budget_exhausted_after_max(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _enforce_entry_idempotency,
+            mark_entry_idempotency_submitted,
+            release_entry_idempotency,
+        )
+
+        # Original entry + one re-quote admitted; second release exhausts.
+        c1 = self._canonical("coid-1", "intent-1")
+        _enforce_entry_idempotency(c1)
+        mark_entry_idempotency_submitted("KXBTC15M-TEST", "yes", "coid-1", "ord-1")
+        release_entry_idempotency("KXBTC15M-TEST", "yes")
+
+        c2 = self._canonical("coid-2", "intent-2")
+        _enforce_entry_idempotency(c2)
+        mark_entry_idempotency_submitted("KXBTC15M-TEST", "yes", "coid-2", "ord-2")
+        release_entry_idempotency("KXBTC15M-TEST", "yes")
+
+        with pytest.raises(OrderIntentValidationError, match="requote_budget_exhausted"):
+            _enforce_entry_idempotency(self._canonical("coid-3", "intent-3"))
+
+    def test_executed_record_never_releases(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _enforce_entry_idempotency,
+            mark_entry_idempotency_executed,
+            mark_entry_idempotency_submitted,
+            release_entry_idempotency,
+        )
+
+        c1 = self._canonical("coid-1", "intent-1")
+        _enforce_entry_idempotency(c1)
+        mark_entry_idempotency_submitted("KXBTC15M-TEST", "yes", "coid-1", "ord-1")
+        mark_entry_idempotency_executed("KXBTC15M-TEST", "yes")
+
+        # A filled order keeps protecting the window even if a release is
+        # requested by a stale venue-terminal event.
+        assert release_entry_idempotency("KXBTC15M-TEST", "yes") is False
+        with pytest.raises(OrderIntentValidationError, match="duplicate_entry"):
+            _enforce_entry_idempotency(self._canonical("coid-2", "intent-2"))
+
+    def test_unsubmitted_release_does_not_consume_budget(self):
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _enforce_entry_idempotency,
+            release_entry_idempotency,
+        )
+
+        c1 = self._canonical("coid-1", "intent-1")
+        _enforce_entry_idempotency(c1)
+        # Pre-submit release (router rejection) frees the slot but does not
+        # consume the re-quote budget - no venue slot was ever used.
+        assert release_entry_idempotency("KXBTC15M-TEST", "yes") is True
+
+        # Three sequential pre-submit rejects remain admissible.
+        for n in (2, 3, 4):
+            _enforce_entry_idempotency(self._canonical(f"coid-{n}", f"intent-{n}"))
+            release_entry_idempotency("KXBTC15M-TEST", "yes")
