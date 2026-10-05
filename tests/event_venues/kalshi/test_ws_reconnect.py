@@ -194,14 +194,14 @@ class TestKalshiWebSocketConnectionErrors:
         ws_client._running = True
         ws_client._ws = AsyncMock()
 
-        # Simulate connection error during listen
-        async def raise_error():
-            raise ConnectionError("Connection lost")
-            yield  # Make it a generator
+        # Simulate connection error during listen.  The recv loop reads via
+        # recv() (not async iteration); an un-configured AsyncMock recv()
+        # returns a non-str without suspending and spins the loop forever.
+        ws_client._ws.recv = AsyncMock(side_effect=ConnectionError("Connection lost"))
 
-        ws_client._ws.__aiter__ = lambda self: raise_error()
-
-        with patch.object(ws_client, '_reconnect', new_callable=AsyncMock) as mock_reconnect:
+        with patch.object(ws_client, '_reconnect', new_callable=AsyncMock) as mock_reconnect, \
+             patch.object(ws_client, 'connect', new_callable=AsyncMock), \
+             patch.object(ws_client, '_monitor_connection_health', new_callable=AsyncMock):
             # Stop after first reconnect attempt
             async def stop_running():
                 ws_client._running = False
@@ -276,3 +276,42 @@ class TestKalshiWebSocketAuth:
 
         with pytest.raises((ValueError, AttributeError)):
             await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_closed_socket_with_noop_reconnect_yields_instead_of_spinning():
+    """2026-10-05 livelock: force_session_reconnect held the reconnect lock
+    while awaiting close(); the recv loop's _reconnect() returned early and
+    recv() on the closed socket re-raised synchronously, so the loop never
+    suspended (thousands of disconnect logs, GIL pinned).  The loop must
+    yield/back off whenever _reconnect() leaves it disconnected."""
+    from websockets.exceptions import ConnectionClosedError
+
+    ws_client = KalshiWebSocket()
+    ws_client._running = True
+    ws_client._reconnect_delay = 0.5
+
+    class _ClosedWS:
+        state = None
+        open = False
+
+        async def recv(self):
+            raise ConnectionClosedError(None, None)
+
+    ws_client._ws = _ClosedWS()
+    reconnects = {"n": 0}
+
+    async def _noop_reconnect():
+        reconnects["n"] += 1
+
+    ws_client._reconnect = _noop_reconnect
+
+    async def _other_coroutine():
+        # Would never run if the recv loop spun without awaiting.
+        await asyncio.sleep(0)
+        ws_client._running = False
+
+    other = asyncio.create_task(_other_coroutine())
+    await asyncio.wait_for(ws_client._process_messages_until_disconnect(), timeout=3.0)
+    await other
+    assert reconnects["n"] <= 2

@@ -779,8 +779,22 @@ class KalshiWebSocket(EventVenueStream):
             # subscription sets so resubscribe replays them.
             old_ws = self._ws
             if old_ws is not None:
+                # 2026-10-05: bound the close handshake.  A stalled peer never
+                # sends its close frame; an unbounded await here held the
+                # reconnect lock indefinitely and blocked recovery.
                 try:
-                    await old_ws.close(code=1001, reason=f"session recycle: {reason}")
+                    await asyncio.wait_for(
+                        old_ws.close(code=1001, reason=f"session recycle: {reason}"),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[WS-SESSION-RECYCLE] close handshake timed out; abandoning old socket")
+                    try:
+                        _transport = getattr(old_ws, "transport", None)
+                        if _transport is not None:
+                            _transport.abort()
+                    except Exception:
+                        pass
                 except Exception as e:
                     if not self._is_benign_ws_error(e):
                         logger.warning("[WS-SESSION-RECYCLE] close error: %r", e)
@@ -1576,6 +1590,7 @@ class KalshiWebSocket(EventVenueStream):
                 
                 self._last_message_ts = _time.monotonic()
                 self._messages_received += 1
+                self._disconnect_streak = 0
 
                 # Hop instrumentation: stamp the socket-read boundary BEFORE any
                 # parsing/queueing so downstream hops can attribute event age to
@@ -1839,8 +1854,9 @@ class KalshiWebSocket(EventVenueStream):
 
             except (ConnectionError, RuntimeError, ValueError) as e:
                 if self._running:
-                    logger.warning("Kalshi WebSocket error (%s): %s", type(e).__name__, e)
+                    self._log_disconnect("Kalshi WebSocket error", e)
                     await self._reconnect()
+                    await self._backoff_if_still_disconnected()
             except (AttributeError, KeyError, TypeError, IndexError) as e:
                 # ROBUSTNESS FIX: Data-processing errors on a malformed/unexpected
                 # message must NOT be treated as a disconnect. Previously these
@@ -1848,10 +1864,13 @@ class KalshiWebSocket(EventVenueStream):
                 # reconnect storm (e.g. "'list' object has no attribute 'get'" on a
                 # non-dict WS payload). Skip the offending message and keep the
                 # connection alive so the event stream is not interrupted.
-                logger.warning(
-                    "Kalshi WS message processing error (skipping message, connection kept): %s: %s",
-                    type(e).__name__, e,
+                self._log_disconnect(
+                    "Kalshi WS message processing error (skipping message, connection kept)", e
                 )
+                # Yield so a persistently failing recv() cannot spin the loop.
+                await asyncio.sleep(0)
+                if not self.is_connected():
+                    await self._backoff_if_still_disconnected()
                 continue
             except ReplayExhausted:
                 # End of replay tape — stop cleanly instead of reconnecting.
@@ -1860,11 +1879,41 @@ class KalshiWebSocket(EventVenueStream):
                 break
             except Exception as e:  # BUG-10: catch websockets.ConnectionClosed and any other
                 if self._running:
-                    logger.warning(
-                        "Kalshi WebSocket disconnected (%s): %s — reconnecting",
-                        type(e).__name__, e,
-                    )
+                    self._log_disconnect("Kalshi WebSocket disconnected", e)
                     await self._reconnect()
+                    await self._backoff_if_still_disconnected()
+
+    def _log_disconnect(self, prefix: str, e: BaseException) -> None:
+        """Warn on the first disconnect of a streak, then once per 30s.
+
+        2026-10-05: a closed socket re-raises on every recv(); per-iteration
+        warnings produced ~6 lines/s (thousands per outage).
+        """
+        now = _time.monotonic()
+        streak = getattr(self, "_disconnect_streak", 0) + 1
+        self._disconnect_streak = streak
+        last = getattr(self, "_disconnect_last_log_ts", 0.0)
+        if streak == 1 or now - last >= 30.0:
+            self._disconnect_last_log_ts = now
+            logger.warning(
+                "%s (%s): %s — reconnecting (streak=%d)",
+                prefix, type(e).__name__, e, streak,
+            )
+
+    async def _backoff_if_still_disconnected(self) -> None:
+        """Yield to the loop when _reconnect() returned without a live socket.
+
+        2026-10-05 livelock fix: _reconnect() returns early (reconnect lock
+        held by force_session_reconnect, circuit open, lag pause).  recv() on
+        the closed socket then raises synchronously, so the loop spun without
+        ever suspending — starving the coroutine holding the lock (close()
+        never completed) and pinning the GIL for every other thread.
+        """
+        if self.is_connected():
+            self._disconnect_streak = 0
+            return
+        delay = max(0.5, min(float(self._reconnect_delay or 1.0), 5.0))
+        await asyncio.sleep(delay)
 
     # ── Phase 2: Coalescing buffer processor ────────────────────────────────────────
     
@@ -2059,9 +2108,15 @@ class KalshiWebSocket(EventVenueStream):
                                 os.environ.get("MERID_WS_DELTA_DROP_RES_MS", "2500")
                             )
                             if _res_ms > _drop_ms:
+                                # Orderbook deltas nest the ticker in ``msg``;
+                                # keying on "?" made every market share one
+                                # resync-forward slot per notify interval.
+                                _body = _kalshi_ws_payload(data)
                                 _tk = (
                                     data.get("ticker")
                                     or data.get("market_ticker")
+                                    or _body.get("market_ticker")
+                                    or _body.get("ticker")
                                     or "?"
                                 )
                                 _st = getattr(self, "_stale_delta_drop", None)
