@@ -22,7 +22,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Set, Any
 
-logger = logging.getLogger(__name__)
+# Route through the shared get_logger so records reach the async queue
+# handler (full.log + console).  A bare logging.getLogger() under the
+# uvicorn root leaves this monitor's INFO telemetry invisible.
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Market order fallback integration
 try:
@@ -392,6 +397,10 @@ class RestingOrderMonitor:
             return record.kalshi_order_id
 
         return None
+
+    def get_all_orders(self) -> List[RestingOrderRecord]:
+        """All registered resting orders (heartbeat/liveness metrics read this)."""
+        return list(self._resting_orders.values())
 
     def get_orders_by_ticker(self, ticker: str) -> List[RestingOrderRecord]:
         """Get all resting orders for a given ticker.
@@ -985,7 +994,7 @@ class RestingOrderMonitor:
         """
         while self._running:
             try:
-                logger.info(
+                logger.debug(
                     f"[RESTING_ORDER_MONITOR] Re-checking {len(self._resting_orders)} orders against signals"
                 )
                 results = await self._recheck_all_orders()
@@ -993,7 +1002,7 @@ class RestingOrderMonitor:
                 cancel_count = sum(1 for r in results if r.action == "cancel")
                 keep_count = sum(1 for r in results if r.action == "keep")
                 
-                logger.info(
+                logger.debug(
                     f"[RESTING_ORDER_MONITOR] Re-check complete: {cancel_count} cancelled, "
                     f"{keep_count} kept (total_cancelled={self._cancel_count}, total_kept={self._keep_count})"
                 )
