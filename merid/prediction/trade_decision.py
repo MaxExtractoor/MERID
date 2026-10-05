@@ -1571,6 +1571,25 @@ def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
                 if breakdown is not None
                 else None
             ),
+            route="maker",
+            depth_for_quantity_cc=(
+                float(getattr(decision, f"{sel}_depth_cc", 0) or 0) if sel else None
+            ),
+            risk_reserve_cents=(
+                float(breakdown.model_risk_reserve) * 100.0
+                if breakdown is not None
+                else None
+            ),
+            exit_cost_reserve_cents=(
+                float(breakdown.exit_cost_reserve) * 100.0
+                if breakdown is not None
+                else None
+            ),
+            adverse_selection_reserve_cents=(
+                float(breakdown.adverse_selection_reserve) * 100.0
+                if breakdown is not None
+                else None
+            ),
         )
     except Exception:
         pass
@@ -4461,6 +4480,13 @@ def compute_trade_decision(
                 spot_price=float(spot_price),
                 strike_price=float(strike_price),
                 fee_cents=float(fee) * 100.0,
+                route="maker",
+                depth_for_quantity_cc=float(
+                    yes_depth_cc if best_side == "yes" else no_depth_cc
+                ),
+                risk_reserve_cents=float(_rej_bd.model_risk_reserve) * 100.0,
+                exit_cost_reserve_cents=float(_rej_bd.exit_cost_reserve) * 100.0,
+                adverse_selection_reserve_cents=float(_rej_bd.adverse_selection_reserve) * 100.0,
             )
 
     # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
@@ -4502,6 +4528,13 @@ def compute_trade_decision(
                     spot_price=float(spot_price),
                     strike_price=float(strike_price),
                     fee_cents=float(fee) * 100.0,
+                    route="maker",
+                    depth_for_quantity_cc=float(
+                        yes_depth_cc if selected_outcome == "yes" else no_depth_cc
+                    ),
+                    risk_reserve_cents=float(edge_breakdown.model_risk_reserve) * 100.0,
+                    exit_cost_reserve_cents=float(edge_breakdown.exit_cost_reserve) * 100.0,
+                    adverse_selection_reserve_cents=float(edge_breakdown.adverse_selection_reserve) * 100.0,
                 )
                 selected_outcome = None
                 edge_breakdown = None
@@ -4673,6 +4706,13 @@ def compute_trade_decision(
                     spot_price=float(spot_price),
                     strike_price=float(strike_price),
                     fee_cents=float(fee) * 100.0,
+                    route="maker",
+                    depth_for_quantity_cc=float(
+                        yes_depth_cc if selected_outcome == "yes" else no_depth_cc
+                    ),
+                    risk_reserve_cents=float(edge_breakdown.model_risk_reserve) * 100.0,
+                    exit_cost_reserve_cents=float(edge_breakdown.exit_cost_reserve) * 100.0,
+                    adverse_selection_reserve_cents=float(edge_breakdown.adverse_selection_reserve) * 100.0,
                 )
                 logger.info(
                     "[ENTRY-POLICY-SHADOW] asset=%s ticker=%s side=%s price_cents=%.2f "

@@ -167,10 +167,20 @@ async def test_false_mark_no_lock_when_bid_below_threshold(monitor):
 
 @pytest.mark.asyncio
 async def test_untrusted_quote_blocks_lock_with_p0_alert(monitor, caplog):
-    """Bid >= 90c on an untrusted book -> BLOCKED decision, no intent, P0 alert."""
+    """Bid >= 90c on an untrusted book -> BLOCKED decision, no intent, P0 alert.
+
+    2026-10-05: the witnessed lock-level bid must also be LATCHED as a durable
+    obligation (previously the alert fired but no obligation was recorded, so
+    later polls degraded into EXIT_BLOCKED_BOOK_INVALID forever).
+    """
     position = _make_position(PositionSide.YES, entry_cents=50)
     monitor.add_position(position)
     calls = _capture_callback(monitor)
+
+    async def _no_recovery(_pos):
+        return None
+
+    monitor._hard_lock_quote_recovery = _no_recovery
 
     decision = await monitor._check_position(
         position,
@@ -185,6 +195,15 @@ async def test_untrusted_quote_blocks_lock_with_p0_alert(monitor, caplog):
     assert decision.metadata["block_reason"] == "TP_QUOTE_NOT_TRUSTED"
     assert len(calls) == 0
     assert "HARD_PROFIT_LOCK_BLOCKED_UNTRUSTED_QUOTE" in caplog.text
+    # The witnessed 95c bid is now a durable obligation with the event trail.
+    assert position.hard_lock_pending is not None
+    assert position.hard_lock_pending["trigger_bid_cents"] == 95
+    assert position.hard_lock_pending["trusted_at_latch"] is False
+    assert position.hard_lock_pending["latched_via"] == "poll_untrusted"
+    assert any(
+        e.get("event") == "HARD_LOCK_TRIGGERED"
+        for e in position.hard_lock_pending.get("events", [])
+    )
 
 
 @pytest.mark.asyncio
@@ -303,6 +322,184 @@ async def test_incident_replay_73c_no_92c_bid(monitor):
     assert calls[0]["price"] == 92
 
 
+def _book_state(**over):
+    """Minimal market-state object for _get_exit_price_snapshot.
+
+    Models the incident shape: YES bid absent (decided market), YES ask=1c,
+    so the reciprocal NO bid = 99c is populated while best_no_ask is absent.
+    """
+    import types
+    base = dict(
+        book_initialized=True,
+        executable=True,
+        data_quality="GOOD",
+        data_source="ws",
+        live_sequence_confirmed=True,
+        last_book_update_ts=time.monotonic(),
+        best_bid_cents=None,
+        best_ask_cents=1,
+        best_no_bid_cents=99,
+        best_no_ask_cents=None,
+        min_depth_yes=0,
+        min_depth_no=100,
+        has_bid=False,
+        has_no_bid=True,
+        mid_cents=None,
+        spread_cents=None,
+        book_sequence=42,
+        seconds_to_expiry=300.0,
+    )
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_one_sided_book_no_position_produces_snapshot(monitor):
+    """Incident shape: YES bid absent, YES ask=1c -> implied NO bid=99c.
+
+    The old code required own_ask too (no_ask = 100 - yes_bid is absent when
+    the YES bid is gone) and returned None -> BOOK_UNUSABLE while an
+    executable 99c own-side bid sat in the state.  A SELL exit needs only
+    the bid.
+    """
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+
+    snap = monitor._get_exit_price_snapshot(
+        _book_state(), position.side, position.market_id
+    )
+
+    assert snap is not None
+    assert snap.own_side_bid_cents == 99
+    assert snap.own_side_ask_cents is None
+    assert snap.derived_from_reciprocal_book is True
+
+
+@pytest.mark.asyncio
+async def test_one_sided_book_still_fires_lock(monitor):
+    """The resolved 99c reciprocal NO bid reaches the lock trigger."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    snap = monitor._get_exit_price_snapshot(
+        _book_state(), position.side, position.market_id
+    )
+    decision = await monitor._check_position(position, snap, 1)
+
+    assert decision is not None
+    assert decision.reason == ExitReason.HARD_PROFIT_LOCK
+    assert len(calls) == 1
+    assert calls[0]["reason"] == ExitReason.HARD_PROFIT_LOCK
+    # Latch written atomically with the observation.
+    assert position.hard_lock_pending is not None
+    assert position.hard_lock_pending["trigger_bid_cents"] == 99
+    assert position.hard_lock_pending["intent_submitted"] is True
+
+
+@pytest.mark.asyncio
+async def test_lock_latch_one_shot_idempotent(monitor):
+    """Repeated >=90c observations produce exactly one exit intent."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    for i in range(3):
+        await monitor._check_position(position, _snapshot(position, own_bid=92), i)
+
+    assert len(calls) == 1
+    assert position.hard_lock_pending is not None
+
+
+@pytest.mark.asyncio
+async def test_latch_opportunity_lost_on_subthreshold_recovery(monitor):
+    """Latched at 92c, book recovers at 85c -> terminal OPPORTUNITY_LOST,
+    latch cleared, no second intent emitted."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    await monitor._check_position(position, _snapshot(position, own_bid=92), 1)
+    assert position.hard_lock_pending is not None
+    assert len(calls) == 1
+
+    # Book recovers below the lock threshold — the lock obligation lapses.
+    await monitor._check_position(position, _snapshot(position, own_bid=85), 2)
+    assert position.hard_lock_pending is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fast_path_callback_latches_and_emits(monitor):
+    """Market-state update path: a fresh >=90c quote triggers the emit without
+    waiting for the 5s poll."""
+    import asyncio
+
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+    monitor._loop = asyncio.get_running_loop()
+
+    monitor._on_hard_lock_market_update(position.market_id, _book_state())
+    await asyncio.sleep(0.1)
+
+    assert len(calls) == 1
+    assert calls[0]["reason"] == ExitReason.HARD_PROFIT_LOCK
+    assert position.hard_lock_pending is not None
+    assert position.hard_lock_pending["latched_via"] == "market_state_event"
+
+
+@pytest.mark.asyncio
+async def test_fast_path_ignores_subthreshold_quote(monitor):
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+    import asyncio
+    monitor._loop = asyncio.get_running_loop()
+
+    monitor._on_hard_lock_market_update(
+        position.market_id, _book_state(best_ask_cents=15, best_no_bid_cents=85)
+    )
+    await asyncio.sleep(0.05)
+
+    assert len(calls) == 0
+    assert position.hard_lock_pending is None
+
+
+@pytest.mark.asyncio
+async def test_quote_recovery_throttled_and_bounded(monitor):
+    """_hard_lock_quote_recovery enforces max attempts + min interval."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    position.hard_lock_pending = {
+        "state": "PENDING",
+        "trigger_bid_cents": 99,
+        "recovery_attempts": 99,  # exhausted
+        "last_recovery_ts": 0.0,
+    }
+    assert await monitor._hard_lock_quote_recovery(position) is None
+
+    position.hard_lock_pending = {
+        "state": "PENDING",
+        "trigger_bid_cents": 99,
+        "recovery_attempts": 0,
+        "last_recovery_ts": time.monotonic(),  # too soon — throttled
+    }
+    assert await monitor._hard_lock_quote_recovery(position) is None
+
+
+def test_hard_profit_lock_classified_as_hard_risk():
+    """loop_15m price validation must classify the lock as hard-risk —
+    never the discretionary profit floor, never 'unknown classification'
+    (the 04:21 BTC_NO@81 EXIT-PRICE-VALIDATION-FAIL incident)."""
+    from merid.loop_15m import (
+        MERID_HARD_RISK_EXIT_REASONS,
+        MERID_PROFIT_EXIT_REASONS,
+    )
+
+    assert "hard_profit_lock" in MERID_HARD_RISK_EXIT_REASONS
+    assert "hard_profit_lock" not in MERID_PROFIT_EXIT_REASONS
+
+
 def test_model_fair_value_ignores_market_implied():
     """_get_model_fair_value_cents must NOT fall back to implied_prob.
 
@@ -328,3 +525,156 @@ def test_model_fair_value_ignores_market_implied():
 
     assert _get_model_fair_value_cents(_State2(), "yes") == 96
     assert _get_model_fair_value_cents(_State2(), "no") == 4
+
+
+# ── 2026-10-05 incident-shape hardening ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stale_exit_triggered_flag_does_not_freeze_lock(monitor):
+    """exit_triggered=True with no exited_at (a crashed intent path) must not
+    freeze the lock gate upstream of _emit_exit_intent's stale-flag clearing."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    # Simulate the frozen state: flagged as exiting but never actually exited.
+    position.exit_triggered = True
+    position.exited_at = None
+
+    decision = await monitor._check_position(
+        position, _snapshot(position, own_bid=92, mid=8), 1
+    )
+
+    assert decision is not None
+    assert decision.reason == ExitReason.HARD_PROFIT_LOCK
+    assert len(calls) == 1
+    assert calls[0]["reason"] == ExitReason.HARD_PROFIT_LOCK
+
+
+@pytest.mark.asyncio
+async def test_genuinely_exited_position_skips_lock(monitor):
+    """exit_triggered=True WITH exited_at is a real close — lock must not fire."""
+    from datetime import datetime, timezone
+
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    position.exit_triggered = True
+    position.exited_at = datetime.now(timezone.utc)
+
+    decision = await monitor._check_position(
+        position, _snapshot(position, own_bid=92, mid=8), 1
+    )
+
+    assert all(c["reason"] != ExitReason.HARD_PROFIT_LOCK for c in calls)
+    assert decision is None or decision.reason != ExitReason.HARD_PROFIT_LOCK
+
+
+@pytest.mark.asyncio
+async def test_untrusted_latch_then_recovered_quote_emits(monitor):
+    """Incident replay: lock-level bid on an unusable quote latches; a bounded
+    REST recovery that produces a trusted quote emits the exit intent."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    recovered = _snapshot(position, own_bid=99, mid=5)
+
+    async def _recovery(_pos):
+        return recovered
+
+    monitor._hard_lock_quote_recovery = _recovery
+
+    decision = await monitor._check_position(
+        position,
+        _snapshot(position, own_bid=99, executable=False, data_quality="STALE",
+                  book_age_ms=60_000),
+        1,
+    )
+
+    assert decision is not None
+    assert decision.reason == ExitReason.HARD_PROFIT_LOCK
+    assert len(calls) == 1
+    assert calls[0]["reason"] == ExitReason.HARD_PROFIT_LOCK
+    assert calls[0]["price"] == 99
+
+
+@pytest.mark.asyncio
+async def test_unsubmitted_lock_with_stale_inflight_force_reconciles(monitor):
+    """A latched-but-unsubmitted lock blocked by a stale in-flight record must
+    reach _emit_exit_intent's forced reconcile instead of degrading to
+    EXIT_BLOCKED_BOOK_INVALID."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    # Latch the obligation without a submitted intent.
+    monitor._latch_hard_lock(
+        position, bid_cents=99, threshold_cents=90,
+        trusted=False, via="poll_untrusted",
+    )
+
+    # Stale in-flight record that a real exit intent left behind.
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMITTED",
+        "timestamp": time.time() - 1.0,
+        "client_order_id": None,
+        "reason": "stop_loss",
+    }
+
+    async def _fake_reconcile(position_id, client_order_id, force=False, new_price_cents=None):
+        monitor._exit_intent_in_flight.pop(position_id, None)
+
+    monitor._reconcile_exit_intent = _fake_reconcile
+
+    decision = await monitor._check_position(
+        position, _snapshot(position, own_bid=92, mid=8), 1
+    )
+
+    assert decision is not None
+    assert decision.reason == ExitReason.HARD_PROFIT_LOCK
+    assert len(calls) == 1
+    assert calls[0]["reason"] == ExitReason.HARD_PROFIT_LOCK
+
+
+@pytest.mark.asyncio
+async def test_fast_path_unusable_book_latches_obligation(monitor):
+    """Market-state update where the snapshot gate rejects the book but the
+    raw NO bid reads >= lock must latch a durable obligation."""
+    import asyncio
+
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+    monitor._loop = asyncio.get_running_loop()
+
+    # Book unusable (BAD quality) but the raw reciprocal-derived NO bid is 99c.
+    monitor._on_hard_lock_market_update(
+        position.market_id, _book_state(data_quality="BAD_DUALITY", executable=False)
+    )
+    await asyncio.sleep(0.05)
+
+    assert len(calls) == 0  # never emit off an untrusted quote
+    assert position.hard_lock_pending is not None
+    assert position.hard_lock_pending["trigger_bid_cents"] == 99
+    assert position.hard_lock_pending["trusted_at_latch"] is False
+    assert position.hard_lock_pending["latched_via"] == "market_state_event_untrusted"
+
+
+@pytest.mark.asyncio
+async def test_hard_lock_event_trail_recorded(monitor):
+    """The durable lifecycle vocabulary is appended to the pending record."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    _capture_callback(monitor)
+
+    await monitor._check_position(position, _snapshot(position, own_bid=92, mid=8), 1)
+
+    events = [
+        e.get("event") for e in (position.hard_lock_pending or {}).get("events", [])
+    ]
+    assert "HARD_LOCK_TRIGGERED" in events
+    assert "HARD_LOCK_INTENT_CREATED" in events
+    assert "HARD_LOCK_SUBMIT_STARTED" in events

@@ -32,7 +32,12 @@ class ExitPriceSnapshot:
     position_side: PositionSide
     mid_cents: int
     own_side_bid_cents: int
-    own_side_ask_cents: int
+    # 2026-10-05: Optional — a SELL exit executes into the own-side bid only.
+    # On one-sided books (e.g. YES bid absent at end-of-window) the own-side
+    # ask has no valid reciprocal representation and must not poison the
+    # snapshot: no_ask = 100 - yes_bid is 100 or absent exactly when the
+    # contract is decided, while the own bid (100 - yes_ask) is executable.
+    own_side_ask_cents: Optional[int]
     opposite_bid_cents: Optional[int]
     opposite_ask_cents: Optional[int]
     book_age_ms: int
@@ -54,6 +59,11 @@ class ExitPriceSnapshot:
     no_depth: Optional[int] = None
     entry_side_executable_bid_cents: Optional[int] = None
     entry_side_executable_ask_cents: Optional[int] = None
+    # 2026-10-05: True when the executable own-side price was derived from the
+    # reciprocal book level (NO bid = 100 - YES ask) rather than a direct
+    # own-side level.  Audit-only — reciprocal derivation is valid execution
+    # semantics on a binary book, but the flag distinguishes one-sided states.
+    derived_from_reciprocal_book: bool = False
 
     def is_fresh(self, max_age_ms: int = 10_000) -> bool:
         """Return True if the book is within the freshness window."""
@@ -65,7 +75,6 @@ class ExitPriceSnapshot:
             self.executable
             and self.has_bid_size
             and 0 < self.own_side_bid_cents < 100
-            and 0 < self.own_side_ask_cents < 100
             and self.data_quality == "GOOD"
         )
 

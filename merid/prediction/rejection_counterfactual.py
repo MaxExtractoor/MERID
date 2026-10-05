@@ -85,6 +85,47 @@ def should_log(reason: Optional[str]) -> bool:
     return any(reason.startswith(p) for p in _COUNTERFACTUAL_REASON_PREFIXES)
 
 
+def _price_bucket(price_cents: Optional[float]) -> Optional[str]:
+    """Map a held-side executable price to the mandate's band vocabulary."""
+    if price_cents is None:
+        return None
+    try:
+        p = float(price_cents)
+    except (TypeError, ValueError):
+        return None
+    if p < 0 or p > 100:
+        return None
+    bands = ((1, 9), (10, 19), (20, 39), (40, 59), (60, 79), (80, 89), (90, 99))
+    for lo, hi in bands:
+        if lo <= p <= hi:
+            return f"{lo}-{hi}c"
+    if p < 1:
+        return "0-1c"
+    return "100c"
+
+
+def _canonical_reason(reason: str, net_edge: Optional[float]) -> Optional[str]:
+    """Resolve the mutually exclusive top-level rejection code.
+
+    Delegates to the shared ``canonical_terminal_code`` taxonomy so every
+    funnel stage uses one vocabulary (MARKET_UNAVAILABLE / BOOK_NOT_TRUSTED /
+    NO_ELIGIBLE_PRICE_BAND / NO_POSITIVE_EXECUTABLE_EDGE /
+    EDGE_BELOW_DYNAMIC_THRESHOLD / ...).
+    """
+    try:
+        from merid.prediction.terminal_codes import canonical_terminal_code
+
+        best_ev_cents = None
+        if net_edge is not None:
+            try:
+                best_ev_cents = float(net_edge) * 100.0
+            except (TypeError, ValueError):
+                best_ev_cents = None
+        return canonical_terminal_code(reason, best_ev_cents)
+    except Exception:
+        return None
+
+
 def log_rejected_candidate(
     *,
     reason: str,
@@ -104,32 +145,82 @@ def log_rejected_candidate(
     spot_price: Optional[float] = None,
     strike_price: Optional[float] = None,
     fee_cents: Optional[float] = None,
+    # 2026-10-05: executable-price counterfactual fields (mandate).  All
+    # optional; the scorecard joins on whatever the producing gate could see.
+    route: Optional[str] = None,
+    depth_for_quantity_cc: Optional[float] = None,
+    impact_reserve_cents: Optional[float] = None,
+    risk_reserve_cents: Optional[float] = None,
+    exit_cost_reserve_cents: Optional[float] = None,
+    adverse_selection_reserve_cents: Optional[float] = None,
+    book_imbalance: Optional[float] = None,
+    quote_state: Optional[str] = None,
+    quote_age_ms: Optional[float] = None,
+    book_sequence: Optional[int] = None,
+    intended_quantity: Optional[int] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
     if not _ENABLED or not should_log(reason):
         return
     try:
+        # Derived attribution: the true shortfall is how far the candidate's
+        # net edge fell below its active dynamic threshold (cents), and the
+        # underlying distance is spot-vs-strike separation when both exist.
+        true_shortfall_cents = None
+        if net_edge is not None and edge_threshold is not None:
+            try:
+                true_shortfall_cents = max(
+                    0.0, (float(edge_threshold) - float(net_edge)) * 100.0
+                )
+            except (TypeError, ValueError):
+                true_shortfall_cents = None
+        underlying_distance = None
+        if spot_price is not None and strike_price is not None:
+            try:
+                underlying_distance = float(spot_price) - float(strike_price)
+            except (TypeError, ValueError):
+                underlying_distance = None
+
         record = {
             "type": "rejected_candidate",
-            "schema_version": 1,
+            "schema_version": 2,
             "event_ts_utc": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id,
             "decision_id": decision_id,
             "asset": asset,
             "ticker": ticker,
+            "window_id": ticker,  # 15m ticker IS the window id
             "side": side,
+            "route": route,
             "model_p_selected": model_p_selected,
+            "fair_probability": model_p_selected,
             "held_price_cents": held_price_cents,
+            "executable_price_cents": held_price_cents,
+            "price_bucket": _price_bucket(held_price_cents),
+            "depth_for_quantity_cc": depth_for_quantity_cc,
+            "intended_quantity": intended_quantity,
             "gross_edge": gross_edge,
             "net_edge": net_edge,
             "edge_threshold": edge_threshold,
+            "dynamic_threshold": edge_threshold,
+            "true_shortfall_cents": true_shortfall_cents,
             "pi_star": pi_star,
             "min_p_selected": min_p_selected,
             "tte_seconds": tte_seconds,
             "spot_price": spot_price,
             "strike_price": strike_price,
+            "underlying_distance_from_strike": underlying_distance,
+            "book_imbalance": book_imbalance,
+            "quote_state": quote_state,
+            "quote_age_ms": quote_age_ms,
+            "book_sequence": book_sequence,
             "fee_cents": fee_cents,
+            "impact_reserve_cents": impact_reserve_cents,
+            "risk_reserve_cents": risk_reserve_cents,
+            "exit_cost_reserve_cents": exit_cost_reserve_cents,
+            "adverse_selection_reserve_cents": adverse_selection_reserve_cents,
             "reject_reason": reason,
+            "canonical_reason": _canonical_reason(reason, net_edge),
         }
         path = os.environ.get("MERID_REJECTED_CANDIDATES_LOG", _DEFAULT_PATH)
         line = json.dumps(record, default=str)
