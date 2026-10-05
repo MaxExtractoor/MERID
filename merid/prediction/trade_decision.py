@@ -4537,11 +4537,18 @@ def compute_trade_decision(
     # ``net_edge > 0`` is preserved via the p_selected > cost-basis leg.
     _canary_side: Optional[str] = None
     _canary_edge = 0.0
+    # 2026-10-05: the canary accepts either attested quote owner — a
+    # REST-owned effective quote is already a verified exchange snapshot,
+    # and the router re-verifies a fresh REST pull at submit time for any
+    # intent (the relaxed ws_resync fallback).  Requiring WS ownership here
+    # starved the lane every time books cycled DEGRADED.
     _canary_pristine = (
         MERID_CANARY_LANE_ENABLED
         and route == "taker"
-        and indicators.get("quote_owner") == "WS_FRESH_VERIFIED"
-        and not indicators.get("quote_degraded_mode")
+        and indicators.get("quote_owner") in (
+            "WS_FRESH_VERIFIED",
+            "REST_VERIFIED_DEGRADED",
+        )
     )
     # Only the best-side edge is canary-eligible — the lane exists for the
     # top-ranked candidate, and the dual-side assertion below requires
@@ -4644,7 +4651,7 @@ def compute_trade_decision(
             indicators["canary_taker_blocked"] = {
                 "side": best_side,
                 "gate_ev_cents": _ce2 * 100.0,
-                "failed_gates": ["quote_not_ws_verified"],
+                "failed_gates": ["quote_not_verified"],
                 "quote_owner": indicators.get("quote_owner"),
                 "degraded": bool(indicators.get("quote_degraded_mode")),
             }

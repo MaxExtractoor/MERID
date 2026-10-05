@@ -978,13 +978,13 @@ def strip_concentration_block(
     ev_cents: Optional[float],
     ts: Optional[float] = None,
 ) -> Optional[str]:
-    """One same-directional entry across all five assets per 15-minute strip.
+    """Same-directional concurrency cap across all five assets per strip.
 
-    Additional same-side entries are permitted while fewer than
-    ``MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE`` (default 1) prior entries remain
-    open — the new candidate must still beat the best prior entry's net EV
-    by ``MERID_STRIP_CONC_EV_MARGIN_CENTS``.  Once all priors are closed the
-    same EV ladder applies to re-entry.
+    Up to ``MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE`` same-side entries may be
+    open at once — the open cap is the exposure bound (1 contract each).
+    Re-entry after every prior has closed must additionally beat the best
+    prior entry's net EV by ``MERID_STRIP_CONC_EV_MARGIN_CENTS`` (negative
+    margins relax the ladder).
     """
     if not throttle_enabled() or side not in ("yes", "no"):
         return None
@@ -995,10 +995,17 @@ def strip_concentration_block(
     if not same:
         return None
     open_same = [e for e in same if e.get("open", True)]
+    if open_same:
+        # 2026-10-05 relax: while same-side slots remain the cap itself is
+        # the bound — up to MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE concurrent
+        # 1-contract entries may stack across the five correlated crypto
+        # markets.  The EV ladder only gates re-entry once every prior has
+        # closed (replacing a finished position).
+        if len(open_same) >= _strip_max_open_same_side():
+            return f"strip_same_side_open:{side}"
+        return None
     margin = _strip_ev_margin_cents()
     best_prior = max(float(e.get("ev") or 0.0) for e in same)
-    if open_same and len(open_same) >= _strip_max_open_same_side():
-        return f"strip_same_side_open:{side}"
     if ev_cents is None or float(ev_cents) < best_prior + margin:
         return f"strip_same_side_ev:{side}"
     return None
