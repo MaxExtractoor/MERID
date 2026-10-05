@@ -325,6 +325,11 @@ class RestingOrderMonitor:
         self._intent_to_order_id: Dict[str, str] = {}  # intent_id -> kalshi_order_id
         # Exit order state tracking (kalshi_order_id -> ExitOrderState)
         self._exit_states: Dict[str, ExitOrderState] = {}
+        # Released re-entry slots: (ticker, contract) -> release context.
+        # Populated on venue-authoritative terminal release of an unfilled
+        # entry; swept each poll until a fresh candidate submits or the
+        # market window expires (REENTRY_DECISION_COMPLETED).
+        self._released_slots: Dict[tuple, Dict[str, Any]] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -555,11 +560,77 @@ class RestingOrderMonitor:
                 record, trigger=f"venue_terminal:{terminal_status}",
                 terminal_state=terminal_status, released=released,
             )
+            if released:
+                self._released_slots[(record.ticker, contract)] = {
+                    "released_ts": time.time(),
+                    "parent_order_id": record.kalshi_order_id,
+                    "intent_id": record.intent_id,
+                    "client_order_id": record.client_order_id,
+                    "price_cents": record.price_cents,
+                    "terminal_status": terminal_status,
+                }
+                _emit_resting_lifecycle(
+                    "REENTRY_ELIGIBLE_SLOT_OPENED", record,
+                    trigger=f"venue_terminal:{terminal_status}",
+                    terminal_state=terminal_status,
+                    contract=contract,
+                )
         except Exception as e:
             logger.warning(
                 "[RESTING-ORDER-DEDUPE-RELEASE] failed for %s: %s",
                 record.kalshi_order_id, e,
             )
+
+    def _sweep_released_slots(self) -> None:
+        """Complete released re-entry slots with a durable decision outcome.
+
+        For every (ticker, contract) released after a zero-fill venue terminal:
+          - a NEW canonical record that reaches ``submitted`` proves a fresh
+            fully-gated candidate entered routing -> outcome=SUBMITTED
+          - window expiry (or stale tracking) without a new submitted record
+            -> outcome=NO_ELIGIBLE_CANDIDATE (economics never re-qualified)
+        Re-entry attempts blocked by the budget emit REQUOTE_BUDGET_EXHAUSTED
+        from the contract itself.
+        """
+        if not self._released_slots:
+            return
+        try:
+            from merid.event_venues.kalshi.order_intent_contract import (
+                _accepted_entry_intents,
+            )
+            from merid.event_venues.kalshi.position_cache import _is_expired_ticker
+        except Exception:
+            return
+        now = time.time()
+        for (ticker, contract), rel in list(self._released_slots.items()):
+            rec = _accepted_entry_intents.get((ticker, contract))
+            new_submitted = bool(
+                rec is not None
+                and rec.get("submitted")
+                and rec.get("intent_id")
+                and rec.get("intent_id") != rel.get("intent_id")
+            )
+            if new_submitted:
+                _emit_resting_lifecycle(
+                    "REENTRY_DECISION_COMPLETED", None, ticker=ticker,
+                    outcome="SUBMITTED", attempt_number=2,
+                    contract=contract,
+                    parent_order_id=rel.get("parent_order_id"),
+                    new_intent_id=rec.get("intent_id"),
+                    new_client_order_id=rec.get("client_order_id"),
+                    reentry_reason="ttl_expired_edge_revalidated",
+                )
+                del self._released_slots[(ticker, contract)]
+                continue
+            if _is_expired_ticker(ticker) or now - rel.get("released_ts", now) > 1200:
+                _emit_resting_lifecycle(
+                    "REENTRY_DECISION_COMPLETED", None, ticker=ticker,
+                    outcome="NO_ELIGIBLE_CANDIDATE",
+                    contract=contract,
+                    parent_order_id=rel.get("parent_order_id"),
+                    terminal_reason="window_expired",
+                )
+                del self._released_slots[(ticker, contract)]
 
     def get_orders_by_ticker(self, ticker: str) -> List[RestingOrderRecord]:
         """Get all resting orders for a given ticker.
@@ -1129,7 +1200,7 @@ class RestingOrderMonitor:
         # Remove terminal orders
         for kalshi_order_id in orders_to_remove:
             self.unregister_order(kalshi_order_id)
-        
+
         logger.info(
             f"[RESTING_ORDER_MONITOR] Poll complete: {len(orders_to_remove)} removed, "
             f"{len(self._resting_orders)} still resting (total_polls={self._poll_count})"
@@ -1233,9 +1304,12 @@ class RestingOrderMonitor:
                 self._last_poll_time = datetime.utcnow()
                 await self._poll_all_orders()
                 self._poll_count += 1
+                # Sweep released re-entry slots even when no orders rest - the
+                # empty-registry early return must not strand completions.
+                self._sweep_released_slots()
             except Exception as e:
                 logger.error(f"[RESTING_ORDER_MONITOR] Poll loop error: {e}")
-            
+
             await asyncio.sleep(self.poll_interval)
     
     async def start(self) -> None:
