@@ -410,6 +410,7 @@ except ImportError:
     _settings = None
 
 import asyncio
+import re
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -5537,7 +5538,14 @@ async def _run_loop(self) -> None:
                 if isinstance(candidates, CycleResult):
                     total_candidates = candidates.total_generated
                     if candidates.rejection_breakdown:
-                        self._rejection_counters.update(candidates.rejection_breakdown)
+                        # Collapse value-bearing reasons ("time_to_expiry=29.7s < min=30.0s")
+                        # to one key and drop zero counts; raw keys grew the counter
+                        # and the per-tick log line without bound.
+                        _normalized = Counter()
+                        for _rk, _rv in candidates.rejection_breakdown.items():
+                            if _rv:
+                                _normalized[re.sub(r"\d+(?:\.\d+)?", "N", str(_rk))] += _rv
+                        self._rejection_counters.update(_normalized)
                         logger.info(
                             "[REJECTION-BREAKDOWN-INGEST] tick=%d total_generated=%d breakdown=%s",
                             tick_id, total_candidates, dict(candidates.rejection_breakdown),

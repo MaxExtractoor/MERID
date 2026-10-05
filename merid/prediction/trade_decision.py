@@ -1560,7 +1560,13 @@ def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
             net_edge=(
                 float(breakdown.net_edge) if breakdown is not None else None
             ),
-            edge_threshold=_ind.get(f"{sel}_effective_required_edge_cents"),
+            # Indicator is in cents; the record's edge_threshold is a
+            # probability like net_edge (shortfall = (thr - net) * 100).
+            edge_threshold=(
+                float(_ind[f"{sel}_effective_required_edge_cents"]) / 100.0
+                if _ind.get(f"{sel}_effective_required_edge_cents") is not None
+                else None
+            ),
             tte_seconds=(
                 float(decision.seconds_to_expiry)
                 if decision.seconds_to_expiry is not None
@@ -4372,7 +4378,15 @@ def compute_trade_decision(
             best_threshold = yes_min_edge if best_side == "yes" else no_min_edge
             best_min_p = yes_min_p if best_side == "yes" else no_min_p
             best_evidence_ok = yes_evidence_ok if best_side == "yes" else no_evidence_ok
-            if best_net_edge <= 0 and best_threshold >= 0:
+            # 2026-10-05: label with the same quantities the qualification gate
+            # compared (EPC-adjusted edge vs post-slack bound).  The raw
+            # reserve-stacked net edge mislabeled EPC-cleared sides (gate EV
+            # +4.8c) as no_positive_executable_edge, hiding the real blocker.
+            _best_gate_ev = _yes_eff_edge if best_side == "yes" else _no_eff_edge
+            _best_gate_bound = (
+                _yes_edge_eff_bound if best_side == "yes" else _no_edge_eff_bound
+            )
+            if _best_gate_ev <= 0 and best_threshold >= 0:
                 # 2026-09-30: both legs uneconomic is an EV rejection, not an
                 # evidence-policy veto.  Label it honestly so the funnel can
                 # separate "no edge right now" from "historically censored".
@@ -4380,7 +4394,7 @@ def compute_trade_decision(
                 # non-positive EV — the EV-zero label would mask whichever
                 # structural gate or lane floor actually vetoed.
                 no_trade_reason = "no_positive_executable_edge"
-            elif best_net_edge < best_threshold:
+            elif _best_gate_ev < _best_gate_bound:
                 if best_threshold < 0:
                     no_trade_reason = f"{best_side}_edge_below_lane_floor"
                 elif best_side == "yes":

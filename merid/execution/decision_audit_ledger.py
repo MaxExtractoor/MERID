@@ -316,6 +316,8 @@ class DecisionAuditLedger:
         self._shared_conn: Optional[sqlite3.Connection] = None
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_evidence_refresh = 0.0
+        self._evidence_refresh_guard = threading.Lock()
+        self._evidence_refresh_inflight = False
 
     def _ensure_db(self) -> None:
         """Create parent directory, schema, and run migrations on first use."""
@@ -1796,11 +1798,11 @@ class DecisionAuditLedger:
                 exc,
             )
         try:
-            self._maybe_refresh_live_entry_evidence()
+            self._maybe_refresh_live_entry_evidence(background=True)
         except Exception as exc:
             logger.debug("[DECISION-AUDIT-LEDGER] live evidence refresh failed: %s", exc)
 
-    def _maybe_refresh_live_entry_evidence(self) -> None:
+    def _maybe_refresh_live_entry_evidence(self, background: bool = False) -> None:
         """Rebuild the trailing-window live entry-evidence artifact.
 
         The static tail-calibration artifact is only refit offline, so when a
@@ -1837,37 +1839,94 @@ class DecisionAuditLedger:
             return
         self._last_evidence_refresh = now
         window_hours = float(os.environ.get("MERID_LIVE_EVIDENCE_WINDOW_HOURS", "48"))
+        if not background:
+            self._refresh_live_entry_evidence(now, window_hours)
+            return
+        # 2026-10-05: single-flight background refresh.  The query previously
+        # ran inline on the settlement thread while holding ``self._lock``;
+        # on the multi-GB audit DB it took 10+ minutes, and every decision
+        # write (``record_trade_decision`` -> ``_bump_cycle_stats``) parked
+        # behind the lock — the strategy loop froze after each settlement.
+        with self._evidence_refresh_guard:
+            if self._evidence_refresh_inflight:
+                return
+            self._evidence_refresh_inflight = True
+
+        def _run() -> None:
+            try:
+                self._refresh_live_entry_evidence(now, window_hours)
+            except Exception as exc:
+                logger.warning(
+                    "[DECISION-AUDIT-LEDGER] live evidence refresh failed: %s", exc
+                )
+            finally:
+                with self._evidence_refresh_guard:
+                    self._evidence_refresh_inflight = False
+
+        threading.Thread(
+            target=_run, name="live-evidence-refresh", daemon=True
+        ).start()
+
+    def _refresh_live_entry_evidence(self, now: float, window_hours: float) -> None:
+        """Query settled ENTER outcomes and atomically rewrite the artifact.
+
+        Runs on its own query-only connection and never takes ``self._lock``:
+        WAL readers don't block the ledger's writer, so a slow read can no
+        longer stall the decision pipeline.
+        """
+        since = now - window_hours * 3600.0
+        t0 = time.time()
+        conn: Optional[sqlite3.Connection] = None
         try:
-            with self._lock, self._conn() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT d.asset AS asset,
-                           d.selected_side AS side,
-                           d.ticker AS ticker,
-                           d.decision_id AS decision_id,
-                           d.seconds_to_close AS seconds_to_close,
-                           COALESCE(o.actual_fill_price_cents,
-                                    se.executable_entry_price_cents) AS entry_cents,
-                           o.settled_yes AS settled_yes,
-                           o.settled_at AS settled_at
-                    FROM strategy_decision_outcomes o
-                    JOIN strategy_decisions d ON d.decision_id = o.decision_id
-                    LEFT JOIN strategy_decision_side_ev se
-                      ON se.decision_id = o.decision_id
-                     AND se.side = d.selected_side
-                    WHERE o.outcome_status = 'SETTLED'
-                      AND o.settled_at >= ?
-                      AND d.decision = 'ENTER'
-                      AND d.selected_side IN ('yes', 'no')
-                      AND d.is_eligible_for_research = 1
-                    """,
-                    (now - window_hours * 3600.0,),
-                ).fetchall()
+            conn = sqlite3.connect(str(self.db_path), timeout=30)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = 1")
+            # Drive from decision_ts: rows are appended chronologically, so the
+            # index range reads contiguous pages; ENTER rows are then a handful
+            # of point lookups.  Driving from outcomes (status index, ~all rows
+            # SETTLED) random-read the whole decision table (575s vs 56s cold).
+            # A decision always precedes its settlement, and window_hours plus
+            # a one-hour pad covers decisions made just before the window.
+            rows = conn.execute(
+                """
+                SELECT d.asset AS asset,
+                       d.selected_side AS side,
+                       d.ticker AS ticker,
+                       d.decision_id AS decision_id,
+                       d.seconds_to_close AS seconds_to_close,
+                       COALESCE(o.actual_fill_price_cents,
+                                se.executable_entry_price_cents) AS entry_cents,
+                       o.settled_yes AS settled_yes,
+                       o.settled_at AS settled_at
+                FROM strategy_decisions d
+                JOIN strategy_decision_outcomes o ON o.decision_id = d.decision_id
+                LEFT JOIN strategy_decision_side_ev se
+                  ON se.decision_id = d.decision_id
+                 AND se.side = d.selected_side
+                WHERE d.decision_ts >= ?
+                  AND d.decision = 'ENTER'
+                  AND d.selected_side IN ('yes', 'no')
+                  AND d.is_eligible_for_research = 1
+                  AND o.outcome_status = 'SETTLED'
+                  AND o.settled_at >= ?
+                """,
+                (since - 3600.0, since),
+            ).fetchall()
         except Exception as exc:
             logger.debug(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
             )
             return
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        logger.info(
+            "[DECISION-AUDIT-LEDGER] live evidence query rows=%d elapsed_s=%.1f",
+            len(rows), time.time() - t0,
+        )
 
         assets: Dict[str, Dict[str, Any]] = {}
         for row in rows:

@@ -310,3 +310,35 @@ def test_ledger_refresh_respects_export_flag(_isolate_evidence, tmp_path, monkey
     _seed_audit_db(ledger)
     ledger._maybe_refresh_live_entry_evidence()
     assert not Path(os.environ["MERID_LIVE_EVIDENCE_PATH"]).exists()
+
+
+def test_background_refresh_never_holds_ledger_lock(_isolate_evidence, tmp_path, monkeypatch):
+    """2026-10-05: the settlement-thread refresh held ``ledger._lock`` through a
+    10+ minute query on the production DB, parking every decision write behind
+    it.  Background refresh must leave the lock free and be single-flight."""
+    import threading as _th
+
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_REFRESH_S", "0")
+    ledger = DecisionAuditLedger(db_path=tmp_path / "audit.db")
+    ledger._ensure_db()
+
+    started = _th.Event()
+    release = _th.Event()
+    calls = {"n": 0}
+
+    def _slow_refresh(now, window_hours):
+        calls["n"] += 1
+        started.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(ledger, "_refresh_live_entry_evidence", _slow_refresh)
+    ledger._maybe_refresh_live_entry_evidence(background=True)
+    assert started.wait(2.0)
+    try:
+        assert ledger._lock.acquire(timeout=1.0), "refresh must not hold the ledger lock"
+        ledger._lock.release()
+        ledger._maybe_refresh_live_entry_evidence(background=True)
+        assert calls["n"] == 1, "a second refresh must not start while one is in flight"
+    finally:
+        release.set()
