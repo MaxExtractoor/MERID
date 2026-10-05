@@ -72,6 +72,7 @@ def _make_agent():
     agent._last_velocity_signal_type = None
     agent._last_velocity_threshold = None
     agent._last_spot_data = {}
+    agent._feature_snapshot = None
     agent._record_signal_rejection = lambda reason, **ctx: rejections.append((reason, ctx))
     agent._build_trade_decision_rejection_context = lambda *a, **k: dict(k.get("extra") or {})
     agent._classify_regime = lambda ticker: "normal"
@@ -83,7 +84,23 @@ def _make_agent():
 def _make_market():
     expiry = datetime.now(timezone.utc) + timedelta(seconds=600)
     market = SimpleNamespace(
-        market=SimpleNamespace(market_id="KXBTC15M-TEST", end_date=expiry),
+        market=SimpleNamespace(
+            market_id="KXBTC15M-TEST",
+            end_date=expiry,
+            raw_data={
+                "rules_primary": (
+                    "The expiration value is the arithmetic mean of the CF "
+                    "Benchmarks Bitcoin Real-Time Index (BRTI) values published "
+                    "at one-second intervals during the final 60 seconds "
+                    "preceding expiration."
+                ),
+                "rules_secondary": None,
+                "resolution_source": "CF Benchmarks",
+                "fee_type": "quadratic_with_maker_fees",
+                "fee_multiplier": "1.0",
+                "fee_waiver_expiration_time_ms": None,
+            },
+        ),
         expires_at=expiry,
         settlement_digits=2,
         seconds_to_expiry=600.0,
