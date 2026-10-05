@@ -4017,8 +4017,12 @@ def compute_trade_decision(
     # one-loss -> manual-review relock).  The margin is added to the side's
     # effective min edge so downstream threshold fields record what was
     # actually enforced.
-    _yes_caution_c = _dr.side_caution_margin_cents("yes", now.timestamp())
-    _no_caution_c = _dr.side_caution_margin_cents("no", now.timestamp())
+    _yes_caution_c = _dr.side_caution_margin_cents(
+        "yes", now.timestamp(), asset=asset
+    )
+    _no_caution_c = _dr.side_caution_margin_cents(
+        "no", now.timestamp(), asset=asset
+    )
     if _yes_caution_c > 0.0:
         yes_min_edge = float(yes_min_edge) + _yes_caution_c / 100.0
     if _no_caution_c > 0.0:
