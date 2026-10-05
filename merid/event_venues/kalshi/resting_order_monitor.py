@@ -76,8 +76,121 @@ def _normalize_status(raw_status: str) -> str:
         "expired": "expired",
         "rejected": "rejected",
     }
-    
+
     return status_mapping.get(status, status)
+
+
+# ---------------------------------------------------------------------------
+# Durable resting-order lifecycle ledger (2026-10-05)
+#
+# Append-only JSONL at logs/resting_order_lifecycle.jsonl.  Every registered
+# passive order gets a durable, attributable trail: registered -> rechecked
+# (even when the decision is "keep") -> cancel request/ack or venue terminal
+# -> deregistered.  This is the evidence needed to compare TTL expiry,
+# policy cancels, fills and adverse selection without trusting console logs.
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+_RESTING_LIFECYCLE_PATH = Path("logs") / "resting_order_lifecycle.jsonl"
+_RESTING_POLICY_VERSION = os.environ.get("MERID_RESTING_POLICY_VERSION", "resting_monitor_v1")
+
+
+def _resting_quote_snapshot(ticker: str) -> Dict[str, Any]:
+    """Best-effort current book snapshot for ledger rows (never raises)."""
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+        _store = get_kalshi_market_state_store()
+        _st = _store.get(ticker) if _store else None
+        if _st is None:
+            return {}
+        _yb = getattr(_st, "best_bid_cents", None)
+        _ya = getattr(_st, "best_ask_cents", None)
+        _updated = (
+            getattr(_st, "book_updated_ts", None)
+            or getattr(_st, "last_book_update_ts", None)
+        )
+        _age_ms = (
+            max(0, int((time.monotonic() - float(_updated)) * 1000))
+            if isinstance(_updated, (int, float)) and _updated > 0
+            else None
+        )
+        _mid = ((float(_yb) + float(_ya)) / 2.0) if (_yb is not None and _ya is not None) else None
+        return {
+            "yes_bid_cents": _yb,
+            "yes_ask_cents": _ya,
+            "yes_mid_cents": _mid,
+            "quote_age_ms": _age_ms,
+            "book_sequence": getattr(_st, "book_sequence", None),
+        }
+    except Exception:
+        return {}
+
+
+def _emit_resting_lifecycle(
+    event: str,
+    record: Optional["RestingOrderRecord"] = None,
+    *,
+    ticker: Optional[str] = None,
+    **fields: Any,
+) -> None:
+    """Append one lifecycle row; also mirrors notable events to the logger.
+
+    Never raises - a broken ledger must not break order management.
+    """
+    try:
+        _tkr = ticker or (record.ticker if record is not None else "")
+        row: Dict[str, Any] = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "event": event,
+            "ticker": _tkr,
+            "policy_version": _RESTING_POLICY_VERSION,
+            "code_sha": os.environ.get("MERID_BUILD_SHA"),
+        }
+        if record is not None:
+            _age_s = (
+                round((datetime.utcnow() - record.created_at).total_seconds(), 3)
+                if isinstance(record.created_at, datetime)
+                else None
+            )
+            _tte_s = None
+            if record.original_minutes_to_expiry is not None and _age_s is not None:
+                _tte_s = round(record.original_minutes_to_expiry * 60.0 - _age_s, 1)
+            row.update(
+                {
+                    "order_id": record.kalshi_order_id,
+                    "client_order_id": record.client_order_id,
+                    "intent_id": record.intent_id,
+                    "asset": record.asset or None,
+                    "side": record.side,
+                    "action": record.action,
+                    "order_price_cents": record.price_cents,
+                    "original_size": record.original_size,
+                    "filled_size": record.filled_size,
+                    "remaining_quantity": record.remaining_size,
+                    "time_in_force": record.time_in_force,
+                    "order_expiration_ts": record.order_expiration_ts,
+                    "order_age_seconds": _age_s,
+                    "tte_seconds": _tte_s,
+                    "initial_edge_pct": record.original_edge_pct,
+                    "status": record.status,
+                    "risk_tier": record.risk_tier or None,
+                    "window_id": record.window_resolution_id or None,
+                }
+            )
+            row.update(_resting_quote_snapshot(_tkr))
+        row.update(fields)
+        try:
+            _RESTING_LIFECYCLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_RESTING_LIFECYCLE_PATH, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(row, default=str) + "\n")
+        except Exception as _we:
+            logger.debug("[RESTING-LIFECYCLE] ledger write failed: %s", _we)
+        if event not in ("RESTING_ORDER_RECHECKED",):
+            logger.info("[RESTING-LIFECYCLE] %s", _json.dumps(row, default=str))
+    except Exception as _e:
+        logger.debug("[RESTING-LIFECYCLE] emit failed: %s", _e)
 
 
 @dataclass
@@ -339,17 +452,20 @@ class RestingOrderMonitor:
         self._resting_orders[record.kalshi_order_id] = record
         if record.intent_id:
             self._intent_to_order_id[record.intent_id] = record.kalshi_order_id
-        
+
         logger.info(
             f"[RESTING_ORDER_MONITOR] Registered order: kalshi_order_id={record.kalshi_order_id} "
             f"intent_id={record.intent_id} ticker={record.ticker} risk_tier={record.risk_tier} "
             f"original_size={record.original_size} remaining_size={record.remaining_size} status={record.status} "
             f"max_hold_seconds={record.max_hold_seconds}"
         )
-    
+        _emit_resting_lifecycle(
+            "RESTING_ORDER_REGISTERED", record, trigger="venue_ack_gtc",
+        )
+
     def unregister_order(self, kalshi_order_id: str) -> None:
         """Unregister an order by server-side order_id.
-        
+
         Args:
             kalshi_order_id: Kalshi server-side order ID to unregister
         """
@@ -359,6 +475,10 @@ class RestingOrderMonitor:
             if record.intent_id and record.intent_id in self._intent_to_order_id:
                 del self._intent_to_order_id[record.intent_id]
             logger.debug(f"[RESTING_ORDER_MONITOR] Unregistered order: kalshi_order_id={kalshi_order_id}")
+            _emit_resting_lifecycle(
+                "RESTING_ORDER_DEREGISTERED", record,
+                trigger="local_unregister", terminal_state=record.status,
+            )
     
     def find_open_order(
         self,
@@ -401,6 +521,45 @@ class RestingOrderMonitor:
     def get_all_orders(self) -> List[RestingOrderRecord]:
         """All registered resting orders (heartbeat/liveness metrics read this)."""
         return list(self._resting_orders.values())
+
+    def _release_entry_dedupe_for_terminal(
+        self, record: RestingOrderRecord, terminal_status: str
+    ) -> None:
+        """Release the canonical entry idempotency record for a venue-terminal,
+        never-filled entry order so a fresh candidate may re-qualify.
+
+        Safe guards inside release_entry_idempotency(): refuses when the record
+        shows has_execution, so a filled-then-cancelled order keeps its dedupe.
+        Exit orders are filtered by the caller via self._exit_states.
+        """
+        side = (record.side or "").upper()
+        contract = "yes" if "YES" in side else ("no" if "NO" in side else None)
+        if not contract or not record.ticker:
+            return
+        try:
+            from merid.event_venues.kalshi.order_intent_contract import (
+                release_entry_idempotency,
+            )
+
+            released = release_entry_idempotency(
+                market_ticker=record.ticker, contract=contract,
+            )
+            logger.info(
+                "[RESTING-ORDER-DEDUPE-RELEASE] ticker=%s contract=%s order=%s "
+                "terminal=%s released=%s - entry slot freed for re-qualification",
+                record.ticker, contract, record.kalshi_order_id,
+                terminal_status, released,
+            )
+            _emit_resting_lifecycle(
+                "RESTING_ORDER_DEDUPE_RELEASED" if released else "RESTING_ORDER_DEDUPE_RELEASE_SKIPPED",
+                record, trigger=f"venue_terminal:{terminal_status}",
+                terminal_state=terminal_status, released=released,
+            )
+        except Exception as e:
+            logger.warning(
+                "[RESTING-ORDER-DEDUPE-RELEASE] failed for %s: %s",
+                record.kalshi_order_id, e,
+            )
 
     def get_orders_by_ticker(self, ticker: str) -> List[RestingOrderRecord]:
         """Get all resting orders for a given ticker.
@@ -872,6 +1031,10 @@ class RestingOrderMonitor:
                     f"ticker={record.ticker} fill_amount={fill_amount} remaining={remaining_size} "
                     f"total_filled={record.filled_size}/{record.original_size}"
                 )
+                _emit_resting_lifecycle(
+                    "RESTING_ORDER_PARTIAL_FILL", record,
+                    trigger="venue_remaining_decrease", fill_amount=fill_amount,
+                )
             
             # Terminal handling - use terminal status as primary signal
             # remaining_size == 0 is a sanity check
@@ -881,7 +1044,9 @@ class RestingOrderMonitor:
                     f"status={status} remaining_size={remaining_size} - removing from monitor"
                 )
                 # Emit filled/canceled/expired/rejected event based on status
+                _terminal_event = "RESTING_ORDER_RECONCILED"
                 if status == "filled":
+                    _terminal_event = "RESTING_ORDER_FILLED"
                     logger.info(
                         f"[EVENT] resting_order_filled | kalshi_order_id={record.kalshi_order_id} "
                         f"ticker={record.ticker} remaining_size={remaining_size}"
@@ -892,6 +1057,7 @@ class RestingOrderMonitor:
                         f"ticker={record.ticker} remaining_size={remaining_size}"
                     )
                 elif status == "expired":
+                    _terminal_event = "RESTING_ORDER_EXPIRED_VENUE"
                     logger.info(
                         f"[EVENT] resting_order_expired | kalshi_order_id={record.kalshi_order_id} "
                         f"ticker={record.ticker} remaining_size={remaining_size}"
@@ -901,6 +1067,24 @@ class RestingOrderMonitor:
                         f"[EVENT] resting_order_rejected | kalshi_order_id={record.kalshi_order_id} "
                         f"ticker={record.ticker} remaining_size={remaining_size}"
                     )
+                _emit_resting_lifecycle(
+                    _terminal_event, record,
+                    trigger="venue_terminal_status",
+                    terminal_state=status,
+                    old_status=old_status,
+                )
+                # 2026-10-05: a venue-authoritative terminal status on an ENTRY
+                # order with no fills must release the canonical (ticker,
+                # contract) idempotency record.  Without this the record stayed
+                # "submitted" for its 900s TTL and every re-entry intent in the
+                # window raised duplicate_entry - one-shot-per-window despite
+                # the venue having freed the slot.
+                if (
+                    status in ("canceled", "expired", "rejected")
+                    and (record.filled_size or 0) <= 0
+                    and record.kalshi_order_id not in self._exit_states
+                ):
+                    self._release_entry_dedupe_for_terminal(record, status)
                 return True
             
             # Check expiration discrepancy - check all resting statuses, not just "open"
@@ -964,26 +1148,52 @@ class RestingOrderMonitor:
         for record in list(self._resting_orders.values()):
             result = await self._recheck_order(record)
             results.append(result)
-            
+
+            # Durable recheck row for every order every cycle - a "keep" with no
+            # row would be indistinguishable from a dead monitor loop.
+            _recheck_event = "RESTING_ORDER_RECHECKED"
+            if "toxic_mid" in (result.reason or ""):
+                _recheck_event = "RESTING_ORDER_TOXIC_MID"
+            elif "untrusted" in (result.reason or "") or "no_book" in (result.reason or ""):
+                _recheck_event = "RESTING_ORDER_QUOTE_UNTRUSTED"
+            elif "edge" in (result.reason or "") and result.action == "cancel":
+                _recheck_event = "RESTING_ORDER_EDGE_DECAYED"
+            _emit_resting_lifecycle(
+                _recheck_event, record,
+                recheck_action=result.action,
+                trigger=result.reason,
+                current_regime=getattr(result, "current_regime", None),
+                model_quality_good=getattr(result, "model_quality_good", None),
+            )
+
             if result.action == "cancel":
                 self._cancel_count += 1
                 logger.warning(
                     f"[RESTING_ORDER_MONITOR] Cancelling order: kalshi_order_id={record.kalshi_order_id} "
                     f"ticker={record.ticker} reason={result.reason}"
                 )
+                _emit_resting_lifecycle(
+                    "RESTING_ORDER_CANCEL_REQUESTED", record, trigger=result.reason,
+                )
                 # Cancel the order on Kalshi
+                _cancel_ok = False
                 try:
                     from merid.event_venues.kalshi.client import get_kalshi_client
                     client = get_kalshi_client()
                     await client.cancel_order(record.kalshi_order_id, record.ticker)
+                    _cancel_ok = True
                 except Exception as e:
                     logger.error(f"[RESTING_ORDER_MONITOR] Failed to cancel order {record.kalshi_order_id}: {e}")
-                
+                _emit_resting_lifecycle(
+                    "RESTING_ORDER_CANCEL_ACKNOWLEDGED" if _cancel_ok else "RESTING_ORDER_CANCEL_FAILED",
+                    record, trigger=result.reason,
+                )
+
                 # Unregister cancelled order
                 self.unregister_order(record.kalshi_order_id)
             else:
                 self._keep_count += 1
-        
+
         return results
     
     async def _run_loop(self) -> None:

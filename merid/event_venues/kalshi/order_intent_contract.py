@@ -126,12 +126,48 @@ def _pre_submit_stale_ttl_seconds() -> float:
 # The ticker encodes the 15-minute window/expiry, so the key is per
 # ticker/side/window as required.
 _accepted_entry_intents: dict[tuple[str, str], dict[str, Any]] = {}
+# (market_ticker, contract) -> count of submitted-but-never-executed entry
+# records that reached a terminal release.  This is the bounded re-quote
+# budget: each release consumes one slot, and _enforce_entry_idempotency
+# admits at most MERID_ENTRY_MAX_REQUOTES_PER_KEY fresh entries after the
+# original order (default 1 => original + one re-quote).
+_terminal_released_slots: dict[tuple[str, str], int] = {}
 _entry_idempotency_lock = threading.RLock()
+
+
+def _max_requotes_per_key() -> int:
+    try:
+        return max(0, int(os.getenv("MERID_ENTRY_MAX_REQUOTES_PER_KEY", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _note_terminal_release(key: tuple[str, str], rec: dict[str, Any]) -> None:
+    """Count a submitted-record release against the re-quote budget."""
+    if rec.get("submitted"):
+        _terminal_released_slots[key] = _terminal_released_slots.get(key, 0) + 1
+
+
+def _check_requote_budget(key: tuple[str, str], i: "CanonicalOrderIntent") -> None:
+    """Raise if this (ticker, contract) already consumed its re-quote budget."""
+    used = _terminal_released_slots.get(key, 0)
+    mx = _max_requotes_per_key()
+    if used > mx:
+        logger.warning(
+            "[ENTRY-REQUOTE-BUDGET-EXHAUSTED] ticker=%s contract=%s intent=%s "
+            "used=%d max=%d reason=requote_budget_exhausted",
+            key[0], key[1], i.intent_id, used, mx,
+        )
+        raise OrderIntentValidationError(
+            f"requote_budget_exhausted:ticker={key[0]}:side={key[1]}:"
+            f"used={used}:max={mx}"
+        )
 
 
 def clear_entry_idempotency_registry() -> None:
     """Reset the accepted-entry registry (tests and process restart only)."""
     _accepted_entry_intents.clear()
+    _terminal_released_slots.clear()
 
 
 def ticker_has_stale_pending_entry_intent(ticker: str, max_age_s: float = 60.0) -> bool:
@@ -210,6 +246,7 @@ def _prune_stale_entry_records(now: float) -> None:
 
     for key in keys_to_remove:
         removed = _accepted_entry_intents.pop(key, None)
+        _terminal_released_slots.pop(key, None)
         if removed is not None:
             logger.info(
                 "[ENTRY-IDEMPOTENCY-PRUNE] ticker=%s contract=%s intent=%s "
@@ -260,6 +297,7 @@ def _enforce_entry_idempotency(i: CanonicalOrderIntent) -> None:
                     if gate_rec is None or gate_rec.status.value in ("rejected", "canceled", "expired") or gate_rec.status.value == "pending" and now - gate_rec.created_at >= pre_ttl:
                         replace = True
                     if replace:
+                        _check_requote_budget(key, i)
                         logger.warning(
                             "[ENTRY-IDEMPOTENCY-STALE-REPLACE] ticker=%s contract=%s "
                             "stale_intent=%s age=%.1fs new_intent=%s gate_status=%s",
@@ -285,6 +323,7 @@ def _enforce_entry_idempotency(i: CanonicalOrderIntent) -> None:
                 f"original_intent={rec.get('intent_id')}"
             )
 
+        _check_requote_budget(key, i)
         _accepted_entry_intents[key] = _new_entry_record(i, now)
         logger.info(
             "[ENTRY-IDEMPOTENCY-RECORDED] ticker=%s contract=%s intent=%s "
@@ -328,7 +367,7 @@ def release_entry_idempotency(
     market_ticker: str,
     contract: str,
     client_order_id: str | None = None,
-) -> None:
+) -> bool:
     """Remove a canonical entry record for a rejected/pre-submit intent.
 
     Safe to call from any rejection path.  Once a record has progressed to
@@ -336,28 +375,34 @@ def release_entry_idempotency(
     continue to protect the window.  A record that was only submitted but
     never executed is removed so an exchange rejection/cancel does not block
     a retry.
+
+    Returns True when a record was removed.  Removing a submitted-but-unfilled
+    record consumes one bounded re-quote slot (see _terminal_released_slots).
     """
     key = (market_ticker, contract)
     with _entry_idempotency_lock:
         rec = _accepted_entry_intents.get(key)
         if rec is None:
-            return
+            return False
         if client_order_id and client_order_id != rec.get("client_order_id"):
             # If the record still has no client_order_id, bind this call to it.
             if rec.get("client_order_id") is not None:
-                return
+                return False
             rec["client_order_id"] = client_order_id
         if rec.get("has_execution"):
             # Real fill; do not remove the record.
-            return
+            return False
         # Remove the record: this was a rejected/canceled or pre-submit
         # terminal intent and must not block a retry.
+        _note_terminal_release(key, rec)
         _accepted_entry_intents.pop(key, None)
         logger.info(
             "[ENTRY-IDEMPOTENCY-RELEASED] ticker=%s contract=%s intent=%s "
-            "client_order_id=%s",
+            "client_order_id=%s submitted=%s requotes_used=%d",
             market_ticker, contract, rec.get("intent_id"), rec.get("client_order_id"),
+            rec.get("submitted"), _terminal_released_slots.get(key, 0),
         )
+        return True
 
 
 def mark_entry_idempotency_submitted(
@@ -432,6 +477,7 @@ def release_entry_idempotency_by_key(
     with _entry_idempotency_lock:
         removed = _accepted_entry_intents.pop(key, None)
         if removed is not None:
+            _note_terminal_release(key, removed)
             logger.warning(
                 "[ENTRY-IDEMPOTENCY-FORCE-RELEASE] ticker=%s contract=%s intent=%s",
                 market_ticker, contract, removed.get("intent_id"),
@@ -460,6 +506,7 @@ def release_entry_idempotency_by_client_order_id(client_order_id: str | None) ->
                 return False
             removed = _accepted_entry_intents.pop(key, None)
             if removed is not None:
+                _note_terminal_release(key, removed)
                 logger.info(
                     "[ENTRY-IDEMPOTENCY-RELEASED] ticker=%s contract=%s intent=%s "
                     "client_order_id=%s (venue-confirmed not_submitted)",
