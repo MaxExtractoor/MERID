@@ -47,6 +47,12 @@ from merid.event_venues.kalshi.stop_candidate import (
     record_stop_candidate,
 )
 from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
+from merid.event_venues.kalshi.executable_quote import (
+    ExecutableQuote,
+    QuoteUnavailable,
+    QuotePurpose,
+    resolve_executable_quote,
+)
 from merid.event_venues.kalshi.order_attempt_store import (
     ExitOrderAttemptState,
     ExitOrderAttemptConflict,
@@ -627,6 +633,76 @@ def _hard_profit_lock_threshold_cents() -> int:
         return 90
 
 
+def _hard_lock_fast_path_enabled() -> bool:
+    """Evaluate the hard lock on every market-state update, not just poll ticks."""
+    return os.getenv("MERID_HARD_LOCK_FAST_PATH", "1").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _hard_lock_rest_recovery_enabled() -> bool:
+    """Bounded exact-ticker REST quote recovery for a latched lock."""
+    return os.getenv("MERID_HARD_LOCK_REST_RECOVERY_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _hard_lock_recovery_interval_s() -> float:
+    """Min seconds between exact-ticker REST quote recoveries for a latched lock."""
+    try:
+        return max(0.5, float(os.getenv("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "2.0")))
+    except Exception:
+        return 2.0
+
+
+def _hard_lock_recovery_max_attempts() -> int:
+    """Max REST quote-recovery attempts per latched lock obligation."""
+    try:
+        return max(0, int(os.getenv("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "3")))
+    except Exception:
+        return 3
+
+
+# Durable hard-lock lifecycle vocabulary (2026-10-05).  Every witnessed lock
+# obligation must terminate in exactly one of these recorded states; the
+# events list on position.hard_lock_pending is persisted with the position so
+# the audit trail survives restarts.
+_HARD_LOCK_EVENT_FILLED = "HARD_LOCK_FILLED"
+_HARD_LOCK_EVENT_UNFILLED = "HARD_LOCK_UNFILLED"
+
+
+def _hl_record_event(position: "Position", event: str, **fields: Any) -> None:
+    """Append a bounded durable lifecycle event to ``hard_lock_pending``.
+
+    The pending record is serialized with the position (``to_dict`` includes
+    ``hard_lock_pending``), so these events constitute the durable audit trail
+    for the witnessed 90c+ obligation: trigger -> intent -> submit ->
+    acknowledge -> fill/unfilled/lost.
+    """
+    try:
+        pending = getattr(position, "hard_lock_pending", None)
+        if pending is None:
+            return
+        ev = {"event": event, "ts": round(time.time(), 3)}
+        for k, v in fields.items():
+            if v is not None:
+                ev[k] = v
+        evts = pending.setdefault("events", [])
+        evts.append(ev)
+        if len(evts) > 64:
+            del evts[: len(evts) - 64]
+        pending["last_event"] = event
+        logger.info(
+            "[HARD-LOCK-EVENT] %s position=%s market=%s %s",
+            event,
+            (getattr(position, "position_id", "") or "")[:8],
+            getattr(position, "market_id", None),
+            json.dumps(ev, default=str),
+        )
+    except Exception:
+        pass
+
+
 def _p0_exit_alert(alert: str, position: "Position", detail: str = "") -> None:
     """P0 alert for profit-lock invariant violations.
 
@@ -783,6 +859,15 @@ class PositionMonitor:
         # A position is removed from active trading immediately; any failed bookkeeping is retried.
         self._cleanup_pending: List[Dict[str, Any]] = []  # queue of cleanup work items
 
+        # 2026-10-05: hard-lock event fast-path.  Market-state subscriber
+        # callbacks (book updates) evaluate the lock immediately for positioned
+        # tickers instead of waiting for the 5s poll — a 90c+ binary quote can
+        # vanish within one poll interval.  _loop is captured by _poll_loop so
+        # callbacks (invoked on the market-state thread) can schedule the async
+        # emit path back onto it.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._hl_subscribed: set = set()
+
     def _is_expired_market(self, market_id: str) -> bool:
         """Check if a market has expired based on its ticker.
 
@@ -885,6 +970,18 @@ class PositionMonitor:
             self._market_to_position[position.market_id] = position.position_id
             self._sweep_orphan_exit_registry(position.position_id)
 
+        # 2026-10-05: subscribe the hard-lock fast path immediately — waiting for
+        # the next poll-cycle subscription reconcile leaves a fresh position
+        # uncovered for up to one poll interval.
+        try:
+            if _hard_profit_lock_enabled() and _hard_lock_fast_path_enabled():
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                _store = get_kalshi_market_state_store()
+                _store.subscribe_to_updates(position.market_id, self._on_hard_lock_market_update)
+                self._hl_subscribed.add(position.market_id)
+        except Exception as _sub_exc:
+            logger.debug("[HARD-LOCK-FASTPATH] eager subscribe failed for %s: %s", position.market_id, _sub_exc)
+
         logger.info(
             "[POSITION-MONITOR] Added position: %s market=%s side=%s size=%s entry=%dc TP=%s SL=%s vol_regime=%s confidence=%s",
             position.position_id[:8],
@@ -985,6 +1082,7 @@ class PositionMonitor:
             "staged_exit_stage_1_executed", "staged_exit_stage_2_executed",
             "staged_exit_stage_0_timestamp", "staged_exit_stage_1_timestamp",
             "staged_exit_stage_2_timestamp",
+            "hard_lock_pending",
         }
 
         # Provenance/construction fields that an older, more trusted record should keep.
@@ -1207,6 +1305,21 @@ class PositionMonitor:
             self._position_exit_locks.pop(resolved_id, None)
             self._exit_intent_in_flight.pop(resolved_id, None)
             self._position_to_client_order.pop(resolved_id, None)
+
+        # 2026-10-05: drop the hard-lock fast-path subscription for the ticker
+        # unless another open position still needs it.
+        try:
+            _ticker = position.market_id
+            if _ticker in self._hl_subscribed and not any(
+                p.market_id == _ticker for p in self._open_positions.values()
+            ):
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                get_kalshi_market_state_store().unsubscribe_from_updates(
+                    _ticker, self._on_hard_lock_market_update
+                )
+                self._hl_subscribed.discard(_ticker)
+        except Exception as _unsub_exc:
+            logger.debug("[HARD-LOCK-FASTPATH] unsubscribe failed for %s: %s", position.market_id, _unsub_exc)
 
         logger.info(
             "[POSITION-MONITOR] Removed active position: %s (market=%s, exit_reason=%s, exit_price=%sc)",
@@ -2176,6 +2289,16 @@ class PositionMonitor:
             reason or "monitor_mark_submitted",
             exchange_order_id=exchange_order_id,
         )
+        if reason == ExitReason.HARD_PROFIT_LOCK.value:
+            with self._lock:
+                _hl_pos = self._open_positions.get(position_id)
+            if _hl_pos is not None and getattr(_hl_pos, "hard_lock_pending", None):
+                _hl_record_event(
+                    _hl_pos,
+                    "HARD_LOCK_VENUE_ACKNOWLEDGED",
+                    exchange_order_id=exchange_order_id,
+                    client_order_id=_coid,
+                )
         self._save_exit_intent_in_flight()
 
     def _mark_exit_intent_retryable(
@@ -2251,6 +2374,20 @@ class PositionMonitor:
             self._terminal_state_from_reason(reason),
             reason,
         )
+        # 2026-10-05: terminalize the durable hard-lock lifecycle vocabulary.
+        with self._lock:
+            _hl_pos = self._open_positions.get(position_id)
+        _hl_pending = getattr(_hl_pos, "hard_lock_pending", None) if _hl_pos is not None else None
+        if _hl_pending is not None:
+            _r = (reason or "").lower()
+            if "partial" in _r:
+                _hl_record_event(_hl_pos, "HARD_LOCK_PARTIAL_FILL", reconcile_reason=reason)
+            elif "filled" in _r or "position_closed" in _r or "size_zero" in _r or "flat" in _r:
+                _hl_record_event(_hl_pos, "HARD_LOCK_FILLED", reconcile_reason=reason)
+                _hl_pending["state"] = "FILLED"
+            else:
+                _hl_record_event(_hl_pos, "HARD_LOCK_UNFILLED", reconcile_reason=reason)
+                _hl_pending["state"] = "UNFILLED"
         self._save_exit_intent_in_flight()
 
     def _get_unresolved_exit_client_order_id(
@@ -3483,16 +3620,121 @@ class PositionMonitor:
         # executable mark, it does not decide sell-vs-hold.  The intent still
         # flows through _emit_exit_intent -> callback -> reduce-only IOC ->
         # durable ExitOrderAttempt, so the whole lifecycle stays auditable.
-        if _hard_profit_lock_enabled() and not position.exit_triggered:
+        # 2026-10-05: a stale exit_triggered flag (set without a real exited_at
+        # — e.g. a crashed intent path) must not freeze the lock gate upstream
+        # of _emit_exit_intent's stale-flag clearing and forced reconcile.
+        _lock_stale_exit_flag = bool(
+            position.exit_triggered and getattr(position, "exited_at", None) is None
+        )
+        if _hard_profit_lock_enabled() and (
+            not position.exit_triggered or _lock_stale_exit_flag
+        ):
             _lock_threshold = _hard_profit_lock_threshold_cents()
             _lock_bid = snapshot.own_side_bid_cents if snapshot is not None else None
-            if _lock_bid is not None and _lock_bid >= _lock_threshold:
-                _quote_trusted = (
-                    snapshot is not None
-                    and bool(getattr(snapshot, "executable", False))
-                    and getattr(snapshot, "data_quality", None) == "GOOD"
-                    and snapshot.is_fresh(EXIT_PRICE_MAX_AGE_MS)
+            _lock_pending = getattr(position, "hard_lock_pending", None)
+
+            def _hl_snap_trusted(snap) -> bool:
+                return bool(
+                    snap is not None
+                    and getattr(snap, "executable", False)
+                    and getattr(snap, "data_quality", None) == "GOOD"
+                    and snap.is_fresh(EXIT_PRICE_MAX_AGE_MS)
                 )
+
+            _quote_trusted = _hl_snap_trusted(snapshot)
+
+            # 2026-10-05: a witnessed lock-level held-side bid is a durable
+            # obligation even when the current quote is untrusted/degraded —
+            # latch it so bounded exact-ticker REST recovery can verify the
+            # price instead of degrading into EXIT_BLOCKED_BOOK_INVALID.
+            if (
+                _lock_pending is None
+                and _lock_bid is not None
+                and _lock_bid >= _lock_threshold
+            ):
+                self._latch_hard_lock(
+                    position,
+                    bid_cents=int(_lock_bid),
+                    threshold_cents=_lock_threshold,
+                    trusted=bool(_quote_trusted),
+                    via="poll_trusted" if _quote_trusted else "poll_untrusted",
+                    snapshot_id=getattr(snapshot, "snapshot_id", None),
+                    book_sequence=getattr(snapshot, "book_sequence", None),
+                )
+                _lock_pending = position.hard_lock_pending
+                if _quote_trusted:
+                    logger.warning(
+                        "[HARD-LOCK-OBSERVED] position=%s market=%s latched at "
+                        "bid=%dc snapshot=%s seq=%s",
+                        position.position_id[:8],
+                        position.market_id,
+                        _lock_bid,
+                        getattr(snapshot, "snapshot_id", None),
+                        getattr(snapshot, "book_sequence", None),
+                    )
+                else:
+                    logger.warning(
+                        "[HARD-LOCK-OBSERVED-UNTRUSTED] position=%s market=%s "
+                        "bid=%dc threshold=%dc on untrusted quote - latched; "
+                        "verifying via bounded REST recovery",
+                        position.position_id[:8],
+                        position.market_id,
+                        _lock_bid,
+                        _lock_threshold,
+                    )
+
+            # Pending obligation + unusable quote -> one bounded exact-ticker
+            # REST refresh (throttled/bounded inside _hard_lock_quote_recovery).
+            # A refreshed trusted snapshot re-enters evaluation immediately.
+            if (
+                _lock_pending is not None
+                and not _quote_trusted
+                and not _lock_pending.get("intent_submitted")
+            ):
+                _recovered = await self._hard_lock_quote_recovery(position)
+                if _recovered is not None:
+                    snapshot = _recovered
+                    _lock_bid = snapshot.own_side_bid_cents
+                    _quote_trusted = _hl_snap_trusted(snapshot)
+
+            # 2026-10-05: a latched lock that now sees a *trusted* fresh quote
+            # BELOW the threshold has lost its opportunity — the durable
+            # obligation is to capture the lock price, not to dump at any
+            # price.  An untrusted below-lock reading never terminalizes it.
+            if (
+                _lock_pending is not None
+                and _quote_trusted
+                and _lock_bid is not None
+                and _lock_bid < _lock_threshold
+            ):
+                logger.warning(
+                    "[HARD-LOCK-OPPORTUNITY-LOST] position=%s market=%s "
+                    "latched_bid=%sc current_bid=%sc threshold=%sc - lock "
+                    "opportunity lapsed before execution",
+                    position.position_id[:8],
+                    position.market_id,
+                    _lock_pending.get("trigger_bid_cents"),
+                    _lock_bid,
+                    _lock_threshold,
+                )
+                _hl_record_event(
+                    position,
+                    "HARD_LOCK_OPPORTUNITY_LOST",
+                    latched_bid_cents=_lock_pending.get("trigger_bid_cents"),
+                    current_bid_cents=_lock_bid,
+                    threshold_cents=_lock_threshold,
+                    reason="BID_BELOW_LOCK_AFTER_LATCH",
+                )
+                position.hard_lock_pending = None
+                self._log_exit_eval(
+                    position=position,
+                    snapshot=snapshot,
+                    decision="HARD_LOCK_OPPORTUNITY_LOST",
+                    reason_code="BID_BELOW_LOCK_AFTER_LATCH",
+                    target_hit=False,
+                    exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                )
+            if _lock_bid is not None and _lock_bid >= _lock_threshold:
                 _lock_qty = int(position.size) if position.size else 0
                 _lock_depth = (
                     snapshot.min_depth_own_side
@@ -3504,9 +3746,9 @@ class PositionMonitor:
                 )
                 if not _quote_trusted:
                     # The bid reads >= lock but the quote cannot be trusted for a
-                    # marketable sell.  Emit a durable BLOCKED eval plus a P0
-                    # alert — the invariant "executable bid >= lock without a
-                    # lock trigger" must never be silent.
+                    # marketable sell even after recovery.  Emit a durable
+                    # BLOCKED eval plus a P0 alert — the invariant "executable
+                    # bid >= lock without a lock trigger" must never be silent.
                     _p0_exit_alert(
                         "HARD_PROFIT_LOCK_BLOCKED_UNTRUSTED_QUOTE",
                         position,
@@ -3554,6 +3796,40 @@ class PositionMonitor:
                         position,
                         f"bid={_lock_bid}c min_depth={_lock_depth} qty={_lock_qty} - "
                         "submitting IOC anyway; venue takes available depth, residual re-evaluates next tick",
+                    )
+                # 2026-10-05: one-shot latch — once a valid lock observation has
+                # produced a dispatched intent, repeated qualifying updates must
+                # not re-fire.  The durable in-flight intent + venue reconciliation
+                # own the obligation; if reconcile terminalizes it (proven failure),
+                # a fresh bid >= threshold may re-arm on the next evaluation.
+                _lp_now = getattr(position, "hard_lock_pending", None)
+                if (
+                    _lp_now is not None
+                    and _lp_now.get("intent_submitted")
+                    and self._is_exit_intent_in_flight(position.position_id)
+                ):
+                    logger.info(
+                        "[HARD-LOCK-DEDUP] position=%s market=%s bid=%dc - lock "
+                        "obligation already dispatched and in-flight; suppressing "
+                        "duplicate emission",
+                        position.position_id[:8],
+                        position.market_id,
+                        _lock_bid,
+                    )
+                    return ExitDecision(
+                        reason=ExitReason.HARD_PROFIT_LOCK,
+                        priority=get_priority_for_reason(ExitReason.HARD_PROFIT_LOCK),
+                        source_layer=ExitSourceLayer.POSITION_LEVEL,
+                        exit_price_cents=_lock_bid,
+                        metadata={
+                            "trigger_family": "HARD_PROFIT_LOCK",
+                            "trigger_reason": "EXECUTABLE_BID_AT_OR_ABOVE_LOCK",
+                            "lock_threshold_cents": _lock_threshold,
+                            "held_side_executable_bid_cents": _lock_bid,
+                            "available_exit_depth": _lock_depth,
+                            "depth_sufficient": _lock_depth_sufficient,
+                            "deduplicated": True,
+                        },
                     )
                 await self._emit_exit_intent(
                     position,
@@ -5960,6 +6236,8 @@ class PositionMonitor:
 
             # Mark intent as in-flight before calling callback
             self._mark_exit_intent_in_flight(position.position_id, reason=exit_reason.value)
+            if exit_reason == ExitReason.HARD_PROFIT_LOCK:
+                _hl_record_event(position, "HARD_LOCK_INTENT_CREATED")
 
             try:
                 logger.info(
@@ -5971,6 +6249,17 @@ class PositionMonitor:
                 # Pass contracts_to_close to callback for partial close handling
                 self._exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close)
                 callback_dispatched = True
+                # 2026-10-05: mark the hard-lock obligation as submitted ONLY after
+                # the callback accepted it.  A failed/missing callback leaves
+                # intent_submitted=False so the latch re-attempts on the next
+                # qualifying quote or the bounded recovery path.
+                if exit_reason == ExitReason.HARD_PROFIT_LOCK:
+                    _lp = getattr(position, "hard_lock_pending", None)
+                    if _lp is not None:
+                        _lp["state"] = "INTENT_SUBMITTED"
+                        _lp["intent_submitted"] = True
+                        _lp["exit_intent_ts"] = time.time()
+                    _hl_record_event(position, "HARD_LOCK_SUBMIT_STARTED")
                 logger.info(
                     "[POSITION-MONITOR] Exit intent callback completed for position=%s",
                     position.position_id[:8],
@@ -6054,6 +6343,69 @@ class PositionMonitor:
                     exc_info=True
                 )
 
+    def _latch_hard_lock(
+        self,
+        position: "Position",
+        *,
+        bid_cents: int,
+        threshold_cents: int,
+        trusted: bool,
+        via: str,
+        snapshot_id: Optional[str] = None,
+        book_sequence: Optional[int] = None,
+    ) -> bool:
+        """Create the durable one-shot hard-lock obligation if none exists.
+
+        A witnessed held-side bid >= threshold must be latched even when the
+        quote is untrusted — the pending record (persisted with the position)
+        is what drives bounded REST recovery instead of silently looping
+        BOOK_UNUSABLE.  Returns True when this call created the latch.
+        """
+        if getattr(position, "hard_lock_pending", None) is not None:
+            return False
+        position.hard_lock_pending = {
+            "state": "PENDING",
+            "trigger_bid_cents": int(bid_cents),
+            "trigger_ts": time.time(),
+            "trigger_snapshot_id": snapshot_id,
+            "trigger_book_sequence": book_sequence,
+            "threshold_cents": threshold_cents,
+            "intent_submitted": False,
+            "recovery_attempts": 0,
+            "last_recovery_ts": 0.0,
+            "latched_via": via,
+            "trusted_at_latch": bool(trusted),
+        }
+        _hl_record_event(
+            position,
+            "HARD_LOCK_TRIGGERED",
+            bid_cents=int(bid_cents),
+            threshold_cents=threshold_cents,
+            trusted_at_latch=bool(trusted),
+            latched_via=via,
+            snapshot_id=snapshot_id,
+            book_sequence=book_sequence,
+        )
+        return True
+
+    def _raw_observed_lock_bid(self, position: "Position", state) -> Optional[int]:
+        """Best witnessed held-side bid on the raw state, ignoring freshness.
+
+        Used only to decide whether a lock-level price was *seen* on an
+        unusable book — never to price a submission.
+        """
+        _raw = resolve_executable_quote(
+            ticker=position.market_id,
+            held_side="yes" if position.side == PositionSide.YES else "no",
+            quantity=1,
+            purpose=QuotePurpose.EXIT,
+            required_freshness_ms=None,
+            state=state,
+        )
+        return getattr(_raw, "best_bid_cents", None) or getattr(
+            _raw, "observed_bid_cents", None
+        )
+
     def _get_exit_price_snapshot(
         self, state, position_side: PositionSide, market_id: str
     ) -> Optional[ExitPriceSnapshot]:
@@ -6065,144 +6417,64 @@ class PositionMonitor:
         the side we are long).  Mid prices and opposite-side prices can produce
         false exits, especially in volatile or one-sided books.
 
+        2026-10-05: all trust gates and held-side price resolution now run
+        through the canonical ``resolve_executable_quote`` so the exit stack,
+        entry stack, and hard-lock paths agree on what "executable" means.
+
         Returns:
             ExitPriceSnapshot, or None if the book is stale, non-executable,
             missing the side we need, or otherwise unfit for an exit decision.
         """
-        if not state:
+        held_side = "yes" if position_side == PositionSide.YES else "no"
+        quote = resolve_executable_quote(
+            ticker=market_id,
+            held_side=held_side,
+            quantity=1,
+            purpose=QuotePurpose.EXIT,
+            required_freshness_ms=EXIT_PRICE_MAX_AGE_MS,
+            state=state,
+        )
+        if isinstance(quote, QuoteUnavailable):
             logger.warning(
-                "[POSITION-MONITOR] No market state for %s; cannot build exit snapshot",
+                "[POSITION-MONITOR] Quote unavailable for %s side=%s: reason=%s "
+                "detail=%s observed_bid=%s quality=%s source=%s seq=%s",
                 market_id,
+                held_side,
+                quote.reason,
+                quote.detail,
+                quote.observed_bid_cents,
+                quote.data_quality,
+                quote.data_source,
+                quote.book_sequence,
             )
             return None
 
-        # Basic health checks (keep defaults for unit-test Mocks)
-        book_initialized = getattr(state, "book_initialized", True)
-        if book_initialized is False:
-            logger.warning(
-                "[POSITION-MONITOR] Book not initialized for %s; skipping exit snapshot",
-                market_id,
-            )
-            return None
+        own_bid = quote.best_bid_cents
+        own_ask = quote.best_ask_cents
 
-        executable = getattr(state, "executable", True)
-        if executable is False:
-            logger.warning(
-                "[POSITION-MONITOR] State not executable for %s; skipping exit snapshot",
-                market_id,
-            )
-            return None
-
-        data_quality = getattr(state, "data_quality", None)
-        if isinstance(data_quality, str) and data_quality != "GOOD":
-            logger.warning(
-                "[POSITION-MONITOR] data_quality=%s for %s not trusted for exit snapshot",
-                data_quality,
-                market_id,
-            )
-            return None
-
-        # P1 HARDENING (2026-08-22): A WebSocket bootstrap snapshot is a full
-        # book but is not live-sequence confirmed.  Discretionary exits must not
-        # price off it until a contiguous WS delta or a fresh REST full snapshot
-        # attests the book.  Emergency/reduce-only paths may bypass this later.
-        data_source = getattr(state, "data_source", "UNKNOWN")
-        live_sequence_confirmed = getattr(state, "live_sequence_confirmed", False)
-        if (
-            data_source == "BOOTSTRAP_VALID_BUT_UNCONFIRMED"
-            and not live_sequence_confirmed
-        ):
-            logger.warning(
-                "[POSITION-MONITOR] %s data_source=%s live_sequence_confirmed=%s; "
-                "skipping exit snapshot until book is confirmed",
-                market_id,
-                data_source,
-                live_sequence_confirmed,
-            )
-            return None
-
-        # Age check: use the orderbook timestamp only.  REST catalog metadata is
-        # not a quote refresh; a REST orderbook snapshot still updates
-        # last_book_update_ts, so REST-only exits remain enabled.
-        last_book_update_ts = getattr(state, "last_book_update_ts", None)
-        effective_ts = last_book_update_ts if isinstance(last_book_update_ts, (int, float)) and last_book_update_ts > 0 else None
-        book_age_ms = 0
-        if effective_ts is not None:
-            try:
-                age_s = time.monotonic() - effective_ts
-                max_age_s = EXIT_PRICE_MAX_AGE_MS / 1000.0
-                if age_s > max_age_s:
-                    logger.warning(
-                        "[POSITION-MONITOR] Book age=%.1fs exceeds %.1fs for %s; skipping exit snapshot",
-                        age_s,
-                        max_age_s,
-                        market_id,
-                    )
-                    return None
-                book_age_ms = int(age_s * 1000)
-            except Exception:
-                pass
-
-        # Side-aware bid/ask extraction
+        # Opposite-side BBO for attribution only.
         if position_side == PositionSide.YES:
-            own_bid = getattr(state, "best_bid_cents", None)
-            own_ask = getattr(state, "best_ask_cents", None)
             opposite_bid = getattr(state, "best_no_bid_cents", None)
             opposite_ask = getattr(state, "best_no_ask_cents", None)
             min_depth = getattr(state, "min_depth_yes", 0)
             has_bid_size = bool(getattr(state, "has_bid", False) and min_depth > 0)
         else:
-            own_bid = getattr(state, "best_no_bid_cents", None)
-            own_ask = getattr(state, "best_no_ask_cents", None)
             opposite_bid = getattr(state, "best_bid_cents", None)
             opposite_ask = getattr(state, "best_ask_cents", None)
             min_depth = getattr(state, "min_depth_no", 0)
             has_bid_size = bool(getattr(state, "has_no_bid", False) and min_depth > 0)
 
-        # Fallback for older states that only had YES-side best bid/ask and no no-side fields
-        if own_bid is None or own_ask is None:
-            mid = getattr(state, "mid_cents", None)
-            if mid is not None:
-                spread = getattr(state, "spread_cents", 0) or 1
-                if position_side == PositionSide.YES:
-                    own_bid = mid - spread // 2
-                    own_ask = mid + spread // 2
-                else:
-                    no_mid = 100 - mid
-                    own_bid = no_mid - spread // 2
-                    own_ask = no_mid + spread // 2
-            else:
-                logger.warning(
-                    "[POSITION-MONITOR] No executable prices for %s side=%s; skipping exit snapshot",
-                    market_id,
-                    position_side.value,
-                )
-                return None
-
-        # Canonical price validation
-        if not (0 < own_bid < 100 and 0 < own_ask < 100):
-            logger.warning(
-                "[POSITION-MONITOR] Invalid own-side prices for %s side=%s bid=%s ask=%s",
-                market_id,
-                position_side.value,
-                own_bid,
-                own_ask,
-            )
-            return None
-
-        # Mid for reference
+        # Mid for reference (YES-centric at the state layer -> own-side space).
         mid_cents = getattr(state, "mid_cents", None)
         if mid_cents is not None and 0 < mid_cents < 100:
-            if position_side == PositionSide.YES:
-                mid = int(mid_cents)
-            else:
-                mid = int(100 - mid_cents)
-        else:
+            mid = int(mid_cents) if position_side == PositionSide.YES else int(100 - mid_cents)
+        elif own_ask is not None:
             mid = (own_bid + own_ask) // 2
+        else:
+            mid = own_bid
 
         snapshot_id = f"{market_id}:{getattr(state, 'last_book_update_ts', time.monotonic())}"
         seconds_to_expiry = getattr(state, "seconds_to_expiry", None)
-        book_sequence = getattr(state, "book_sequence", None)
 
         # YES and NO raw book for attribution.  Asks are derived as 100 - opposite bid.
         yes_bid = getattr(state, "best_bid_cents", None)
@@ -6217,11 +6489,11 @@ class PositionMonitor:
             position_side=position_side,
             mid_cents=mid,
             own_side_bid_cents=int(own_bid),
-            own_side_ask_cents=int(own_ask),
+            own_side_ask_cents=int(own_ask) if own_ask is not None else None,
             opposite_bid_cents=int(opposite_bid) if opposite_bid is not None else None,
             opposite_ask_cents=int(opposite_ask) if opposite_ask is not None else None,
             # CRITICAL FIX (2026-08-10): Full book provenance for exit attribution
-            book_sequence=book_sequence,
+            book_sequence=quote.book_sequence,
             yes_bid_cents=int(yes_bid) if yes_bid is not None else None,
             yes_ask_cents=int(yes_ask) if yes_ask is not None else None,
             no_bid_cents=int(no_bid) if no_bid is not None else None,
@@ -6229,11 +6501,16 @@ class PositionMonitor:
             yes_depth=yes_depth,
             no_depth=no_depth,
             entry_side_executable_bid_cents=int(own_bid),
-            entry_side_executable_ask_cents=int(own_ask),
-            book_age_ms=book_age_ms,
-            data_source=data_source,
-            data_quality=data_quality if isinstance(data_quality, str) else "UNKNOWN",
-            executable=executable,
+            entry_side_executable_ask_cents=int(own_ask) if own_ask is not None else None,
+            derived_from_reciprocal_book=(
+                quote.derived_from_reciprocal
+                or quote.corrected_to_rest
+                or position_side == PositionSide.NO
+            ),
+            book_age_ms=int(quote.quote_age_ms or 0),
+            data_source=quote.quote_source or getattr(state, "data_source", "UNKNOWN"),
+            data_quality=quote.data_quality,
+            executable=True,
             has_bid_size=has_bid_size,
             snapshot_id=snapshot_id,
             timestamp=time.monotonic(),
@@ -6316,6 +6593,214 @@ class PositionMonitor:
             # Example: YES mid = 42c → NO price = 58c
             return int(100 - state.mid_cents)
 
+    def _reconcile_hard_lock_subscriptions(self, store, market_ids: List[str]) -> None:
+        """Subscribe the hard-lock fast path to every positioned ticker's
+        market-state updates; unsubscribe tickers that no longer have a
+        position.  Convergent — called once per poll from positions_snapshot.
+        """
+        if not (_hard_profit_lock_enabled() and _hard_lock_fast_path_enabled()):
+            return
+        try:
+            positioned = set(market_ids)
+            for ticker in positioned - self._hl_subscribed:
+                store.subscribe_to_updates(ticker, self._on_hard_lock_market_update)
+                self._hl_subscribed.add(ticker)
+            for ticker in self._hl_subscribed - positioned:
+                try:
+                    store.unsubscribe_from_updates(ticker, self._on_hard_lock_market_update)
+                except Exception:
+                    pass
+                self._hl_subscribed.discard(ticker)
+        except Exception as exc:
+            logger.debug("[HARD-LOCK-FASTPATH] subscription reconcile failed: %s", exc)
+
+    def _on_hard_lock_market_update(self, ticker: str, state) -> None:
+        """Market-state subscriber callback (runs on the store's callback
+        thread).  Evaluates ONLY the hard-profit lock — the deterministic
+        risk rule that cannot wait for the 5s poll — then schedules the
+        normal emit path on the monitor loop.  Idempotent: the in-flight
+        check inside _emit_exit_intent serializes with the poll path.
+        """
+        try:
+            if not (_hard_profit_lock_enabled() and _hard_lock_fast_path_enabled()):
+                return
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                return
+            with self._lock:
+                pid = self._market_to_position.get(ticker)
+                position = self._open_positions.get(pid) if pid else None
+            # 2026-10-05: only a genuinely exited position (exit_triggered AND
+            # exited_at) may skip; a stale terminal flag must not freeze the lock.
+            if (
+                position is None
+                or (position.exit_triggered and getattr(position, "exited_at", None) is not None)
+            ):
+                return
+            _pending = getattr(position, "hard_lock_pending", None)
+            if _pending is not None and _pending.get("intent_submitted"):
+                return
+            if self._is_exit_intent_in_flight(position.position_id):
+                return
+            threshold = _hard_profit_lock_threshold_cents()
+            snapshot = self._get_exit_price_snapshot(state, position.side, ticker)
+            if snapshot is None:
+                # 2026-10-05: the snapshot gate rejected this update, but the
+                # raw state may still carry a witnessed lock-level bid.  Latch
+                # a durable obligation so the poll loop's bounded REST
+                # recovery verifies it — never emit off an untrusted quote.
+                _raw_bid = self._raw_observed_lock_bid(position, state)
+                if _raw_bid is not None and _raw_bid >= threshold:
+                    if self._latch_hard_lock(
+                        position,
+                        bid_cents=int(_raw_bid),
+                        threshold_cents=threshold,
+                        trusted=False,
+                        via="market_state_event_untrusted",
+                    ):
+                        logger.warning(
+                            "[HARD-LOCK-OBSERVED-UNTRUSTED] position=%s market=%s "
+                            "raw bid=%dc threshold=%dc on unusable quote - latched "
+                            "for REST recovery",
+                            position.position_id[:8], ticker, _raw_bid, threshold,
+                        )
+                return
+            bid = snapshot.own_side_bid_cents
+            if bid is None or bid < threshold:
+                return
+            if not (
+                getattr(snapshot, "executable", False)
+                and getattr(snapshot, "data_quality", None) == "GOOD"
+                and snapshot.is_fresh(EXIT_PRICE_MAX_AGE_MS)
+            ):
+                # Same durable-obligation rule for a snapshot whose bid reads
+                # >= lock but fails the trust re-check.
+                self._latch_hard_lock(
+                    position,
+                    bid_cents=int(bid),
+                    threshold_cents=threshold,
+                    trusted=False,
+                    via="market_state_event_untrusted",
+                    snapshot_id=getattr(snapshot, "snapshot_id", None),
+                    book_sequence=getattr(snapshot, "book_sequence", None),
+                )
+                return
+            # Latch + schedule on the monitor loop — the emit path owns
+            # in-flight dedupe, the exit guard, and venue submission.
+            self._latch_hard_lock(
+                position,
+                bid_cents=int(bid),
+                threshold_cents=threshold,
+                trusted=True,
+                via="market_state_event",
+                snapshot_id=getattr(snapshot, "snapshot_id", None),
+                book_sequence=getattr(snapshot, "book_sequence", None),
+            )
+            asyncio.run_coroutine_threadsafe(
+                self._emit_exit_intent(
+                    position,
+                    ExitReason.HARD_PROFIT_LOCK,
+                    bid,
+                    snapshot=snapshot,
+                ),
+                loop,
+            )
+        except Exception as exc:
+            logger.error(
+                "[HARD-LOCK-FASTPATH] callback failed for %s: %s", ticker, exc
+            )
+
+    async def _hard_lock_quote_recovery(self, position: Position) -> Optional[ExitPriceSnapshot]:
+        """Bounded exact-ticker REST orderbook refresh for a latched hard lock
+        whose local quote vanished.  Never fabricates a quote — a failed or
+        still-unusable refresh returns None and the obligation stays pending
+        for the next poll.  Throttled per pending record.
+        """
+        pending = getattr(position, "hard_lock_pending", None)
+        if pending is None or not _hard_lock_rest_recovery_enabled():
+            return None
+        now = time.monotonic()
+        attempts = int(pending.get("recovery_attempts", 0) or 0)
+        last = float(pending.get("last_recovery_ts", 0.0) or 0.0)
+        if (
+            attempts >= _hard_lock_recovery_max_attempts()
+            or (now - last) < _hard_lock_recovery_interval_s()
+        ):
+            return None
+        pending["recovery_attempts"] = attempts + 1
+        pending["last_recovery_ts"] = now
+        try:
+            from merid.event_venues.kalshi.port import get_kalshi_execution_port
+            from merid.event_venues.kalshi.market_state import (
+                get_kalshi_market_state_store,
+            )
+            ob_result = await asyncio.wait_for(
+                get_kalshi_execution_port().get_orderbook(position.market_id),
+                timeout=3.0,
+            )
+            if not ob_result or not getattr(ob_result, "success", False):
+                pending["last_recovery_error"] = str(
+                    getattr(ob_result, "error", "no_result")
+                )[:200]
+                _hl_record_event(
+                    position,
+                    "HARD_LOCK_QUOTE_RECOVERY_FAILED",
+                    attempt=pending.get("recovery_attempts"),
+                    error=pending["last_recovery_error"],
+                )
+                return None
+            yes_levels = [
+                [level.price_cents / 100.0, float(level.size)]
+                for level in (ob_result.yes_levels or [])
+            ]
+            no_levels = [
+                [level.price_cents / 100.0, float(level.size)]
+                for level in (ob_result.no_levels or [])
+            ]
+            store = get_kalshi_market_state_store()
+            store.apply_orderbook_message(
+                {
+                    "ticker": position.market_id,
+                    "type": "orderbook_snapshot",
+                    "yes": yes_levels,
+                    "no": no_levels,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                via="rest_polling",
+            )
+            state = store.get(position.market_id)
+            if state is None:
+                _hl_record_event(
+                    position,
+                    "HARD_LOCK_QUOTE_RECOVERY_FAILED",
+                    attempt=pending.get("recovery_attempts"),
+                    error="state_missing_after_refresh",
+                )
+                return None
+            _snap = self._get_exit_price_snapshot(state, position.side, position.market_id)
+            if _snap is None:
+                _hl_record_event(
+                    position,
+                    "HARD_LOCK_QUOTE_RECOVERY_FAILED",
+                    attempt=pending.get("recovery_attempts"),
+                    error="quote_still_untrusted_after_refresh",
+                )
+            return _snap
+        except Exception as exc:
+            pending["last_recovery_error"] = str(exc)[:200]
+            _hl_record_event(
+                position,
+                "HARD_LOCK_QUOTE_RECOVERY_FAILED",
+                attempt=pending.get("recovery_attempts"),
+                error=pending["last_recovery_error"],
+            )
+            logger.debug(
+                "[HARD-LOCK-RECOVERY] %s refresh failed: %s",
+                position.market_id,
+                exc,
+            )
+            return None
+
     async def _poll_loop(self) -> None:
         """
         Main polling loop.
@@ -6324,6 +6809,13 @@ class PositionMonitor:
         """
         poll_count = 0
         last_poll_time = None
+        # 2026-10-05: capture the loop so market-state subscriber callbacks
+        # (which run on the store's callback thread) can schedule the async
+        # hard-lock emit path via run_coroutine_threadsafe.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except Exception:
+            self._loop = None
         while self._running:
             try:
                 poll_start_time = __import__('time').monotonic()
@@ -6368,6 +6860,13 @@ class PositionMonitor:
 
                     with self._lock:
                         positions_snapshot = list(self._open_positions.items())
+
+                    # 2026-10-05: keep market-state subscriptions aligned with
+                    # positioned tickers so the hard-lock fast path sees every
+                    # quote update, not just 5s poll ticks.
+                    self._reconcile_hard_lock_subscriptions(
+                        store, [p.market_id for _, p in positions_snapshot]
+                    )
 
                     # AUDIT: Log trigger coverage - confirm each position is checked
                     logger.info(
@@ -6437,6 +6936,119 @@ class PositionMonitor:
                             )
                             await self._check_position(position, price_snapshot, poll_count)
                         else:
+                            # 2026-10-05: a latched hard-lock obligation must not
+                            # degrade into a silent BOOK_UNUSABLE.  Emit the
+                            # pending-recovery state and attempt one bounded
+                            # exact-ticker REST refresh per poll.
+                            _lock_pending = getattr(position, "hard_lock_pending", None)
+                            _lock_on = _hard_profit_lock_enabled()
+                            _genuinely_exited = bool(
+                                position.exit_triggered
+                                and getattr(position, "exited_at", None) is not None
+                            )
+                            # 2026-10-05: the snapshot gate rejected the book,
+                            # but the raw state may still carry a witnessed
+                            # lock-level held-side bid (the BTC NO 99c incident
+                            # shape).  Latch a durable obligation so bounded
+                            # REST recovery verifies it — a witnessed lock bid
+                            # must never silently become BOOK_UNUSABLE forever.
+                            if (
+                                _lock_on
+                                and not _genuinely_exited
+                                and _lock_pending is None
+                            ):
+                                _raw_bid = self._raw_observed_lock_bid(position, state)
+                                if (
+                                    _raw_bid is not None
+                                    and _raw_bid >= _hard_profit_lock_threshold_cents()
+                                ):
+                                    if self._latch_hard_lock(
+                                        position,
+                                        bid_cents=int(_raw_bid),
+                                        threshold_cents=_hard_profit_lock_threshold_cents(),
+                                        trusted=False,
+                                        via="poll_raw_observation",
+                                    ):
+                                        _lock_pending = position.hard_lock_pending
+                                        logger.warning(
+                                            "[HARD-LOCK-OBSERVED-UNTRUSTED] position=%s "
+                                            "market=%s raw bid=%dc on unusable book - "
+                                            "latched for REST recovery",
+                                            position.position_id[:8],
+                                            position.market_id,
+                                            _raw_bid,
+                                        )
+                            if (
+                                _lock_pending is not None
+                                and _lock_on
+                                and not _genuinely_exited
+                                # 2026-10-05: skip only while a SUBMITTED intent
+                                # is still in-flight (it owns the obligation).  A
+                                # stale in-flight record blocking an unsubmitted
+                                # lock must not suppress recovery — the emit path
+                                # force-reconciles stale intents for hard locks.
+                                and not (
+                                    _lock_pending.get("intent_submitted")
+                                    and self._is_exit_intent_in_flight(position.position_id)
+                                )
+                            ):
+                                if not _lock_pending.get("intent_submitted"):
+                                    if not _lock_pending.get("p0_alerted"):
+                                        _lock_pending["p0_alerted"] = True
+                                        _p0_exit_alert(
+                                            "HARD_LOCK_PEAK_WITHOUT_INTENT",
+                                            position,
+                                            f"latched_bid={_lock_pending.get('trigger_bid_cents')}c "
+                                            f"threshold={_lock_pending.get('threshold_cents')}c "
+                                            "- quote vanished before exit intent; attempting REST recovery",
+                                        )
+                                self._log_exit_eval(
+                                    position=position,
+                                    snapshot=None,
+                                    decision="HARD_LOCK_PENDING_QUOTE_RECOVERY",
+                                    reason_code="QUOTE_UNAVAILABLE_AFTER_LATCH",
+                                    target_hit=False,
+                                    exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                                )
+                                recovered = await self._hard_lock_quote_recovery(position)
+                                if recovered is not None:
+                                    await self._check_position(position, recovered, poll_count)
+                                    continue
+                                # 2026-10-05: bounded recovery exhausted with no
+                                # executable quote — the witnessed lock-level bid is
+                                # provably gone.  Emit the terminal evidence record
+                                # once instead of looping BOOK_UNUSABLE forever.
+                                if (
+                                    int(_lock_pending.get("recovery_attempts", 0) or 0)
+                                    >= _hard_lock_recovery_max_attempts()
+                                    and not _lock_pending.get("opportunity_lost")
+                                ):
+                                    _lock_pending["opportunity_lost"] = True
+                                    _hl_record_event(
+                                        position,
+                                        "HARD_LOCK_OPPORTUNITY_LOST",
+                                        latched_bid_cents=_lock_pending.get("trigger_bid_cents"),
+                                        threshold_cents=_lock_pending.get("threshold_cents"),
+                                        recovery_attempts=_lock_pending.get("recovery_attempts"),
+                                        reason="RECOVERY_EXHAUSTED_QUOTE_GONE",
+                                    )
+                                    _p0_exit_alert(
+                                        "HARD_LOCK_OPPORTUNITY_LOST",
+                                        position,
+                                        f"latched_bid={_lock_pending.get('trigger_bid_cents')}c "
+                                        f"threshold={_lock_pending.get('threshold_cents')}c "
+                                        f"recovery_attempts={_lock_pending.get('recovery_attempts')} "
+                                        f"last_error={_lock_pending.get('last_recovery_error')} - "
+                                        "no executable quote after bounded REST recovery",
+                                    )
+                                    self._log_exit_eval(
+                                        position=position,
+                                        snapshot=None,
+                                        decision="HARD_LOCK_OPPORTUNITY_LOST",
+                                        reason_code="RECOVERY_EXHAUSTED_QUOTE_GONE",
+                                        target_hit=False,
+                                        exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                                    )
                             logger.warning(
                                 "[POSITION-MONITOR] Could not determine executable price for %s - skipping exit check",
                                 position.market_id,

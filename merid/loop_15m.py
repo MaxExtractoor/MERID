@@ -114,6 +114,13 @@ MERID_HARD_RISK_EXIT_REASONS = frozenset({
     "reconciliation",
     "expiry_liquidation",
     "manual",
+    # 2026-10-05: hard_profit_lock is a mechanical risk rule (canonical class
+    # "emergency"), not a discretionary profit exit.  It must never hit the
+    # net-profit floor below and must never fall through to "unknown exit
+    # reason classification" — the 04:21 BTC_NO@81 incident: guard approved
+    # the 92c lock, then this layer rejected it and the position rode to
+    # settlement with a recorded 99c peak.
+    "hard_profit_lock",
     # An EV-approved value switch may realize a bounded loss by design (sell
     # below entry when the model says holding is worse); still gated.
     "value_switch_exit",
@@ -3164,6 +3171,21 @@ async def _execute_exit_order(
             position.exit_reason = None
             position.exit_price_cents = None
         return
+
+    # 2026-10-05: durable hard-lock lifecycle — the exit price guard is the
+    # firewall in the mandate vocabulary; record its approval when a lock
+    # obligation is outstanding.
+    try:
+        if getattr(position, "hard_lock_pending", None) is not None:
+            from merid.position_management.position_monitor import _hl_record_event
+            _hl_record_event(
+                position,
+                "HARD_LOCK_FIREWALL_APPROVED",
+                guard_decision_id=guard_decision_id,
+                exit_price_cents=int(exit_price_cents),
+            )
+    except Exception:
+        pass
 
     # Record the chosen exit reason/price for telemetry.  The position is still
     # open; exit_triggered is only set after a confirmed fill.

@@ -365,10 +365,12 @@ class TestPositionMonitorExitCallback:
             mock_resolver.resolve.return_value = mock_policy_exit
             asyncio.run(monitor._legacy_check_position(position, 90))
             
-            # Callback should be called with DYNAMIC_TAKE_PROFIT
+            # Callback fires once.  At a 90c held-side bid the hard-profit lock
+            # (priority 96, deterministic risk control) supersedes the
+            # discretionary dynamic-TP reason.
             callback.assert_called_once()
             call_args = callback.call_args
-            assert call_args[0][1] == ExitReason.DYNAMIC_TAKE_PROFIT
+            assert call_args[0][1] == ExitReason.HARD_PROFIT_LOCK
             assert call_args[0][2] == 90
     
     def test_dynamic_take_profit_edge_adjustment(self):
@@ -492,11 +494,11 @@ class TestPositionMonitorExitCallback:
         # Move price to 99c (extreme profit)
         asyncio.run(monitor_yes._legacy_check_position(position_yes, 99))
         
-        # Callback should be called with EXTREME_PROFIT or AUTO_EXIT_99C reason
+        # Callback should be called once.  A 99c executable bid is owned by
+        # HARD_PROFIT_LOCK (priority 96), which supersedes AUTO_EXIT_99C (95).
         callback_yes.assert_called_once()
         call_args = callback_yes.call_args
-        # Note: The actual ExitReason is AUTO_EXIT_99C for 99c exits
-        assert call_args[0][1] == ExitReason.AUTO_EXIT_99C
+        assert call_args[0][1] == ExitReason.HARD_PROFIT_LOCK
         assert call_args[0][2] == 99  # exit price
         assert call_args[0][3] is None  # contracts_to_close (full exit)
         
@@ -519,10 +521,10 @@ class TestPositionMonitorExitCallback:
         # Move price to 99c (extreme profit for NO - side-space convention)
         asyncio.run(monitor_no._legacy_check_position(position_no, 99))
         
-        # Callback should be called with AUTO_EXIT_99C reason (99c triggers this)
+        # Same precedence on the NO leg: HARD_PROFIT_LOCK owns the 99c exit.
         callback_no.assert_called_once()
         call_args = callback_no.call_args
-        assert call_args[0][1] == ExitReason.AUTO_EXIT_99C
+        assert call_args[0][1] == ExitReason.HARD_PROFIT_LOCK
         assert call_args[0][2] == 99  # exit price
         assert call_args[0][3] is None  # contracts_to_close (full exit)
 
@@ -560,9 +562,12 @@ class TestPositionMonitorExitCallback:
                 exit_action = "buy"
                 exit_side = "yes"
             
-            # Determine order type based on exit reason
-            if exit_reason in (ExitReason.EXTREME_PROFIT, ExitReason.AUTO_EXIT_99C):
-                order_type = "market"
+            # Determine order type based on exit reason.  Production routes all
+            # monitor exits as marketable limit+IOC (aggressiveness=1.0);
+            # HARD_PROFIT_LOCK owns the >=90c domain that used to reach
+            # AUTO_EXIT_99C here.
+            if exit_reason in (ExitReason.EXTREME_PROFIT, ExitReason.AUTO_EXIT_99C, ExitReason.HARD_PROFIT_LOCK):
+                order_type = "limit"
                 time_in_force = "ioc"
             elif exit_reason == ExitReason.RATCHET_TRIM:
                 order_type = "limit"
@@ -1694,9 +1699,12 @@ class TestPositionMonitorPositionCacheIntegration:
                 exit_action = "buy"
                 exit_side = "yes"
             
-            # Determine order type based on exit reason
-            if exit_reason in (ExitReason.EXTREME_PROFIT, ExitReason.AUTO_EXIT_99C):
-                order_type = "market"
+            # Determine order type based on exit reason.  Production routes all
+            # monitor exits as marketable limit+IOC (aggressiveness=1.0);
+            # HARD_PROFIT_LOCK owns the >=90c domain that used to reach
+            # AUTO_EXIT_99C here.
+            if exit_reason in (ExitReason.EXTREME_PROFIT, ExitReason.AUTO_EXIT_99C, ExitReason.HARD_PROFIT_LOCK):
+                order_type = "limit"
                 time_in_force = "ioc"
             elif exit_reason == ExitReason.RATCHET_TRIM:
                 order_type = "limit"
@@ -1757,11 +1765,12 @@ class TestPositionMonitorPositionCacheIntegration:
         # Wait for async task to complete
         await asyncio.sleep(0.1)
         
-        # Verify route_order_async was called with market order
+        # Verify route_order_async was called with a marketable limit+IOC order
+        # (the production exit shape for hard-lock / extreme-profit exits).
         assert mock_route_order_async.called
         call_args = mock_route_order_async.call_args
         order_intent = call_args[0][0]
-        assert order_intent.order_type == "market"
+        assert order_intent.order_type == "limit"
         assert order_intent.time_in_force == "ioc"
         assert order_intent.price_cents == 99
         assert order_intent.count == 10
@@ -1794,7 +1803,7 @@ class TestPositionMonitorPositionCacheIntegration:
         order_intent = call_args[0][0]
         # CRITICAL FIX: Verify agent_id is correctly derived from asset
         assert order_intent.agent_id == "BTC_15M", f"Expected BTC_15M, got {order_intent.agent_id}"
-        assert order_intent.order_type == "market"
+        assert order_intent.order_type == "limit"
         assert order_intent.time_in_force == "ioc"
         # Note: The exit price is 99c because that's what we passed to _check_position
         # For NO positions, 99c YES-side = 1c own-side, but the exit uses the passed price

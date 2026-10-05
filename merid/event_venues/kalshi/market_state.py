@@ -1308,6 +1308,22 @@ class KalshiMarketStateStore:
                                 self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
                                 self._last_lock_wait_ms[ticker] = lock_wait_ms
 
+                        # 2026-10-05: notify subscribers once per applied batch,
+                        # after the ticker orderbook lock is released.  This is
+                        # the hard-lock fast path — a positioned ticker seeing a
+                        # >= lock-threshold executable bid must evaluate
+                        # immediately, not wait for the 5s monitor poll.
+                        if batch_count > 0:
+                            _notify_state = self._states.get(ticker)
+                            if _notify_state is not None:
+                                try:
+                                    self._notify_subscribers(ticker, _notify_state)
+                                except Exception as _ns_exc:
+                                    logger.debug(
+                                        "[BATCH-WORKER] subscriber notify failed for %s: %s",
+                                        ticker, _ns_exc
+                                    )
+
                     # Event-driven adaptive batching: block until the next delta
                     # arrives or the batch interval elapses. This replaces the fixed
                     # 10ms sleep, cutting latency when the queue is busy and throttling
@@ -3752,6 +3768,16 @@ class KalshiMarketStateStore:
 
                 # CRITICAL FIX: Return the updated state after snapshot application
                 self._note_book_state(ticker, state, f"apply_orderbook_end:{via}")
+                # 2026-10-05: notify subscribers after the snapshot settles so the
+                # hard-lock fast path sees fresh book state immediately (the
+                # batch worker does the same for delta batches).
+                try:
+                    self._notify_subscribers(ticker, state)
+                except Exception as _ns_exc:
+                    logger.debug(
+                        "[market-state] subscriber notify failed after snapshot for %s: %s",
+                        ticker, _ns_exc
+                    )
                 return state
         else:
             return None
@@ -4311,6 +4337,13 @@ class KalshiMarketStateStore:
             with self._lock:
                 if ticker in self._subscribers:
                     callbacks = list(self._subscribers[ticker])
+
+        # 2026-10-05: WS book updates now route through this notifier once per
+        # applied delta-batch/snapshot (hard-lock fast path).  Return silently
+        # when no callbacks exist — a per-event ENTER/EXIT log line at WS cadence
+        # would flood the log even for tickers nobody subscribes to.
+        if not callbacks:
+            return
 
         logger.info("[APPLY-REST-MARKET] _notify_subscribers ENTER ticker=%s thread=%s callbacks=%d", ticker, threading.current_thread().name, len(callbacks))
 

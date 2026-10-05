@@ -192,6 +192,11 @@ class Position:
     max_favorable_price_cents: int = 0  # Updated as price moves favorably
     high_watermark_cents: int = 0  # CRITICAL FIX (2026-08-09): best own-side bid observed
     low_watermark_cents: int = 100  # CRITICAL FIX (2026-08-09): worst own-side bid observed
+    # 2026-10-05: Durable hard-profit-lock obligation.  A trusted executable
+    # bid >= lock threshold latches this record; the obligation survives a
+    # vanishing book until a terminal venue result, a recovered quote below
+    # threshold (OPPORTUNITY_LOST), or market expiry.
+    hard_lock_pending: Optional[Dict[str, Any]] = None
     trailing_activated: bool = False  # Research: activate trailing after min_profit_cents (12¢ per 2026 research)
     trailing_profit_zone_activated: bool = False  # CRITICAL FIX: 2026-07-06 - Aggressive trailing in 80-85c profit zone
     trailing_state: TrailingState = TrailingState.UNARMED  # CRITICAL FIX (2026-08-09): finite state machine
@@ -1315,6 +1320,7 @@ class Position:
             "max_favorable_price_cents": self.max_favorable_price_cents,
             "high_watermark_cents": self.high_watermark_cents,
             "low_watermark_cents": self.low_watermark_cents,
+            "hard_lock_pending": dict(self.hard_lock_pending) if self.hard_lock_pending else None,
             "trailing_activated": self.trailing_activated,
             "trailing_profit_zone_activated": self.trailing_profit_zone_activated,
             "trailing_state": self.trailing_state.value if isinstance(self.trailing_state, TrailingState) else self.trailing_state,
@@ -1424,6 +1430,7 @@ class Position:
             max_favorable_price_cents=data.get("max_favorable_price_cents", 0),
             high_watermark_cents=data.get("high_watermark_cents", 0),
             low_watermark_cents=data.get("low_watermark_cents", 100),
+            hard_lock_pending=dict(data["hard_lock_pending"]) if data.get("hard_lock_pending") else None,
             trailing_activated=data.get("trailing_activated", False),
             trailing_profit_zone_activated=data.get("trailing_profit_zone_activated", False),
             trailing_state=TrailingState(data.get("trailing_state", "unarmed")),

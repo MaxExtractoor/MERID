@@ -85,7 +85,7 @@ def _snapshot_ineligibility_reason(snapshot: Optional[ExitPriceSnapshot]) -> str
         return "missing_bid_size"
     if not snapshot.executable:
         return "not_executable"
-    if not (0 < snapshot.own_side_bid_cents < 100 and 0 < snapshot.own_side_ask_cents < 100):
+    if not (0 < snapshot.own_side_bid_cents < 100):
         return f"invalid_prices_bid={snapshot.own_side_bid_cents}_ask={snapshot.own_side_ask_cents}"
     if snapshot.data_quality != "GOOD":
         return f"data_quality={snapshot.data_quality}"
