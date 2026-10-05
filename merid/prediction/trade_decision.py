@@ -591,6 +591,10 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # execution policy converts it to IOC at taker fee rather than resting
     # post-only.  1-contract, per-day submission cap.
     "canary_taker",
+    # 2026-10-05: maker-route canary — marginal positive net edge that only
+    # exists at maker fees.  Rests post-only GTC at the bounded 1-contract
+    # size; shares the canary daily cap and per-window dedupe.
+    "canary_maker",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -4542,9 +4546,14 @@ def compute_trade_decision(
     # and the router re-verifies a fresh REST pull at submit time for any
     # intent (the relaxed ws_resync fallback).  Requiring WS ownership here
     # starved the lane every time books cycled DEGRADED.
+    # Same change: the lane also runs on the maker route — most marginal
+    # positive edges only exist at maker fees, so a taker-only canary
+    # starved whenever the ~1.75c fee delta pushed a +EV signal below the
+    # floor.  canary_maker rests post-only at the bounded 1-contract size.
+    _canary_route_lane = {"taker": "canary_taker", "maker": "canary_maker"}.get(route)
     _canary_pristine = (
         MERID_CANARY_LANE_ENABLED
-        and route == "taker"
+        and _canary_route_lane is not None
         and indicators.get("quote_owner") in (
             "WS_FRESH_VERIFIED",
             "REST_VERIFIED_DEGRADED",
@@ -4637,7 +4646,7 @@ def compute_trade_decision(
         # Edge in the canary window but the quote isn't WS-verified — stamp
         # the blocker so the lane's starvation is measurable, not silent.
         MERID_CANARY_LANE_ENABLED
-        and route == "taker"
+        and _canary_route_lane is not None
         and not yes_qualifies
         and not no_qualifies
         and best_side is not None
@@ -4675,7 +4684,7 @@ def compute_trade_decision(
         edge_breakdown = (
             yes_breakdown if _canary_side == "yes" else no_breakdown
         )
-        indicators["decision_lane"] = "canary_taker"
+        indicators["decision_lane"] = _canary_route_lane
     else:
         # No side qualifies.  Determine the most informative rejection reason.
         if best_side is None:

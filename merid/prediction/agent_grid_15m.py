@@ -9143,7 +9143,7 @@ class LeanAgent15m:
             # admission already ran; here we enforce the lane's own budget:
             # daily submission cap and one canary per asset per 15m window.
             if (
-                _decision_lane == "canary_taker"
+                _decision_lane in ("canary_taker", "canary_maker")
                 and decision.selected_outcome is not None
             ):
                 _ticker_now = str(getattr(decision, "ticker", "") or ticker or "")
