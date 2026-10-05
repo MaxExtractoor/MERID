@@ -364,6 +364,74 @@ MERID_DISABLE_EXIT_POLICY = os.environ.get(
     "MERID_DISABLE_EXIT_POLICY", "0"
 ).strip().lower() in ("1", "true", "yes")
 
+# 2026-10-05 (entry-throughput canary): policy-aware expected exit cost.
+# The old reserve charged a full taker exit fee at 100% probability on every
+# entry.  Under the current ``ev_gated`` discretionary mode only a fraction
+# of positions ever submit an exit order — fills-ledger counts since the
+# 2026-09-28 exit hardening show ~10% of entries, concentrated in
+# hard_profit_lock on tail-priced positions — and settlement itself is
+# fee-free on Kalshi.  The reserve is therefore ``p_trigger * taker_fee``
+# rather than ``1.0 * taker_fee``:
+#   * settlement lane / exits disabled          -> 0  ("hold_to_settlement")
+#   * entries priced >= MERID_EXPECTED_EXIT_LOCK_PROXIMITY_CENTS can
+#     plausibly print the MERID_HARD_PROFIT_LOCK_CENTS bid inside the window
+#                                                -> MERID_EXPECTED_EXIT_PROB_TAIL
+#   * every other entry                          -> MERID_EXPECTED_EXIT_PROB
+# Exit orders are always IOC/taker when they fire, so the conditional cost
+# stays the full taker fee; only the trigger probability is modeled.
+# ``MERID_EXPECTED_EXIT_COST=0`` restores the legacy unconditional reserve.
+MERID_EXPECTED_EXIT_COST = os.environ.get(
+    "MERID_EXPECTED_EXIT_COST", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_EXPECTED_EXIT_PROB = float(
+    os.environ.get("MERID_EXPECTED_EXIT_PROB", "0.10")
+)
+MERID_EXPECTED_EXIT_PROB_TAIL = float(
+    os.environ.get("MERID_EXPECTED_EXIT_PROB_TAIL", "0.30")
+)
+MERID_EXPECTED_EXIT_LOCK_PROXIMITY_CENTS = float(
+    os.environ.get("MERID_EXPECTED_EXIT_LOCK_PROXIMITY_CENTS", "60")
+)
+
+# 2026-10-05 (entry-throughput canary): counter-regime admission.  The
+# categorical countertrend veto closed half the side-space whenever the
+# tick-run regime was confirmed — including genuinely large, independently
+# supported reversal edges.  In "penalty" mode the veto becomes an elevated
+# absolute net-edge floor for the counter-regime side (default 8c — far
+# above the ordinary dynamic bound) plus a degraded-quote ban; the deep-ITM
+# exception inside ``regime_entry_block`` is unchanged, and ``veto``
+# restores the categorical block.
+MERID_COUNTER_REGIME_MODE = os.environ.get(
+    "MERID_COUNTER_REGIME_MODE", "penalty"
+).strip().lower()
+MERID_COUNTER_REGIME_MIN_EDGE = float(
+    os.environ.get("MERID_COUNTER_REGIME_MIN_EDGE_CENTS", "8.0")
+) / 100.0
+
+# 2026-10-05 (entry-throughput canary): evidence "transferrable" tier.  A
+# sparse exact cell whose price-matched pooled level already cleared its
+# posterior-LCB margin check is supported evidence, not blind exploration —
+# it skips the escape vetoes (which were built for zero-evidence trials)
+# but must clear an extra margin premium over its active edge bound.
+MERID_EVIDENCE_TRANSFER_EXTRA_C = float(
+    os.environ.get("MERID_EVIDENCE_TRANSFER_EXTRA_CENTS", "1.0")
+)
+
+# 2026-10-05 (entry-throughput canary): top-edge IOC canary lane.  When the
+# full bound rejects the taker pass on edge alone, the side may still
+# qualify at a reduced floor — but only on a pristine verified quote with
+# adequate depth, fresh book state, and no WS/REST divergence, and only
+# through the bounded ``canary_taker`` lane (1 contract, IOC, daily cap).
+MERID_CANARY_LANE_ENABLED = os.environ.get(
+    "MERID_CANARY_LANE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_CANARY_MIN_EDGE = float(
+    os.environ.get("MERID_CANARY_MIN_EDGE_CENTS", "1.5")
+) / 100.0
+MERID_CANARY_DAILY_MAX = int(
+    os.environ.get("MERID_CANARY_DAILY_MAX", "8")
+)
+
 # 2026-09-23: Market-anchor shrinkage.  Kalshi short-dated crypto binaries are
 # arbitraged tick-for-tick against spot and are essentially perfectly
 # calibrated inside the last minutes (prediction-market-efficiency audits show
@@ -519,6 +587,10 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # δ-slack below the active maker bound, bid-priced, 1-contract post-only,
     # short resting life.  Cohort measured separately vs current policy.
     "empirical_marginal_maker",
+    # 2026-10-05: top-edge IOC canary — taker route, so the bounded-lane
+    # execution policy converts it to IOC at taker fee rather than resting
+    # post-only.  1-contract, per-day submission cap.
+    "canary_taker",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -1577,7 +1649,7 @@ def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
                 if breakdown is not None
                 else None
             ),
-            route="maker",
+            route=_ind.get("order_route") or "unknown",
             depth_for_quantity_cc=(
                 float(getattr(decision, f"{sel}_depth_cc", 0) or 0) if sel else None
             ),
@@ -2332,6 +2404,30 @@ def entry_cost_stack_from_breakdown(
         model_uncertainty_prob=breakdown.model_risk_reserve,
         required_net_edge_prob=required_net_edge,
     )
+
+
+def _expected_exit_cost(
+    entry_price_frac: float,
+    fee_frac: float,
+    settlement_lane: bool,
+) -> Tuple[float, str, float]:
+    """Policy-aware expected liquidation cost — see MERID_EXPECTED_EXIT_*.
+
+    Returns ``(expected_cost, exit_policy_class, trigger_prob)`` in
+    probability-fraction units.  ``hold_to_settlement`` (settlement lane or
+    exits disabled) reserves nothing; ``legacy_full_taker_reserve`` is the
+    pre-2026-10-05 unconditional fee; ``expected_ev_gated`` charges
+    ``p_trigger * fee`` where p_trigger is higher for tail-priced entries
+    that can realistically print the hard-profit-lock bid in-window.
+    """
+    if settlement_lane or MERID_DISABLE_EXIT_POLICY:
+        return 0.0, "hold_to_settlement", 0.0
+    if not MERID_EXPECTED_EXIT_COST:
+        return float(fee_frac), "legacy_full_taker_reserve", 1.0
+    tail = float(entry_price_frac) * 100.0 >= MERID_EXPECTED_EXIT_LOCK_PROXIMITY_CENTS
+    p = MERID_EXPECTED_EXIT_PROB_TAIL if tail else MERID_EXPECTED_EXIT_PROB
+    p = min(1.0, max(0.0, float(p)))
+    return float(fee_frac) * p, "expected_ev_gated", p
 
 
 def _compute_model_risk_reserve(
@@ -3290,9 +3386,28 @@ def compute_trade_decision(
     # 2026-09-27: identical reasoning when the operator disabled the exit
     # policy outright — every entry holds to settlement, so no exit fee can
     # ever be incurred.  Charging it understates net edge by ~1.6c/contract.
-    _holds_to_settlement = settlement_lane or MERID_DISABLE_EXIT_POLICY
-    expected_exit_cost_yes = 0.0 if _holds_to_settlement else fee
-    expected_exit_cost_no = 0.0 if _holds_to_settlement else fee
+    # 2026-10-05: the exit reserve is the *expected* liquidation cost under
+    # the active exit policy, not a full taker fee charged at certainty.
+    # Settlement-lane / exit-disabled entries still reserve zero; ev_gated
+    # entries reserve p_trigger * fee (see MERID_EXPECTED_EXIT_* constants).
+    expected_exit_cost_yes, _exit_class_yes, _exit_p_yes = _expected_exit_cost(
+        yes_entry, fee, settlement_lane
+    )
+    expected_exit_cost_no, _exit_class_no, _exit_p_no = _expected_exit_cost(
+        no_entry, fee, settlement_lane
+    )
+    indicators.update({
+        "yes_exit_policy_class": _exit_class_yes,
+        "no_exit_policy_class": _exit_class_no,
+        "yes_exit_trigger_prob": _exit_p_yes,
+        "no_exit_trigger_prob": _exit_p_no,
+        "yes_exit_cost_method": (
+            "p_trigger_x_taker_fee" if _exit_p_yes > 0.0 else "none"
+        ),
+        "no_exit_cost_method": (
+            "p_trigger_x_taker_fee" if _exit_p_no > 0.0 else "none"
+        ),
+    })
 
     model_risk_reserve = _compute_model_risk_reserve(
         model_uncertainty, data_quality, regime, seconds_to_expiry,
@@ -3696,8 +3811,33 @@ def compute_trade_decision(
                         # Evidence passed cleanly — name the owner so the
                         # admission lineage is explicit either way.
                         _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
+                        # 2026-10-05 (pooled-transfer tier): a sparse exact
+                        # cell backed by an adequately-sampled price-matched
+                        # pooled level (CELL_EVIDENCE_PASS on a scored level)
+                        # is *transferrable* evidence, not blind exploration.
+                        # It skips the escape vetoes — those were built for
+                        # zero-evidence trials — but must clear an extra
+                        # margin premium over the side's active edge bound.
+                        _transfer = (
+                            _ed.escape_required
+                            and _ed.code == "CELL_EVIDENCE_PASS"
+                            and _ed.evidence_level_used not in (None, "none")
+                            and _ed.effective_independent_n
+                            >= evidence_policy.min_cell_neff()
+                        )
                         _escape_veto = None
-                        if _ed.escape_required:
+                        if _transfer:
+                            if (
+                                float(_ne_c)
+                                < float(_d.total) * 100.0
+                                + MERID_EVIDENCE_TRANSFER_EXTRA_C
+                            ):
+                                _escape_veto = "evidence_transfer_margin"
+                            else:
+                                indicators[f"{_side}_evidence_mode"] = (
+                                    "pooled_transfer"
+                                )
+                        elif _ed.escape_required:
                             _escape_veto = _evidence_escape_veto_reason(
                                 asset=asset,
                                 side=_side,
@@ -3734,6 +3874,7 @@ def compute_trade_decision(
                                 "threshold_cell" if _d.cell_id is not None
                                 else "current_build_provisional"
                                 if _d.provisional_cell_id is not None
+                                else "evidence_pooled_transfer" if _transfer
                                 else "evidence_escape" if _ed.escape_required
                                 else "formula"
                             )
@@ -4030,6 +4171,34 @@ def compute_trade_decision(
     indicators["yes_epc_eff_edge_cents"] = _yes_eff_edge * 100.0
     indicators["no_epc_eff_edge_cents"] = _no_eff_edge * 100.0
 
+    # 2026-10-05 (canary): the countertrend regime block is an elevated
+    # floor, not a categorical veto, under MERID_COUNTER_REGIME_MODE=penalty.
+    # A counter-regime side may qualify only when its effective net edge
+    # clears the absolute floor AND the quote owner is not degraded; the
+    # ordinary economics bound still applies on top.  Same-direction and
+    # deep-ITM sides are unaffected (``regime_entry_block`` returns None).
+    _cr_penalty = MERID_COUNTER_REGIME_MODE == "penalty"
+    _yes_regime_ok = _yes_regime_block is None or (
+        _cr_penalty
+        and _yes_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE
+        and not indicators.get("quote_degraded_mode")
+    )
+    _no_regime_ok = _no_regime_block is None or (
+        _cr_penalty
+        and _no_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE
+        and not indicators.get("quote_degraded_mode")
+    )
+    indicators.update({
+        "counter_regime_mode": MERID_COUNTER_REGIME_MODE,
+        "counter_regime_min_edge_cents": MERID_COUNTER_REGIME_MIN_EDGE * 100.0,
+        "yes_counter_regime_admitted": bool(
+            _yes_regime_block is not None and _yes_regime_ok
+        ),
+        "no_counter_regime_admitted": bool(
+            _no_regime_block is not None and _no_regime_ok
+        ),
+    })
+
     # 2026-10-04: marginal-band rescue slack.  Only positive thresholds in the
     # 50-89c executable band relax; bounded negative-floor lanes keep their own
     # edge bound, and >89c/<50c near-misses are counterfactually unprofitable.
@@ -4221,7 +4390,7 @@ def compute_trade_decision(
                     _yes_cbp_neg_floor
                     or yes_breakdown.p_selected > yes_min_p
                 )
-                and _yes_regime_block is None
+                and _yes_regime_ok
                 and _yes_conv_block is None
                 and _yes_ct_lane_block is None
             )
@@ -4236,7 +4405,7 @@ def compute_trade_decision(
         )
         and not tail_guard_violation_no
         and no_evidence_ok
-        and _no_regime_block is None
+        and _no_regime_ok
         and _no_conv_block is None
         and _no_throttle_block is None
         and _no_ct_lane_block is None
@@ -4335,7 +4504,7 @@ def compute_trade_decision(
         "yes_block": _side_block_reason(
             "yes", yes_breakdown, yes_min_edge, yes_min_p,
             yes_evidence_ok, tail_guard_violation_yes, yes_depth_ok,
-            regime_block_s=_yes_regime_block,
+            regime_block_s=_yes_regime_block if not _yes_regime_ok else None,
             conv_block_s=_yes_conv_block,
             throttle_block_s=_yes_throttle_block,
             ct_lane_block_s=_yes_ct_lane_block,
@@ -4347,7 +4516,7 @@ def compute_trade_decision(
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
             no_evidence_ok, tail_guard_violation_no, no_depth_ok,
-            regime_block_s=_no_regime_block,
+            regime_block_s=_no_regime_block if not _no_regime_ok else None,
             conv_block_s=_no_conv_block,
             throttle_block_s=_no_throttle_block,
             ct_lane_block_s=_no_ct_lane_block,
@@ -4355,6 +4524,79 @@ def compute_trade_decision(
             eff_edge_s=_no_eff_edge,
         ),
     })
+
+    # 2026-10-05 (top-edge IOC canary): a side that failed ONLY the edge
+    # bound — every structural gate passed, the executable quote is the
+    # WS-verified canonical book — may still be emitted at the reduced
+    # canary floor.  Taker route only (IOC at the ask); the grid assigns
+    # the bounded ``canary_taker`` lane and the daily submission cap.
+    # ``net_edge > 0`` is preserved via the p_selected > cost-basis leg.
+    _canary_side: Optional[str] = None
+    _canary_edge = 0.0
+    _canary_pristine = (
+        MERID_CANARY_LANE_ENABLED
+        and route == "taker"
+        and indicators.get("quote_owner") == "WS_FRESH_VERIFIED"
+        and not indicators.get("quote_degraded_mode")
+    )
+    # Only the best-side edge is canary-eligible — the lane exists for the
+    # top-ranked candidate, and the dual-side assertion below requires
+    # selected_outcome == best_side.
+    if (
+        _canary_pristine
+        and not yes_qualifies
+        and not no_qualifies
+        and best_side is not None
+    ):
+        _cs = best_side
+        _ce = _yes_eff_edge if _cs == "yes" else _no_eff_edge
+        _cb = _yes_edge_eff_bound if _cs == "yes" else _no_edge_eff_bound
+        if _cb >= 0.0 and MERID_CANARY_MIN_EDGE <= _ce < _cb:
+            if _cs == "yes":
+                _gates_ok = (
+                    yes_depth_ok
+                    and not tail_guard_violation_yes
+                    and yes_evidence_ok
+                    and _yes_regime_ok
+                    and _yes_conv_block is None
+                    and _yes_throttle_block is None
+                    and _yes_ct_lane_block is None
+                    and _yes_bookflow_block is None
+                    and not _yes_hi_price
+                    and (
+                        _yes_cbp_neg_floor
+                        or yes_breakdown.p_selected > yes_min_p
+                    )
+                )
+            else:
+                _gates_ok = (
+                    no_depth_ok
+                    and not tail_guard_violation_no
+                    and no_evidence_ok
+                    and _no_regime_ok
+                    and _no_conv_block is None
+                    and _no_throttle_block is None
+                    and _no_ct_lane_block is None
+                    and _no_bookflow_block is None
+                    and (
+                        _no_cbp_neg_floor
+                        or no_breakdown.p_selected > no_min_p
+                    )
+                )
+            if _gates_ok:
+                _canary_side = _cs
+                _canary_edge = _ce
+        if _canary_side is not None:
+            indicators["canary_taker"] = {
+                "side": _canary_side,
+                "gate_ev_cents": _canary_edge * 100.0,
+                "full_bound_cents": (
+                    _yes_edge_eff_bound if _canary_side == "yes"
+                    else _no_edge_eff_bound
+                ) * 100.0,
+                "canary_floor_cents": MERID_CANARY_MIN_EDGE * 100.0,
+                "quote_owner": indicators.get("quote_owner"),
+            }
 
     if yes_qualifies and no_qualifies:
         # This should not happen because of duality, but handle explicitly.
@@ -4370,6 +4612,12 @@ def compute_trade_decision(
     elif no_qualifies:
         selected_outcome = "no"
         edge_breakdown = no_breakdown
+    elif _canary_side is not None:
+        selected_outcome = _canary_side
+        edge_breakdown = (
+            yes_breakdown if _canary_side == "yes" else no_breakdown
+        )
+        indicators["decision_lane"] = "canary_taker"
     else:
         # No side qualifies.  Determine the most informative rejection reason.
         if best_side is None:
@@ -4421,7 +4669,12 @@ def compute_trade_decision(
                 indicators[f"cost_basis_override_{best_side}_p"] = best_p
                 indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
             elif (
-                _yes_regime_block if best_side == "yes" else _no_regime_block
+                # Under counter-regime *penalty* mode a cleared side is not a
+                # regime rejection — report the effective block only.
+                (_yes_regime_block if best_side == "yes" and not _yes_regime_ok
+                 else _no_regime_block if best_side == "no" and not _no_regime_ok
+                 else None)
+                if best_side is not None else None
             ) or (
                 _yes_conv_block if best_side == "yes" else _no_conv_block
             ) or (
@@ -4435,9 +4688,11 @@ def compute_trade_decision(
             ):
                 # 2026-10-01: edge cleared the floor but a structural safety
                 # gate owns the rejection — report the gate, not evidence.
+                _eff_regime_yes = _yes_regime_block if not _yes_regime_ok else None
+                _eff_regime_no = _no_regime_block if not _no_regime_ok else None
                 _gate_blocks = (
                     (
-                        _yes_regime_block,
+                        _eff_regime_yes,
                         _yes_conv_block,
                         _yes_throttle_block,
                         _yes_ct_lane_block,
@@ -4446,7 +4701,7 @@ def compute_trade_decision(
                     )
                     if best_side == "yes"
                     else (
-                        _no_regime_block,
+                        _eff_regime_no,
                         _no_conv_block,
                         _no_throttle_block,
                         _no_ct_lane_block,
@@ -4494,7 +4749,7 @@ def compute_trade_decision(
                 spot_price=float(spot_price),
                 strike_price=float(strike_price),
                 fee_cents=float(fee) * 100.0,
-                route="maker",
+                route=route,
                 depth_for_quantity_cc=float(
                     yes_depth_cc if best_side == "yes" else no_depth_cc
                 ),
@@ -4542,7 +4797,7 @@ def compute_trade_decision(
                     spot_price=float(spot_price),
                     strike_price=float(strike_price),
                     fee_cents=float(fee) * 100.0,
-                    route="maker",
+                    route=route,
                     depth_for_quantity_cc=float(
                         yes_depth_cc if selected_outcome == "yes" else no_depth_cc
                     ),
@@ -4720,7 +4975,7 @@ def compute_trade_decision(
                     spot_price=float(spot_price),
                     strike_price=float(strike_price),
                     fee_cents=float(fee) * 100.0,
-                    route="maker",
+                    route=route,
                     depth_for_quantity_cc=float(
                         yes_depth_cc if selected_outcome == "yes" else no_depth_cc
                     ),

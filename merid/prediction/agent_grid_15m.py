@@ -936,6 +936,58 @@ def _record_emm_submission(asset: str, ticker: str) -> int:
     return state["count"]
 
 
+# ── Top-edge IOC canary lane (2026-10-05) ──────────────────────────────────
+# Narrow taker canary: a best-side candidate that passed every structural
+# gate but fell bounded-short of its full required edge on the taker pass,
+# on a WS-verified canonical quote, may emit as a 1-contract IOC at the
+# ask.  Gate lives in trade_decision.compute_trade_decision; the daily cap
+# and per-asset-window dedupe live here.  Telemetry cohort = decision_lane
+# "canary_taker" — measured separately from maker and full-bound taker.
+# Env name shared with trade_decision.MERID_CANARY_DAILY_MAX.
+MERID_CANARY_DAILY_CAP = int(os.environ.get("MERID_CANARY_DAILY_MAX", "8"))
+MERID_CANARY_DAILY_FILE = os.environ.get(
+    "MERID_CANARY_DAILY_FILE", "data/canary_taker_lane.json"
+)
+
+_canary_window_state: dict = {}
+_canary_window_lock = threading.Lock()
+
+
+def _canary_daily_state() -> dict:
+    """Read the canary lane's UTC-day submission counter."""
+    try:
+        with open(MERID_CANARY_DAILY_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if state.get("date") == datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+            return state
+    except Exception:
+        pass
+    return {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0}
+
+
+def _canary_under_daily_cap() -> bool:
+    return int(_canary_daily_state().get("count", 0)) < MERID_CANARY_DAILY_CAP
+
+
+def _canary_window_open(asset: str, ticker: str) -> bool:
+    with _canary_window_lock:
+        return _canary_window_state.get(str(asset).upper()) != ticker
+
+
+def _record_canary_submission(asset: str, ticker: str) -> int:
+    with _canary_window_lock:
+        _canary_window_state[str(asset).upper()] = ticker
+    state = _canary_daily_state()
+    state["count"] = int(state.get("count", 0)) + 1
+    try:
+        Path(MERID_CANARY_DAILY_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(MERID_CANARY_DAILY_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+    return state["count"]
+
+
 def _fvg_edge_components(
     score: int,
     side_velocity_sign: float,
@@ -9087,6 +9139,42 @@ class LeanAgent15m:
             if _decision_lane in BOUNDED_POST_ONLY_LANES:
                 if int(decision.approved_size_cc) > 100:
                     decision = replace(decision, approved_size_cc=Decimal("100"))
+            # 2026-10-05: canary_taker emission gate — the decision-side
+            # admission already ran; here we enforce the lane's own budget:
+            # daily submission cap and one canary per asset per 15m window.
+            if (
+                _decision_lane == "canary_taker"
+                and decision.selected_outcome is not None
+            ):
+                _ticker_now = str(getattr(decision, "ticker", "") or ticker or "")
+                if not _canary_under_daily_cap() or not _canary_window_open(
+                    asset, _ticker_now
+                ):
+                    logger.info(
+                        "[CANARY-TAKER-GATE] asset=%s side=%s ticker=%s "
+                        "suppressed=daily_cap_or_window count_today=%d cap=%d",
+                        asset,
+                        decision.selected_outcome,
+                        _ticker_now,
+                        int(_canary_daily_state().get("count", 0)),
+                        MERID_CANARY_DAILY_CAP,
+                    )
+                    decision = replace(
+                        decision,
+                        selected_outcome=None,
+                        no_trade_reason="canary_taker_daily_cap_or_window",
+                    )
+                else:
+                    _n = _record_canary_submission(asset, _ticker_now)
+                    logger.info(
+                        "[CANARY-TAKER] asset=%s side=%s ticker=%s "
+                        "lane submissions today=%d cap=%d",
+                        asset,
+                        decision.selected_outcome,
+                        _ticker_now,
+                        _n,
+                        MERID_CANARY_DAILY_CAP,
+                    )
 
         # Production-safe containment: compute a Bachelier-only shadow decision so
         # we can compare the live hybrid side against the baseline side on the same

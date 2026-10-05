@@ -437,6 +437,96 @@ def test_positive_outcomes_do_not_suspend():
     assert ok is True and blocked is None
 
 
+# ---------------------------------------------------------------------------
+# PROBATION: controlled release of stale SUSPENDED cells (2026-10-05)
+# ---------------------------------------------------------------------------
+
+def test_probation_reset_releases_aged_suspension(monkeypatch):
+    from merid.prediction.threshold_cells import (
+        probation_reset_cell,
+        set_cell_state,
+    )
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    set_cell_state(cell.cell_id, "SUSPENDED", "test")
+    moved, block = probation_reset_cell(cell.cell_id)
+    assert moved is True and block is None
+    assert get_cell_state(cell.cell_id) == "PROBATION"
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is True and blocked is None
+
+
+def test_probation_reset_blocked_by_cooldown():
+    from merid.prediction.threshold_cells import (
+        probation_reset_cell,
+        set_cell_state,
+    )
+    cell = _cell()
+    set_cell_state(cell.cell_id, "SUSPENDED", "test")
+    moved, block = probation_reset_cell(cell.cell_id)
+    assert moved is False
+    assert block.startswith("probation_cooldown")
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_probation_reset_rejects_non_suspended():
+    from merid.prediction.threshold_cells import probation_reset_cell
+    cell = _cell()
+    moved, block = probation_reset_cell(cell.cell_id)
+    assert moved is False
+    assert block == "not_suspended:PROVISIONAL"
+
+
+def test_probation_single_strike_resuspends(monkeypatch):
+    from merid.prediction.threshold_cells import (
+        probation_reset_cell,
+        set_cell_state,
+    )
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    set_cell_state(cell.cell_id, "SUSPENDED", "test")
+    moved, _ = probation_reset_cell(cell.cell_id)
+    assert moved is True
+    # One fresh router strike re-suspends — no second chance.
+    record_cell_router_reject(cell.cell_id)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+
+
+def test_probation_submission_cap_tighter(monkeypatch):
+    from merid.prediction.threshold_cells import (
+        probation_reset_cell,
+        record_cell_submission,
+        set_cell_state,
+    )
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    set_cell_state(cell.cell_id, "SUSPENDED", "test")
+    moved, _ = probation_reset_cell(cell.cell_id)
+    assert moved is True
+    record_cell_submission(cell_id=cell.cell_id)
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is False and blocked == "probation_submission_cap"
+
+
+def test_probation_resuspend_uses_longer_cooldown(monkeypatch):
+    from merid.prediction.threshold_cells import (
+        probation_reset_cell,
+        set_cell_state,
+    )
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    set_cell_state(cell.cell_id, "SUSPENDED", "test")
+    moved, _ = probation_reset_cell(cell.cell_id)
+    assert moved is True
+    record_cell_router_reject(cell.cell_id)
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+    # Probation-triggered suspension needs the long cooldown — the short
+    # min-age floor must not immediately release it again.
+    moved, block = probation_reset_cell(cell.cell_id)
+    assert moved is False
+    assert block.startswith("probation_cooldown")
+
+
 def test_funnel_counters():
     cell = _cell()
     bump_cell_funnel("matched", cell.cell_id)

@@ -291,6 +291,8 @@ def test_escape_lane_disabled_denies_sparse_pass(monkeypatch):
 
 
 def test_escape_cap_exhausted_denies(monkeypatch, tmp_path):
+    # Pin the cap — .env overrides (e.g. 24) must not leak into this test.
+    monkeypatch.setenv("MERID_EVIDENCE_ESCAPE_DAILY_MAX", "12")
     path = tmp_path / "escape.json"
     today = time.strftime("%Y-%m-%d", time.gmtime())
     path.write_text(json.dumps({"date": today, "count": 12}))
