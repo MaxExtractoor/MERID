@@ -158,6 +158,19 @@ def _check_requote_budget(key: tuple[str, str], i: "CanonicalOrderIntent") -> No
             "used=%d max=%d reason=requote_budget_exhausted",
             key[0], key[1], i.intent_id, used, mx,
         )
+        try:
+            from merid.event_venues.kalshi.resting_order_monitor import (
+                _emit_resting_lifecycle,
+            )
+
+            _emit_resting_lifecycle(
+                "REENTRY_DECISION_COMPLETED", None, ticker=key[0],
+                outcome="REQUOTE_BUDGET_EXHAUSTED", contract=key[1],
+                intent_id=i.intent_id, client_order_id=i.client_order_id,
+                requotes_used=used, max_requotes=mx,
+            )
+        except Exception:
+            pass
         raise OrderIntentValidationError(
             f"requote_budget_exhausted:ticker={key[0]}:side={key[1]}:"
             f"used={used}:max={mx}"
