@@ -205,13 +205,17 @@ def test_conviction_gate_disable(monkeypatch):
 
 # ------------------------------------------------------------- bookflow ----
 
-def test_bookflow_blocks_no_under_yes_pressure():
+def test_bookflow_blocks_no_under_yes_pressure(monkeypatch):
+    # Production .env relaxes the imbalance block (2026-10-05 throughput
+    # tuning); pin the code default so the test asserts gate semantics.
+    monkeypatch.delenv("MERID_BOOKFLOW_IMB_BLOCK", raising=False)
     snap = _Snap({"XRP": _Slice(0.001, yes_imb=0.35)})
     assert dr.bookflow_block_reason(snap, "XRP", "no") == "bookflow_yes_pressure"
     assert dr.bookflow_block_reason(snap, "XRP", "yes") is None
 
 
-def test_bookflow_blocks_yes_under_no_pressure():
+def test_bookflow_blocks_yes_under_no_pressure(monkeypatch):
+    monkeypatch.delenv("MERID_BOOKFLOW_IMB_BLOCK", raising=False)
     snap = _Snap({"XRP": _Slice(-0.001, no_imb=0.35)})
     assert dr.bookflow_block_reason(snap, "XRP", "yes") == "bookflow_no_pressure"
 

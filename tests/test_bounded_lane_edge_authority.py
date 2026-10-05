@@ -97,6 +97,9 @@ class TestBoundedLaneMembership:
             # 2026-10-05: top-edge IOC canary — taker-evaluated admission;
             # bounded-lane policy converts it to 1-contract IOC.
             "canary_taker",
+            # 2026-10-05: maker-route canary — marginal +EV at maker fees;
+            # rests post-only at the bounded 1-contract size.
+            "canary_maker",
         }
 
 
