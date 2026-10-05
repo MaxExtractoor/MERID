@@ -68,6 +68,11 @@ MERID_EXIT_ALLOWED_REASONS = frozenset({
     # The settlement-aligned EV gate's own exit reason.  Still classified
     # DISCRETIONARY downstream, so it can never submit while the gate is off.
     "value_switch_exit",
+    # 2026-10-05: HARD_PROFIT_LOCK (held-side executable bid >= threshold) is
+    # a mechanical risk-control rule, not a discretionary exit.  Without this
+    # entry every hard-lock intent died here as exit_reason_not_allowed
+    # (live incident: DOGE NO@85, bid 92, 2026-10-05T03:53).
+    "hard_profit_lock",
 })
 
 # Map internal ExitReason enum values to canonical audit reasons.  The
@@ -2561,6 +2566,19 @@ def _run_exit_price_guard(
                 return False, exit_price_cents, record, decision_id
         else:
             limit_cents = max(1, best_bid - slippage)
+    elif canonical == "hard_profit_lock":
+        # 2026-10-05: anchor the IOC limit at the configured lock threshold,
+        # not bid-minus-slippage.  The lock's contract is "exit at >=90c or
+        # not at all"; a bid-5c floor could fill at 87c if the book faded
+        # between trigger and submit.  With limit=threshold the IOC fills at
+        # best available >= threshold, else returns unfilled and the monitor
+        # re-evaluates next cycle.
+        try:
+            _lock_floor = int(os.environ.get("MERID_HARD_PROFIT_LOCK_CENTS", "90"))
+        except (TypeError, ValueError):
+            _lock_floor = 90
+        limit_cents = max(1, min(99, _lock_floor))
+        record["lock_threshold_cents"] = _lock_floor
     else:
         limit_cents = best_bid if is_profit_exit else max(1, best_bid - slippage)
 
@@ -2625,6 +2643,10 @@ def _run_exit_price_guard(
         or canonical in _MERID_EXIT_RISK_INVALIDATION_REASONS
         or is_emergency
         or is_forced
+        # 2026-10-05: hard_profit_lock is a mechanical risk rule — the
+        # discretionary per-contract profit floor must not veto a lock whose
+        # executable bid crossed the configured threshold.
+        or canonical == "hard_profit_lock"
     )
     if not is_stop_or_emergency:
         min_profit_total = MERID_EXIT_MIN_PROFIT_CENTS * closed_count
@@ -2753,6 +2775,12 @@ def _run_exit_price_guard(
         and not is_emergency
         and ev_eval is not None
         and ev_eval.decision != EvDecision.BLOCK_UNKNOWN_REASON
+        # 2026-10-05: hard_profit_lock is exempt from the winning-side hold
+        # veto.  The veto fires precisely when the model values the held side
+        # above the bid - the same regime where a >=90c executable lock
+        # triggers.  The lock's whole purpose is to take realized profit over
+        # residual EV; vetoes would silently neuter it every time.
+        and canonical != "hard_profit_lock"
     ):
         try:
             _hold = (

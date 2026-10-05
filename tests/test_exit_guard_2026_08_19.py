@@ -152,8 +152,16 @@ def test_fresh_quote_loss_exit_rejected_on_profit_floor():
     assert record["best_bid_cents"] == 42
 
 
-def test_emergency_expiry_liquidation_approved():
-    """Near-expiry emergency liquidation with a bounded loss is preserved."""
+def test_emergency_expiry_liquidation_approved(monkeypatch):
+    """Near-expiry emergency liquidation with a bounded loss is preserved.
+
+    Scope: the mechanical guard (limit price, loss bound, emergency class).
+    The 2026-09-24 settle-default gate (MERID_SETTLEMENT_GUARD_EV_GATE) is a
+    separate sell-vs-settle policy that requires a trusted calibrated eval;
+    without one this scenario correctly rides to settlement.  It is disabled
+    here so this test keeps covering the mechanical path it was written for.
+    """
+    monkeypatch.setenv("MERID_SETTLEMENT_GUARD_EV_GATE", "0")
     position = _make_position()
     state = _make_state(no_bid=70, no_ask=72, seconds_to_expiry=30.0)
 
@@ -394,3 +402,75 @@ def test_operational_exit_fails_open_to_intent_contract_on_cache_error(monkeypat
     # Reached the quote-freshness gate -> the cache error did not block or approve.
     assert record["reject_reason"] == "stale_quote"
     assert record["exit_reason_canonical"] == "reconciliation"
+
+
+def test_hard_profit_lock_approved_at_threshold_floor():
+    """2026-10-05 incident: hard_profit_lock must pass the guard.
+
+    Live incident: DOGE NO@85, held-side bid 92c, every hard-lock intent was
+    rejected as exit_reason_not_allowed and the position rode to settlement.
+    The guard must now approve with the IOC limit anchored at the lock
+    threshold (fills >=90c or unfilled, never a faded 87c print).
+    """
+    position = _make_position()
+    state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+
+    approved, price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=92, state=state
+    )
+
+    assert approved is True
+    assert record["exit_reason_canonical"] == "hard_profit_lock"
+    assert record["exit_class"] == "emergency"
+    assert record["status"] == "approved"
+    assert record["limit_cents"] == 90  # threshold floor, not bid-minus-slippage
+    assert price == 90
+
+
+def test_hard_profit_lock_not_vetoed_by_model_hold_advantage():
+    """The winning-side hold veto must not silently neuter the lock.
+
+    The veto fires precisely when the model values the held side above the
+    bid - the same regime where a >=90c lock triggers.  The lock is a risk
+    rule: it takes realized profit over residual EV by design.
+    """
+    position = _make_position()
+    state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+
+    approved, _price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=92, state=state
+    )
+
+    assert approved is True
+    assert record.get("reject_reason") != "ev_hold_advantage"
+
+
+def test_hard_profit_lock_bypasses_discretionary_profit_floor():
+    """A marginal lock is not vetoed by the per-contract profit floor.
+
+    Entry 89c, bid 90c: net after fees may be below the discretionary floor,
+    but a mechanical risk rule does not have a minimum-profit requirement.
+    """
+    position = _make_position(avg_entry_price_cents=89)
+    from merid.event_venues.kalshi.position_cache import (
+        CachedPosition,
+        get_position_cache,
+    )
+
+    cache = get_position_cache()
+    cache._positions["KXBTC15M-26AUG100000-00"] = CachedPosition(
+        market_id="KXBTC15M-26AUG100000-00",
+        agent_id="test",
+        contracts=1,
+        side="no",
+        thesis_side="no",
+        avg_price_cents=89,
+    )
+    state = _make_state(no_bid=90, no_ask=91, age_ms=80)
+
+    approved, _price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=90, state=state
+    )
+
+    assert approved is True
+    assert record.get("reject_reason") != "profit_exit_not_profitable"
