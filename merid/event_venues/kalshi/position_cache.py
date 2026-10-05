@@ -2950,8 +2950,22 @@ class KalshiPositionCache:
                                 # leg poisoned monitor reconstruction with a
                                 # wrong-space basis -> phantom PnL -> bogus
                                 # exits.
-                                eps.entry_fill_price_cents = position_side_price if position_side_price else price_cents
-                                eps.entry_fill_timestamp = datetime.now(timezone.utc)
+                                # 2026-10-05: NEVER fall back to the canonical
+                                # leg price.  When the held-side price is
+                                # unavailable the record must stay unset —
+                                # restoring code treats a missing value as
+                                # unknown provenance, which is safe; a wrong-
+                                # space value is not.
+                                if position_side_price:
+                                    eps.entry_fill_price_cents = position_side_price
+                                    eps.entry_fill_timestamp = datetime.now(timezone.utc)
+                                else:
+                                    logger.warning(
+                                        "[POSITION-CACHE-PROVENANCE-SIDE-GUARD] market=%s "
+                                        "client_order_id=%s held-side entry price unavailable "
+                                        "(canonical leg=%s) - leaving provenance entry price unset",
+                                        market_id, client_order_id, price_cents,
+                                    )
                                 eps.entry_executable_bid_cents = entry_executable_bid_cents
                                 eps.entry_executable_ask_cents = entry_executable_ask_cents
                                 eps.entry_book_capture_quality = entry_book_capture_quality
@@ -4594,10 +4608,34 @@ class KalshiPositionCache:
         position.stop_loss_price_cents = (
             position.stop_loss_price_cents or snapshot.sl_price_cents
         )
+        # 2026-10-05: Held-side entry-price invariant.  The position's entry
+        # basis must always live in the held outcome side's price space
+        # (BUY_NO@73 stays held=NO entry=73, never leg-complement 27).  A
+        # provenance snapshot written with the canonical execution leg carries
+        # the complement; detect it by parity with the exchange-reported
+        # held-side average (leg + held == 100) and convert instead of
+        # restoring a wrong-space basis.
+        _snap_entry_price = (
+            snapshot.entry_fill_price_cents or snapshot.entry_price_cents
+        )
+        if (
+            _snap_entry_price
+            and position.avg_price_cents
+            and 0 < position.avg_price_cents < 100
+            and _snap_entry_price != position.avg_price_cents
+            and abs(_snap_entry_price + position.avg_price_cents - 100) <= 1
+        ):
+            logger.warning(
+                "[POSITION-CACHE-ENTRY-SPACE-FIX] market=%s provenance entry=%dc is the "
+                "complement of held-side avg=%dc - converting to held-side space (%dc)",
+                position.market_id,
+                _snap_entry_price,
+                position.avg_price_cents,
+                100 - _snap_entry_price,
+            )
+            _snap_entry_price = 100 - _snap_entry_price
         position.entry_fill_price_cents = (
-            position.entry_fill_price_cents
-            or snapshot.entry_fill_price_cents
-            or snapshot.entry_price_cents
+            position.entry_fill_price_cents or _snap_entry_price
         )
         position.entry_fill_timestamp = (
             position.entry_fill_timestamp or snapshot.entry_fill_timestamp
@@ -4636,10 +4674,12 @@ class KalshiPositionCache:
         position.confidence = position.confidence or "unknown"
 
         # Fall back to a trusted entry price if the REST price is missing/invalid.
+        # 2026-10-05: use the held-side-validated _snap_entry_price, never the
+        # raw snapshot field (see ENTRY-SPACE-FIX parity conversion above).
         if (
             position.avg_price_cents is None or position.avg_price_cents == 0
-        ) and snapshot.entry_fill_price_cents:
-            position.avg_price_cents = int(snapshot.entry_fill_price_cents)
+        ) and _snap_entry_price:
+            position.avg_price_cents = int(_snap_entry_price)
             position.entry_price_state = "provenance"
 
         return position
