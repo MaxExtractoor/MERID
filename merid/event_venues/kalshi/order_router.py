@@ -3130,7 +3130,11 @@ def resolve_bounded_lane_execution_policy(
     the equally-immutable taker contract; maker-posture intents keep the
     post-only contract the lanes were designed around.
     """
-    if decision_lane not in ("threshold_cell", "current_build_provisional"):
+    if decision_lane not in (
+        "threshold_cell",
+        "current_build_provisional",
+        "empirical_marginal_maker",
+    ):
         return None
     if not post_only:
         return ExecutionPolicy(
@@ -3149,6 +3153,19 @@ def resolve_bounded_lane_execution_policy(
             allow_taker_fallback=False,
             max_reprice_attempts=1,
             max_order_lifetime_s=60,
+        )
+    if decision_lane == "empirical_marginal_maker":
+        # Experiment A marginal-maker contract: an order admitted below the
+        # active bound on δ slack exists to measure whether the near-miss
+        # cohort is profitable — it must rest truly passive, never reprice
+        # into a marketable fill, and expire quickly if untouched.
+        return ExecutionPolicy(
+            lane="empirical_marginal_maker",
+            required_post_only=True,
+            required_liquidity_role="maker",
+            allow_taker_fallback=False,
+            max_reprice_attempts=0,
+            max_order_lifetime_s=45,
         )
     # current_build_provisional: same immutable post-only maker contract,
     # 45s resting life — a current-build measurement order that cannot
@@ -15506,7 +15523,20 @@ async def _route_live(
                 # Default for unknown assets
                 min_live_edge = EDGE_CANCEL_THRESHOLD_BTC
                 max_live_seconds = MAX_LIVE_SECONDS_RESTING_BTC
-            
+
+            # Experiment A: the marginal-maker contract caps resting life at
+            # the policy's short TTL — a sub-bound admission that cannot fill
+            # inside ~45s is a measurement answer, not a position to hold.
+            if getattr(intent, "decision_lane", None) == "empirical_marginal_maker":
+                max_live_seconds = min(
+                    max_live_seconds,
+                    getattr(
+                        getattr(intent, "execution_policy", None),
+                        "max_order_lifetime_s",
+                        45,
+                    ),
+                )
+
             if asset:
                 resting_order = RestingOrder(
                     order_id=intent.client_tag,

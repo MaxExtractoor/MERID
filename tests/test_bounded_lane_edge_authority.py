@@ -91,6 +91,9 @@ class TestBoundedLaneMembership:
             # 2026-10-02: queue-priced maker lane — admitted on bid-side
             # economics; stays inside the bounded post-only contract.
             "maker_bid",
+            # 2026-10-05 (Experiment A): bounded δ-slack marginal maker —
+            # bid-priced, 1-contract post-only, short resting life.
+            "empirical_marginal_maker",
         }
 
 

@@ -870,6 +870,72 @@ def _record_maker_bid_submission() -> int:
     return state["count"]
 
 
+# ── Experiment A: empirical_marginal_maker lane (2026-10-05) ────────────────
+# Controlled minimum-opportunity experiment: admit candidates that fall a
+# bounded δ≤0.5c short of the active maker requirement, priced at the bid
+# (truly non-marketable), inside 4-10min TTE and the 50-89c price band.
+# Runs only after the full-bound maker/maker_bid passes rejected, so every
+# emission needed the slack.  1 contract, one entry per asset per 15m
+# window, small daily cap, short resting life — incremental expectancy is
+# measured against the current policy, never imposed as a quota.
+MERID_EMM_LANE_ENABLED = os.environ.get(
+    "MERID_EMM_LANE_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes")
+MERID_EMM_DAILY_CAP = int(os.environ.get("MERID_EMM_DAILY_CAP", "8"))
+MERID_EMM_DAILY_FILE = os.environ.get(
+    "MERID_EMM_DAILY_FILE", "data/emm_lane.json"
+)
+MERID_EMM_TTE_LO_SECONDS = int(
+    os.environ.get("MERID_EMM_TTE_LO_SECONDS", "240")
+)
+MERID_EMM_TTE_HI_SECONDS = int(
+    os.environ.get("MERID_EMM_TTE_HI_SECONDS", "600")
+)
+MERID_EMM_MIN_SPREAD_CENTS = float(
+    os.environ.get("MERID_EMM_MIN_SPREAD_CENTS", "3.0")
+)
+
+# Per-asset one-entry-per-window dedupe: asset -> ticker of the 15m
+# contract the lane already submitted on (ticker IS the window identity).
+_emm_window_state: dict = {}
+_emm_window_lock = threading.Lock()
+
+
+def _emm_daily_state() -> dict:
+    """Read the EMM lane's UTC-day submission counter."""
+    try:
+        with open(MERID_EMM_DAILY_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if state.get("date") == datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+            return state
+    except Exception:
+        pass
+    return {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "count": 0}
+
+
+def _emm_under_daily_cap() -> bool:
+    return int(_emm_daily_state().get("count", 0)) < MERID_EMM_DAILY_CAP
+
+
+def _emm_window_open(asset: str, ticker: str) -> bool:
+    with _emm_window_lock:
+        return _emm_window_state.get(str(asset).upper()) != ticker
+
+
+def _record_emm_submission(asset: str, ticker: str) -> int:
+    with _emm_window_lock:
+        _emm_window_state[str(asset).upper()] = ticker
+    state = _emm_daily_state()
+    state["count"] = int(state.get("count", 0)) + 1
+    try:
+        Path(MERID_EMM_DAILY_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(MERID_EMM_DAILY_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+    return state["count"]
+
+
 def _fvg_edge_components(
     score: int,
     side_velocity_sign: float,
@@ -8628,6 +8694,72 @@ class LeanAgent15m:
                                 ).get(_k)
                             except Exception:
                                 pass
+                # Experiment A (2026-10-05): empirical_marginal_maker — the
+                # bounded near-miss lane.  Runs only after the full-bound
+                # maker/maker_bid passes rejected, so every emission needed
+                # the δ slack; stays post-only at the bid (truly
+                # non-marketable), 1-contract, short resting life.
+                if (
+                    decision.selected_outcome is None
+                    and MERID_EMM_LANE_ENABLED
+                    and _emm_under_daily_cap()
+                    and _emm_window_open(asset, ticker)
+                    and seconds_to_expiry is not None
+                    and MERID_EMM_TTE_LO_SECONDS
+                    <= float(seconds_to_expiry)
+                    <= MERID_EMM_TTE_HI_SECONDS
+                ):
+                    decision_emm = _call_trade_decision(
+                        maker_fee_cents, p_yes_model,
+                        route="empirical_marginal_maker",
+                        price_basis="bid",
+                        adv_sel_reserve=MERID_MAKER_BID_ADV_SEL_CENTS / 100.0,
+                    )
+                    _emm_side = (
+                        getattr(decision_emm, "selected_outcome", None)
+                        if decision_emm is not None
+                        else None
+                    )
+                    # Emit only when the side needed the slack — a candidate
+                    # that clears the full bound belongs to the maker lanes
+                    # already evaluated above.
+                    _emm_rescued = bool(
+                        _emm_side
+                        and (
+                            (
+                                (decision_emm.indicators or {}).get(
+                                    "marginal_band"
+                                )
+                                or {}
+                            ).get(f"{_emm_side}_rescued")
+                        )
+                    )
+                    if _emm_side is not None and _emm_rescued:
+                        _emm_spread = (
+                            (float(no_ask) - float(no_bid))
+                            if _emm_side == "no"
+                            else (float(yes_ask) - float(yes_bid))
+                        )
+                        if _emm_spread >= MERID_EMM_MIN_SPREAD_CENTS:
+                            decision = decision_emm
+                            liquidity_role = "maker"
+                            aggressiveness = 0.0
+                            post_only = True
+                            time_in_force = "gtc"
+                            execution_mode = "maker"
+                            fee_cents = maker_fee_cents
+                            _n_emm = _record_emm_submission(asset, ticker)
+                            logger.info(
+                                "[EMM-LANE] asset=%s side=%s spread=%.1fc "
+                                "net_edge=%.2fc lane submissions today=%d",
+                                asset, _emm_side, _emm_spread,
+                                float(decision_emm.net_edge or 0) * 100.0,
+                                _n_emm,
+                            )
+                        else:
+                            decision.indicators["emm_block"] = (
+                                f"spread:{_emm_spread:.1f}c"
+                            )
         else:
             decision = decision_taker
             liquidity_role = "taker"
@@ -8675,6 +8807,50 @@ class LeanAgent15m:
                 liquidity_role_eval=liquidity_role,
                 decision_reason=decision.no_trade_reason or ("selected" if decision.selected_outcome else "none"),
                 was_selected=bool(decision.selected_outcome == "no"),
+            )
+        except Exception:
+            pass
+
+        # Late-taker IOC research shadow (Experiment B, observe-only): every
+        # 2-4min evaluation is recorded with the executable ask, all-in
+        # taker fee, and regime reserves so a post-settlement join can
+        # calibrate the live IOC lane — 1s/5s/15s markouts and settlement
+        # P&L — before any order routes through it.  Never routes.
+        try:
+            from merid.prediction.late_taker_shadow import log_late_taker_shadow
+            from merid.prediction.directional_regime import bookflow_block_reason as _bf_reason
+            _fs = getattr(self, "_feature_snapshot", None)
+            _ind_t2 = (decision_taker.indicators or {}) if decision_taker is not None else {}
+            log_late_taker_shadow(
+                run_id=run_id,
+                decision_id=decision.decision_id,
+                asset=asset,
+                ticker=ticker,
+                yes_bid_cents=float(yes_bid),
+                yes_ask_cents=float(yes_ask),
+                no_bid_cents=float(no_bid),
+                no_ask_cents=float(no_ask),
+                yes_depth_cc=float(yes_depth_cc),
+                no_depth_cc=float(no_depth_cc),
+                p_yes_calibrated=float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
+                p_no_calibrated=float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
+                net_edge_taker_yes=float(decision_taker.yes_net_edge) if decision_taker is not None and decision_taker.yes_net_edge is not None else None,
+                net_edge_taker_no=float(decision_taker.no_net_edge) if decision_taker is not None and decision_taker.no_net_edge is not None else None,
+                taker_fee_cents=float(taker_fee_cents),
+                tte_seconds=float(seconds_to_expiry) if seconds_to_expiry is not None else None,
+                quote_age_ms=_quote_age_ms_for_decision,
+                rti_age_ms=_rti_age_ms_for_decision,
+                yes_admission_owner=_ind_t2.get("yes_admission_owner"),
+                no_admission_owner=_ind_t2.get("no_admission_owner"),
+                yes_bookflow_block=(
+                    _bf_reason(_fs, asset, "yes") if _fs is not None else None
+                ),
+                no_bookflow_block=(
+                    _bf_reason(_fs, asset, "no") if _fs is not None else None
+                ),
+                regime=regime,
+                decision_reason=decision.no_trade_reason or ("selected" if decision.selected_outcome else "none"),
+                was_selected=bool(decision.selected_outcome),
             )
         except Exception:
             pass
@@ -10812,6 +10988,38 @@ class LeanAgent15m:
                 "no_cell_required_edge_cents": _ind.get("no_cell_required_edge_cents"),
                 "yes_effective_required_edge_cents": _ind.get("yes_effective_required_edge_cents"),
                 "no_effective_required_edge_cents": _ind.get("no_effective_required_edge_cents"),
+                # Post-mutation enforced bound + gate comparison (2026-10-05):
+                # the effective/route fields are stamped after the caution
+                # margin and marginal-band slack so the record shows the bound
+                # the gate actually applied, the EV actually compared, and the
+                # true per-side shortfall against it.
+                "yes_route_required_edge_cents": _ind.get("yes_route_required_edge_cents"),
+                "no_route_required_edge_cents": _ind.get("no_route_required_edge_cents"),
+                "yes_effective_gate_edge_cents": _ind.get("yes_effective_gate_edge_cents"),
+                "no_effective_gate_edge_cents": _ind.get("no_effective_gate_edge_cents"),
+                "yes_gate_ev_cents": _ind.get("yes_gate_ev_cents"),
+                "no_gate_ev_cents": _ind.get("no_gate_ev_cents"),
+                "yes_true_shortfall_cents": _ind.get("yes_true_shortfall_cents"),
+                "no_true_shortfall_cents": _ind.get("no_true_shortfall_cents"),
+                "yes_fee_reserve_cents": _ind.get("yes_fee_reserve_cents"),
+                "no_fee_reserve_cents": _ind.get("no_fee_reserve_cents"),
+                "yes_impact_reserve_cents": _ind.get("yes_impact_reserve_cents"),
+                "no_impact_reserve_cents": _ind.get("no_impact_reserve_cents"),
+                "yes_model_uncertainty_reserve_cents": _ind.get("yes_model_uncertainty_reserve_cents"),
+                "no_model_uncertainty_reserve_cents": _ind.get("no_model_uncertainty_reserve_cents"),
+                "yes_adverse_selection_reserve_cents": _ind.get("yes_adverse_selection_reserve_cents"),
+                "no_adverse_selection_reserve_cents": _ind.get("no_adverse_selection_reserve_cents"),
+                "yes_caution_ev_margin_cents": _ind.get("yes_caution_ev_margin_cents"),
+                "no_caution_ev_margin_cents": _ind.get("no_caution_ev_margin_cents"),
+                "order_route": _ind.get("order_route"),
+                "entry_price_basis": _ind.get("entry_price_basis"),
+                "order_would_cross": _ind.get("order_would_cross"),
+                "selected_side_best_bid_cents": _ind.get("selected_side_best_bid_cents"),
+                "selected_side_best_ask_cents": _ind.get("selected_side_best_ask_cents"),
+                "effective_gate_edge_cents": _ind.get("effective_gate_edge_cents"),
+                "true_shortfall_to_active_requirement_cents": _ind.get("true_shortfall_to_active_requirement_cents"),
+                "edge_gate_bound_source": _ind.get("edge_gate_bound_source"),
+                "reject_reason_code": _ind.get("reject_reason_code"),
                 "yes_threshold_source": _ind.get("yes_threshold_source"),
                 "no_threshold_source": _ind.get("no_threshold_source"),
                 "yes_thr_cell_miss_reason": _ind.get("yes_thr_cell_miss_reason"),
@@ -10851,6 +11059,9 @@ class LeanAgent15m:
                 "evidence_yes": _ind.get("evidence_yes"),
                 "evidence_no": _ind.get("evidence_no"),
                 "decision_lane": _ind.get("decision_lane"),
+                "marginal_band_rescue": _ind.get("marginal_band_rescue"),
+                "empirical_marginal_maker": _ind.get("empirical_marginal_maker"),
+                "marginal_band": _ind.get("marginal_band"),
                 "yes_admission_owner": _ind.get("yes_admission_owner"),
                 "no_admission_owner": _ind.get("no_admission_owner"),
                 "admission_owner": _ind.get(
