@@ -457,6 +457,7 @@ _ENV_OVERRIDES.update({
         ("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "decimal", 1, 99),
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "int", 0, 60),
+        ("MERID_ENTRY_MAX_REQUOTES_PER_KEY", "int", 0, 5),
     )
 })
 
