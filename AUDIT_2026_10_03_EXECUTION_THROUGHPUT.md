@@ -194,3 +194,12 @@ The P0 fixes + P1-1 (deep-ITM lane) attack that asymmetry directly.
 | 5 | Shadow-EV in late_window_shadow, then TTE floor 120→90s balanced band | code+config | opens 30-120s pocket | med — use settlement distribution guard |
 | 6 | Strip concentration → per-asset scope; provisional caps 6→12/day | config | raises ceiling ~5x | low once 1-2 land |
 | 7 | Keep: band floors ≥180s on skewed, <35c tails closed, evidence gate, book/spot trust, 1c+ entry band on unvalidated cells | — | — | — |
+
+## Known issue (recorded 2026-10-05, out of exit-reliability scope)
+
+**Boundary discovery lag**: at 15m window rollover (~20s), some series drop
+from `market_state_store` (`COLLECT-SERIES-MISSING` for KXBTC15M/KXSOL15M at
+22:15Z while DOGE/ETH/XRP stayed). Candidates in that gap reject as
+`market_discovered: no market available from market state store` - an
+entry-availability issue, not an exit defect. Worth a dedicated look at
+series re-discovery/subscription timing at window boundaries.
