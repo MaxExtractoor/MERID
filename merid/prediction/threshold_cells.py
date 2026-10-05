@@ -782,11 +782,13 @@ def explain_cell_miss(
 CELL_STATE_PROVISIONAL = "PROVISIONAL"
 CELL_STATE_OBSERVATION = "OBSERVATION"
 CELL_STATE_SUSPENDED = "SUSPENDED"
+CELL_STATE_PROBATION = "PROBATION"
 CELL_STATE_PROMOTED = "PROMOTED"
 CELL_STATES = (
     CELL_STATE_PROVISIONAL,
     CELL_STATE_OBSERVATION,
     CELL_STATE_SUSPENDED,
+    CELL_STATE_PROBATION,
     CELL_STATE_PROMOTED,
 )
 
@@ -1040,6 +1042,81 @@ def _suspend_cell(cell_id: str, reason: str) -> None:
         set_cell_state(cell_id, CELL_STATE_SUSPENDED, reason)
 
 
+# 2026-10-05: SUSPENDED -> PROBATION controlled reset.  A historic suspension
+# for router mechanics (post-only cross / stale revalidation) is not evidence
+# the cell's signal is bad — but re-opening fully would repeat the same fills
+# risk that triggered the stop.  PROBATION keeps every provisional bound
+# (1-contract, bounded lane, all caps) while a fresh verified quote path is
+# exercised, and re-suspends on ONE new strike instead of two.  Strike and
+# outcome history are preserved — the reset only changes the state record.
+def probation_min_suspend_s() -> float:
+    """Minimum age a SUSPENDED record must reach before probation release."""
+    return _env_float("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", 3600.0)
+
+
+def probation_reset_cooldown_s() -> float:
+    """Cooldown after a *probation-triggered* re-suspension before the next
+    reset is permitted (longer than the initial-release floor)."""
+    return _env_float(
+        "MERID_THRESHOLD_CELL_PROBATION_RESET_COOLDOWN_S", 21600.0
+    )
+
+
+def probation_max_submissions_per_cell() -> int:
+    """Per-cell submissions/day while on PROBATION — tighter than the
+    provisional cap; one bounded probe per day is enough to re-verify."""
+    return _env_int("MERID_THRESHOLD_CELL_PROBATION_MAX_SUBMISSIONS", 1)
+
+
+def probation_reset_cell(
+    cell_id: str, reason: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
+    """SUSPENDED -> PROBATION release gate.
+
+    Returns ``(moved, block_reason)``.  Requires:
+      * the cell is currently SUSPENDED (PROVISIONAL/OBSERVATION/PROMOTED
+        cells have nothing to reset; an unknown state is an error);
+      * the suspension record is at least ``probation_min_suspend_s()`` old —
+        fresh suspensions are not recycled;
+      * if the suspension followed a *probation* strike, the longer
+        ``probation_reset_cooldown_s()`` applies instead.
+    History (``router_consecutive_rejects``, outcomes) is intentionally kept —
+    a probation release is a measured retry, not amnesty.
+    """
+    st = _load_state()
+    rec = (st.get("cell_states") or {}).get(cell_id) or {}
+    state = str(rec.get("state") or CELL_STATE_PROVISIONAL)
+    if state != CELL_STATE_SUSPENDED:
+        return False, f"not_suspended:{state}"
+    since = float(rec.get("since_ts") or 0.0)
+    age_s = time.time() - since if since > 0 else float("inf")
+    if rec.get("probation_triggered"):
+        required = probation_reset_cooldown_s()
+    else:
+        required = probation_min_suspend_s()
+    if age_s < required:
+        return False, f"probation_cooldown:{int(required - age_s)}s_remaining"
+    rec["probation_count"] = int(rec.get("probation_count") or 0) + 1
+    set_cell_state(
+        cell_id,
+        CELL_STATE_PROBATION,
+        reason or f"probation_release age_s={int(age_s)}",
+    )
+    # set_cell_state overwrote ``since_ts``/``reason`` but our pre-transition
+    # fields on the same record persist.  Flag this as an active probation
+    # so a fresh router strike lands the re-suspension cooldown above.
+    st = _load_state()
+    (st["cell_states"].setdefault(cell_id, {}))["on_probation"] = True
+    # The legacy consecutive-reject counter stays armed in
+    # _evaluate_suspension (consec >= 2) — the strikes that produced the
+    # suspension would re-suspend the cell on the next outcome event,
+    # defeating the release.  Clear the armed counter only; the lifetime
+    # ``router_rejects`` total, outcomes, and suspension reason are kept.
+    (st.setdefault("router_consecutive_rejects", {}))[cell_id] = 0
+    _save_state()
+    return True, None
+
+
 # ---------------------------------------------------------------------------
 # Counters / caps
 # ---------------------------------------------------------------------------
@@ -1188,7 +1265,11 @@ def record_cell_router_attempt(cell_id: str) -> None:
 
 def record_cell_router_reject(cell_id: str) -> None:
     """Post-only cross/reprice/venue reject; feeds the reject-rate rule and
-    the consecutive-reject emergency rule (two in a row -> suspend)."""
+    the consecutive-reject emergency rule (two in a row -> suspend).
+
+    2026-10-05: on PROBATION a single new strike re-suspends immediately —
+    the cell already burned its measured-retry allowance.
+    """
     if not cell_id:
         return
     st = _load_state()
@@ -1196,8 +1277,22 @@ def record_cell_router_reject(cell_id: str) -> None:
     rej[cell_id] = int(rej.get(cell_id) or 0) + 1
     consec = st.setdefault("router_consecutive_rejects", {})
     consec[cell_id] = int(consec.get(cell_id) or 0) + 1
+    _on_probation = bool(
+        (st.get("cell_states") or {}).get(cell_id, {}).get("on_probation")
+    )
     _save_state()
     bump_cell_funnel("router_rejected", cell_id)
+    if _on_probation:
+        st = _load_state()
+        rec = (st.get("cell_states") or {}).get(cell_id) or {}
+        rec["probation_triggered"] = True
+        rec["on_probation"] = False
+        _save_state()
+        _suspend_cell(
+            cell_id,
+            "probation_router_reject: one strike during probation",
+        )
+        return
     _evaluate_suspension(cell_id)
 
 
@@ -1617,6 +1712,14 @@ def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
         return False, "cell_suspended"
     if state not in CELL_STATES:
         return False, f"cell_state_unknown:{state}"
+    # PROBATION: controlled re-verification — one bounded submission/day
+    # instead of the ordinary per-cell cap; every other cap still applies.
+    if (
+        state == CELL_STATE_PROBATION
+        and cell_submissions_today_cell(cell_id)
+        >= probation_max_submissions_per_cell()
+    ):
+        return False, "probation_submission_cap"
     if cell_fills_today(cell_id) >= cell_daily_max_fills():
         return False, "cell_fills_cap_exhausted"
     if cell_fills_today_total() >= cell_daily_max_fills_total():
@@ -1688,7 +1791,11 @@ def threshold_cell_admission_allowed(
     if float(net_ev_cents) < float(effective_required_edge_cents):
         return False, "ev_below_cell_threshold"
     state = get_cell_state(cell_id)
-    if state not in (CELL_STATE_PROVISIONAL, CELL_STATE_OBSERVATION):
+    if state not in (
+        CELL_STATE_PROVISIONAL,
+        CELL_STATE_OBSERVATION,
+        CELL_STATE_PROBATION,
+    ):
         return False, f"cell_state_{state.lower()}"
     allowed, block = cell_admission(cell_id)
     if not allowed:

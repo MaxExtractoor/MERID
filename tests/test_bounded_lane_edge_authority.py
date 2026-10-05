@@ -94,6 +94,9 @@ class TestBoundedLaneMembership:
             # 2026-10-05 (Experiment A): bounded δ-slack marginal maker —
             # bid-priced, 1-contract post-only, short resting life.
             "empirical_marginal_maker",
+            # 2026-10-05: top-edge IOC canary — taker-evaluated admission;
+            # bounded-lane policy converts it to 1-contract IOC.
+            "canary_taker",
         }
 
 
