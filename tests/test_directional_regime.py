@@ -304,12 +304,28 @@ def test_strip_concentration_blocks_open_same_side(throttle_path):
     assert dr.strip_concentration_block("yes", 1.0, ts=now + 60) is None
 
 
-def test_strip_second_entry_needs_ev_margin(throttle_path):
+def test_strip_second_entry_needs_ev_margin(throttle_path, monkeypatch):
+    monkeypatch.setenv("MERID_STRIP_CONC_EV_MARGIN_CENTS", "3.0")
     now = 1_700_000_000.0
     dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
     dr.record_side_settlement("no", +20.0, ts=now + 30, decision_id="a")  # closes 'a'
     assert dr.strip_concentration_block("no", 7.0, ts=now + 60) == "strip_same_side_ev:no"
     assert dr.strip_concentration_block("no", 9.0, ts=now + 60) is None
+
+
+def test_strip_open_slots_take_any_positive_edge(throttle_path, monkeypatch):
+    """2026-10-05 relax: while same-side slots remain, the EV ladder does not
+    apply — a weaker candidate may stack beside a stronger open prior."""
+    monkeypatch.setenv("MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE", "3")
+    monkeypatch.setenv("MERID_STRIP_CONC_EV_MARGIN_CENTS", "3.0")
+    now = 1_700_000_000.0
+    dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
+    # Prior is still open: a 1c-EV entry below the 8c ladder proceeds (slot 2 of 3).
+    assert dr.strip_concentration_block("no", 1.0, ts=now + 60) is None
+    # Third open entry also fine — the cap fires only on the fourth.
+    dr.record_strip_entry("no", 1.0, ts=now + 61, decision_id="b")
+    dr.record_strip_entry("no", 1.0, ts=now + 62, decision_id="c")
+    assert dr.strip_concentration_block("no", 50.0, ts=now + 63) == "strip_same_side_open:no"
 
 
 def test_strip_window_rolls_over(throttle_path):

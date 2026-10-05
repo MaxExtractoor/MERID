@@ -199,16 +199,15 @@ def test_strip_default_serializes(throttle_path, monkeypatch):
 
 
 def test_strip_max_open_allows_second_concurrent(throttle_path, monkeypatch):
-    """max_open=2: a second same-side entry proceeds only if it beats the
-    prior best EV + margin; a third is blocked while two remain open."""
+    """2026-10-05 relax: max_open=2 — while a same-side slot remains, any
+    positive-EV entry may stack (no EV ladder); the cap binds at 2 open.
+    The ladder only gates re-entry after every prior has closed."""
     monkeypatch.setenv("MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE", "2")
+    monkeypatch.setenv("MERID_STRIP_CONC_EV_MARGIN_CENTS", "3.0")
     now = 1_699_999_800.0  # mid-strip: +120s stays inside the same 900s strip
     dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
-    # EV ladder: prior best 5.0 + margin 3.0 -> needs >= 8.0.
-    assert dr.strip_concentration_block("no", 7.0, ts=now + 60) == (
-        "strip_same_side_ev:no"
-    )
-    assert dr.strip_concentration_block("no", 9.0, ts=now + 60) is None
+    # Open slot remains: a weaker 7c entry stacks beside the 5c open prior.
+    assert dr.strip_concentration_block("no", 7.0, ts=now + 60) is None
 
     dr.record_strip_entry("no", 9.0, ts=now + 60, decision_id="b")
     # Two open now -> third blocked regardless of EV.
