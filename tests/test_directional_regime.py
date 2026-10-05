@@ -386,6 +386,87 @@ def test_caution_expires_and_win_clears(throttle_path):
     assert dr.side_lane_state("no", now=1_000_101.0) == "OPEN"
 
 
+def test_caution_scoped_to_asset_lane(throttle_path):
+    """A SOL NO loss cautions sol:no only — other assets' NO flow is clear."""
+    dr.record_side_settlement("no", -50.0, ts=1_000_000.0,
+                              decision_id="d1", asset="sol")
+    assert dr.side_caution_margin_cents("no", now=1_000_001.0,
+                                        asset="sol") == pytest.approx(2.0)
+    assert dr.side_lane_state("no", now=1_000_001.0, asset="sol") == "CAUTION"
+    # Other lanes see no margin; unattributed reads see no global caution.
+    assert dr.side_caution_margin_cents("no", now=1_000_001.0,
+                                        asset="eth") == 0.0
+    assert dr.side_caution_margin_cents("no", now=1_000_001.0) == 0.0
+    assert dr.side_lane_state("no", now=1_000_001.0, asset="eth") == "OPEN"
+
+
+def test_caution_ttl_one_window(throttle_path, monkeypatch):
+    """Caution lasts one 15-min window by default."""
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_CAUTION_S", raising=False)
+    dr.record_side_settlement("no", -50.0, ts=1_000_000.0,
+                              decision_id="d1", asset="sol")
+    assert dr.side_caution_margin_cents("no", now=1_000_899.0,
+                                        asset="sol") == pytest.approx(2.0)
+    assert dr.side_caution_margin_cents("no", now=1_000_901.0,
+                                        asset="sol") == 0.0
+
+
+def test_windowed_suspension_scoped_to_lane(throttle_path):
+    """Two consecutive losses on one lane suspend that lane only."""
+    now = 1_000_000.0
+    dr.record_side_settlement("no", -50.0, ts=now - 100,
+                              decision_id="d1", asset="sol")
+    dr.record_side_settlement("no", -30.0, ts=now,
+                              decision_id="d2", asset="sol")
+    blk = dr.side_throttle_block("no", now=now + 1, asset="sol")
+    assert blk and "side_suspended" in blk
+    assert dr.side_throttle_block("no", now=now + 1, asset="eth") is None
+    # Unattributed read sees no whole-side suspension.
+    assert dr.side_throttle_block("no", now=now + 1) is None
+
+
+def test_mixed_asset_losses_do_not_suspend(throttle_path):
+    """Losses on different lanes earn their own cautions, not a suspension."""
+    now = 1_000_000.0
+    dr.record_side_settlement("no", -50.0, ts=now - 100,
+                              decision_id="d1", asset="sol")
+    dr.record_side_settlement("no", -30.0, ts=now,
+                              decision_id="d2", asset="eth")
+    assert dr.side_throttle_block("no", now=now + 1, asset="sol") is None
+    assert dr.side_throttle_block("no", now=now + 1, asset="eth") is None
+    assert dr.side_caution_margin_cents("no", now=now + 1,
+                                        asset="sol") == pytest.approx(2.0)
+    assert dr.side_caution_margin_cents("no", now=now + 1,
+                                        asset="eth") == pytest.approx(2.0)
+
+
+def test_epoch_review_tier_stays_global(throttle_path):
+    """3 consecutive same-side losses across assets = systemic -> global review."""
+    now = 1_000_000.0
+    dr.record_side_settlement("no", -10.0, ts=now - 7200,
+                              decision_id="d1", asset="sol")
+    dr.record_side_settlement("no", -20.0, ts=now - 3700,
+                              decision_id="d2", asset="eth")
+    dr.record_side_settlement("no", -30.0, ts=now,
+                              decision_id="d3", asset="btc")
+    blk = dr.side_throttle_block("no", now=now + 1, asset="xrp")
+    assert blk and "manual_review" in blk
+
+
+def test_lane_win_clears_only_own_caution(throttle_path):
+    now = 1_000_000.0
+    dr.record_side_settlement("no", -50.0, ts=now,
+                              decision_id="d1", asset="sol")
+    dr.record_side_settlement("no", -40.0, ts=now,
+                              decision_id="d2", asset="eth")
+    dr.record_side_settlement("no", +10.0, ts=now + 30,
+                              decision_id="d3", asset="sol")
+    assert dr.side_caution_margin_cents("no", now=now + 31,
+                                        asset="sol") == 0.0
+    assert dr.side_caution_margin_cents("no", now=now + 31,
+                                        asset="eth") == pytest.approx(2.0)
+
+
 def test_release_watermark_restarts_streak(throttle_path):
     """Operator release: pre-release losses no longer count toward tiers."""
     now = 1_000_000.0

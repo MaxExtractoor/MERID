@@ -24,11 +24,15 @@ This module supplies four shared, deterministic controls consumed by
    |p_cal - 0.5| must clear ``MERID_CONVICTION_MIN_DIST_<ASSET>``.  A coin-flip
    read (BTC NO at p=0.501) cannot be a directional trade.
 
-4. ``SideThrottle`` — persisted same-side loss-streak suspension and
-   per-strip same-direction concentration cap.  Two same-side settled losses
-   inside 60 minutes suspend that side for 60 minutes; three suspend it
-   until manual review or the next policy epoch.  ``data/directional_throttle.json``
-   is written atomically (tmp + replace).
+4. ``SideThrottle`` — persisted loss-streak suspension and per-strip
+   same-direction concentration cap.  The routine tiers are lane-scoped
+   (``{asset}:{side}``): one settled loss cautions the offending lane
+   (+margin for one 15-min window), two consecutive same-lane losses inside
+   60 minutes suspend that lane for 60 minutes.  The epoch tier stays
+   global: three consecutive same-side losses anywhere suspend the whole
+   side until manual review or the next policy epoch — that is systemic
+   directional evidence, not a lane problem.
+   ``data/directional_throttle.json`` is written atomically (tmp + replace).
 
 Adverse-selection conditioning lives in
 ``current_build_provisional.adverse_selection_reserve_cents`` (regime-aware
@@ -559,7 +563,9 @@ def _catastrophe_ttl_s() -> float:
 
 
 def _caution_ttl_s() -> float:
-    return _env_float("MERID_SIDE_THROTTLE_CAUTION_S", 3600.0)
+    # One 15-min window by default: the loss is evidence about that lane's
+    # current calibration; the next window is a new contract.
+    return _env_float("MERID_SIDE_THROTTLE_CAUTION_S", 900.0)
 
 
 def _caution_ev_margin_cents() -> float:
@@ -629,19 +635,23 @@ def _streak(
     now: float,
     window_s: Optional[float],
     since_ts: float = 0.0,
+    asset: Optional[str] = None,
 ) -> int:
-    """Trailing consecutive settled losses for ``side``.
+    """Trailing consecutive settled losses for ``side`` (optionally one asset).
 
-    A win on that side breaks the run; other-side outcomes are ignored.
-    ``window_s=None`` counts the epoch-wide run (for the manual-review tier);
-    a finite window bounds the 60-minute suspension tier — losses older than
-    the window no longer count toward it.  ``since_ts`` is the operator
-    release watermark: settlements at or before it are review history and do
-    not count toward re-suspension (release = fresh-start semantics).
+    A win on that side (same asset when ``asset`` is given) breaks the run;
+    other-side outcomes are ignored.  ``window_s=None`` counts the
+    epoch-wide run (for the manual-review tier); a finite window bounds the
+    60-minute suspension tier — losses older than the window no longer
+    count toward it.  ``since_ts`` is the operator release watermark:
+    settlements at or before it are review history and do not count toward
+    re-suspension (release = fresh-start semantics).
     """
     streak = 0
     for rec in reversed(list(settlements or [])):
         if rec.get("side") != side:
+            continue
+        if asset is not None and rec.get("asset") != asset:
             continue
         rts = float(rec.get("ts") or 0.0)
         if rts <= since_ts:
@@ -667,6 +677,7 @@ def record_side_settlement(
     pnl_cents: Optional[float],
     ts: Optional[float] = None,
     decision_id: Optional[str] = None,
+    asset: Optional[str] = None,
 ) -> None:
     """Record a settled entry outcome for streak/concentration accounting.
 
@@ -674,17 +685,26 @@ def record_side_settlement(
     every settled decision passes through).  Maintains the rolling loss
     streak and applies the graded state machine:
 
-      first post-release settled loss -> ``CAUTION`` for
-          ``MERID_SIDE_THROTTLE_CAUTION_S`` (3600s): the side stays open but
-          its required edge is raised by
+      first post-release settled loss -> ``CAUTION`` on the offending
+          ``{asset}:{side}`` lane for ``MERID_SIDE_THROTTLE_CAUTION_S``
+          (900s — one 15-min window): the lane stays open but its required
+          edge is raised by
           ``MERID_SIDE_THROTTLE_CAUTION_EV_CENTS`` (default 2.0c).  An
-          ordinary one-off loss is signal noise, not proof of a broken lane.
-      >= ``MERID_SIDE_THROTTLE_SUSPEND_COUNT`` (2) consecutive same-side
-          losses inside ``MERID_SIDE_THROTTLE_LOSS_WINDOW_S`` (3600s)
-          -> suspend that side for ``MERID_SIDE_THROTTLE_SUSPEND_S`` (3600s).
+          ordinary one-off loss is signal noise about that lane's current
+          calibration, not proof of a broken side — one SOL NO loss must
+          not tax BTC/ETH/XRP/DOGE NO flow (same scope rule as the
+          catastrophe path).  Settlements without asset attribution fall
+          back to the legacy whole-side key (fail-closed).
+      >= ``MERID_SIDE_THROTTLE_SUSPEND_COUNT`` (2) consecutive losses on the
+          same ``{asset}:{side}`` lane inside
+          ``MERID_SIDE_THROTTLE_LOSS_WINDOW_S`` (3600s)
+          -> suspend that lane for ``MERID_SIDE_THROTTLE_SUSPEND_S``
+          (3600s).  Cross-asset losses earn their own lanes' caution but do
+          not compound into a suspension.
       >= ``MERID_SIDE_THROTTLE_REVIEW_COUNT`` (3) consecutive same-side
-          losses post-release -> suspend until manual review or the next
-          policy epoch.
+          losses post-release across ANY asset -> suspend the whole side
+          until manual review or the next policy epoch.  This is the
+          systemic-directional-failure tier and stays global.
 
     Streaks count only settlements after ``released_at[side]`` — an operator
     release is an explicit reviewed restart, not a continuation of the run
@@ -693,11 +713,19 @@ def record_side_settlement(
     if not throttle_enabled() or side not in ("yes", "no"):
         return
     ts = float(ts or time.time())
+    asset_key = str(asset).lower() if asset else None
+    scope_key = f"{asset_key}:{side}" if asset_key else side
     pnl = float(pnl_cents or 0.0)
     with _THROTTLE_LOCK:
         st = _load_throttle_state(force=True)
         st["recent_settlements"].append(
-            {"ts": ts, "side": side, "pnl": pnl, "decision_id": decision_id}
+            {
+                "ts": ts,
+                "side": side,
+                "pnl": pnl,
+                "decision_id": decision_id,
+                "asset": asset_key,
+            }
         )
         st["recent_settlements"] = st["recent_settlements"][-300:]
         # close any open strip entries for this decision
@@ -707,9 +735,14 @@ def record_side_settlement(
                     e["open"] = False
         window = _loss_window_s()
         released = _released_ts(st, side)
+        # Windowed suspension tier counts only the same lane when the loss is
+        # asset-attributed; unattributed losses keep the whole-side count.
         streak_window = _streak(
-            st["recent_settlements"], side, ts, window, since_ts=released
+            st["recent_settlements"], side, ts, window,
+            since_ts=released, asset=asset_key,
         )
+        # The epoch review tier stays global: N consecutive same-side losses
+        # anywhere is systemic directional evidence, not a lane problem.
         streak_epoch = _streak(
             st["recent_settlements"], side, ts, None, since_ts=released
         )
@@ -726,34 +759,34 @@ def record_side_settlement(
                 side, streak_epoch,
             )
         elif pnl < 0 and streak_window >= _loss_suspend_count():
-            st["suspensions"][side] = {
+            st["suspensions"][scope_key] = {
                 "until": ts + _loss_suspend_seconds(),
                 "reason": f"{streak_window}_consecutive_losses",
                 "triggered_at": ts,
             }
-            st.setdefault("cautions", {}).pop(side, None)
+            st.setdefault("cautions", {}).pop(scope_key, None)
             logger.warning(
-                "[SIDE-THROTTLE] side=%s suspended %.0fs "
+                "[SIDE-THROTTLE] scope=%s suspended %.0fs "
                 "(%d consecutive losses in %.0fs window)",
-                side, _loss_suspend_seconds(), streak_window, window,
+                scope_key, _loss_suspend_seconds(), streak_window, window,
             )
         elif pnl < 0:
-            st.setdefault("cautions", {})[side] = {
+            st.setdefault("cautions", {})[scope_key] = {
                 "until": ts + _caution_ttl_s(),
                 "reason": f"{streak_epoch}_post_release_loss",
                 "triggered_at": ts,
             }
             logger.info(
-                "[SIDE-THROTTLE] side=%s CAUTION %.0fs — edge floor +%.1fc "
+                "[SIDE-THROTTLE] scope=%s CAUTION %.0fs — edge floor +%.1fc "
                 "(post-release loss streak=%d)",
-                side, _caution_ttl_s(), _caution_ev_margin_cents(),
+                scope_key, _caution_ttl_s(), _caution_ev_margin_cents(),
                 streak_epoch,
             )
         else:
-            # A win/push breaks the run and clears caution; timed suspensions
-            # stay on their clock (deliberate: a fast win does not erase the
-            # evidence that produced the suspension).
-            (st.get("cautions") or {}).pop(side, None)
+            # A win/push breaks the run and clears this lane's caution; timed
+            # suspensions stay on their clock (deliberate: a fast win does
+            # not erase the evidence that produced the suspension).
+            (st.get("cautions") or {}).pop(scope_key, None)
         _save_throttle_state(st)
 
 
@@ -772,13 +805,18 @@ def release_side(side: str, ts: Optional[float] = None) -> None:
         st = _load_throttle_state(force=True)
         (st.get("suspensions") or {}).pop(side, None)
         (st.get("cautions") or {}).pop(side, None)
-        # Clear any asset-scoped suspensions for this side too — an operator
-        # release covers the whole side surface.
+        # Clear any asset-scoped suspensions/cautions for this side too — an
+        # operator release covers the whole side surface.
         for _k in [
             k for k in (st.get("suspensions") or {})
             if k.endswith(f":{side}")
         ]:
             st["suspensions"].pop(_k, None)
+        for _k in [
+            k for k in (st.get("cautions") or {})
+            if k.endswith(f":{side}")
+        ]:
+            st["cautions"].pop(_k, None)
         st.setdefault("released_at", {})[side] = ts
         _save_throttle_state(st)
     logger.warning(
@@ -878,24 +916,32 @@ def side_throttle_block(
     return None
 
 
-def side_caution_margin_cents(side: str, now: Optional[float] = None) -> float:
-    """Additive edge-floor margin while ``side`` is in the CAUTION tier.
+def side_caution_margin_cents(
+    side: str,
+    now: Optional[float] = None,
+    asset: Optional[str] = None,
+) -> float:
+    """Additive edge-floor margin while the lane is in the CAUTION tier.
 
-    CAUTION is not a suspension — the side keeps trading, but each candidate
+    CAUTION is not a suspension — the lane keeps trading, but each candidate
     must clear ``min_edge + margin`` until the caution expires or a win
-    resets the streak.
+    resets the streak.  Checks the whole-side key plus the scoped
+    ``"{asset}:{side}"`` key when ``asset`` is supplied — an asset-scoped
+    caution taxes only its own lane.
     """
     if not throttle_enabled() or side not in ("yes", "no"):
         return 0.0
     now = float(now or time.time())
     st = _load_throttle_state()
-    caution = (st.get("cautions") or {}).get(side)
-    if not caution:
-        return 0.0
-    until = caution.get("until")
-    if until is None or now >= float(until):
-        return 0.0
-    return _caution_ev_margin_cents()
+    cautions = st.get("cautions") or {}
+    for key in _suspension_keys(side, asset):
+        caution = cautions.get(key)
+        if not caution:
+            continue
+        until = caution.get("until")
+        if until is not None and now < float(until):
+            return _caution_ev_margin_cents()
+    return 0.0
 
 
 def side_lane_state(
@@ -918,7 +964,7 @@ def side_lane_state(
             return "MANUAL_REVIEW"
         if now < float(until):
             return "SUSPENDED"
-    if side_caution_margin_cents(side, now) > 0.0:
+    if side_caution_margin_cents(side, now, asset=asset) > 0.0:
         return "CAUTION"
     return "OPEN"
 

@@ -1484,7 +1484,8 @@ class DecisionAuditLedger:
             return
 
         drow = conn.execute(
-            "SELECT selected_side FROM strategy_decisions WHERE decision_id = ?",
+            "SELECT selected_side, asset FROM strategy_decisions "
+            "WHERE decision_id = ?",
             (decision_id,),
         ).fetchone()
         if drow is None or not drow["selected_side"]:
@@ -1547,6 +1548,7 @@ class DecisionAuditLedger:
                 _net_pnl_cents,
                 ts=time.time(),
                 decision_id=decision_id,
+                asset=(str(drow["asset"]).lower() if drow["asset"] else None),
             )
         except Exception as exc:
             logger.debug(
