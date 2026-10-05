@@ -282,3 +282,94 @@ class TestCachedPositionProceedsBasedPnL:
         # half of -1.00 cost = -0.50; realized = 0.60 + (-0.50) = 0.10
         assert float(pos.realized_pnl_usd) == pytest.approx(0.10)
         assert float(pos.entry_cash_proceeds_usd) == pytest.approx(-0.50)
+
+
+class TestHeldSideEntryPriceInvariant:
+    """2026-10-05: provenance restore must never leak the canonical execution
+    leg into the held-side entry basis.
+
+    Incident: a BUY_NO @73c fill stored its canonical leg as SELL_YES @27c.
+    A rehydration path restored entry_fill_price=27 onto a position whose
+    held-side REST average was 73 -> wrong-space basis -> TP/SL math off by
+    46c.  The restore must detect leg-vs-held parity (sum == 100) and convert.
+    """
+
+    def _position(self, side: str = "no", avg: int = 73) -> CachedPosition:
+        return CachedPosition(
+            market_id="KXBTC15M-PROV-INVARIANT",
+            agent_id="test",
+            thesis_side=side,
+            contracts=1,
+            side=side,
+            avg_price_cents=avg,
+            realized_pnl_usd=Decimal("0"),
+            unrealized_pnl_usd=Decimal("0"),
+        )
+
+    def _snapshot(self, entry_fill_price_cents=None, entry_price_cents=None):
+        return SimpleNamespace(
+            snapshot_id="snap-1",
+            tp_policy_id=None,
+            tp_policy_version=None,
+            sl_policy_id=None,
+            sl_policy_version=None,
+            client_order_id="co-1",
+            fill_id="fill-1",
+            order_id="ord-1",
+            tp_price_cents=None,
+            take_profit_r_multiple=None,
+            stop_loss_enabled=False,
+            sl_price_cents=None,
+            entry_fill_price_cents=entry_fill_price_cents,
+            entry_price_cents=entry_price_cents,
+            entry_fill_timestamp=None,
+            entry_executable_bid_cents=None,
+            entry_executable_ask_cents=None,
+            entry_book_capture_quality="UNKNOWN",
+            entry_book_timestamp=None,
+            entry_book_sequence=None,
+            entry_book_source=None,
+            entry_fair_value=None,
+            entry_market_value=None,
+            entry_edge=None,
+            exit_policy_id=None,
+        )
+
+    def test_leg_complement_converted_to_held_side(self):
+        """NO position, held avg=73, snapshot carries leg 27 -> restored as 73."""
+        cache = KalshiPositionCache()
+        pos = self._position(side="no", avg=73)
+        pos = cache._apply_provenance_snapshot_to_cached_position(
+            pos, self._snapshot(entry_fill_price_cents=27), complete=True
+        )
+        assert pos.entry_fill_price_cents == 73, (
+            f"complement leg leaked into held-side basis: {pos.entry_fill_price_cents}"
+        )
+
+    def test_held_side_price_unchanged(self):
+        """Snapshot that already carries the held-side price stays unchanged."""
+        cache = KalshiPositionCache()
+        pos = self._position(side="no", avg=73)
+        pos = cache._apply_provenance_snapshot_to_cached_position(
+            pos, self._snapshot(entry_fill_price_cents=73), complete=True
+        )
+        assert pos.entry_fill_price_cents == 73
+
+    def test_yes_side_complement_converted(self):
+        """YES position, held avg=37, snapshot leg=63 -> restored as 37."""
+        cache = KalshiPositionCache()
+        pos = self._position(side="yes", avg=37)
+        pos = cache._apply_provenance_snapshot_to_cached_position(
+            pos, self._snapshot(entry_fill_price_cents=63), complete=True
+        )
+        assert pos.entry_fill_price_cents == 37
+
+    def test_non_complement_price_not_flipped(self):
+        """A snapshot price that is NOT the complement must not be converted —
+        an honestly divergent basis is a BASIS_DISPUTED concern, not leg confusion."""
+        cache = KalshiPositionCache()
+        pos = self._position(side="no", avg=73)
+        pos = cache._apply_provenance_snapshot_to_cached_position(
+            pos, self._snapshot(entry_fill_price_cents=70), complete=True
+        )
+        assert pos.entry_fill_price_cents == 70
