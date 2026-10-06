@@ -4694,6 +4694,9 @@ def compute_trade_decision(
                 }
         if _canary_side is not None:
             indicators["canary_taker"] = {
+                # The record key predates the maker-route canary; the lane
+                # name inside disambiguates canary_taker vs canary_maker.
+                "lane": _canary_route_lane,
                 "side": _canary_side,
                 "gate_ev_cents": _canary_edge * 100.0,
                 "full_bound_cents": (
@@ -4746,6 +4749,19 @@ def compute_trade_decision(
             yes_breakdown if _canary_side == "yes" else no_breakdown
         )
         indicators["decision_lane"] = _canary_route_lane
+        # 2026-10-06: a canary admission is enforced against the lane's own
+        # floor, not the route bound it under-cleared.  Restamp the admission
+        # bound so the allocator's lane-bound re-check and the loop's
+        # executable-cost re-gate compare against the floor the candidate was
+        # actually admitted under.  Without this the stamp stayed at the
+        # post-caution route bound and every canary selection was guaranteed
+        # to die downstream as EXPECTED_VALUE_BELOW_MINIMUM — a dead lane
+        # that still emitted selected=1 telemetry.  The superseded route
+        # bound remains recorded under indicators[f"canary_*"]["full_bound_cents"]
+        # and the gate-verdict columns still show the enforced-route verdict.
+        indicators[f"{_canary_side}_effective_required_edge_cents"] = (
+            MERID_CANARY_MIN_EDGE * 100.0
+        )
     else:
         # No side qualifies.  Determine the most informative rejection reason.
         if best_side is None:

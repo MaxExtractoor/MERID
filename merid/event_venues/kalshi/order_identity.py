@@ -156,6 +156,28 @@ def _build_record(
     # be audited back to the feed that owned its entry quote.
     payload["quote_owner"] = getattr(intent, "quote_owner", None)
     payload["degraded_mode"] = bool(getattr(intent, "degraded_mode", False))
+    # 2026-10-06: persist the requested order parameters readably.  The
+    # fingerprint hashes them but is opaque; the attempt row must answer
+    # "what was actually submitted" (e.g. 3-contract sizing vs 1-contract
+    # fill) without replaying logs.
+    try:
+        _count_fp = getattr(intent, "count_fp", None)
+        if _count_fp is None:
+            _count_fp = Decimal(getattr(intent, "count", 0) or 0)
+        else:
+            _count_fp = Decimal(_count_fp)
+    except Exception:
+        _count_fp = Decimal("0")
+    payload["order"] = {
+        "ticker": str(getattr(intent, "ticker", "") or ""),
+        "action": str(getattr(intent, "action", "") or "").lower(),
+        "side": str(getattr(intent, "side", "") or "").lower(),
+        "price_cents": int(getattr(intent, "price_cents", 0) or 0),
+        "count_fp": f"{_count_fp:.6f}",
+        "tif": _resolve_tif(intent),
+        "decision_lane": getattr(intent, "decision_lane", None),
+        "liquidity_role": getattr(intent, "liquidity_role", None),
+    }
     return OrderAttemptRecord(
         order_attempt_id=order_attempt_id,
         client_order_id=client_order_id,

@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS strategy_decision_side_ev (
     passed_edge_gate INTEGER NOT NULL DEFAULT 0,
     gate_ev_cents REAL,
     enforced_edge_bound_cents REAL,
+    decision_lane TEXT,
     PRIMARY KEY (decision_id, side)
 );
 
@@ -257,6 +258,10 @@ DECISION_EVENT_CANDIDATE_OBSERVED = "CANDIDATE_OBSERVED"
 DECISION_EVENT_PRE_DECISION_REJECTED = "PRE_DECISION_REJECTED"
 DECISION_EVENT_MODEL_REJECTED = "MODEL_REJECTED"
 DECISION_EVENT_MODEL_SELECTED = "MODEL_SELECTED"
+# A bounded lane's own emission budget (daily cap / per-asset-window dedupe)
+# suppressed a model selection before a candidate was emitted — distinct from
+# ALLOCATION_REJECTED because the allocator never saw it.
+DECISION_EVENT_LANE_SUPPRESSED = "LANE_SUPPRESSED"
 DECISION_EVENT_ALLOCATION_REJECTED = "ALLOCATION_REJECTED"
 DECISION_EVENT_RISK_REJECTED = "RISK_REJECTED"
 DECISION_EVENT_COOLDOWN_REJECTED = "COOLDOWN_REJECTED"
@@ -393,6 +398,11 @@ class DecisionAuditLedger:
         # named components (marginal-band slack, EPC lift).
         _add_column(conn, "strategy_decision_side_ev", "gate_ev_cents", "REAL")
         _add_column(conn, "strategy_decision_side_ev", "enforced_edge_bound_cents", "REAL")
+        # 2026-10-06: the lane that admitted the candidate (decision-level).
+        # selected=1 & passed_edge_gate=0 is legible once the admission lane
+        # is recorded — a bounded lane (canary_maker, threshold_cell, ...)
+        # can admit a side below the full enforced-route bound.
+        _add_column(conn, "strategy_decision_side_ev", "decision_lane", "TEXT")
 
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
@@ -2637,8 +2647,9 @@ class DecisionAuditLedger:
                         counterfactual_fee_model_version,
                         counterfactual_slippage_model_version,
                         counterfactual_fill_model_version,
-                        gate_ev_cents, enforced_edge_bound_cents
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        gate_ev_cents, enforced_edge_bound_cents,
+                        decision_lane
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -2681,6 +2692,7 @@ class DecisionAuditLedger:
                         side_row.get("counterfactual_fill_model_version"),
                         side_row.get("gate_ev_cents"),
                         side_row.get("enforced_edge_bound_cents"),
+                        side_row.get("decision_lane"),
                     ),
                 )
 
@@ -2993,6 +3005,11 @@ def _build_side_ev_row(
         "passed_edge_gate": bool(passed_edge),
         "gate_ev_cents": _gate_ev_cents,
         "enforced_edge_bound_cents": _enforced_bound_cents,
+        # The admission lane is decision-level (a canary/bounded lane admits
+        # the selected side below the full enforced-route bound) — stamping it
+        # per row makes `selected=1 AND passed_edge_gate=0` interpretable
+        # instead of contradictory.
+        "decision_lane": indicators.get("decision_lane"),
         "admission_owner": indicators.get(f"{side}_admission_owner"),
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),

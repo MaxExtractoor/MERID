@@ -9181,6 +9181,40 @@ class LeanAgent15m:
                         int(_canary_daily_state().get("count", 0)),
                         MERID_CANARY_DAILY_CAP,
                     )
+                    # 2026-10-06: the decision row already persisted
+                    # selected=1 — without this event the selection vanished
+                    # with no downstream trace (observed 2026-10-06 for two
+                    # DOGE canary selections).  Emit the terminal event so the
+                    # funnel is fully attributable.
+                    try:
+                        from merid.execution.decision_audit_ledger import (
+                            get_decision_audit_ledger,
+                        )
+                        get_decision_audit_ledger().append_decision_event(
+                            decision_id=str(
+                                getattr(decision, "decision_id", "") or ""
+                            ),
+                            event_type="LANE_SUPPRESSED",
+                            stage="ALLOCATION",
+                            reason_code="canary_daily_cap_or_window",
+                            reason_detail={
+                                "side": decision.selected_outcome,
+                                "lane": _decision_lane,
+                                "ticker": _ticker_now,
+                                "canary_count_today": int(
+                                    _canary_daily_state().get("count", 0)
+                                ),
+                                "canary_daily_cap": MERID_CANARY_DAILY_CAP,
+                            },
+                            trace_id=str(
+                                getattr(decision, "decision_id", "") or ""
+                            ),
+                            run_id=decision.indicators.get("run_id"),
+                            ticker=_ticker_now,
+                            asset=asset,
+                        )
+                    except Exception:
+                        pass
                     decision = replace(
                         decision,
                         selected_outcome=None,
@@ -9765,6 +9799,12 @@ class LeanAgent15m:
             "provisional_tte_bucket": _ind.get("provisional_tte_bucket"),
             "legacy_risk_label": _ind.get(f"{str(side).lower()}_legacy_risk_label"),
             "effective_required_edge_cents": _ind.get(f"{str(side).lower()}_effective_required_edge_cents"),
+            # 2026-10-06: the edge quantity the qualification gate actually
+            # compared (EPC-adjusted, slack-rescued).  The allocator's lane
+            # re-check must compare this same quantity — using raw edge_pct
+            # re-vetoes EPC-rescued candidates a second time on a different
+            # economic metric than the one they were admitted under.
+            "gate_ev_cents": _ind.get(f"{str(side).lower()}_gate_ev_cents"),
         }
 
     def _generate_price_based_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
@@ -18327,6 +18367,7 @@ class LeanAgent15m:
                 "cell_required_edge_cents": signal.get("cell_required_edge_cents"),
                 "provisional_required_edge_cents": signal.get("provisional_required_edge_cents"),
                 "effective_required_edge_cents": signal.get("effective_required_edge_cents"),
+                "gate_ev_cents": signal.get("gate_ev_cents"),
                 "provisional_price_bucket": signal.get("provisional_price_bucket"),
                 "provisional_tte_bucket": signal.get("provisional_tte_bucket"),
                 "legacy_risk_label": signal.get("legacy_risk_label"),
@@ -20279,6 +20320,12 @@ class LeanAgentGrid15m:
                         effective_required_edge_cents=(
                             float(candidate['effective_required_edge_cents'])
                             if candidate.get('effective_required_edge_cents') is not None
+                            else None
+                        ),
+
+                        gate_ev_cents=(
+                            float(candidate['gate_ev_cents'])
+                            if candidate.get('gate_ev_cents') is not None
                             else None
                         ),
 
