@@ -1039,6 +1039,47 @@ def record_strip_entry(
         _save_throttle_state(st)
 
 
+def release_strip_entry(
+    decision_id: Optional[str],
+    ts: Optional[float] = None,
+) -> bool:
+    """Mark a strip entry as no longer open when its order died without fills.
+
+    ``record_strip_entry`` runs when an entry order is ACCEPTED (filled or
+    resting).  The ``open`` flag is otherwise cleared only by
+    ``record_side_settlement`` — i.e. only when a filled position reaches
+    settlement.  A resting GTC entry that is cancelled/expired/rejected with
+    zero fills never produces a position or a settlement, so without this
+    release its same-side slot stayed occupied for the remainder of the
+    15-minute strip, suppressing fresh qualifying re-entries across all five
+    assets on that side.
+
+    Entry orders whose fills produced a real position keep their slot: the
+    caller only invokes this for terminal-zero-fill records, so a filled
+    position's exposure still counts until settlement (deliberate — the cap
+    bounds live directional exposure, not just working orders).
+    """
+    if not decision_id:
+        return False
+    ts = float(ts or time.time())
+    released = False
+    with _THROTTLE_LOCK:
+        st = _load_throttle_state(force=True)
+        for entries in (st.get("strip_entries") or {}).values():
+            for e in entries:
+                if e.get("decision_id") == decision_id and e.get("open", True):
+                    e["open"] = False
+                    released = True
+        if released:
+            _save_throttle_state(st)
+    if released:
+        logger.info(
+            "[SIDE-THROTTLE] strip slot released decision_id=%s "
+            "(terminal-nonfill order)", decision_id,
+        )
+    return released
+
+
 def throttle_status() -> Dict[str, Any]:
     """Observability snapshot for heartbeats/tests."""
     st = _load_throttle_state()

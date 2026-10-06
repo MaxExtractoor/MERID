@@ -35,8 +35,8 @@ class Test1ContractAllocationRule:
         )
         assert valid_request.count == 1
 
-        # Valid entry order with count=2 should pass (2026-08-22: max 2 contracts per order)
-        valid_request_2 = AllocationRequest(
+        # Valid entry order with count=3 should pass (2026-10-06: max 3 contracts per order)
+        valid_request_3 = AllocationRequest(
             agent_id="test_agent",
             asset="BTC",
             ticker="KXBTC15M-TEST",
@@ -45,11 +45,11 @@ class Test1ContractAllocationRule:
             spread_cents=2,
             confidence=0.8,
             is_exit_order=False,
-            count=2
+            count=3
         )
-        assert valid_request_2.count == 2
+        assert valid_request_3.count == 3
 
-        # Invalid entry order with count=3 should raise ValueError
+        # Invalid entry order with count=4 should raise ValueError
         with pytest.raises(ValueError) as exc_info:
             invalid_request = AllocationRequest(
                 agent_id="test_agent",
@@ -60,9 +60,9 @@ class Test1ContractAllocationRule:
                 spread_cents=2,
                 confidence=0.8,
                 is_exit_order=False,
-                count=3
+                count=4
             )
-        assert "between 1 and 2" in str(exc_info.value)
+        assert "and 3" in str(exc_info.value)
     
     def test_allocation_request_count_validation_exit(self):
         """Test that AllocationRequest allows count>1 for exit orders."""
@@ -107,10 +107,10 @@ class Test1ContractAllocationRule:
                 is_exit_order=True,
                 count=0
             )
-        assert "count>0" in str(exc_info.value)
+        assert "count>=0.01" in str(exc_info.value)
     
     def test_global_slot_allocator_count_validation(self):
-        """Test that GlobalSlotAllocator enforces count in [1, 2] for entry orders."""
+        """Test that GlobalSlotAllocator enforces count within the per-order cap for entry orders."""
         allocator = GlobalSlotAllocator()
 
         # Valid entry order with count=1 should be allocated
@@ -151,7 +151,26 @@ class Test1ContractAllocationRule:
 
         allocator.release_slot(slot_id_2)
 
-        # Invalid entry order with count=3 should raise ValueError at creation time
+        # Valid entry order with count=3 should also be allocated (2026-10-06)
+        valid_request_3 = AllocationRequest(
+            agent_id="test_agent",
+            asset="BTC",
+            ticker="KXBTC15M-TEST",
+            entry_price_cents=50,
+            edge_pct=5.0,
+            spread_cents=2,
+            confidence=0.8,
+            is_exit_order=False,
+            count=3
+        )
+        allocated_3, reason_3, slot_id_3 = allocator.request_allocation(valid_request_3)
+        assert allocated_3 is True
+        assert slot_id_3 is not None
+        assert allocator.get_total_exposure() == 1.5  # 3 contracts @ 50c
+
+        allocator.release_slot(slot_id_3)
+
+        # Invalid entry order with count=4 should raise ValueError at creation time
         # (validation happens in AllocationRequest.__post_init__)
         with pytest.raises(ValueError) as exc_info:
             invalid_request = AllocationRequest(
@@ -163,9 +182,9 @@ class Test1ContractAllocationRule:
                 spread_cents=2,
                 confidence=0.8,
                 is_exit_order=False,
-                count=3
+                count=4
             )
-        assert "between 1 and 2" in str(exc_info.value)
+        assert "and 3" in str(exc_info.value)
     
     def test_global_slot_allocator_exit_order_bypass(self):
         """Test that exit orders bypass count validation in slot allocator."""
@@ -189,7 +208,7 @@ class Test1ContractAllocationRule:
         assert slot_id is None
     
     def test_global_allocator_count_filtering(self):
-        """Test that GlobalAllocator filters candidates with count outside [1, 2]."""
+        """Test that GlobalAllocator filters candidates with count outside [0.01, 3]."""
         allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=0.01)
 
         candidates = [
@@ -211,7 +230,7 @@ class Test1ContractAllocationRule:
                 side="yes",
                 action="buy",
                 price_cents=10,
-                count=3,  # Invalid - exceeds max 2, should be filtered
+                count=4,  # Invalid - exceeds max 3, should be filtered
                 edge_pct=4.0,
                 confidence=0.7,
                 model_prob=0.55,
@@ -233,16 +252,16 @@ class Test1ContractAllocationRule:
 
         chosen = allocator.allocate(candidates, current_positions={})
 
-        # Only BTC and SOL should be chosen (ETH filtered due to count=3)
+        # Only BTC and SOL should be chosen (ETH filtered due to count=4)
         assert len(chosen) == 2
         assets = [c.asset for c in chosen]
         assert "BTC" in assets
         assert "SOL" in assets
         assert "ETH" not in assets
 
-        # Verify all chosen have count in [1, 2]
+        # Verify all chosen have count within the per-order cap [0.01, 3]
         for candidate in chosen:
-            assert 1 <= candidate.count <= 2
+            assert 1 <= candidate.count <= 3
     
     def test_position_slot_contracts_tracking(self):
         """Test that PositionSlot tracks contract count correctly."""

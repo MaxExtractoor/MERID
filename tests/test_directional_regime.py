@@ -172,7 +172,11 @@ def test_none_regime_blocks_nothing():
 
 # ------------------------------------------------------------ conviction ----
 
-def test_conviction_defaults():
+def test_conviction_defaults(monkeypatch):
+    # Production .env relaxes the per-asset distances (2026-10-xx throughput
+    # tuning); pin the code defaults so the test asserts gate semantics.
+    for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        monkeypatch.delenv(f"MERID_CONVICTION_MIN_DIST_{asset}", raising=False)
     assert dr.conviction_min_distance("BTC") == pytest.approx(0.06)
     assert dr.conviction_min_distance("ETH") == pytest.approx(0.06)
     assert dr.conviction_min_distance("SOL") == pytest.approx(0.07)
@@ -180,7 +184,10 @@ def test_conviction_defaults():
     assert dr.conviction_min_distance("DOGE") == pytest.approx(0.08)
 
 
-def test_coin_flip_blocked_both_sides():
+def test_coin_flip_blocked_both_sides(monkeypatch):
+    # Pin the code default distance so the assertions hold regardless of
+    # operator .env overrides (p=0.561/0.439 sit just inside the 0.06 band).
+    monkeypatch.delenv("MERID_CONVICTION_MIN_DIST_BTC", raising=False)
     # BTC NO at p=0.501 — the canonical loss-episode violation.
     assert dr.conviction_block_reason("BTC", 0.501) == "low_conviction"
     assert dr.conviction_block_reason("BTC", 0.499) == "low_conviction"
@@ -336,6 +343,38 @@ def test_strip_window_rolls_over(throttle_path):
     now = 1_700_000_000.0
     dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
     assert dr.strip_concentration_block("no", 1.0, ts=now + 901) is None
+
+
+def test_strip_entry_released_on_terminal_nonfill(throttle_path, monkeypatch):
+    """A resting entry order that dies without fills must free the same-side
+    slot — otherwise a cancelled GTC blocks re-entry for the rest of the
+    15-minute strip (2026-10-06 audit: strip_entries.open was only cleared by
+    settlement, so a dead order suppressed the whole same-side window)."""
+    monkeypatch.setenv("MERID_STRIP_CONC_EV_MARGIN_CENTS", "3.0")
+    now = 1_700_000_000.0
+    dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
+    assert dr.strip_concentration_block("no", 9.0, ts=now + 30) == "strip_same_side_open:no"
+    # Order goes terminal with zero fills -> release marks open=False.
+    assert dr.release_strip_entry("a", ts=now + 40) is True
+    # Slot freed: re-entry now faces only the EV ladder (closed entries), not
+    # the open-slot veto.
+    assert dr.strip_concentration_block("no", 9.0, ts=now + 45) is None
+    assert dr.strip_concentration_block("no", 7.0, ts=now + 45) == "strip_same_side_ev:no"
+    # Idempotent: a second release is a no-op, unknown ids return False.
+    assert dr.release_strip_entry("a", ts=now + 50) is False
+    assert dr.release_strip_entry("never_recorded", ts=now + 50) is False
+    assert dr.release_strip_entry(None, ts=now + 50) is False
+
+
+def test_release_strip_entry_spans_prior_strip(throttle_path, monkeypatch):
+    """An order can straddle a window boundary (submitted 14:59, terminal
+    15:01).  Release must find the entry in the PRIOR strip key, not just the
+    current one."""
+    monkeypatch.setenv("MERID_STRIP_CONC_EV_MARGIN_CENTS", "3.0")
+    now = 1_700_000_000.0
+    dr.record_strip_entry("no", 5.0, ts=now, decision_id="a")
+    # Release evaluated one strip later still clears the old entry's flag.
+    assert dr.release_strip_entry("a", ts=now + 901) is True
 
 
 def test_throttle_disabled_no_blocks(throttle_path, monkeypatch):

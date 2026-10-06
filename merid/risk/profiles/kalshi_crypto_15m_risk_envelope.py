@@ -470,10 +470,10 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Cycle Risk Cap ───────────────────────────────────────────────────────
     max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
-    # ── Window-Based Risk Tracking REMOVED (2026-07-08: Fixed $2 exposure cap) ─────────────────
-    # CRITICAL: Uses fixed $2.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # ── Window-Based Risk Tracking REMOVED (2026-07-08: Fixed $3 exposure cap) ─────────────────
+    # CRITICAL: Uses fixed $3.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
     # Percentage-based limits (3% per-agent, 5% total venue) REMOVED
-    # Global slot allocator enforces $2.00 total cap across all 5 assets
+    # Global slot allocator enforces $3.00 total cap across all 5 assets
     # Window tracking fields retained for monitoring only, not enforcement
     
     # Window tracking state
@@ -512,17 +512,17 @@ class KalshiCrypto15mRiskEnvelope:
     
     # ── Legacy / Deprecated fields (Retained for backward compatibility, not enforced) ─
     # 2026-07-12: Added these fields to prevent AttributeError when code accesses them
-    # These are set to the fixed $2.00 cap but are NOT used for enforcement
+    # These are set to the fixed $3.00 cap but are NOT used for enforcement
     # MUST be at the end of dataclass to avoid "non-default argument follows default argument" error
     guardrails_per_window_risk_pct: float = 0.0  # Deprecated; percentage windows removed
     guardrails_total_venue_risk_pct: float = 0.0  # Deprecated; percentage venue cap removed
-    per_agent_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
-    total_venue_window_limit_usd: float = 2.00  # Deprecated: Fixed $2 global cap (not per-agent)
+    per_agent_window_limit_usd: float = 3.00  # Deprecated: Fixed $3 global cap (not per-agent)
+    total_venue_window_limit_usd: float = 3.00  # Deprecated: Fixed $3 global cap (not per-agent)
 
     # 2026-08-29: Absolute fixed exposure cap from resolved live config.
     # This is the single source of truth for the global slot allocator and
     # all window/total exposure hard stops.
-    fixed_exposure_cap_usd: float = 2.00
+    fixed_exposure_cap_usd: float = 3.00
 
     # 2026-08-29: Stop-loss/daily-loss policy from the resolved live config.
     stop_loss_enabled: bool = False
@@ -1161,7 +1161,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     def _fixed_exposure_cap() -> float:
         if resolved_config is not None and resolved_config.resolved:
             return min(float(resolved_config.fixed_exposure_cap_usd), live_bankroll_usd)
-        return min(float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00')), live_bankroll_usd)
+        return min(float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00')), live_bankroll_usd)
 
     # CRITICAL FIX 2026-07-08: Initialize peak bankroll on envelope creation
     # This ensures peak bankroll is set even before first check_window_limit call

@@ -79,10 +79,10 @@ class ResolvedLiveConfig:
     resolved_at: float = 0.0
 
     # Exposure and sizing
-    fixed_exposure_cap_usd: Decimal = Decimal("2.00")
-    max_total_notional_usd: Decimal = Decimal("2.00")
-    max_single_order_notional_usd: Decimal = Decimal("2.00")
-    max_contracts_per_order: int = 2
+    fixed_exposure_cap_usd: Decimal = Decimal("3.00")
+    max_total_notional_usd: Decimal = Decimal("3.00")
+    max_single_order_notional_usd: Decimal = Decimal("3.00")
+    max_contracts_per_order: int = 3
     max_positions_per_asset: int = 1
 
     # Price collar (execution; router must be a subset of this)
@@ -1266,7 +1266,10 @@ class LiveConfigResolver:
             max_total_notional_usd=fixed_exposure_cap,
             max_single_order_notional_usd=fixed_exposure_cap,
             max_contracts_per_order=max_contracts,
-            max_positions_per_asset=int(profile.agent_max_yes_position),
+            max_positions_per_asset=int(
+                getattr(profile, "agent_max_positions_per_asset", None)
+                or profile.agent_max_yes_position
+            ),
             min_entry_cents=min_entry,
             max_entry_cents=max_entry,
             valid_price_cents_min=valid_min,

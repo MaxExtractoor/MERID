@@ -378,13 +378,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
     Returns:
         Max contracts for this asset
     
-    Fallback: returns 2 if profile is unavailable; production must activate the profile.
+    Fallback: returns 3 if profile is unavailable; production must activate the profile.
     """
     if not _PROFILE_AVAILABLE:
         logger.warning(
-            "[UNIFIED-SIZING] Profile adapter not available - using default max_contracts=2"
+            "[UNIFIED-SIZING] Profile adapter not available - using default max_contracts=3"
         )
-        return 2
+        return 3
     
     try:
         if is_profile_active():
@@ -401,13 +401,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             if asset_config:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
-            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=2", asset, asset_normalized)
-            return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
+            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=3", asset, asset_normalized)
+            return 3  # Slot model: 3 contracts per order ($3 global slot allocator)
         else:
             logger.warning(
-                "[UNIFIED-SIZING] Profile not active - using default max_contracts=2"
+                "[UNIFIED-SIZING] Profile not active - using default max_contracts=3"
             )
-            return 2  # Slot model default; production must activate profile for real values
+            return 3  # Slot model default; production must activate profile for real values
     except Exception as e:
         logger.error(
             "[UNIFIED-SIZING] Failed to read max_contracts from profile: %s - "
@@ -589,7 +589,7 @@ def _get_dynamic_sizing_base_contracts() -> int:
         Base contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 1  # Default
+        return 3  # Default
     
     try:
         if is_profile_active():
@@ -599,7 +599,7 @@ def _get_dynamic_sizing_base_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_base_contracts: %s", e)
     
-    return 1  # Default
+    return 3  # Default
 
 
 def _get_dynamic_sizing_edge_multiplier() -> float:
@@ -655,7 +655,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
         Max contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
+        return 3  # Slot model: 3 contracts per order ($3 global slot allocator)
     
     try:
         if is_profile_active():
@@ -665,7 +665,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
     
-    return 2  # Slot model: 2 contracts per order ($2 global slot allocator)
+    return 3  # Slot model: 3 contracts per order ($3 global slot allocator)
 
 
 def _get_dynamic_sizing_min_contracts() -> int:
@@ -905,13 +905,13 @@ def compute_order_size(
             asset, model_prob, price_cents, kelly_fraction
         )
     
-    # 2026-07-08 UPDATE: Fixed $2 total exposure model - slot-based position management
+    # 2026-10-06 UPDATE: Fixed $3 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
-    # New model: sum of all contract prices must be ≤ $2
+    # New model: sum of all contract prices must be ≤ $3
     
     # Step 1: Get fixed exposure cap from the resolved live config.
-    # The resolved config is the single source of truth for the $2 / $1 cap.
-    fixed_exposure_cap_usd = Decimal("2.00")  # Default
+    # The resolved config is the single source of truth for the $3 cap.
+    fixed_exposure_cap_usd = Decimal("3.00")  # Default
     try:
         from merid.config.live_config import get_resolved_live_config
 

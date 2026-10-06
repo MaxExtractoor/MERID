@@ -69,8 +69,8 @@ class ConfigInvariantChecker:
     PRODUCTION_VALUES = {
         "min_price_cents": 10,
         "max_price_cents": 75,
-        "fixed_exposure_cap_usd": 1.00,
-        "max_contracts_per_trade": 1,
+        "fixed_exposure_cap_usd": 3.00,
+        "max_contracts_per_trade": 3,
         "critical_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
         "min_edge_threshold": 0.01,
         "max_spread_cents": 30,
@@ -150,8 +150,8 @@ class ConfigInvariantChecker:
         """INVARIANT: Risk limits in tests must match production risk limits.
         
         Critical fields that must match:
-        - fixed_exposure_cap_usd ($1.00)
-        - max_contracts_per_trade (1)
+        - fixed_exposure_cap_usd ($3.00)
+        - max_contracts_per_trade (3)
         - Percentage-based caps should be 0.0 (disabled, using fixed cap)
         """
         if production_risk_limits is None:
@@ -453,13 +453,13 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
     test_profile_valid = {
         "min_price_cents": 10,
         "max_price_cents": 75,
-        "fixed_exposure_cap_usd": 1.00,
-        "max_contracts_per_trade": 1,
+        "fixed_exposure_cap_usd": 3.00,
+        "max_contracts_per_trade": 3,
     }
     
     test_risk_limits_valid = {
-        "fixed_exposure_cap_usd": 1.00,
-        "max_contracts_per_trade": 1,
+        "fixed_exposure_cap_usd": 3.00,
+        "max_contracts_per_trade": 3,
         "max_cycle_risk_pct": 0.0,
         "max_total_risk_pct": 0.0,
         "max_notional_pct": 0.0,
@@ -481,8 +481,8 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
     test_profile_invalid_price = {
         "min_price_cents": 10,
         "max_price_cents": 50,  # Old value, should be 75
-        "fixed_exposure_cap_usd": 1.00,
-        "max_contracts_per_trade": 1,
+        "fixed_exposure_cap_usd": 3.00,
+        "max_contracts_per_trade": 3,
     }
     
     test_cases.append({
@@ -518,8 +518,8 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
     
     # Invalid case: percentage-based cap not disabled
     test_risk_limits_pct = {
-        "fixed_exposure_cap_usd": 1.00,
-        "max_contracts_per_trade": 1,
+        "fixed_exposure_cap_usd": 3.00,
+        "max_contracts_per_trade": 3,
         "max_cycle_risk_pct": 0.05,  # Should be 0.0
         "max_total_risk_pct": 0.0,
         "max_notional_pct": 0.0,

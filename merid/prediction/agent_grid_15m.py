@@ -43,6 +43,7 @@ from merid.config.live_config import get_resolved_live_config
 # This keeps the signal/EV contract identical to the sizing Kelly calculator.
 try:
     from merid.prediction.unified_sizing import (
+        _get_dynamic_sizing_base_contracts,
         _get_slippage_cents,
         compute_all_in_cost_cents,
         compute_ev_net,
@@ -51,10 +52,31 @@ try:
     _UNIFIED_SIZING_AVAILABLE = True
 except ImportError:
     _UNIFIED_SIZING_AVAILABLE = False
+    _get_dynamic_sizing_base_contracts = None  # type: ignore
     _get_slippage_cents = None  # type: ignore
     compute_all_in_cost_cents = None  # type: ignore
     compute_ev_net = None  # type: ignore
     compute_fee_cents = None  # type: ignore
+
+
+def _default_entry_contracts() -> float:
+    """Configured per-entry contract target used to seed candidate["count"].
+
+    unified_sizing.compute_order_size still computes the authoritative size in
+    loop_15m; this seed only ensures allocator reservations and the sizing
+    failure fallback target the configured size instead of a hardcoded 1.
+    """
+    try:
+        if _UNIFIED_SIZING_AVAILABLE and _get_dynamic_sizing_base_contracts is not None:
+            base = float(_get_dynamic_sizing_base_contracts())
+            if base >= 0.01:
+                return base
+    except Exception:
+        pass
+    try:
+        return float(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
+    except Exception:
+        return 3.0
 
 # Microstructure features for order-flow, book-imbalance, and cross-asset lead-lag.
 # Loaded defensively; if missing, the live path falls back to Bachelier-only.
@@ -7356,7 +7378,7 @@ class LeanAgent15m:
             "orderflow_bias": orderflow_bias,  # Order book imbalance signal
             "onchain_velocity": onchain_velocity,  # On-chain activity signal
 
-            "count": 1,  # CRITICAL: Include default count for order execution
+            "count": _default_entry_contracts(),  # CRITICAL: seed with configured entry target; unified_sizing recomputes the authoritative count
 
             # CRITICAL FIX 2026-08-02: Add candidate_id for end-to-end tracing
             "candidate_id": candidate_id,
@@ -20177,13 +20199,16 @@ class LeanAgentGrid15m:
                     # allocator evaluates the full contract and rejects when it
                     # does not fit — under-sizing here would let execution
                     # submit a non-canonical quantity the lane's bookkeeping
-                    # cannot attribute.
+                    # cannot attribute.  Reserve exactly 1 contract for these
+                    # lanes even if the generic seed target is higher.
                     _bounded_lane = bool(
                         candidate.get('decision_lane')
                         in BOUNDED_POST_ONLY_LANES
                         or candidate.get('threshold_cell_id')
                         or candidate.get('provisional_cell_id')
                     )
+                    if _bounded_lane:
+                        _pre_count = 1.0
                     try:
                         from decimal import Decimal as _D, ROUND_DOWN as _RD
                         _cap_usd = _D(str(getattr(allocator, "venue_cap_usd", 0.0) or 0.0))
@@ -20193,11 +20218,11 @@ class LeanAgentGrid15m:
                             if _pre_count <= 0.0 or (_D(str(_pre_count)) > _fit and not _bounded_lane):
                                 _pre_count = float(_fit)
                         if _pre_count <= 0.0:
-                            _pre_count = 1.0
+                            _pre_count = _default_entry_contracts()
                     except Exception as _fit_err:
                         logger.debug("[GLOBAL-ALLOCATOR] cap pre-fit skipped: %s", _fit_err)
                         if _pre_count <= 0.0:
-                            _pre_count = 1.0
+                            _pre_count = 1.0 if _bounded_lane else _default_entry_contracts()
                     candidate['count'] = _pre_count
 
                     # Effective-quote ownership for degraded-mode accounting:

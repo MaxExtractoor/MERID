@@ -521,13 +521,13 @@ class Settings(BaseSettings):
         default="America/New_York",
         description="Timezone for Kalshi maintenance window (e.g., 'America/New_York')"
     )
-    # PM limits - FIXED $1 EXPOSURE CAP MODEL (2026-07-17)
+    # PM limits - FIXED $3 EXPOSURE CAP MODEL (2026-07-17)
     # CRITICAL: Percentage-based allocation caps are DISABLED for 15m crypto stack
-    # System uses fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # System uses fixed $3 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
     # via GlobalSlotAllocator. These settings are DEPRECATED for 15m crypto.
     MERID_MAX_RISK_FRACTION_PER_CYCLE: float = Field(
-        default=0.0,  # DISABLED - using fixed $2 exposure cap
-        description="DEPRECATED: Maximum risk fraction per cycle (DISABLED - using fixed $2 exposure cap)"
+        default=0.0,  # DISABLED - using fixed $3 exposure cap
+        description="DEPRECATED: Maximum risk fraction per cycle (DISABLED - using fixed $3 exposure cap)"
     )
     MERID_PM_RISK_PER_EDGE_PCT: float = Field(
         default=0.0,  # 0 = compute from MERID_MAX_RISK_FRACTION_PER_CYCLE / 3
@@ -1481,14 +1481,14 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to fixed $2 exposure cap if static mode but no override (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $2 exposure cap
+            # Fallback to fixed $3 exposure cap if static mode but no override (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $3 exposure cap
             logger.warning(
-                "[STATIC_FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED)"
+                "[STATIC_FALLBACK] Using fixed $3 exposure cap (percentage-based model DISABLED)"
             )
-            # Use fixed $2 exposure cap from environment variable
+            # Use fixed $3 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1533,14 +1533,14 @@ class Settings(BaseSettings):
                 )
             
             # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # FIX: Changed to fixed $2 exposure cap (2026-07-17)
-            # Percentage-based model DISABLED - using fixed $2 exposure cap
+            # FIX: Changed to fixed $3 exposure cap (2026-07-17)
+            # Percentage-based model DISABLED - using fixed $3 exposure cap
             logger.warning(
-                "[FALLBACK] Using fixed $2 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using fixed $3 exposure cap (percentage-based model DISABLED): bankroll=$%.2f", bankroll_usd
             )
-            # Use fixed $2 exposure cap from environment variable
+            # Use fixed $3 exposure cap from environment variable
             import os
-            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+            unified_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),

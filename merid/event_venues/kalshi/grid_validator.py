@@ -147,14 +147,14 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
 
             # ── Check 2: risk limits ──────────────────────────────────
             notional = float(agent.risk_limits.max_notional_usd)
-            # If 0, use fixed $1 exposure cap (2026-07-17: percentage-based model DISABLED)
+            # If 0, use the fixed exposure cap (2026-07-17: percentage-based model DISABLED)
             if notional == 0:
                 try:
                     import os
-                    # Use fixed $1 exposure cap from environment variable
-                    notional = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+                    # Use the fixed exposure cap from environment variable
+                    notional = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
                 except Exception:
-                    notional = 2.0  # Fail closed to $2 default on error
+                    notional = 3.0  # Fail closed to $3 default on error
             cell.max_notional_usd = notional
             if notional < 0:
                 cell.errors.append(

@@ -62,7 +62,7 @@ class RiskLimits:
     
     # Fixed exposure cap (SINGLE SOURCE OF TRUTH: global slot allocator $2 model)
     # Mirrors MERID_FIXED_EXPOSURE_CAP_USD used by global_slot_allocator and risk envelope.
-    fixed_exposure_cap_usd: float = 2.00
+    fixed_exposure_cap_usd: float = 3.00
     
     # Bankroll-based limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $1 exposure cap)
     # Percentage-based allocation contradicts the $1 global slot allocator model.
@@ -80,7 +80,7 @@ class RiskLimits:
     # 2026-07-08: Fixed $1 total exposure cap - never exceed $1 at any given time
     # This means only 1 active slot total, regardless of correlation
     correlated_stack_max_notional_pct: float = 0.0  # DISABLED - using fixed USD cap instead
-    correlated_stack_max_usd: float = 1.0  # Max $1 total exposure (hard cap)
+    correlated_stack_max_usd: float = 3.0  # Max $3 total exposure (hard cap)
     correlated_stack_min_cap_usd: float = 1.0
     
     # Per-asset caps
@@ -89,7 +89,7 @@ class RiskLimits:
     
     # Per-trade limits (DISABLED 2026-07-16: pct==0.0 defers to fixed $2 exposure cap)
     per_trade_max_notional_pct: float = 0.0  # DISABLED - fixed $2 cap via global slot allocator
-    per_trade_max_contracts: int = 2  # Matches slot model MAX_CONTRACTS_PER_ORDER=2
+    per_trade_max_contracts: int = 3  # Matches slot model MAX_CONTRACTS_PER_ORDER=3
     
     # Drawdown limits (aligned with profile YAML)
     drawdown_halt_pct: float = 0.20  # 20% (was 0.10 - aligned with profile)
@@ -200,7 +200,7 @@ class UnifiedRiskManager:
             import os
             limits.fixed_exposure_cap_usd = float(
                 os.getenv('MERID_FIXED_EXPOSURE_CAP_USD',
-                          str(config.get('fixed_exposure_cap_usd', 2.00)))
+                          str(config.get('fixed_exposure_cap_usd', 3.00)))
             )
             
             # Bankroll limits (DISABLED defaults: 0.0 defers to fixed $1 exposure cap)
@@ -229,7 +229,7 @@ class UnifiedRiskManager:
             # Per-trade limits (DISABLED default: 0.0 defers to fixed $1 exposure cap)
             if 'per_trade' in config:
                 limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.0)  # DISABLED - fixed $2 model
-                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 2)  # Slot model: 2 contracts per order
+                limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 3)  # Slot model: 3 contracts per order
             
             # Drawdown limits
             if 'drawdown' in config:

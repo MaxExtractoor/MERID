@@ -124,80 +124,61 @@ class TestFixed1ExposureCapEnforcement:
         print("✓ Correlation matrix Kelly allocation is marked DEPRECATED")
     
     def test_global_slot_allocator_enforces_1_cap(self):
-        """Test that GlobalSlotAllocator enforces $1 exposure cap."""
+        """Test that GlobalSlotAllocator enforces the configured exposure cap."""
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
         )
-        
+
         allocator = get_global_slot_allocator()
-        
-        # Try to allocate more than $1.00 total
-        requests = [
-            AllocationRequest(
-                agent_id="BTC_15M",
-                asset="BTC",
-                ticker="KXBTC15M-26JUL111145-45",
-                entry_price_cents=30,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-            AllocationRequest(
-                agent_id="ETH_15M",
-                asset="ETH",
-                ticker="KXETH15M-26JUL111145-45",
-                entry_price_cents=30,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-            AllocationRequest(
-                agent_id="SOL_15M",
-                asset="SOL",
-                ticker="KXSOL15M-26JUL111145-45",
-                entry_price_cents=30,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-            AllocationRequest(
-                agent_id="XRP_15M",
-                asset="XRP",
-                ticker="KXXRP15M-26JUL111145-45",
-                entry_price_cents=30,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-        ]
-        
-        # Allocate 4 positions at 30c each = $1.20 total
+        cap = allocator.max_exposure_usd
+
+        # Spam requests across all 5 assets and 3 slots/asset worth of distinct
+        # tickers at 30c each.  Whatever the configured cap, the allocator must
+        # never let total exposure exceed it.
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         allocated_count = 0
-        for req in requests:
-            allocated, _, _ = allocator.request_allocation(req)
-            if allocated:
-                allocated_count += 1
-        
-        # Should not be able to allocate all 4 (would exceed $1)
-        assert allocated_count <= 3, f"Should not allocate more than 3 positions at 30c, got {allocated_count}"
-        
-        # Total exposure should not exceed $1.00
+        for i in range(3):
+            for asset in assets:
+                req = AllocationRequest(
+                    agent_id=f"{asset}_15M",
+                    asset=asset,
+                    ticker=f"KX{asset}15M-26JUL1111{i:02d}-45",
+                    entry_price_cents=30,
+                    edge_pct=2.0,
+                    spread_cents=5,
+                    is_exit_order=False
+                )
+                allocated, _, _ = allocator.request_allocation(req)
+                if allocated:
+                    allocated_count += 1
+
+        # At most floor(cap/0.30) 30c-contract slots can fit under the cap.
+        max_fit = int(cap / 0.30)
+        assert allocated_count <= max_fit, \
+            f"Allocated {allocated_count} slots at 30c but cap ${cap:.2f} only fits {max_fit}"
+
+        # Total exposure must never exceed the configured cap.
         total_exposure = allocator.get_total_exposure()
-        assert total_exposure <= 1.00, f"Total exposure ${total_exposure:.2f} should not exceed $1.00"
-        
-        print("✓ GlobalSlotAllocator enforces $1 exposure cap")
-    
+        assert total_exposure <= cap + 1e-9, \
+            f"Total exposure ${total_exposure:.2f} should not exceed ${cap:.2f}"
+
+        print(f"✓ GlobalSlotAllocator enforces ${cap:.2f} exposure cap")
+
     def test_environment_variable_default_is_1(self):
-        """Test that MERID_FIXED_EXPOSURE_CAP_USD defaults to $1.00."""
+        """Test that MERID_FIXED_EXPOSURE_CAP_USD defaults to the policy cap."""
         import os
-        
-        # Get the default value (should be 1.00)
-        default_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-        
-        assert default_cap == 1.00, f"MERID_FIXED_EXPOSURE_CAP_USD should default to 1.00, got {default_cap}"
-        
-        print("✓ MERID_FIXED_EXPOSURE_CAP_USD defaults to $1.00")
+
+        # Code fallback default is the $3.00 policy cap (2026-10-06); the env
+        # value may only differ when an operator deliberately lowers it.
+        default_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
+
+        from merid.risk.global_slot_allocator import GlobalSlotAllocator
+        assert default_cap <= GlobalSlotAllocator.MAX_EXPOSURE_USD or \
+            default_cap == float(os.getenv('MERID_MAX_EXPOSURE_USD', '3.00')), \
+            f"Env cap ${default_cap:.2f} must not exceed the allocator policy cap"
+
+        print(f"✓ MERID_FIXED_EXPOSURE_CAP_USD resolves to ${default_cap:.2f}")
     
     def test_order_router_hard_exposure_cap_check(self):
         """Test that order_router has hard $1 exposure cap check."""
@@ -205,29 +186,38 @@ class TestFixed1ExposureCapEnforcement:
         from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
         
         allocator = get_global_slot_allocator()
-        
-        # Fill up to 75c exposure (max canonical price)
-        request = AllocationRequest(
-            agent_id="BTC_15M",
-            asset="BTC",
-            ticker="KXBTC15M-26JUL111145-45",
-            entry_price_cents=75,
-            edge_pct=2.0,
-            spread_cents=5,
-            is_exit_order=False
-        )
-        allocated, _, _ = allocator.request_allocation(request)
-        assert allocated
-        assert allocator.get_total_exposure() == 0.75
-        
-        # The order router should reject 30c order due to hard exposure cap
+        cap = allocator.max_exposure_usd
+
+        # Fill exposure to the cap using 75c slots across assets
+        # (max_positions_per_asset slots per asset).
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        i = 0
+        while allocator.get_available_exposure() >= 0.75 and i < 20:
+            asset = assets[i % len(assets)]
+            request = AllocationRequest(
+                agent_id=f"{asset}_15M",
+                asset=asset,
+                ticker=f"KX{asset}15M-26JUL2211{i:02d}-45",
+                entry_price_cents=75,
+                edge_pct=2.0,
+                spread_cents=5,
+                is_exit_order=False
+            )
+            allocated, _, _ = allocator.request_allocation(request)
+            if not allocated:
+                break
+            i += 1
+        assert allocator.get_total_exposure() >= 0.75
+
+        # The order router should reject a 30c order once the cap is full.
         # This is a structural check - the router checks slot_allocator.get_total_exposure()
         # against MERID_FIXED_EXPOSURE_CAP_USD
         current_exposure = allocator.get_total_exposure()
-        fixed_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+        fixed_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', str(cap)))
         order_notional = 30 / 100.0  # 30c = $0.30
-        
-        assert current_exposure + order_notional > fixed_cap, "Test setup: order should exceed cap"
+
+        assert current_exposure + order_notional > fixed_cap, \
+            f"Test setup: {current_exposure:.2f}+{order_notional:.2f} should exceed cap ${fixed_cap:.2f}"
         
         print("✓ Order router hard exposure cap check validated")
     
@@ -270,44 +260,30 @@ class TestFixed1ExposureCapEnforcement:
         )
         
         allocator = get_global_slot_allocator()
-        
-        # Fill up to $1.00 cap
-        requests = [
-            AllocationRequest(
-                agent_id="BTC_15M",
-                asset="BTC",
-                ticker="KXBTC15M-26JUL111145-45",
-                entry_price_cents=30,
+        cap = allocator.max_exposure_usd
+
+        # Fill up to the cap using 75c slots across assets.
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        i = 0
+        while allocator.get_available_exposure() >= 0.75 and i < 20:
+            asset = assets[i % len(assets)]
+            request = AllocationRequest(
+                agent_id=f"{asset}_15M",
+                asset=asset,
+                ticker=f"KX{asset}15M-26JUL2211{i:02d}-45",
+                entry_price_cents=75,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
-            ),
-            AllocationRequest(
-                agent_id="ETH_15M",
-                asset="ETH",
-                ticker="KXETH15M-26JUL111145-45",
-                entry_price_cents=30,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-            AllocationRequest(
-                agent_id="SOL_15M",
-                asset="SOL",
-                ticker="KXSOL15M-26JUL111145-45",
-                entry_price_cents=40,
-                edge_pct=2.0,
-                spread_cents=5,
-                is_exit_order=False
-            ),
-        ]
-        
-        for req in requests:
-            allocated, _, _ = allocator.request_allocation(req)
-        
-        # Should be at or near $1.00 cap
+            )
+            allocated, _, _ = allocator.request_allocation(request)
+            if not allocated:
+                break
+            i += 1
+
+        # Should be at or near the configured cap
         total_exposure = allocator.get_total_exposure()
-        assert total_exposure >= 0.95, f"Should be near cap, got ${total_exposure:.2f}"
+        assert total_exposure >= cap - 0.05, f"Should be near cap ${cap:.2f}, got ${total_exposure:.2f}"
         
         # Exit order should bypass cap
         exit_request = AllocationRequest(

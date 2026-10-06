@@ -221,7 +221,7 @@ class Crypto15mProfile:
     # Risk policy
     # 2026-07-08 UPDATE: Fixed $2 exposure model for small bankroll optimization
     # Replaces percentage-based sizing with fixed dollar cap to ensure $2+ profit per 15m window
-    risk_policy_fixed_exposure_cap_usd: float  # Fixed $2 max exposure (NEW)
+    risk_policy_fixed_exposure_cap_usd: float  # Fixed $3 max exposure (NEW)
     risk_policy_sequential_trading: bool  # No new entries until all positions exit (NEW)
     # Mandatory profit exit parameters (NEW)
     mandatory_profit_exit_enabled: bool  # Enable automatic profit exits
@@ -387,11 +387,15 @@ class Crypto15mProfile:
     
     # Position Management: Dynamic Sizing Configuration
     dynamic_sizing_enabled: bool = True  # 2026-07-15: Re-enabled with slot-model compatibility
-    dynamic_sizing_base_contracts: int = 1
+    dynamic_sizing_base_contracts: int = 3
     dynamic_sizing_edge_multiplier: float = 2.0
     dynamic_sizing_confidence_multiplier: float = 1.0
-    dynamic_sizing_max_contracts: int = 2  # CRITICAL: 2 contracts per order to respect $2 fixed exposure cap
+    dynamic_sizing_max_contracts: int = 3  # CRITICAL: 3 contracts per order to respect $3 fixed exposure cap
     dynamic_sizing_min_contracts: int = 1
+    # 2026-10-06: Dedicated position-count cap (slots per asset).  Decoupled from
+    # agent_max_yes/no_position so the 3-contract entry target does not silently
+    # widen the number of concurrent positions an asset may hold.
+    agent_max_positions_per_asset: int = 2
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
     calibration_enabled: bool = True  # Enable/disable probability calibration (ENABLED for dynamic adjustment)
     calibration_auto_fit: bool = True  # Automatically fit calibration when sufficient data
@@ -1115,8 +1119,9 @@ class Crypto15mProfileAdapter:
                 # Per-agent defaults (percentage-based DISABLED 2026-07-16 - fixed $2 model)
                 agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.0)),  # DISABLED - fixed $2 model
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 24),  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
-                agent_max_yes_position=agent_defaults.get('max_yes_position', 2),  # FIXED: Default 2 to match YAML (2026-07-14 fix)
-                agent_max_no_position=agent_defaults.get('max_no_position', 2),  # FIXED: Default 2 to match YAML (2026-07-14 fix)
+                agent_max_yes_position=agent_defaults.get('max_yes_position', 3),  # Default 3 to match YAML (2026-10-06)
+                agent_max_no_position=agent_defaults.get('max_no_position', 3),  # Default 3 to match YAML (2026-10-06)
+                agent_max_positions_per_asset=int(agent_defaults.get('max_positions_per_asset', agent_defaults.get('max_yes_position', 3))),
                 # CRITICAL FIX (2026-07-17): Removed agent_max_concurrent_trades - $2 exposure cap is the limit
                 agent_minutes_before_expiry=agent_defaults.get('minutes_before_expiry', 15),  # FIXED: Default 15 to match YAML (2026-07-16 fix)
                 agent_cutoff_minutes_before_expiry=agent_defaults.get('cutoff_minutes_before_expiry', 0),  # FIXED: Default 0 to match YAML (2026-07-16 fix)
@@ -1183,12 +1188,12 @@ class Crypto15mProfileAdapter:
                 contract_caps_max_contracts_per_cluster=contract_caps.get('max_contracts_per_cluster', 750),
                 # Handle nested dict format for max_single_order_contracts
                 contract_caps_max_single_order_contracts=self._normalize_contracts_value(
-                    contract_caps.get('max_single_order_contracts', 2)  # CRITICAL FIX (2026-07-08): Default 2 to enforce 3% risk limit
+                    contract_caps.get('max_single_order_contracts', 3)  # 2026-10-06: Default 3 to match the 3-contract target
                 ),
                 
                 # Risk policy (normalize dict format for percentage fields)
-                # 2026-07-08 UPDATE: Fixed $2 exposure model parameters
-                risk_policy_fixed_exposure_cap_usd=float(risk_policy.get('fixed_exposure_cap_usd', 2.00)),
+                # 2026-10-06 UPDATE: Fixed $3 exposure model parameters
+                risk_policy_fixed_exposure_cap_usd=float(risk_policy.get('fixed_exposure_cap_usd', 3.00)),
                 risk_policy_sequential_trading=bool(risk_policy.get('sequential_trading', True)),
                 # Mandatory profit exit parameters
                 mandatory_profit_exit_enabled=bool(risk_policy.get('mandatory_profit_exit', {}).get('enabled', True)),
@@ -1233,7 +1238,7 @@ class Crypto15mProfileAdapter:
                 universe_max_spread_cents=int(universe.get('max_spread_cents', 30)),
                 
                 # Failsafe configuration (emergency brake)
-                failsafe_max_contracts_per_order=int(failsafe.get('max_contracts_per_order', 1)),
+                failsafe_max_contracts_per_order=int(failsafe.get('max_contracts_per_order', 3)),
                 
                 # Edge/lag filter configuration
                 edge_lag_filter_min_edge_lag_ratio=raw.get('edge_lag_filter', {}).get('min_edge_lag_ratio', {}),

@@ -1380,15 +1380,18 @@ def _min_p_for_side(breakdown: EdgeBreakdown, floor: float) -> float:
     """Return the side-aware minimum p_selected for a positive-EV trade.
 
     The model probability must exceed the all-in cost basis of the held
-    side: executable entry price plus entry fee, expected exit cost, and
-    model-risk reserve.  The absolute ``floor`` (from env / live config) is
-    applied as an additional hard minimum.
+    side: executable entry price plus entry fee, expected exit cost,
+    model-risk reserve, and the adverse-selection reserve.  The absolute
+    ``floor`` (from env / live config) is applied as an additional hard
+    minimum.  This must match the authoritative EV gate's cost stack —
+    ``p_selected > min_p`` is the same check as ``net_ev > 0`` there.
     """
     cost_basis = (
         breakdown.executable_entry_price
         + breakdown.entry_fee
         + breakdown.exit_cost_reserve
         + breakdown.model_risk_reserve
+        + breakdown.adverse_selection_reserve
     )
     return max(floor, cost_basis)
 
@@ -1420,9 +1423,9 @@ def _get_resolved_max_contracts() -> int:
     if resolved is not None and resolved.max_contracts_per_order is not None:
         return int(resolved.max_contracts_per_order)
     try:
-        return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
+        return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
     except Exception:
-        return 2
+        return 3
 
 
 def _canary_lcb_threshold_cents(
@@ -2084,13 +2087,29 @@ class EdgeBreakdown:
 
 @dataclass(frozen=True)
 class EntryCostStack:
-    """Single probability-space acceptance hurdle for one executable side."""
+    """Single probability-space acceptance hurdle for one executable side.
+
+    Canonical contract (settlement-horizon EV):
+
+        net_edge = p_selected - executable_price
+                   - venue_fee - spread_slippage - model_uncertainty
+                   - adverse_selection
+        pi_star  = executable_price + all costs + required_net_edge
+                   = break-even probability + required margin
+        p_selected - pi_star == net_edge - required_net_edge   (identity)
+
+    ``adverse_selection_prob`` is the resting-fill pick-off reserve; it is
+    part of ``pi_star`` so the identity above holds exactly (previously the
+    stack silently omitted it, making ``pi_star_identity_difference``
+    equal the adverse-selection reserve by construction).
+    """
 
     executable_price_prob: float
     venue_fee_prob: float
     spread_slippage_prob: float
     model_uncertainty_prob: float
     required_net_edge_prob: float
+    adverse_selection_prob: float = 0.0
 
     @property
     def pi_star(self) -> float:
@@ -2099,6 +2118,7 @@ class EntryCostStack:
             + self.venue_fee_prob
             + self.spread_slippage_prob
             + self.model_uncertainty_prob
+            + self.adverse_selection_prob
             + self.required_net_edge_prob
         )
 
@@ -2108,6 +2128,7 @@ class EntryCostStack:
             + self.venue_fee_prob
             + self.spread_slippage_prob
             + self.model_uncertainty_prob
+            + self.adverse_selection_prob
         )
 
     def net_edge_after_required(self, p_selected: float) -> float:
@@ -2407,6 +2428,7 @@ def entry_cost_stack_from_breakdown(
         spread_slippage_prob=breakdown.exit_cost_reserve,
         model_uncertainty_prob=breakdown.model_risk_reserve,
         required_net_edge_prob=required_net_edge,
+        adverse_selection_prob=breakdown.adverse_selection_reserve,
     )
 
 
@@ -3418,6 +3440,45 @@ def compute_trade_decision(
         settlement_lane=settlement_lane,
     )
 
+    # 2026-10-06 (EV reconciliation): the adverse-selection reserve is the
+    # realized pick-off cost of a *resting* fill — measured from the
+    # provisional lane's post-only markouts.  It therefore applies only to
+    # the bid-priced (maker) basis; ask-priced taker candidates never carry
+    # it.  It is charged exactly once, here inside each side's EdgeBreakdown
+    # (max of the caller's lane prior and the measured estimate), so the
+    # margin gate, the p_selected cost-basis floor, the pi* hurdle, the
+    # authoritative EV gate and the audit side_ev rows all consume the same
+    # number.  Previously the EV gate recomputed it post-selection for every
+    # route, silently vetoing ask-priced candidates whose recorded economics
+    # had never carried the charge.
+    _asr_param = float(adverse_selection_reserve or 0.0)
+    _asr_meas_yes = 0.0
+    _asr_meas_no = 0.0
+    if entry_price_basis == "bid" and seconds_to_expiry is not None:
+        try:
+            from merid.prediction import (
+                current_build_provisional as _cbp_asr,
+            )
+            _asr_regime_label = getattr(directional_regime, "label", None)
+            _asr_meas_yes = float(
+                _cbp_asr.adverse_selection_reserve_cents(
+                    asset, "yes", float(yes_entry) * 100.0,
+                    float(seconds_to_expiry), regime_label=_asr_regime_label,
+                )
+            ) / 100.0
+            _asr_meas_no = float(
+                _cbp_asr.adverse_selection_reserve_cents(
+                    asset, "no", float(no_entry) * 100.0,
+                    float(seconds_to_expiry), regime_label=_asr_regime_label,
+                )
+            ) / 100.0
+        except Exception:
+            _asr_meas_yes = _asr_meas_no = 0.0
+    _asr_yes = max(_asr_param, _asr_meas_yes)
+    _asr_no = max(_asr_param, _asr_meas_no)
+    indicators["yes_adverse_selection_measured_cents"] = _asr_meas_yes * 100.0
+    indicators["no_adverse_selection_measured_cents"] = _asr_meas_no * 100.0
+
     yes_breakdown = compute_edge(
         p_yes=p_yes_for_yes,
         selected_side="yes",
@@ -3425,7 +3486,7 @@ def compute_trade_decision(
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_yes,
         model_risk_reserve=model_risk_reserve,
-        adverse_selection_reserve=adverse_selection_reserve,
+        adverse_selection_reserve=_asr_yes,
     )
     no_breakdown = compute_edge(
         p_yes=p_yes_for_no,
@@ -3433,7 +3494,7 @@ def compute_trade_decision(
         entry_price=no_entry,
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_no,
-        adverse_selection_reserve=adverse_selection_reserve,
+        adverse_selection_reserve=_asr_no,
         model_risk_reserve=model_risk_reserve,
     )
 
@@ -4899,8 +4960,17 @@ def compute_trade_decision(
         net_edge = Decimal(str(edge_breakdown.net_edge))
 
         # The probability hurdle is an algebraic view of the same final
-        # net-edge policy. It must not be a second independent veto.
-        _required_edge = yes_min_edge if selected_outcome == "yes" else no_min_edge
+        # net-edge policy. It must not be a second independent veto.  The
+        # required term is the bound the gate actually compared against
+        # (post-slack enforced bound), so net_edge_after_required reports
+        # surplus vs the enforced margin; with the adverse-selection
+        # component now inside the stack, pi_star_identity_difference is a
+        # true float-noise assertion (~0), not a hidden reserve.
+        _required_edge = (
+            _yes_edge_eff_bound
+            if selected_outcome == "yes"
+            else _no_edge_eff_bound
+        )
         _entry_cost_stack = entry_cost_stack_from_breakdown(edge_breakdown, _required_edge)
         _pi_star = _entry_cost_stack.pi_star
         _net_edge_before_required = _entry_cost_stack.net_edge_before_required(
@@ -4922,6 +4992,7 @@ def compute_trade_decision(
                 "venue_fee_prob": _entry_cost_stack.venue_fee_prob,
                 "spread_slippage_prob": _entry_cost_stack.spread_slippage_prob,
                 "model_uncertainty_prob": _entry_cost_stack.model_uncertainty_prob,
+                "adverse_selection_prob": _entry_cost_stack.adverse_selection_prob,
                 "required_net_edge_prob": _entry_cost_stack.required_net_edge_prob,
             },
         })
@@ -5134,30 +5205,16 @@ def compute_trade_decision(
     # Post-only fills are picked off when the market moves through them —
     # the provisional lane's rolling 5s markouts are the realized cost for
     # this (asset, side, price, tte) bucket, floored so cold cells still
-    # carry a prior.  Charged inside the authoritative EV gate; also stamped
-    # on the decision so the audit side_ev rows record it.
+    # carry a prior.  2026-10-06 (EV reconciliation): the reserve is charged
+    # once, inside the selected side's EdgeBreakdown (bid-priced lanes only —
+    # see the breakdown construction above) — the gate consumes that value
+    # so the recorded economics and the enforced verdict share one cost
+    # stack instead of recomputing a different reserve post-selection.
     adverse_selection_reserve = Decimal("0")
-    if (
-        selected_outcome is not None
-        and selected_outcome_price is not None
-        and seconds_to_expiry is not None
-    ):
-        try:
-            from merid.prediction import (
-                current_build_provisional as _cbp_asr,
-            )
-            _asr_cents = _cbp_asr.adverse_selection_reserve_cents(
-                asset,
-                selected_outcome,
-                float(selected_outcome_price) * 100.0,
-                float(seconds_to_expiry),
-                regime_label=getattr(directional_regime, "label", None),
-            )
-            adverse_selection_reserve = (
-                Decimal(str(_asr_cents)) / Decimal("100")
-            )
-        except Exception:
-            adverse_selection_reserve = Decimal("0")
+    if selected_outcome is not None and edge_breakdown is not None:
+        adverse_selection_reserve = Decimal(
+            str(getattr(edge_breakdown, "adverse_selection_reserve", 0.0) or 0.0)
+        )
     uncertainty_reserve = Decimal(str(model_risk_reserve))
 
     if selected_outcome is not None:

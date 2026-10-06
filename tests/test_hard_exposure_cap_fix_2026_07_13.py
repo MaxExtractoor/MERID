@@ -727,13 +727,13 @@ class TestEndToEndExecutionFlow:
     def test_full_flow_enforces_exposure_cap(self):
         """Test that the full flow enforces the exposure cap across all assets.
 
-        The canonical cap moved from $1.00 to $2.00
+        The canonical cap moved from $1.00 to $2.00 and then to $3.00
         (MERID_FIXED_EXPOSURE_CAP_USD default)."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
 
         allocator = GlobalSlotAllocator()
 
-        # Allocate BTC at 50c ($0.50)
+        # Allocate BTC: 3 contracts at 50c ($1.50)
         request1 = AllocationRequest(
             agent_id="BTC_15M",
             ticker="KXBTC15M-TEST",
@@ -741,14 +741,15 @@ class TestEndToEndExecutionFlow:
             entry_price_cents=50,
             edge_pct=0.02,
             spread_cents=2,
-            confidence=0.5
+            confidence=0.5,
+            count=3
         )
 
         success1, reason1, slot_id1 = allocator.request_allocation(request1)
         assert success1, f"First allocation should succeed: {reason1}"
-        assert allocator.get_total_exposure() == 0.50
+        assert allocator.get_total_exposure() == 1.50
 
-        # Allocate ETH at 60c ($0.60) - allowed (total $1.10 <= $2.00)
+        # Allocate ETH: 2 contracts at 60c ($1.20) - allowed (total $2.70 <= $3.00)
         request2 = AllocationRequest(
             agent_id="ETH_15M",
             ticker="KXETH15M-TEST",
@@ -756,13 +757,16 @@ class TestEndToEndExecutionFlow:
             entry_price_cents=60,
             edge_pct=0.03,
             spread_cents=2,
-            confidence=0.5
+            confidence=0.5,
+            count=2
         )
 
         success2, reason2, slot_id2 = allocator.request_allocation(request2)
         assert success2, f"ETH allocation should succeed: {reason2}"
+        assert allocator.get_total_exposure() == pytest.approx(2.70)
 
-        # Allocate SOL at 60c ($0.60) - allowed (total $1.70 <= $2.00)
+        # Try to allocate SOL: 1 contract at 60c ($0.60) - should fail
+        # (total $3.30 > $3.00)
         request3 = AllocationRequest(
             agent_id="SOL_15M",
             ticker="KXSOL15M-TEST",
@@ -774,28 +778,12 @@ class TestEndToEndExecutionFlow:
         )
 
         success3, reason3, slot_id3 = allocator.request_allocation(request3)
-        assert success3, f"SOL allocation should succeed: {reason3}"
-        assert allocator.get_total_exposure() == pytest.approx(1.70)
-
-        # Try to allocate XRP at 60c ($0.60) - should fail (total $2.30 > $2.00)
-        request4 = AllocationRequest(
-            agent_id="XRP_15M",
-            ticker="KXXRP15M-TEST",
-            asset="XRP",
-            entry_price_cents=60,
-            edge_pct=0.03,
-            spread_cents=2,
-            confidence=0.5
-        )
-
-        success4, reason4, slot_id4 = allocator.request_allocation(request4)
-        assert not success4, f"XRP allocation should fail (exceeds $2 cap): {reason4}"
-        assert "exposure" in reason4.lower(), f"Should mention exposure cap: {reason4}"
+        assert not success3, f"SOL allocation should fail (exceeds $3 cap): {reason3}"
+        assert "exposure" in reason3.lower(), f"Should mention exposure cap: {reason3}"
 
         # Cleanup
         allocator.release_slot(slot_id1)
         allocator.release_slot(slot_id2)
-        allocator.release_slot(slot_id3)
 
 
 class TestAgentGridDeduplicationFix:
