@@ -154,15 +154,25 @@ class TestFix6AutoCorrectiveReconciliation:
 
     @pytest.mark.asyncio
     async def test_auto_corrective_reconciliation_added(self):
-        """Test that auto-corrective reconciliation code was added to fills_ledger."""
+        """Verify the exchange-vs-ledger reconciliation report contract.
+
+        The Fix-6 era auto-corrective reconciler was refactored: divergence
+        correction now lives in the position-cache/canonical reconcilers and
+        ``reconcile_with_kalshi_positions`` is a purely diagnostic reporter.
+        The contract that must hold is a structured divergence report the
+        risk engine can consume.
+        """
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
 
         ledger = get_fills_ledger()
 
-        # Verify reconcile_with_kalshi_positions contains auto-correction code
-        import inspect
-        source = inspect.getsource(ledger.reconcile_with_kalshi_positions)
-        assert "AUTO-CORRECT" in source or "FIX 6" in source
+        report = await ledger.reconcile_with_kalshi_positions([])
+
+        assert report["positions_checked"] == 0
+        assert report["divergences"] == []
+        assert "status" in report
+        assert "positions_matched" in report
+        assert "ghost_trade_candidates" in report
 
 
 class TestFix7RESTAsPrimarySource:
@@ -186,15 +196,29 @@ class TestFix9AtomicWindowCapacityRelease:
 
     @pytest.mark.asyncio
     async def test_atomic_capacity_release_added(self):
-        """Test that atomic capacity release code was added to position_monitor."""
+        """Verify remove_position atomically drops the position and all
+        associated registries under the monitor lock — the Fix-9 contract is
+        that no stale capacity/exit state survives a removal."""
         from merid.position_management.position_monitor import PositionMonitor
+        from merid.position_management.position import Position, PositionSide
 
         monitor = PositionMonitor()
+        position = Position(
+            position_id="fix9-pos-1",
+            market_id="KXBTC15M-FIX9",
+            side=PositionSide.YES,
+            size=1,
+            avg_entry_price_cents=50,
+        )
+        monitor.add_position(position)
+        assert position.position_id in monitor._open_positions
 
-        # Verify remove_position contains atomic capacity release code
-        import inspect
-        source = inspect.getsource(monitor.remove_position)
-        assert "Atomic" in source or "FIX 9" in source
+        monitor.remove_position(position.position_id)
+
+        assert position.position_id not in monitor._open_positions
+        assert "KXBTC15M-FIX9" not in monitor._market_to_position
+        assert position.position_id not in monitor._exit_registry
+        assert position.position_id not in monitor._exit_quantities
 
 
 class TestFix10PersistentRiskEnvelopeState:
@@ -262,75 +286,54 @@ class TestFix10PersistentRiskEnvelopeState:
 
 
 class TestFix11PersistentSlotAllocatorState:
-    """Test Fix 11: Persistent slot allocator state."""
+    """Test Fix 11: Slot allocator state durability.
 
-    def test_save_slot_state(self):
-        """Test saving slot allocator state to file."""
-        from merid.risk.global_slot_allocator import get_global_slot_allocator
-        import os
+    The allocator no longer persists slots to a JSON file; durable state is
+    derived by reconciling slots against the canonical position cache
+    (``sync_with_position_cache``) and by clearing phantom slots when the
+    cache reports zero open positions (``clear_slots_on_empty_positions``).
+    """
 
-        allocator = get_global_slot_allocator()
-
-        # Add a slot (exposure_usd is a property, not constructor param)
-        from merid.risk.global_slot_allocator import AllocationRequest, PositionSlot, SlotStatus
-        allocator._slots["test_slot"] = PositionSlot(
-            slot_id="test_slot",
-            agent_id="BTC_15M",
-            asset="BTC",
-            ticker="KXBTC15M-TEST",
-            entry_price_cents=50,
-            entry_time=time.time(),
-            status=SlotStatus.OCCUPIED
-        )
-
-        # Save state
-        result = allocator.save_slot_state()
-
-        # Verify save succeeded
-        assert result is True
-
-        # Cleanup
-        state_file = "data/slot_allocator_state.json"
-        if os.path.exists(state_file):
-            os.remove(state_file)
-        allocator._slots.clear()
-
-    def test_load_slot_state(self):
-        """Test loading slot allocator state from file."""
-        from merid.risk.global_slot_allocator import get_global_slot_allocator
-        import os
-
-        allocator = get_global_slot_allocator()
-
-        # Add and save a slot
+    def _add_slot(self, allocator, slot_id="test_slot"):
         from merid.risk.global_slot_allocator import PositionSlot, SlotStatus
-        allocator._slots["test_slot"] = PositionSlot(
-            slot_id="test_slot",
+        allocator._slots[slot_id] = PositionSlot(
+            slot_id=slot_id,
             agent_id="BTC_15M",
             asset="BTC",
             ticker="KXBTC15M-TEST",
             entry_price_cents=50,
             entry_time=time.time(),
-            status=SlotStatus.OCCUPIED
+            status=SlotStatus.OCCUPIED,
         )
-        allocator.save_slot_state()
 
-        # Clear slots
-        allocator._slots.clear()
+    def test_orphan_slot_removed_by_cache_sync(self):
+        """A slot with no backing position is removed by cache reconciliation."""
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
 
-        # Load state
-        result = allocator.load_slot_state()
+        allocator = get_global_slot_allocator()
+        try:
+            self._add_slot(allocator)
+            changed = allocator.sync_with_position_cache()
+            assert changed >= 1
+            assert "test_slot" not in allocator._slots
+        finally:
+            allocator._slots.clear()
 
-        # Verify load succeeded and slot was restored
-        assert result is True
-        assert "test_slot" in allocator._slots
-        assert allocator._slots["test_slot"].asset == "BTC"
+    def test_phantom_slots_cleared_on_empty_position_cache(self):
+        """Phantom slots are cleared when the cache reports zero positions."""
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
 
-        # Cleanup
-        state_file = "data/slot_allocator_state.json"
-        if os.path.exists(state_file):
-            os.remove(state_file)
-        allocator._slots.clear()
+        allocator = get_global_slot_allocator()
+        try:
+            self._add_slot(allocator)
+            allocator.clear_slots_on_empty_positions(position_count=0)
+            assert allocator._slots == {}
+
+            self._add_slot(allocator)
+            allocator.clear_slots_on_empty_positions(position_count=1)
+            assert "test_slot" in allocator._slots
+        finally:
+            allocator._slots.clear()
 
 
 if __name__ == "__main__":

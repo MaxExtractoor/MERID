@@ -183,16 +183,20 @@ class TestAssetSpecificExitParameters:
         asset = extract_asset_from_position(position)
         assert asset == "DOGE"
     
-    def test_all_5_assets_in_profile_config(self):
+    def test_all_5_assets_in_profile_config(self, monkeypatch):
         """
         Test that all 5 critical assets are in profile config.
-        
+
         Verify that BTC, ETH, SOL, XRP, DOGE all have configured
         TP/SL distances in the profile YAML.
         """
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        
+
+        # get_active_profile() returns None unless the 15m profile is the
+        # active profile; pin it the way production .env does.
+        monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
         profile = get_active_profile()
+        assert profile is not None, "kalshi_crypto_15m_v2 adapter failed to load"
         
         # Access the profile dataclass directly
         profile_data = profile.profile

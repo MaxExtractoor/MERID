@@ -136,6 +136,19 @@ class TestEdgeRealizationProfitGate:
             "merid.position_management.position_monitor._get_fair_value_cents",
             lambda state, held: fair_cents,
         )
+        # 2026-10-05: the monitor now anchors discretionary exits on the MODEL
+        # fair only (_get_model_fair_value_cents); the implied_prob fallback is
+        # not consulted.  Stub both so the fixed value reaches the gate.
+        monkeypatch.setattr(
+            "merid.position_management.position_monitor._get_model_fair_value_cents",
+            lambda state, held: fair_cents,
+        )
+        # 2026-09-25: loss/thesis exit candidates are EV-gated by the
+        # settlement evaluator (_LOSS_EXIT_EV_GATED_REASONS), which needs a
+        # live book state this class does not provide.  These tests exercise
+        # the trigger-level profit/underwater gate itself; disable the EV
+        # layer so trigger semantics are what is asserted.
+        monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "0")
         # The lookup requires a non-None unified/kalshi market state.
         stub_state = SimpleNamespace()
         stub_store = SimpleNamespace(
