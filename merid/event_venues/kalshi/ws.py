@@ -2107,7 +2107,58 @@ class KalshiWebSocket(EventVenueStream):
                             _drop_ms = float(
                                 os.environ.get("MERID_WS_DELTA_DROP_RES_MS", "2500")
                             )
-                            if _res_ms > _drop_ms:
+                            _stale = _res_ms > _drop_ms
+                            # 2026-10-06: when the delta carries a venue
+                            # timestamp, supersede on *projected event age*
+                            # (venue→now) rather than queue residence alone.
+                            # A delta with low wire lag and 2.6s residence is
+                            # still inside the downstream KALSHI_BOOK_MAX_
+                            # EVENT_AGE_MS bound and would apply cleanly —
+                            # superseding it anyway manufactures a sequence
+                            # gap, forces an invalidation, and pays a full
+                            # snapshot resync to shed ~1ms of parse work.
+                            # The residence bound remains the fallback for
+                            # frames with no usable venue timestamp.
+                            _body0 = _kalshi_ws_payload(data)
+                            _vts0 = (
+                                _body0.get("ts_ms") or _body0.get("ts")
+                                or data.get("ts_ms") or data.get("ts")
+                            )
+                            if _vts0 is not None:
+                                try:
+                                    if isinstance(_vts0, str):
+                                        from datetime import datetime as _vdt
+                                        _vms0 = _vdt.fromisoformat(
+                                            _vts0.replace("Z", "+00:00")
+                                        ).timestamp() * 1000.0
+                                    else:
+                                        _v0 = float(_vts0)
+                                        _vms0 = _v0 if _v0 > 1e12 else _v0 * 1000.0
+                                    _now_wall0 = _time.time() * 1000.0
+                                    _age_margin_ms = float(
+                                        os.environ.get(
+                                            "MERID_WS_DELTA_DROP_AGE_MARGIN_MS",
+                                            "500",
+                                        )
+                                    )
+                                    _event_age_bound_ms = float(
+                                        os.environ.get(
+                                            "KALSHI_BOOK_MAX_EVENT_AGE_MS",
+                                            "4000",
+                                        )
+                                    ) - _age_margin_ms
+                                    _age_ms0 = _now_wall0 - _vms0
+                                    if 0.0 <= _age_ms0 < (
+                                        _event_age_bound_ms * 4.0
+                                    ):
+                                        # Trust the venue clock only when the
+                                        # derived age is sane; a skewed stamp
+                                        # (future or ancient) falls back to the
+                                        # residence predicate.
+                                        _stale = _age_ms0 >= _event_age_bound_ms
+                                except Exception:
+                                    pass
+                            if _stale:
                                 # Orderbook deltas nest the ticker in ``msg``;
                                 # keying on "?" made every market share one
                                 # resync-forward slot per notify interval.

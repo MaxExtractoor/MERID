@@ -8994,11 +8994,63 @@ class LeanAgent15m:
             if _decision_lane == "evidence_cell_escape":
                 try:
                     from merid.prediction import evidence_policy as _ep
+                    # 2026-10-06: the daily cap is a check-then-act race — the
+                    # decision-side veto reads the counter during evaluation
+                    # but the slot is only consumed here at emission, so
+                    # parallel asset decisions can all pass the same stale
+                    # count (observed: count=24 vs cap=12 on 2026-10-06).
+                    # Consume the slot first, then suppress the emission if
+                    # the true count exceeded the cap — the counter is the
+                    # single source of truth, and an over-cap emission becomes
+                    # a LANE_SUPPRESSED event instead of a silent budget leak.
                     _n = _ep.record_escape_submission()
-                    logger.info(
-                        "[EVIDENCE-ESCAPE] asset=%s side=%s lane submissions today=%d",
-                        asset, decision.selected_outcome, _n,
-                    )
+                    _cap = _ep.escape_daily_max()
+                    if _n > _cap:
+                        try:
+                            from merid.execution.decision_audit_ledger import (
+                                get_decision_audit_ledger,
+                            )
+                            _ticker_now = str(
+                                getattr(decision, "ticker", "") or ticker or ""
+                            )
+                            get_decision_audit_ledger().append_decision_event(
+                                decision_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                event_type="LANE_SUPPRESSED",
+                                stage="ALLOCATION",
+                                reason_code="evidence_escape_cap_exceeded_at_emission",
+                                reason_detail={
+                                    "side": decision.selected_outcome,
+                                    "lane": _decision_lane,
+                                    "ticker": _ticker_now,
+                                    "escape_count_today": int(_n),
+                                    "escape_daily_cap": int(_cap),
+                                },
+                                trace_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                run_id=decision.indicators.get("run_id"),
+                                ticker=_ticker_now,
+                                asset=asset,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[EVIDENCE-ESCAPE] asset=%s side=%s suppressed — "
+                            "emission count=%d exceeded daily cap=%d",
+                            asset, decision.selected_outcome, _n, _cap,
+                        )
+                        decision = replace(
+                            decision,
+                            selected_outcome=None,
+                            no_trade_reason="evidence_escape_cap_exceeded_at_emission",
+                        )
+                    else:
+                        logger.info(
+                            "[EVIDENCE-ESCAPE] asset=%s side=%s lane submissions today=%d",
+                            asset, decision.selected_outcome, _n,
+                        )
                 except Exception:
                     pass
             if _decision_lane == "threshold_cell":
