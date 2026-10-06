@@ -202,6 +202,14 @@ def _isolate_gate_and_lease(monkeypatch, tmp_path):
     reset_contract_lease_registry_for_testing()
     UnifiedRiskManager.reset_for_tests()
 
+    # These tests exercise identity/recovery of *resting* venue orders
+    # (broker-query resolution, 409 idempotency, cancel/fill race) — a real
+    # production path via exits and maker-enabled lanes.  The Sep-23
+    # MERID_ENTRY_MAKER_ENABLED default-off coercion would turn every
+    # maker-posture entry into a marketable IOC (unfilled_ioc), which is
+    # orthogonal to what this file verifies.
+    monkeypatch.setenv("MERID_ENTRY_MAKER_ENABLED", "1")
+
     # Real risk manager, but with limits loose enough for unit-level identity tests.
     risk = get_unified_risk_manager()
     risk._limits.fixed_exposure_cap_usd = 1000.0

@@ -9537,8 +9537,16 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     _lane_min_dollar_ev = None
                     _lane_min_ev_tail = None
                     _eff_edge_c = candidate.get("effective_required_edge_cents")
+                    # 2026-10-06: include decision_lane itself — a canary or
+                    # other bounded lane admitted below the full route bound
+                    # must be re-gated against its own stamped admission bound,
+                    # not the generic min_dollar_ev=0 floor (for canary) or a
+                    # leftover cell bound.  The stamp is terminal at selection:
+                    # canary lanes carry the canary floor, cell lanes their
+                    # cell bound, gate passes the route bound.
                     if (
-                        candidate.get("threshold_cell_id") is not None
+                        candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
+                        or candidate.get("threshold_cell_id") is not None
                         or candidate.get("provisional_cell_id") is not None
                         or candidate.get("marginal_band_rescue")
                     ) and _eff_edge_c is not None:

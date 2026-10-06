@@ -469,7 +469,26 @@ class OrderAttemptStore:
     ) -> bool:
         conn = self._get_conn()
         now = self._now()
-        payload_json = json.dumps(payload, default=str, sort_keys=True) if payload is not None else None
+        if payload is not None:
+            # Merge into the existing payload rather than replacing it: the
+            # attempt row is seeded with the order parameters at creation
+            # (ticker/side/count/price/lane) and a wholesale replace would let
+            # any caller silently erase the audit fields.
+            try:
+                cur = conn.execute(
+                    "SELECT payload_json FROM order_attempts WHERE order_attempt_id = ?",
+                    (order_attempt_id,),
+                )
+                row = cur.fetchone()
+                existing = json.loads(row[0]) if row and row[0] else {}
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+            existing.update(payload)
+            payload_json = json.dumps(existing, default=str, sort_keys=True)
+        else:
+            payload_json = None
         try:
             if payload_json is not None:
                 conn.execute(

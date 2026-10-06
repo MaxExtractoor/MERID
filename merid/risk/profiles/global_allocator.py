@@ -85,6 +85,13 @@ class OrderCandidate:
     threshold_cell_id: Optional[str] = None
     provisional_cell_id: Optional[str] = None
     effective_required_edge_cents: Optional[float] = None
+    # 2026-10-06: the edge quantity the decision-side qualification gate
+    # actually compared (EPC-adjusted effective edge, cents).  When present,
+    # the EDGE stage's lane-bound re-check compares THIS value — the one the
+    # candidate was admitted under — instead of raw edge_pct, so a candidate
+    # admitted via an EPC lift is not vetoed a second time on a different
+    # economic metric.  Falls back to edge_pct when absent.
+    gate_ev_cents: Optional[float] = None
 
     @property
     def notional_usd(self) -> float:
@@ -125,9 +132,18 @@ class OrderCandidate:
         if bound is not None and (
             self.decision_lane or self.threshold_cell_id or self.provisional_cell_id
         ):
-            return (
-                _to_edge_fraction(self.edge_pct) - float(bound) / 100.0
-            ) * self.confidence
+            # 2026-10-06: margin over the lane bound must be measured on the
+            # same quantity the admission gate compared (gate_ev when
+            # stamped).  Scoring an EPC-rescued pick on raw edge would
+            # re-derive the below-bound veto at the ranking layer — the EDGE
+            # stage now compares gate_ev for exactly this reason.
+            edge_frac = _to_edge_fraction(self.edge_pct)
+            if self.gate_ev_cents is not None:
+                try:
+                    edge_frac = float(self.gate_ev_cents) / 100.0
+                except (TypeError, ValueError):
+                    pass
+            return (edge_frac - float(bound) / 100.0) * self.confidence
         return self.edge_score
 
 
@@ -486,6 +502,21 @@ class GlobalAllocator:
         for c, d in working:
             asset_min_edge = self.per_asset_min_edge_pct.get(c.asset, self.min_edge_pct)
             candidate_edge_frac = _to_edge_fraction(c.edge_pct)
+            # 2026-10-06: when the decision-side gate stamped the edge quantity
+            # it actually enforced (EPC-adjusted gate_ev), re-check that same
+            # quantity here.  Comparing raw edge_pct against a bound the
+            # candidate cleared on gate_ev is a second, inconsistent EV veto —
+            # the exact double-gate defect the EV reconciliation removed from
+            # the decision layer.  gate_ev stays informational for non-TD
+            # candidates (fallback keeps raw edge_pct).
+            _gate_ev = getattr(c, "gate_ev_cents", None)
+            _compared_source = "raw_edge_pct"
+            if _gate_ev is not None:
+                try:
+                    candidate_edge_frac = float(_gate_ev) / 100.0
+                    _compared_source = "gate_ev_cents"
+                except (TypeError, ValueError):
+                    pass
             asset_min_edge_frac = _to_edge_fraction(asset_min_edge)
             # Degraded-mode reserve: a REST-owned effective quote carries
             # latency/uncertainty the raw edge cannot see.  It must clear the
@@ -522,12 +553,14 @@ class GlobalAllocator:
                 _mark_terminal(d, "EDGE", REASON_EXPECTED_VALUE_BELOW_MINIMUM)
                 logger.info(
                     "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < required=%.3f%% "
-                    "(min=%.3f%% degraded=%s lane=%s lane_bound_cents=%s)",
-                    c.asset, _to_edge_percent(c.edge_pct),
+                    "(min=%.3f%% degraded=%s lane=%s lane_bound_cents=%s "
+                    "compared=%s)",
+                    c.asset, _to_edge_percent(candidate_edge_frac),
                     _to_edge_percent(_required_edge_frac),
                     _to_edge_percent(asset_min_edge), _degraded,
                     getattr(c, "decision_lane", None),
                     getattr(c, "effective_required_edge_cents", None),
+                    _compared_source,
                 )
                 # 2026-09-29: decomposed EV-floor record so a reject shows the
                 # exact reserve stack it failed against.  Reserves already
@@ -542,7 +575,11 @@ class GlobalAllocator:
                         "side": c.side,
                         "ticker": c.ticker,
                         "price_cents": c.price_cents,
-                        "raw_net_ev_cents": round(candidate_edge_frac * 100.0, 3),
+                        "compared_ev_cents": round(candidate_edge_frac * 100.0, 3),
+                        "compared_ev_source": _compared_source,
+                        "raw_net_ev_cents": round(
+                            _to_edge_fraction(c.edge_pct) * 100.0, 3
+                        ),
                         "base_floor_cents": round(asset_min_edge_frac * 100.0, 3),
                         "degraded_quote_reserve_cents": round(
                             (_required_edge_frac - asset_min_edge_frac) * 100.0, 3
