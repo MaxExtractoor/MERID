@@ -94,7 +94,12 @@ Log "watchdog started; monitoring port $Port (health=loop-status, hang>${HangThr
 $fails = 0
 $lastRelaunch = [DateTime]::MinValue
 
+# A supervisor must never die silently: trap terminating errors into the log
+# and wrap each poll so a transient failure only costs one cycle.
+trap { Log "watchdog fatal: $($_.Exception.Message)"; break }
+
 while ($true) {
+    try {
     $healthy = Test-LoopHealthy
     if ($healthy) {
         if ($fails -ge $FailThreshold) { Log "server recovered on port $Port" }
@@ -140,6 +145,9 @@ while ($true) {
                 }
             }
         }
+    }
+    } catch {
+        Log "poll-cycle exception (continuing): $($_.Exception.Message)"
     }
     Start-Sleep -Seconds $PollSeconds
 }
