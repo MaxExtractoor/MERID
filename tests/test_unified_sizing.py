@@ -154,7 +154,7 @@ class TestUnifiedSizing(unittest.TestCase):
         """Test sizing with cheap contracts (10 cents).
 
         CRITICAL FIX: 2026-07-06 - min_notional lowered from $0.50 to $0.15 to align with 15c price floor.
-        The $2 fixed exposure cap and profile max_contracts=2 allow 2 contracts for BTC at 10c.
+        The $3 fixed exposure cap and profile max_contracts=3 allow 3 contracts for BTC at 10c.
         """
         bankroll = Decimal("100.00")
         price_cents = 10
@@ -168,17 +168,17 @@ class TestUnifiedSizing(unittest.TestCase):
         )
 
         # Expected (profile-driven slot sizing):
-        # fixed_exposure_cap_usd = $2.00
+        # fixed_exposure_cap_usd = $3.00
         # existing_exposure = $0.00
-        # available = $2.00
+        # available = $3.00
         # contract_cost = $0.10
-        # max_by_exposure = floor(2.00 / 0.10) = 20
-        # max_contracts_cap = 2 (BTC per kalshi_crypto_15m_v2.yaml)
-        # count = min(2, 2, 20) = 2
-        # notional = 2 × $0.10 = $0.20
+        # max_by_exposure = floor(3.00 / 0.10) = 30
+        # max_contracts_cap = 3 (BTC per kalshi_crypto_15m_v2.yaml)
+        # count = min(3, 3, 30) = 3
+        # notional = 3 × $0.10 = $0.30
 
-        self.assertEqual(count, 2, f"Expected 2 contracts for {asset} at {price_cents}c, got {count}")
-        self.assertEqual(notional_usd, Decimal("0.20"))
+        self.assertEqual(count, 3, f"Expected 3 contracts for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("0.30"))
     
     def test_sizing_with_expensive_contracts(self):
         """Test sizing with expensive contracts (75 cents - max canonical range).

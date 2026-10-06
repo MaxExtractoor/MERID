@@ -8358,7 +8358,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                     asset, intent.price_cents, slot_allocator.get_available_exposure()
                 )
             
-            # CRITICAL FIX (2026-07-14): Hard $1 exposure cap check using slot_allocator
+            # CRITICAL FIX (2026-07-14): Hard exposure cap check using slot_allocator
             # This provides real-time exposure tracking from the authoritative source
             # Exit orders bypass this check to allow position closure
             # CRITICAL FIX (2026-08-18): Use canonical qty_cc so fractional sizes are
@@ -8369,11 +8369,11 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             if not _is_exit_order(intent):
                 current_exposure = slot_allocator.get_total_exposure()
                 order_notional = (qty_cc * price_cents_int) / 10000.0
-                fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '2.00'))
+                fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
 
-                # CRITICAL FIX (2026-07-31): Log contract count enforcement for $2 rule
+                # CRITICAL FIX (2026-07-31): Log contract count enforcement for the fixed-cap rule
                 logger.info(
-                    "[HARD-EXPOSURE-CAP] Checking $2 cap with count constraint: "
+                    "[HARD-EXPOSURE-CAP] Checking fixed cap with count constraint: "
                     "asset=%s qty_cc=%d price=%dc notional=$%.4f current_exposure=$%.2f cap=$%.2f",
                     asset, qty_cc, price_cents_int, order_notional, current_exposure, fixed_exposure_cap
                 )
@@ -17731,6 +17731,7 @@ async def _route_live(
                             kalshi_order_id=kalshi_order_id,
                             intent_id=intent.intent_id,
                             client_order_id=intent.client_tag,
+                            decision_id=str(getattr(intent, "decision_id", "") or ""),
                             ticker=intent.ticker,
                             side=intent.side,
                             action=intent.action,

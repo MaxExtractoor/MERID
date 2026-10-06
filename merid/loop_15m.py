@@ -503,9 +503,9 @@ def _get_max_contracts_per_order() -> int:
         return get_global_slot_allocator().max_contracts_per_order
     except Exception:
         try:
-            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "2"))
+            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
         except Exception:
-            return 2
+            return 3
 
 logger = get_logger("merid.loop_15m")
 
@@ -6310,8 +6310,23 @@ async def _run_loop(self) -> None:
                                     ticker, count, _get_max_contracts_per_order()
                                 )
                             except Exception as sizing_err:
-                                logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1.0: %s", sizing_err)
-                                candidate["count"] = 1.0
+                                # 2026-10-06: Do NOT silently downgrade to 1 contract when the
+                                # configured target is higher.  Keep the candidate's seeded
+                                # target count (or the configured per-order target if absent);
+                                # downstream caps (max_per_order, approved_size_cc, hard
+                                # exposure cap) still bound it.
+                                _fallback_count = candidate.get("count")
+                                try:
+                                    _fallback_count = float(_fallback_count)
+                                except (TypeError, ValueError):
+                                    _fallback_count = 0.0
+                                if _fallback_count < 0.01:
+                                    _fallback_count = float(_get_max_contracts_per_order())
+                                logger.warning(
+                                    "[15m-LOOP] Dynamic sizing failed, keeping configured target count=%s: %s",
+                                    _fallback_count, sizing_err
+                                )
+                                candidate["count"] = _fallback_count
                             
                             # Execute candidate and check if order was actually submitted
                             order_submitted = await self._execute_candidate(candidate, tick_id)

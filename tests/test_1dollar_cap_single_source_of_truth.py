@@ -19,11 +19,11 @@ class Test2DollarCapSingleSourceOfTruth:
     """Verify $2 cap is the single source of truth for exposure."""
 
     def test_global_slot_allocator_enforces_2dollar_cap(self):
-        """Verify GlobalSlotAllocator enforces $2 exposure cap."""
+        """Verify GlobalSlotAllocator enforces $3 exposure cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
-        assert GlobalSlotAllocator.MAX_EXPOSURE_USD == 2.00, "MAX_EXPOSURE_USD must be $2.00"
-        assert GlobalSlotAllocator.MAX_CONTRACTS_PER_ORDER == 2, "MAX_CONTRACTS_PER_ORDER must be 2"
+        assert GlobalSlotAllocator.MAX_EXPOSURE_USD == 3.00, "MAX_EXPOSURE_USD must be $3.00"
+        assert GlobalSlotAllocator.MAX_CONTRACTS_PER_ORDER == 3, "MAX_CONTRACTS_PER_ORDER must be 3"
         assert GlobalSlotAllocator.MAX_POSITIONS_PER_ASSET == 1, "MAX_POSITIONS_PER_ASSET must be 1"
 
     def test_profile_yaml_has_no_contradictory_limits(self):
@@ -39,11 +39,11 @@ class Test2DollarCapSingleSourceOfTruth:
         assert "max_contracts_per_asset:" not in content, "max_contracts_per_asset should be removed from profile"
         assert "max_contracts_per_cluster:" not in content, "max_contracts_per_cluster should be removed from profile"
         
-        # These should exist (align with $2 cap)
-        assert "max_single_order_contracts: 2" in content, "max_single_order_contracts should be 2"
-        assert "max_yes_position: 2" in content, "max_yes_position should be 2"
-        assert "max_no_position: 2" in content, "max_no_position should be 2"
-        assert "fixed_exposure_cap_usd: 2.00" in content, "fixed_exposure_cap_usd should be 2.00"
+        # These should exist (align with $3 cap)
+        assert "max_single_order_contracts: 3" in content, "max_single_order_contracts should be 3"
+        assert "max_yes_position: 3" in content, "max_yes_position should be 3"
+        assert "max_no_position: 3" in content, "max_no_position should be 3"
+        assert "fixed_exposure_cap_usd: 3.00" in content, "fixed_exposure_cap_usd should be 3.00"
 
     def test_agent_grid_config_has_removed_limits(self):
         """Verify LeanAgentConfig has removed contradictory limits."""
@@ -123,8 +123,8 @@ class Test2DollarCapSingleSourceOfTruth:
         import inspect
         from merid.settings import Settings
         source = inspect.getsource(Settings)
-        assert "$2 cap" in source or "exposure cap" in source, \
-            "Settings should document alignment with $2 cap"
+        assert "$3 cap" in source or "exposure cap" in source, \
+            "Settings should document alignment with $3 cap"
 
 
 class Test2DollarCapMathematicalConsistency:
@@ -134,8 +134,8 @@ class Test2DollarCapMathematicalConsistency:
         """Verify $2 cap allows realistic number of positions."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
-        # With $2 cap and 2 contracts/order at max 75c
-        # Maximum positions = floor(2.00 / 0.10) = 20 (at min price)
+        # With $3 cap and 3 contracts/order at max 75c
+        # Maximum positions = floor(3.00 / 0.10) = 30 (at min price)
         # Realistic positions = 1-4 (at 50-75c)
         max_positions_min_price = int(GlobalSlotAllocator.MAX_EXPOSURE_USD / 0.10)
         max_positions_max_price = int(GlobalSlotAllocator.MAX_EXPOSURE_USD / 0.75)

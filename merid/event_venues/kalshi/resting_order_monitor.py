@@ -226,6 +226,7 @@ class RestingOrderRecord:
     # Diagnostic fields (not primary keys)
     intent_id: str = ""  # For reconciling with original OrderIntent
     client_order_id: Optional[str] = None  # For idempotency checks
+    decision_id: str = ""  # For releasing same-side strip concentration slots
     
     # Original signal context
     original_minutes_to_expiry: Optional[float] = None
@@ -560,6 +561,19 @@ class RestingOrderMonitor:
                 record, trigger=f"venue_terminal:{terminal_status}",
                 terminal_state=terminal_status, released=released,
             )
+            # A terminal-zero-fill entry also holds the same-side strip
+            # concentration slot recorded at submission time — release it so
+            # the remainder of the 15-min window can re-qualify fresh
+            # candidates on that side.
+            try:
+                from merid.prediction import directional_regime as _dr
+
+                _dr.release_strip_entry(record.decision_id)
+            except Exception as _strip_err:
+                logger.debug(
+                    "[STRIP-ENTRY-RELEASE] failed for %s: %s",
+                    record.kalshi_order_id, _strip_err,
+                )
             if released:
                 self._released_slots[(record.ticker, contract)] = {
                     "released_ts": time.time(),

@@ -379,7 +379,7 @@ class TestSlotAllocatorAtomicity:
     """Test slot allocator atomicity fixes."""
     
     def test_entry_order_count_validation(self):
-        """Test that entry orders must have count=1."""
+        """Test that entry orders accept count within the per-order cap."""
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Valid entry order
@@ -402,12 +402,12 @@ class TestSlotAllocatorAtomicity:
             pytest.fail(f"Valid entry order should not raise error: {e}")
     
     def test_entry_order_count_validation_invalid(self):
-        """Test that entry orders with count!=1 are rejected."""
+        """Test that entry orders exceeding the per-order cap are rejected."""
         from merid.risk.global_slot_allocator import AllocationRequest
         
         # Should raise ValueError during construction
-        with pytest.raises(ValueError, match="Entry orders must have count=1"):
-            # Invalid entry order (count=2)
+        with pytest.raises(ValueError, match="Entry orders must have count between"):
+            # Invalid entry order (count=4, exceeds max 3)
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
@@ -417,7 +417,7 @@ class TestSlotAllocatorAtomicity:
                 spread_cents=1,
                 confidence=0.8,
                 is_exit_order=False,
-                count=2  # Invalid: must be 1
+                count=4  # Invalid: exceeds per-order cap of 3
             )
     
     def test_exit_order_count_validation_bypassed(self):

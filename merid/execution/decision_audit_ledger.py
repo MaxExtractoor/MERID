@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS strategy_decision_side_ev (
     lower_confidence_bound_ev_cents REAL,
     required_edge_cents REAL,
     passed_edge_gate INTEGER NOT NULL DEFAULT 0,
+    gate_ev_cents REAL,
+    enforced_edge_bound_cents REAL,
     PRIMARY KEY (decision_id, side)
 );
 
@@ -383,6 +385,14 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decision_side_ev", "admission_owner", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "threshold_source", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "legacy_risk_label", "TEXT")
+        # 2026-10-06 (EV reconciliation): the quantities the live economics
+        # gate actually compared — gate_ev_cents (EPC-adjusted effective
+        # edge) vs enforced_edge_bound_cents (post-caution, post-slack
+        # bound).  expected_net_ev_cents/required_edge_cents remain the raw
+        # decomposition; the delta between the two pairs is attributable to
+        # named components (marginal-band slack, EPC lift).
+        _add_column(conn, "strategy_decision_side_ev", "gate_ev_cents", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "enforced_edge_bound_cents", "REAL")
 
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
@@ -2626,8 +2636,9 @@ class DecisionAuditLedger:
                         counterfactual_execution_status, counterfactual_entry_source,
                         counterfactual_fee_model_version,
                         counterfactual_slippage_model_version,
-                        counterfactual_fill_model_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        counterfactual_fill_model_version,
+                        gate_ev_cents, enforced_edge_bound_cents
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -2668,6 +2679,8 @@ class DecisionAuditLedger:
                         side_row.get("counterfactual_fee_model_version"),
                         side_row.get("counterfactual_slippage_model_version"),
                         side_row.get("counterfactual_fill_model_version"),
+                        side_row.get("gate_ev_cents"),
+                        side_row.get("enforced_edge_bound_cents"),
                     ),
                 )
 
@@ -2866,12 +2879,30 @@ def _build_side_ev_row(
     )
     eligible_for_policy = eligible_for_model and in_canonical
 
-    # Edge gate: net edge clears the per-side dynamic threshold.
-    passed_edge = (
-        eligible_for_model
-        and math.isfinite(net_edge)
-        and net_edge * 100.0 >= required_edge_cents - 1e-9
+    # Edge gate verdict = the comparison the live gate actually enforced:
+    # the EPC-adjusted effective edge vs the post-caution, post-slack bound
+    # (stamped as {side}_gate_ev_cents / {side}_effective_gate_edge_cents).
+    # When those stamps are absent (legacy decisions) fall back to the raw
+    # net-edge vs policy-bound check.  The raw pair stays in
+    # expected_net_ev_cents / required_edge_cents so the strict economics
+    # view is still derivable and any rescue/lift is attributable to the
+    # named slack or EPC components.
+    _gate_ev_cents = _to_float(indicators.get(f"{side}_gate_ev_cents"))
+    _enforced_bound_cents = _to_float(
+        indicators.get(f"{side}_effective_gate_edge_cents")
     )
+    if _gate_ev_cents is not None and _enforced_bound_cents is not None:
+        passed_edge = (
+            eligible_for_model
+            and math.isfinite(_gate_ev_cents)
+            and _gate_ev_cents >= _enforced_bound_cents - 1e-9
+        )
+    else:
+        passed_edge = (
+            eligible_for_model
+            and math.isfinite(net_edge)
+            and net_edge * 100.0 >= required_edge_cents - 1e-9
+        )
 
     # Infer an exclusion reason for the side when the no-trade reason applies.
     no_trade_reason = getattr(decision, "no_trade_reason", None) or ""
@@ -2949,8 +2980,10 @@ def _build_side_ev_row(
         "gross_edge_cents": gross_edge_cents,
         "entry_fee_cents": entry_fee_cents,
         "exit_or_settlement_fee_cents": exit_fee_cents,
+        # Per-side reserve actually charged in this side's EdgeBreakdown —
+        # not the decision-level scalar (which is the selected side's value).
         "adverse_selection_haircut_cents": (
-            _to_float(getattr(decision, "adverse_selection_reserve", None))
+            _to_float(getattr(breakdown, "adverse_selection_reserve", None))
             or 0.0
         ) * 100.0,
         "model_uncertainty_haircut_cents": model_risk_cents,
@@ -2958,6 +2991,8 @@ def _build_side_ev_row(
         "lower_confidence_bound_ev_cents": lcb,
         "required_edge_cents": required_edge_cents,
         "passed_edge_gate": bool(passed_edge),
+        "gate_ev_cents": _gate_ev_cents,
+        "enforced_edge_bound_cents": _enforced_bound_cents,
         "admission_owner": indicators.get(f"{side}_admission_owner"),
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),

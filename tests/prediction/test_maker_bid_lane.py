@@ -100,8 +100,14 @@ def test_bid_basis_selects_and_stamps_lane():
     assert decision.indicators.get("entry_price_basis") == "bid"
 
 
-def test_bid_basis_reserve_is_charged():
-    """Zero reserve must produce strictly more net edge than 2c reserve."""
+def test_bid_basis_reserve_is_charged(monkeypatch):
+    """The lane charge is max(caller prior, measured): a higher prior must
+    reduce net edge by the prior-minus-measured delta, and a measured value
+    above the prior must be charged even when the caller passed zero."""
+    monkeypatch.setattr(
+        "merid.prediction.current_build_provisional.adverse_selection_reserve_cents",
+        lambda *a, **k: 0.5,  # 0.5c measured — below the 2c lane prior
+    )
     base = _make_decision(
         decision_id="test-mb-r0",
         fee_per_contract_cents=0.5,
@@ -115,7 +121,31 @@ def test_bid_basis_reserve_is_charged():
         adverse_selection_reserve=0.02,
     )
     assert float(hair.net_edge) == pytest.approx(
-        float(base.net_edge) - 0.02, abs=1e-6
+        float(base.net_edge) - 0.015, abs=1e-6  # max(0,0.5c)=0.5c vs 2c
+    )
+
+    monkeypatch.setattr(
+        "merid.prediction.current_build_provisional.adverse_selection_reserve_cents",
+        lambda *a, **k: 3.0,  # 3c measured — above the prior
+    )
+    meas = _make_decision(
+        decision_id="test-mb-r3",
+        fee_per_contract_cents=0.5,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.02,
+    )
+    zero = _make_decision(
+        decision_id="test-mb-r4",
+        fee_per_contract_cents=0.5,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.0,
+    )
+    # max(prior, measured) = 3c for both -> identical net edge.
+    assert float(meas.net_edge) == pytest.approx(
+        float(zero.net_edge), abs=1e-6
+    )
+    assert float(meas.net_edge) == pytest.approx(
+        float(base.net_edge) - 0.025, abs=1e-6  # base charged 0.5c
     )
 
 
