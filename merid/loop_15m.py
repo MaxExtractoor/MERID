@@ -6510,7 +6510,15 @@ async def _run_loop(self) -> None:
                 # CRITICAL FIX (2026-08-27): total_candidates comes from the agent_grid
                 # CycleResult (total_generated) so pre-loop rejections (ENTRIES_DISABLED,
                 # allocator loss, allocator error) are included in the invariant.
-                tick_rejections = sum(self._rejection_counters.values())
+                # 2026-10-06: parity_winner_mismatch / parity_price_violation are
+                # sub-reasons nested inside parity_blocked (all three increment on
+                # the same candidate).  Exclude them from the candidate-level sum
+                # or one blocked candidate counts as two rejections.
+                _sub_reason_keys = {"parity_winner_mismatch", "parity_price_violation"}
+                tick_rejections = sum(
+                    v for k, v in self._rejection_counters.items()
+                    if k not in _sub_reason_keys
+                )
                 tick_executed = self._tick_executed_count  # Use per-tick counter, not window-accumulated
 
                 # CRITICAL FIX: 2026-08-02 - Verify against lifecycle event log for single source of truth
@@ -10852,6 +10860,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             from merid.prediction.canonical_edge import (
                 CENTS_EDGE_GATE_ENABLED,
                 compute_canonical_edges,
+                repriced_parity_edges,
                 required_edge_cents,
                 resolve_gate_side,
                 select_winner_side,
@@ -11107,12 +11116,43 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     no_bid=no_bid,
                     no_ask=no_ask,
                 )
-                
+
+                # 2026-10-06: WINNER_MISMATCH must run in the lane's price space.
+                # edge_yes/edge_no above are midpoint-space edges — exact mirrors
+                # by construction — so a bounded post-only lane that picked NO
+                # on executable EV (e.g. a resting 54c NO bid when the book is
+                # 34/35 x 65/66) was vetoed whenever the mid leaned YES.
+                # repriced_parity_edges puts each side at its lane-executable
+                # basis; a real side inversion still fails.
+                _parity_edge_yes = edge_yes
+                _parity_edge_no = edge_no
+                if _is_bounded_lane:
+                    _repriced_yes, _repriced_no = repriced_parity_edges(
+                        chosen_side=chosen_side,
+                        model_prob_yes=model_prob_yes_canonical,
+                        limit_price_frac=(price_cents / 100.0) if price_cents is not None else None,
+                        yes_bid_cents=yes_bid,
+                        yes_ask_cents=yes_ask,
+                        no_bid_cents=no_bid,
+                        no_ask_cents=no_ask,
+                        liquidity_role=resolved_liquidity_role,
+                        fallback_edge_yes=edge_yes,
+                        fallback_edge_no=edge_no,
+                    )
+                    if (_repriced_yes, _repriced_no) != (edge_yes, edge_no):
+                        logger.info(
+                            "[15M-LOOP] BOUNDED-LANE parity repriced: ticker=%s "
+                            "lane=%s side=%s edge_yes=%.4f edge_no=%.4f (was mid %.4f/%.4f)",
+                            ticker, _td_lane, chosen_side,
+                            _repriced_yes, _repriced_no, edge_yes, edge_no,
+                        )
+                        _parity_edge_yes, _parity_edge_no = _repriced_yes, _repriced_no
+
                 bot_view = BotView(
                     model_prob_yes=model_prob_yes_canonical,
                     model_prob_no=(1.0 - model_prob_yes_canonical) if model_prob_yes_canonical is not None else None,
-                    edge_yes=edge_yes,
-                    edge_no=edge_no,
+                    edge_yes=_parity_edge_yes,
+                    edge_no=_parity_edge_no,
                     chosen_side=chosen_side,
                     exposure_intent=exposure_intent,
                 )
@@ -11217,8 +11257,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             
             # 2026-07-25: Log pipeline trace for blocked candidate
             logger.info(
-                "[PIPELINE-TRACE] ticker=%s side=%s canonical_edge_yes=%.4f canonical_edge_no=%.4f min_edge_frac=%.4f decision=BLOCK_REASON=PARITY_BOTH_SIDES_BELOW_THRESHOLD",
-                ticker, kalshi_side, edge_yes, edge_no, min_edge
+                "[PIPELINE-TRACE] ticker=%s side=%s canonical_edge_yes=%.4f canonical_edge_no=%.4f min_edge_frac=%.4f decision=BLOCK_REASON=PARITY_%s",
+                ticker, kalshi_side, edge_yes, edge_no, min_edge, block_reason.upper()
             )
             # Skip routing this order - return to skip this candidate
             return False

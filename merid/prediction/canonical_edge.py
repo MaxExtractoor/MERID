@@ -261,6 +261,63 @@ def resolve_gate_side(
     return recomputed_side, False
 
 
+def repriced_parity_edges(
+    chosen_side: Optional[str],
+    model_prob_yes: Optional[float],
+    limit_price_frac: Optional[float],
+    yes_bid_cents: Optional[float],
+    yes_ask_cents: Optional[float],
+    no_bid_cents: Optional[float],
+    no_ask_cents: Optional[float],
+    liquidity_role: Optional[str],
+    fallback_edge_yes: Optional[float],
+    fallback_edge_no: Optional[float],
+) -> Tuple[Optional[float], Optional[float]]:
+    """Reprice YES/NO edges into the bounded lane's executable price space.
+
+    Midpoint edges are exact mirrors by construction (edge_no == -edge_yes),
+    so a midpoint argmax vetoes any bounded post-only pick whose executable
+    edge disagrees with the mid sign — e.g. a resting 54c NO bid when the book
+    is 34/35 x 65/66 and the model's mid-edge leans YES.  The parity
+    WINNER_MISMATCH check needs each side's edge at the price that side would
+    actually pay:
+
+    - chosen side: its submitted limit price,
+    - alternate side: its maker-postable bid (maker role) or the ask
+      (taker role — the price to get the alternate exposure immediately).
+
+    A genuine side inversion still fails: the wrong side's edge is deeply
+    negative at any executable price.  When inputs are missing the caller's
+    fallback edges are returned unchanged (fail closed to prior behavior).
+    """
+    if (
+        chosen_side not in ("yes", "no")
+        or model_prob_yes is None
+        or limit_price_frac is None
+    ):
+        return fallback_edge_yes, fallback_edge_no
+
+    p_yes = float(model_prob_yes)
+    p_no = 1.0 - p_yes
+    lim = float(limit_price_frac)
+    is_maker = liquidity_role == "maker"
+
+    if chosen_side == "no":
+        alt_px_cents = yes_bid_cents if is_maker else yes_ask_cents
+        chosen_edge = p_no - lim
+        alt_edge = (p_yes - float(alt_px_cents) / 100.0) if alt_px_cents is not None else None
+        if alt_edge is None:
+            return fallback_edge_yes, fallback_edge_no
+        return alt_edge, chosen_edge
+
+    alt_px_cents = no_bid_cents if is_maker else no_ask_cents
+    chosen_edge = p_yes - lim
+    alt_edge = (p_no - float(alt_px_cents) / 100.0) if alt_px_cents is not None else None
+    if alt_edge is None:
+        return fallback_edge_yes, fallback_edge_no
+    return chosen_edge, alt_edge
+
+
 def validate_price_parity(
     market_price_yes: Optional[float],
     market_price_no: Optional[float],
