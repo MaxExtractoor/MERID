@@ -364,6 +364,28 @@ def _is_expired_ticker(ticker: str) -> bool:
     return False
 
 
+def _fill_created_time_dt(fill_record: Any) -> Optional[datetime]:
+    """Return a tz-aware UTC datetime for a fill record's ``created_time``.
+
+    ``KalshiFill.created_time`` is normally a datetime, but persisted/replayed
+    records and synthetic fixtures may carry an ISO string.  Returns ``None``
+    when no trustworthy exchange timestamp exists — callers must treat that as
+    "cannot prove coverage", not as "old".
+    """
+    if fill_record is None:
+        return None
+    raw = getattr(fill_record, "created_time", None)
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
 def _get_market_price_fallback(ticker: str) -> int:
     """Get market price from KalshiMarketStateStore as fallback for avg_price_cents.
 
@@ -600,6 +622,12 @@ class CachedPosition:
     settlement_status: str = "open"
     known_aliases: List[str] = field(default_factory=list)
     exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
+    # 2026-10-06: UTC timestamp of the newest REST position snapshot reflected in
+    # this record.  A REST snapshot is absolute state — every exchange fill with
+    # created_time <= this stamp is already included in the synced quantity and
+    # must not re-apply as a delta (fills arriving after the snapshot apply
+    # normally).  Stamped by sync_from_rest; unset for fill-created positions.
+    rest_synced_at: Optional[datetime] = None
 
     def __post_init__(self):
         """Initialize canonical quantity_cc and display contracts consistently."""
@@ -2328,6 +2356,64 @@ class KalshiPositionCache:
                 else:
                     fill_yes_delta = 0
             expected_post_yes = pre_position_yes + fill_yes_delta
+
+            # 2026-10-06: REST-snapshot coverage guard (exactly-once across
+            # snapshot and event paths).  A REST position snapshot is absolute
+            # state: when it reconstructed/refreshed this position at
+            # rest_synced_at, every exchange fill with created_time <= that
+            # stamp was already included in the synced quantity.  A delayed
+            # canonical fill event for one of those fills must not re-apply the
+            # delta — observed live as recompute-replay +100 then fill-bus
+            # +100 -> cache=200 vs exchange=100 on the same economic fill.
+            # The fill is still marked applied and its provenance is migrated
+            # onto the position (the snapshot cannot carry fill linkage).
+            if pre_position is not None and fill_id:
+                _pos_rest_ts = getattr(pre_position, "rest_synced_at", None)
+                if _pos_rest_ts is not None:
+                    _cover_rec = fill_record
+                    if _cover_rec is None:
+                        try:
+                            _cover_ledger = self._get_fills_ledger()
+                            _cover_rec = (
+                                _cover_ledger.get_fill_by_id(fill_id)
+                                if _cover_ledger is not None else None
+                            )
+                        except Exception:
+                            _cover_rec = None
+                    _fill_ct = _fill_created_time_dt(_cover_rec)
+                    if _fill_ct is not None and _fill_ct <= _pos_rest_ts:
+                        logger.warning(
+                            "[POSITION-CACHE-FILL-COVERED-BY-REST] fill_id=%s market=%s "
+                            "fill_created=%s <= rest_synced_at=%s - snapshot already contains "
+                            "this fill; skipping delta (pre_yes=%s would-be delta=%s)",
+                            fill_id, market_id, _fill_ct.isoformat(), _pos_rest_ts.isoformat(),
+                            pre_position_yes, fill_yes_delta,
+                        )
+                        self._applied_fill_ids[fill_id] = replay_time()
+                        self._save_applied_fill_ids()
+                        # Migrate entry provenance the snapshot could not carry.
+                        # Only when the fill opens the currently-held side and
+                        # the record lacks linkage — never overwrite existing
+                        # provenance, never stamp an exit fill as the entry.
+                        _pos_yes = pre_position._yes_exposure()
+                        _opens_held_side = (
+                            _pos_yes != 0
+                            and fill_yes_delta != 0
+                            and (fill_yes_delta > 0) == (_pos_yes > 0)
+                        )
+                        if _opens_held_side:
+                            if not pre_position.entry_fill_id or pre_position.entry_fill_id == "unknown":
+                                pre_position.entry_fill_id = fill_id
+                            _coid = client_order_id or getattr(_cover_rec, "client_order_id", None)
+                            if _coid and not pre_position.client_order_id:
+                                pre_position.client_order_id = _coid
+                            _forder = getattr(_cover_rec, "order_id", None)
+                            if _forder and not pre_position.entry_order_id:
+                                pre_position.entry_order_id = _forder
+                            _fintent = getattr(_cover_rec, "intent_id", None)
+                            if _fintent and not pre_position.entry_intent_id:
+                                pre_position.entry_intent_id = _fintent
+                        return
 
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
@@ -4824,6 +4910,13 @@ class KalshiPositionCache:
         if rest_timestamp is None:
             rest_timestamp = replay_time()
 
+        # 2026-10-06: Snapshot coverage bound.  The REST snapshot is absolute
+        # exchange state as of rest_timestamp — any ledger fill with
+        # created_time <= rest_timestamp is already included in the synced
+        # quantities and must be marked applied so a delayed fill event cannot
+        # re-apply the same economic fill as a delta.
+        rest_sync_dt = datetime.fromtimestamp(rest_timestamp, tz=timezone.utc)
+
         # CRITICAL FIX (2026-08-11): Per-source idempotency guard.  Multiple
         # reconcilers (fills_poller, agent_grid, continuous_reconciliation,
         # venue_adapter) can race to call sync_from_rest with the same snapshot.
@@ -5677,6 +5770,7 @@ class KalshiPositionCache:
                             ratchet_activated=pos.get("ratchet_activated", base_position.ratchet_activated),
                             ratchet_floor_price_cents=pos.get("ratchet_floor_price_cents", base_position.ratchet_floor_price_cents),
                             ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp", base_position.ratchet_activation_timestamp),
+                            rest_synced_at=rest_sync_dt,
                         )
                     else:
                         self._positions[market_id] = CachedPosition(
@@ -5709,6 +5803,7 @@ class KalshiPositionCache:
                             ratchet_activated=pos.get("ratchet_activated", False),
                             ratchet_floor_price_cents=pos.get("ratchet_floor_price_cents"),
                             ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp"),
+                            rest_synced_at=rest_sync_dt,
                         )
 
                     # CRITICAL FIX (2026-08-23): Rehydrate the exit plan from durable
@@ -5722,6 +5817,40 @@ class KalshiPositionCache:
                         )
 
                     positions_processed += 1
+
+                    # 2026-10-06: Exactly-once across fill events and snapshots.
+                    # This market's synced state already contains every fill with
+                    # created_time <= rest_timestamp (the snapshot is absolute).
+                    # Mark them applied so a delayed canonical fill event — the
+                    # same economic fill delivered later by the HTTP poller/WS —
+                    # cannot re-apply the delta.  Fills newer than the snapshot
+                    # are left unmarked and apply normally when they arrive.
+                    try:
+                        _sync_ledger = self._get_fills_ledger()
+                        if _sync_ledger is not None:
+                            _newly_covered = 0
+                            for _lf in _sync_ledger.get_fills_by_market(market_id) or []:
+                                _lf_id = getattr(_lf, "fill_id", None)
+                                _lf_ct = _fill_created_time_dt(_lf)
+                                if (
+                                    _lf_id
+                                    and _lf_id not in self._applied_fill_ids
+                                    and _lf_ct is not None
+                                    and _lf_ct <= rest_sync_dt
+                                ):
+                                    self._applied_fill_ids[_lf_id] = replay_time()
+                                    _newly_covered += 1
+                            if _newly_covered:
+                                logger.info(
+                                    "[POSITION-CACHE-REST-COVERAGE] market=%s marked %d ledger "
+                                    "fill(s) applied (covered by REST snapshot ts=%s)",
+                                    market_id, _newly_covered, rest_sync_dt.isoformat(),
+                                )
+                    except Exception as _cover_err:
+                        logger.debug(
+                            "[POSITION-CACHE-REST-COVERAGE] fill coverage marking failed for %s: %s",
+                            market_id, _cover_err,
+                        )
 
                 # CRITICAL FIX (2026-08-12): When force=True and cleanup_stale=True, REST is
                 # treated as an authoritative full snapshot.  Remove any cached 15m positions
@@ -5750,6 +5879,10 @@ class KalshiPositionCache:
                         "[REST-SYNC-AFTER-POSITION] market=%s thesis_side=%s contracts=%.2f",
                         market_id, cached_pos.thesis_side, cached_pos.contracts
                     )
+
+                # Persist snapshot-covered fill ids added during this sync so a
+                # restart cannot re-apply fills the snapshot already contained.
+                self._save_applied_fill_ids()
 
                 # CRITICAL FIX (2026-07-16): Add REST-synced positions to PositionMonitor for exit enforcement
                 # This ensures positions are monitored after restart when synced from REST API
@@ -6191,6 +6324,7 @@ class KalshiPositionCache:
             # side-tagged prices.  This matches recompute_position_from_ledger and
             # avoids the naive buy/sell and 100 - price assumptions.
             rebuilt_count = 0
+            _rebuild_marked_any = False
             for market_id, fills in market_fills.items():
                 net_yes_cc = 0
                 # Track cost and quantity in fixed-point cents / centi-contracts to
@@ -6201,6 +6335,7 @@ class KalshiPositionCache:
                 exit_policy_id = None
                 take_profit_price_cents = None
                 stop_loss_price_cents = None
+                contributed_fill_ids: List[str] = []
 
                 for fill in fills:
                     # Determine quantity in centi-contracts.  Prefer the canonical
@@ -6310,6 +6445,15 @@ class KalshiPositionCache:
 
                     net_yes_cc = new_yes_cc
 
+                    # 2026-10-06: This fill's signed delta is now reflected in the
+                    # rebuilt state — record it so it can be marked applied once
+                    # the rebuild for this market completes.  Fills skipped above
+                    # (zero qty, undetermined direction, unpriceable) did not
+                    # contribute and must remain applicable by the event path.
+                    _replayed_fid = getattr(fill, 'fill_id', None)
+                    if _replayed_fid:
+                        contributed_fill_ids.append(_replayed_fid)
+
                     # Extract exit policy metadata from fill
                     if hasattr(fill, 'raw_payload'):
                         import json
@@ -6373,6 +6517,31 @@ class KalshiPositionCache:
                         "[POSITION-CACHE-REBUILD] Rebuilt position: market=%s contracts=%.2f avg_price=%dc thesis_side=%s",
                         market_id, net_contracts, avg_price_cents or 0, thesis_side or "unknown"
                     )
+
+                # 2026-10-06: Exactly-once across replay and event paths.  Every
+                # fill that contributed to this market's rebuilt state is by
+                # definition already reflected in the cache — mark it applied so
+                # a delayed canonical fill event for the same economic fill
+                # cannot re-apply the delta (observed live: replay +100 then
+                # fill-bus +100 -> cache=200 vs exchange=100).  This also covers
+                # markets replayed to flat: an entry fill re-delivered on an
+                # empty cache would otherwise ghost a closed position.
+                if contributed_fill_ids:
+                    _newly_marked = 0
+                    for _fid in contributed_fill_ids:
+                        if _fid not in self._applied_fill_ids:
+                            self._applied_fill_ids[_fid] = replay_time()
+                            _newly_marked += 1
+                            _rebuild_marked_any = True
+                    if _newly_marked:
+                        logger.info(
+                            "[POSITION-CACHE-REBUILD-COVERAGE] market=%s marked %d replayed "
+                            "fill(s) applied (net_yes_cc=%s)",
+                            market_id, _newly_marked, net_yes_cc,
+                        )
+
+            if _rebuild_marked_any:
+                self._save_applied_fill_ids()
 
             logger.info(
                 "[POSITION-CACHE-REBUILD] Rebuilt %d positions from %d fills in fills ledger",
