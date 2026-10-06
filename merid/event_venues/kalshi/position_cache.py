@@ -422,7 +422,7 @@ def _position_current_price_cents(position) -> Optional[int]:
         return None
 
 
-def _get_fallback_price_for_market(market_id: str) -> Optional[int]:
+def _get_fallback_price_for_market(market_id: str, held_side: Optional[str] = None) -> Optional[int]:
     """Get fallback price for a market based on asset.
 
     This provides asset-specific fallback prices when REST API returns
@@ -431,6 +431,11 @@ def _get_fallback_price_for_market(market_id: str) -> Optional[int]:
 
     Args:
         market_id: Kalshi market ID (e.g., "KXBTC15M-26AUG010100-00")
+        held_side: The position's held outcome side ("yes"/"no").  Market
+            mids and the asset defaults below are YES-space prices; for a
+            NO position the fallback must be the complement (100 - yes),
+            otherwise the monitor entry basis lands in the wrong price
+            space (e.g. 17c instead of 83c for a NO held at 84c).
 
     Returns:
         Fallback price in cents, or None if cannot determine
@@ -438,22 +443,22 @@ def _get_fallback_price_for_market(market_id: str) -> Optional[int]:
     try:
         # First try to get from market state store (most accurate)
         fallback = _get_market_price_fallback(market_id)
-        if fallback != 50:  # If we got actual market data, use it
-            return fallback
-
-        # Asset-specific fallbacks based on typical price ranges
-        if "BTC" in market_id.upper():
-            return 46  # Typical BTC 15m contract price
-        elif "ETH" in market_id.upper():
-            return 23  # Typical ETH 15m contract price
-        elif "SOL" in market_id.upper():
-            return 54  # Typical SOL 15m contract price
-        elif "XRP" in market_id.upper():
-            return 55  # Typical XRP 15m contract price
-        elif "DOGE" in market_id.upper():
-            return 28  # Typical DOGE 15m contract price
-        else:
-            return 50  # Generic fallback
+        if fallback == 50:  # No actual market data; use asset defaults below
+            if "BTC" in market_id.upper():
+                fallback = 46  # Typical BTC 15m YES contract price
+            elif "ETH" in market_id.upper():
+                fallback = 23
+            elif "SOL" in market_id.upper():
+                fallback = 54
+            elif "XRP" in market_id.upper():
+                fallback = 55
+            elif "DOGE" in market_id.upper():
+                fallback = 28
+            else:
+                fallback = 50
+        if (held_side or "").lower() == "no":
+            return max(1, min(99, 100 - fallback))
+        return fallback
     except Exception as _exc:
         logger.debug("position_cache: failed to determine fallback price for %s: %s", market_id, _exc)
         return 50
@@ -4409,6 +4414,12 @@ class KalshiPositionCache:
         entry_intent_id = None
         fill_source = "alpha"
         first_fill: Any = None
+        # Held-side (thesis-space) price of the fill that opened the current
+        # exposure epoch.  ``first_fill.price_cents`` is the raw *execution* leg
+        # (e.g. the YES leg of a SELL_YES fill that economically opens long NO);
+        # storing it as entry_fill_price_cents would leave the record in the
+        # wrong side space and trip complement guards downstream.
+        entry_anchor_price_cents: Optional[int] = None
 
         for fill in sorted_fills:
             if first_fill is None:
@@ -4456,22 +4467,32 @@ class KalshiPositionCache:
                 entry_intent_id = getattr(fill, 'intent_id', None)
                 fill_source = getattr(fill, 'fill_source', 'alpha')
 
-            # Use the price in the position's (thesis) side space.  When the
-            # canonical fill side differs from the held side, read the stored
-            # YES/NO leg price.  Never fall back to the raw execution price or
-            # compute a complement.
-            if fill_side.lower() != thesis_side.lower():
-                converted = _fill_position_side_price_cents(fill, thesis_side)
+            pre_yes_exposure = yes_exposure
+            is_increase = pre_yes_exposure == 0 or pre_yes_exposure * fill_yes > 0
+            is_flip = (not is_increase) and abs(fill_yes) > abs(pre_yes_exposure)
+
+            # Use the price in the space of the side whose basis this fill
+            # touches.  Fills that open/add exposure — including a flip residual
+            # starting a new epoch — are priced in their delta's direction; a
+            # pure reduce is priced in the current held side (its realized-PnL
+            # anchor).  A SELL_YES fill that opens long NO must therefore read
+            # the stored NO leg — never the raw YES execution leg and never a
+            # synthesized 100-x complement.
+            if is_increase or is_flip:
+                price_side, _ = from_signed_yes_exposure(fill_yes)
+            else:
+                price_side, _ = from_signed_yes_exposure(pre_yes_exposure)
+            if not price_side:
+                price_side = thesis_side
+            if fill_side.lower() != (price_side or "").lower():
+                converted = _fill_position_side_price_cents(fill, price_side)
                 if converted is None or converted <= 0:
                     logger.warning(
                         "[POSITION-RECOMPUTE] Cannot determine %s-side price for %s fill_id=%s; skipping fill",
-                        thesis_side, market_id, getattr(fill, 'fill_id', 'unknown'),
+                        price_side, market_id, getattr(fill, 'fill_id', 'unknown'),
                     )
                     continue
                 fill_price_cents = converted
-
-            pre_yes_exposure = yes_exposure
-            is_increase = pre_yes_exposure == 0 or pre_yes_exposure * fill_yes > 0
 
             # Signed cash proceeds for this fill.  ``proceeds_dollars`` is
             # authoritative; derive it from the canonical action and the
@@ -4492,6 +4513,7 @@ class KalshiPositionCache:
                 # not drag avg_price_cents toward its own execution price.
                 if pre_yes_exposure == 0:
                     avg_price_cents = fill_price_cents
+                    entry_anchor_price_cents = fill_price_cents
                 else:
                     pre_contracts = abs(pre_yes_exposure)
                     total_cost = pre_contracts * (avg_price_cents or 0) + fill_quantity_cc * fill_price_cents
@@ -4505,9 +4527,13 @@ class KalshiPositionCache:
                 released_basis = entry_cash_proceeds_usd * closed_fraction
                 if abs(fill_yes) > abs(pre_yes_exposure):
                     # Over-close (flip): attribute cash pro-rata; the remainder
-                    # seeds the basis of the reversed residual.
+                    # seeds the basis of the reversed residual.  The residual is
+                    # a fresh exposure epoch — re-anchor its basis to this fill's
+                    # held-side price instead of carrying the old epoch's avg.
                     closed_cash = fill_proceeds * (Decimal(closed_cc) / Decimal(abs(fill_yes)))
                     remainder_cash = fill_proceeds - closed_cash
+                    avg_price_cents = fill_price_cents
+                    entry_anchor_price_cents = fill_price_cents
                 else:
                     closed_cash = fill_proceeds
                     remainder_cash = Decimal("0")
@@ -4584,6 +4610,11 @@ class KalshiPositionCache:
             outcome_side=thesis_side,
             book_side="ask",
             avg_price_cents=avg_price_cents,
+            # The basis above is derived from durable fills-ledger leg prices —
+            # the most trusted source.  Leaving this "unknown" caused the REST
+            # monitor handoff to overwrite it with a market-price fallback in
+            # the wrong (YES) side space for NO positions.
+            entry_price_state="known" if avg_price_cents and 0 < avg_price_cents < 100 else "unknown",
             realized_pnl_usd=realized_pnl_usd,
             entry_cash_proceeds_usd=entry_cash_proceeds_usd,
             unrealized_pnl_usd=Decimal("0"),  # Would need current market price
@@ -4608,9 +4639,14 @@ class KalshiPositionCache:
             # CRITICAL FIX (2026-09-02): Keep the immutable first-fill price as the
             # canonical entry anchor; the REST-reported average is retained in
             # avg_price_cents for reconciliation only.
+            # 2026-10-06: The anchor must be the *held-side* leg price
+            # (entry_anchor_price_cents), not the raw execution leg — a SELL_YES
+            # fill that opens long NO would otherwise store its YES leg (16c)
+            # as the entry anchor for an 84c NO basis and poison every
+            # complement-parity check downstream.
             entry_fill_price_cents=(
-                int(getattr(first_fill, 'price_cents', 0) or 0)
-                if first_fill and getattr(first_fill, 'price_cents', None)
+                entry_anchor_price_cents
+                if entry_anchor_price_cents is not None
                 else avg_price_cents
             ),
             all_in_entry_basis_cents=None,  # will be derived from entry_fill_price_cents/avg in __post_init__
@@ -5412,22 +5448,36 @@ class KalshiPositionCache:
                                 # Look up the most recent entry fill for this market
                                 fills = self._fills_ledger.get_fills_by_market(market_id)
                                 if fills:
-                                    # Find the first entry fill (buy action) for this market.
-                                    # Use the fill's stored YES/NO leg price in the entry side's own space.
+                                    # Find the first fill that opens exposure on the
+                                    # position's held side.  Match on the signed YES
+                                    # delta — not action == 'buy' — so complement-form
+                                    # entries (SELL_YES opening long NO) are found too,
+                                    # and read the *held-side* leg price.
                                     for fill in fills:
-                                        fill_action = (getattr(fill, 'canonical_position_action', None) or getattr(fill, 'action', '')).lower()
-                                        fill_side = (getattr(fill, 'canonical_position_side', None) or getattr(fill, 'side', '')).lower()
-                                        if fill_action == 'buy' and fill_side in ('yes', 'no'):
-                                            fill_price = _fill_position_side_price_cents(fill, fill_side)
-                                            if fill_price and fill_price > 0:
-                                                avg_price_cents = int(fill_price)
-                                                entry_price_state = "fills_ledger"
-                                                avg_price_source = "fills_ledger"
-                                                logger.info(
-                                                    "[POSITION-CACHE] Reconstructed avg_price_cents=%d from fills_ledger for %s (fill_id=%s, side=%s)",
-                                                    avg_price_cents, market_id, getattr(fill, 'fill_id', 'unknown'), fill_side
-                                                )
-                                                break
+                                        _delta = getattr(fill, 'canonical_yes_delta_cc', None)
+                                        if _delta is None:
+                                            _a = (getattr(fill, 'canonical_position_action', None) or getattr(fill, 'action', '')).lower()
+                                            _s = (getattr(fill, 'canonical_position_side', None) or getattr(fill, 'side', '')).lower()
+                                            _q = getattr(fill, 'quantity_cc', None) or int((getattr(fill, 'count_fp', 0) or 0) * 100)
+                                            try:
+                                                _delta = yes_delta(_a, _s, _q) if BINARY_PRICE_SPACE_AVAILABLE else None
+                                            except Exception:
+                                                _delta = None
+                                        if _delta is None:
+                                            continue
+                                        _held_side, _ = from_signed_yes_exposure(_delta)
+                                        if _held_side != validated_rest_side:
+                                            continue
+                                        fill_price = _fill_position_side_price_cents(fill, validated_rest_side)
+                                        if fill_price and fill_price > 0:
+                                            avg_price_cents = int(fill_price)
+                                            entry_price_state = "fills_ledger"
+                                            avg_price_source = "fills_ledger"
+                                            logger.info(
+                                                "[POSITION-CACHE] Reconstructed avg_price_cents=%d from fills_ledger for %s (fill_id=%s, side=%s)",
+                                                avg_price_cents, market_id, getattr(fill, 'fill_id', 'unknown'), validated_rest_side
+                                            )
+                                            break
                             except Exception as fills_err:
                                 logger.debug("[POSITION-CACHE] Could not reconstruct avg_price from fills_ledger for %s: %s", market_id, fills_err)
 
@@ -5940,8 +5990,15 @@ class KalshiPositionCache:
                             # Track if we used fallback price for this position
                             original_avg_price = None
                             if cached_pos.entry_price_state in ("unknown", "invalid"):
-                                # Use fallback price based on asset (same logic as notional calculation)
-                                fallback_price_cents = _get_fallback_price_for_market(market_id)
+                                # Use fallback price based on asset (same logic as notional
+                                # calculation).  Must be in the position's held-side space —
+                                # a YES mid for a NO position gives a complement basis.
+                                _held_side = (
+                                    cached_pos.thesis_side
+                                    if cached_pos.thesis_side in ("yes", "no")
+                                    else cached_pos.side
+                                )
+                                fallback_price_cents = _get_fallback_price_for_market(market_id, held_side=_held_side)
                                 if fallback_price_cents:
                                     logger.warning(
                                         "[POSITION-CACHE-REST-SYNC] Using fallback entry price for monitor: "
