@@ -139,11 +139,12 @@ async def test_http_counterparty_buy_no_promotes_router_buy_no(ledger):
         yes_price_dollars="0.40",
         no_price_dollars="0.60",
     )
-    ledger.on_fill(router_fill, canonicalization_state="TRUSTED_LIVE_V1")
+    ledger.on_fill(router_fill)
 
     assert len(ledger._fills) == 1
-    key = "KXBTC15M-TEST:no"
+    key = "KXBTC15M-TEST"
     assert key in ledger._open_positions
+    assert ledger._open_positions[key]["side"] == "no"
     assert ledger._open_positions[key]["total_contracts"] == 1
 
     # HTTP fill in counterparty form with the *same market*, correct labels.
@@ -169,8 +170,13 @@ async def test_http_counterparty_buy_no_promotes_router_buy_no(ledger):
     assert "http-fill-swap-1" in ledger._fills
     promoted = ledger._fills["http-fill-swap-1"]
     assert promoted.confirmed_by_rest is True
-    assert promoted.canonical_position_side == "no"
-    assert promoted.canonical_position_action == "buy"
+    # The promoted record keeps the authoritative wire form (SELL_YES); the
+    # signed YES delta (-100) is what carries the user's economic exposure and
+    # must match the provisional router record exactly.
+    assert promoted.canonicalization_state == "TRUSTED_LIVE_V1"
+    assert promoted.canonical_yes_delta_cc == -100
+    # Corrected legs: YES=0.60/NO=0.40 -> NO-side basis is the complement (40c).
+    assert ledger._open_positions[key]["avg_price_cents"] == 40
 
 
 @pytest.mark.asyncio
@@ -191,12 +197,13 @@ async def test_http_counterparty_buy_yes_promotes_router_buy_no(ledger):
         yes_delta=-100,
         leg_price_cents=52,
     )
-    ledger.on_fill(router_fill, canonicalization_state="TRUSTED_LIVE_V1")
+    ledger.on_fill(router_fill)
 
     assert len(ledger._fills) == 1
     assert len(ledger._open_positions) == 1
-    key = "KXBTC15M-TEST:no"
+    key = "KXBTC15M-TEST"
     assert key in ledger._open_positions
+    assert ledger._open_positions[key]["side"] == "no"
     assert ledger._open_positions[key]["total_contracts"] == 1
 
     # 2. HTTP /portfolio/fills returns the counterparty form: SELL_YES at YES=48.
@@ -219,13 +226,15 @@ async def test_http_counterparty_buy_yes_promotes_router_buy_no(ledger):
     assert len(ledger._open_positions) == 1
     assert ledger._open_positions[key]["total_contracts"] == 1
 
-    # The single remaining record is the authoritative (promoted) HTTP fill_id,
-    # but the canonical cost basis is preserved from the live-router record.
+    # The single remaining record is the authoritative (promoted) HTTP fill_id.
+    # Its canonical form records the exchange wire side (SELL_YES); the signed
+    # YES delta (-100) must equal the provisional router record's exposure.
     assert "http-fill-1" in ledger._fills
     promoted = ledger._fills["http-fill-1"]
     assert promoted.confirmed_by_rest is True
-    assert promoted.canonical_position_side == "no"
-    assert promoted.canonical_position_action == "buy"
-    assert promoted.canonical_leg_price_cents == 52
+    assert promoted.canonicalization_state == "TRUSTED_LIVE_V1"
+    assert promoted.canonical_yes_delta_cc == -100
+    # The user's economic cost basis is preserved on the held (NO) side.
+    assert ledger._open_positions[key]["avg_price_cents"] == 52
 
 

@@ -36,20 +36,28 @@ class TestPreFillExposureFix:
         assert "REMOVED pre-fill slot allocation" in source, "Fix description should be present"
 
     def test_slot_allocation_on_fill(self):
-        """Verify slot allocation code is present in post-fill path."""
+        """Verify slot allocation and its phantom-exposure guards in _route_live.
+
+        The 2026-07-14 follow-up moved allocation back to BEFORE submission
+        (closing the can_allocate TOCTOU race where concurrent unfilled orders
+        could all pass limits).  Phantom exposure is now prevented by
+        releasing the slot on rejection/no-fill and reconciling slots with the
+        position cache, not by deferring allocation to the fill path.
+        """
         from merid.event_venues.kalshi.order_router import _route_live
         import inspect
-        
-        # Get the source code of _route_live
+
         source = inspect.getsource(_route_live)
-        
-        # Verify slot allocation code IS present in post-fill path
+
+        # Pre-submission allocation with the slot_id carried for release.
         assert "request_allocation" in source, "Slot allocation should be present in _route_live"
-        assert "SLOT-ALLOCATED-ON-FILL" in source, "Post-fill allocation log should be present"
-        
-        # Verify the fix comment is present
-        assert "CRITICAL FIX (2026-07-13)" in source, "Fix comment should be present"
-        assert "Allocate slot on fill" in source, "Fix description should be present"
+        assert "SLOT-ALLOCATOR-PRE-SUBMIT" in source, "Pre-submit allocation log should be present"
+        assert "_allocated_slot_id" in source, "Allocated slot id should be tracked for release"
+
+        # Phantom-exposure guards: release on reject / no-fill, and sync the
+        # slot to the actual fill price when the order does fill.
+        assert "_release_allocated_slot" in source, "Slot release on reject/no-fill should be present"
+        assert "update_slot_fill_price" in source or "update_slot_by_ticker" in source, "Fill-price slot sync should be present"
 
     def test_unified_sizing_uses_slot_allocator(self):
         """Verify unified_sizing uses slot_allocator for exposure check."""
