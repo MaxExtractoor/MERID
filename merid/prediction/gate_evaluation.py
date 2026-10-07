@@ -70,6 +70,8 @@ _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     ("countertrend", "countertrend_lane"),
     ("bookflow", "book_flow"),
     ("book_flow", "book_flow"),
+    ("moneyness_coin_flip", "moneyness"),
+    ("entry_price_cap", "moneyness"),
     ("trend_yes_hi", "trend_hi_lane"),
     ("both_sides_out_of_range", "price_band"),
     ("both_sides_out_of_canonical", "price_band"),
@@ -135,6 +137,7 @@ def _blocking_gate_names(reason: Optional[str], side: Optional[str]) -> set:
                 "throttle",
                 "countertrend_lane",
                 "book_flow",
+                "moneyness",
                 "fade_gate",
             ):
                 # Per-side gate: attach the side encoded in the reason, else
@@ -459,6 +462,21 @@ def evaluate_all_gates(
         # 2026-10-04: structural safety vetoes are not evidence blocks —
         # conviction and the strategy-structure gates have dedicated
         # canonical codes instead of a fake evidence veto.
+        # 2026-10-07: the moneyness gate owns two indicator keys — the
+        # coin-flip veto (near-strike entries) and the extreme-price cap
+        # (normal-path entries above the configured cent ceiling).
+        mev1, mp1, mr1 = _block_gate(ind, f"{side}_coinflip_block")
+        mev2, mp2, mr2 = _block_gate(ind, f"{side}_price_cap_block")
+        _add(
+            f"{side}_moneyness",
+            "STRUCTURAL_RISK_VETO",
+            STAGE_MODEL,
+            evaluated=mev1 or mev2,
+            passed=(mr1 is None and mr2 is None) if (mev1 or mev2) else None,
+            observed={"coinflip_block": mr1, "price_cap_block": mr2},
+            threshold={},
+        )
+
         for key, gate_suffix, code in (
             (f"{side}_regime_block", "regime", "STRUCTURAL_RISK_VETO"),
             (f"{side}_conviction_block", "conviction", "LOW_CONVICTION"),

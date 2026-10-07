@@ -81,6 +81,11 @@ _os.environ["MERID_SETTLEMENT_MAX_MISSING_SAMPLES"] = "0"
 # keep their expected terminal reasons; it is exercised explicitly in
 # tests/test_directional_regime.py.
 _os.environ["MERID_CONVICTION_GATE_ENABLED"] = "0"
+# 2026-10-07 (moneyness audit): same convention as the conviction gate —
+# the coin-flip/price-cap veto is on by default in production but pinned
+# off here so legacy decision tests keep their expected terminal reasons;
+# it is exercised explicitly in tests/test_directional_regime.py.
+_os.environ["MERID_MONEYNESS_GATE_ENABLED"] = "0"
 # Markout telemetry must not write into production logs during tests.
 _os.environ["MERID_ENTRY_MARKOUT_LOG"] = str(
     __import__("pathlib").Path(

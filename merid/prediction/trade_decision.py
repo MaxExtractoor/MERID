@@ -4149,6 +4149,24 @@ def compute_trade_decision(
         _dr.bookflow_block_reason(feature_snapshot, asset, "no")
         if _bookflow_applies else None
     )
+    # 2026-10-07 (moneyness audit): a candidate pinned to the strike is a
+    # coin flip — claimed edge there is regime-tilt noise, and the losing
+    # tail rides to settlement under profit_only_v1.  Gate on market
+    # structure (|dist| or |z| displacement), NOT on the model's own edge
+    # claim: the counterfactual showed edge>=6c entries were net-negative
+    # while |dist|>=10bp entries ran +78c.  dist is (spot-strike)/strike,
+    # the same basis the audit ledger persists as distance_to_strike.
+    _dist_frac = None
+    try:
+        if spot_price is not None and strike_price:
+            _dist_frac = (float(spot_price) - float(strike_price)) / float(strike_price)
+    except Exception:
+        _dist_frac = None
+    _coinflip_block = _dr.coin_flip_block_reason(_dist_frac, z)
+    # Price cap applies to NO unconditionally; YES applies it only on the
+    # normal path — the trend_yes_hi lane (91-94c) is separately gated.
+    _yes_price_cap_block = _dr.entry_price_cap_block_reason(yes_price_cents)
+    _no_price_cap_block = _dr.entry_price_cap_block_reason(no_price_cents)
     # 91-94c YES window: the lane's strict-gate failure (armed) or the
     # reserved-window price with the lane off both own the terminal reason.
     _yes_lane_terminal = (
@@ -4170,6 +4188,11 @@ def compute_trade_decision(
         "no_ct_lane_block": _no_ct_lane_block,
         "yes_bookflow_block": _yes_bookflow_block,
         "no_bookflow_block": _no_bookflow_block,
+        "yes_coinflip_block": _coinflip_block,
+        "no_coinflip_block": _coinflip_block,
+        "yes_price_cap_block": _yes_price_cap_block,
+        "no_price_cap_block": _no_price_cap_block,
+        "moneyness_dist_frac": _dist_frac,
         "yes_trend_hi_price": _yes_hi_price,
         "yes_trend_hi_block": _yes_trend_hi_block,
         "yes_trend_hi_qualifies": bool(_yes_trend_hi_qualifies),
@@ -4450,6 +4473,7 @@ def compute_trade_decision(
         and yes_evidence_ok
         and _yes_throttle_block is None
         and _yes_bookflow_block is None
+        and _coinflip_block is None
         and (
             _yes_trend_hi_qualifies
             or (
@@ -4462,6 +4486,7 @@ def compute_trade_decision(
                 and _yes_regime_ok
                 and _yes_conv_block is None
                 and _yes_ct_lane_block is None
+                and _yes_price_cap_block is None
             )
         )
     )
@@ -4479,6 +4504,8 @@ def compute_trade_decision(
         and _no_throttle_block is None
         and _no_ct_lane_block is None
         and _no_bookflow_block is None
+        and _coinflip_block is None
+        and _no_price_cap_block is None
     )
 
     # Candidate-surface export: per-side executable economics and the first
@@ -4498,6 +4525,8 @@ def compute_trade_decision(
         throttle_block_s: Optional[str] = None,
         ct_lane_block_s: Optional[str] = None,
         bookflow_block_s: Optional[str] = None,
+        coinflip_block_s: Optional[str] = None,
+        price_cap_block_s: Optional[str] = None,
         hi_price_applies_s: bool = False,
         trend_hi_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
@@ -4547,6 +4576,10 @@ def compute_trade_decision(
             return ct_lane_block_s
         if bookflow_block_s:
             return bookflow_block_s
+        if coinflip_block_s:
+            return f"{coinflip_block_s}_{side}"
+        if price_cap_block_s:
+            return price_cap_block_s
         if not evidence_ok_s:
             return (
                 yes_evidence_reason if side == "yes" else no_evidence_reason
@@ -4578,6 +4611,10 @@ def compute_trade_decision(
             throttle_block_s=_yes_throttle_block,
             ct_lane_block_s=_yes_ct_lane_block,
             bookflow_block_s=_yes_bookflow_block,
+            coinflip_block_s=_coinflip_block,
+            price_cap_block_s=(
+                None if _yes_trend_hi_qualifies else _yes_price_cap_block
+            ),
             hi_price_applies_s=_yes_hi_price,
             trend_hi_block_s=_yes_trend_hi_block,
             eff_edge_s=_yes_eff_edge,
@@ -4590,6 +4627,8 @@ def compute_trade_decision(
             throttle_block_s=_no_throttle_block,
             ct_lane_block_s=_no_ct_lane_block,
             bookflow_block_s=_no_bookflow_block,
+            coinflip_block_s=_coinflip_block,
+            price_cap_block_s=_no_price_cap_block,
             eff_edge_s=_no_eff_edge,
         ),
     })
@@ -4643,6 +4682,8 @@ def compute_trade_decision(
                     and _yes_throttle_block is None
                     and _yes_ct_lane_block is None
                     and _yes_bookflow_block is None
+                    and _coinflip_block is None
+                    and _yes_price_cap_block is None
                     and not _yes_hi_price
                     and (
                         _yes_cbp_neg_floor
@@ -4659,6 +4700,8 @@ def compute_trade_decision(
                     and _no_throttle_block is None
                     and _no_ct_lane_block is None
                     and _no_bookflow_block is None
+                    and _coinflip_block is None
+                    and _no_price_cap_block is None
                     and (
                         _no_cbp_neg_floor
                         or no_breakdown.p_selected > no_min_p
@@ -4678,6 +4721,8 @@ def compute_trade_decision(
                         ("throttle", _yes_throttle_block is None if _cs == "yes" else _no_throttle_block is None),
                         ("ct_lane", _yes_ct_lane_block is None if _cs == "yes" else _no_ct_lane_block is None),
                         ("bookflow", _yes_bookflow_block is None if _cs == "yes" else _no_bookflow_block is None),
+                        ("moneyness", _coinflip_block is None),
+                        ("price_cap", _yes_price_cap_block is None if _cs == "yes" else _no_price_cap_block is None),
                         ("hi_price", not _yes_hi_price if _cs == "yes" else True),
                         ("cost_basis", (
                             (_yes_cbp_neg_floor or yes_breakdown.p_selected > yes_min_p)
@@ -4828,6 +4873,12 @@ def compute_trade_decision(
             ) or (
                 _yes_bookflow_block if best_side == "yes" else _no_bookflow_block
             ) or (
+                _coinflip_block if best_side is not None else None
+            ) or (
+                _yes_price_cap_block
+                if best_side == "yes" and not _yes_trend_hi_qualifies
+                else _no_price_cap_block if best_side == "no" else None
+            ) or (
                 best_side == "yes" and _yes_lane_terminal
             ):
                 # 2026-10-01: edge cleared the floor but a structural safety
@@ -4841,6 +4892,8 @@ def compute_trade_decision(
                         _yes_throttle_block,
                         _yes_ct_lane_block,
                         _yes_bookflow_block,
+                        _coinflip_block,
+                        None if _yes_trend_hi_qualifies else _yes_price_cap_block,
                         _yes_lane_terminal,
                     )
                     if best_side == "yes"
@@ -4850,13 +4903,15 @@ def compute_trade_decision(
                         _no_throttle_block,
                         _no_ct_lane_block,
                         _no_bookflow_block,
+                        _coinflip_block,
+                        _no_price_cap_block,
                         None,
                     )
                 )
                 _first_gate = next((b for b in _gate_blocks if b), None)
                 no_trade_reason = (
                     f"{_first_gate}_{best_side}"
-                    if _first_gate == "low_conviction"
+                    if _first_gate in ("low_conviction", "moneyness_coin_flip")
                     else _first_gate
                 )
             elif not best_evidence_ok:
