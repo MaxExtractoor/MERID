@@ -506,6 +506,89 @@ def countertrend_lane_block(
 
 
 # ---------------------------------------------------------------------------
+# Moneyness gate: skip true coin flips and extreme-price entries
+# ---------------------------------------------------------------------------
+
+def moneyness_gate_enabled() -> bool:
+    return _env_flag("MERID_MONEYNESS_GATE_ENABLED", True)
+
+
+def _moneyness_min_dist_bp() -> float:
+    return _env_float("MERID_MONEYNESS_MIN_DIST_BP", 5.0)
+
+
+def _moneyness_min_abs_z() -> float:
+    return _env_float("MERID_MONEYNESS_MIN_ABS_Z", 0.5)
+
+
+def moneyness_max_entry_price_cents() -> float:
+    return _env_float("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS", 75.0)
+
+
+def _finite_or_none(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def coin_flip_block_reason(
+    distance_to_strike: Optional[float],
+    zscore: Optional[float],
+) -> Optional[str]:
+    """Reject near-strike coin flips.
+
+    Spot pinned to the strike with minutes left is a ~50/50 proposition;
+    the claimed model edge there is regime-tilt noise, and under the
+    profit_only lifecycle the losing tail rides to settlement.  2026-10-07
+    audit (72 reconstructed positions): |dist|<2bp ran 59% wins at -2.5c
+    avg, |z|<0.3 ran 61% wins — while |dist|>=10bp went 82%/+4.6c.  A
+    candidate passes on EITHER real displacement (|d| >= floor) OR model
+    separation (|z| >= floor); missing measurements degrade to no-block —
+    the data_state gate owns absent spot/strike upstream.
+    """
+    if not moneyness_gate_enabled():
+        return None
+    d = _finite_or_none(distance_to_strike)
+    z = _finite_or_none(zscore)
+    if d is None and z is None:
+        return None
+    if d is not None and abs(d) >= _moneyness_min_dist_bp() / 10000.0:
+        return None
+    if z is not None and abs(z) >= _moneyness_min_abs_z():
+        return None
+    return "moneyness_coin_flip"
+
+
+def entry_price_cap_block_reason(
+    entry_price_cents: Optional[float],
+) -> Optional[str]:
+    """Reject extreme-price entries on the normal qualify path.
+
+    2026-10-07 audit: 80-101c entries won 80% yet netted -46.6c — each tail
+    loss (-74c..-83c) erases 4-6 ordinary ~+15c wins.  ``<=0`` disables the
+    cap.  The trend_yes_hi lane (91-94c YES) is exempt: it keeps its own
+    stricter admission (confirmed rally, p>=0.94, net EV>=3c, TTE window),
+    so the caller applies this block only on the normal YES path while NO
+    applies it unconditionally.
+    """
+    if not moneyness_gate_enabled():
+        return None
+    cap = moneyness_max_entry_price_cents()
+    if cap <= 0.0:
+        return None
+    px = _finite_or_none(entry_price_cents)
+    if px is None:
+        return None
+    if px > cap:
+        return f"entry_price_cap_{px:.0f}c_gt_{cap:.0f}c"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Side throttle: loss streaks + same-direction strip concentration
 # ---------------------------------------------------------------------------
 

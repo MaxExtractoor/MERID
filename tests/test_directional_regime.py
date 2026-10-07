@@ -232,6 +232,65 @@ def test_bookflow_missing_slice_no_block():
     assert dr.bookflow_block_reason(_Snap({}), "XRP", "no") is None
 
 
+# ------------------------------------------------------------ moneyness ----
+
+@pytest.fixture
+def moneyness_pinned(monkeypatch):
+    """Pin gate defaults so assertions hold regardless of operator .env."""
+    monkeypatch.setenv("MERID_MONEYNESS_GATE_ENABLED", "1")
+    monkeypatch.setenv("MERID_MONEYNESS_MIN_DIST_BP", "5.0")
+    monkeypatch.setenv("MERID_MONEYNESS_MIN_ABS_Z", "0.5")
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS", "75")
+
+
+def test_coinflip_blocks_pinned_strike(moneyness_pinned):
+    # dist ~0 and z ~0 — the canonical 2026-10-07 loss profile.
+    assert dr.coin_flip_block_reason(0.0000, 0.01) == "moneyness_coin_flip"
+    assert dr.coin_flip_block_reason(-0.0002, -0.13) == "moneyness_coin_flip"
+
+
+def test_coinflip_passes_on_either_leg(moneyness_pinned):
+    assert dr.coin_flip_block_reason(0.0006, 0.0) is None   # dist alone clears
+    assert dr.coin_flip_block_reason(0.0000, 0.9) is None   # z alone clears
+    assert dr.coin_flip_block_reason(-0.0012, -1.4) is None
+
+
+def test_coinflip_missing_measurements_degrade_open(moneyness_pinned):
+    assert dr.coin_flip_block_reason(None, None) is None
+    assert dr.coin_flip_block_reason(None, 0.1) == "moneyness_coin_flip"
+    assert dr.coin_flip_block_reason(None, 0.8) is None
+    assert dr.coin_flip_block_reason(0.0010, None) is None
+
+
+def test_coinflip_env_thresholds(moneyness_pinned, monkeypatch):
+    monkeypatch.setenv("MERID_MONEYNESS_MIN_DIST_BP", "10.0")
+    assert dr.coin_flip_block_reason(0.0008, 0.0) == "moneyness_coin_flip"
+    assert dr.coin_flip_block_reason(0.0012, 0.0) is None
+    monkeypatch.setenv("MERID_MONEYNESS_MIN_ABS_Z", "1.0")
+    assert dr.coin_flip_block_reason(0.0012, 0.6) is None   # dist still clears
+    monkeypatch.setenv("MERID_MONEYNESS_MIN_DIST_BP", "999.0")
+    assert dr.coin_flip_block_reason(0.0012, 0.6) == "moneyness_coin_flip"
+
+
+def test_coinflip_gate_disabled(monkeypatch):
+    monkeypatch.setenv("MERID_MONEYNESS_GATE_ENABLED", "0")
+    assert dr.coin_flip_block_reason(0.0, 0.0) is None
+    assert dr.entry_price_cap_block_reason(95.0) is None
+
+
+def test_entry_price_cap(moneyness_pinned):
+    assert dr.entry_price_cap_block_reason(50.0) is None
+    assert dr.entry_price_cap_block_reason(75.0) is None
+    blk = dr.entry_price_cap_block_reason(80.0)
+    assert blk and blk.startswith("entry_price_cap_")
+    assert dr.entry_price_cap_block_reason(None) is None
+
+
+def test_entry_price_cap_disabled(moneyness_pinned, monkeypatch):
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS", "0")
+    assert dr.entry_price_cap_block_reason(99.0) is None
+
+
 # --------------------------------------------------------- side throttle ----
 
 @pytest.fixture
@@ -244,6 +303,10 @@ def throttle_path(tmp_path, monkeypatch):
     monkeypatch.delenv("MERID_STRIP_CONC_MAX_OPEN_SAME_SIDE", raising=False)
     monkeypatch.delenv("MERID_SIDE_CATASTROPHE_SCOPE", raising=False)
     monkeypatch.delenv("MERID_SIDE_CATASTROPHE_TTL_S", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_SUSPEND_COUNT", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_SUSPEND_S", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_REVIEW_COUNT", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_LOSS_WINDOW_S", raising=False)
     dr._throttle_cache = (0.0, {})
     yield str(p)
     dr._throttle_cache = (0.0, {})
