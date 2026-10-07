@@ -3809,7 +3809,7 @@ class PositionMonitor:
                     and self._is_exit_intent_in_flight(position.position_id)
                 ):
                     logger.info(
-                        "[HARD-LOCK-DEDUP] position=%s market=%s bid=%dc - lock "
+                        "[HARD-LOCK-DEDUP] position=%s market=%s bid=%sc - lock "
                         "obligation already dispatched and in-flight; suppressing "
                         "duplicate emission",
                         position.position_id[:8],
@@ -5192,7 +5192,7 @@ class PositionMonitor:
         own_bid = snapshot.own_side_bid_cents if snapshot is not None else current_price_cents
         own_ask = snapshot.own_side_ask_cents if snapshot is not None else current_price_cents
         logger.info(
-            "[STOP-LOSS-BOOK-STATE] position=%s side=%s entry=%dc bid=%dc ask=%dc "
+            "[STOP-LOSS-BOOK-STATE] position=%s side=%s entry=%dc bid=%dc ask=%sc "
             "executable_exit=%dc fair=%dc sl=%s hard=%s time_held=%.2fs",
             position.position_id[:8],
             position.side.value,
@@ -6922,7 +6922,7 @@ class PositionMonitor:
                             # AUDIT: Log state freshness for each position check
                             logger.info(
                                 "[POSITION-MONITOR-AUDIT] position=%s market=%s data_source=%s data_age_ms=%d "
-                                "mid=%dc bid=%dc ask=%dc side=%s executable=%s has_bid_size=%s",
+                                "mid=%sc bid=%sc ask=%sc side=%s executable=%s has_bid_size=%s",
                                 position.position_id[:8],
                                 position.market_id,
                                 price_snapshot.data_source,
