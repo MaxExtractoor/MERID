@@ -133,6 +133,29 @@ def _settlement_bypass_env_enabled() -> bool:
     """Live read of the env override so tests and hot-reloads can toggle it."""
     return os.environ.get("MERID_SETTLEMENT_BYPASS_IN_FLIGHT", "false").lower() in ("1", "true", "yes")
 
+
+def _inflight_reconcile_slow_seconds() -> float:
+    """Slow-cadence interval for reconcile probes after the initial 5x5s burst."""
+    try:
+        return float(os.environ.get("MERID_INFLIGHT_RECONCILE_SLOW_S", "30"))
+    except Exception:
+        return 30.0
+
+
+def _exit_inflight_stale_force_seconds() -> float:
+    """Age after which a SUBMISSION_UNKNOWN lock is treated as deadlocked.
+
+    Once an attempt is this stale, ANY exit trigger (including take-profit and
+    ratchet-floor profit exits) may force-reconcile it: cancel the possibly-live
+    stale order and resubmit at the current price.  Default 30s ≈ 2x the intent
+    timeout — long enough for genuine reconcile, short enough to matter in a
+    15-minute market.
+    """
+    try:
+        return float(os.environ.get("MERID_EXIT_INFLIGHT_STALE_FORCE_S", "30"))
+    except Exception:
+        return 30.0
+
 # Exit reasons that may force a stale in-flight order to be reconciled,
 # cancelled, and re-emitted. These are time-to-expiry, safety, or
 # operator-driven exits; profit-taking exits are NOT in this set.
@@ -497,6 +520,36 @@ def _get_hard_loss_cap_cents() -> int:
         return int(round(float(usd) * 100))
     except Exception:
         return 500  # $5.00 default
+
+
+def _get_tail_loss_floor_config() -> Dict[str, Any]:
+    """Tail-loss floor knobs (env-tunable, live-read).
+
+    Distinct from the armed SL (disabled under profit_only_v1) and the
+    $-sized hard loss cap: fires when the executable own-side bid has fallen
+    ``drop_cents`` below entry OR under the absolute ``floor_cents``.  At that
+    depth the contract is a lottery ticket — salvage value beats riding a
+    dead position to zero.  Emits a HARD_STOP-class StopCandidate on the
+    reduce-only IOC channel, so it executes even while the exit-intent
+    in-flight lock is jammed in SUBMISSION_UNKNOWN.
+
+    MERID_TAIL_LOSS_ENABLED     master switch (default 1)
+    MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
+    MERID_TAIL_LOSS_FLOOR_CENTS absolute bid floor that triggers (default 18)
+    """
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, str(default)))
+        except Exception:
+            return default
+
+    return {
+        "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
+        in ("1", "true", "yes", "on"),
+        "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
+        "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
+    }
 
 
 def _get_continuation_stop_config(asset: str) -> Dict[str, Any]:
@@ -2491,21 +2544,21 @@ class PositionMonitor:
                 # CRITICAL FIX (2026-08-27): A single failed reconcile must not leave the
                 # lock stuck forever.  Re-attempt reconciliation every few seconds, with a
                 # cap, so network or pagination hiccups do not permanently block exits.
+                # 2026-10-07: once the initial burst is exhausted, keep probing on a slow
+                # cadence instead of stopping — a permanently jammed SUBMISSION_UNKNOWN
+                # blocks every exit for the rest of a 15m market's life (XRP-1800 loss).
                 last_reconcile = flight.get("last_reconcile_at", 0.0)
                 reconcile_count = flight.get("reconcile_count", 0)
                 now = time.time()
-                if now - last_reconcile > 5.0 and reconcile_count < 5:
+                retry_interval = 5.0 if reconcile_count < 5 else _inflight_reconcile_slow_seconds()
+                if now - last_reconcile > retry_interval:
                     flight["last_reconcile_at"] = now
                     flight["reconcile_count"] = reconcile_count + 1
                     logger.warning(
-                        "[EXIT-INTENT-IN-FLIGHT] Re-attempting reconcile %d/5 for position=%s client_order_id=%s",
+                        "[EXIT-INTENT-IN-FLIGHT] Re-attempting reconcile %d for position=%s client_order_id=%s",
                         reconcile_count + 1, position_id[:8], client_order_id
                     )
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(self._reconcile_exit_intent(position_id, client_order_id))
-                    except RuntimeError:
-                        pass
+                    self._schedule_exit_reconcile(position_id, client_order_id)
                 return True
 
             # state == EXECUTION_PENDING or SUBMITTED
@@ -2528,15 +2581,80 @@ class PositionMonitor:
                     position_id[:8], client_order_id, time.time() - intent_time
                 )
                 # Trigger reconciliation asynchronously.
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._reconcile_exit_intent(position_id, client_order_id))
-                except RuntimeError:
-                    # No event loop in synchronous contexts; reconcile will run on next poll.
-                    pass
+                self._schedule_exit_reconcile(position_id, client_order_id)
                 return True
 
             return True
+
+    def _schedule_exit_reconcile(
+        self, position_id: str, client_order_id: Optional[str]
+    ) -> None:
+        """Schedule ``_reconcile_exit_intent`` from sync or async context.
+
+        2026-10-07: ``_is_exit_intent_in_flight`` runs on the sync monitor poll,
+        where ``asyncio.get_running_loop()`` raises RuntimeError — the previous
+        ``except RuntimeError: pass`` silently dropped the reconcile, so a lost
+        exit ack deadlocked the position permanently.  Fall back to
+        ``run_coroutine_threadsafe`` on the stored monitor loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        try:
+            if loop is not None and loop.is_running():
+                loop.create_task(self._reconcile_exit_intent(position_id, client_order_id))
+                return
+            mon_loop = self._loop
+            if mon_loop is not None and mon_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._reconcile_exit_intent(position_id, client_order_id),
+                    mon_loop,
+                )
+        except Exception:
+            logger.debug(
+                "[EXIT-INTENT-IN-FLIGHT] Failed to schedule reconcile for position=%s client_order_id=%s",
+                position_id[:8],
+                (client_order_id or "")[:8],
+            )
+
+    def _submit_stop_candidate(self, candidate) -> None:
+        """Schedule ``maybe_submit_stop_candidate`` from sync or async context.
+
+        2026-10-07: ``maybe_submit_stop_candidate_sync`` relies on
+        ``asyncio.get_event_loop()``; when the monitor poll runs off-loop that
+        returns nothing usable, so the protective close is recorded but never
+        submitted — the same silent failure as the exit-intent reconcile.
+        Fall back to ``run_coroutine_threadsafe`` on the stored monitor loop.
+        """
+        from merid.event_venues.kalshi.stop_candidate import (
+            maybe_submit_stop_candidate,
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        try:
+            if loop is not None and loop.is_running():
+                loop.create_task(maybe_submit_stop_candidate(candidate))
+                return
+            mon_loop = self._loop
+            if mon_loop is not None and mon_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    maybe_submit_stop_candidate(candidate), mon_loop
+                )
+                return
+        except Exception:
+            logger.exception(
+                "[STOP-CANDIDATE] failed to submit candidate=%s ticker=%s",
+                getattr(candidate, "candidate_id", "?"),
+                getattr(candidate, "market_ticker", "?"),
+            )
+            return
+        # No usable loop anywhere — the sync wrapper's critical alert + ledger
+        # record still fire.
+        maybe_submit_stop_candidate_sync(candidate)
 
     async def _reconcile_exit_intent(
         self,
@@ -3348,6 +3466,112 @@ class PositionMonitor:
             )
             _add_candidate(ExitReason.LOSS_CAP, current_price_cents)
             # Continue evaluating candidates; the central resolver will choose the final exit.
+
+        # 2026-10-07: Tail-loss floor — catastrophic salvage for deep-tail losses.
+        # Independent of the armed SL (disabled under profit_only_v1): fires when
+        # the executable bid has dropped >= drop_cents vs entry, or sits at/below
+        # the absolute floor.  Emits a HARD_STOP-class StopCandidate: mechanical
+        # hard-risk, reduce-only IOC, and a submission channel that does not flow
+        # through the intent in-flight lock — so a stale SUBMISSION_UNKNOWN exit
+        # cannot hold a dying position hostage (the XRP-1800 failure mode).
+        _tail_cfg = _get_tail_loss_floor_config()
+        if (
+            _tail_cfg["enabled"]
+            and current_price_cents is not None
+            and not position.tail_loss_floor_fired
+        ):
+            _entry_px = getattr(position, "avg_entry_price_cents", 0) or 0
+            _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _tail_cfg["drop_cents"]
+            _floor_hit = current_price_cents <= _tail_cfg["floor_cents"]
+            if _drop_hit or _floor_hit:
+                _has_fill_provenance = (
+                    position.fill_source is not None or position.entry_fill_id is not None
+                )
+                if _has_fill_provenance and not (
+                    snapshot is not None and getattr(snapshot, "executable", False)
+                ):
+                    logger.warning(
+                        "[POSITION-MONITOR] TAIL-LOSS-FLOOR rejected: position=%s "
+                        "bid=%dc - snapshot not executable",
+                        position.position_id[:8], current_price_cents,
+                    )
+                else:
+                    # Telemetry stop level: the deeper of the two triggers.
+                    _tail_level = max(
+                        1,
+                        min(
+                            (_entry_px - _tail_cfg["drop_cents"]) if _entry_px > 0 else 99,
+                            _tail_cfg["floor_cents"],
+                        ),
+                    )
+                    logger.warning(
+                        "[POSITION-MONITOR] TAIL-LOSS-FLOOR triggered: position=%s side=%s "
+                        "bid=%dc entry=%dc drop_cents=%d floor=%dc level=%dc - exiting",
+                        position.position_id[:8],
+                        position.side.value,
+                        current_price_cents,
+                        _entry_px,
+                        _tail_cfg["drop_cents"],
+                        _tail_cfg["floor_cents"],
+                        _tail_level,
+                    )
+                    position.tail_loss_floor_fired = True
+                    try:
+                        _position_cc = to_signed_yes_exposure(
+                            position.side.value,
+                            int(position.size * Decimal("100")),
+                        )
+                        _kalshi_state = None
+                        _unified_state = None
+                        _book_age_ms_val = None
+                        _seconds_to_expiry = None
+                        try:
+                            from merid.event_venues.kalshi.market_state import (
+                                get_kalshi_market_state_store,
+                            )
+
+                            _store = get_kalshi_market_state_store()
+                            _kalshi_state = _store.get(position.market_id)
+                            _unified_state = (
+                                _store.get_unified(position.market_id)
+                                if hasattr(_store, "get_unified")
+                                else None
+                            )
+                            if _kalshi_state is not None:
+                                _book_age_ms_val = _book_age_ms(_kalshi_state)
+                                _seconds_to_expiry = getattr(
+                                    _kalshi_state, "seconds_to_expiry", None
+                                )
+                            if _seconds_to_expiry is None and _unified_state is not None:
+                                _seconds_to_expiry = getattr(
+                                    _unified_state, "seconds_to_expiry", None
+                                )
+                        except Exception as _st_exc:
+                            logger.debug(
+                                "[TAIL-LOSS] market state lookup failed for %s: %s",
+                                position.market_id, _st_exc,
+                            )
+                        candidate = build_stop_candidate(
+                            market_ticker=position.market_id,
+                            exchange_position_cc=_position_cc,
+                            trigger_reason="HARD_STOP",
+                            entry_price_cents=_entry_px or None,
+                            kalshi_state=_kalshi_state,
+                            unified_state=_unified_state,
+                            quote_age_ms=_book_age_ms_val,
+                            consecutive_edge_below=0,
+                            hard_stop_cents=_tail_level,
+                        )
+                        record_stop_candidate(candidate)
+                        self._submit_stop_candidate(candidate)
+                    except Exception as _tail_exc:
+                        position.tail_loss_floor_fired = False
+                        logger.exception(
+                            "[POSITION-MONITOR] TAIL-LOSS-FLOOR emission failed for %s: %s",
+                            position.position_id[:8], _tail_exc,
+                        )
+                # Continue evaluating candidates; the central resolver will choose the final exit.
+
         # Wired as a config-driven parameter but DISABLED by default.  The 24h fill
         # set should be used to backtest-calibrate threshold_pct before enabling.
         # When enabled, this will exit if the underlying spot continues moving
@@ -5287,7 +5511,7 @@ class PositionMonitor:
                 hard_stop_cents=position.hard_stop_price_cents,
             )
             record_stop_candidate(candidate)
-            maybe_submit_stop_candidate_sync(candidate)
+            self._submit_stop_candidate(candidate)
 
             logger.info(
                 "[STOP-LOSS-HARD-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
@@ -5375,7 +5599,7 @@ class PositionMonitor:
                     hysteresis_cents=STOP_EDGE_HYSTERESIS_CENTS,
                 )
                 record_stop_candidate(candidate)
-                maybe_submit_stop_candidate_sync(candidate)
+                self._submit_stop_candidate(candidate)
 
                 logger.info(
                     "[STOP-LOSS-EDGE-CANDIDATE] position=%s price=%dc fair=%dc exit=%dc "
@@ -5448,7 +5672,7 @@ class PositionMonitor:
                     else "eval_failed"
                 )
             if _ev_submit_ok:
-                maybe_submit_stop_candidate_sync(edge_candidate)
+                self._submit_stop_candidate(edge_candidate)
                 logger.info(
                     "[STOP-LOSS-EDGE-DECAY-CANDIDATE] position=%s price=%dc fair=%dc sl=%dc "
                     "edge_decay=%dc entry_edge=%dc current_edge=%dc - hybrid stop triggers at fair",
@@ -5489,7 +5713,7 @@ class PositionMonitor:
                     hard_stop_cents=position.stop_loss_price_cents,
                 )
                 record_stop_candidate(candidate)
-                maybe_submit_stop_candidate_sync(candidate)
+                self._submit_stop_candidate(candidate)
 
                 logger.info(
                     "[STOP-LOSS-SOFT-CANDIDATE] position=%s price=%dc sl=%dc - submission gated until replay tests pass",
@@ -6182,11 +6406,25 @@ class PositionMonitor:
                     existing_client_order_id = (
                         flight.get("client_order_id") if flight else None
                     ) or self._position_to_client_order.get(position.position_id)
+                    # 2026-10-07: a SUBMISSION_UNKNOWN attempt older than the stale
+                    # threshold is functionally deadlocked (XRP-1800: ~25 intents over
+                    # 5 minutes, zero orders).  Any trigger — including profit exits —
+                    # may then force-reconcile: cancel the possibly-live stale order
+                    # and resubmit at the current price.
+                    flight_state = flight.get("state") if flight else None
+                    flight_age_s = (
+                        time.time() - float(flight.get("timestamp") or 0.0)
+                        if flight else 0.0
+                    )
+                    stale_force = (
+                        flight_state == "SUBMISSION_UNKNOWN"
+                        and flight_age_s >= _exit_inflight_stale_force_seconds()
+                    )
 
                 # CRITICAL FIX (2026-08-27): Forced/safety exits must not be blocked by a
                 # stale in-flight lock.  Reconcile the existing order first; if it cannot
                 # be proven live, release the lock and re-emit with a fresh idempotency key.
-                if _is_forced_exit_reason(exit_reason) or _is_settlement_guard_override(exit_reason):
+                if _is_forced_exit_reason(exit_reason) or _is_settlement_guard_override(exit_reason) or stale_force:
                     logger.warning(
                         "[EXIT-INTENT-FORCED-RECONCILE] position=%s existing_reason=%s new_reason=%s; "
                         "attempting forced reconciliation of client_order_id=%s",
