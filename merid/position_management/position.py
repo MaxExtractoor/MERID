@@ -205,6 +205,9 @@ class Position:
     soft_stop_observations: int = 0  # Consecutive polls where own-side bid <= soft stop
     hard_stop_confirmed: bool = False  # True once a hard stop has triggered
     hard_stop_price_cents: Optional[int] = None  # soft stop - extra buffer for taker fee/slippage
+    # 2026-10-07: tail-loss floor (profit_only_v1 has no armed SL — this is the
+    # catastrophic salvage trigger, emitted as a HARD_STOP-class StopCandidate).
+    tail_loss_floor_fired: bool = False
 
     # Trailing-stop timing (2026-08-10)
     trail_armed_at: Optional[float] = None  # when profit first reached arm threshold
@@ -1327,6 +1330,7 @@ class Position:
             "soft_stop_observations": self.soft_stop_observations,
             "hard_stop_confirmed": self.hard_stop_confirmed,
             "hard_stop_price_cents": self.hard_stop_price_cents,
+            "tail_loss_floor_fired": self.tail_loss_floor_fired,
             "trail_armed_at": self.trail_armed_at,
             "trail_started_at": self.trail_started_at,
             "high_watermark_updated_at": self.high_watermark_updated_at,
@@ -1437,6 +1441,7 @@ class Position:
             soft_stop_observations=data.get("soft_stop_observations", 0),
             hard_stop_confirmed=data.get("hard_stop_confirmed", False),
             hard_stop_price_cents=data.get("hard_stop_price_cents"),
+            tail_loss_floor_fired=data.get("tail_loss_floor_fired", False),
             trail_armed_at=data.get("trail_armed_at"),
             trail_started_at=data.get("trail_started_at"),
             high_watermark_updated_at=data.get("high_watermark_updated_at"),

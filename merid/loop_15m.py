@@ -73,6 +73,11 @@ MERID_EXIT_ALLOWED_REASONS = frozenset({
     # entry every hard-lock intent died here as exit_reason_not_allowed
     # (live incident: DOGE NO@85, bid 92, 2026-10-05T03:53).
     "hard_profit_lock",
+    # 2026-10-07: LOSS_CAP is the catastrophic tail-salvage reason emitted by
+    # the position monitor's $-cap / tail-floor.  Without this entry it died
+    # here as exit_reason_not_allowed — the cap has been dead code since it
+    # was added.
+    "loss_cap",
 })
 
 # Map internal ExitReason enum values to canonical audit reasons.  The
@@ -98,6 +103,9 @@ _MERID_EXIT_RISK_INVALIDATION_REASONS = frozenset({
     "signal_reversal",
     "model_invalidation",
     "value_switch_exit",
+    # 2026-10-07: the tail-loss floor salvages deep losers; bound by the
+    # position's own cost basis (worst case = premium, same as settlement).
+    "loss_cap",
 })
 
 # Single policy owner for "is a loss exit permitted?"  The guard layer decides
@@ -121,6 +129,9 @@ MERID_HARD_RISK_EXIT_REASONS = frozenset({
     # the 92c lock, then this layer rejected it and the position rode to
     # settlement with a recorded 99c peak.
     "hard_profit_lock",
+    # 2026-10-07: the catastrophic tail-loss floor must never be rejected
+    # solely because exit_price < entry or hit "unknown classification".
+    "loss_cap",
     # An EV-approved value switch may realize a bounded loss by design (sell
     # below entry when the model says holding is worse); still gated.
     "value_switch_exit",
@@ -2789,6 +2800,12 @@ def _run_exit_price_guard(
         # triggers.  The lock's whole purpose is to take realized profit over
         # residual EV; vetoes would silently neuter it every time.
         and canonical != "hard_profit_lock"
+        # 2026-10-07: loss_cap is the catastrophic tail-salvage floor.  The
+        # hold veto's whole failure mode is that p_cal overvalued the dying
+        # side all the way to settlement (XRP-1800: net_sell 18c <= p_cal 22c,
+        # 12c <= 16c, 9c <= 12c — held straight into a 0 payout).  At the tail
+        # the salvage bid is the only trustworthy value.
+        and canonical != "loss_cap"
     ):
         try:
             _hold = (
@@ -3796,8 +3813,11 @@ async def _execute_exit_order(
             durable_exit_attempt = store.get_exit_attempt_by_client_order_id(client_order_id)
             if durable_exit_attempt is not None and OrderAttemptStore.is_terminal_state(durable_exit_attempt.state):
                 # A prior attempt reached a terminal state (e.g. NOT_ACCEPTED_CONFIRMED).
-                # Supersede it so the same client_order_id can be reused for this
-                # new logical exit attempt after a re-arm.
+                # Supersede it — AND mint a fresh client_order_id: the old wire id is
+                # consumed on the exchange (resubmitting a dead id gets HTTP 409 /
+                # silent idempotent-hit — the XRP-1800 second jam).  The deterministic
+                # exit_<sha(fill,reason)> id only protects UNRESOLVED in-flight retries;
+                # once the attempt is proven terminal, the retry is a new order.
                 superseded = store.transition_exit_attempt(
                     durable_exit_attempt.attempt_id,
                     ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL.value,
@@ -3805,6 +3825,12 @@ async def _execute_exit_order(
                     reason="superseded_for_rearm",
                 )
                 if superseded:
+                    _salt = hashlib.sha256(
+                        f"client_order_id:{exit_parent_id}:{exit_reason_str}:{durable_exit_attempt.attempt_id}".encode()
+                    ).hexdigest()[:20]
+                    client_order_id = f"exit_{_salt}"
+                    intent.client_order_id = client_order_id
+                    intent.client_tag = client_order_id
                     durable_exit_attempt = None
             if durable_exit_attempt is None:
                 # exit_policy may be None or malformed; a missing policy must

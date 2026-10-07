@@ -142,6 +142,11 @@ EXIT_REASON_CANONICAL_MAP: Dict[str, str] = {
     # The EV gate's own exit reason: submitted only when the evaluator
     # independently concludes net liquidation beats conservative hold value.
     "value_switch_exit": "value_switch_exit",
+    # 2026-10-07: catastrophic tail-loss floor ($-cap / drop-floor salvage).
+    # Mechanical hard-risk — bypasses the discretionary EV gate and the
+    # winning-side hold veto (p_cal overvalued the dying side all the way to
+    # settlement in the XRP-1800 incident).
+    "loss_cap": "loss_cap",
 }
 
 
@@ -214,6 +219,7 @@ _EMERGENCY_CANONICAL_REASONS = frozenset({
     "emergency",
     "hard_risk",
     "hard_profit_lock",
+    "loss_cap",
 })
 
 # Raw trigger-reason strings used by the StopCandidate path.  They classify a
@@ -251,6 +257,7 @@ _OPERATIONAL_TRIGGER_REASONS = frozenset({
     # not model discretion — it must fire regardless of the EV-gate flag state.
     # Normal (soft) stop-loss and loss-cut triggers stay discretionary below.
     "HARD_STOP",
+    "LOSS_CAP",
 })
 _DISCRETIONARY_TRIGGER_REASONS = frozenset({
     # Flat stop losses stay gated while the operator observes the other exits.
