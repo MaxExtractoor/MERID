@@ -4063,14 +4063,26 @@ async def _execute_exit_order(
                 await asyncio.sleep(0.2)
                 continue
 
+            if _result_status == "duplicate":
+                # "duplicate": another route for this client_order_id is still
+                # in flight (concurrent-dedup).  That route OWNS the outcome —
+                # marking the shared durable attempt SUBMISSION_UNKNOWN here
+                # would regress a healthy SUBMITTING/ACKNOWLEDGED attempt and
+                # mislabel a live submission as lost (observed: 191 events).
+                # Keep the in-flight lock untouched and return; the owning
+                # route and the reconciler drive the attempt forward.
+                logger.warning(
+                    "[EXIT-ORDER] Duplicate exit submit deduped (concurrent in-flight); "
+                    "keeping in-flight for owning route: position=%s market=%s client_order_id=%s",
+                    position.position_id[:8],
+                    position.market_id,
+                    intent.client_order_id,
+                )
+                return
+
             if getattr(result, "requires_recovery", False) or _result_status in (
                 "submission_unknown",
                 "duplicate_unknown",
-                # "duplicate": another route for this client_order_id is still
-                # in flight (concurrent-dedup).  That route owns the outcome —
-                # re-arming here would resubmit against an unresolved attempt
-                # and burn the exit retry budget.
-                "duplicate",
             ):
                 logger.warning(
                     "[EXIT-ORDER] Exit in %s state; keeping in-flight for reconcile: "
@@ -4334,6 +4346,7 @@ async def _execute_exit_order(
             )
             position.size = new_size
             position.mark_reconciling(finalizer_reason)
+            _order_still_working = bool(result and getattr(result, "is_resting", False))
             if durable_exit_attempt:
                 try:
                     from merid.event_venues.kalshi.order_attempt_store import (
@@ -4342,7 +4355,7 @@ async def _execute_exit_order(
                     )
                     partial_state = (
                         ExitOrderAttemptState.RESTING.value
-                        if result and getattr(result, "is_resting", False)
+                        if _order_still_working
                         else ExitOrderAttemptState.PARTIALLY_FILLED.value
                     )
                     OrderAttemptStore().transition_exit_attempt(
@@ -4354,7 +4367,27 @@ async def _execute_exit_order(
                     )
                 except Exception:
                     pass
-            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
+            if _order_still_working:
+                # The RESTING order still owns the remainder: re-arming here
+                # would mint a second exit order against the same position and
+                # double the open exit quantity (observed hazard pattern:
+                # partial fill -> re-arm -> fresh submit while order works).
+                # Keep the in-flight lock; fill callbacks and the reconciler
+                # drive the remainder to FILLED or terminalize the order.
+                logger.info(
+                    "[EXIT-ORDER-RESTING] position=%s market=%s order_id=%s "
+                    "remainder_cc=%d stays owned by the working order - "
+                    "in-flight lock retained, no re-arm",
+                    position.position_id[:8],
+                    position.market_id,
+                    getattr(result, "order_id", None),
+                    int(round(float(new_size) * 100)),
+                )
+            else:
+                # Dead partial (unfilled IOC remainder, expired, post-fill
+                # cancel): no working order covers the remainder — re-arm so
+                # the next evaluation retries exactly the residual quantity.
+                self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
         else:
             logger.error(
                 "[EXIT-ORDER] Exit order did not execute: status=%s error=%s reason=%s finalizer=%s",
@@ -4403,12 +4436,27 @@ async def _execute_exit_order(
                     OrderAttemptStore,
                     ExitOrderAttemptState,
                 )
-                OrderAttemptStore().transition_exit_attempt(
+                _att_store = OrderAttemptStore()
+                # If the exception fired between create_exit_attempt and the
+                # router call, the attempt is still INTENT_PERSISTED and
+                # REJECTED_EXCHANGE is an invalid (silently dropped)
+                # transition — the INTENT_PERSISTED stall pattern.  Record the
+                # stall honestly as TERMINAL_UNFILLED; fall back to
+                # REJECTED_EXCHANGE only when the attempt already advanced
+                # past dispatch.
+                updated = _att_store.transition_exit_attempt(
                     durable_exit_attempt.attempt_id,
-                    ExitOrderAttemptState.REJECTED_EXCHANGE.value,
+                    ExitOrderAttemptState.TERMINAL_UNFILLED.value,
                     "loop_15m",
-                    reason=f"exception:{error_type} error={e}",
+                    reason=f"submit_dispatch_error:{error_type} error={e}",
                 )
+                if updated is None:
+                    _att_store.transition_exit_attempt(
+                        durable_exit_attempt.attempt_id,
+                        ExitOrderAttemptState.REJECTED_EXCHANGE.value,
+                        "loop_15m",
+                        reason=f"exception:{error_type} error={e}",
+                    )
             except Exception:
                 pass
         if is_code_failure:

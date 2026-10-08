@@ -133,6 +133,15 @@ EXIT_REASON_CANONICAL_MAP: Dict[str, str] = {
     "model_invalidation": "model_invalidation",
     "model_invalidation_loss_exit": "model_invalidation",
     "auto_exit_99c": "expiry_liquidation",
+    # 2026-10-08: close the UNKNOWN gaps left in the monitor's ExitReason
+    # enum — under the shared-taxonomy gate an UNKNOWN reason fails closed,
+    # so these previously-mechanical exits must carry an explicit class.
+    # extreme_profit is the deprecated alias for AUTO_EXIT_99C (near-settlement
+    # 99c cash-out); dynamic_take_profit is a profit exit; continuation_stop
+    # is a per-asset vol-normalized momentum-failure stop (signal family).
+    "extreme_profit": "expiry_liquidation",
+    "dynamic_take_profit": "take_profit",
+    "continuation_stop": "signal_reversal",
     "hard_profit_lock": "hard_profit_lock",
     "settlement_guard": "expiry_liquidation",
     "ratchet_floor": "take_profit",

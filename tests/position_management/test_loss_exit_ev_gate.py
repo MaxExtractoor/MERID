@@ -1,11 +1,12 @@
-"""Tests for the mid-trade loss-exit EV gate (2026-09-25).
+"""Tests for the mid-trade loss-exit EV gate.
 
-The gate vetoes edge_decay / current_edge_reversal / time_stop /
-model_invalidation_loss_exit candidates unless the settlement-aligned
-evaluator independently concludes that liquidating beats the calibrated,
-risk-reserved hold value (net_sell > conservative_hold + margin, persistent).
-This prevents the measured premature-loss pattern of selling recoverable dips
-at or below model fair on 0/100 binaries.
+2026-10-08 repair: the shared exit taxonomy is the sole classification
+authority.  Only DISCRETIONARY reasons (``stop_loss``, ``loss_cut``,
+``value_switch_exit``) consult the EV comparison; OPERATIONAL and EMERGENCY
+exits are never vetoed here, and UNKNOWN reasons fail closed.  The monitor
+passes the candidate's real canonical reason to the evaluator instead of the
+hardcoded ``value_switch_exit`` that used to convert every gated call into a
+discretionary one.
 """
 
 from types import SimpleNamespace
@@ -97,27 +98,39 @@ def ev_env(monkeypatch):
 
 
 class TestGatedReasonSet:
-    def test_loss_reasons_gated(self):
-        gated = pm._LOSS_EXIT_EV_GATED_REASONS
-        assert ExitReason.EDGE_DECAY in gated
-        assert ExitReason.CURRENT_EDGE_REVERSAL in gated
-        assert ExitReason.TIME_STOP in gated
-        assert ExitReason.MODEL_INVALIDATION_LOSS_EXIT in gated
+    def test_discretionary_reasons_gated(self):
+        assert pm._exit_reason_is_ev_gated(ExitReason.STOP_LOSS) is True
+        assert pm._exit_reason_is_ev_gated(ExitReason.LOSS_CUT_40PCT) is True
+        assert pm._exit_reason_is_ev_gated("value_switch_exit") is True
 
-    def test_profit_and_hard_reasons_not_gated(self):
-        gated = pm._LOSS_EXIT_EV_GATED_REASONS
+    def test_operational_and_emergency_reasons_not_gated(self):
         for reason in (
+            ExitReason.EDGE_DECAY,
+            ExitReason.CURRENT_EDGE_REVERSAL,
+            ExitReason.TIME_STOP,
+            ExitReason.MODEL_INVALIDATION_LOSS_EXIT,
             ExitReason.TAKE_PROFIT,
             ExitReason.DYNAMIC_TAKE_PROFIT,
             ExitReason.TRAIL,
             ExitReason.AUTO_EXIT_99C,
             ExitReason.SETTLEMENT_GUARD,
             ExitReason.LOSS_CAP,
-            ExitReason.STOP_LOSS,
             ExitReason.RISK,
             ExitReason.CONTINUATION_STOP,
+            ExitReason.EXTREME_PROFIT,
+            ExitReason.HARD_PROFIT_LOCK,
         ):
-            assert reason not in gated
+            assert pm._exit_reason_is_ev_gated(reason) is False, reason
+
+    def test_unknown_reason_gated_fail_closed(self):
+        assert pm._exit_reason_is_ev_gated("totally_made_up_reason") is True
+
+    def test_no_monitor_reason_classifies_unknown(self):
+        """Every monitor ExitReason must resolve to a known class — the
+        fail-closed UNKNOWN path would silently veto a previously-mechanical
+        exit (2026-10-08 regression guard)."""
+        for reason in ExitReason:
+            assert pm._exit_policy_class(reason).value != "unknown", reason.value
 
     def test_gate_enabled_by_default(self, monkeypatch):
         monkeypatch.delenv("MERID_LOSS_EXIT_EV_GATE", raising=False)
@@ -142,22 +155,37 @@ class TestFilterEvGatedCandidates:
         # No gated reasons → the evaluator must not even be consulted.
         assert ev_env["evaluator"].evaluate.call_count == 0
 
-    def test_veto_drops_gated_keeps_ungated(self, monkeypatch, ev_env):
+    def test_veto_drops_discretionary_keeps_operational(self, monkeypatch, ev_env):
+        """A vetoed discretionary exit must not suppress operational exits
+        raised in the same tick."""
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
         ev_env["set"](decision=EvDecision.HOLD_SELL_VALUE_INFERIOR)
         cands = [
+            _decision(ExitReason.STOP_LOSS),
             _decision(ExitReason.TIME_STOP),
-            _decision(ExitReason.EDGE_DECAY, ExitPriority.EDGE_DECAY),
             _decision(ExitReason.TAKE_PROFIT, ExitPriority.TAKE_PROFIT),
         ]
         out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
-        assert [c.reason for c in out] == [ExitReason.TAKE_PROFIT]
+        assert [c.reason for c in out] == [ExitReason.TIME_STOP, ExitReason.TAKE_PROFIT]
+
+    def test_operational_exits_never_consult_evaluator(self, monkeypatch, ev_env):
+        """edge_decay / time_stop / model_invalidation submit mechanically —
+        the 2026-09-25 bug EV-vetoed exactly these reasons."""
+        monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
+        ev_env["set"](exc=RuntimeError("evaluator must not be called"))
+        cands = [
+            _decision(ExitReason.EDGE_DECAY),
+            _decision(ExitReason.TIME_STOP),
+            _decision(ExitReason.MODEL_INVALIDATION_LOSS_EXIT),
+        ]
+        out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
+        assert out == cands
 
     def test_pass_keeps_gated(self, monkeypatch, ev_env):
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
         ev_env["set"](decision=EvDecision.SELL_SIGNALLED)
         cands = [
-            _decision(ExitReason.TIME_STOP),
+            _decision(ExitReason.STOP_LOSS),
             _decision(ExitReason.TAKE_PROFIT, ExitPriority.TAKE_PROFIT),
         ]
         out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
@@ -167,22 +195,15 @@ class TestFilterEvGatedCandidates:
         """A breach without the required consecutive confirmations holds."""
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
         ev_env["set"](decision=EvDecision.HOLD_PERSISTENCE_NOT_MET)
-        cands = [_decision(ExitReason.MODEL_INVALIDATION_LOSS_EXIT)]
+        cands = [_decision(ExitReason.STOP_LOSS)]
         out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
         assert out == []
 
     def test_eval_exception_fails_closed(self, monkeypatch, ev_env):
-        """An eval error must not let a loss exit slip through."""
+        """An eval error must not let a discretionary loss exit slip through."""
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
         ev_env["set"](exc=RuntimeError("no state store"))
-        cands = [_decision(ExitReason.TIME_STOP)]
-        out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
-        assert out == []
-
-    def test_current_edge_reversal_gated(self, monkeypatch, ev_env):
-        monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
-        ev_env["set"](decision=EvDecision.HOLD_DATA_INSUFFICIENT)
-        cands = [_decision(ExitReason.CURRENT_EDGE_REVERSAL)]
+        cands = [_decision(ExitReason.STOP_LOSS)]
         out = pm._filter_ev_gated_exit_candidates(_position(), cands, None, 400.0)
         assert out == []
 
@@ -193,7 +214,7 @@ class TestFilterEvGatedCandidates:
         pos = _position()
         pos.fill_source = None
         pos.entry_fill_id = None
-        cands = [_decision(ExitReason.TIME_STOP)]
+        cands = [_decision(ExitReason.STOP_LOSS)]
         out = pm._filter_ev_gated_exit_candidates(pos, cands, None, 400.0)
         assert out == cands
         assert ev_env["evaluator"].evaluate.call_count == 0
@@ -203,13 +224,29 @@ class TestLossExitEvJustified:
     def test_sell_signalled_allowed(self, monkeypatch, ev_env):
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
         ev_env["set"](decision=EvDecision.SELL_SIGNALLED)
-        ok, ev = pm._loss_exit_ev_justified(_position(), None, 400.0)
+        ok, ev = pm._loss_exit_ev_justified(
+            _position(), None, 400.0, exit_reason=ExitReason.STOP_LOSS
+        )
         assert ok is True
         assert ev.decision == EvDecision.SELL_SIGNALLED
         kwargs = ev_env["evaluator"].evaluate.call_args.kwargs
-        assert kwargs["canonical_reason"] == "value_switch_exit"
+        # The evaluator is consulted under the candidate's REAL canonical
+        # reason — the old code hardcoded "value_switch_exit" and silently
+        # converted operational exits into discretionary ones.
+        assert kwargs["canonical_reason"] == "stop_loss"
         assert kwargs["held_side"] == "yes"
         assert kwargs["market_key"] == "KXBTC15M-26SEP251200-00"
+
+    def test_bypass_decisions_allow_operational_exits(self, monkeypatch, ev_env):
+        """OPERATIONAL/EMERGENCY reasons pass through BYPASS_* decisions —
+        the evaluator records telemetry but cannot veto a mandatory close."""
+        monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")
+        for decision in (EvDecision.BYPASS_OPERATIONAL, EvDecision.BYPASS_EMERGENCY):
+            ev_env["set"](decision=decision)
+            ok, _ = pm._loss_exit_ev_justified(
+                _position(), None, 400.0, exit_reason=ExitReason.EDGE_DECAY
+            )
+            assert ok is True, decision
 
     def test_hold_decisions_veto(self, monkeypatch, ev_env):
         monkeypatch.setenv("MERID_LOSS_EXIT_EV_GATE", "1")

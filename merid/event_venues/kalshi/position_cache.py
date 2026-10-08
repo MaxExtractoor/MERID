@@ -5064,8 +5064,13 @@ class KalshiPositionCache:
                 try:
                     fills_ledger = self._get_fills_ledger()
                     if fills_ledger:
-                        # Get all fills from ledger
-                        fills = fills_ledger.get_fills(since=datetime.now(timezone.utc) - timedelta(hours=24))
+                        # Canonical execution view (2026-10-08): venue-evidenced
+                        # fills plus still-pending router mirrors; superseded
+                        # mirrors are excluded so expected exposure is never
+                        # double-counted against REST.
+                        _cv = fills_ledger.get_canonical_fills(
+                            since=datetime.now(timezone.utc) - timedelta(hours=24))
+                        fills = _cv.authoritative + _cv.provisional
 
                         # Build expected signed-YES exposure from fills.
                         # This is the canonical reconciliation boundary: both REST and fills are

@@ -35,7 +35,9 @@ def sentiment_tagged_notional_usd(asset: str) -> float:
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
 
         ledger = get_fills_ledger()
-        fills = ledger.get_fills()
+        # Canonical execution view: synthetic router-mirror rows must not
+        # double-count notional (2026-10-08 accounting repair).
+        fills = ledger.get_canonical_fills().authoritative
     except Exception:
         return 0.0
     au = asset.upper()

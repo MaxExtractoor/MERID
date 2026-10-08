@@ -535,19 +535,32 @@ class RiskController:
                     
                     # Get fills since daily loss start timestamp
                     since_ts = self._daily_loss_start_ts
-                    fills = ledger.get_fills(since=since_ts)
+                    # CANONICAL EXECUTION VIEW (2026-10-08): only venue-evidenced
+                    # fills may contribute to realized P&L.  Synthetic
+                    # ``live_router_*`` mirror rows are excluded (previously
+                    # double-counted or fabricated phantom proceeds) and
+                    # unconfirmed router rows are tracked as unresolved so the
+                    # guard can distinguish "no losses" from "losses not yet
+                    # authoritatively established".
+                    view = ledger.get_canonical_fills(since=since_ts)
+                    fills = view.authoritative
+                    unresolved = ledger.unresolved_router_fills(since=since_ts)
+                    self._unresolved_fill_rows = len(unresolved)
                     
-                    # Aggregate proceeds_dollars from fills
+                    # Aggregate proceeds_dollars from authoritative fills only
                     daily_pnl_dollars = sum(
                         float(f.proceeds_dollars or 0) 
                         for f in fills 
                         if f.is_live
                     )
                     
-                    pnl_source = "fills_since_start"
+                    pnl_source = "fills_canonical"
                     logger.info(
-                        "[DAILY-LOSS-CALC] Computed from fills: since=%s num_fills=%d pnl=$%.2f",
-                        since_ts.isoformat() if since_ts else "None", len(fills), daily_pnl_dollars
+                        "[DAILY-LOSS-CALC] Computed from canonical fills: since=%s "
+                        "authoritative=%d unresolved_router=%d excluded=%d pnl=$%.2f",
+                        since_ts.isoformat() if since_ts else "None",
+                        len(fills), len(unresolved), len(view.excluded),
+                        daily_pnl_dollars
                     )
                 except Exception as e:
                     logger.warning("[DAILY-LOSS-CALC] Failed to compute from fills: %s", e)

@@ -341,25 +341,68 @@ def _settlement_guard_sell_justified(
         return False
 
 
-# 2026-09-25: Mid-trade loss/thesis exits are EV-gated.  On a 0/100 binary the
-# expected value of holding to settlement is the (calibrated) held-side
-# probability; selling pays a second taker fee plus spread.  Triggering
-# edge_decay / current_edge_reversal / time_stop / model_invalidation the
-# moment a noisy dip makes a reason "true" locks the loss at the model's most
-# pessimistic price — the dominant premature-loss pattern in live fills
-# (winners sold at 1-50c below entry that then settled in-the-money).  These
-# reasons may only liquidate when the settlement evaluator independently
-# concludes net liquidation beats the conservative (risk-reserved) hold value
-# — i.e. the market is paying a premium over a calibrated, risk-adjusted hold.
-# Catastrophic hard-risk exits (loss cap, stop loss, risk, continuation,
-# operational/manual) and all profit exits (take-profit, trail, ratchet,
-# scale-out, 99c) remain mechanical and are never gated here.
-_LOSS_EXIT_EV_GATED_REASONS = frozenset({
-    ExitReason.EDGE_DECAY,
-    ExitReason.CURRENT_EDGE_REVERSAL,
-    ExitReason.TIME_STOP,
-    ExitReason.MODEL_INVALIDATION_LOSS_EXIT,
-})
+# 2026-09-25 → 2026-10-08 repair: mid-trade exits are EV-gated ONLY when the
+# shared taxonomy classifies their reason DISCRETIONARY.  On a 0/100 binary
+# the expected value of holding to settlement is the (calibrated) held-side
+# probability; selling pays a second taker fee plus spread — so a
+# discretionary loss/thesis exit may only liquidate when the settlement
+# evaluator concludes net liquidation beats the conservative (risk-reserved)
+# hold value on a trusted book and calibrated model.
+# OPERATIONAL and EMERGENCY reasons (edge_decay, time_exit, model
+# invalidation, signal reversal, take-profit, trail, hard stop, loss cap,
+# settlement guard, expiry liquidation, hard profit lock, reconciliation)
+# submit mechanically and are never gated here — the shared taxonomy in
+# ``settlement_aligned_exit`` is the sole classification authority.  UNKNOWN
+# reasons fail closed.
+def _exit_policy_class(reason: Any) -> "ExitClass":
+    """Shared exit taxonomy — the ONLY classification source.
+
+    ``settlement_aligned_exit.classify_exit_reason`` is authoritative; the
+    monitor must not maintain a parallel table.  (2026-10-08 repair: the
+    hardcoded ``_LOSS_EXIT_EV_GATED_REASONS`` set gated reasons whose shared
+    classification is OPERATIONAL, contradicting the taxonomy.)
+    """
+    from merid.event_venues.kalshi.settlement_aligned_exit import (
+        classify_exit_reason,
+    )
+    _orig, _canon, cls = classify_exit_reason(
+        getattr(reason, "value", reason)
+    )
+    return cls
+
+
+def _exit_reason_is_ev_gated(reason: Any) -> bool:
+    """True when the exit class may be EV-vetoed.
+
+    Only DISCRETIONARY reasons are gated.  OPERATIONAL and EMERGENCY exits
+    submit mechanically; the evaluator still records a BYPASS shadow decision
+    downstream.  UNKNOWN fails closed — an unclassified reason is gated and
+    the evaluator itself returns BLOCK_UNKNOWN_REASON.
+    """
+    from merid.event_venues.kalshi.settlement_aligned_exit import ExitClass
+    return _exit_policy_class(reason) in (ExitClass.DISCRETIONARY, ExitClass.UNKNOWN)
+
+
+def _degraded_exit_deadline_seconds() -> float:
+    """Exposure deadline for degraded-policy exits.
+
+    Inside this window, a discretionary exit vetoed *only* on missing/
+    uncalibrated model inputs still closes: an independently configured
+    risk/expiry deadline must not be erased by unavailable vol or RTI data.
+    """
+    try:
+        return float(os.environ.get("MERID_EXIT_DEGRADED_DEADLINE_S", "300"))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+# Eval-detail blockers that indicate missing *model inputs* (as opposed to
+# mechanical book/provenance failures, which always block).
+_DEGRADED_INPUT_BLOCKERS = (
+    "uncalibrated_model_inputs",
+    "rti_unavailable_or_ineligible",
+    "no_model_valuation",
+)
 
 
 def _loss_exit_ev_gate_enabled() -> bool:
@@ -371,15 +414,22 @@ def _loss_exit_ev_justified(
     position: "Position",
     snapshot: Optional["ExitPriceSnapshot"],
     seconds_to_expiry: Optional[float],
+    exit_reason: Any = None,
 ) -> Tuple[bool, Any]:
     """Return (allowed, evaluation) for a mid-trade loss/thesis exit.
 
-    Runs the settlement-aligned evaluator as a *discretionary* value-switch:
-    the exit is allowed only when ``net_sell > conservative_hold + margin``
-    persists for the configured consecutive-eval count on a trusted book and
-    calibrated model.  Any data/provenance/model failure fails toward hold —
-    for a capped-loss binary, riding to settlement preserves the residual
-    option value that selling at/below fair donates.
+    Runs the settlement-aligned evaluator under the *actual* canonical exit
+    reason (2026-10-08 fix — previously every call was hardcoded to the
+    discretionary ``value_switch_exit`` reason, so operational and emergency
+    exits were wrongly subjected to the discretionary EV veto).  For
+    DISCRETIONARY reasons the exit is allowed only when ``net_sell >
+    conservative_hold + margin`` persists for the configured consecutive-eval
+    count on a trusted book and calibrated model.  OPERATIONAL/EMERGENCY
+    reasons return ``BYPASS_*`` decisions from the evaluator and are always
+    allowed here — this function never vetoes a mandatory close.  UNKNOWN
+    reasons fail closed.  Inside the degraded-input deadline, a discretionary
+    hold caused *only* by missing/uncalibrated model inputs is also allowed:
+    an absent vol source cannot silently cancel a configured risk deadline.
     """
     try:
         from merid.event_venues.kalshi.market_state import (
@@ -387,7 +437,11 @@ def _loss_exit_ev_justified(
         )
         from merid.event_venues.kalshi.settlement_aligned_exit import (
             EvDecision,
+            canonicalize_exit_reason,
             get_exit_evaluator,
+        )
+        _orig_reason, _canon_reason = canonicalize_exit_reason(
+            exit_reason or "value_switch_exit"
         )
 
         store = get_kalshi_market_state_store()
@@ -426,7 +480,7 @@ def _loss_exit_ev_justified(
             position,
             market_key=position.market_id,
             held_side=held_side,
-            canonical_reason="value_switch_exit",
+            canonical_reason=_canon_reason,
             quantity_contracts=position.size,
             kalshi_state=kalshi_state,
             unified_state=unified_state,
@@ -435,7 +489,42 @@ def _loss_exit_ev_justified(
             book_age_ms=book_age_ms,
             seconds_to_expiry=seconds_to_expiry,
         )
-        return ev.decision == EvDecision.SELL_SIGNALLED, ev
+        if ev.decision in (EvDecision.BYPASS_OPERATIONAL,
+                           EvDecision.BYPASS_EMERGENCY):
+            # Mandatory class: evaluation ran for telemetry only; the close
+            # proceeds mechanically.
+            return True, ev
+        if ev.decision == EvDecision.SELL_SIGNALLED:
+            return True, ev
+        # Degraded-inputs deadline: discretionary hold is erased by a
+        # configured exposure deadline when every recorded blocker is a
+        # missing-model-input class (uncalibrated vol / missing RTI / absent
+        # model valuation) rather than a mechanical book failure.  An
+        # explicit HOLD_NEAR_SETTLEMENT_POLICY_REQUIRED is NOT overridden —
+        # it is the evaluator's intended terminal policy inside the final
+        # averaging minute and records settlement exposure explicitly.
+        if (
+            seconds_to_expiry is not None
+            and seconds_to_expiry <= _degraded_exit_deadline_seconds()
+            and ev.decision == EvDecision.HOLD_DATA_INSUFFICIENT
+            and ev.detail
+            and all(
+                b.split(":")[0] in _DEGRADED_INPUT_BLOCKERS
+                for b in str(ev.detail).split(";")
+            )
+        ):
+            logger.warning(
+                "[LOSS-EXIT-EV-DEGRADED-DEADLINE] position=%s market=%s "
+                "s2e=%s decision=%s detail=%s - configured deadline reached "
+                "with degraded model inputs; proceeding mechanically",
+                position.position_id[:8],
+                position.market_id,
+                seconds_to_expiry,
+                ev.decision,
+                ev.detail,
+            )
+            return True, ev
+        return False, ev
     except Exception as exc:
         logger.warning(
             "[LOSS-EXIT-EV-HOLD] position=%s market=%s - eval failed (%s); "
@@ -453,18 +542,22 @@ def _filter_ev_gated_exit_candidates(
     snapshot: Optional["ExitPriceSnapshot"],
     seconds_to_expiry: Optional[float],
 ) -> List["ExitDecision"]:
-    """Drop gated loss/thesis-exit candidates that fail the EV justification.
+    """Drop DISCRETIONARY-classified candidates that fail the EV justification.
 
-    A gated candidate (edge_decay / current_edge_reversal / time_stop /
-    model_invalidation_loss_exit) survives only when the settlement evaluator
-    signals ``SELL`` — the market is paying a premium over the calibrated,
-    risk-reserved hold value.  Ungated reasons (profit exits, hard-risk exits,
-    settlement, operational) pass through untouched, so an EV-vetoed loss exit
-    can never suppress a take-profit or trailing exit raised in the same tick.
+    The shared exit taxonomy (``settlement_aligned_exit``) is the sole
+    classification authority: DISCRETIONARY and UNKNOWN reasons consult the
+    EV comparison; OPERATIONAL and EMERGENCY reasons pass through untouched —
+    the evaluator still records a BYPASS shadow decision downstream, and an
+    EV-vetoed discretionary exit can never suppress a mandatory close raised
+    in the same tick.
     """
     if not _loss_exit_ev_gate_enabled():
         return candidates
-    gated = [c for c in candidates if c.reason in _LOSS_EXIT_EV_GATED_REASONS]
+    # 2026-10-08: gate by the shared taxonomy, not a private reason list —
+    # operational/emergency candidates pass mechanically while the evaluator
+    # records telemetry; only DISCRETIONARY (or UNKNOWN, fail-closed) reasons
+    # consult the EV comparison.
+    gated = [c for c in candidates if _exit_reason_is_ev_gated(c.reason)]
     if not gated:
         return candidates
     # Same convention as the stop-loss arming/spread guards: synthetic or
@@ -477,7 +570,9 @@ def _filter_ev_gated_exit_candidates(
     )
     if not has_fill_provenance:
         return candidates
-    ev_ok, ev = _loss_exit_ev_justified(position, snapshot, seconds_to_expiry)
+    ev_ok, ev = _loss_exit_ev_justified(
+        position, snapshot, seconds_to_expiry, exit_reason=gated[0].reason
+    )
     if ev_ok:
         logger.info(
             "[LOSS-EXIT-EV-PASS] position=%s market=%s allowed=%s "
@@ -503,7 +598,7 @@ def _filter_ev_gated_exit_candidates(
         getattr(ev, "net_sell_value_cents", None),
         getattr(ev, "conservative_hold_cents", None),
     )
-    return [c for c in candidates if c.reason not in _LOSS_EXIT_EV_GATED_REASONS]
+    return [c for c in candidates if not _exit_reason_is_ev_gated(c.reason)]
 
 
 def _get_hard_loss_cap_cents() -> int:
@@ -2574,17 +2669,141 @@ class PositionMonitor:
                         )
                         return True
 
+                # 2026-10-08: distinguish a never-dispatched obligation from a
+                # genuinely lost submission.  If the durable attempt is still
+                # INTENT_PERSISTED, the SUBMITTING transition (and therefore
+                # the router call) never ran — a "worker not dispatched" /
+                # dispatch-error stall, NOT an unknown venue outcome.  It
+                # terminalizes as TERMINAL_UNFILLED with the stall reason and
+                # the lock releases so the next evaluation mints a fresh
+                # attempt; entering SUBMISSION_UNKNOWN reconcile would wedge
+                # the position behind a lookup that can never resolve.
+                _durable_state = self._durable_exit_attempt_state(client_order_id)
+                if _durable_state == ExitOrderAttemptState.INTENT_PERSISTED.value:
+                    logger.critical(
+                        "[EXIT-INTENT-STALL] Exit obligation aged out UNSUBMITTED "
+                        "(dispatch never invoked): position_id=%s client_order_id=%s "
+                        "age=%.2fs reason=%s - terminalizing TERMINAL_UNFILLED; "
+                        "re-evaluation will mint a fresh attempt",
+                        position_id[:8], client_order_id,
+                        time.time() - intent_time, flight.get("reason") or "unknown",
+                    )
+                    self._transition_exit_attempt(
+                        client_order_id,
+                        ExitOrderAttemptState.TERMINAL_UNFILLED.value,
+                        "unsubmitted_age_limit:dispatch_timeout",
+                    )
+                    del self._exit_intent_in_flight[position_id]
+                    if position_id in self._position_to_client_order:
+                        del self._position_to_client_order[position_id]
+                    self._save_exit_intent_in_flight()
+                    return False
+
                 flight["state"] = "SUBMISSION_UNKNOWN"
                 logger.error(
                     "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out -> SUBMISSION_UNKNOWN: position_id=%s "
                     "client_order_id=%s age=%.2fs. Reconciliation required before new exit.",
                     position_id[:8], client_order_id, time.time() - intent_time
                 )
+                # Push the durable record into SUBMISSION_UNKNOWN too so the
+                # store (not just the in-memory projection) reflects that the
+                # submission outcome is unproven.  The edge exists from
+                # SUBMITTING/RESOLVING_ON_EXCHANGE; from ACKNOWLEDGED it is
+                # correctly rejected and the reconciler resolves the truth.
+                self._transition_exit_attempt(
+                    client_order_id,
+                    ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+                    "intent_timeout_submission_unknown",
+                )
                 # Trigger reconciliation asynchronously.
                 self._schedule_exit_reconcile(position_id, client_order_id)
                 return True
 
             return True
+
+    def _durable_exit_attempt_state(self, client_order_id: Optional[str]) -> Optional[str]:
+        """Return the durable ExitOrderAttempt state for ``client_order_id``."""
+        if not client_order_id:
+            return None
+        try:
+            store = OrderAttemptStore()
+            record = store.get_exit_attempt_by_client_order_id(client_order_id)
+            return record.state if record is not None else None
+        except Exception:
+            return None
+
+    def _unsubmitted_exit_age_seconds(self) -> float:
+        """Age limit for an exit obligation that never reached dispatch."""
+        try:
+            return float(os.environ.get("MERID_EXIT_UNSUBMITTED_AGE_S", "120"))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _sweep_stale_exit_obligations(self) -> int:
+        """Terminalize exit obligations that never reached dispatch.
+
+        An INTENT_PERSISTED record older than ``MERID_EXIT_UNSUBMITTED_AGE_S``
+        is an obligation that was created but whose submit was never invoked —
+        worker not dispatched, dispatch exception, process kill, or a
+        legacy-migrated record.  Each is terminalized as TERMINAL_UNFILLED
+        with a classified stall reason, and the in-memory flight is released
+        so a still-open position mints a fresh attempt on next evaluation.
+
+        Returns the number of obligations terminalized.
+        """
+        try:
+            store = OrderAttemptStore()
+            pending = [
+                r for r in store.list_nonterminal_exit_attempts()
+                if r.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+            ]
+        except Exception as exc:
+            logger.debug("[EXIT-OBLIGATION-SWEEP] store listing failed: %s", exc)
+            return 0
+        if not pending:
+            return 0
+        now = time.time()
+        limit = self._unsubmitted_exit_age_seconds()
+        swept = 0
+        for record in pending:
+            age = now - record.created_at
+            if age < limit:
+                continue
+            try:
+                payload = json.loads(record.payload_json or "{}")
+            except Exception:
+                payload = {}
+            with self._lock:
+                position_open = record.position_key in self._open_positions
+            if payload.get("migrated_from_json") or payload.get("migrated_from_order_attempt_id"):
+                stall = "migrated_legacy"
+            elif position_open:
+                stall = "worker_not_dispatched"
+            else:
+                stall = "obligation_orphaned_position_gone"
+            updated = store.transition_exit_attempt(
+                record.attempt_id,
+                ExitOrderAttemptState.TERMINAL_UNFILLED.value,
+                actor="position_monitor",
+                reason=f"unsubmitted_age_limit:{stall}",
+            )
+            if not updated:
+                continue
+            swept += 1
+            with self._lock:
+                flight = self._exit_intent_in_flight.pop(record.position_key, None)
+                self._position_to_client_order.pop(record.position_key, None)
+            log = logger.critical if position_open else logger.warning
+            log(
+                "[EXIT-OBLIGATION-SWEEP] attempt=%s position=%s client_order_id=%s "
+                "age=%.1fs stall=%s - unsubmitted obligation TERMINAL_UNFILLED; "
+                "fresh evaluation will mint a new attempt if still required",
+                record.attempt_id[:8], record.position_key[:8],
+                record.client_order_id[:12], age, stall,
+            )
+        if swept:
+            self._save_exit_intent_in_flight()
+        return swept
 
     def _schedule_exit_reconcile(
         self, position_id: str, client_order_id: Optional[str]
@@ -2769,6 +2988,27 @@ class PositionMonitor:
                                 "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; exit still live",
                                 client_order_id[:8], status, position_id[:8]
                             )
+                            # The order is provably working — restore the
+                            # in-memory lock to SUBMITTED and advance the
+                            # durable attempt out of RESOLVING_ON_EXCHANGE so
+                            # re-evaluations recognize a live obligation
+                            # instead of probing reconcile every cycle.
+                            with self._lock:
+                                _fl = self._exit_intent_in_flight.get(position_id)
+                                if _fl is not None and _fl.get("state") == "SUBMISSION_UNKNOWN":
+                                    _fl["state"] = "SUBMITTED"
+                                    _fl["submitted_at"] = time.time()
+                            self._transition_exit_attempt(
+                                client_order_id,
+                                (
+                                    ExitOrderAttemptState.RESTING.value
+                                    if status in ("resting", "open")
+                                    else ExitOrderAttemptState.ACKNOWLEDGED.value
+                                ),
+                                f"reconcile_order_{status}",
+                                exchange_order_id=getattr(order, "order_id", None),
+                            )
+                            self._save_exit_intent_in_flight()
                             return
                 except Exception as order_exc:
                     logger.debug(
@@ -5664,7 +5904,8 @@ class PositionMonitor:
             _ev_detail = None
             if _loss_exit_ev_gate_enabled():
                 _ev_submit_ok, _ev_obj = _loss_exit_ev_justified(
-                    position, snapshot, seconds_to_expiry
+                    position, snapshot, seconds_to_expiry,
+                    exit_reason="edge_decay",
                 )
                 _ev_detail = (
                     f"{getattr(_ev_obj, 'decision', None)}:{getattr(_ev_obj, 'detail', None)}"
@@ -7079,6 +7320,18 @@ class PositionMonitor:
                     get_entry_markout_tracker().poll()
                 except Exception as _mk_err:
                     logger.debug("[ENTRY-MARKOUT] poll failed: %s", _mk_err)
+
+                # 2026-10-08: age-limit unsubmitted exit obligations.  Runs
+                # even with no open positions — orphaned INTENT_PERSISTED
+                # records must still terminalize (observed: 388 legacy
+                # migrated records wedged nonterminal across restarts).
+                _now_m = __import__('time').monotonic()
+                if _now_m - getattr(self, "_last_obligation_sweep", 0.0) >= 30.0:
+                    self._last_obligation_sweep = _now_m
+                    try:
+                        self._sweep_stale_exit_obligations()
+                    except Exception as _sw_err:
+                        logger.warning("[EXIT-OBLIGATION-SWEEP] failed: %s", _sw_err)
 
                 if not self._open_positions:
                     await asyncio.sleep(self._poll_interval)

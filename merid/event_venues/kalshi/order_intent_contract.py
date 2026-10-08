@@ -1207,6 +1207,34 @@ def validate_canonical_intent(
         if i.time_to_expiry_seconds is None or not math.isfinite(i.time_to_expiry_seconds):
             raise OrderIntentValidationError("missing_time_to_expiry")
 
+        # 2026-10-08 accounting repair: new entries are prohibited while live
+        # execution accounting is unresolved — router-mirror fills that never
+        # received venue confirmation mean the loss guards cannot establish
+        # authoritative realized P&L.  Exits are unaffected (exposure-reducing
+        # closes must remain submit-able).  The grace window absorbs normal
+        # fill-confirmation latency; the window cap prevents ancient DB
+        # artifacts from blocking forever.
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            _unres = get_fills_ledger().unresolved_router_fills(
+                min_age_seconds=float(
+                    os.getenv("MERID_UNRESOLVED_FILL_GRACE_S", "90")),
+                max_age_seconds=float(
+                    os.getenv("MERID_UNRESOLVED_FILL_WINDOW_S", "86400")),
+            )
+            if _unres:
+                raise OrderIntentValidationError(
+                    "unresolved_fill_accounting:unconfirmed_router_fills="
+                    f"{len(_unres)}"
+                )
+        except OrderIntentValidationError:
+            raise
+        except Exception as _unres_err:
+            logger.warning(
+                "[CANONICAL-ORDER-INTENT] unresolved-fill check failed "
+                "(allowing entry): %s", _unres_err,
+            )
+
         exit_only_cutoff = float(
             os.environ.get(
                 "MERID_EXIT_ONLY_CUTOFF_S",
