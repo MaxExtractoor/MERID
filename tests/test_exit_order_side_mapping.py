@@ -188,6 +188,11 @@ class TestStopLossTriggerYesPosition:
             size=1,
             avg_entry_price_cents=60,
             stop_loss_price_cents=45,
+            # 2026-10-08: satisfy the trusted-anchor contract — UNKNOWN
+            # provenance disables the stop-loss fields (position.py:565).
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            entry_fill_id="test-fill",
         )
         
         # YES bid at 44c (below stop at 45c) - should trigger
@@ -211,6 +216,11 @@ class TestStopLossTriggerYesPosition:
             size=1,
             avg_entry_price_cents=60,
             stop_loss_price_cents=45,
+            # 2026-10-08: satisfy the trusted-anchor contract — UNKNOWN
+            # provenance disables the stop-loss fields (position.py:565).
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            entry_fill_id="test-fill",
         )
         
         # 55c - no trigger
@@ -238,6 +248,11 @@ class TestStopLossTriggerNoPosition:
             size=1,
             avg_entry_price_cents=60,
             stop_loss_price_cents=45,
+            # 2026-10-08: satisfy the trusted-anchor contract — UNKNOWN
+            # provenance disables the stop-loss fields (position.py:565).
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            entry_fill_id="test-fill",
         )
         
         # NO bid at 44c (below stop at 45c) - should trigger
@@ -261,6 +276,11 @@ class TestStopLossTriggerNoPosition:
             size=1,
             avg_entry_price_cents=60,
             stop_loss_price_cents=45,
+            # 2026-10-08: satisfy the trusted-anchor contract — UNKNOWN
+            # provenance disables the stop-loss fields (position.py:565).
+            risk_params_state="original_persisted",
+            risk_params_schema_version=2,
+            entry_fill_id="test-fill",
         )
         
         # 55c - no trigger

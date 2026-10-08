@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from decimal import Decimal
 from typing import TYPE_CHECKING, Set
 
 from utils.logger import get_logger
@@ -73,7 +74,13 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
             "asset": asset,
             "side": _can_side,
             "action": (_can_action or "").lower(),
-            "contracts": int(fill.count_fp),
+            # Exact fractional quantity is authoritative; int(count_fp) would
+            # report a 0.75 fill as 0 contracts to every subscriber.
+            "contracts": float(fill.count_fp),
+            "count_fp": str(fill.count_fp),
+            "quantity_cc": getattr(fill, "quantity_cc", None)
+            if getattr(fill, "quantity_cc", None) is not None
+            else int(Decimal(str(fill.count_fp)) * Decimal("100")),
             "price_cents": int(price_cents),
             "fee_cents": int(float(fill.fee_cost) * 100),
             "simulated": False,
@@ -107,7 +114,7 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
             # explicit canonicalization state.  None or UNTRUSTED_* is fail-closed.
             await cache.on_fill(
                 market_id=fill.market_ticker,
-                contracts=int(fill.count_fp),
+                contracts=float(fill.count_fp),
                 quantity_cc=getattr(fill, 'quantity_cc', None),
                 price_cents=int(price_cents),
                 fee_cents=int(float(fill.fee_cost) * 100),
@@ -133,7 +140,9 @@ async def publish_order_filled_for_ledger_fill(fill: "KalshiFill") -> None:
                 if _candidate in _ticker_upper:
                     _tf = _candidate.lower()
                     break
-            _fill_cents = int(float(fill.price_cents) * int(fill.count_fp))
+            _fill_cents = int(
+                Decimal(str(fill.price_cents)) * Decimal(str(fill.count_fp))
+            )
             _cm_fill(asset or "unknown", _tf, _fill_cents, 0)
         except Exception as e:
             logger.debug(f"fill_bus cell_metrics error: {e}")

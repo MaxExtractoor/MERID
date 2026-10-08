@@ -757,6 +757,7 @@ class KalshiFill:
     action: str = ""  # raw exchange action ("buy" or "sell")
     count_fp: Decimal = Decimal("0")  # Exact fixed-point contract count
     quantity_cc: int = 0  # Integer centi-contracts; canonical for exposure math
+    post_position_cc: Optional[int] = None  # Venue post-fill signed-YES position (centi-contracts), when reported
     yes_price_dollars: Optional[Decimal] = None  # Price if side=yes
     no_price_dollars: Optional[Decimal] = None  # Price if side=no
     fee_cost: Decimal = Decimal("0")  # Fee paid
@@ -1095,6 +1096,24 @@ class KalshiFill:
         # No held-side leg price and no execution-side match: do not synthesize
         # or fall back to a potentially wrong-side execution price.
         return None
+
+
+@dataclass
+class CanonicalFillsView:
+    """Result of ``KalshiFillsLedger.get_canonical_fills()``.
+
+    ``authoritative`` rows are the only fills allowed to move cash or signed
+    exposure in risk, P&L, allocation, dashboard, and audit consumers.
+    ``provisional`` rows are unconfirmed router mirrors; ``excluded`` rows are
+    superseded mirrors and duplicate ``trade_id`` rows (never counted).
+    """
+    authoritative: List["KalshiFill"]
+    provisional: List["KalshiFill"]
+    excluded: List["KalshiFill"]
+
+    @property
+    def unresolved_count(self) -> int:
+        return len(self.provisional)
 
 
 @dataclass
@@ -3101,6 +3120,116 @@ class KalshiFillsLedger:
     def get_fill_by_id(self, fill_id: str) -> Optional[KalshiFill]:
         """Get a single fill by ID."""
         return self._fills.get(fill_id)
+
+    # ── CANONICAL EXECUTION VIEW (2026-10-08 accounting repair) ────────────
+    # One authoritative view for position reconstruction, realized P&L,
+    # daily/window loss controls, allocation reservations, dashboards, and
+    # audit consumers.  Router intent/mirror rows remain in the ledger for
+    # observability but never contribute cash flows or position deltas here.
+    #
+    # Row classification:
+    #   authoritative — venue-evidenced fills: ingestion_source is not a
+    #     router mirror, OR the row was promoted/confirmed by REST
+    #     (``confirmed_by_rest``).  Deduplicated by ``trade_id`` (Kalshi's
+    #     unique per-fill identifier) so a REST+WS pair applies once while
+    #     multiple fractional fills on one ``order_id`` all survive.
+    #   provisional — ``live_router_*`` / ``order_router`` mirror rows with
+    #     no venue twin yet.  Recorded for observability and pending-exposure
+    #     tracking; excluded from cash/exposure until a venue fill confirms.
+    #   excluded — superseded router mirrors (venue twin exists: counting
+    #     them double-applies one economic fill) and duplicate ``trade_id``
+    #     rows.
+    _VENUE_EVIDENCED_SOURCES = frozenset({
+        "http_poller", "websocket", "backfill", "db_restore",
+        "manual_operator_close", "settlement", "reconciliation",
+    })
+
+    def _canonical_fill_class(self, fill: KalshiFill) -> str:
+        fid = str(getattr(fill, "fill_id", "") or "")
+        src = (getattr(fill, "ingestion_source", "") or "").lower()
+        if self._is_superseded_live_router_fill(fill):
+            return "excluded"
+        if fid.startswith("live_router_") or src == "order_router":
+            return "provisional"
+        return "authoritative"
+
+    def get_canonical_fills(
+        self,
+        since: Optional[datetime] = None,
+        market_ticker: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        asset: Optional[str] = None,
+    ) -> "CanonicalFillsView":
+        """Authoritative execution view; see class contract above."""
+        auth, prov, excl = [], [], []
+        for f in list(self._fills.values()):
+            if since is not None:
+                try:
+                    if f.created_time < since:
+                        continue
+                except TypeError:
+                    pass  # mixed tz-naive/aware — include rather than drop
+            if market_ticker and f.market_ticker != market_ticker:
+                continue
+            if agent_id and f.agent_id != agent_id:
+                continue
+            if asset and f.asset != asset:
+                continue
+            cls = self._canonical_fill_class(f)
+            (auth if cls == "authoritative" else
+             prov if cls == "provisional" else excl).append(f)
+
+        # Dedup by unique venue fill identifier (trade_id falls back to
+        # fill_id).  Venue-confirmed rows win over derived/WS-only copies.
+        seen_tids: Dict[str, KalshiFill] = {}
+        deduped: List[KalshiFill] = []
+        auth.sort(key=lambda f: (0 if f.confirmed_by_rest else 1, f.created_time))
+        for f in auth:
+            tid = str(getattr(f, "trade_id", None) or getattr(f, "fill_id", "") or "")
+            if tid and tid in seen_tids:
+                excl.append(f)
+                continue
+            if tid:
+                seen_tids[tid] = f
+            deduped.append(f)
+        deduped.sort(key=lambda f: f.created_time)
+        prov.sort(key=lambda f: f.created_time)
+        excl.sort(key=lambda f: f.created_time)
+        return CanonicalFillsView(
+            authoritative=deduped, provisional=prov, excluded=excl)
+
+    def unresolved_router_fills(
+        self,
+        since: Optional[datetime] = None,
+        min_age_seconds: float = 0.0,
+        max_age_seconds: Optional[float] = None,
+        live_only: bool = True,
+    ) -> List[KalshiFill]:
+        """Provisional router-mirror rows still lacking venue confirmation.
+
+        A non-empty result means execution accounting is unresolved for those
+        rows: the venue may still deliver the authoritative fill, or the row
+        may be a phantom that must be reconciled.  ``min_age_seconds`` gives
+        normal confirmation latency a grace window; ``max_age_seconds``
+        bounds the window so historical artifacts don't count as live
+        accounting ambiguity.
+        """
+        view = self.get_canonical_fills(since=since)
+        now = datetime.now(timezone.utc)
+        out = []
+        for f in view.provisional:
+            if live_only and not getattr(f, "is_live", False):
+                continue
+            try:
+                age = (now - f.created_time).total_seconds()
+            except Exception:
+                age = None
+            if min_age_seconds > 0 and age is not None and age < min_age_seconds:
+                continue
+            if max_age_seconds is not None and age is not None and age > max_age_seconds:
+                continue
+            out.append(f)
+        return out
 
     def get_fills_by_market(self, market_id: str) -> List[KalshiFill]:
         """Get all fills for a specific market (ticker).
@@ -8124,6 +8253,57 @@ class KalshiFillsLedger:
             else:
                 proceeds = _expected_proceeds
 
+        # 2026-10-08: Post-fill position reconciliation.  Kalshi reports
+        # ``post_position_fp`` on fills; when present, the ledger-derived
+        # signed-YES exposure (prior fills + this fill's canonical delta) must
+        # equal the venue's post-fill position.  A divergence means the delta
+        # interpretation or prior-exposure bookkeeping is wrong — quarantine
+        # rather than book a divergent position.
+        _post_fp_raw = raw.get("post_position_fp") or raw.get("post_position")
+        _post_position_cc: Optional[int] = None
+        if _post_fp_raw is not None:
+            try:
+                _post_position_cc = int(Decimal(str(_post_fp_raw)) * Decimal("100"))
+            except Exception:
+                _post_position_cc = None
+        if (
+            _post_position_cc is not None
+            and _canonical_yes_delta_cc is not None
+            and not is_unmatched
+        ):
+            try:
+                _prior_cc = self._prior_signed_yes_cc(
+                    _ticker_for_identity,
+                    before_time=created_time,
+                    exclude_fill_id=str(fill_id),
+                    exclude_order_id=order_id,
+                )
+                _expected_post_cc = _prior_cc + _canonical_yes_delta_cc
+                if _expected_post_cc != _post_position_cc:
+                    is_unmatched = True
+                    if not unmatched_reason:
+                        unmatched_reason = (
+                            f"post_position_mismatch:ledger={_expected_post_cc}:"
+                            f"venue={_post_position_cc}"
+                        )
+                    _canonicalization_state = "UNTRUSTED_POST_POSITION"
+                    _action = None
+                    _canonical_side = None
+                    _canonical_leg_price_cents = None
+                    _canonical_yes_delta_cc = None
+                    logger.critical(
+                        "[FILL-POST-POSITION-MISMATCH] fill_id=%s ticker=%s "
+                        "ledger_post=%dcc venue_post=%dcc - Quarantining; "
+                        "exposure interpretation diverged from venue.",
+                        fill_id, _ticker_for_identity,
+                        _expected_post_cc, _post_position_cc,
+                    )
+            except Exception as _pp_err:
+                logger.warning(
+                    "[FILL-POST-POSITION-CHECK] fill_id=%s check failed "
+                    "(non-fatal): %s", fill_id, _pp_err,
+                )
+
         # Determine if this is a LIVE trade (real money)
         # This is critical for bankroll reconciliation
         # CRITICAL FIX (2026-07-15): Use VenueGate as canonical source of truth for Kalshi venue mode
@@ -8212,6 +8392,7 @@ class KalshiFillsLedger:
             action=_execution_action,
             count_fp=_count_fp,
             quantity_cc=_quantity_cc,
+            post_position_cc=_post_position_cc,
             yes_price_dollars=yes_price_dollars,
             no_price_dollars=no_price_dollars,
             fee_cost=fee_decimal,

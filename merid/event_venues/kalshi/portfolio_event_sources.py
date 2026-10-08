@@ -129,7 +129,9 @@ class FillsEventSource(KalshiEventSourceAdapter):
                 "no_price_cents": fill_data.get("no_price_cents"),
                 # count_fp arrives as a fixed-point string ("5.00"); route
                 # through Decimal — int("5.00") raises and float() is inexact.
-                "contracts": int(Decimal(str(fill_data.get("count_fp", fill_data.get("size", 0))))),
+                # Fractional contracts are real exposure: int() truncation
+                # would report a 0.75 fill as 0 contracts.
+                "contracts": Decimal(str(fill_data.get("count_fp", fill_data.get("size", 0)))),
                 "price_cents": Decimal(str(fill_data.get("price_cents", 0))),
                 # Kalshi fees quantize to $0.0001 (0.01c); keep sub-cent cents
                 # as Decimal rather than truncating via int(float()*100).

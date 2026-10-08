@@ -707,10 +707,10 @@ class StopCandidateExecutionReducer:
         if qty_cc <= 0:
             return None, None, "stop_candidate_no_held_position"
 
-        # Whole contracts only for the order count; fractional remainders are not
-        # submitted.  This is consistent with the existing stop path.
-        if qty_cc % 100 != 0:
-            return None, None, "stop_candidate_fractional_qty"
+        # Fractional centi-contract positions are first-class exposure: the
+        # close order targets the exact remaining quantity via count_fp.  A
+        # sub-one-contract remainder must never be skipped.
+        qty_fp = Decimal(qty_cc) / Decimal("100")
 
         held_contracts = qty_cc // 100
 
@@ -772,7 +772,8 @@ class StopCandidateExecutionReducer:
             side=held_side,
             action="sell",
             price_cents=exit_price,
-            count=held_contracts,
+            count=float(qty_fp),
+            count_fp=qty_fp,
             order_type="limit",
             time_in_force="ioc",
             source="stop_candidate_reducer",
@@ -789,6 +790,10 @@ class StopCandidateExecutionReducer:
             exit_policy_id=exit_policy_id,
             pre_position_size=pre_contracts,
             expected_post_position_size=max(0, pre_contracts - held_contracts),
+            # Exact centi-contract position deltas (authoritative for
+            # fractional exposure; *_size fields above are display floors).
+            pre_position_fp=fresh_qty,
+            expected_post_position_fp=max(0, fresh_qty - qty_cc),
             reason=f"stop_loss:{candidate.trigger_reason}:{candidate.candidate_id}",
             rationale=f"stop_candidate_reducer:{candidate.trigger_reason}:{candidate.candidate_id}",
             parentage_status=parentage_status,

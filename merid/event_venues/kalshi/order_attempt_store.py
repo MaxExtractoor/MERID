@@ -185,6 +185,13 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
     ExitOrderAttemptState.INTENT_PERSISTED: {
         ExitOrderAttemptState.SUBMITTING,
         ExitOrderAttemptState.CANCELED,
+        # An obligation that never reached dispatch (exception between
+        # record creation and submit invocation, process kill, or a
+        # legacy-migrated record for a long-closed position) must
+        # terminalize honestly instead of wedging nonterminal forever.
+        # The stale-obligation sweep uses this edge with a recorded
+        # stall reason (unsubmitted_age_limit:*).
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
     },
     ExitOrderAttemptState.SUBMITTING: {
         ExitOrderAttemptState.ACKNOWLEDGED,

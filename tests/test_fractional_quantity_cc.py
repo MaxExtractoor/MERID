@@ -49,9 +49,10 @@ def ledger():
     return KalshiFillsLedger()
 
 
-def _intent(count_fp: Decimal, side="yes", action="buy", price=50, count=None, **kw):
+def _intent(count_fp: Decimal, side="yes", action="buy", price=50, count=None,
+            ticker="KXETH15M-FRAC", **kw):
     return OrderIntent(
-        ticker="KXETH15M-FRAC",
+        ticker=ticker,
         side=side,
         action=action,
         price_cents=price,
@@ -121,6 +122,24 @@ class TestPaperFillFractional:
         assert fill["count"] == 0
         assert fill["requested_quantity_cc"] == 35
         assert fill["remaining_quantity_cc"] == 0
+
+    def test_simulate_partial_fill_preserves_centi_contracts(self, monkeypatch):
+        # The partial-fill draw must operate in centi-contracts, not whole
+        # contracts: a stubbed draw of 63cc on a 1.40 request produces a 0.63
+        # fill with a 0.77 remainder — the venue's fixed-point granularity.
+        import random
+        class _FixedRng:
+            def random(self): return 0.0  # always below partial-fill prob
+            def randint(self, lo, hi): return 63
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_router.PAPER_PARTIAL_FILL_PROB", 1.0
+        )
+        intent = _intent(Decimal("1.40"))
+        fill = simulate_paper_fill(intent, _rng=_FixedRng())
+        assert fill["partial_fill"] is True
+        assert fill["count_fp"] == "0.63"
+        assert fill["quantity_cc"] == 63
+        assert fill["remaining_quantity_cc"] == 140 - 63
 
     def test_simulate_partial_fill_fractional(self):
         # 2.50 contracts -> partial fill of 2 with 0.50 remainder.
@@ -194,51 +213,124 @@ class TestExitInvariantsFractional:
         assert c4.qty_cc == 35 and c4.yes_delta() == -35
 
 
+def _stub_entry_gates(monkeypatch):
+    """Satisfy the fail-closed entry gates added after 2026-08-18 so the mock
+    route reaches ``simulate_paper_fill``: caller authorization, sizing
+    pass-throughs, a healthy risk envelope, a permissive strategy policy, and
+    the authoritative entry-readiness store (live-sequence-confirmed book).
+    """
+    import merid.event_venues.kalshi.order_router as _router
+    from types import SimpleNamespace
+    _router._startup_time = 0.0
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._is_authorized_caller",
+        lambda caller: True,
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._apply_risk_based_order_sizing",
+        lambda intent, bankroll_usd=None: intent.count_fp or Decimal(intent.count),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._apply_depth_based_order_sizing",
+        lambda intent, state=None: intent.count_fp or Decimal(intent.count),
+    )
+
+    class _MockEnvelope:
+        max_total_notional_usd = 1000.0
+        def get_depth_thresholds(self, _asset):
+            return {"min_depth_yes": 1, "min_depth_no": 1}
+
+    monkeypatch.setattr(
+        "merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope",
+        lambda *_a, **_k: _MockEnvelope(),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._get_strategy_policy",
+        lambda _intent: {
+            "min_edge": 0.0,
+            "min_confidence": 0.0,
+            "max_md_staleness_sec": 1000,
+        },
+    )
+    # The entry-readiness gate requires a live-sequence-confirmed book state;
+    # stub the store rather than weaken the fail-closed production check.
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
+        lambda: SimpleNamespace(
+            get=lambda ticker: None,
+            is_market_entry_ready=lambda ticker, max_age_seconds=None: (True, ""),
+        ),
+    )
+
+
+def _entry_kwargs(**overrides):
+    """Valid entry provenance: the canonical contract rejects open intents with
+    missing/non-finite time-to-expiry, so the fixture must supply it."""
+    kw = dict(
+        confidence=0.95, edge_pct=0.03, model_prob=0.55,
+        effective_equity_usd=1000.0, entry_or_exit="entry",
+        exit_policy_id="frac_test_ep", window_resolution_id="frac_test_wr",
+        risk_tier="standard", max_hold_seconds=900,
+        time_to_expiry_seconds=600.0,
+    )
+    kw.update(overrides)
+    return kw
+
+
 class TestRouterFractional:
     """route_order must preserve fractional size through the router."""
 
     def test_mock_entry_fill_zero_point_three_five(self, cache, ledger, monkeypatch):
-        import merid.event_venues.kalshi.order_router as _router
-        _router._startup_time = 0.0
-        monkeypatch.setattr(
-            "merid.event_venues.kalshi.order_router._is_authorized_caller",
-            lambda caller: True,
-        )
-        monkeypatch.setattr(
-            "merid.event_venues.kalshi.order_router._apply_risk_based_order_sizing",
-            lambda intent, bankroll_usd=None: intent.count_fp or Decimal(intent.count),
-        )
-        monkeypatch.setattr(
-            "merid.event_venues.kalshi.order_router._apply_depth_based_order_sizing",
-            lambda intent, state=None: intent.count_fp or Decimal(intent.count),
-        )
-        # Provide a healthy risk envelope so bankroll checks pass.
-        class _MockEnvelope:
-            max_total_notional_usd = 1000.0
-            def get_depth_thresholds(self, _asset):
-                return {"min_depth_yes": 1, "min_depth_no": 1}
-        monkeypatch.setattr(
-            "merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope",
-            lambda *_a, **_k: _MockEnvelope(),
-        )
-        monkeypatch.setattr(
-            "merid.event_venues.kalshi.order_router._get_strategy_policy",
-            lambda _intent: {
-                "min_edge": 0.0,
-                "min_confidence": 0.0,
-                "max_md_staleness_sec": 1000,
-            },
-        )
-        intent = _intent(
-            Decimal("0.35"), confidence=0.95, edge_pct=0.03, model_prob=0.55,
-            effective_equity_usd=1000.0, entry_or_exit="entry",
-            exit_policy_id="frac_test_ep", window_resolution_id="frac_test_wr",
-            risk_tier="standard", max_hold_seconds=900,
-        )
+        _stub_entry_gates(monkeypatch)
+        intent = _intent(Decimal("0.35"), **_entry_kwargs())
         result = route_order(intent)
         assert result.status == "filled_mock"
         assert result.fill["count_fp"] == "0.35"
         assert result.fill["quantity_cc"] == 35
+
+    @pytest.mark.parametrize("count_fp,expected_cc,ticker", [
+        ("0.01", 1, "KXETH15M-FRAC-A"),
+        ("0.75", 75, "KXSOL15M-FRAC-B"),
+        ("1.55", 155, "KXXRP15M-FRAC-C"),
+    ])
+    def test_mock_entry_fill_fractional_sizes(
+        self, cache, ledger, monkeypatch, count_fp, expected_cc, ticker
+    ):
+        # Force deterministic full fills: the paper simulator randomly
+        # partial-fills requests >1 contract.
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_router.PAPER_PARTIAL_FILL_PROB", 0.0
+        )
+        # Distinct tickers per case: the contract-lease/idempotency singletons
+        # hold a ticker-scoped lease for ~300s, so reusing one ticker across
+        # tests would collide on entry idempotency rather than quantity math.
+        _stub_entry_gates(monkeypatch)
+        intent = _intent(Decimal(count_fp), ticker=ticker, **_entry_kwargs(
+            client_order_id=f"frac-{count_fp}",
+        ))
+        result = route_order(intent)
+        assert result.status == "filled_mock"
+        assert result.fill["count_fp"] == count_fp
+        assert result.fill["quantity_cc"] == expected_cc
+
+    def test_multi_fill_total_sums_exactly_in_cc(self, cache, ledger, monkeypatch):
+        """Two mock fills on separate orders must sum in centi-contracts, e.g.
+        0.75 + 1.40 = 2.15 -> 215cc, never floored to 2 whole contracts."""
+        _stub_entry_gates(monkeypatch)
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_router.PAPER_PARTIAL_FILL_PROB", 0.0
+        )
+        total_cc = 0
+        tickers = ("KXDOGE15M-FRAC-D", "KXBTC15M-FRAC-E")
+        for i, fp in enumerate((Decimal("0.75"), Decimal("1.40"))):
+            intent = _intent(
+                fp, ticker=tickers[i],
+                **_entry_kwargs(client_order_id=f"multi-{i}"),
+            )
+            result = route_order(intent)
+            assert result.status == "filled_mock"
+            total_cc += result.fill["quantity_cc"]
+        assert total_cc == 215
 
     def test_mock_exit_over_close_rejected(self, cache, monkeypatch):
         monkeypatch.setattr(

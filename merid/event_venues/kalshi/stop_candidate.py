@@ -1025,7 +1025,7 @@ async def _maybe_degraded_stop_exit(
     primary_result: Any,
     *,
     held_side: str,
-    held_contracts: int,
+    held_qty_cc: int,
 ) -> None:
     """Residual-exposure branch for a non-executable protective exit.
 
@@ -1043,7 +1043,7 @@ async def _maybe_degraded_stop_exit(
     reason_str = str(getattr(primary_result, "reason", "") or "")
     is_non_exec = "limit_not_executable" in reason_str.lower()
     vwap_cents = parse_non_executable_vwap_cents(reason_str)
-    if not is_non_exec or held_contracts <= 0:
+    if not is_non_exec or held_qty_cc <= 0:
         return
 
     from merid.event_venues.kalshi.residual_exit import (
@@ -1060,7 +1060,7 @@ async def _maybe_degraded_stop_exit(
         or f"unlinked:{candidate.candidate_id}",
         trigger_id=candidate.candidate_id,
         trigger_reason=candidate.trigger_reason,
-        quantity_cc=held_contracts * 100,
+        quantity_cc=held_qty_cc,
         settlement_deadline=(
             time.time() + candidate.seconds_to_expiry
             if candidate.seconds_to_expiry is not None
@@ -1080,7 +1080,7 @@ async def _maybe_degraded_stop_exit(
         "ticker": candidate.market_ticker,
         "residual_id": residual.residual_id,
         "trigger_reason": candidate.trigger_reason,
-        "held_contracts": held_contracts,
+        "held_qty_cc": held_qty_cc,
         "fair_value_cents": fair,
         "degraded_vwap_cents": vwap_cents,
         "primary_reject_reason": reason_str,
@@ -1231,12 +1231,14 @@ async def _maybe_degraded_stop_exit(
 
     kalshi_side = to_kalshi_side(held_side, "sell")
     attempt_no = residual.degraded_attempt_number
+    _dg_qty_fp = Decimal(held_qty_cc) / Decimal("100")
     intent = OrderIntent(
         ticker=candidate.market_ticker,
         side=held_side,
         action="sell",
         price_cents=degraded_limit,
-        count=held_contracts,
+        count=float(_dg_qty_fp),
+        count_fp=_dg_qty_fp,
         order_type="limit",
         time_in_force="ioc",
         source="stop_candidate_degraded",
@@ -1261,10 +1263,12 @@ async def _maybe_degraded_stop_exit(
             f"degraded_exit:vwap={vwap_cents}:fair={fair}:{candidate.candidate_id}"
         ),
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
+        pre_position_fp=held_qty_cc,
+        expected_post_position_fp=0,
     )
     logger.info(
         "[STOP-DEGRADED-SUBMIT] candidate=%s ticker=%s attempt=%d "
-        "vwap=%dc fresh_bid=%dc raw_limit=%.1f limit=%dc qty=%d",
+        "vwap=%dc fresh_bid=%dc raw_limit=%.1f limit=%dc qty_cc=%d",
         candidate.candidate_id,
         candidate.market_ticker,
         attempt_no,
@@ -1272,7 +1276,7 @@ async def _maybe_degraded_stop_exit(
         fresh_bid,
         raw_limit,
         degraded_limit,
-        held_contracts,
+        held_qty_cc,
     )
     result = await route_order_async(intent)
     record["decision"] = "DEGRADED_EXIT_APPROVED"
@@ -1280,18 +1284,43 @@ async def _maybe_degraded_stop_exit(
     record["result"] = _serialize_result(result)
 
     fill = getattr(result, "fill", None) or {}
-    filled_contracts = 0
-    for k in ("filled_count", "count"):
-        v = fill.get(k) if isinstance(fill, dict) else None
-        if v is not None:
-            try:
-                filled_contracts = int(v)
-                break
-            except (TypeError, ValueError):
-                pass
+    # Exact centi-contract fill accounting: a fractional fill (e.g. 0.75) must
+    # never be int()-truncated to zero, which would misclassify a real partial
+    # close as an unfilled IOC and drop the residual from tracking.
+    filled_qty_cc = 0
+    _eqc = getattr(result, "executed_quantity_cc", None)
+    if _eqc:
+        filled_qty_cc = int(_eqc)
+    elif isinstance(fill, dict):
+        for k in ("quantity_cc", "executed_quantity_cc", "filled_quantity_cc"):
+            v = fill.get(k)
+            if v is not None:
+                try:
+                    filled_qty_cc = int(v)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        else:
+            for k in ("filled_count_fp", "count_fp"):
+                v = fill.get(k)
+                if v is not None:
+                    try:
+                        filled_qty_cc = int(Decimal(str(v)) * Decimal("100"))
+                        break
+                    except Exception:
+                        pass
+            else:
+                for k in ("filled_count", "count"):
+                    v = fill.get(k)
+                    if v is not None:
+                        try:
+                            filled_qty_cc = int(Decimal(str(v)) * Decimal("100"))
+                            break
+                        except Exception:
+                            pass
     certainty = str(getattr(result, "submission_certainty", "") or "")
     status = str(getattr(result, "status", "") or "").lower()
-    record["filled_contracts"] = filled_contracts
+    record["filled_qty_cc"] = filled_qty_cc
     record["submission_certainty"] = certainty
 
     if status == "unknown" or certainty in ("in_flight", "unknown"):
@@ -1299,21 +1328,21 @@ async def _maybe_degraded_stop_exit(
         # so no further degraded order can be issued until reconciliation
         # observes the true position.
         record["basis"] = "degraded_ioc_ambiguous_awaiting_reconciliation"
-    elif filled_contracts >= held_contracts:
+    elif filled_qty_cc >= held_qty_cc:
         tracker.transition(
             residual,
             ResidualStatus.CLOSED,
             reason="degraded_ioc_filled",
             remaining_quantity_cc=0,
-            venue_acknowledged_quantity=filled_contracts * 100,
+            venue_acknowledged_quantity=filled_qty_cc,
         )
-    elif filled_contracts > 0:
+    elif filled_qty_cc > 0:
         tracker.transition(
             residual,
             ResidualStatus.PARTIALLY_FILLED,
             reason="partial_degraded_fill",
-            remaining_quantity_cc=(held_contracts - filled_contracts) * 100,
-            venue_acknowledged_quantity=filled_contracts * 100,
+            remaining_quantity_cc=held_qty_cc - filled_qty_cc,
+            venue_acknowledged_quantity=filled_qty_cc,
         )
     else:
         # Venue processed the IOC with zero execution (or rejected it): the
@@ -1511,15 +1540,17 @@ async def maybe_submit_stop_candidate(
             reason="stop_candidate_no_held_position",
         )
 
-    # current OrderIntent.count is whole contracts, so fractional cc positions
-    # cannot be precisely closed through this path.
+    # Fractional centi-contract positions are first-class exposure: the close
+    # order must target the exact remaining quantity via OrderIntent.count_fp.
+    # A sub-one-contract position is not dust — it must never be skipped merely
+    # because it cannot be expressed in the legacy whole-contract count field.
     qty_cc = min(candidate.held_contracts_cc, held_qty_cc)
-    if qty_cc <= 0 or qty_cc % 100 != 0:
+    if qty_cc <= 0:
         record_stop_candidate(candidate)
         return OrderResult(
             status="rejected",
             mode=TradingMode.PAPER,
-            reason="stop_candidate_fractional_qty",
+            reason="stop_candidate_no_closeable_qty",
         )
 
     exit_bid = candidate.executable_exit_cents
@@ -1558,6 +1589,9 @@ async def maybe_submit_stop_candidate(
 
     kalshi_side = to_kalshi_side(held_side, "sell")
 
+    qty_fp = Decimal(qty_cc) / Decimal("100")
+    # Legacy whole-contract fields floor for display only; *_fp fields carry
+    # the exact centi-contract quantity into the canonical contract.
     pre_contracts = held_qty_cc // 100
     held_contracts = qty_cc // 100
 
@@ -1607,7 +1641,8 @@ async def maybe_submit_stop_candidate(
         side=held_side,
         action="sell",
         price_cents=exit_price,
-        count=held_contracts,
+        count=float(qty_fp),
+        count_fp=qty_fp,
         order_type="limit",
         time_in_force="ioc",
         source="stop_candidate",
@@ -1624,6 +1659,10 @@ async def maybe_submit_stop_candidate(
         exit_policy_id=exit_policy_id,
         pre_position_size=pre_contracts,
         expected_post_position_size=max(0, pre_contracts - held_contracts),
+        # Exact centi-contract position-delta fields (authoritative for
+        # fractional exposure; the *_size fields above are display floors).
+        pre_position_fp=held_qty_cc,
+        expected_post_position_fp=max(0, held_qty_cc - qty_cc),
         reason=f"stop_loss:{candidate.trigger_reason}:{candidate.candidate_id}",
         rationale=f"stop_candidate:{candidate.trigger_reason}:{candidate.candidate_id}",
         parentage_status=parentage_status,
@@ -1701,7 +1740,7 @@ async def maybe_submit_stop_candidate(
             candidate,
             result,
             held_side=held_side,
-            held_contracts=held_contracts,
+            held_qty_cc=qty_cc,
         )
     except Exception as exc:
         logger.critical(

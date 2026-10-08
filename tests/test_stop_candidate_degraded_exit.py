@@ -66,7 +66,7 @@ def _patch_env(monkeypatch, tmp_path):
 def _run(cand, result, **kw):
     return asyncio.run(
         sc._maybe_degraded_stop_exit(
-            cand, result, held_side="no", held_contracts=3, **kw
+            cand, result, held_side="no", held_qty_cc=300, **kw
         )
     )
 
@@ -183,6 +183,7 @@ def test_degraded_submit_uses_fresh_dg_coid(monkeypatch, tmp_path):
     assert intent.time_in_force == "ioc"
     assert intent.reduce_only is True
     assert intent.action == "sell" and intent.side == "no" and intent.count == 3
+    assert intent.count_fp == 3 and intent.pre_position_fp == 300
     rec = ledger.records[0]
     assert rec["decision"] == "DEGRADED_EXIT_APPROVED"
     assert rec["basis"] == "degraded_ioc_submitted"

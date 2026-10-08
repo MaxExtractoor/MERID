@@ -4113,11 +4113,17 @@ def _order_snapshot_to_reconciled_result(
     else:
         _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "submitted_live"
 
-    _requested_count = max(int(_size), int(_filled) + max(int(_remaining), 0))
-    _filled_count = int(_filled)
-    _remaining_count = max(int(_remaining), 0)
-    _filled_quantity_cc = _filled_count * 100
-    _remaining_quantity_cc = _remaining_count * 100
+    # Fractional fills are first-class: derive centi-contract quantities from
+    # the exact fixed-point sizes BEFORE producing the legacy whole-contract
+    # display counts.  int(Decimal("0.75")) would silently erase a real fill.
+    _filled_quantity_cc = int(Decimal(str(_filled)) * Decimal("100"))
+    _remaining_quantity_cc = int(Decimal(str(_remaining)) * Decimal("100"))
+    _size_cc = int(Decimal(str(_size)) * Decimal("100"))
+    _filled_count = _filled_quantity_cc // 100
+    _remaining_count = _remaining_quantity_cc // 100
+    _requested_count = (
+        max(_size_cc, _filled_quantity_cc + _remaining_quantity_cc) // 100
+    )
 
     # Prefer the broker snapshot for side/action; fall back to the intent.
     _side = getattr(order, "outcome", None) or intent.side
@@ -7819,14 +7825,15 @@ def simulate_paper_fill(
     # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
     fill_price = max(10, min(75, requested_price + (side_sign * slippage_cents)))
 
-    # Partial fill simulation when size > 1 contract.
+    # Partial fill simulation when size > 1 contract.  The draw is in integer
+    # centi-contracts so fractional pieces (e.g. 0.63 of a 1.40 request) remain
+    # representable — matching the venue's 0.01-contract fixed-point fills.
     partial_fill = False
     fill_count_fp = requested_count_fp
-    if requested_count_fp > 1 and rng.random() < PAPER_PARTIAL_FILL_PROB:
+    if requested_qty_cc > 100 and rng.random() < PAPER_PARTIAL_FILL_PROB:
         partial_fill = True
-        min_fill = max(1, int(round(float(requested_count_fp) * PAPER_MIN_FILL_RATIO)))
-        fill_count_int = rng.randint(min_fill, int(requested_count_fp))
-        fill_count_fp = Decimal(fill_count_int)
+        min_fill_cc = max(1, int(round(requested_qty_cc * PAPER_MIN_FILL_RATIO)))
+        fill_count_fp = Decimal(rng.randint(min_fill_cc, requested_qty_cc)) / Decimal("100")
 
     remaining_count_fp = max(Decimal("0"), requested_count_fp - fill_count_fp)
     fill_qty_cc = int(fill_count_fp * Decimal("100"))
