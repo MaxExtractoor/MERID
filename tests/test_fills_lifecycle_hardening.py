@@ -622,3 +622,59 @@ class TestRevalidationVetoProvenance:
             "reason=", "sel_px", "exec_px", "p_sel0", "ev_new", "spot",
         ):
             assert field in line
+
+# ── Test-environment isolation guards ───────────────────────────────────────
+#
+# 2026-10-09 incident: a non-isolated verification harness let an unmatched
+# test fill (fill_id "dup1", order "o7", ticker KXBTC15M-TEST) reach the REAL
+# trading circuit breaker, which persisted a halt to data/ that survived the
+# process and gated every live cycle after the next restart.  These guards
+# make that class of leak structurally impossible.
+
+
+class TestTestEnvIsolation:
+    @pytest.mark.asyncio
+    async def test_ledger_refuses_prod_db_under_testing_env(
+        self, tmp_path, monkeypatch
+    ):
+        """MERID_ENV=testing + production db path must raise, not write."""
+        monkeypatch.setenv("MERID_ENV", "testing")
+        monkeypatch.setenv(
+            "MERID_FILLS_DB_PATH", "data/kalshi_fills.db"
+        )
+        monkeypatch.setenv("POSTGRES_PASSWORD", "")
+        from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger
+
+        ledger = KalshiFillsLedger()
+        with pytest.raises(RuntimeError, match="production data"):
+            await ledger._init_db()
+
+    def test_breaker_halt_write_refuses_default_path(self, monkeypatch):
+        monkeypatch.setenv("MERID_ENV", "testing")
+        monkeypatch.delenv("MERID_CB_HALT_STATE_PATH", raising=False)
+        from merid.governance import trading_circuit_breaker as tcb
+
+        rec = tcb.HaltRecord(reason="t", timestamp=tcb._now())
+        with pytest.raises(RuntimeError, match="MERID_CB_HALT_STATE_PATH"):
+            tcb._save_halt_record(rec)
+
+    def test_breaker_watermark_write_refuses_default_path(self, monkeypatch):
+        monkeypatch.setenv("MERID_ENV", "testing")
+        monkeypatch.delenv("MERID_CB_HTTP_WATERMARK_PATH", raising=False)
+        from merid.governance import trading_circuit_breaker as tcb
+
+        with pytest.raises(RuntimeError, match="MERID_CB_HTTP_WATERMARK_PATH"):
+            tcb._save_watermark(tcb._now())
+
+    @pytest.mark.asyncio
+    async def test_ledger_allows_redirected_test_db(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MERID_ENV", "testing")
+        monkeypatch.setenv(
+            "MERID_FILLS_DB_PATH", str(tmp_path / "kalshi_fills.db")
+        )
+        monkeypatch.setenv("POSTGRES_PASSWORD", "")
+        from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger
+
+        ledger = KalshiFillsLedger()
+        await ledger._init_db()  # must not raise
+        assert (tmp_path / "kalshi_fills.db").exists()

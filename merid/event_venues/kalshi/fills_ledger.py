@@ -8574,6 +8574,23 @@ class KalshiFillsLedger:
         import aiosqlite
         import os
 
+        # TEST-ISOLATION GUARD (2026-10-09): under MERID_ENV=testing the fills
+        # DB must resolve OUTSIDE the repo data/ directory.  A test writing to
+        # the production DB contaminates restore state, and an unmatched test
+        # fill can trip the real circuit-breaker halt file which survives
+        # process exit and gates live trading on the next boot.
+        if os.environ.get("MERID_ENV") == "testing":
+            _repo_data = (
+                Path(__file__).resolve().parents[3] / "data"
+            ).resolve()
+            _resolved = Path(self._db_path).resolve()
+            if _resolved == _repo_data / "kalshi_fills.db" or _repo_data in _resolved.parents:
+                raise RuntimeError(
+                    "MERID_ENV=testing but MERID_FILLS_DB_PATH resolves to the "
+                    f"production data dir: {_resolved}. Set MERID_FILLS_DB_PATH "
+                    "to a per-test temp path."
+                )
+
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
 
         async with aiosqlite.connect(self._db_path) as db:

@@ -66,17 +66,40 @@ def _load_watermark() -> datetime:
     return _now()
 
 
+def _assert_test_isolation(env_key: str) -> None:
+    """Under MERID_ENV=testing, durable breaker state must be env-redirected.
+
+    A halt record written to the production data/ path survives the test
+    process and gates the live trading loop on the next boot — observed
+    2026-10-09 when a non-isolated harness tripped a real persisted halt
+    (fill_id 'dup1', ticker KXBTC15M-TEST) that blocked all entries.
+    """
+    if os.environ.get("MERID_ENV") != "testing":
+        return
+    if os.environ.get(env_key):
+        return
+    raise RuntimeError(
+        "MERID_ENV=testing but %s is not set — durable breaker state would "
+        "write to the production data/ path. Redirect it to a temp path."
+        % env_key
+    )
+
+
 def _save_watermark(watermark: datetime) -> None:
     try:
+        _assert_test_isolation("MERID_CB_HTTP_WATERMARK_PATH")
         HTTP_FILL_WATERMARK_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(HTTP_FILL_WATERMARK_PATH, "w", encoding="utf-8") as f:
             json.dump({"watermark": watermark.isoformat()}, f)
+    except RuntimeError:
+        raise
     except Exception as exc:
         logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to persist HTTP watermark: %s", exc)
 
 
 def _save_halt_record(record: "HaltRecord") -> None:
     try:
+        _assert_test_isolation("MERID_CB_HALT_STATE_PATH")
         HALT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(HALT_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(
@@ -88,6 +111,8 @@ def _save_halt_record(record: "HaltRecord") -> None:
                 f,
                 default=str,
             )
+    except RuntimeError:
+        raise
     except Exception as exc:
         logger.warning("[TRADING-CIRCUIT-BREAKER] Failed to persist halt record: %s", exc)
 
