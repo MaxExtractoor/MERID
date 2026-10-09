@@ -24,34 +24,39 @@ post-restart verdict stream in `logs/rejected_candidates.jsonl`.
 | Suspensions that are **execution-class** | **20 of 31** cbp + 4 of 5 tc |
 | Suspensions that are **economic-class** | 11 cbp + 0 tc |
 | Integrity suspensions | 0 live (none recorded) |
-| Otherwise-qualified evals blocked post-restart | ~453 across both lanes |
+| Otherwise-qualified evals blocked post-restart | **corrected: 254** (§6 — ~453 used an invalid price approximation) |
 
 **The dominant restriction cause is not losing trades.** 13 of 31 cbp
 suspensions are `consecutive_router_rejects=2 (post-only cross/stale
 revalidation)` — a router-mechanics defect, not realized P&L. Every one of
 them predates the router repair. Under the pre-fix code they were permanent
 and indistinguishable from economic failure; under the repaired code they
-classify `execution`, release to PROBATION after 6 h, and probe at 1
-submission/day under a positive-EV gate.
+classify `mechanical`, release to PROBATION after 6 h (allowlist-gated), and
+probe under bounded submission/fill/loss budgets.
 
 ## 2. What was repaired before this report (all committed)
 
 | Defect | Fix |
 |---|---|
 | No recovery path — 31/40 cells permanently off | `maybe_recover_cell` lazy release → PROBATION → OBSERVATION, class-gated timing |
-| Router rejects conflated with losses | `_classify_suspension_reason` stamps `suspension_class` on every record; rejects never write outcome/loss rows |
+| Router rejects conflated with losses **and** with markouts | Five-way subtype map: `mechanical` / `contract_violation` / `execution_quality` / `economic` / `integrity`, ordered token rules (`router_reject` resolves before the `(post-only …)` parenthetical in live reasons) |
+| `post_only_order_became_taker` classified `integrity` (never recovers), then plain `execution` | Now `contract_violation`: hard-failed until `MERID_EXEC_CONTRACT_FIX_VERIFIED=1`, then restricted probation |
 | `_suspend_cell(cell_id=…)` arg-order bug at 9 call sites | Fixed — reason and class now land in correct fields |
 | Armed `router_consecutive_rejects` counter surviving release → instant re-suspension | Counter zeroed in `maybe_recover_cell` |
-| `post_only_order_became_taker` classified `integrity` (never recovers) | Reclassified `execution` — mechanical route breach, probe-verified recovery |
-| Probation strikes missing in cbp lane | One-strike re-suspend + `probation_triggered` cooldown (6h exec / 24h econ) |
+| Probation strikes missing in cbp lane | Cause-specific strikes: mechanical = 1h health pause, contract/integrity = stop, economic = loss budget + 24h cooldown |
 | Stale `on_probation` flag on re-suspension | Cleared on strike |
 | Missing evidence artifact → silent production admit | Fail-closed synthetic decisions + stale artifacts forced escape-only |
-| `n_eff ≥ 50` toxic-cell block unreachable | Severity-compensated mid tier added (see §7) |
+| `n_eff ≥ 50` toxic-cell block unreachable | Severity-compensated sparse tier added — **env-gated off** (`MERID_EVIDENCE_HARD_SPARSE_TIER`, see §7) |
+| Unbounded probation / blunt one-strike | Separate budgets: submissions/day, fills/episode, realized-loss budget (50¢); unfilled expiry = evidence, not a strike |
+| Lazy release invisible/racy | Atomic `_transition_cell` under `RLock`; every release writes a journaled record (cell, prev/new state, original reason, class, budget, counters reset, policy epoch, ts) |
+| No Stage-A scoping | `MERID_RECOVERY_ALLOWLIST` — when set, only listed cell ids may auto-release |
+| `100 − selected_ask` used as the other side's ask | Rejected-candidate records now persist `yes_price_cents` / `no_price_cents` / `entry_price_basis` from canonical decision inputs; counting marks unverifiable evals `price_unverified` (§6) |
 
-Recovery knobs (env-tunable): exec suspend ≥6h → econ ≥24h → PROBATION;
-probation = 1 submission/day/cell, candidate must clear `max(0, bound)`
-conservative EV; 2 clean observations → OBSERVATION; 1 strike → re-suspend
-with cooldown. Integrity = manual reset only.
+Recovery knobs (env-tunable): mechanical/execution ≥6h → execution-quality
+≥24h → economic ≥24h → PROBATION; contract = verified-fix gate + 24h;
+integrity = operator only. Probation = bounded submissions/day (default 1),
+max fills/episode (default 1), loss budget 50¢; 2 clean observations →
+OBSERVATION; strike handling is cause-specific.
 
 ## 3. Full cell inventory
 
@@ -214,13 +219,54 @@ reachable but slow — no fill requirement blocks it, which is correct.
 | No opportunities → reads as failed probation | **OK** — no fail timer; cell stays PROBATION until clean obs or strike |
 | Repaired exec path needs profit to clear | **Fixed** — exec release is 6h+time; only *submission* needs +EV |
 
-## 6. Blocked-opportunity accounting — caveat
+## 6. Blocked-opportunity accounting — corrected
 
-`executable_price_cents` records only the *selected* side's ask; the other
-side's price is derived as `100 − ask` (~half of evals). 5,447/8,300 evals
-didn't match a cell domain. `QBLK` = evals reaching econPASS/explAUTH inside
-the cell domain that were not submitted — conservative for OBS cells (they
-may fail downstream caps). Frontier sizes are directional, not exact counts.
+**The earlier ~453 figure is withdrawn.** It used `100 − selected_ask` as the
+non-selected side's price. Per Kalshi's book identity `a_Y = 1 − b_N` /
+`a_N = 1 − b_Y`, that complement is the opposite side's **bid**, not its ask;
+in a nonzero-spread book it understates purchase cost by the spread, which
+both moved evals into the wrong price band and inflated qualified counts.
+
+Corrected methodology (`scripts/_blocked_opportunity_counts.py`):
+
+- **Selected-side evals with a recorded price are verified** and kept.
+- **Non-selected-side evals are `price_unverified`** — pre-deploy records
+  carry no independent per-side ask/bid/depth/timestamp fields, so no valid
+  reconstruction exists for them. They are excluded from band matching
+  (4,516 of 9,032 side evals in the post-restart window).
+- Post-deploy records persist `yes_price_cents`, `no_price_cents`, and
+  `entry_price_basis` from the canonical decision inputs — both side prices
+  are now real (the pipeline already derived a missing ask from the
+  *opposite* bid, the correct identity). Bid-basis records are flagged and
+  never band-matched as asks.
+- Dedup distinguishes raw side evals from unique `(decision_id, side)`
+  evaluations and unique `(ticker, side)` market windows.
+- Gate attribution separates evidence, cell-state, cap, and other blocks —
+  `tte_seconds` is used (the earlier pass read the wrong field name).
+
+Corrected counts (post-restart window, 9,032 side evals):
+
+| Metric | Value |
+|---|---|
+| Raw side evals / unique decision evals | 9,032 / 9,032 |
+| Verified-price evals | 4,516 (all selected-side `selected_ask`) |
+| `price_unverified` evals (excluded) | 4,516 |
+| Evals inside a cell domain | 683 verified |
+| Otherwise-qualified evals (cons-EV ≥ cell bound, no hard flag, not stale) | **254** |
+| — blocked by cell state | **0** (evidence gate fires upstream; `cell_suspended` never reached) |
+| — blocked by evidence | 239 |
+| — blocked by other gates | 15 |
+| Records carrying `entry_price_cap_*` | 57 (40 of them `EXPLORATION_AUTHORIZED` + cap-rejected BTC NO 80–89) |
+
+Conclusions that depended on the invalid approximation: the ~453 total, the
+ETH YES 60–70 QBLK of 92, and the "26 cap-only BTC NO opportunities" figure.
+Corrected: **qSTATE = 0 everywhere** — suspended cells' candidates are
+rejected at the evidence stage before lane admission, so the true cost of
+suspension is *indirect* (a qualified eval never reaches the cell veto); the
+BTC NO 80–89 cohort is 40 exploration-authorized cap-blocks, **not 26**, and
+the 26 previously cited are `ECONOMICS_FAIL` records (correct rejects).
+Per-cell `QBLK` columns in §3 are approximation-era values retained for the
+record; the verified totals above supersede them.
 
 ## 7. n_eff reachability — final answer
 
@@ -238,12 +284,34 @@ Measured ceiling (48h artifact, 171 markets, 45 populated cells):
 
 Aggregate per asset/side also <50 (max ~23.5). **n_eff ≥ 50 is structurally
 unreachable in the current window** — the level was a policy reserve, not a
-live evidence level. Fix applied per spec: a severity-compensated mid tier —
-hard-block now reachable at `n_eff ≥ 8` *only* when demonstrated LCB-EV ≤
-−10¢ (vs −5¢ at the unreachable tier), while the n_eff≥50 tier remains as
-the full-toxicity standard. Immediate severe-loss tripwires already live in
-the per-cell suspension triggers; insufficient-evidence controls size via
-the bounded lanes rather than pretending to prove safety.
+live evidence level.
+
+A severity-compensated sparse tier exists in code — `n_eff ≥ 8` *and*
+LCB-EV ≤ −10¢ (vs −5¢ at the dense tier) → hard block with a `sparse_severe`
+tier marker — but it is **gated behind `MERID_EVIDENCE_HARD_SPARSE_TIER`
+(default off)** and is **not part of this release**. It is a policy change,
+not a repair, and its rollout stays separately attributable. Before enabling,
+the following must be documented and tested against known histories:
+
+- *Why 8 markets suffice:* n_eff is a market-normalized decay-weighted count
+  (each market contributes its newest observation's weight) — 8 markets ≈
+  8 freshest-observation weights, which may carry far fewer independent
+  fills; the estimator's effective support must be stated.
+- *What the LCB estimates:* the lower confidence bound on the cell's
+  conservative net EV per candidate at the cohort's own entry prices —
+  **not** realized lifecycle P&L, settlement EV, or markout (each a distinct
+  metric in §6/§10 semantics).
+- *Uncertainty:* LCB is computed at `MERID_EVIDENCE_LCB_Q` (q=0.10) over the
+  decay-weighted outcome distribution; one extreme −N¢ outcome can dominate
+  a sparse weighted set — the single-observation influence must be measured.
+- *Overlap:* the per-cell suspension tripwires (markout, mean-PnL, router
+  reject-rate) already fire on the same adverse evidence — the tier's added
+  value is a *cross-candidate statistical* block on cells that suspend by
+  accumulation rather than trigger.
+- *Stale artifacts:* a stale artifact already caps at max uplift and can
+  never hard-block; the sparse tier inherits that fail-closed rule.
+- *Escape-lane interaction:* a sparse-severe hard block must not be reachable
+  via the bounded escape lane either (hard means hard).
 
 ## 8. Experiment configurations (ready, not promoted)
 
@@ -265,12 +333,22 @@ otherwise-qualified evals in t120_300 post-restart). Downstream cbp caps,
 post-only routing, and lane state checks unchanged. Per-candidate: no band
 promotion.
 
-## 9. Regression coverage (18/18 passing)
+## 9. Regression coverage (29/29 recovery tests; 521 gated suite green)
 
-`tests/test_suspension_recovery.py` — exec/econ/integrity release timing,
-probation completion, strike re-suspension, restart state preservation,
-lane-authority separation, reject≠loss bookkeeping, missing-artifact
-fail-closed, stale→escape-only, duplicate-settlement idempotency.
+`tests/test_suspension_recovery.py` — subtype classification for every
+observed live reason (router parenthetical resolves mechanical, not
+contract); exec-quality vs mechanical timing; contract verified-fix gate;
+allowlist gating; atomic release journal; probation budgets (submissions,
+fills, loss); unfilled-expiry non-strike; stale-counter reset on release;
+restart preservation + backfill; missing/stale/corrupt artifact fail-closed;
+duplicate-settlement idempotency; per-side price telemetry fields (both
+asks persisted, no synthesized complement, bid-basis flagged).
+
+Full gated run (`pytest`, 27 files incl. evidence, threshold-cells, router,
+fractional accounting, exit lifecycle): **521 passed, 0 failed** — the first
+clean run; 15 prior failures were resolved (`.env` cap leakage into unit
+tests, a `get_fills` empty-page-with-cursor misreporting `MAX_PAGES`, and a
+lazy-path-only prod-DB guard now failing fast at ledger construction).
 
 ## 10. Recommendations
 
@@ -285,3 +363,43 @@ fail-closed, stale→escape-only, duplicate-settlement idempotency.
   longer evidence window, not a lower bar.
 - **Keep:** XRP YES −4¢ floor unchanged; directional-throttle semantics
   (TTL, asset-scope, margin cautions) already correct.
+
+## 11. Stage A controlled release — deployed 2026-10-09 ~04:35 UTC
+
+**Commit:** `ad40db12` (recovery mechanics + telemetry; earlier state-machine
+commit `f907eae6` is included in the release).
+**Pre-release state backup:** `backups/pre_release_20261009_035011/`.
+
+**Allowlist** (`MERID_RECOVERY_ALLOWLIST`, persisted in `.env`): the 17
+mechanical-class cells whose suspension reason is a router reject matching
+the demonstrated repair — 13 cbp (`consecutive_router_rejects=2
+(post-only cross/stale revalidation)`) + 4 threshold cells (router-reject
+rate / probation router strike / consecutive rejects). Economic (11),
+execution-quality/markout (8), and any contract/integrity cells are NOT in
+the allowlist and remain suspended.
+
+**Off-gates for this release** (explicit in `.env`):
+`MERID_PRICE_CAP_EXCEPT_BTC_NO=0`, `MERID_EXEC_CONTRACT_FIX_VERIFIED=0`,
+`MERID_EVIDENCE_HARD_SPARSE_TIER=0`.
+
+**Verified post-restart:**
+- Production startup gate passed (clean tree — the earlier attempt correctly
+  refused to boot with uncommitted live-path changes).
+- Atomic transition journal live: each SUSPENDED→PROBATION release records
+  cell_id, prev/new state, original suspension reason, class, policy epoch,
+  probation budget snapshot, and counters reset (`router_consecutive_rejects`).
+- Lazy release working as designed — only allowlisted cells that produce a
+  qualifying candidate move: at verification time, cbp PROBATION =
+  `cbp_doge_no_60_70_t300_600`, `cbp_btc_no_70_80_t300_600`,
+  `cbp_xrp_no_60_70_t120_300` (Experiment A cell), `cbp_sol_no_80_90_t120_300`,
+  `cbp_eth_no_70_80_t300_600`; tc PROBATION = `sol_no_60_80_t120_600`,
+  `doge_no_70_90_t120_600` (+ pre-existing `xrp_no_80_90_t120_600` canary).
+  The other allowlisted cells stay SUSPENDED until a candidate arrives in
+  their domain — no probe is burned on a cell with no flow.
+- New rejected-candidate records carry `yes_price_cents` / `no_price_cents` /
+  `entry_price_basis` (150+ already logged) — future blocked-opportunity
+  counts will use real side-specific asks, never the `100 − ask` complement.
+
+**Rollback:** `MERID_RECOVERY_ALLOWLIST=` (empty) restores all-suspended
+gating; per-cell `set_cell_state(SUSPENDED)` for any misbehaving probation
+cell; state backups in the directory above.
