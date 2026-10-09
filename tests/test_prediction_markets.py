@@ -636,6 +636,13 @@ class TestPredictionMarketRisk:
             max_slippage_cents=Decimal("3"),
             min_depth_contracts=5,
             max_spread_cents=Decimal("10"),
+            # Pin the drawdown scenario these tests exercise: ordinary halt
+            # at 10%, forced unwind at 15%.  The class defaults were
+            # deliberately raised to 20%/25% by the 4-zone drawdown model
+            # (f8c88cbf); the tests below assert state-machine behavior at
+            # these explicit thresholds, not the defaults.
+            drawdown_halt_pct=Decimal("0.10"),
+            drawdown_unwind_pct=Decimal("0.15"),
         )
         self.risk = PredictionMarketRisk(config=self.config)
 
@@ -877,6 +884,77 @@ class TestPredictionMarketRisk:
         self.risk.check_drawdown(portfolio_value_usd=Decimal("960"), peak_value_usd=peak)
         assert self.risk.is_halted is False
 
+    # ------------------------------------------------------------------
+    # Drawdown threshold configuration intent
+    # ------------------------------------------------------------------
+
+    def test_fixture_pins_drawdown_scenario_thresholds(self):
+        """The fixture's effective thresholds are the 10%/15% scenario under test."""
+        assert self.config.drawdown_halt_pct == Decimal("0.10")
+        assert self.config.drawdown_unwind_pct == Decimal("0.15")
+        assert self.risk.config.drawdown_halt_pct == Decimal("0.10")
+        assert self.risk.config.drawdown_unwind_pct == Decimal("0.15")
+
+    def test_default_drawdown_thresholds_are_zone_model(self):
+        """Default PredictionRiskConfig retains the deliberate 4-zone thresholds.
+
+        Pinning the fixture thresholds must not hide a regression in the
+        default configuration: halt=20% / unwind=25% are intentional
+        production defaults (f8c88cbf), not test scaffolding.
+        """
+        cfg = PredictionRiskConfig()
+        assert cfg.drawdown_yellow_pct == Decimal("0.10")
+        assert cfg.drawdown_halt_pct == Decimal("0.20")
+        assert cfg.drawdown_unwind_pct == Decimal("0.25")
+
+    # ------------------------------------------------------------------
+    # Drawdown threshold boundaries
+    # ------------------------------------------------------------------
+
+    def test_drawdown_just_below_halt_threshold(self):
+        """9% drawdown (< 10% halt) leaves the kill switch untouched."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("910"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is False
+        assert self.risk.unwind_requested is False
+
+    def test_drawdown_just_below_unwind_threshold(self):
+        """14% drawdown (>= halt, < unwind) halts without an unwind request."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("860"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is False
+
+    def test_drawdown_exactly_at_unwind_threshold(self):
+        """15% drawdown == unwind threshold → halt + unwind request."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("850"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is True
+
+    def test_drawdown_escalates_halt_to_unwind(self):
+        """A deepening drawdown escalates an ordinary halt into an unwind halt."""
+        # 10% → ordinary halt, no unwind
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("900"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is False
+
+        # 16% → crosses the 15% unwind threshold → unwind latches on
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("840"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is True
 
     def test_circuit_breaker_trips(self):
         now = datetime.now(timezone.utc)
