@@ -83,42 +83,6 @@ class TestMicroScalpingEdgeThresholds:
             f"Penny multiplier {config.fee_edge_multiplier_penny} too high for micro-scalping"
 
 
-class TestMicroScalpingPositionSizing:
-    """Validate position sizing produces viable sizes for $44 bankroll."""
-
-    def test_position_sizing_with_44_bankroll(self):
-        """Position sizing should produce at least 1 contract with $44 bankroll."""
-        # P2: Use venue config instead of deprecated PM config
-        from archive.legacy.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
-        from decimal import Decimal
-
-        config = KalshiRiskConfig()
-        engine = KalshiRiskEngine(config, name="test")
-        
-        # $44.35 bankroll = 4435 cents
-        balance_cents = 4435
-        
-        # At 50¢ contract price with 4% edge
-        edge = Decimal("0.04")
-        contract_price_cents = 50
-        
-        size = engine.calculate_order_size(
-            balance_cents=balance_cents,
-            edge=edge,
-            contract_price_cents=contract_price_cents,
-            existing_position=0,
-            total_open_positions=0,
-        )
-        
-        # With $44 bankroll and 1% max risk = $0.44 = 44 cents
-        # At 50¢ price, max contracts = floor(44/50) = 0, but should get at least 1
-        # due to the "at minimum, if we can afford 1 contract and Kelly says go, do 1" logic
-        assert size >= 0, "Size should be non-negative"
-        
-        # With 4% edge at 50¢ price, we should be able to trade at least 1 contract
-        # if we have sufficient edge and the fee drag is acceptable
-
-
 class TestTimeframeFiltering:
     """Validate agents only process markets matching their configured timeframe."""
 

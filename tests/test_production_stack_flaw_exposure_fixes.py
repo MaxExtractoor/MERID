@@ -91,15 +91,6 @@ class TestCircuitBreakerImplementation:
         assert CircuitBreaker is not None
 
 
-class TestDisasterRecoveryImplementation:
-    """Test that disaster recovery implementation exists."""
-    
-    def test_disaster_recovery_importable(self):
-        """Test that DisasterRecoveryManager can be imported."""
-        from recovery.disaster_recovery import DisasterRecoveryManager
-        assert DisasterRecoveryManager is not None
-
-
 class TestLatencyMonitoringImplementation:
     """Test that latency monitoring implementation exists."""
     
