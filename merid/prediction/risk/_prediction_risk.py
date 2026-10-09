@@ -941,7 +941,10 @@ class PredictionMarketRisk:
         already_halted = self._halted
         self._halted = True
         self._halt_reason = reason
-        self._unwind_requested = unwind
+        # Unwind is strictly more severe than halt: once latched it must not be
+        # downgraded by a later ordinary halt (e.g. drawdown oscillating between
+        # the halt and unwind thresholds).  Only resume() clears the latch.
+        self._unwind_requested = self._unwind_requested or unwind
         self._log_breach("HALT", reason)
         logger.warning(f"PM kill switch activated: {reason} (unwind={unwind})")
         # Fire alert + escalation only on fresh halts to avoid suppression issues.
