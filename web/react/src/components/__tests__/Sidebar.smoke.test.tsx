@@ -27,20 +27,22 @@ jest.mock('../../context/KalshiModeContext', () => ({
 }));
 
 // Expected nav items in the current 8-View Architecture Sidebar implementation
-// (see Sidebar.tsx: DASHBOARD_NAV, OPERATIONS_NAV, ANALYTICS_NAV, SYSTEM_NAV)
+// (see Sidebar.tsx: tradingCore, swarmIntelligence, analytics, operatorSection, system)
 const EXPECTED_ITEMS: Array<{ name: string; href: string }> = [
   { name: 'Dashboard', href: 'dashboard' },
+  { name: 'Markets', href: 'kalshi-dashboard' },
+  { name: 'Portfolio', href: 'kalshi-portfolio' },
   { name: 'Trade', href: 'trade' },
-  { name: 'Monitor', href: 'monitor' },
   { name: 'Grid', href: 'grid' },
   { name: 'Risk', href: 'risk' },
   { name: 'Calibration', href: 'calibration' },
+  { name: 'Monitor', href: 'monitor' },
   { name: 'Logs', href: 'logs' },
   { name: 'Settings', href: 'settings' },
 ];
 
 const EXPECTED_SECTION_LABELS = [
-  'Dashboard', 'Operations', 'Analytics', 'System',
+  'Trading', 'Swarm Intelligence', 'Analytics', 'Operator', 'System',
 ];
 
 describe('Sidebar Smoke Tests', () => {
