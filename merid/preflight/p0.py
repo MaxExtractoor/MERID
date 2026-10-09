@@ -127,11 +127,14 @@ async def run_p0_preflight_checks(
         ledger = get_fills_ledger()
 
         # Ensure the ledger is loaded from its durable store before comparing.
-        if hasattr(ledger, "load_from_db"):
+        # Prefer ensure_loaded(): it shares the single in-flight restore task
+        # with the poller instead of running a second full load_from_db pass.
+        _load = getattr(ledger, "ensure_loaded", None) or getattr(ledger, "load_from_db", None)
+        if _load is not None:
             try:
-                await ledger.load_from_db()
+                await _load()
             except Exception as load_err:
-                logger.warning("[P0-PREFLIGHT] fills_ledger load_from_db failed: %s", load_err)
+                logger.warning("[P0-PREFLIGHT] fills_ledger load failed: %s", load_err)
 
         # REST is authoritative for exchange fills. Reconcile it into the
         # durable ledger before comparing identities so a fill received while

@@ -1900,12 +1900,14 @@ class KalshiFillsLedger:
     async def start(self) -> int:
         """Bootstrap ledger by loading persisted fills from SQLite.
 
+        Delegates to ensure_loaded() so a bootstrap races neither the
+        poller's restore nor an ingest-triggered load — all share one
+        in-flight task.
+
         Returns:
             Number of fills loaded from database.
         """
-        if self._loaded_count == 0:
-            self._loaded_count = await self.load_from_db()
-        return self._loaded_count
+        return await self.ensure_loaded()
 
     async def clear_incomplete_fills(self) -> int:
         """Remove incomplete/false fills from the fills ledger DB.
