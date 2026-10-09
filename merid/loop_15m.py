@@ -1499,6 +1499,7 @@ class Kalshi15mLoop:
             "BLOCKED_POSITION": ("RISK_REJECTED", "RISK"),
             "BLOCKED_RESTING_ORDER": ("RISK_REJECTED", "RISK"),
             "BLOCKED_DUPLICATE": ("RISK_REJECTED", "RISK"),
+            "BLOCKED_ENTRIES_DISABLED": ("LANE_SUPPRESSED", "RISK"),
             "BLOCKED_PARITY": ("ROUTER_REJECTED", "EXECUTION"),
             "REJECTED": ("ROUTER_REJECTED", "EXECUTION"),
             "EXECUTED": ("ORDER_SUBMITTED", "EXECUTION"),
@@ -5680,6 +5681,27 @@ async def _run_loop(self) -> None:
                     # agent_grid_15m returns filtered candidates for telemetry even when
                     # entries are disabled; the loop must not execute them.
                     logger.info("[15m-LOOP] %d candidates generated but new entries are disabled; skipping execution", len(candidates))
+                    # 2026-10-08: selected candidates were vanishing silently at
+                    # this gate — no order row, no candidate lifecycle event.
+                    # Attribute the suppression per-candidate so the funnel is
+                    # complete (MODEL_SELECTED -> SUPPRESSED/entries_disabled).
+                    for _supp_cand in candidates:
+                        try:
+                            _supp_cid = _supp_cand.get("candidate_id")
+                            if not _supp_cid:
+                                continue
+                            if not hasattr(self, "_candidate_context"):
+                                self._candidate_context = {}
+                            self._candidate_context[_supp_cid] = _supp_cand
+                            self._log_candidate_lifecycle_event(
+                                candidate_id=_supp_cid,
+                                from_state="GENERATED",
+                                to_state="BLOCKED_ENTRIES_DISABLED",
+                                reason="entries_disabled:allow_new_entries_false",
+                                context={"asset": _supp_cand.get("asset"), "ticker": _supp_cand.get("ticker")},
+                            )
+                        except Exception:
+                            pass
                 else:
                     # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
                     logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
