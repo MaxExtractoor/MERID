@@ -32,7 +32,6 @@ const tradingCore = [{ label: 'Trading', stage: 'TRADE', color: 'emerald', accen
 
 const swarmIntelligence = [{ label: 'Swarm Intelligence', stage: 'SWARM', color: 'cyan', accent: 'from-cyan-500 to-cyan-600', items: [
   { name: 'Grid', href: 'grid', icon: Grid },
-  { name: 'Operations', href: 'execute', icon: Gauge },
 ]}] as const;
 
 const analytics = [{ label: 'Analytics', stage: 'ANALYTICS', color: 'purple', accent: 'from-purple-500 to-purple-600', items: [
