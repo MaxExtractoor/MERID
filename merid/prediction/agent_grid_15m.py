@@ -169,6 +169,25 @@ def _is_legacy_signal_enabled() -> bool:
     return True
 
 
+def _route_prefers_taker(
+    taker_net_cents: float,
+    maker_net_cents: float,
+    maker_fill_prob: float,
+    taker_pref_margin_cents: float = 0.0,
+) -> bool:
+    """Route-choice comparison when both IOC (taker) and post-only (maker)
+    entry economics qualify.
+
+    A resting order's edge exists only conditional on execution, so the
+    honest maker value is ``maker_fill_prob * maker_net_cents`` — the
+    measured/assumed probability the post-only order fills before rollover
+    or cancel.  Taker wins when the certain executable surplus is at least
+    the fill-adjusted maker edge plus ``taker_pref_margin_cents``.
+    """
+    p_fill = max(0.0, min(1.0, maker_fill_prob))
+    return taker_net_cents >= p_fill * maker_net_cents + taker_pref_margin_cents
+
+
 # Minimum minutes to expiry before an entry is permitted in normal mode.
 # This is a fail-closed gate; the trade-decision layer may apply a stricter limit.
 MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN: float = 5.0
@@ -8664,16 +8683,57 @@ class LeanAgent15m:
             and (decision_taker.indicators or {}).get("marginal_band_rescue")
         )
 
-        if maker_entries_enabled:
-            use_taker = (
-                decision_taker.selected_outcome is not None
-                and (is_late or is_high_edge or _taker_rescued)
-            )
-        else:
+        # 2026-10-08 (route-choice audit): the ask-priced maker pass is
+        # evaluated up-front so routing compares executable (taker) surplus
+        # against resting (maker) economics directly.  Previously the maker
+        # pass ran only after the is_late/is_high_edge shortcut failed, so
+        # "taker-qualified but routed passive" was decided without ever
+        # comparing the two routes' economics.
+        decision_maker = None
+        if maker_entries_enabled and not is_late:
+            decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model, route="maker")
+
+        _taker_sel = decision_taker.selected_outcome is not None
+        _maker_sel = (
+            decision_maker is not None
+            and decision_maker.selected_outcome is not None
+        )
+
+        if not maker_entries_enabled:
             # Maker lane disabled: the taker EV gate is the sole arbiter — if
             # the trade does not clear executable-cost economics at taker fees
             # it does not trade at all.
-            use_taker = decision_taker.selected_outcome is not None
+            use_taker = _taker_sel
+        elif not _taker_sel:
+            use_taker = False
+        elif is_late or is_high_edge or _taker_rescued or not _maker_sel:
+            # Positive taker surplus + no qualified passive alternative:
+            # forcing this candidate to rest forfeits a certain fill for the
+            # maker-fee delta.  Route IOC (bounded by the economic cap).
+            use_taker = True
+        else:
+            # Both routes qualify: prefer maker only when its
+            # fill-probability-adjusted edge beats the certain taker surplus.
+            # Measured resting-entry fill rate is the honest weight
+            # (MERID_MAKER_FILL_PROB_EST, default 0.20 — resting entries
+            # historically fill ~15-25% before rollover/cancel); a maker
+            # order's edge exists only conditional on execution.
+            _p_fill = (
+                _numeric_pref(os.environ.get("MERID_MAKER_FILL_PROB_EST")) or 0.20
+            )
+            _pref_margin_c = (
+                _numeric_pref(os.environ.get("MERID_TAKER_PREF_MARGIN_CENTS")) or 0.0
+            )
+            _t_net_c = float(decision_taker.net_edge or 0.0) * 100.0
+            _m_net_c = float(decision_maker.net_edge or 0.0) * 100.0
+            use_taker = _route_prefers_taker(_t_net_c, _m_net_c, _p_fill, _pref_margin_c)
+            logger.info(
+                "[ROUTE-CHOICE] asset=%s ticker=%s side=%s taker_net=%.2fc "
+                "maker_net=%.2fc p_fill_est=%.2f margin=%.2fc -> %s",
+                asset, ticker, decision_taker.selected_outcome,
+                _t_net_c, _m_net_c, _p_fill, _pref_margin_c,
+                "taker" if use_taker else "maker",
+            )
 
         if use_taker:
             decision = decision_taker
@@ -8684,8 +8744,7 @@ class LeanAgent15m:
             execution_mode = "taker"
             fee_cents = taker_fee_cents
         elif maker_entries_enabled and not is_late:
-            decision_maker = _call_trade_decision(maker_fee_cents, p_yes_model, route="maker")
-            if decision_maker.selected_outcome is not None:
+            if _maker_sel:
                 decision = decision_maker
                 liquidity_role = "maker"
                 aggressiveness = 0.0
