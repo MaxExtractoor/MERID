@@ -16519,6 +16519,88 @@ async def _route_live(
         # rejected order DID register the coid venue-side (created then
         # auto-canceled), so reusing it guarantees a 409.  The intent-level
         # coid stays canonical; only the wire id gets the ``r1`` suffix.
+        # 2026-10-08: maker->taker conversion (one-shot, bounded).  When the
+        # venue rejects a post-only order as crossed — or a passive reprice
+        # attempt is itself cross-rejected — the book has moved against us and
+        # no passive fill is available.  The venue already rejected the maker
+        # order authoritatively (no fill possible), so submitting an IOC is
+        # not a duplicate.  Fresh taker qualification is required: refetch the
+        # book and confirm the current ask is still inside the edge-preserving
+        # cap; the IOC limit is min(fresh_ask, cap) so we never chase beyond
+        # the economic bound.  Buy-side only (entries are always buys here).
+        async def _convert_to_ioc() -> bool:
+            nonlocal placed_res, latency, final_price_cents
+            if getattr(intent, "_postonly_converted_taker", False):
+                return False
+            if (getattr(intent, "action", "") or "").lower() != "buy":
+                return False
+            _cap = _max_edge_preserving_buy_price(intent)
+            if _cap is None:
+                return False
+            try:
+                _cb_ob = await asyncio.wait_for(
+                    port.get_orderbook(intent.ticker), timeout=3.0
+                )
+                _cb_book = _canonical_yes_book_from_port(_cb_ob)
+                if _cb_book is None:
+                    return False
+                _cb_side = _side_aware_book_for_intent(_cb_book, intent.side)
+                _cb_ask = int(_cb_side.get("ask_cents") or 0)
+            except Exception:
+                return False
+            if _cb_ask <= 0 or _cb_ask > _cap:
+                return False
+            intent._postonly_converted_taker = True
+            _conv_px = min(_cb_ask, _cap)
+            _conv_old_px = int(getattr(intent, "price_cents", 0) or 0)
+            intent.price_cents = _conv_px
+            # The wire price is derived from final_price_cents, not
+            # intent.price_cents — track the same delta the reprice path uses.
+            final_price_cents = int(final_price_cents) + (_conv_px - _conv_old_px)
+            try:
+                _conv_req = _build_create_order_request(
+                    intent,
+                    ticker=_wire_ticker,
+                    exchange_index=_resolved_exchange_index,
+                    final_price_cents=final_price_cents,
+                    effective_order_type=effective_order_type,
+                    effective_tif="ioc",
+                    expiration_ts=resolved_tif.expiration_time,
+                    post_only=False,
+                )
+            except (ValueError, OrderIdentityError) as _conv_req_err:
+                # e.g. canonical entry-range cap — a converted IOC above the
+                # entry band must not fire; decline rather than propagate.
+                logger.warning(
+                    "[MAKER->TAKER] request declined intent_id=%s ticker=%s err=%s",
+                    intent.intent_id, intent.ticker, _conv_req_err,
+                )
+                return False
+            # Fresh wire coid — the rejected maker submission consumed the
+            # original client_order_id venue-side (created then auto-canceled).
+            _conv_req.client_order_id = f"{intent.client_order_id}t1"
+            if getattr(_conv_req, "idempotency_key", None):
+                _conv_req.idempotency_key = f"{_conv_req.idempotency_key}t1"
+            try:
+                _conv_req.metadata["maker_to_taker_conversion"] = True
+                _conv_req.metadata["conversion_of_client_order_id"] = getattr(
+                    intent, "client_order_id", None
+                )
+            except Exception:
+                pass
+            _conv_res = await port.create_order(_conv_req)
+            latency = (_time.monotonic() - t0) * 1000
+            logger.info(
+                "[MAKER->TAKER] intent_id=%s ticker=%s fresh_ask=%dc "
+                "edge_cap=%dc ioc_price=%dc success=%s",
+                intent.intent_id, intent.ticker, _cb_ask, _cap,
+                int(intent.price_cents), bool(getattr(_conv_res, "success", False)),
+            )
+            if getattr(_conv_res, "success", False):
+                placed_res = _conv_res
+                return True
+            return False
+
         _po_err_lower = str(getattr(placed_res, "error", "") or "").lower()
         if (
             placed_res is not None
@@ -16589,14 +16671,29 @@ async def _route_live(
                             f"{_rt_ev_new:+.1f}" if _rt_ev_new is not None else "na",
                             bool(getattr(placed_res, "success", False)),
                         )
+                        # 2026-10-08: if the passive reprice was itself
+                        # cross-rejected (book still moving — the XRP case),
+                        # attempt the bounded maker->taker IOC conversion.
+                        if (
+                            placed_res is not None
+                            and not placed_res.success
+                            and "post only cross"
+                            in str(getattr(placed_res, "error", "") or "").lower()
+                        ):
+                            await _convert_to_ioc()
                     else:
-                        logger.warning(
-                            "[POST-ONLY-REPRICE] declined intent_id=%s ticker=%s "
-                            "reason=%s fresh_bid=%dc fresh_ask=%dc",
-                            intent.intent_id, intent.ticker,
-                            _rt_rej or "no_reprice_needed",
-                            _rt_side["bid_cents"], _rt_side["ask_cents"],
-                        )
+                        # No passive price exists — the book has fully
+                        # crossed.  Attempt the bounded maker->taker IOC
+                        # conversion; decline otherwise.
+                        _conv_done = await _convert_to_ioc()
+                        if not _conv_done:
+                            logger.warning(
+                                "[POST-ONLY-REPRICE] declined intent_id=%s ticker=%s "
+                                "reason=%s fresh_bid=%dc fresh_ask=%dc",
+                                intent.intent_id, intent.ticker,
+                                _rt_rej or "no_reprice_needed",
+                                _rt_side["bid_cents"], _rt_side["ask_cents"],
+                            )
                 else:
                     logger.warning(
                         "[POST-ONLY-REPRICE] no fresh book for %s — cross stands",

@@ -71,6 +71,76 @@ class TestRoutePrefersTaker(unittest.TestCase):
         self.assertTrue(self._fn()(0.01, 0.0, 0.20))
 
 
+class TestMakerToTakerConversion(unittest.TestCase):
+    """Source-level regression guards for the bounded maker->taker IOC
+    conversion added 2026-10-08.
+
+    Observed live (KXXRP15M-26OCT081830-30): post-only YES bid @67c rested
+    ~4.3s, venue rejected 'post only cross', passive reprice to @60c was
+    *also* cross-rejected -> terminal reject.  The conversion lets an
+    economically-qualified candidate take the moved ask as IOC instead.
+    """
+
+    def _src(self):
+        import inspect
+        import merid.event_venues.kalshi.order_router as _or
+        return inspect.getsource(_or)
+
+    def test_conversion_helper_exists_and_is_one_shot(self):
+        src = self._src()
+        assert "_convert_to_ioc" in src
+        # Bounded to exactly one conversion per intent.
+        assert "_postonly_converted_taker" in src
+
+    def test_conversion_is_ioc_not_post_only(self):
+        src = self._src()
+        conv_pos = src.find("async def _convert_to_ioc")
+        assert conv_pos > 0
+        seg = src[conv_pos:conv_pos + 6000]
+        assert 'effective_tif="ioc"' in seg
+        assert "post_only=False" in seg
+
+    def test_conversion_qualified_by_edge_preserving_cap(self):
+        """Fresh taker qualification = fresh ask <= _max_edge_preserving_buy_price;
+        the IOC limit is min(ask, cap) — never chase beyond the economic bound."""
+        src = self._src()
+        conv_pos = src.find("async def _convert_to_ioc")
+        seg = src[conv_pos:conv_pos + 6000]
+        assert "_max_edge_preserving_buy_price(intent)" in seg
+        assert "_cb_ask <= 0 or _cb_ask > _cap" in seg
+        assert "min(_cb_ask, _cap)" in seg
+
+    def test_conversion_mints_fresh_wire_coid(self):
+        """The rejected maker submission consumed the coid venue-side — the
+        conversion must mint a fresh wire id ('t1') mirroring the 'r1'
+        reprice convention, else Kalshi 409-duplicates it."""
+        src = self._src()
+        assert 'f"{intent.client_order_id}t1"' in src
+        assert "maker_to_taker_conversion" in src
+        assert "conversion_of_client_order_id" in src
+
+    def test_conversion_runs_after_repriced_cross_reject(self):
+        """Site 2: a passive reprice that is *itself* cross-rejected must
+        reach the conversion path (the XRP live case)."""
+        src = self._src()
+        retry_pos = src.find('"reprice_of_client_order_id"')
+        assert retry_pos > 0
+        after = src[retry_pos:retry_pos + 9000]
+        # Within the reprice-retry region, a second 'post only cross' result
+        # must invoke _convert_to_ioc.
+        assert '"post only cross"' in after and "_convert_to_ioc()" in after
+
+    def test_conversion_is_buy_only_and_not_exit(self):
+        src = self._src()
+        conv_pos = src.find("async def _convert_to_ioc")
+        seg = src[conv_pos:conv_pos + 3000]
+        assert '"buy"' in seg  # action guard — entries are always buys here
+        # Outer post-only-cross block is already gated on not _is_exit_order.
+        outer = src.find('"post only cross" in _po_err_lower')
+        guard = src.rfind("not _is_exit_order(intent)", 0, outer + 500)
+        assert guard > 0
+
+
 class TestRouteSelectionIntegration(unittest.TestCase):
     """Pin the routing contract around the selection block:
 
