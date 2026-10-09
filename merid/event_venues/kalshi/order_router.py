@@ -5055,7 +5055,19 @@ async def _revalidate_entry_economics(
             from merid.risk.probability.tail_calibrator import load_tail_calibrator
 
             _asset = str(_pinputs.get("asset") or (intent.ticker or "").split("-")[0])
-            _side_l = (intent.side or _pinputs.get("side") or "").strip().lower()
+            _side_raw = (intent.side or _pinputs.get("side") or "").strip()
+            # Normalize Kalshi wire format ("BUY_NO"/"SELL_YES"/...) to the
+            # outcome side ("yes"/"no") — the model-side branches below test
+            # against outcome sides, so a raw "buy_no" would silently fall
+            # into the YES branch and invert the revalidated probability.
+            try:
+                _side_l = (
+                    _side_raw.lower()
+                    if _side_raw.lower() in ("yes", "no")
+                    else extract_outcome_side(_side_raw)
+                )
+            except (ValueError, AttributeError):
+                _side_l = _side_raw.lower()
             _vol = _pinputs.get("annualized_vol")
             _tte0 = float(_pinputs["seconds_to_expiry_decision"])
             _dec_age_s = max(0.0, _time.time() - float(getattr(intent, "snapshot_ts", _time.time())))
