@@ -2632,14 +2632,18 @@ def _load_live_evidence() -> Optional[Dict[str, Any]]:
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return None
+        # 2026-10-09: an absent artifact is an explicit insufficient-evidence
+        # state, never a silent pass — the caller maps this sentinel to a
+        # synthetic bounded-lane-only decision per side.
+        return {"artifact_missing": True, "generated_at": 0.0}
     if _live_evidence_cache["mtime"] == mtime and _live_evidence_cache["data"] is not None:
         return _live_evidence_cache["data"]
     try:
         with open(path, "r") as f:
             data = json.load(f)
     except Exception:
-        return None
+        # Unreadable/corrupt artifact = same fail-closed missing state.
+        return {"artifact_missing": True, "generated_at": 0.0}
     _live_evidence_cache["mtime"] = mtime
     _live_evidence_cache["data"] = data
     return data
@@ -3005,6 +3009,19 @@ def _assemble_side_verdict(
         "negative_floor_lane": bool(cbp_neg_floor),
         "hard_safety_flag": ev_hard,
     }
+
+
+# ── Experiment B: cohort-scoped 75c cap exception (2026-10-09 audit) ──────
+# BTC NO 80-89c candidates may pass the global entry-price cap ONLY when each
+# candidate individually clears its cell's conservative-EV bound at the fresh
+# executable price.  This is exploration authorization, not production
+# promotion: downstream the candidate still rides the current-build
+# provisional lane (1 contract, post-only, lane caps + suspension state), and
+# every other veto (depth, tail, regime, conviction, throttle, strip,
+# bookflow, coinflip, evidence) is untouched.  Off unless explicitly enabled.
+MERID_PRICE_CAP_EXCEPT_BTC_NO = os.environ.get(
+    "MERID_PRICE_CAP_EXCEPT_BTC_NO", "0"
+).strip().lower() in ("1", "true", "yes")
 
 
 def compute_trade_decision(
@@ -3824,9 +3841,21 @@ def compute_trade_decision(
         _live_ev = _load_live_evidence()
         if _live_ev is not None:
             indicators["live_evidence_evaluated"] = True
-            if evidence_policy.enabled() and isinstance(
-                (_live_ev or {}).get("cells"), dict
-            ) and (_live_ev or {}).get("cells"):
+            _artifact_missing = bool((_live_ev or {}).get("artifact_missing"))
+            _cells_usable = (
+                not _artifact_missing
+                and isinstance(_live_ev.get("cells"), dict)
+                and bool(_live_ev.get("cells"))
+            )
+            # 2026-10-09: a missing/empty artifact is an explicit
+            # insufficient-evidence state — both sides get a synthetic
+            # bounded-lane-only decision instead of a silent pass.
+            if evidence_policy.enabled() and not _cells_usable:
+                indicators["evidence_artifact_state"] = (
+                    "missing" if _artifact_missing else "empty"
+                )
+            if evidence_policy.enabled() and (_cells_usable or _artifact_missing
+                                            or isinstance(_live_ev.get("cells"), dict)):
                 indicators["evidence_policy_version"] = (
                     evidence_policy.EVIDENCE_POLICY_VERSION
                 )
@@ -3834,16 +3863,30 @@ def compute_trade_decision(
                     ("yes", yes_price_cents, float(yes_breakdown.net_edge) * 100.0),
                     ("no", no_price_cents, float(no_breakdown.net_edge) * 100.0),
                 ):
-                    _ed = evidence_policy.evaluate(
-                        _live_ev,
-                        asset,
-                        _side,
-                        _px,
-                        seconds_to_expiry,
-                        fee,
-                        MERID_LIVE_EVIDENCE_MARGIN,
-                        _ne_c,
-                    )
+                    if _cells_usable:
+                        _ed = evidence_policy.evaluate(
+                            _live_ev,
+                            asset,
+                            _side,
+                            _px,
+                            seconds_to_expiry,
+                            fee,
+                            MERID_LIVE_EVIDENCE_MARGIN,
+                            _ne_c,
+                        )
+                    else:
+                        _ed = evidence_policy.evaluate_missing_artifact(
+                            asset,
+                            _side,
+                            _px,
+                            seconds_to_expiry,
+                            fee,
+                            MERID_LIVE_EVIDENCE_MARGIN,
+                            _ne_c,
+                            artifact_state=(
+                                "missing" if _artifact_missing else "empty"
+                            ),
+                        )
                     indicators[f"evidence_{_side}"] = _ed.detail()
                     if _ed.escape_required:
                         indicators[f"evidence_escape_{_side}"] = True
@@ -4081,6 +4124,8 @@ def compute_trade_decision(
                                 "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
                                 "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
                                 "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
+                                "EVIDENCE_ARTIFACT_MISSING": "evidence_artifact_missing",
+                                "EVIDENCE_ARTIFACT_EMPTY": "evidence_artifact_empty",
                             }.get(_ed.code, f"evidence_{_ed.code.lower()}")
                             if _side == "yes" and yes_evidence_ok:
                                 yes_evidence_ok = False
@@ -4176,7 +4221,7 @@ def compute_trade_decision(
                             elif _side == "no" and not no_evidence_ok:
                                 no_evidence_ok = True
                                 no_evidence_reason = None
-            else:
+            elif not _artifact_missing:
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee
                 )
@@ -4385,6 +4430,24 @@ def compute_trade_decision(
     # normal path — the trend_yes_hi lane (91-94c) is separately gated.
     _yes_price_cap_block = _dr.entry_price_cap_block_reason(yes_price_cents)
     _no_price_cap_block = _dr.entry_price_cap_block_reason(no_price_cents)
+    # Experiment B cohort exception: BTC NO above the 75c cap is permitted
+    # only when the individual candidate's conservative (reserve-stacked)
+    # net EV at the fresh executable ask clears the cell bound (+2.0c) and
+    # the side lane is otherwise open.  Exploration authorization only.
+    if (
+        _no_price_cap_block is not None
+        and MERID_PRICE_CAP_EXCEPT_BTC_NO
+        and str(asset).upper() == "BTC"
+        and no_price_cents is not None
+        and 75.0 < float(no_price_cents) <= 89.99
+        and no_breakdown is not None
+        and float(no_breakdown.net_edge) * 100.0 >= 2.0
+        and _no_throttle_block is None
+    ):
+        indicators["no_price_cap_exception"] = (
+            "btc_no_80_89_cons_ev>=%.1f" % (float(no_breakdown.net_edge) * 100.0)
+        )
+        _no_price_cap_block = None
     # 91-94c YES window: the lane's strict-gate failure (armed) or the
     # reserved-window price with the lane off both own the terminal reason.
     _yes_lane_terminal = (

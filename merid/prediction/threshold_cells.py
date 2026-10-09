@@ -792,6 +792,34 @@ CELL_STATES = (
     CELL_STATE_PROMOTED,
 )
 
+# Suspension classes (2026-10-09 audit) — recovery criteria differ by cause.
+# Mirrors current_build_provisional: realized-PnL stops are "economic",
+# route/order-path degradation is "execution", contract/invariant breaches
+# are "integrity".  Unknown reasons default to economic (strictest gate).
+SUSPENSION_CLASS_ECONOMIC = "economic"
+SUSPENSION_CLASS_EXECUTION = "execution"
+SUSPENSION_CLASS_INTEGRITY = "integrity"
+
+
+def _classify_suspension_reason(reason: Optional[str]) -> str:
+    r = str(reason or "")
+    if "mean_net_pnl" in r or "first_trade_pnl" in r:
+        return SUSPENSION_CLASS_ECONOMIC
+    if (
+        "invariant_violation" in r
+        or "exec_failures" in r
+    ):
+        return SUSPENSION_CLASS_INTEGRITY
+    if (
+        "router_reject" in r
+        or "markout" in r
+        or "post_only" in r
+        or "fill_ev_nonpositive" in r
+        or "ev_drop" in r
+    ):
+        return SUSPENSION_CLASS_EXECUTION
+    return SUSPENSION_CLASS_ECONOMIC
+
 FUNNEL_STAGES = (
     "matched",
     "blocked_by_price_band",
@@ -953,6 +981,21 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
         for k in ("cell_states", "outcomes", "decision_cell_map", "open_orders", "open_orders_ts"):
             if isinstance(rec.get(k), dict):
                 state[k] = rec[k]
+        # 2026-10-09 backfill: pre-class suspension records get classified
+        # from their reason so recovery gating covers the live set; a
+        # SUSPENDED record must not carry a stale on_probation flag
+        # (probation is a state, not a label on a suspended cell).
+        for _c_rec in (state.get("cell_states") or {}).values():
+            if (
+                isinstance(_c_rec, dict)
+                and _c_rec.get("state") == CELL_STATE_SUSPENDED
+            ):
+                if not _c_rec.get("suspension_class"):
+                    _c_rec["suspension_class"] = _classify_suspension_reason(
+                        _c_rec.get("reason")
+                    )
+                if _c_rec.get("on_probation"):
+                    _c_rec["on_probation"] = False
         # Daily-scoped keys only count when the file is from today.
         if rec.get("date") == state["date"]:
             for k in (
@@ -1033,13 +1076,28 @@ def set_cell_state(cell_id: str, state: str, reason: Optional[str] = None) -> No
     )
 
 
-def _suspend_cell(cell_id: str, reason: str) -> None:
-    if get_cell_state(cell_id) != CELL_STATE_SUSPENDED:
-        logger.warning(
-            "[THRESHOLD-CELL-SUSPEND] cell=%s reason=%s — lane fails closed",
-            cell_id, reason,
-        )
-        set_cell_state(cell_id, CELL_STATE_SUSPENDED, reason)
+def _suspend_cell(
+    cell_id: str,
+    reason: str,
+    suspension_class: Optional[str] = None,
+) -> None:
+    if get_cell_state(cell_id) == CELL_STATE_SUSPENDED:
+        return
+    _pre = (_load_state().get("cell_states") or {}).get(cell_id) or {}
+    if _pre.get("on_probation") and not str(reason).startswith("probation_"):
+        reason = f"probation_strike:{reason}"
+    cls = suspension_class or _classify_suspension_reason(reason)
+    logger.warning(
+        "[THRESHOLD-CELL-SUSPEND] cell=%s reason=%s class=%s — lane fails closed",
+        cell_id, reason, cls,
+    )
+    set_cell_state(cell_id, CELL_STATE_SUSPENDED, reason)
+    rec = (_load_state().get("cell_states") or {}).get(cell_id) or {}
+    rec["suspension_class"] = cls
+    if _pre.get("on_probation"):
+        rec["probation_triggered"] = True
+    rec["on_probation"] = False
+    _save_state()
 
 
 # 2026-10-05: SUSPENDED -> PROBATION controlled reset.  A historic suspension
@@ -1052,6 +1110,13 @@ def _suspend_cell(cell_id: str, reason: str) -> None:
 def probation_min_suspend_s() -> float:
     """Minimum age a SUSPENDED record must reach before probation release."""
     return _env_float("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", 3600.0)
+
+
+def probation_min_suspend_econ_s() -> float:
+    """Longer minimum age for realized-PnL (economic-class) suspensions."""
+    return _env_float(
+        "MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S", 6.0 * 3600.0
+    )
 
 
 def probation_reset_cooldown_s() -> float:
@@ -1088,10 +1153,23 @@ def probation_reset_cell(
     state = str(rec.get("state") or CELL_STATE_PROVISIONAL)
     if state != CELL_STATE_SUSPENDED:
         return False, f"not_suspended:{state}"
+    # 2026-10-09: class-gated release.  Integrity-class suspensions never
+    # auto-release — they require an operator reset after the underlying
+    # contract defect is verified repaired.  Execution suspensions use the
+    # base floor; economic suspensions wait the longer evidence horizon.
+    cls = str(
+        rec.get("suspension_class")
+        or _classify_suspension_reason(rec.get("reason"))
+    )
+    rec["suspension_class"] = cls
+    if cls == SUSPENSION_CLASS_INTEGRITY:
+        return False, "integrity_suspension_requires_operator_reset"
     since = float(rec.get("since_ts") or 0.0)
     age_s = time.time() - since if since > 0 else float("inf")
     if rec.get("probation_triggered"):
         required = probation_reset_cooldown_s()
+    elif cls == SUSPENSION_CLASS_ECONOMIC:
+        required = probation_min_suspend_econ_s()
     else:
         required = probation_min_suspend_s()
     if age_s < required:
@@ -1283,14 +1361,10 @@ def record_cell_router_reject(cell_id: str) -> None:
     _save_state()
     bump_cell_funnel("router_rejected", cell_id)
     if _on_probation:
-        st = _load_state()
-        rec = (st.get("cell_states") or {}).get(cell_id) or {}
-        rec["probation_triggered"] = True
-        rec["on_probation"] = False
-        _save_state()
         _suspend_cell(
             cell_id,
             "probation_router_reject: one strike during probation",
+            suspension_class=SUSPENSION_CLASS_EXECUTION,
         )
         return
     _evaluate_suspension(cell_id)
@@ -1512,6 +1586,46 @@ def record_cell_markout(
     _save_state()
     if horizon_s == 5:
         _evaluate_suspension(cell_id)
+    _maybe_complete_probation(cell_id)
+
+
+def _probation_pass_observations() -> int:
+    """Clean post-release observations needed for PROBATION -> OBSERVATION."""
+    return _env_int("MERID_THRESHOLD_CELL_PROBATION_PASS_OBS", 2)
+
+
+def _maybe_complete_probation(cell_id: str) -> None:
+    """PROBATION -> OBSERVATION on enough clean post-release observations.
+
+    Clean = settled outcome with net PnL >= 0, or a non-negative markout,
+    recorded after the probation transition (``since_ts``).  Strikes
+    re-suspend via ``_evaluate_suspension`` / ``_suspend_cell`` before
+    completion can accrue.
+    """
+    st = _load_state()
+    rec = (st.get("cell_states") or {}).get(cell_id) or {}
+    if not rec.get("on_probation") or rec.get("state") != CELL_STATE_PROBATION:
+        return
+    since = float(rec.get("since_ts") or 0.0)
+    clean = 0
+    for o in (st.get("outcomes") or {}).get(cell_id) or []:
+        if float(o.get("ts") or 0.0) < since:
+            continue
+        if o.get("kind") == "settled" and float(o.get("net_pnl_cents") or 0.0) >= 0.0:
+            clean += 1
+        elif o.get("kind") == "markout":
+            for k in ("markout_30s_cents", "markout_5s_cents", "markout_1s_cents"):
+                v = o.get(k)
+                if v is not None and float(v) >= 0.0:
+                    clean += 1
+                    break
+    if clean >= _probation_pass_observations():
+        rec["on_probation"] = False
+        set_cell_state(
+            cell_id,
+            CELL_STATE_OBSERVATION,
+            f"probation_passed clean_observations={clean}",
+        )
 
 
 def record_cell_settlement(
@@ -1543,6 +1657,7 @@ def record_cell_settlement(
         del outs[:-25]
     _save_state()
     _evaluate_suspension(cell_id)
+    _maybe_complete_probation(cell_id)
 
 
 def _evaluate_suspension(cell_id: str) -> None:
@@ -1709,7 +1824,15 @@ def cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
         return False, "threshold_cells_disabled"
     state = get_cell_state(cell_id)
     if state == CELL_STATE_SUSPENDED:
-        return False, "cell_suspended"
+        # Lazy recovery evaluation: probation_reset_cell enforces the
+        # class-specific minimum age / cooldown itself.  Integrity-class
+        # suspensions return without releasing (operator reset only).
+        moved, _ = probation_reset_cell(
+            cell_id, reason="auto_probation_eval"
+        )
+        if not moved:
+            return False, "cell_suspended"
+        state = get_cell_state(cell_id)
     if state not in CELL_STATES:
         return False, f"cell_state_unknown:{state}"
     # PROBATION: controlled re-verification — one bounded submission/day

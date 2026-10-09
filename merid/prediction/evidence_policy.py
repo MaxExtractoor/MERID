@@ -109,6 +109,27 @@ def hard_ev_floor_c() -> float:
     return _env_float("MERID_EVIDENCE_HARD_EV_C", 5.0)
 
 
+def hard_sparse_min_neff() -> float:
+    """Mid-tier hard block: minimum effective n for a matched cell to
+    hard-block on the *severe* toxicity floor.
+
+    2026-10-09 repair: n_eff is a market-normalized decayed count bounded by
+    the number of distinct settled markets per cell; under current occupancy
+    ``hard_min_neff`` (50) is unreachable even pooled to asset|side, which
+    made the toxic-cell protection inert.  Rather than lowering the 50 bar,
+    sparse cohorts may still hard-block — but only at a much deeper
+    demonstrated-loss floor (``hard_sparse_ev_floor_c``).  Shallow adverse
+    cells keep failing via the margin path (CELL_EVIDENCE_INSUFFICIENT /
+    soft-penalty / challenge), unchanged.
+    """
+    return _env_float("MERID_EVIDENCE_HARD_SPARSE_MIN_NEFF", 8.0)
+
+
+def hard_sparse_ev_floor_c() -> float:
+    """Severe LCB net-EV floor required to hard-block a sparse matched cell."""
+    return _env_float("MERID_EVIDENCE_HARD_SPARSE_EV_C", 10.0)
+
+
 def evidence_stale_s() -> float:
     """Artifact older than this cannot hard-block; uplift is maxed."""
     return _env_float("MERID_EVIDENCE_STALE_S", 3600.0)
@@ -477,6 +498,44 @@ def _posterior(
     return alpha, bet, mean, lcb
 
 
+def evaluate_missing_artifact(
+    asset: str,
+    side: str,
+    entry_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+    fee_frac: float,
+    margin_frac: float,
+    net_edge_cents: Optional[float],
+    *,
+    artifact_state: str = "missing",
+    now: Optional[float] = None,
+) -> EvidenceDecision:
+    """Fail-closed verdict when the artifact file is absent/unreadable or
+    carries no cell data.
+
+    Runs the same empty-evidence economics test (model net edge must clear
+    the max sparse-uncertainty uplift, escape-lane only) but re-codes the
+    outcome so telemetry proves provenance: a missing artifact can admit a
+    *bounded* trial, never an evidence-backed production entry.
+    ``artifact_state``: ``missing`` (no readable file) or ``empty``
+    (file present, no usable cells).
+    """
+    d = evaluate(
+        {}, asset, side, entry_price_cents, tte_seconds,
+        fee_frac, margin_frac, net_edge_cents, now=now,
+    )
+    tag = (
+        "EVIDENCE_ARTIFACT_MISSING" if artifact_state == "missing"
+        else "EVIDENCE_ARTIFACT_EMPTY"
+    )
+    d.code = f"{tag}_PASS" if d.allowed else tag
+    d.fallback_reason = (
+        f"artifact {artifact_state}; treated as empty evidence — "
+        "bounded-lane admission only, never production"
+    )
+    return d
+
+
 def _pick_cells(evidence: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Select the cell aggregate sub-dict for the configured half-life."""
     cells = evidence.get("cells")
@@ -573,12 +632,15 @@ def evaluate(
             fallback="no executable price; evidence gate skipped",
         )
 
-    # -- Hard block: exact or price-matched cell, dense, toxic, uncontradicted -
+    # -- Hard block: matched cell, toxic, uncontradicted.  Two tiers -------
+    # (2026-10-09): dense tier n_eff>=50 needs only the -5c demonstrated-loss
+    # floor; a sparse matched cell (n_eff>=8) can still hard-block, but only
+    # when toxicity is severe (LCB net EV < -10c at its own cost basis).
     if not stale:
         for hb_name in _HARD_BLOCK_LEVELS:
             hb_dims = dict(_HIERARCHY)[hb_name]
             hb_agg = aggregate_at_level(cells, asset, side_l, pb, tb, hb_dims)
-            if hb_agg.n_eff < hard_min_neff():
+            if hb_agg.n_eff < hard_sparse_min_neff():
                 continue
             # Parent prior = nearest broader level, leave-one-out.
             idx = [n for n, _ in _HIERARCHY].index(hb_name)
@@ -598,14 +660,27 @@ def evaluate(
                 recent_wr is None
                 or recent_wr < hb_agg.avg_entry_cents / 100.0 + float(fee_frac)
             )
-            if hb_ev < -abs(hard_ev_floor_c()) and recent_agrees:
+            dense_toxic = (
+                hb_agg.n_eff >= hard_min_neff()
+                and hb_ev < -abs(hard_ev_floor_c())
+            )
+            sparse_severe = (
+                hb_agg.n_eff < hard_min_neff()
+                and hb_ev < -abs(hard_sparse_ev_floor_c())
+            )
+            if (dense_toxic or sparse_severe) and recent_agrees:
+                tier = "dense" if dense_toxic else "sparse_severe"
                 return _base(
                     allowed=False, code="MATCHING_TOXIC_CELL",
                     level=hb_name, n_eff=hb_agg.n_eff, w=hb_agg.w, l=hb_agg.l,
                     n_raw=hb_agg.n_raw, p_mean=hm, p_lcb=hlcb,
                     p_std=_beta_std(ha, hb_), lcb_ev=hb_ev, hard=True,
                     hb_level=hb_name, hb_ev=hb_ev,
-                    fallback="matched dense toxic cell with no contrary recent evidence",
+                    fallback=(
+                        f"matched {tier} toxic cell "
+                        f"(n_eff={hb_agg.n_eff:.1f}, lcb_ev={hb_ev:+.1f}c) "
+                        "with no contrary recent evidence"
+                    ),
                 )
 
     if not cells:
@@ -693,7 +768,9 @@ def evaluate(
     req_margin = margin_frac * 100.0 + uplift
     lcb_ev = (lcb - float(entry_price_cents) / 100.0 - float(fee_frac)) * 100.0
 
-    escape = exact_cell.n_eff < sparse_full_neff()
+    # 2026-10-09: a stale artifact can never authorize production.  Any pass
+    # on stale evidence is escape-lane only (bounded, separately capped).
+    escape = exact_cell.n_eff < sparse_full_neff() or stale
     ok = lcb_ev >= req_margin
 
     def _escape_gate(ok_pass: bool, code_off: str, code_cap: str,
