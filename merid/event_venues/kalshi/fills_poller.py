@@ -106,7 +106,23 @@ class FillsPoller:
         self._reconcile_task: Optional[asyncio.Task] = None
         self._backfill_task: Optional[asyncio.Task] = None
         self._cache_cleanup_task: Optional[asyncio.Task] = None
-        
+        self._restore_task: Optional[asyncio.Task] = None
+
+        # Readiness lifecycle: "tasks started" is NOT "safe to trade".
+        # STARTING -> RESTORING -> RECONCILING -> READY; any stage can drop to
+        # DEGRADED with an explicit reason.
+        self._readiness: str = "STARTING"
+        self._degraded_reason: Optional[str] = None
+        self._restore_done: bool = False
+        self._first_reconcile_done: bool = False
+        self._recovery_attempts: int = 0
+
+        # Poll stage instrumentation (seconds): where poll latency actually goes
+        self._last_poll_stages: Dict[str, float] = {}
+        self._last_poll_fill_count: int = 0
+        # Event-loop scheduling lag (seconds) at last wake
+        self._last_loop_lag_s: float = 0.0
+
         # State
         self._running = False
         self._shutdown: asyncio.Event = None  # type: ignore  # Created in start() to bind to running event loop
@@ -166,24 +182,33 @@ class FillsPoller:
         # failed", which then left provisional router fills unpromoted and
         # blocked all entries via unresolved_fill_accounting).  The poll
         # loops self-load via ensure_loaded() on first ingest anyway.
+        # ensure_loaded() shares ONE in-flight restore across the poller and
+        # every ingestion path — no concurrent double-restore.
+        self._readiness = "RESTORING"
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
-            _restore = asyncio.create_task(
-                ledger.load_from_db(), name="fills-ledger-restore"
+            self._restore_task = asyncio.create_task(
+                ledger.ensure_loaded(), name="fills-ledger-restore"
             )
 
             def _restore_done(t: asyncio.Task) -> None:
                 if t.cancelled():
+                    self._degraded_reason = "restore_cancelled"
                     return
                 exc = t.exception()
                 if exc is not None:
+                    self._degraded_reason = f"restore_failed:{type(exc).__name__}"
                     logger.warning("DB restore failed: %s", exc)
-                elif t.result() > 0:
-                    logger.info("FillsPoller: Restored %d fills from DB", t.result())
+                else:
+                    self._restore_done = True
+                    self._transition_readiness()
+                    if t.result() > 0:
+                        logger.info("FillsPoller: Restored %d fills from DB", t.result())
 
-            _restore.add_done_callback(_restore_done)
+            self._restore_task.add_done_callback(_restore_done)
         except Exception as e:
+            self._degraded_reason = f"restore_spawn_failed:{type(e).__name__}"
             logger.warning(f"DB restore failed: {e}")
         
         def _task_done_cb(task: asyncio.Task) -> None:
@@ -192,7 +217,12 @@ class FillsPoller:
                 return
             exc = task.exception()
             if exc is not None:
-                logger.error("FillsPoller task %s crashed: %s", task.get_name(), exc, exc_info=exc)
+                self._degraded_reason = f"task_crashed:{task.get_name()}:{type(exc).__name__}"
+                self._transition_readiness()
+                logger.error(
+                    "FillsPoller task %s crashed: %s — readiness=DEGRADED reason=%s",
+                    task.get_name(), exc, self._degraded_reason, exc_info=exc,
+                )
 
         # Start tasks
         self._poll_task = asyncio.create_task(
@@ -222,27 +252,115 @@ class FillsPoller:
         """Stop background polling."""
         if not self._running:
             return
-            
+
         self._running = False
         if self._shutdown is not None:
             self._shutdown.set()
-        
-        # Cancel tasks
-        for task in [self._poll_task, self._reconcile_task, self._backfill_task]:
+
+        # Cancel tasks — including the background DB restore so shutdown never
+        # leaves an orphan restore writing into the ledger after teardown.
+        for task in [
+            self._poll_task,
+            self._reconcile_task,
+            self._backfill_task,
+            self._cache_cleanup_task,
+            self._restore_task,
+        ]:
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-        
+
         logger.info("FillsPoller stopped")
+
+    # ── Readiness ────────────────────────────────────────────────────────────
+
+    def _transition_readiness(self) -> None:
+        """Recompute the lifecycle state from component progress.
+
+        READY requires the DB restore finished AND at least one reconcile
+        cycle completed — "tasks started" alone never means safe to trade.
+        A task crash demotes to DEGRADED with an attributable reason.
+        """
+        if self._degraded_reason:
+            self._readiness = "DEGRADED"
+            return
+        if not self._restore_done:
+            self._readiness = "RESTORING"
+        elif not self._first_reconcile_done:
+            self._readiness = "RECONCILING"
+        else:
+            self._readiness = "READY"
+
+    def readiness(self) -> Dict[str, Any]:
+        """Machine-readable readiness + recovery telemetry for gates/health."""
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        unresolved = 0
+        oldest_age_s: Optional[float] = None
+        pending_qty = 0
+        try:
+            ledger = get_fills_ledger()
+            rows = ledger.unresolved_router_fills()
+            unresolved = len(rows)
+            now = datetime.now(timezone.utc)
+            for r in rows:
+                pending_qty += int(getattr(r, "quantity_cc", 0) or 0)
+                try:
+                    age = (now - r.created_time).total_seconds()
+                    oldest_age_s = age if oldest_age_s is None else max(oldest_age_s, age)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return {
+            "state": self._readiness,
+            "degraded_reason": self._degraded_reason,
+            "restore_done": self._restore_done,
+            "first_reconcile_done": self._first_reconcile_done,
+            "recovery_attempts": self._recovery_attempts,
+            "polls_completed": self._polls_completed,
+            "polls_failed": self._polls_failed,
+            "last_poll_time": self._last_poll_time.isoformat() if self._last_poll_time else None,
+            "last_poll_fill_count": self._last_poll_fill_count,
+            "last_poll_stages": dict(self._last_poll_stages),
+            "last_loop_lag_s": self._last_loop_lag_s,
+            "last_reconcile_time": self._last_reconcile_time.isoformat() if self._last_reconcile_time else None,
+            "fills_ingested": self._fills_ingested,
+            "unresolved_router_fills": unresolved,
+            "unresolved_pending_qty_cc": pending_qty,
+            "unresolved_oldest_age_s": round(oldest_age_s, 1) if oldest_age_s is not None else None,
+            "task_states": {
+                name: ("running" if t is not None and not t.done() else
+                       ("crashed" if t is not None and t.done() and not t.cancelled() and t.exception() else "stopped"))
+                for name, t in (
+                    ("poll", self._poll_task),
+                    ("reconcile", self._reconcile_task),
+                    ("backfill", self._backfill_task),
+                    ("restore", self._restore_task),
+                )
+            },
+        }
     
     # ── Polling loops ─────────────────────────────────────────────────────────
     
     async def _poll_loop(self) -> None:
         """Main polling loop — fills since last poll."""
+        # Event-loop lag: how late each scheduled wake actually fired.  A
+        # starved loop (CPU-bound startup, blocking calls) shows up here long
+        # before it shows up as a fetch timeout — this distinguishes "Kalshi
+        # was slow" from "the task never got scheduled".
+        _expected_wake = time.monotonic()
         while not self._shutdown.is_set():
+            _now = time.monotonic()
+            _lag = _now - _expected_wake
+            self._last_loop_lag_s = round(max(0.0, _lag), 3)
+            if _lag > 5.0:
+                logger.warning(
+                    "Fills poll loop wake lag %.2fs (>5s) — event-loop starvation suspected",
+                    _lag,
+                )
             try:
                 await self._do_poll()
                 self._polls_completed += 1
@@ -252,7 +370,8 @@ class FillsPoller:
                 self._polls_failed += 1
                 self._last_error = str(e)
                 logger.warning(f"Fills poll failed: {e}", exc_info=True)
-            
+
+            _expected_wake = time.monotonic() + self._poll_interval
             try:
                 await asyncio.wait_for(
                     self._shutdown.wait(),
@@ -289,21 +408,27 @@ class FillsPoller:
         since_ts = int((datetime.now(timezone.utc) - timedelta(seconds=self._poll_interval * 2)).timestamp() * 1000)
         
         # Fetch fills through the normalized execution port
+        _stages: Dict[str, float] = {}
+        _t0 = time.monotonic()
         try:
             await client.connect()
+            _stages["connect_s"] = round(time.monotonic() - _t0, 3)
             # BUG-FIX (2026-05-12): Add timeout to get_fills call to prevent indefinite blocking
             # Wrap in asyncio.wait_for to prevent 30s timeout from blocking the event loop
             # 2026-08-24: Allow a longer, configurable timeout for the Kalshi
             # fills endpoint. Slow responses are common during high-load windows;
             # a shorter 10s timeout produced frequent false-positive warnings.
             _fills_poll_timeout = float(_os.getenv("MERID_FILLS_POLL_TIMEOUT_SECONDS", "20.0"))
+            _tf = time.monotonic()
             response = await asyncio.wait_for(
                 client.get_fills(limit=200, since_ts=since_ts),
                 timeout=_fills_poll_timeout
             )
-            
+            _stages["fetch_s"] = round(time.monotonic() - _tf, 3)
+
             # Convert normalized fills through the fail-closed adapter.
             # Any malformed DTO is skipped rather than fed to the legacy parser.
+            _tc = time.monotonic()
             fills: List[Dict[str, Any]] = []
             for fill in response.fills:
                 try:
@@ -315,20 +440,26 @@ class FillsPoller:
                         exc,
                         extra={"field": exc.field, "value": str(exc.value)},
                     )
+            _stages["convert_s"] = round(time.monotonic() - _tc, 3)
+            self._last_poll_stages = _stages
+            self._last_poll_fill_count = len(fills)
 
             if not fills:
                 return 0
-            
+
             # Ingest into ledger
+            _ti = time.monotonic()
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
-            
+
             # Build agent map from client_order_id patterns
             agent_map = self._build_agent_map()
-            
+
             new_count, new_ids = await ledger.ingest_http_fills(fills, agent_map)
+            _stages["ingest_s"] = round(time.monotonic() - _ti, 3)
+            self._last_poll_stages = _stages
             self._fills_ingested += new_count
-            
+
             if new_count > 0:
                 logger.info(f"Poll ingested {new_count} new fills (from {len(fills)} fetched)")
                 try:
@@ -339,15 +470,20 @@ class FillsPoller:
                             await publish_order_filled_for_ledger_fill(row)
                 except Exception as _bus_exc:
                     logger.debug("fill_bus after HTTP poll skipped: %s", _bus_exc)
-            
+
             return new_count
-            
+
         except asyncio.TimeoutError:
             self._fills_ingestion_errors += 1
-            logger.warning("Fills poll timed out after %ss - Kalshi API slow to respond", _fills_poll_timeout)
+            self._last_poll_stages = _stages
+            logger.warning(
+                "Fills poll timed out after %ss - stages=%s",
+                _fills_poll_timeout, _stages,
+            )
             return 0
         except Exception as e:
             self._fills_ingestion_errors += 1
+            self._last_poll_stages = _stages
             logger.warning(f"Fills poll error: {e}")
             raise
     
@@ -362,6 +498,10 @@ class FillsPoller:
                 logger.info("[RECONCILE-LOOP] Starting reconciliation cycle")
                 await self._do_reconcile()
                 self._last_reconcile_time = datetime.now(timezone.utc)
+                if not self._first_reconcile_done:
+                    self._first_reconcile_done = True
+                    self._transition_readiness()
+                    logger.info("[RECONCILE-LOOP] first reconcile complete — readiness=%s", self._readiness)
             except Exception as e:
                 self._reconcile_errors += 1
                 logger.warning(f"Reconciliation failed: {e}", exc_info=True)

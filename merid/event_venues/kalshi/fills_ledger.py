@@ -1507,6 +1507,10 @@ class KalshiFillsLedger:
 
         # Load persisted fills on startup
         self._loaded_count = 0
+        # In-flight DB restore task shared by ensure_loaded() and the poller's
+        # background restore so concurrent callers await ONE load instead of
+        # racing two interleaved load_from_db() passes over self._fills.
+        self._load_task: Optional["asyncio.Task"] = None
 
         # DEFENSIVE-FIX-001: Circuit breaker and error tracking
         self._schema_error_count: int = 0
@@ -2496,6 +2500,21 @@ class KalshiFillsLedger:
                 self._duplicates_dropped += 1
                 return False
 
+            # 2026-10-09: Promotion parity with ingest_http_fills.  A WS fill
+            # for an order carrying a provisional live-router row must overlay
+            # that row (authoritative fee/proceeds/provenance + idempotent
+            # rekey), not merely coexist as a superseding sibling — sibling-only
+            # supersession leaves provisional economics in place and loses the
+            # merge.  A promotion means the venue twin consumed the provisional
+            # record: not a new ledger row.
+            promoted_id = self._promote_live_router_fill(fill)
+            if promoted_id:
+                logger.debug(
+                    "[FILLS-LEDGER-WS] Promoted provisional live-router fill %s for order_id=%s; skipping duplicate row",
+                    promoted_id, fill.order_id,
+                )
+                return False
+
             # 2026-08-12: Validate the canonical position side/action.  The raw
             # exchange action may be the taker/counterparty view and is not used
             # to decide whether this fill is position-applicable.  Quarantined
@@ -3066,9 +3085,25 @@ class KalshiFillsLedger:
                 pass
 
     async def ensure_loaded(self) -> int:
-        """Async public accessor to trigger a DB load exactly once."""
-        if self._loaded_count == 0:
-            self._loaded_count = await self.load_from_db()
+        """Async public accessor to trigger a DB load exactly once.
+
+        Shares one in-flight task across all callers: without this guard a
+        backgrounded startup restore and the first ingest's ensure_loaded()
+        spawn two concurrent load_from_db() passes, doubling work and
+        interleaving writes into self._fills and its secondary indexes.
+        A failed task is cleared so the next caller retries cleanly.
+        """
+        if self._loaded_count > 0:
+            return self._loaded_count
+        task = self._load_task
+        if task is None or task.done():
+            task = asyncio.create_task(self.load_from_db(), name="fills-ledger-load")
+            self._load_task = task
+        try:
+            self._loaded_count = await task
+        finally:
+            if task.done() and task.exception() is not None:
+                self._load_task = None
         return self._loaded_count
 
     def update_intent_status(self, intent_id: str, status: str,
@@ -8515,18 +8550,18 @@ class KalshiFillsLedger:
         return kalshi_fill
 
     def _index_fill(self, fill: KalshiFill) -> None:
-        """Add fill to secondary indexes."""
+        """Add fill to secondary indexes (idempotent: no duplicate entries)."""
         # Index by order_id
         if fill.order_id:
-            if fill.order_id not in self._fills_by_order:
-                self._fills_by_order[fill.order_id] = []
-            self._fills_by_order[fill.order_id].append(fill.fill_id)
+            _oids = self._fills_by_order.setdefault(fill.order_id, [])
+            if fill.fill_id not in _oids:
+                _oids.append(fill.fill_id)
 
         # Index by market
         if fill.market_ticker:
-            if fill.market_ticker not in self._fills_by_market:
-                self._fills_by_market[fill.market_ticker] = []
-            self._fills_by_market[fill.market_ticker].append(fill.fill_id)
+            _mids = self._fills_by_market.setdefault(fill.market_ticker, [])
+            if fill.fill_id not in _mids:
+                _mids.append(fill.fill_id)
 
     async def _init_db(self) -> None:
         """Initialize SQLite with WAL mode and proper settings.
@@ -9748,6 +9783,9 @@ class KalshiFillsLedger:
 
     async def load_from_db(self) -> int:
         """Load fills from SQLite on startup."""
+        import time as _time
+        _rst: Dict[str, float] = {}
+        _rt0 = _time.monotonic()
         try:
             import aiosqlite
 
@@ -9755,6 +9793,7 @@ class KalshiFillsLedger:
             if not self._db_initialized:
                 await self._init_db()
 
+            _rq = _time.monotonic()
             async with aiosqlite.connect(self._db_path) as db:
                 await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
                 db.row_factory = aiosqlite.Row
@@ -9762,6 +9801,8 @@ class KalshiFillsLedger:
                     "SELECT * FROM kalshi_fills ORDER BY created_time DESC LIMIT 10000"
                 ) as cursor:
                     rows = await cursor.fetchall()
+                _rst["query_s"] = round(_time.monotonic() - _rq, 3)
+                _rd = _time.monotonic()
 
                 skipped_test = 0
                 legacy_rows_total = len(rows)
@@ -9915,6 +9956,13 @@ class KalshiFillsLedger:
                         unmatched=_is_untrusted,
                         unmatched_reason="untrusted_legacy" if _is_untrusted else None,
                     )
+                    # Restore must merge, not overwrite: the SELECT snapshot was
+                    # taken before this loop ran, so an in-memory row for the
+                    # same fill_id is NEWER than the DB copy (e.g. a promotion,
+                    # confirmed_by_rest, or field merge that landed mid-restore).
+                    # In-memory state wins; the stale row is skipped.
+                    if fill.fill_id in self._fills:
+                        continue
                     self._fills[fill.fill_id] = fill
                     self._index_fill(fill)
 
@@ -9944,12 +9992,12 @@ class KalshiFillsLedger:
                         canonicalization_failures += 1
 
                 loaded = len(rows) - skipped_test
+                _rst["decode_apply_s"] = round(_time.monotonic() - _rd, 3)
                 if skipped_test:
                     logger.warning(
                         "Filtered %d test-fixture fills from DB (prefixes: %s)",
                         skipped_test, ", ".join(_TEST_FILL_PREFIXES[:3]) + "..."
                     )
-                logger.info(f"Loaded {loaded} fills from database")
 
                 # 2026-08-27: Rebuild the live-router promotion index after a restart
                 # so authoritative HTTP/WS fills that arrive again can be deduplicated
@@ -10005,11 +10053,21 @@ class KalshiFillsLedger:
                 )
 
                 # Session-based PnL tracking: rebuild session PnL from loaded fills
+                _rp = _time.monotonic()
                 self.rebuild_session_pnl_from_fills()
+                _rst["pnl_rebuild_s"] = round(_time.monotonic() - _rp, 3)
+                _rst["total_s"] = round(_time.monotonic() - _rt0, 3)
+                logger.info(
+                    "Loaded %d fills from database — restore_stages=%s",
+                    loaded, _rst,
+                )
 
                 return loaded
         except Exception as e:
-            logger.warning("No existing fills DB or load error: %s", e, exc_info=True)
+            logger.warning(
+                "No existing fills DB or load error: %s — restore_stages=%s",
+                e, _rst, exc_info=True,
+            )
             return 0
 
     def get_migration_summary(self) -> Dict[str, Any]:
