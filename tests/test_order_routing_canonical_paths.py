@@ -101,13 +101,16 @@ class TestOrderRoutingCanonicalPaths:
         assert "UnifiedRiskManager" in KalshiRiskManager.__doc__
 
     def test_global_slot_allocator_exists(self):
-        """Verify GlobalSlotAllocator exists for $2 exposure cap."""
+        """Verify GlobalSlotAllocator exists with the configured exposure cap."""
+        import os as _os
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
-        
-        # Should be able to create instance
+
+        # The class attribute is bound at import from MERID_MAX_EXPOSURE_USD
+        # (default 3.00; .env raises it on the trade-every-window profile).
+        expected = float(_os.getenv("MERID_MAX_EXPOSURE_USD", "3.00"))
         allocator = GlobalSlotAllocator()
         assert allocator is not None
-        assert allocator.MAX_EXPOSURE_USD == 2.00
+        assert allocator.MAX_EXPOSURE_USD == expected
 
     def test_price_range_constants_exist(self):
         """Verify canonical price range constants exist."""

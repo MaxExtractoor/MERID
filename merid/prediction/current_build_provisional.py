@@ -574,31 +574,58 @@ CELL_STATES = (
 SUSPENSION_CLASS_ECONOMIC = "economic"
 SUSPENSION_CLASS_EXECUTION = "execution"
 SUSPENSION_CLASS_INTEGRITY = "integrity"
+# 2026-10-09 subtypes (replaces the single "execution" bucket): a repaired
+# router failure, a post-only contract breach, and an adverse markout are
+# different evidence with different recovery requirements.
+SUSPENSION_CLASS_MECHANICAL = "mechanical"
+SUSPENSION_CLASS_CONTRACT = "contract_violation"
+SUSPENSION_CLASS_EXEC_QUALITY = "execution_quality"
+# Backward-compat alias: records stamped "execution" are re-classified from
+# their reason on load (see _load_state backfill).
+SUSPENSION_CLASS_EXECUTION = "execution"
+
+_SUSP_CLASSES = frozenset({
+    SUSPENSION_CLASS_MECHANICAL, SUSPENSION_CLASS_CONTRACT,
+    SUSPENSION_CLASS_EXEC_QUALITY, SUSPENSION_CLASS_ECONOMIC,
+    SUSPENSION_CLASS_INTEGRITY, SUSPENSION_CLASS_EXECUTION,
+})
+
+# Ordered token map.  Router-reject is checked FIRST because live reasons
+# embed "(post-only cross/stale revalidation)" — that parenthetical is the
+# venue message, not a contract breach.  A standalone post_only/became_taker
+# reason IS a contract breach.
+_REASON_SUBTYPE_RULES = (
+    ("router_reject", SUSPENSION_CLASS_MECHANICAL),
+    ("consecutive_router", SUSPENSION_CLASS_MECHANICAL),
+    ("dispatch", SUSPENSION_CLASS_MECHANICAL),
+    ("stale_lock", SUSPENSION_CLASS_MECHANICAL),
+    ("order_lock", SUSPENSION_CLASS_MECHANICAL),
+    ("invariant_violation", SUSPENSION_CLASS_INTEGRITY),
+    ("exec_failures", SUSPENSION_CLASS_INTEGRITY),
+    ("accounting", SUSPENSION_CLASS_INTEGRITY),
+    ("post_only", SUSPENSION_CLASS_CONTRACT),
+    ("post-only", SUSPENSION_CLASS_CONTRACT),
+    ("became_taker", SUSPENSION_CLASS_CONTRACT),
+    ("mode_violation", SUSPENSION_CLASS_CONTRACT),
+    ("markout", SUSPENSION_CLASS_EXEC_QUALITY),
+    ("fill_ev_nonpositive", SUSPENSION_CLASS_EXEC_QUALITY),
+    ("fill_time_ev", SUSPENSION_CLASS_EXEC_QUALITY),
+    ("ev_drop", SUSPENSION_CLASS_EXEC_QUALITY),
+    ("mean_net_pnl", SUSPENSION_CLASS_ECONOMIC),
+    ("first_trade_pnl", SUSPENSION_CLASS_ECONOMIC),
+    ("net_pnl", SUSPENSION_CLASS_ECONOMIC),
+)
+
 
 def _classify_suspension_reason(reason: Optional[str]) -> str:
-    """Classify a suspension reason into economic / execution / integrity.
-
-    Substring matching (not prefixes) so ``probation_strike:<inner>`` is
-    classified by the strike cause.  Realized-PnL triggers are economic;
-    route/order-path degradation and adverse markouts are execution;
-    contract/invariant breaches are integrity.  Unknown reasons default to
-    economic — the strictest recovery gate.
-    """
+    """Map a suspension reason to a subtype.  Substring matching over an
+    ordered token list so ``probation_strike:<inner>`` resolves by the
+    strike cause.  Unknown reasons default to economic — the strictest
+    recovery-evidence gate."""
     r = str(reason or "")
-    if "mean_net_pnl" in r or "first_trade_pnl" in r:
-        return SUSPENSION_CLASS_ECONOMIC
-    if (
-        "invariant_violation" in r
-        or "exec_failures" in r
-    ):
-        return SUSPENSION_CLASS_INTEGRITY
-    if (
-        "router_reject" in r
-        or "markout" in r
-        or "post_only" in r
-        or "fill_ev_nonpositive" in r
-    ):
-        return SUSPENSION_CLASS_EXECUTION
+    for token, subtype in _REASON_SUBTYPE_RULES:
+        if token in r:
+            return subtype
     return SUSPENSION_CLASS_ECONOMIC
 
 FUNNEL_STAGES = (
@@ -613,7 +640,9 @@ FUNNEL_STAGES = (
     "filled",
 )
 
-_state_lock = threading.Lock()
+# RLock so a multi-field transition (state + class + counters + transition
+# record) can hold the lock across _load_state/_save_state atomically.
+_state_lock = threading.RLock()
 _STATE_CACHE: Optional[Dict[str, Any]] = None
 _STATE_CACHE_PATH: Optional[str] = None
 
@@ -929,6 +958,7 @@ def _default_state(now: float) -> Dict[str, Any]:
         "review_reported": {},
         "funnel": {s: 0 for s in FUNNEL_STAGES},
         "funnel_by_cell": {},
+        "transitions": [],
     }
 
 
@@ -967,7 +997,10 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
                 isinstance(_c_rec, dict)
                 and _c_rec.get("state") == CELL_STATE_SUSPENDED
             ):
-                if not _c_rec.get("suspension_class"):
+                # Backfill (incl. interim "execution" stamps) re-classifies
+                # from the reason so subtype gating applies to live records.
+                _cls = _c_rec.get("suspension_class")
+                if _cls not in _SUSP_CLASSES or _cls == SUSPENSION_CLASS_EXECUTION:
                     _c_rec["suspension_class"] = _classify_suspension_reason(
                         _c_rec.get("reason")
                     )
@@ -985,6 +1018,8 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
         ):
             if isinstance(rec.get(k), dict):
                 state[k] = rec[k]
+        if isinstance(rec.get("transitions"), list):
+            state["transitions"] = rec["transitions"][-500:]
         if rec.get("date") == state["date"]:
             for k in (
                 "count", "submissions", "fills_today", "fills_today_asset",
@@ -1040,24 +1075,69 @@ def get_cell_state(cell_id: str) -> str:
     return str(rec.get("state") or CELL_STATE_PROVISIONAL)
 
 
-def set_cell_state(cell_id: str, state: str, reason: Optional[str] = None) -> None:
-    """Explicit state transition; PROMOTED is only reachable through here."""
-    state = state.upper()
-    if state not in CELL_STATES:
-        raise ValueError(f"invalid provisional-cell state {state!r}")
-    st = _load_state()
-    rec = st["cell_states"].setdefault(cell_id, {})
-    rec["state"] = state
-    rec["since_ts"] = time.time()
-    rec["reason"] = reason
-    _save_state()
-    logger.info("[CBP-STATE] cell=%s -> %s reason=%s", cell_id, state, reason)
+def _transition_cell(
+    cell_id: str,
+    new_state: str,
+    reason: Optional[str],
+    extra_fields: Optional[Dict[str, Any]] = None,
+    transition_kind: str = "state_transition",
+    counters_reset: Optional[list] = None,
+) -> None:
+    """Single atomic state transition + auditable record.
+
+    Everything (state, class, probation flags, counter resets, the
+    ``transitions`` journal entry) is mutated and persisted under one lock —
+    a racing evaluation can never observe a half-written transition, and an
+    exception before ``_save_state`` leaves the persisted file untouched.
+    """
+    new_state = new_state.upper()
+    if new_state not in CELL_STATES:
+        raise ValueError(f"invalid provisional-cell state {new_state!r}")
+    with _state_lock:
+        st = _load_state()
+        rec = st["cell_states"].setdefault(cell_id, {})
+        prev_state = rec.get("state")
+        prev_reason = rec.get("reason")
+        rec["state"] = new_state
+        rec["since_ts"] = time.time()
+        rec["reason"] = reason
+        if extra_fields:
+            rec.update(extra_fields)
+        if counters_reset:
+            for key in counters_reset:
+                st.setdefault(key, {})[cell_id] = 0
+        journal = st.setdefault("transitions", [])
+        journal.append({
+            "cell_id": cell_id,
+            "kind": transition_kind,
+            "previous_state": prev_state,
+            "new_state": new_state,
+            "reason": reason,
+            "suspension_context_reason": prev_reason,
+            "suspension_class": rec.get("suspension_class"),
+            "ts": rec["since_ts"],
+            "policy_version": _policy_epoch(),
+            "counters_reset": list(counters_reset or []),
+            "probation_budget": {
+                "max_submissions_per_day": probation_max_submissions_per_cell(),
+                "max_fills_per_episode": probation_max_fills_per_episode(),
+                "loss_budget_cents": probation_loss_budget_cents(),
+            } if new_state == CELL_STATE_PROBATION else None,
+        })
+        del journal[:-500]
+        _save_state()
+    logger.info("[CBP-STATE] cell=%s -> %s reason=%s", cell_id, new_state, reason)
     emit_provisional_lifecycle(
-        "state_transition",
+        transition_kind,
         provisional_cell_id=cell_id,
-        terminal_state=state,
+        terminal_state=new_state,
         reason=reason,
     )
+
+
+def set_cell_state(cell_id: str, state: str, reason: Optional[str] = None) -> None:
+    """Explicit state transition; PROMOTED is only reachable through here."""
+    _transition_cell(cell_id, state, reason)
 
 
 def _suspend_cell(
@@ -1075,13 +1155,16 @@ def _suspend_cell(
         "[CBP-SUSPEND] cell=%s reason=%s class=%s — lane fails closed",
         cell_id, reason, cls,
     )
-    set_cell_state(cell_id, CELL_STATE_SUSPENDED, reason)
-    rec = (_load_state().get("cell_states") or {}).get(cell_id) or {}
-    rec["suspension_class"] = cls
+    fields: Dict[str, Any] = {
+        "suspension_class": cls,
+        "on_probation": False,
+    }
     if _pre.get("on_probation"):
-        rec["probation_triggered"] = True
-    rec["on_probation"] = False
-    _save_state()
+        fields["probation_triggered"] = True
+    _transition_cell(
+        cell_id, CELL_STATE_SUSPENDED, reason,
+        extra_fields=fields, transition_kind="suspension",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1096,27 +1179,55 @@ def _suspend_cell(
 #                *positive*-EV candidate (probation never uses a negative
 #                floor), so no probe fires unless the tape offers one.
 #   integrity  - never auto-releases; operator ``set_cell_state`` only.
-# PROBATION admits at most ``probation_max_submissions``/day at positive EV
-# and re-suspends on a single strike; ``probation_clean`` qualifying
-# observations return the cell to OBSERVATION.
+# PROBATION admits at most ``probation_max_submissions``/day at positive EV.
+# Strikes are cause-specific: a transient router reject during probation is a
+# health pause, not a reset; a contract/integrity breach stops immediately;
+# a realized loss consumes the experiment-loss budget.
 
 def probation_min_suspend_s(suspension_class: str) -> float:
-    if suspension_class == SUSPENSION_CLASS_EXECUTION:
-        return _env_float("MERID_CBP_RECOVERY_EXEC_MIN_S", 6.0 * 3600.0)
+    if suspension_class in (
+        SUSPENSION_CLASS_MECHANICAL, SUSPENSION_CLASS_EXECUTION,
+    ):
+        return _env_float("MERID_CBP_RECOVERY_MECH_MIN_S", 6.0 * 3600.0)
+    if suspension_class == SUSPENSION_CLASS_EXEC_QUALITY:
+        return _env_float("MERID_CBP_RECOVERY_EQ_MIN_S", 24.0 * 3600.0)
     if suspension_class == SUSPENSION_CLASS_ECONOMIC:
         return _env_float("MERID_CBP_RECOVERY_ECON_MIN_S", 24.0 * 3600.0)
+    if suspension_class == SUSPENSION_CLASS_CONTRACT:
+        # Hard failure until the contract defect is verified fixed.
+        if not _env_flag("MERID_EXEC_CONTRACT_FIX_VERIFIED", False):
+            return math.inf
+        return _env_float("MERID_CBP_RECOVERY_CONTRACT_MIN_S", 24.0 * 3600.0)
     return math.inf  # integrity: no time-based release
 
 
 def probation_reset_cooldown_s(suspension_class: str) -> float:
-    """Cooldown after a probation strike before the next release window."""
+    """Cooldown after a probation strike, by the strike's own subtype."""
     if suspension_class == SUSPENSION_CLASS_ECONOMIC:
         return _env_float("MERID_CBP_PROBATION_RESET_COOLDOWN_S", 24.0 * 3600.0)
-    return _env_float("MERID_CBP_PROBATION_RESET_COOLDOWN_S", 6.0 * 3600.0)
+    if suspension_class == SUSPENSION_CLASS_EXEC_QUALITY:
+        return _env_float("MERID_CBP_PROBATION_EQ_COOLDOWN_S", 6.0 * 3600.0)
+    if suspension_class == SUSPENSION_CLASS_CONTRACT:
+        return _env_float("MERID_CBP_PROBATION_CONTRACT_COOLDOWN_S", 24.0 * 3600.0)
+    if suspension_class == SUSPENSION_CLASS_INTEGRITY:
+        return math.inf
+    # mechanical/transient: a bounded health pause, not a full reset.
+    return _env_float("MERID_CBP_PROBATION_MECH_PAUSE_S", 1.0 * 3600.0)
 
 
 def probation_max_submissions_per_cell() -> int:
     return _env_int("MERID_CBP_PROBATION_MAX_SUBMISSIONS", 1)
+
+
+def probation_max_fills_per_episode() -> int:
+    """Filled-exposure budget per probation episode (distinct from the
+    submission budget — an unfilled expiry is not a completed experiment)."""
+    return _env_int("MERID_CBP_PROBATION_MAX_FILLS", 1)
+
+
+def probation_loss_budget_cents() -> float:
+    """Realized-loss budget that re-suspends the probation episode."""
+    return _env_float("MERID_CBP_PROBATION_LOSS_BUDGET_CENTS", 50.0)
 
 
 def probation_pass_observations() -> int:
@@ -1124,45 +1235,83 @@ def probation_pass_observations() -> int:
     return _env_int("MERID_CBP_PROBATION_PASS_OBS", 2)
 
 
-def maybe_recover_cell(cell_id: str, now: Optional[float] = None) -> bool:
-    """SUSPENDED -> PROBATION when the class-specific recovery window passed.
+def _recovery_allowlist() -> Optional[frozenset]:
+    """Stage-A gate: when MERID_RECOVERY_ALLOWLIST is set, only the listed
+    cell ids may auto-release to probation.  Unset -> all eligible cells."""
+    v = os.environ.get("MERID_RECOVERY_ALLOWLIST")
+    if v is None:
+        return None
+    return frozenset(s.strip() for s in v.split(",") if s.strip())
 
-    Called on the admission path so recovery is evaluated lazily exactly
-    when a fresh candidate arrives — a suspended cohort that never produces
-    a qualifying candidate never burns a probe.  Integrity suspensions are
-    excluded: they require an explicit operator reset.
+
+def maybe_recover_cell(
+    cell_id: str,
+    now: Optional[float] = None,
+    trigger_snapshot: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """SUSPENDED -> PROBATION when the subtype-specific window passed.
+
+    Called lazily on the admission path — a suspended cohort that never
+    produces a qualifying candidate never burns a probe.  Integrity
+    suspensions never auto-release; contract-violation suspensions release
+    only after ``MERID_EXEC_CONTRACT_FIX_VERIFIED=1`` (the defect must be
+    demonstrated fixed, not merely aged).  ``MERID_RECOVERY_ALLOWLIST`` (when
+    set) restricts auto-release to the reviewed cell ids.
     """
-    st = _load_state()
-    rec = (st.get("cell_states") or {}).get(cell_id) or {}
-    if rec.get("state") != CELL_STATE_SUSPENDED:
-        return False
-    cls = str(rec.get("suspension_class")
-              or _classify_suspension_reason(rec.get("reason")))
-    rec["suspension_class"] = cls
-    if cls == SUSPENSION_CLASS_INTEGRITY:
+    allow = _recovery_allowlist()
+    if allow is not None and cell_id not in allow:
         return False
     now = time.time() if now is None else float(now)
-    since = float(rec.get("since_ts") or 0.0)
-    age_s = max(0.0, now - since)
-    required = (
-        probation_reset_cooldown_s(cls)
-        if rec.get("probation_triggered")
-        else probation_min_suspend_s(cls)
-    )
-    if age_s < required:
-        return False
-    rec["probation_count"] = int(rec.get("probation_count") or 0) + 1
-    set_cell_state(
-        cell_id,
-        CELL_STATE_PROBATION,
-        f"probation_release class={cls} age_s={int(age_s)}",
-    )
-    (st["cell_states"].setdefault(cell_id, {}))["on_probation"] = True
-    # The armed consecutive-reject counter belongs to the suspension being
-    # released — leaving it at >=2 would re-trip the cell on the very next
-    # evaluation before the probe collects any new evidence.
-    (st.setdefault("router_consecutive_rejects", {}))[cell_id] = 0
-    _save_state()
+    with _state_lock:
+        st = _load_state()
+        rec = (st.get("cell_states") or {}).get(cell_id) or {}
+        if rec.get("state") != CELL_STATE_SUSPENDED:
+            return False
+        cls = str(rec.get("suspension_class")
+                  or _classify_suspension_reason(rec.get("reason")))
+        rec["suspension_class"] = cls
+        since = float(rec.get("since_ts") or 0.0)
+        age_s = max(0.0, now - since)
+        required = (
+            probation_reset_cooldown_s(cls)
+            if rec.get("probation_triggered")
+            else probation_min_suspend_s(cls)
+        )
+        if cls == SUSPENSION_CLASS_INTEGRITY or age_s < required or required == math.inf:
+            return False
+        if cls == SUSPENSION_CLASS_CONTRACT and not _env_flag(
+            "MERID_EXEC_CONTRACT_FIX_VERIFIED", False
+        ):
+            return False
+        original_reason = rec.get("reason")
+        rec["probation_count"] = int(rec.get("probation_count") or 0) + 1
+        _transition_cell(
+            cell_id,
+            CELL_STATE_PROBATION,
+            f"probation_release class={cls} age_s={int(age_s)}",
+            extra_fields={
+                "on_probation": True,
+                "probation_count": rec["probation_count"],
+                "probation_started_ts": now,
+                "probation_fills": 0,
+                "probation_loss_cents": 0.0,
+            },
+            transition_kind="probation_release",
+            # The armed consecutive-reject counter belongs to the suspension
+            # being released — left armed it would re-trip on the next eval.
+            counters_reset=["router_consecutive_rejects"],
+        )
+        journal = st.get("transitions") or []
+        if journal:
+            journal[-1]["original_suspension_reason"] = original_reason
+            journal[-1]["probation_count"] = rec["probation_count"]
+            if trigger_snapshot:
+                journal[-1]["qualification_snapshot"] = {
+                    k: trigger_snapshot.get(k)
+                    for k in ("decision_id", "ticker", "price_cents",
+                              "net_ev_cents", "tte_seconds")
+                }
+            _save_state()
     return True
 
 
@@ -1279,11 +1428,15 @@ def provisional_cell_admission(cell_id: str) -> Tuple[bool, Optional[str]]:
         return False, f"cell_state_unknown:{state}"
     if state == CELL_STATE_PROBATION:
         # Recovery probes are the scarcest lane capacity: one bounded
-        # submission/day, and the daily fills cap applies unchanged.
+        # submission/day, a per-episode fill budget (an unfilled expiry is
+        # not a completed experiment), and the daily fills cap unchanged.
         if provisional_submissions_today_cell(
             cell_id
         ) >= probation_max_submissions_per_cell():
             return False, "probation_submission_cap"
+        _rec = (_load_state().get("cell_states") or {}).get(cell_id) or {}
+        if int(_rec.get("probation_fills") or 0) >= probation_max_fills_per_episode():
+            return False, "probation_fills_cap"
     if provisional_fills_today(cell_id) >= provisional_daily_max_fills_per_cell():
         return False, "cell_fills_cap_exhausted"
     if provisional_fills_today_total() >= provisional_daily_max_fills_total():
@@ -1464,12 +1617,13 @@ def record_provisional_router_reject(cell_id: str) -> None:
     _save_state()
     bump_provisional_funnel("router_rejected", cell_id)
     if _on_probation:
-        # One strike during probation re-suspends — the probe already burned
-        # its measured-retry allowance.
+        # A transient router reject during probation is a mechanical health
+        # pause (short cooldown), not an economic strike — the probe burned
+        # its measured-retry allowance but the signal evidence stands.
         _suspend_cell(
             cell_id,
-            "probation_router_reject: one strike during probation",
-            suspension_class=SUSPENSION_CLASS_EXECUTION,
+            "probation_router_reject: transient strike during probation",
+            suspension_class=SUSPENSION_CLASS_MECHANICAL,
         )
         return
     _evaluate_suspension(cell_id)
@@ -1661,6 +1815,11 @@ def record_provisional_fill(
     if decision_id:
         st.setdefault("decision_cell_map", {})[decision_id] = cell_id
         _cap_decision_cell_map(st)
+    # Probation exposure budget: track fills during the episode so the
+    # submission cap is not the only bound — a fill is committed exposure.
+    _prec = (st.get("cell_states") or {}).get(cell_id) or {}
+    if _prec.get("on_probation") and _prec.get("state") == CELL_STATE_PROBATION:
+        _prec["probation_fills"] = int(_prec.get("probation_fills") or 0) + 1
     _save_state()
     bump_provisional_funnel("filled", cell_id)
     if get_cell_state(cell_id) == CELL_STATE_PROVISIONAL:
@@ -1728,11 +1887,14 @@ def record_provisional_settlement(
         return
     st = _load_state()
     outs = st.setdefault("outcomes", {}).setdefault(cell_id, [])
+    _pnl_delta = float(net_pnl_cents)
     for o in reversed(outs):
         # Idempotent: match fill OR already-settled rows for this decision so a
         # second attribution (exit path + settlement join) updates in place
-        # instead of appending a duplicate settled outcome.
+        # instead of appending a duplicate settled outcome.  The probation
+        # loss budget accumulates only the DELTA so a repeat call is inert.
         if o.get("decision_id") == decision_id and o.get("kind") in ("fill", "settled"):
+            _pnl_delta = float(net_pnl_cents) - float(o.get("net_pnl_cents") or 0.0)
             o["net_pnl_cents"] = float(net_pnl_cents)
             o["kind"] = "settled"
             if regime is not None:
@@ -1749,7 +1911,26 @@ def record_provisional_settlement(
             "policy_epoch": policy_epoch or _policy_epoch(),
         })
         del outs[:-25]
+    # Probation loss budget: realized losses during the episode accumulate
+    # against a hard bound; exceeding it re-suspends as economic regardless
+    # of the rolling-window rules.
+    _prec = (st.get("cell_states") or {}).get(cell_id) or {}
+    _breach_budget = False
+    if _prec.get("on_probation") and _prec.get("state") == CELL_STATE_PROBATION:
+        _prec["probation_loss_cents"] = float(
+            _prec.get("probation_loss_cents") or 0.0
+        ) + _pnl_delta
+        if _prec["probation_loss_cents"] <= -abs(probation_loss_budget_cents()):
+            _breach_budget = True
     _save_state()
+    if _breach_budget:
+        _suspend_cell(
+            cell_id,
+            "probation_loss_budget_exceeded="
+            f"{_prec['probation_loss_cents']:+.2f}c",
+            suspension_class=SUSPENSION_CLASS_ECONOMIC,
+        )
+        return
     _evaluate_suspension(cell_id)
     _maybe_complete_probation(cell_id)
     _maybe_emit_promotion_review(cell_id, st=st)

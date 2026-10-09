@@ -172,6 +172,16 @@ def log_rejected_candidate(
     # plus the mutually-exclusive admission_verdict — so a bounded
     # negative-floor admit never reads as a profitable production admit.
     side_verdicts: Optional[dict] = None,
+    # 2026-10-09: BOTH side asks at decision time.  Without these the
+    # non-selected side's price was reconstructed as 100 - selected ask,
+    # which is actually the opposite-side BID (a_N = 1 - b_Y), understating
+    # the true ask by the spread and inflating blocked-opportunity counts.
+    yes_price_cents: Optional[float] = None,
+    no_price_cents: Optional[float] = None,
+    # ask | bid — which book level the yes/no price fields represent.  Under
+    # bid-basis (maker lane) they are BIDS, not asks; band-matching on them
+    # as asks would reintroduce the spread error this change removes.
+    entry_price_basis: Optional[str] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
     if not _ENABLED or not should_log(reason):
@@ -210,6 +220,9 @@ def log_rejected_candidate(
             "fair_probability": model_p_selected,
             "held_price_cents": held_price_cents,
             "executable_price_cents": held_price_cents,
+            "yes_price_cents": yes_price_cents,
+            "no_price_cents": no_price_cents,
+            "entry_price_basis": entry_price_basis,
             "price_bucket": _price_bucket(held_price_cents),
             "depth_for_quantity_cc": depth_for_quantity_cc,
             "intended_quantity": intended_quantity,

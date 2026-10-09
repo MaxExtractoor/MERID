@@ -136,7 +136,11 @@ def test_opposite_side_not_affected():
 
 
 def test_loader_missing_file_returns_none(_isolate_evidence):
-    assert _load_live_evidence() is None
+    # 2026-10-09 fail-closed change: a missing artifact returns an explicit
+    # marker (never silent None) so admission can distinguish "no file" from
+    # "file passed" -- the marker itself must not qualify anything.
+    ev = _load_live_evidence()
+    assert ev is not None and ev.get("artifact_missing") is True
 
 
 def test_loader_reads_and_caches(_isolate_evidence):

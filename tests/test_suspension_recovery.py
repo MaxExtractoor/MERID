@@ -4,12 +4,18 @@ Covers the repaired lifecycle in both governed lanes (threshold cells +
 current-build provisional) and the missing-artifact admission policy:
 
   * scope isolation — a suspension never bleeds across assets/sides/routes
-  * operational failures (router rejects) classify as execution, never as
-    realized economic losses
-  * bounded recovery — SUSPENDED -> PROBATION -> OBSERVATION with a clean
-    evidence requirement and a one-strike re-suspension rule
+  * subtype classification — mechanical / contract_violation /
+    execution_quality / economic / integrity, with router-reject checked
+    before the "(post-only ...)" parenthetical in live reasons
+  * operational failures (router rejects) classify mechanical, never as
+    realized economic losses; markouts classify execution_quality (slower)
+  * bounded recovery — SUSPENDED -> PROBATION -> OBSERVATION with clean-
+    evidence requirement and cause-specific strike handling
   * stale armed counters cleared on release (no instant re-trip)
   * repeated evaluations never extend or complete probation
+  * probation budgets: submissions/day, fills/episode, loss budget
+  * release writes an auditable transition journal record
+  * MERID_RECOVERY_ALLOWLIST gates auto-release to reviewed cells
   * restart preserves state; legacy records backfill safely
   * missing/unreadable evidence artifact fails closed (bounded lane only)
   * stale artifact passes are escape-lane only, never production
@@ -98,22 +104,41 @@ def test_all_five_assets_share_recovery_framework(lanes):
         if cbp.provisional_cell_for_id(cid) is None:
             continue
         cls = cbp._classify_suspension_reason("consecutive_router_rejects=2")
-        assert cls == cbp.SUSPENSION_CLASS_EXECUTION
+        assert cls == cbp.SUSPENSION_CLASS_MECHANICAL
         cls2 = cbp._classify_suspension_reason("rolling_3_mean_net_pnl=-5.0c")
         assert cls2 == cbp.SUSPENSION_CLASS_ECONOMIC
+
+
+def test_router_reason_with_postonly_parenthetical_is_mechanical(lanes):
+    """The live reason 'consecutive_router_rejects=2 (post-only cross/stale
+    revalidation twice in a row)' is a repaired MECHANICAL failure — the
+    post-only text is the venue message, not a contract breach."""
+    r = "consecutive_router_rejects=2 (post-only cross/stale revalidation twice in a row)"
+    assert cbp._classify_suspension_reason(r) == cbp.SUSPENSION_CLASS_MECHANICAL
+    assert tc._classify_suspension_reason(r) == tc.SUSPENSION_CLASS_MECHANICAL
+    # But a standalone post-only breach IS a contract violation.
+    assert (
+        cbp._classify_suspension_reason("post_only_order_became_taker")
+        == cbp.SUSPENSION_CLASS_CONTRACT
+    )
+    # Adverse markouts are execution-quality evidence, not mechanics.
+    assert (
+        cbp._classify_suspension_reason("first_fill_markout_5s=-6.50c <= -3.00c")
+        == cbp.SUSPENSION_CLASS_EXEC_QUALITY
+    )
 
 
 # ── 2. Operational failures are not economic losses ─────────────────────────
 
 def test_router_rejects_are_execution_class_not_losses(lanes):
-    """Two consecutive router rejects suspend with class=execution and write
+    """Two consecutive router rejects suspend with class=mechanical and write
     NO outcome rows — the reject is never double-counted as a losing trade."""
     cid = "cbp_btc_no_60_70_t300_600"
     cbp.record_provisional_router_reject(cid)
     cbp.record_provisional_router_reject(cid)
     assert cbp.get_cell_state(cid) == cbp.CELL_STATE_SUSPENDED
     rec = (cbp._load_state()["cell_states"])[cid]
-    assert rec["suspension_class"] == cbp.SUSPENSION_CLASS_EXECUTION
+    assert rec["suspension_class"] == cbp.SUSPENSION_CLASS_MECHANICAL
     # No outcome row may exist: rejects are not economic evidence.
     outs = (cbp._load_state().get("outcomes") or {}).get(cid) or []
     assert outs == []
@@ -126,7 +151,7 @@ def test_threshold_cell_router_reject_classified_execution(lanes):
     tc.record_cell_router_reject(cid)
     assert tc.get_cell_state(cid) == tc.CELL_STATE_SUSPENDED
     rec = (tc._load_state()["cell_states"])[cid]
-    assert rec["suspension_class"] == tc.SUSPENSION_CLASS_EXECUTION
+    assert rec["suspension_class"] == tc.SUSPENSION_CLASS_MECHANICAL
 
 
 # ── 3. Bounded recovery: release, probe, complete or strike ─────────────────
@@ -174,17 +199,26 @@ def test_economic_suspension_waits_longer_than_execution(lanes):
 
 
 def test_probation_strike_resuspends_on_one_router_reject(lanes):
+    """A transient router strike during probation re-suspends as a
+    MECHANICAL health pause — a bounded retry window, not a full reset."""
     cid = "cbp_btc_no_50_60_t300_600"
     _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_PROBATION,
-               reason="probation_release class=execution",
+               reason="probation_release class=mechanical",
                age_s=100.0, extra={"on_probation": True},
                lanes=lanes)
     cbp.record_provisional_router_reject(cid)
     rec = (cbp._load_state()["cell_states"])[cid]
     assert rec["state"] == cbp.CELL_STATE_SUSPENDED
     assert rec.get("probation_triggered") is True
-    assert rec.get("suspension_class") == cbp.SUSPENSION_CLASS_EXECUTION
+    assert rec.get("suspension_class") == cbp.SUSPENSION_CLASS_MECHANICAL
     assert "probation" in str(rec.get("reason"))
+    # After the mechanical pause (1h), the cell re-releases — a transient
+    # strike does not impose the 6h+ initial-suspension floor again.
+    rec2 = (cbp._load_state()["cell_states"])[cid]
+    rec2["since_ts"] = time.time() - 2.0 * 3600.0
+    cbp._save_state()
+    assert cbp.maybe_recover_cell(cid) is True
+    assert cbp.get_cell_state(cid) == cbp.CELL_STATE_PROBATION
 
 
 def test_probation_completes_on_clean_observations(lanes):
@@ -261,7 +295,7 @@ def test_restart_preserves_suspension_and_backfills_class(lanes):
     cbp._STATE_CACHE_PATH = None
     rec = (cbp._load_state(path=lanes["pv"])["cell_states"])[cid]
     assert rec["state"] == "SUSPENDED"
-    assert rec["suspension_class"] == cbp.SUSPENSION_CLASS_EXECUTION
+    assert rec["suspension_class"] == cbp.SUSPENSION_CLASS_EXEC_QUALITY
     assert rec.get("on_probation") is not True
 
 
@@ -350,3 +384,189 @@ def test_artifact_missing_never_hard_blocks():
     )
     assert d.matching_hard_block is False
     assert "TOXIC" not in d.code
+
+
+# ── 7. Subtype-specific recovery + Stage-A allowlist ───────────────────────
+
+def test_markout_suspension_is_exec_quality_and_waits_longer(lanes):
+    """An adverse markout is execution-QUALITY evidence, not a repaired
+    mechanic — it does not auto-release at the mechanical 6h floor."""
+    cid = "cbp_eth_no_80_90_t120_300"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_SUSPENDED,
+               reason="first_fill_markout_5s=-25.50c <= -3.00c",
+               age_s=7.0 * 3600.0, lanes=lanes)
+    assert cbp.maybe_recover_cell(cid) is False  # exec_quality floor is 24h
+    st = cbp._load_state(path=lanes["pv"])
+    st["cell_states"][cid]["since_ts"] = time.time() - 25.0 * 3600.0
+    cbp._save_state(path=lanes["pv"])
+    assert cbp.maybe_recover_cell(cid) is True
+
+
+def test_contract_violation_requires_verified_fix(lanes):
+    """A post-only breach never auto-releases until the contract defect is
+    declared verified-fixed — elapsed time alone is not authorization."""
+    cid = "cbp_btc_no_60_70_t120_300"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_SUSPENDED,
+               reason="post_only_order_became_taker",
+               age_s=900.0 * 3600.0, lanes=lanes)
+    saved = os.environ.get("MERID_EXEC_CONTRACT_FIX_VERIFIED")
+    try:
+        os.environ.pop("MERID_EXEC_CONTRACT_FIX_VERIFIED", None)
+        assert cbp.maybe_recover_cell(cid) is False
+        assert cbp.get_cell_state(cid) == cbp.CELL_STATE_SUSPENDED
+        # With the fix verified, the contract floor (24h) applies.
+        os.environ["MERID_EXEC_CONTRACT_FIX_VERIFIED"] = "1"
+        assert cbp.maybe_recover_cell(cid) is True
+        assert cbp.get_cell_state(cid) == cbp.CELL_STATE_PROBATION
+    finally:
+        if saved is None:
+            os.environ.pop("MERID_EXEC_CONTRACT_FIX_VERIFIED", None)
+        else:
+            os.environ["MERID_EXEC_CONTRACT_FIX_VERIFIED"] = saved
+
+
+def test_recovery_allowlist_gates_release(lanes):
+    """When MERID_RECOVERY_ALLOWLIST is set, only listed cells may release —
+    markout/economic cells stay shadow-only even when their timers pass."""
+    allowed_cid = "cbp_btc_no_50_60_t300_600"
+    other_cid = "cbp_eth_no_20_30_t300_600"
+    for cid in (allowed_cid, other_cid):
+        _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_SUSPENDED,
+                   reason="consecutive_router_rejects=2",
+                   age_s=8.0 * 3600.0, lanes=lanes)
+    saved = os.environ.get("MERID_RECOVERY_ALLOWLIST")
+    try:
+        os.environ["MERID_RECOVERY_ALLOWLIST"] = allowed_cid
+        assert cbp.maybe_recover_cell(allowed_cid) is True
+        assert cbp.maybe_recover_cell(other_cid) is False
+        assert cbp.get_cell_state(other_cid) == cbp.CELL_STATE_SUSPENDED
+    finally:
+        if saved is None:
+            os.environ.pop("MERID_RECOVERY_ALLOWLIST", None)
+        else:
+            os.environ["MERID_RECOVERY_ALLOWLIST"] = saved
+
+
+def test_release_writes_auditable_transition(lanes):
+    """The SUSPENDED -> PROBATION release journals a structured record:
+    prev/new state, original reason, class, policy version, budgets, and
+    the counter reset — all in one atomic transition."""
+    cid = "cbp_xrp_no_60_70_t120_300"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_SUSPENDED,
+               reason="consecutive_router_rejects=2",
+               age_s=8.0 * 3600.0, lanes=lanes)
+    st = cbp._load_state(path=lanes["pv"])
+    st.setdefault("router_consecutive_rejects", {})[cid] = 2
+    cbp._save_state(path=lanes["pv"])
+    assert cbp.maybe_recover_cell(cid) is True
+    journal = cbp._load_state()["transitions"]
+    tr = [t for t in journal if t.get("cell_id") == cid][-1]
+    assert tr["kind"] == "probation_release"
+    assert tr["previous_state"] == "SUSPENDED"
+    assert tr["new_state"] == "PROBATION"
+    assert tr["original_suspension_reason"] == "consecutive_router_rejects=2"
+    assert tr["suspension_class"] == cbp.SUSPENSION_CLASS_MECHANICAL
+    assert tr["policy_version"]
+    assert "router_consecutive_rejects" in tr["counters_reset"]
+    assert tr["probation_budget"]["max_submissions_per_day"] >= 1
+    # Journal survives a reload (restart-safe).
+    cbp._STATE_CACHE = None
+    cbp._STATE_CACHE_PATH = None
+    assert cbp._load_state()["transitions"][-1]["cell_id"] == cid
+
+
+def test_probation_fills_cap_blocks_second_probe(lanes):
+    """The per-episode fill budget is separate from the submission cap —
+    once the episode's fill allowance is used, admission refuses."""
+    cid = "cbp_btc_no_50_60_t300_600"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_PROBATION,
+               reason="probation_release", age_s=10.0,
+               extra={"on_probation": True, "probation_fills": 1},
+               lanes=lanes)
+    ok, reason = cbp.provisional_cell_admission(cid)
+    assert ok is False
+    assert reason == "probation_fills_cap"
+
+
+def test_probation_loss_budget_resuspends_economic(lanes):
+    """A realized loss past the episode budget re-suspends as ECONOMIC —
+    and a duplicate settlement re-attribution cannot double-count it."""
+    cid = "cbp_btc_no_50_60_t300_600"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_PROBATION,
+               reason="probation_release", age_s=10.0,
+               extra={"on_probation": True},
+               lanes=lanes)
+    over = cbp.probation_loss_budget_cents() + 10.0
+    cbp.record_provisional_settlement(
+        "dec-loss", net_pnl_cents=-over, cell_id=cid,
+    )
+    rec = (cbp._load_state()["cell_states"])[cid]
+    assert rec["state"] == cbp.CELL_STATE_SUSPENDED
+    assert rec["suspension_class"] == cbp.SUSPENSION_CLASS_ECONOMIC
+    assert "loss_budget" in str(rec["reason"])
+
+
+def test_probation_unfilled_expiry_is_not_a_strike(lanes):
+    """A passive order expiring unfilled records fill-probability evidence
+    only — it cannot strike the probation episode or write a loss."""
+    cid = "cbp_btc_no_50_60_t300_600"
+    _seed_cell(cbp, "pv", cid, state=cbp.CELL_STATE_PROBATION,
+               reason="probation_release", age_s=10.0,
+               extra={"on_probation": True},
+               lanes=lanes)
+    # Order opened then closed without a fill — no outcome row, no strike.
+    cbp.record_provisional_order_open(cid, "ord-1")
+    cbp.record_provisional_order_closed(cid, "ord-1")
+    rec = (cbp._load_state()["cell_states"])[cid]
+    assert rec["state"] == cbp.CELL_STATE_PROBATION
+    outs = (cbp._load_state().get("outcomes") or {}).get(cid) or []
+    assert not any(o.get("net_pnl_cents") for o in outs)
+
+# ---------------------------------------------------------------------------
+# Rejected-candidate price telemetry (2026-10-09 correction)
+# ---------------------------------------------------------------------------
+
+def test_rejected_record_persists_both_side_prices(tmp_path, monkeypatch):
+    """The record must carry yes_price_cents/no_price_cents so the
+    non-selected side never needs the invalid 100-selected_ask fallback."""
+    import merid.prediction.rejection_counterfactual as rc
+    log = tmp_path / "rej.jsonl"
+    monkeypatch.setenv("MERID_REJECTED_CANDIDATES_LOG", str(log))
+    rc.log_rejected_candidate(
+        reason="evidence_insufficient", run_id="r1", decision_id="d1",
+        asset="XRP", ticker="T-1", side="yes", model_p_selected=0.7,
+        held_price_cents=71.0, gross_edge=0.01, net_edge=0.005,
+        edge_threshold=0.02, tte_seconds=200.0,
+        yes_price_cents=71.0, no_price_cents=29.0,
+        entry_price_basis="ask",
+    )
+    rec = json.loads(log.read_text().strip())
+    assert rec["yes_price_cents"] == 71.0
+    assert rec["no_price_cents"] == 29.0
+    assert rec["entry_price_basis"] == "ask"
+
+
+def test_rejected_record_no_price_synthesis(tmp_path, monkeypatch):
+    """When per-side prices are not passed, the record must emit nulls --
+    never a synthesized 100-selected_ask 'other side' price."""
+    import merid.prediction.rejection_counterfactual as rc
+    log = tmp_path / "rej.jsonl"
+    monkeypatch.setenv("MERID_REJECTED_CANDIDATES_LOG", str(log))
+    rc.log_rejected_candidate(
+        reason="evidence_insufficient", run_id="r1", decision_id="d2",
+        asset="XRP", ticker="T-1", side="yes", model_p_selected=0.7,
+        held_price_cents=71.0, gross_edge=0.01, net_edge=0.005,
+        edge_threshold=0.02, tte_seconds=200.0,
+    )
+    rec = json.loads(log.read_text().strip())
+    assert rec["yes_price_cents"] is None
+    assert rec["no_price_cents"] is None
+    # and specifically NOT the invalid complement
+    assert rec["no_price_cents"] != 100.0 - rec["executable_price_cents"]
+
+
+def test_bid_basis_prices_not_verified_as_asks(tmp_path):
+    """Counting-side invariant: bid-basis records cannot band-match as asks."""
+    src = open("scripts/_blocked_opportunity_counts.py", encoding="utf-8").read()
+    assert 'basis == "ask"' in src
+    assert "bid_basis_unverified" in src
