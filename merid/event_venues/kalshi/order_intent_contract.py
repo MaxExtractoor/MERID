@@ -1214,6 +1214,41 @@ def validate_canonical_intent(
         # closes must remain submit-able).  The grace window absorbs normal
         # fill-confirmation latency; the window cap prevents ancient DB
         # artifacts from blocking forever.
+        # 2026-10-09: the same contract now binds poller readiness — "tasks
+        # started" is not "safe to trade".  A dead/crashed confirmation
+        # pipeline (DEGRADED) or an unfinished restore+reconcile is a blocked
+        # entry, not a grace-period candidate.  Missing poller (paper/mock)
+        # does not block.
+        try:
+            from merid.event_venues.kalshi.fills_poller import get_fills_poller
+            _poller = get_fills_poller()
+            _ready = _poller.readiness() if _poller is not None else None
+            if _ready is not None:
+                _state = _ready.get("state")
+                if _state == "DEGRADED":
+                    raise OrderIntentValidationError(
+                        "unresolved_fill_accounting:poller_degraded:"
+                        f"{_ready.get('degraded_reason') or 'unknown'}"
+                    )
+                # A poller that was started but never reached READY — dead
+                # start path, restore still running, or reconcile incomplete —
+                # means the confirmation pipeline cannot promote fills.  A
+                # never-started poller (_running=False, e.g. paper/mock)
+                # stays out of the way.
+                if (
+                    getattr(_poller, "_running", False)
+                    and _state != "READY"
+                ):
+                    raise OrderIntentValidationError(
+                        f"unresolved_fill_accounting:poller_not_ready:{_state}"
+                    )
+        except OrderIntentValidationError:
+            raise
+        except Exception as _rdy_err:
+            logger.debug(
+                "[CANONICAL-ORDER-INTENT] poller-readiness check skipped: %s",
+                _rdy_err,
+            )
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _unres = get_fills_ledger().unresolved_router_fills(

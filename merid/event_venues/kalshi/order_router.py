@@ -350,6 +350,10 @@ def _finalize_attempt_store_for_result(
                 "submission_attempted": getattr(result, "submission_attempted", None),
             }
         )
+        try:
+            payload["execution_contract"] = dict(_execution_contract(intent))
+        except Exception:
+            pass
         store.update_status(order_attempt_id, target, payload=payload)
         logger.info(
             "[ORDER-ATTEMPT-STATUS] terminalized attempt_id=%s %s -> %s "
@@ -1158,6 +1162,55 @@ def _effective_post_only(post_only: bool, aggressiveness: float) -> bool:
     return bool(post_only) and float(aggressiveness or 0.0) == 0.0
 
 
+def _resolve_execution_mode_with_reason(intent: OrderIntent) -> tuple:
+    """Resolve the execution mode AND the rule that produced it.
+
+    Same resolution order as before, but each return carries a
+    ``resolution_reason`` tag identifying which rule won — the attribution
+    half of the resolved-execution contract (2026-10-09).  Returns
+    ``(mode, resolution_reason)``.
+    """
+    # 2026-09-14: Marketable IOC/FOK posture wins over a policy maker hint when
+    # the signal stack has already committed to an aggressive, post-only=False,
+    # terminal TIF. The repricer depends on this being a taker.
+    post_only = bool(getattr(intent, "post_only", False))
+    aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
+    tif = (getattr(intent, "time_in_force", "gtc") or "gtc").strip().lower()
+    if (
+        not post_only
+        and aggressiveness > 0.0
+        and tif in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill")
+    ):
+        policy_role = (
+            getattr(intent, "expected_role", None)
+            or getattr(intent, "fee_type", None)
+            or getattr(intent, "liquidity_role", None)
+        )
+        if policy_role == "maker":
+            return "taker", "marketable_posture_overrides_maker_policy"
+        return "taker", "marketable_posture"
+
+    policy_role = getattr(intent, "expected_role", None) or getattr(intent, "fee_type", None)
+    if policy_role in ("maker", "taker"):
+        return policy_role, f"policy_role:{policy_role}"
+
+    mode = getattr(intent, "execution_mode", None)
+    if mode in ("maker", "taker", "staged_ioc", "passive_quote"):
+        return mode, f"execution_mode:{mode}"
+
+    role = getattr(intent, "liquidity_role", None)
+    if role in ("maker", "taker"):
+        return role, f"liquidity_role:{role}"
+
+    if post_only:
+        return "passive_quote", "posture_post_only"
+    if aggressiveness == 0.0:
+        return "maker", "posture_resting"
+    if aggressiveness >= 1.0:
+        return "taker", "posture_aggressive"
+    return "staged_ioc", "posture_partial_aggressive"
+
+
 def _resolve_execution_mode(intent: OrderIntent) -> str:
     """Return the canonical execution-mode string for an intent.
 
@@ -1179,38 +1232,100 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     staged lifecycle; downstream repricing and validation treat it as taker/IOC
     until the two-stage state machine is implemented.
     """
-    # 2026-09-14: Marketable IOC/FOK posture wins over a policy maker hint when
-    # the signal stack has already committed to an aggressive, post-only=False,
-    # terminal TIF. The repricer depends on this being a taker.
-    post_only = bool(getattr(intent, "post_only", False))
-    aggressiveness = float(getattr(intent, "aggressiveness", 0.0) or 0.0)
-    tif = (getattr(intent, "time_in_force", "gtc") or "gtc").strip().lower()
-    if (
-        not post_only
-        and aggressiveness > 0.0
-        and tif in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill")
-    ):
-        return "taker"
+    return _resolve_execution_mode_with_reason(intent)[0]
 
-    policy_role = getattr(intent, "expected_role", None) or getattr(intent, "fee_type", None)
-    if policy_role in ("maker", "taker"):
-        return policy_role
 
-    mode = getattr(intent, "execution_mode", None)
-    if mode in ("maker", "taker", "staged_ioc", "passive_quote"):
-        return mode
+def _admission_lane(intent: OrderIntent) -> str:
+    """The lane the candidate was admitted under, for the execution contract.
 
-    role = getattr(intent, "liquidity_role", None)
-    if role in ("maker", "taker"):
-        return role
-
-    if post_only:
-        return "passive_quote"
-    if aggressiveness == 0.0:
+    Explicit policy-role fields survive ``_apply_execution_mode``'s overwrite
+    of ``intent.execution_mode``, so they are preferred.  The ``decision_id``
+    route suffix (``cand_...:maker``) is the next-best admission signal, then
+    the pre-resolution ``execution_mode``, then posture.  ``"unstamped"`` marks
+    an intent carrying no admission signal at all.
+    """
+    for attr in ("expected_role", "fee_type", "liquidity_role"):
+        v = getattr(intent, attr, None)
+        if v in ("maker", "taker"):
+            return v
+    _did = str(getattr(intent, "decision_id", "") or "")
+    if ":" in _did:
+        _route = _did.rsplit(":", 1)[-1].strip().lower()
+        if _route in ("maker", "taker"):
+            return _route
+    _em = getattr(intent, "execution_mode", None)
+    if _em in ("maker", "passive_quote"):
         return "maker"
-    if aggressiveness >= 1.0:
+    if _em in ("taker", "staged_ioc"):
         return "taker"
-    return "staged_ioc"
+    if bool(getattr(intent, "post_only", False)):
+        return "maker"
+    if float(getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
+        return "taker"
+    return "unstamped"
+
+
+def _execution_contract(intent: OrderIntent) -> Dict[str, Any]:
+    """Build (once) and return the resolved execution contract for an intent.
+
+    The contract pairs the admission lane with the resolved execution mode so
+    a maker-authorized candidate that reaches the wire as a taker order is
+    attributable rather than silent.  ``_apply_execution_mode`` refreshes the
+    mutable fields after its coercion pass so the cached contract reflects the
+    final submission instructions.
+    """
+    contract = getattr(intent, "_execution_contract", None)
+    if contract is not None:
+        return contract
+
+    resolved_mode, resolution_reason = _resolve_execution_mode_with_reason(intent)
+    action = (getattr(intent, "action", "") or "").lower()
+    econ_cap = None
+    chase_cap = None
+    if action == "buy" and not _is_exit_order(intent):
+        try:
+            econ_cap = _max_edge_preserving_buy_price(intent)
+        except Exception:
+            econ_cap = None
+        _sel_px = getattr(intent, "selected_outcome_price_cents", None)
+        if _sel_px is not None and int(_sel_px) > 0:
+            chase_cap = int(_sel_px) + int(
+                os.environ.get("MERID_ENTRY_MAX_CHASE_CENTS", "5")
+            )
+            econ_cap = min(econ_cap, chase_cap) if econ_cap is not None else chase_cap
+    contract = {
+        "admission_lane": _admission_lane(intent),
+        "resolved_execution_mode": resolved_mode,
+        "post_only": bool(getattr(intent, "post_only", False)),
+        "time_in_force": (getattr(intent, "time_in_force", "gtc") or "gtc").strip().lower(),
+        "selected_side_limit": getattr(intent, "price_cents", None),
+        "economic_cap": econ_cap,
+        "chase_cap": chase_cap,
+        "resolution_reason": resolution_reason,
+    }
+    # An immutable ExecutionPolicy (bounded lanes) is the authoritative
+    # admission contract — its lane and role requirements outrank the
+    # posture-derived lane.
+    _pol = getattr(intent, "execution_policy", None)
+    if _pol is not None:
+        contract.update(
+            admission_lane=getattr(_pol, "lane", None) or contract["admission_lane"],
+            required_post_only=bool(getattr(_pol, "required_post_only", False)),
+            required_liquidity_role=getattr(_pol, "required_liquidity_role", "") or "",
+            allow_taker_fallback=bool(getattr(_pol, "allow_taker_fallback", True)),
+        )
+    intent._execution_contract = contract
+    lane = contract["admission_lane"]
+    if lane == "maker" and resolved_mode in ("taker", "staged_ioc"):
+        logger.warning(
+            "[EXEC-CONTRACT-CONVERT] intent_id=%s ticker=%s admission_lane=maker "
+            "resolved_execution_mode=%s resolution_reason=%s sel_limit=%s "
+            "econ_cap=%s chase_cap=%s",
+            getattr(intent, "intent_id", None), intent.ticker, resolved_mode,
+            resolution_reason, contract["selected_side_limit"],
+            econ_cap, chase_cap,
+        )
+    return contract
 
 
 def _apply_execution_mode(intent: OrderIntent) -> tuple:
@@ -1240,6 +1355,13 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
         intent.post_only = False
         intent.aggressiveness = 1.0
         intent.time_in_force = "ioc"
+        _c = _execution_contract(intent)
+        _c.update(
+            resolved_execution_mode="taker",
+            post_only=False,
+            time_in_force="ioc",
+            resolution_reason=_c.get("resolution_reason", "") + "+exit_forced_marketable",
+        )
         resolved_tif = _resolve_tif(intent)
         return False, 1.0, "limit", resolved_tif.tif
 
@@ -1265,6 +1387,10 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
         )
         execution_mode = "taker"
         intent.execution_mode = "taker"
+        _c = _execution_contract(intent)
+        _c["resolution_reason"] = (
+            _c.get("resolution_reason", "") + "+entry_maker_disabled_coerced_taker"
+        )
 
     if execution_mode == "maker":
         post_only, aggressiveness = True, 0.0
@@ -1314,6 +1440,13 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
         intent.time_in_force = "ioc"
 
     resolved_tif = _resolve_tif(intent)
+    _c = _execution_contract(intent)
+    _c.update(
+        resolved_execution_mode=execution_mode,
+        post_only=post_only,
+        time_in_force=(getattr(intent, "time_in_force", None) or resolved_tif.tif),
+        selected_side_limit=getattr(intent, "price_cents", None),
+    )
     return post_only, aggressiveness, "limit", resolved_tif.tif
 
 
@@ -2902,6 +3035,24 @@ def _emit_execution_stage_latency(
             "ws_rest_divergence_cents": getattr(
                 intent, "_ws_rest_divergence_cents", None
             ),
+            # Resolved execution contract: admission lane vs resolved mode so
+            # maker-admitted candidates executing as taker are attributable.
+            "exec_contract_admission_lane": (
+                getattr(intent, "_execution_contract", None) or {}
+            ).get("admission_lane", ""),
+            "exec_contract_resolved_mode": (
+                getattr(intent, "_execution_contract", None) or {}
+            ).get("resolved_execution_mode", "")
+            or getattr(intent, "execution_mode", "") or "",
+            "exec_contract_resolution_reason": (
+                getattr(intent, "_execution_contract", None) or {}
+            ).get("resolution_reason", ""),
+            "exec_contract_economic_cap": (
+                getattr(intent, "_execution_contract", None) or {}
+            ).get("economic_cap"),
+            "exec_contract_chase_cap": (
+                getattr(intent, "_execution_contract", None) or {}
+            ).get("chase_cap"),
         }
         logger.info("EXECUTION-STAGE-LATENCY %s", json.dumps(fields, default=str))
     except Exception:
@@ -4768,12 +4919,39 @@ async def _revalidate_entry_economics(
     executable price only), and a TTE calibration-bucket crossing under the
     partial path fails closed as ``stale_decision_tte_regime_changed``.
     """
-    _rej = lambda reason: OrderResult(
-        status="rejected",
-        mode=mode,
-        reason=reason,
-        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-    )
+    # 2026-10-09: reject-path provenance.  The ALLOW path logs the full
+    # side-by-side decision-vs-fresh input set via [EXEC-REVALIDATION], but a
+    # veto previously recorded only the reason string — unauditable for the
+    # model-integrity questions a big probability move demands.  Populate
+    # _prov as each input resolves and log it on every rejection.
+    _prov: Dict[str, Any] = {}
+
+    def _rej(reason: str) -> "OrderResult":
+        logger.warning(
+            "[EXEC-REVALIDATION-VETO] intent_id=%s ticker=%s side=%s action=%s "
+            "reason=%s sel_px=%s routed_px=%s exec_px=%s side_bid=%s side_ask=%s "
+            "ev0=%s req=%s p_sel0=%s p_sel_fresh=%s p_yes_fresh=%s tte0=%s tte_now=%s "
+            "tte_regime_changed=%s spot=%s vol=%s strike=%s revalidation=%s "
+            "model_recompute=%s ev_new=%s cap=%s",
+            getattr(intent, "intent_id", None), intent.ticker,
+            getattr(intent, "side", None), _prov.get("action"),
+            reason,
+            _prov.get("sel_px"), _prov.get("routed_px"), _prov.get("exec_px"),
+            _prov.get("side_bid"), _prov.get("side_ask"),
+            _prov.get("ev0"), _prov.get("req"), _prov.get("p_sel0"),
+            _prov.get("p_sel_fresh"), _prov.get("p_yes_fresh"),
+            _prov.get("tte0"), _prov.get("tte_now"),
+            _prov.get("tte_regime_changed"), _prov.get("spot"),
+            _prov.get("vol"), _prov.get("strike"),
+            _prov.get("revalidation_kind"), _prov.get("model_recompute"),
+            _prov.get("ev_new"), _prov.get("cap"),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=reason,
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
 
     # 1) Fresh venue-valid BBO.
     try:
@@ -4810,6 +4988,14 @@ async def _revalidate_entry_economics(
         if _is_maker
         else (_side_book["ask_cents"] if _action == "buy" else _side_book["bid_cents"])
     )
+    _prov.update(
+        action=_action,
+        side_bid=_side_book.get("bid_cents"),
+        side_ask=_side_book.get("ask_cents"),
+        exec_px=_exec_px,
+        routed_px=getattr(intent, "price_cents", None),
+        revalidation_kind="partial_price_revalidation",
+    )
     if not isinstance(_exec_px, int) or _exec_px <= 0:
         return _rej("stale_decision_refresh_failed:no_exec_price")
 
@@ -4817,9 +5003,11 @@ async def _revalidate_entry_economics(
         intent, "price_cents", None
     )
     _ev0 = getattr(intent, "ev_net_cents", None)
+    _prov.update(sel_px=_sel_px, ev0=_ev0)
     if _sel_px is None or _ev0 is None:
         return _rej("stale_decision_refresh_failed:no_economics")
     _p_sel0 = getattr(intent, "p_selected", None)
+    _prov["p_sel0"] = _p_sel0
 
     _min_req = getattr(intent, "min_required_edge", None)
     # 2026-10-02: honor an explicit non-positive threshold — bounded bootstrap
@@ -4829,6 +5017,7 @@ async def _revalidate_entry_economics(
         from merid.prediction.trade_decision import TRADE_DECISION_MIN_REQUIRED_EDGE
         _min_req = TRADE_DECISION_MIN_REQUIRED_EDGE
     _req_cents = float(_min_req) * 100.0
+    _prov["req"] = _req_cents
 
     # 2) Model recompute when the immutable probability inputs are present.
     _pinputs = getattr(intent, "probability_inputs", None)
@@ -4871,11 +5060,16 @@ async def _revalidate_entry_economics(
             _tte0 = float(_pinputs["seconds_to_expiry_decision"])
             _dec_age_s = max(0.0, _time.time() - float(getattr(intent, "snapshot_ts", _time.time())))
             _tte_now = _tte0 - _dec_age_s
+            _prov.update(
+                vol=_vol, strike=_pinputs.get("strike_price"),
+                tte0=_tte0, tte_now=_tte_now,
+            )
             if _tte_now <= 0:
                 return _rej("stale_decision_tte_expired")
             _tte_regime_changed = (
                 _walkforward_tte_bucket(_tte0) != _walkforward_tte_bucket(_tte_now)
             )
+            _prov["tte_regime_changed"] = _tte_regime_changed
 
             # Vol input is decision-snapshot: if it is missing/invalid a full
             # recompute cannot run — fail closed rather than fake the model.
@@ -4903,6 +5097,7 @@ async def _revalidate_entry_economics(
             if _spot_f is None:
                 return _rej("stale_decision_spot_stale:rti_ineligible")
             _spot_state = f"rti_ok_age={_spot_age_s:.1f}s" if _spot_age_s is not None else "rti_ok"
+            _prov["spot"] = f"{_spot_f}/{_spot_state}"
 
             # Replay the decision chain: Bachelier raw -> market-anchor logit
             # blend (fresh mid + fresh weight) -> walkforward cal -> held-side
@@ -4983,6 +5178,11 @@ async def _revalidate_entry_economics(
                 "bachelier_wf_anchor_tailcap"
                 + ("_tte_regime_x" if _tte_regime_changed else "")
             )
+            _prov.update(
+                p_sel_fresh=_p_sel_fresh, p_yes_fresh=_p_yes_fresh,
+                revalidation_kind=_revalidation_kind,
+                model_recompute=_model_recompute,
+            )
         except OrderIdentityError:
             raise
         except Exception as _m_exc:
@@ -5016,6 +5216,7 @@ async def _revalidate_entry_economics(
         else 0.0
     )
     _ev_new = float(_ev0) + float(_delta_px) + float(_delta_p)
+    _prov["ev_new"] = _ev_new
     if _ev_new < _req_cents:
         _stem = (
             "stale_decision_model_edge_decayed"
@@ -5039,6 +5240,7 @@ async def _revalidate_entry_economics(
                 else "stale_decision_price_edge_decayed"
             )
             return _rej(f"{_stem}:exec_px={_exec_px}>cap={_cap}")
+    _prov["cap"] = _cap
 
     # 5) Partial path still needs the legacy unified-spot freshness bound;
     # the model path already gated on execution-eligible RTI.
@@ -13431,11 +13633,14 @@ async def _route_live(
     _gross_edge = getattr(intent, "gross_edge", None)
     _net_edge_pretrade = getattr(intent, "net_edge_pretrade", None)
     _selected_price = getattr(intent, "selected_outcome_price_cents", None)
+    _exec_contract = _execution_contract(intent)
     logger.info(
         "[ORDER-CONSTRUCTION-AUDIT] "
         "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%s "
         "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s snapshot_age=%.1fs "
         "p_yes=%s p_no=%s p_selected=%s selected_price_cents=%s gross_edge=%s net_edge=%s "
+        "admission_lane=%s resolved_exec_mode=%s exec_resolution=%s post_only=%s tif=%s "
+        "econ_cap=%s chase_cap=%s "
         "edge_audit=\"p_selected - price - all_in_costs = net_edge\"",
         intent.intent_id,
         intent.ticker,
@@ -13455,6 +13660,13 @@ async def _route_live(
         _selected_price if _selected_price is not None else "n/a",
         _fmt_float_or_na(_gross_edge),
         _fmt_float_or_na(_net_edge_pretrade),
+        _exec_contract.get("admission_lane"),
+        _exec_contract.get("resolved_execution_mode"),
+        _exec_contract.get("resolution_reason"),
+        _exec_contract.get("post_only"),
+        _exec_contract.get("time_in_force"),
+        _exec_contract.get("economic_cap"),
+        _exec_contract.get("chase_cap"),
     )
     
     # Snapshot staleness gate — refuse stale intents regardless of caller path.
