@@ -152,6 +152,32 @@ def test_model_revalidation_rejects_when_spot_crushes_edge(monkeypatch):
     assert "stale_decision_model_edge_decayed" in res.reason
 
 
+def test_model_revalidation_buy_no_wire_format_side(monkeypatch):
+    # 2026-10-09 regression: production intents carry Kalshi wire sides
+    # ("BUY_NO"), but the model-revalidation branch compared
+    # ``intent.side.lower() == "no"`` — never true for "buy_no" — so every
+    # BUY_NO intent was scored with the freshly recomputed p_yes (the held
+    # side's complement) and vetoed on phantom edge decay.  Same supportive
+    # read as the canonical test must now pass and rebind the NO-side fields.
+    _wire(monkeypatch, book=_ob(yes_bid=48, no_bid=50), rti=_rti(99.9))
+    intent = _intent(side="BUY_NO")
+    res = _run(intent)
+    assert res is None
+    assert intent._execution_revalidated is True
+    # p_selected must remain a NO-side probability (supportive, >0.5):
+    # pre-fix it rebinds to p_yes (<0.5) and the trade dies on inverted EV.
+    assert intent.p_selected is not None and float(intent.p_selected) > 0.5
+
+
+def test_model_revalidation_buy_no_rejects_on_real_decay(monkeypatch):
+    # Wire-format BUY_NO still vetoes when the fresh spot actually crushes
+    # the NO thesis — the fix normalizes the side, it does not weaken the gate.
+    _wire(monkeypatch, book=_ob(yes_bid=92, no_bid=6), rti=_rti(103.0))
+    res = _run(_intent(side="BUY_NO"))
+    assert res is not None and res.status == "rejected"
+    assert "stale_decision_model_edge_decayed" in res.reason
+
+
 def test_model_revalidation_spot_stale_when_rti_ineligible(monkeypatch):
     _wire(
         monkeypatch,
