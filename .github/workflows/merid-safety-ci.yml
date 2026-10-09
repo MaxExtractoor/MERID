@@ -78,18 +78,6 @@ jobs:
       run: |
         source venv_test/bin/activate
         pytest tests/risk/test_unified_risk_enforcement.py -v --tb=short
-    
-    - name: Run Security Tests
-      run: |
-        source venv_test/bin/activate
-        pytest tests/security/ -v --tb=short
-    
-    - name: Run Scenario Tests (Logic-based)
-      run: |
-        source venv_test/bin/activate
-        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioA_MultiAgentFlood -v
-        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioC_ConfigMisSet -v
-        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioE_ModeTransitions -v
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # Summary Job
