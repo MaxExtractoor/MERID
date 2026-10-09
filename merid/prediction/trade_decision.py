@@ -4633,6 +4633,112 @@ def compute_trade_decision(
         ),
     })
 
+    # ── 75c entry-cap shadow evaluation (2026-10-09) ─────────────────────
+    # When the fixed selected-side cap is *a* blocker, evaluate every other
+    # gate as though it did not exist and record the complete verdict set.
+    # Observational only — the cap still owns its rejections; this tells us
+    # how many cap-blocked candidates pass everything else, banded by price,
+    # without submitting anything.
+    def _cap_band_lbl(px: Optional[float]) -> Optional[str]:
+        if px is None:
+            return None
+        for _lo, _hi in ((75.0, 80.0), (80.0, 85.0), (85.0, 90.0), (90.0, 95.0)):
+            if _lo < px <= _hi:
+                return f"{int(_lo)}-{int(_hi)}c"
+        return "95c+" if px > 95.0 else "<=75c"
+
+    def _cap_shadow_side(side: str) -> Dict[str, Any]:
+        """Verdict of every gate EXCEPT the fixed entry-price cap."""
+        if side == "yes":
+            fails = {
+                "depth": not yes_depth_ok,
+                "tail_guard": bool(tail_guard_violation_yes),
+                "evidence": not yes_evidence_ok,
+                "throttle": _yes_throttle_block is not None,
+                "bookflow": _yes_bookflow_block is not None,
+                "coinflip": _coinflip_block is not None,
+                "edge": not (_yes_eff_edge >= _yes_edge_eff_bound),
+                "cost_basis": not (
+                    _yes_cbp_neg_floor
+                    or float(yes_breakdown.p_selected) > yes_min_p
+                ),
+                "regime": not _yes_regime_ok,
+                "conviction": _yes_conv_block is not None,
+                "countertrend_lane": _yes_ct_lane_block is not None,
+            }
+            qualified = bool(_yes_trend_hi_qualifies) or (
+                not _yes_hi_price and not any(fails.values())
+            )
+            px = yes_price_cents
+            bd = yes_breakdown
+            eff_edge = _yes_eff_edge
+            eff_bound = _yes_edge_eff_bound
+            min_p_s = yes_min_p
+            depth = yes_depth_cc
+        else:
+            fails = {
+                "depth": not no_depth_ok,
+                "tail_guard": bool(tail_guard_violation_no),
+                "evidence": not no_evidence_ok,
+                "throttle": _no_throttle_block is not None,
+                "bookflow": _no_bookflow_block is not None,
+                "coinflip": _coinflip_block is not None,
+                "edge": not (_no_eff_edge >= _no_edge_eff_bound),
+                "cost_basis": not (
+                    _no_cbp_neg_floor
+                    or float(no_breakdown.p_selected) > no_min_p
+                ),
+                "regime": not _no_regime_ok,
+                "conviction": _no_conv_block is not None,
+                "countertrend_lane": _no_ct_lane_block is not None,
+            }
+            qualified = not any(fails.values())
+            px = no_price_cents
+            bd = no_breakdown
+            eff_edge = _no_eff_edge
+            eff_bound = _no_edge_eff_bound
+            min_p_s = no_min_p
+            depth = no_depth_cc
+        return {
+            "entry_price_cents": float(px) if px is not None else None,
+            "price_band": _cap_band_lbl(float(px) if px is not None else None),
+            "qualified_ex_cap": bool(qualified),
+            "other_failures": sorted(k for k, v in fails.items() if v),
+            "p_selected": float(bd.p_selected),
+            "eff_net_ev_cents": eff_edge * 100.0,
+            "gate_edge_bound_cents": eff_bound * 100.0,
+            "min_p_selected": float(min_p_s),
+            "depth_cc": float(depth),
+        }
+
+    _yes_cap_blocked = _yes_price_cap_block is not None and not yes_qualifies
+    _no_cap_blocked = _no_price_cap_block is not None and not no_qualifies
+    if _yes_cap_blocked or _no_cap_blocked:
+        _cap_shadow: Dict[str, Any] = {
+            "cap_cents": _dr.moneyness_max_entry_price_cents(),
+            "route": route,
+            "tte_s": float(seconds_to_expiry) if seconds_to_expiry is not None else None,
+        }
+        if _yes_cap_blocked:
+            _cap_shadow["yes"] = _cap_shadow_side("yes")
+        if _no_cap_blocked:
+            _cap_shadow["no"] = _cap_shadow_side("no")
+        indicators["cap_shadow"] = _cap_shadow
+        for _s in ("yes", "no"):
+            _sv = _cap_shadow.get(_s)
+            if _sv is not None:
+                logger.info(
+                    "[CAP-SHADOW] asset=%s ticker=%s side=%s route=%s px=%.0fc "
+                    "band=%s qualified_ex_cap=%s other_failures=%s "
+                    "p_sel=%.3f eff_ev=%.1fc bound=%.1fc tte=%.0fs",
+                    asset, ticker, _s, route,
+                    _sv["entry_price_cents"] or -1.0,
+                    _sv["price_band"], _sv["qualified_ex_cap"],
+                    _sv["other_failures"], _sv["p_selected"],
+                    _sv["eff_net_ev_cents"], _sv["gate_edge_bound_cents"],
+                    _cap_shadow["tte_s"] or -1.0,
+                )
+
     # 2026-10-05 (top-edge IOC canary): a side that failed ONLY the edge
     # bound — every structural gate passed, the executable quote is the
     # WS-verified canonical book — may still be emitted at the reduced
