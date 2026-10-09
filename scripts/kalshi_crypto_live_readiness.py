@@ -32,6 +32,15 @@ Usage:
     python scripts/kalshi_crypto_live_readiness.py --verbose # Detailed diagnostics
     python scripts/kalshi_crypto_live_readiness.py --json    # Machine-readable JSON
 
+    python scripts/kalshi_crypto_live_readiness.py --ci      # CI mode (paper/demo only)
+
+CI mode (--ci):
+    CI runners have no Kalshi credentials, so the credential checks
+    (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_*) are reported as warnings instead of
+    blocking failures. Every other check (formulas, proposal paths, market
+    coverage, dry-run sizing) is still blocking. --ci is refused when
+    KALSHI_ENV=live, so it can never green-light live trading.
+
 Exit codes:
     0  LIVE_READY=YES — all checks passed, safe to enable live trading
     1  LIVE_READY=NO — blocking failures found, DO NOT enable live trading
@@ -41,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import inspect
 import io
 import json
@@ -69,6 +79,13 @@ RED = "\033[91m"
 YELLOW = "\033[93m"
 GRAY = "\033[90m"
 RESET = "\033[0m"
+
+# Credentials that CI runners legitimately do not have. Only downgraded to
+# warnings when the script is run with --ci (never in live mode).
+CI_OPTIONAL_ENV_VARS = {
+    "KALSHI_API_KEY_ID",
+    "KALSHI_PRIVATE_KEY_PATH or KALSHI_PRIVATE_KEY_PEM",
+}
 
 
 # ============================================================================
@@ -130,6 +147,7 @@ class ReadinessReport:
     section_4_coverage: List[MarketCoverageCheck] = field(default_factory=list)
     section_5_dry_run_results: Dict[str, Any] = field(default_factory=dict)
     blocking_failures: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def is_live_ready(self) -> bool:
@@ -521,7 +539,7 @@ async def check_market_coverage(verbose: bool = False) -> List[MarketCoverageChe
 # Section 5: Dry-Run Preflight
 # ============================================================================
 
-async def run_dry_run_preflight(verbose: bool = False) -> Dict[str, Any]:
+async def run_dry_run_preflight(verbose: bool = False, ci_mode: bool = False) -> Dict[str, Any]:
     """Run full preflight dry-run across sample markets."""
     results = {
         "config_validation": False,
@@ -535,10 +553,11 @@ async def run_dry_run_preflight(verbose: bool = False) -> Dict[str, Any]:
         from merid.settings import settings
 
         # Check critical settings
-        all_ok = all([
-            settings.KALSHI_API_KEY_ID not in ("", "change_me", None),
-            settings.KALSHI_API_HOST is not None,
-        ])
+        checks = [settings.KALSHI_API_HOST is not None]
+        if not ci_mode:
+            # CI has no real credentials; live/operator runs must have them.
+            checks.append(settings.KALSHI_API_KEY_ID not in ("", "change_me", None))
+        all_ok = all(checks)
         results["config_validation"] = all_ok
     except Exception as e:
         results["config_validation"] = False
@@ -808,6 +827,11 @@ def print_final_summary(report: ReadinessReport) -> None:
         for i, failure in enumerate(report.blocking_failures, 1):
             print(f"  {i}. {failure}")
 
+    if report.warnings:
+        print(f"\n{YELLOW}Warnings (non-blocking):{RESET}")
+        for i, warning in enumerate(report.warnings, 1):
+            print(f"  {i}. {warning}")
+
     print("=" * 120 + "\n")
 
 
@@ -816,6 +840,7 @@ def to_json(report: ReadinessReport) -> str:
     return json.dumps({
         "live_ready": report.is_live_ready,
         "blocking_failures": report.blocking_failures,
+        "warnings": report.warnings,
         "env_vars": [
             {
                 "name": c.name,
@@ -861,7 +886,7 @@ def to_json(report: ReadinessReport) -> str:
 # Main
 # ============================================================================
 
-async def run_all_checks(verbose: bool = False) -> ReadinessReport:
+async def run_all_checks(verbose: bool = False, ci_mode: bool = False) -> ReadinessReport:
     """Run all readiness checks."""
     report = ReadinessReport()
 
@@ -883,15 +908,23 @@ async def run_all_checks(verbose: bool = False) -> ReadinessReport:
 
     # Section 5: Dry-run
     print("Running Section 5: Dry-run preflight...")
-    report.section_5_dry_run_results = await run_dry_run_preflight(verbose=verbose)
+    report.section_5_dry_run_results = await run_dry_run_preflight(verbose=verbose, ci_mode=ci_mode)
 
     # Collect blocking failures
     report.blocking_failures = []
 
     # Check env vars
+    if ci_mode and os.getenv("KALSHI_ENV", "paper") == "live":
+        report.blocking_failures.append("--ci is not allowed with KALSHI_ENV=live")
+        ci_mode = False
+
     for check in report.section_1_env_vars:
         if check.required_in_live and not check.is_valid:
-            report.blocking_failures.append(f"Env var {check.name}: {check.issue}")
+            msg = f"Env var {check.name}: {check.issue}"
+            if ci_mode and check.name in CI_OPTIONAL_ENV_VARS:
+                report.warnings.append(f"{msg} (skipped in --ci mode)")
+            else:
+                report.blocking_failures.append(msg)
 
     # Check formulas
     for check in report.section_2_formulas:
@@ -929,13 +962,21 @@ async def main() -> None:
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="CI mode: Kalshi credentials are warnings, not blockers (refused when KALSHI_ENV=live)",
+    )
     args = parser.parse_args()
 
-    print(f"{GRAY}MERID Kalshi Crypto Live-Trading Readiness Checklist{RESET}")
-    print(f"{GRAY}{'=' * 80}{RESET}")
+    # In --json mode stdout must be pure JSON, so progress/banner text goes to stderr.
+    progress_out = sys.stderr if args.json else sys.stdout
+    print(f"{GRAY}MERID Kalshi Crypto Live-Trading Readiness Checklist{RESET}", file=progress_out)
+    print(f"{GRAY}{'=' * 80}{RESET}", file=progress_out)
 
     # Run all checks
-    report = await run_all_checks(verbose=args.verbose)
+    with contextlib.redirect_stdout(progress_out):
+        report = await run_all_checks(verbose=args.verbose, ci_mode=args.ci)
 
     # Output results
     if args.json:
