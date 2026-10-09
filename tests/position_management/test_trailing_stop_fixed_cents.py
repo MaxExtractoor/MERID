@@ -246,22 +246,24 @@ class TestTrailingStopFixedCents:
         
         assert profit_cents < min_profit_cents
 
-    async def test_trailing_activation_delay(self):
-        """Test trailing activation delay prevents noise-triggered exits.
-        
-        CRITICAL FIX: 2026-07-12 - Trailing should not activate immediately
-        when profit threshold is reached. It should wait for activation_delay_sec
-        (default 30 seconds) to prevent noise-triggered exits.
+    async def test_trailing_activation_immediate_on_validated_profit(self):
+        """Test trailing activates on the validated executable-profit tick.
+
+        2026-10-09: The unconditional 30s activation delay was removed. An
+        executable own-side bid that crosses the activation threshold is
+        itself the noise filter; a dead zone after a *validated* profit
+        window lets a fast reversal destroy profit protection (BTC-090445).
+        Armed state must persist across pullbacks below the threshold.
         """
         monitor = PositionMonitor(poll_interval=0.1)
-        
+
         exit_triggered = []
-        
+
         def exit_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
             exit_triggered.append((position.position_id, exit_reason, exit_price_cents))
-        
+
         monitor.register_exit_intent_callback(exit_callback)
-        
+
         position = Position(
             position_id="test-8",
             market_id="KXBTC15M-TEST",
@@ -273,35 +275,24 @@ class TestTrailingStopFixedCents:
             trailing_type=TrailingType.FIXED_CENTS,
             trailing_param=5,
         )
-        
+
         # Initially not activated
         assert position.trailing_activated is False
         assert position.trailing_profit_threshold_reached_at is None
-        
+
         monitor.add_position(position)
-        
-        # Price moves to 62 cents (12 cent profit - meets threshold)
-        # This should record the timestamp but NOT activate trailing yet
+
+        # Price moves to 62 cents (12 cent profit - meets threshold):
+        # arms AND activates on the same validated tick.
         await monitor._legacy_check_position(position, 62)
-        
-        # Threshold timestamp should be recorded
         assert position.trailing_profit_threshold_reached_at is not None
-        # But trailing should NOT be activated yet (delay not elapsed)
-        assert position.trailing_activated is False
-        
-        # Price drops back to 60 cents (still above threshold)
-        # Trailing should still not be activated
-        await monitor._legacy_check_position(position, 60)
-        assert position.trailing_activated is False
-        
-        # Wait for delay to elapse (simulate by manually setting timestamp)
-        import time
-        position.trailing_profit_threshold_reached_at = time.time() - 31  # 31 seconds ago
-        
-        # Now check position again at 62 cents (still above threshold)
-        # Trailing should activate after delay elapses
-        await monitor._legacy_check_position(position, 62)
         assert position.trailing_activated is True
+
+        # Pullback below the threshold must NOT disarm an armed trail.
+        position2 = position
+        position2.trailing_activated = True
+        await monitor._legacy_check_position(position2, 58)
+        assert position2.trailing_activated is True
 
     async def test_trailing_activation_r_from_exit_policy(self):
         """Trailing activation threshold is driven by exit_policy.trailing_activation_r."""
@@ -330,16 +321,10 @@ class TestTrailingStopFixedCents:
         assert position.trailing_profit_threshold_reached_at is None
         assert position.trailing_activated is False
 
-        # Price at 54 -> 4c profit, exactly 0.8R. Should arm but not activate yet.
+        # Price at 54 -> 4c profit, exactly 0.8R. Validated executable
+        # profit activates immediately (2026-10-09: no elapsed-delay gate).
         await monitor._legacy_check_position(position, 54)
         assert position.trailing_profit_threshold_reached_at is not None
-        assert position.trailing_activated is False
-
-        # Simulate delay elapsed
-        position.trailing_profit_threshold_reached_at = time.time() - 31
-
-        # Re-check at 54 -> trailing should now be active
-        await monitor._legacy_check_position(position, 54)
         assert position.trailing_activated is True
 
         # Price drops to 49; max_favorable is 54, trail level is 49 -> trigger

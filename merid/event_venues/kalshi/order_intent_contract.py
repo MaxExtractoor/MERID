@@ -1380,17 +1380,38 @@ async def fetch_fresh_signed_yes_exposure(
 
         client = get_kalshi_client()
         if client is not None:
-            positions = await asyncio.wait_for(client.get_positions(), timeout=timeout)
-            for pos in positions:
-                if pos.market_id == ticker:
-                    if pos.outcome_id is None:
-                        raise ValueError(f"ticker={ticker}: missing outcome_id on exchange position")
-                    side = canonical_outcome_side(pos.outcome_id).value
-                    size = pos.size or Decimal("0")
-                    qty_cc = int(Decimal(size) * Decimal("100"))
-                    signed = normalize_rest_position(qty_cc, side, ticker)
-                    avg = int(pos.average_entry_price * Decimal("100")) if pos.average_entry_price is not None else None
-                    return signed, avg, side
+            # Use the result-typed variant: ``get_positions()`` maps failures to
+            # an empty list, which is indistinguishable from a verified-flat
+            # account.  Callers rely on ``None`` meaning "could not determine"
+            # (fail closed), so a successful, fully-paginated list that lacks
+            # the ticker must return an explicit ``0``.
+            positions = None
+            get_result = getattr(client, "get_positions_result", None)
+            if callable(get_result):
+                res = await asyncio.wait_for(get_result(), timeout=timeout)
+                if getattr(res, "success", False):
+                    positions = res.data or []
+                else:
+                    logger.debug(
+                        "[FRESH-POSITION] exchange fetch failed for %s: %s",
+                        ticker,
+                        getattr(res, "error", "unknown"),
+                    )
+            else:
+                positions = await asyncio.wait_for(client.get_positions(), timeout=timeout)
+            if positions is not None:
+                for pos in positions:
+                    if pos.market_id == ticker:
+                        if pos.outcome_id is None:
+                            raise ValueError(f"ticker={ticker}: missing outcome_id on exchange position")
+                        side = canonical_outcome_side(pos.outcome_id).value
+                        size = pos.size or Decimal("0")
+                        qty_cc = int(Decimal(size) * Decimal("100"))
+                        signed = normalize_rest_position(qty_cc, side, ticker)
+                        avg = int(pos.average_entry_price * Decimal("100")) if pos.average_entry_price is not None else None
+                        return signed, avg, side
+                # Complete position list, ticker absent → verified flat.
+                return 0, None, None
     except Exception as exc:
         logger.debug("[FRESH-POSITION] exchange fetch failed for %s: %s", ticker, exc)
 

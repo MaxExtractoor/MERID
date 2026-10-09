@@ -103,11 +103,13 @@ async def test_replay_exit_submission_unknown_lifecycle(temp_db_path, exit_json_
     assert flight["attempt_id"] == record.attempt_id
     assert flight["state"] == ExitOrderAttemptState.SUBMISSION_UNKNOWN.value
 
-    # 4. First exchange lookup: order is still resting. Durable state should move
-    #    to RESOLVING_ON_EXCHANGE while the monitor keeps the in-flight guard.
+    # 4. First exchange lookup: order is still resting. Durable state advances
+    #    through RESOLVING_ON_EXCHANGE to RESTING within one reconcile (the
+    #    "unjam" reconcile path resolves the unknown submission directly to the
+    #    observed venue state) while the monitor keeps the in-flight guard.
     resting_evidence = scenario.exchange_evidence[0]
     resolving = await replay.reconcile(resting_evidence)
-    assert resolving.state == ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value
+    assert resolving.state == ExitOrderAttemptState.RESTING.value
     assert record.position_key in monitor._exit_intent_in_flight
 
     # 5. Second exchange lookup: order was canceled. The FSM should resolve

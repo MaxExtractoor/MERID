@@ -83,14 +83,32 @@ def test_parse_non_executable_vwap():
 
 
 def test_hold_to_settlement_when_fair_above_degraded(monkeypatch, tmp_path):
-    """Fair value still above the degraded exit proceeds -> genuine hold."""
+    """Fair value still above the degraded exit proceeds -> genuine hold
+    for a non-mandatory trigger.  (Mandatory hard-risk triggers bypass this
+    EV hold — see test_mandatory_trigger_bypasses_fair_hold.)"""
     ledger, tracker = _patch_env(monkeypatch, tmp_path)
-    cand = _candidate(fair_value_cents=25)  # 25 + costs(2) + hyst(1) > vwap 18
+    cand = _candidate(trigger_reason="TRAILING_STOP", fair_value_cents=25)  # 25 + costs(2) + hyst(1) > vwap 18
     _run(cand, _reject_result())
     assert ledger.records[0]["decision"] == "HOLD_TO_SETTLEMENT_APPROVED"
     assert ledger.records[0]["basis"] == "fair_above_degraded_exit_value"
     res = next(iter(tracker._records.values()))
     assert res.status == ResidualStatus.HOLD_APPROVED.value
+
+
+def test_mandatory_trigger_bypasses_fair_hold(monkeypatch, tmp_path):
+    """2026-10-09 precedence: a HARD_STOP is a mandatory risk exit — the
+    discretionary "fair > vwap -> hold" comparison must not veto it.  The
+    candidate proceeds to the degraded-exit path (bounded, repriced to the
+    fresh book) instead of riding to settlement on a lagging model fair."""
+    ledger, tracker = _patch_env(monkeypatch, tmp_path)
+    cand = _candidate(trigger_reason="HARD_STOP", fair_value_cents=25)
+    _run(cand, _reject_result())
+    rec = ledger.records[0]
+    assert rec["mandatory_fair_bypass"] is True
+    # fair=25 > vwap=18 would have been a hold under the old precedence;
+    # now the candidate reaches the submission gate (observe-only here).
+    assert rec["decision"] == "DEGRADED_EXIT_APPROVED"
+    assert rec["basis"] == "observe_only_submission_disabled"
 
 
 def test_data_unavailable_without_fair_value(monkeypatch, tmp_path):

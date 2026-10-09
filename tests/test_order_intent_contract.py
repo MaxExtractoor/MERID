@@ -302,14 +302,14 @@ class TestFetchFreshSignedYesExposure:
 
         with patch("merid.event_venues.kalshi.client.get_kalshi_client") as mock_client_get:
             client = MagicMock()
-            client.get_positions = AsyncMock(return_value=[
+            client.get_positions_result = AsyncMock(return_value=types.SimpleNamespace(success=True, data=[
                 MagicMock(
                     market_id="KXBTC15M-TEST",
                     outcome_id="no",
                     size=Decimal("5"),
                     average_entry_price=Decimal("0.45"),
                 )
-            ])
+            ]))
             mock_client_get.return_value = client
 
             signed, avg, side = await fetch_fresh_signed_yes_exposure("KXBTC15M-TEST")
@@ -325,14 +325,14 @@ class TestFetchFreshSignedYesExposure:
 
         with patch("merid.event_venues.kalshi.client.get_kalshi_client") as mock_client_get:
             client = MagicMock()
-            client.get_positions = AsyncMock(return_value=[
+            client.get_positions_result = AsyncMock(return_value=types.SimpleNamespace(success=True, data=[
                 MagicMock(
                     market_id="KXBTC15M-TEST",
                     outcome_id="yes",
                     size=Decimal("5"),
                     average_entry_price=Decimal("0.55"),
                 )
-            ])
+            ]))
             mock_client_get.return_value = client
 
             signed, avg, side = await fetch_fresh_signed_yes_exposure("KXBTC15M-TEST")
@@ -348,14 +348,14 @@ class TestFetchFreshSignedYesExposure:
 
         with patch("merid.event_venues.kalshi.client.get_kalshi_client") as mock_client_get:
             client = MagicMock()
-            client.get_positions = AsyncMock(return_value=[
+            client.get_positions_result = AsyncMock(return_value=types.SimpleNamespace(success=True, data=[
                 MagicMock(
                     market_id="KXBTC15M-TEST",
                     outcome_id="no",
                     size=Decimal("-5"),
                     average_entry_price=Decimal("0.45"),
                 )
-            ])
+            ]))
             mock_client_get.return_value = client
 
             signed, avg, side = await fetch_fresh_signed_yes_exposure("KXBTC15M-TEST")
@@ -370,14 +370,14 @@ class TestFetchFreshSignedYesExposure:
 
         with patch("merid.event_venues.kalshi.client.get_kalshi_client") as mock_client_get:
             client = MagicMock()
-            client.get_positions = AsyncMock(return_value=[
+            client.get_positions_result = AsyncMock(return_value=types.SimpleNamespace(success=True, data=[
                 MagicMock(
                     market_id="KXBTC15M-TEST",
                     outcome_id=None,
                     size=Decimal("5"),
                     average_entry_price=Decimal("0.55"),
                 )
-            ])
+            ]))
             mock_client_get.return_value = client
 
             signed, avg, side = await fetch_fresh_signed_yes_exposure("KXBTC15M-TEST")

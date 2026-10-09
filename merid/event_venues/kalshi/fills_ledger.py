@@ -5224,6 +5224,98 @@ class KalshiFillsLedger:
             - fee
         )
 
+    def _repair_stale_proceeds_for_market(self, market_ticker: Optional[str]) -> int:
+        """Recompute stored proceeds for a market's fills under the complete fill set.
+
+        Signed fill proceeds depend on the account's signed-YES exposure
+        *before* the fill's trade time.  Delivery order across ingestion lanes
+        is not guaranteed: a WS/live-router exit fill can land minutes before
+        the REST-confirmed entry fill that created the exposure (2026-10-09 ETH
+        audit: exit ingested 1.4s after trade time while its entry took +115s
+        through http_poller).  Proceeds computed at ingest then saw zero prior
+        exposure and booked a covered close as a fresh mint — the $1.00/contract
+        cash inversion the signed-proceeds path was built to avoid.
+
+        This pass recomputes each trusted fill's proceeds from its canonical
+        side/action (the intent-resolved position effect that produced the
+        original proceeds inputs — identical to the execution form for normal
+        fills, and equal to the counterparty-form intent substitution for
+        counterparty rows) against the now-complete prior exposure.  Only
+        divergent rows are rewritten; the ingest-time value is preserved in
+        ``raw_payload`` for audit.  Returns the number of repaired rows.
+        """
+        if not market_ticker:
+            return 0
+        repaired = 0
+        for f in list(self._fills.values()):
+            if f.market_ticker != market_ticker:
+                continue
+            if getattr(f, "unmatched", False):
+                continue
+            if getattr(f, "canonicalization_state", None) not in TRUSTED_CANONICALIZATION_STATES:
+                continue
+            action = getattr(f, "canonical_position_action", None)
+            side = getattr(f, "canonical_position_side", None)
+            if action not in ("buy", "sell") or side not in ("yes", "no"):
+                continue
+            leg_price = f.yes_price_dollars if side == "yes" else f.no_price_dollars
+            opp_price = f.no_price_dollars if side == "yes" else f.yes_price_dollars
+            if leg_price is None:
+                continue
+            qty_cc = int(getattr(f, "quantity_cc", 0) or 0)
+            if qty_cc <= 0:
+                continue
+            stored = getattr(f, "proceeds_dollars", None)
+            if stored is None:
+                continue
+            try:
+                expected = self._compute_signed_fill_proceeds(
+                    market_ticker,
+                    execution_action=action,
+                    proceeds_side=side,
+                    proceeds_price=Decimal(str(leg_price)),
+                    opposite_price=Decimal(str(opp_price)) if opp_price is not None else None,
+                    count_fp=Decimal(str(f.count_fp or 0)),
+                    quantity_cc=qty_cc,
+                    before_time=getattr(f, "created_time", None),
+                    exclude_fill_id=getattr(f, "fill_id", None),
+                    exclude_order_id=getattr(f, "order_id", None),
+                    fee=Decimal(str(getattr(f, "fee_cost", None) or 0)),
+                )
+            except Exception:
+                continue
+            if abs(expected - Decimal(str(stored))) <= Decimal("0.005"):
+                continue
+            old = Decimal(str(stored))
+            f.proceeds_dollars = expected
+            try:
+                payload = f.raw_payload
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload.setdefault("proceeds_dollars_at_ingest", str(old))
+                payload["proceeds_repaired_reason"] = "late_prior_fill_arrival"
+                f.raw_payload = payload
+            except Exception:
+                pass
+            logger.warning(
+                "[FILL-PROCEEDS-REPAIRED] fill_id=%s ticker=%s stored=%s -> corrected=%s "
+                "- prior exposure incomplete at ingest (out-of-order fill delivery)",
+                getattr(f, "fill_id", None),
+                market_ticker,
+                str(old),
+                str(expected),
+            )
+            repaired += 1
+        if repaired:
+            try:
+                self._session_realized_pnl = self._recompute_session_realized_pnl()
+                self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+            except Exception:
+                pass
+        return repaired
+
     def _replay_market_position(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Rebuild the open-position record for a market by replaying its fills.
 
@@ -8579,6 +8671,18 @@ class KalshiFillsLedger:
             _mids = self._fills_by_market.setdefault(fill.market_ticker, [])
             if fill.fill_id not in _mids:
                 _mids.append(fill.fill_id)
+
+        # 2026-10-09: A newly inserted fill can change the prior signed
+        # exposure seen by fills that were ingested BEFORE it (out-of-order
+        # delivery across WS/live-router/http_poller lanes).  Their stored
+        # proceeds may have been booked against an incomplete position view —
+        # the covered-close-vs-mint confusion that inverts cash by $1.00 per
+        # contract.  Recompute this market's proceeds whenever a fill lands so
+        # stale rows self-repair (idempotent; only divergent rows are touched).
+        try:
+            self._repair_stale_proceeds_for_market(getattr(fill, "market_ticker", None))
+        except Exception as exc:
+            logger.debug("[FILLS-LEDGER] proceeds repair pass failed (non-critical): %s", exc)
 
     async def _init_db(self) -> None:
         """Initialize SQLite with WAL mode and proper settings.

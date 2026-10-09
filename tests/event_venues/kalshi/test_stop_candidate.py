@@ -136,6 +136,74 @@ class TestStopCandidateReplay:
         assert result.status == "rejected"
         assert "stop_candidate_submission_disabled" in result.reason
 
+    @pytest.mark.asyncio
+    async def test_unverifiable_position_fails_closed(self, monkeypatch):
+        """2026-10-09 BTC audit: a failed REST+cache position fetch returns
+        ``None`` — unknown is NOT flat.  The candidate must be recorded and the
+        submission blocked with an explicit diagnostic reason; silently
+        treating ``None`` as 0 cancelled live protective stops."""
+        from merid.event_venues.kalshi import stop_candidate as sc
+
+        recorded = []
+        monkeypatch.setattr(sc, "record_stop_candidate", lambda c: recorded.append(c))
+
+        async def _no_exposure(*a, **kw):
+            return None, None, None
+
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_intent_contract.fetch_fresh_signed_yes_exposure",
+            _no_exposure,
+        )
+        candidate = StopCandidate(
+            market_ticker="KXBTC15M-TEST",
+            trigger_reason="HARD_STOP",
+            position_from_exchange_cc=-100,
+            candidate_id="sc-unknown-pos",
+        )
+        result = await sc.maybe_submit_stop_candidate(candidate, force=True)
+        assert result is not None
+        assert result.status == "rejected"
+        assert result.reason == "stop_candidate_exchange_position_unknown"
+        assert recorded and recorded[0].candidate_id == "sc-unknown-pos"
+
+    @pytest.mark.asyncio
+    async def test_verified_flat_position_still_short_circuits(self, monkeypatch):
+        """A successful exchange snapshot with the ticker absent returns an
+        explicit 0 — verified flat keeps the flat branch (residual cleanup),
+        distinct from the fail-closed unknown path."""
+        from merid.event_venues.kalshi import stop_candidate as sc
+
+        recorded = []
+        monkeypatch.setattr(sc, "record_stop_candidate", lambda c: recorded.append(c))
+
+        async def _flat_exposure(*a, **kw):
+            return 0, None, None
+
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_intent_contract.fetch_fresh_signed_yes_exposure",
+            _flat_exposure,
+        )
+        # Keep the residual tracker off the production artifact.
+        import merid.event_venues.kalshi.residual_exit as _residual_mod
+        _closed = []
+        monkeypatch.setattr(
+            _residual_mod,
+            "get_residual_exit_tracker",
+            lambda *a, **kw: SimpleNamespace(
+                close_for_ticker=lambda t: _closed.append(t) or 1
+            ),
+        )
+        candidate = StopCandidate(
+            market_ticker="KXBTC15M-TEST",
+            trigger_reason="HARD_STOP",
+            position_from_exchange_cc=-100,
+            candidate_id="sc-flat-pos",
+        )
+        result = await sc.maybe_submit_stop_candidate(candidate, force=True)
+        assert result is not None
+        assert result.status == "rejected"
+        assert result.reason == "stop_candidate_exchange_position_flat"
+
     def test_validate_stop_order_invariants_rejects_non_reduce_only(self):
         """A stop-generated close must be reduce-only."""
         canonical = CanonicalOrderIntent(
@@ -315,6 +383,16 @@ class TestStopCandidateSubmissionIntent:
         )
         fake_cache = SimpleNamespace(get_position=lambda _t: cached_position)
 
+        # No live REST position fetch in tests — exercise the cache fallback.
+        async def _no_positions_result():
+            return SimpleNamespace(success=False, error="test_no_rest", data=None)
+
+        _no_client = SimpleNamespace(get_positions_result=_no_positions_result)
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.client.get_kalshi_client",
+            lambda: _no_client,
+        )
+
         candidate = StopCandidate(
             market_ticker="KXBTC15M-TEST",
             trigger_reason="HARD_STOP",
@@ -353,6 +431,233 @@ class TestStopCandidateSubmissionIntent:
         assert intent.reduce_only is True
         assert intent.time_in_force == "ioc"
         assert intent.entry_or_exit == "exit"
+
+
+class TestTakeProfitRetryObligation:
+    """2026-10-09 BTC-090445 replay: a take-profit exit that fired and was
+    rejected by the execution firewall (``limit_not_executable``) re-arms the
+    position with ``exit_retry_count > 0``.  While the configured TP condition
+    still holds, the discretionary overpay floor must not cancel the
+    outstanding obligation — the retry emits at the executable own-side bid.
+    """
+
+    def _position(self):
+        import time as _t
+        from datetime import datetime, timedelta
+        from merid.position_management.position import (
+            Position,
+            PositionSide,
+            RiskParamsState,
+        )
+
+        opened_at = datetime.utcnow() - timedelta(seconds=120)
+        position = Position(
+            market_id="KXBTC15M-TPRETRY-TEST",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=70,
+            entry_fill_price_cents=70,
+            take_profit_price_cents=78,
+            stop_loss_price_cents=None,
+            stop_loss_enabled=False,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            entry_fill_id="btc-fill-001",
+            entry_fill_timestamp=opened_at,
+            entry_book_capture_quality="AT_FILL",
+            entry_executable_bid_cents=69,
+            entry_executable_ask_cents=71,
+            entry_model_probability=0.82,
+            opened_at=opened_at,
+        )
+        # TP debounce already satisfied — the trigger condition holds.
+        position.tp_debounce_first_seen_at = _t.monotonic() - 60.0
+        return position
+
+    def _snapshot(self, position, bid=79):
+        from merid.position_management.exit_audit import ExitPriceSnapshot
+        return ExitPriceSnapshot(
+            market_id=position.market_id,
+            position_side=position.side,
+            mid_cents=bid,
+            own_side_bid_cents=bid,
+            own_side_ask_cents=bid + 2,
+            opposite_bid_cents=None,
+            opposite_ask_cents=None,
+            book_age_ms=0,
+            data_source="ws_live",
+            data_quality="GOOD",
+            executable=True,
+            has_bid_size=True,
+            snapshot_id="replay-btc",
+            timestamp=0.0,
+            min_depth_own_side=10,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejected_tp_retry_bypasses_overpay_floor(self):
+        """First eval (no outstanding attempt): floor may hold.  After a
+        rejected attempt re-arms (exit_retry_count=1), the same eval must
+        emit TAKE_PROFIT repriced to the executable bid."""
+        from unittest.mock import Mock
+        from merid.position_management.position_monitor import PositionMonitor
+        from merid.position_management.exit_policy import ExitReason
+
+        monitor = PositionMonitor()
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+
+        position = self._position()
+        monitor.add_position(position)
+        snapshot = self._snapshot(position, bid=79)
+
+        # Baseline: fair=82 + cost > 79 — a fresh TP opportunity is suppressed.
+        await monitor._check_position(position, snapshot)
+        fresh_calls = [
+            c for c in callback.call_args_list
+            if len(c.args) > 1 and c.args[1] == ExitReason.TAKE_PROFIT
+        ]
+
+        # Simulate the firewall rejection + re-arm (BTC: limit=81 vs vwap=79).
+        position.exit_retry_count = 1
+        monitor._clear_exit_intent_in_flight(position.position_id)
+
+        await monitor._check_position(position, snapshot)
+
+        retry_calls = [
+            c for c in callback.call_args_list
+            if len(c.args) > 1 and c.args[1] == ExitReason.TAKE_PROFIT
+        ]
+        assert len(retry_calls) > len(fresh_calls), (
+            "outstanding TP obligation must re-emit despite the overpay floor"
+        )
+        # The emitted price must be the executable own-side bid, not the stale
+        # TP level (repriced inside _emit_exit_intent).
+        assert retry_calls[-1].args[2] == 79
+
+
+class TestTrailingActivationBlindSpot:
+    """Reproduces KXBTC15M-26OCT090445-45 (2026-10-09): the trail armed at
+    +6c, but activation required a further 30s elapsed delay while the whole
+    profitable window lasted ~40s — the position collapsed before the trail
+    could activate and settled at a full loss.
+
+    Fixed behavior: activation fires the first tick the validated executable
+    own-side bid covers entry+min_profit; no elapsed delay.  Armed state
+    persists across a pullback below the threshold.
+    """
+
+    def _position(self):
+        from datetime import datetime, timedelta
+        from merid.position_management.position import (
+            Position,
+            PositionSide,
+            RiskParamsState,
+            TrailingType,
+        )
+
+        opened_at = datetime.utcnow() - timedelta(seconds=120)
+        position = Position(
+            market_id="KXBTC15M-TRAIL-TEST",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=70,
+            entry_fill_price_cents=70,
+            take_profit_price_cents=None,
+            stop_loss_price_cents=None,
+            stop_loss_enabled=False,
+            trailing_type=TrailingType.FIXED_CENTS,
+            trailing_param=5.0,
+            risk_params_state=RiskParamsState.ORIGINAL_PERSISTED,
+            risk_params_schema_version=2,
+            entry_fill_id="btc-fill-trail",
+            entry_fill_timestamp=opened_at,
+            entry_book_capture_quality="AT_FILL",
+            entry_executable_bid_cents=69,
+            entry_executable_ask_cents=71,
+            entry_model_probability=0.82,
+            opened_at=opened_at,
+        )
+        return position
+
+    def _snapshot(self, position, bid):
+        from merid.position_management.exit_audit import ExitPriceSnapshot
+        return ExitPriceSnapshot(
+            market_id=position.market_id,
+            position_side=position.side,
+            mid_cents=bid,
+            own_side_bid_cents=bid,
+            own_side_ask_cents=bid + 2,
+            opposite_bid_cents=None,
+            opposite_ask_cents=None,
+            book_age_ms=0,
+            data_source="ws_live",
+            data_quality="GOOD",
+            executable=True,
+            has_bid_size=True,
+            snapshot_id="replay-trail",
+            timestamp=0.0,
+            min_depth_own_side=10,
+        )
+
+    @pytest.mark.asyncio
+    async def test_trail_activates_without_delay_and_fires_on_retrace(self):
+        """BTC window: bid 82 (+12 >= min_profit) -> pullback to 77.
+        Old code: armed at +12 but needed +30s elapsed -> never activated.
+        New code: activates the same tick, then a 5c retrace fires TRAIL."""
+        from unittest.mock import Mock
+        from merid.position_management.position_monitor import PositionMonitor
+        from merid.position_management.exit_policy import ExitReason
+
+        monitor = PositionMonitor()
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+
+        position = self._position()
+        monitor.add_position(position)
+
+        # Tick 1: executable bid covers entry + min_profit (12c default).
+        await monitor._check_position(position, self._snapshot(position, bid=82))
+        assert position.trailing_activated, (
+            "trail must activate on the first tick the executable bid covers "
+            "entry+min_profit — no elapsed-delay dead zone"
+        )
+
+        # Tick 2: 5c retrace from the 82 high-watermark hits the trail level.
+        await monitor._check_position(position, self._snapshot(position, bid=77))
+        trail_calls = [
+            c for c in callback.call_args_list
+            if len(c.args) > 1 and c.args[1] == ExitReason.TRAIL
+        ]
+        assert trail_calls, (
+            "armed trail must fire on retrace below the trail level "
+            "(max_favorable=82, distance=5 -> trail=77)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_armed_state_survives_pullback_below_threshold(self):
+        """Pullback below min_profit must not disarm: an armed trail retains
+        its state and can activate when the executable profit returns."""
+        from unittest.mock import Mock
+        from merid.position_management.position_monitor import PositionMonitor
+
+        monitor = PositionMonitor()
+        monitor.register_exit_intent_callback(Mock())
+
+        position = self._position()
+        monitor.add_position(position)
+
+        # Arm + activate at +12.
+        await monitor._check_position(position, self._snapshot(position, bid=82))
+        assert position.trailing_activated
+
+        # Pullback to +4 (below min_profit) — still inside trail level (77).
+        # The trail stays engaged; a fresh dip below 77 would still fire.
+        await monitor._check_position(position, self._snapshot(position, bid=80))
+        assert position.trailing_activated
+        assert position.max_favorable_price_cents == 82
 
 
 class TestLockedWsDivergentExitQuote:
