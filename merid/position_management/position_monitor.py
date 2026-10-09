@@ -2850,19 +2850,42 @@ class PositionMonitor:
             maybe_submit_stop_candidate,
         )
 
+        def _log_stop_result(fut) -> None:
+            """Surface exceptions from scheduled stop submissions.
+
+            2026-10-09 BTC audit: a scheduled ``maybe_submit_stop_candidate``
+            task whose exception is never retrieved vanishes without a trace —
+            the candidate is recorded but neither the order nor the failure is
+            observable.  Attach a done callback so submission errors are always
+            logged.
+            """
+            try:
+                exc = fut.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if exc is not None:
+                logger.exception(
+                    "[STOP-CANDIDATE] submission task raised candidate=%s ticker=%s: %s",
+                    getattr(candidate, "candidate_id", "?"),
+                    getattr(candidate, "market_ticker", "?"),
+                    exc,
+                )
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         try:
             if loop is not None and loop.is_running():
-                loop.create_task(maybe_submit_stop_candidate(candidate))
+                task = loop.create_task(maybe_submit_stop_candidate(candidate))
+                task.add_done_callback(_log_stop_result)
                 return
             mon_loop = self._loop
             if mon_loop is not None and mon_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
+                fut = asyncio.run_coroutine_threadsafe(
                     maybe_submit_stop_candidate(candidate), mon_loop
                 )
+                fut.add_done_callback(_log_stop_result)
                 return
         except Exception:
             logger.exception(
@@ -4706,6 +4729,18 @@ class PositionMonitor:
             # still fires when the market bids above live fair + costs, so
             # suppressing the TP here cannot strand an overpriced position.
             _tp_suppressed = False
+            # 2026-10-09 durable exit obligation: a take-profit that already
+            # fired and was rejected/unfilled re-arms with exit_retry_count>0.
+            # The overpay floor is a *fresh-opportunity* EV gate — it must not
+            # cancel an outstanding exit obligation while the configured profit
+            # condition (price >= tp) still holds.  BTC-090445: TP fired at 81,
+            # rejected (limit_not_executable, vwap=79), re-armed, then every
+            # retry was suppressed by the floor at price=79/floor=80 and the
+            # position rode to a full settlement loss.  The retry reprices to
+            # the executable bid inside _emit_exit_intent.
+            _tp_retry_outstanding = (
+                getattr(position, "exit_retry_count", 0) or 0
+            ) > 0
             _thesis_fair_cents = None
             _entry_prob = getattr(position, 'entry_model_probability', None)
             if _entry_prob is not None and 0.0 < float(_entry_prob) < 1.0:
@@ -4715,7 +4750,16 @@ class PositionMonitor:
                 if _thesis_fair_cents is not None
                 else _fair_value_cents
             )
-            if _gate_fair_cents is not None and 1 <= _gate_fair_cents <= 99:
+            if _tp_retry_outstanding:
+                logger.info(
+                    "[POSITION-MONITOR] TAKE-PROFIT retry obligation outstanding: position=%s "
+                    "price=%dc tp=%dc retry_count=%d - overpay floor bypassed, repricing to bid",
+                    position.position_id[:8],
+                    current_price_cents,
+                    position.take_profit_price_cents,
+                    getattr(position, "exit_retry_count", 0),
+                )
+            elif _gate_fair_cents is not None and 1 <= _gate_fair_cents <= 99:
                 # Strict overpay floor: selling is only +EV vs free settlement
                 # when bid - exit_cost >= fair, i.e. bid >= fair + exit_cost.
                 _overpay_floor = _gate_fair_cents + _exit_cost_cents
@@ -4880,9 +4924,27 @@ class PositionMonitor:
             if not isinstance(activation_delay_sec, (int, float)):
                 activation_delay_sec = STARTUP_GRACE_WINDOW_SECONDS  # Default fallback
 
-            # Check if profit threshold reached
+            # 2026-10-09: activation on a *validated executable* profit
+            # threshold, not an unconditional elapsed delay.  The previous
+            # 30s ``activation_delay_sec`` left a hard blind spot: BTC-090445
+            # armed the trail at +6c with ~40s of profitable window, then
+            # collapsed before the delay elapsed — profit protection never
+            # activated.  Requiring the own-side *bid* (the price we can
+            # actually sell at) to cover entry+min_profit is itself the noise
+            # filter: a mid-price wick cannot activate the trail.
+            _exec_profit_cents = profit_cents
+            _own_bid_cents = getattr(snapshot, "own_side_bid_cents", None) if snapshot is not None else None
+            if (
+                _own_bid_cents is not None
+                and 1 <= _own_bid_cents <= 99
+                and position.avg_entry_price_cents is not None
+            ):
+                _exec_profit_cents = _own_bid_cents - position.avg_entry_price_cents
+
+            # Arm when the profit threshold is reached (armed state persists
+            # across ticks; activation fires the first tick the executable
+            # condition holds).
             if profit_cents >= min_profit_cents:
-                # Record timestamp when threshold first reached
                 now_ts = time.monotonic()
                 if position.trailing_profit_threshold_reached_at is None:
                     position.trailing_profit_threshold_reached_at = datetime.utcnow().timestamp()
@@ -4890,18 +4952,13 @@ class PositionMonitor:
                     position.high_watermark_updated_at = now_ts
                     position.trailing_state = TrailingState.ARMED
                     logger.info(
-                        "[POSITION-MONITOR] TRAILING profit threshold reached: position=%s price=%dc profit=%dc - waiting %ds delay before activation",
+                        "[POSITION-MONITOR] TRAILING profit threshold reached: position=%s price=%dc profit=%dc - armed, activates on executable profit",
                         position.position_id[:8],
                         current_price_cents,
                         profit_cents,
-                        int(activation_delay_sec),
                     )
 
-                # Check if activation delay has elapsed
-                now = datetime.utcnow().timestamp()
-                delay_elapsed = (now - position.trailing_profit_threshold_reached_at) >= activation_delay_sec
-
-                if delay_elapsed:
+                if _exec_profit_cents >= min_profit_cents:
                     position.trailing_activated = True
                     position.trailing_state = TrailingState.TRAILING
                     if position.trail_started_at is None:
@@ -4915,28 +4972,32 @@ class PositionMonitor:
 
                     if in_profit_zone:
                         logger.info(
-                            "[POSITION-MONITOR] TRAILING activated (AGGRESSIVE 2c mode): position=%s price=%dc profit=%dc R=%.2f - in 80-85c profit zone (delay elapsed)",
+                            "[POSITION-MONITOR] TRAILING activated (AGGRESSIVE 2c mode): position=%s price=%dc profit=%dc exec_profit=%dc R=%.2f - in profit zone",
                             position.position_id[:8],
                             current_price_cents,
                             profit_cents,
+                            _exec_profit_cents,
                             position.r_multiple,
                         )
                     else:
                         logger.info(
-                            "[POSITION-MONITOR] TRAILING activated (normal 5c mode): position=%s price=%dc profit=%dc R=%.2f threshold=%dc (delay elapsed)",
+                            "[POSITION-MONITOR] TRAILING activated (normal 5c mode): position=%s price=%dc profit=%dc exec_profit=%dc R=%.2f threshold=%dc",
                             position.position_id[:8],
                             current_price_cents,
                             profit_cents,
+                            _exec_profit_cents,
                             position.r_multiple,
                             min_profit_cents,
                         )
                 else:
-                    # Still waiting for delay to elapse
+                    # Armed but the executable bid no longer covers the
+                    # profit threshold — trail stays armed for the next tick.
                     logger.debug(
-                        "[POSITION-MONITOR] TRAILING waiting for activation delay: position=%s elapsed=%.1fs/%.1fs",
+                        "[POSITION-MONITOR] TRAILING armed, executable profit short: position=%s profit=%dc exec_profit=%dc min=%dc",
                         position.position_id[:8],
-                        now - position.trailing_profit_threshold_reached_at,
-                        activation_delay_sec,
+                        profit_cents,
+                        _exec_profit_cents,
+                        int(min_profit_cents),
                     )
         else:
             # CRITICAL FIX: 2026-07-06 - Check if position entered profit zone after trailing was already activated

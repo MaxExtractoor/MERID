@@ -269,13 +269,10 @@ class TestPositionMonitorTrailingStateMachine:
         )
         monitor.add_position(position)
 
-        # UNARMED -> ARMED when profit >= min_profit_cents (delay not elapsed yet)
+        # UNARMED -> TRAILING on the validated executable-profit tick.
+        # (2026-10-09: the 30s dead zone was removed; ARMED persists as
+        # timestamp state but the machine activates immediately.)
         assert position.trailing_state == TrailingState.UNARMED
-        await monitor._legacy_check_position(position, 65)
-        assert position.trailing_state == TrailingState.ARMED
-
-        # ARMED -> TRAILING after activation delay is bypassed
-        position.trailing_profit_threshold_reached_at = 0.0
         await monitor._legacy_check_position(position, 65)
         assert position.trailing_state == TrailingState.TRAILING
 

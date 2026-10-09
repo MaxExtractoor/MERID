@@ -180,6 +180,26 @@ def parse_non_executable_vwap_cents(reason: Any) -> Optional[int]:
     m = _NON_EXECUTABLE_VWAP_RE.search(r)
     return int(m.group(1)) if m else None
 
+# Mandatory hard-risk triggers (2026-10-09): these represent configured
+# maximum-loss / expiry obligations, not profit-management discretion.  In the
+# residual-exit branch a discretionary fair-value comparison
+# ("model fair > executable vwap -> hold to settlement") must never veto them —
+# that veto is exactly the regime a hard stop exists for.  They still honor
+# data-availability guards, the settlement-close window, fresh-book checks,
+# and the degraded attempt budget; they skip only the EV-hold override.
+_MANDATORY_RISK_TRIGGER_REASONS = frozenset({
+    "HARD_STOP",
+    "LOSS_CAP",
+    "HARD_RISK",
+    "EMERGENCY",
+    "EXPIRY_LIQUIDATION",
+    "MARKET_EXPIRED",
+    "HARD_PROFIT_LOCK",
+    # NOTE: SETTLEMENT_GUARD and AUTO_EXIT_99C stay discretionary here — their
+    # own policy IS the fair-vs-executable comparison (sell only when the
+    # market premium beats the settle value), so the EV hold must still apply.
+})
+
 # Settlement-aware phase constants (seconds).
 SETTLEMENT_CLOSE_BUFFER_SECONDS = _env_int(
     "MERID_SETTLEMENT_CLOSE_BUFFER_SECONDS", 60
@@ -1146,7 +1166,18 @@ async def _maybe_degraded_stop_exit(
 
     # 3. Genuine hold decision: model fair value still above the
     #    depth-weighted exit proceeds net of costs and hysteresis.
-    if not evaluate_edge_stop(
+    #
+    #    2026-10-09 precedence fix: this EV comparison is discretionary and may
+    #    only veto discretionary/profit-management triggers.  Mandatory
+    #    hard-risk triggers (hard stop, loss cap, expiry liquidation,
+    #    emergency flattening) exist precisely for the regime where model fair
+    #    value is lagging the book — letting "fair > bid" cancel them converts
+    #    a bounded loss into a full-premium settlement loss (BTC-090445 rode
+    #    fair=46/bid=38 to 0).  Mandatory triggers skip the hold; the book
+    #    checks and attempt budget below still apply.
+    if candidate.trigger_reason in _MANDATORY_RISK_TRIGGER_REASONS:
+        record["mandatory_fair_bypass"] = True
+    elif not evaluate_edge_stop(
         fair,
         vwap_cents,
         candidate.total_exit_cost_cents,
@@ -1452,8 +1483,29 @@ async def maybe_submit_stop_candidate(
         )
     )
 
+    # 1b. Unknown exposure must FAIL CLOSED.  ``None`` means neither the REST
+    # snapshot nor the position cache could establish the venue position —
+    # it does NOT mean the account is flat.  Coercing None→0 here silently
+    # cancelled protective stops on live positions (2026-10-09 BTC audit:
+    # HARD_STOP candidates recorded then dropped via the "flat" branch while
+    # -100cc NO rode to a 0 settlement).
     if exchange_position_cc is None:
-        exchange_position_cc = 0
+        logger.critical(
+            "[ALERT][STOP-CANDIDATE-POSITION-UNKNOWN] candidate=%s ticker=%s "
+            "trigger=%s candidate_position_cc=%d executable_exit_cents=%s - "
+            "exchange position unverifiable (REST+cache failed); blocking submission",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            candidate.position_from_exchange_cc,
+            candidate.executable_exit_cents,
+        )
+        record_stop_candidate(candidate)
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason="stop_candidate_exchange_position_unknown",
+        )
 
     position_snapshot_age_ms = int((time.monotonic() - t0) * 1000)
 
