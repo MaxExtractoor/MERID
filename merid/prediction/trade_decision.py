@@ -5072,6 +5072,7 @@ def compute_trade_decision(
                     if book_sequence_confirmed is not None
                     else None
                 ),
+                cap_shadow=indicators.get("cap_shadow"),
             )
 
     # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
