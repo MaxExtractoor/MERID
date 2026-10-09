@@ -1,4 +1,4 @@
-"""Threshold-cell policy tests (merid/prediction/threshold_cells.py).
+﻿"""Threshold-cell policy tests (merid/prediction/threshold_cells.py).
 
 The cells are the data-qualified admission regions approved from the settled
 counterfactual frontier (2026-09).  These tests prove:
@@ -56,7 +56,20 @@ def _disable_market_anchor(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_THRESHOLD_CELLS", raising=False)
     # Isolate the lane state file per test so caps/suspension don't leak.
     monkeypatch.setenv("MERID_THRESHOLD_CELL_STATE_PATH", str(tmp_path / "cells.json"))
-    # Provisional-lane env overrides must not leak from .env — these tests
+    # 2026-10-09: the repo .env raises the lane caps ("trade-every-window");
+    # tests exercise the DEFAULT caps, so every cap env must be cleared.
+    for _v in (
+        "MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS",
+        "MERID_THRESHOLD_CELL_DAILY_MAX",
+        "MERID_THRESHOLD_CELL_PER_CELL_MAX_SUBMISSIONS",
+        "MERID_THRESHOLD_CELL_DAILY_MAX_FILLS",
+        "MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_TOTAL",
+        "MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_PER_ASSET",
+        "MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS",
+        "MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS_TOTAL",
+    ):
+        monkeypatch.delenv(_v, raising=False)
+    # Provisional-lane env overrides must not leak from .env â€” these tests
     # assert formula-vs-cell resolution on the default threshold table.
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
@@ -113,7 +126,7 @@ def test_no_cells_below_20c_and_btc_eth_tte_window():
     for cell in THRESHOLD_CELLS:
         assert cell.price_min_cents >= 20
     assert resolve_threshold_cell("SOL", "no", 15.0, 300.0) is None
-    # BTC/ETH have PROVISIONAL cells since 2026-09-30 batch 1 — in-band
+    # BTC/ETH have PROVISIONAL cells since 2026-09-30 batch 1 â€” in-band
     # quotes resolve, out-of-TTE (their cells are t120-300) fall back.
     assert resolve_threshold_cell("BTC", "no", 45.0, 300.0).cell_id == \
         "btc_no_40_50_t120_300"
@@ -129,12 +142,12 @@ def test_no_cell_without_tte():
 
 def test_daily_cap_fails_closed_to_formula(monkeypatch):
     """A matched cell whose daily lane budget is exhausted must NOT relax the
-    threshold — it falls back to the formula and flags the suppression."""
+    threshold â€” it falls back to the formula and flags the suppression."""
     monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX", "0")
     d = _decomp("SOL", "no", 45, tte=300.0)
     assert d.cell_id is None
     assert d.cell_cap_exhausted is True
-    # Formula total at p=0.45 is ~2.99c — far above the 1.5c cell.
+    # Formula total at p=0.45 is ~2.99c â€” far above the 1.5c cell.
     assert d.total > 0.02
 
 
@@ -168,7 +181,7 @@ def test_cell_overrides_formula_total():
 
 
 def test_cell_threshold_not_floor_clamped():
-    # The cell value (1.5c) is below the legacy 2c floor clamp — the cell is
+    # The cell value (1.5c) is below the legacy 2c floor clamp â€” the cell is
     # the source of truth, so no clamp applies.
     d = _decomp("SOL", "no", 45, tte=300.0)
     assert d.total < 0.02
@@ -188,7 +201,7 @@ def test_out_of_band_tte_falls_back_to_formula():
 
 
 def test_btc_no_cell_same_inputs():
-    """BTC at 45c/300s resolves the btc_no_40_50_t120_300 PROVISIONAL cell —
+    """BTC at 45c/300s resolves the btc_no_40_50_t120_300 PROVISIONAL cell â€”
     its own 2.5c floor is the threshold, not the BTC formula."""
     d = _decomp("BTC", "no", 45, tte=300.0)
     assert d.cell_id == "btc_no_40_50_t120_300"
@@ -249,7 +262,7 @@ def test_decision_records_cell_threshold(monkeypatch):
 
 def test_decision_cell_lane_when_selected(monkeypatch):
     """A cell-admitted NO selection stamps decision_lane=threshold_cell."""
-    # p_no = 0.50 vs no_ask 45c: net EV ~+2-3c — clears the 1.5c cell but is
+    # p_no = 0.50 vs no_ask 45c: net EV ~+2-3c â€” clears the 1.5c cell but is
     # inside the region where the ~3c formula would have rejected.
     d = compute_trade_decision(
         run_id="test_run",
@@ -448,6 +461,7 @@ def test_probation_reset_releases_aged_suspension(monkeypatch):
     )
     cell = _cell()
     monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S", "0")
     set_cell_state(cell.cell_id, "SUSPENDED", "test")
     moved, block = probation_reset_cell(cell.cell_id)
     assert moved is True and block is None
@@ -484,10 +498,11 @@ def test_probation_single_strike_resuspends(monkeypatch):
     )
     cell = _cell()
     monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S", "0")
     set_cell_state(cell.cell_id, "SUSPENDED", "test")
     moved, _ = probation_reset_cell(cell.cell_id)
     assert moved is True
-    # One fresh router strike re-suspends — no second chance.
+    # One fresh router strike re-suspends â€” no second chance.
     record_cell_router_reject(cell.cell_id)
     assert get_cell_state(cell.cell_id) == "SUSPENDED"
 
@@ -500,6 +515,7 @@ def test_probation_submission_cap_tighter(monkeypatch):
     )
     cell = _cell()
     monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S", "0")
     set_cell_state(cell.cell_id, "SUSPENDED", "test")
     moved, _ = probation_reset_cell(cell.cell_id)
     assert moved is True
@@ -515,12 +531,13 @@ def test_probation_resuspend_uses_longer_cooldown(monkeypatch):
     )
     cell = _cell()
     monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S", "0")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S", "0")
     set_cell_state(cell.cell_id, "SUSPENDED", "test")
     moved, _ = probation_reset_cell(cell.cell_id)
     assert moved is True
     record_cell_router_reject(cell.cell_id)
     assert get_cell_state(cell.cell_id) == "SUSPENDED"
-    # Probation-triggered suspension needs the long cooldown — the short
+    # Probation-triggered suspension needs the long cooldown â€” the short
     # min-age floor must not immediately release it again.
     moved, block = probation_reset_cell(cell.cell_id)
     assert moved is False
@@ -806,7 +823,7 @@ SOFT_CODES = (
 
 
 def _register_cell(monkeypatch, asset):
-    """Attach a synthetic approved cell for ANY asset — proves the resolver
+    """Attach a synthetic approved cell for ANY asset â€” proves the resolver
     treats asset as data, not as a policy branch."""
     import merid.prediction.threshold_cells as _tc_mod
     cell = ThresholdCell(
@@ -897,7 +914,7 @@ def test_registry_covers_all_five_assets():
     assert resolve_threshold_cell("BTC", "no", 45.0, 300.0).cell_id == \
         "btc_no_40_50_t120_300"
     assert explain_cell_miss("BTC", "no", 45.0, 300.0) is None
-    # ETH 45c is below every ETH cell floor (50c) — a miss, but an
+    # ETH 45c is below every ETH cell floor (50c) â€” a miss, but an
     # explicit, attributed one.
     assert explain_cell_miss("ETH", "no", 45.0, 300.0) == \
         "threshold_cell_price_below_min"

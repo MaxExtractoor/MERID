@@ -4781,7 +4781,12 @@ class KalshiVenueClient(EventVenueClient):
             # Defensive: some API paths return an empty page with a cursor,
             # which causes unbounded pagination.  Treat an empty page as the end.
             cursor = data.get("cursor")
-            if not fills or not cursor:
+            if not fills:
+                # Empty page is terminal — clear the carried cursor so the
+                # truncation check below does not misreport MAX_PAGES.
+                cursor = None
+                break
+            if not cursor:
                 break
             page += 1
 

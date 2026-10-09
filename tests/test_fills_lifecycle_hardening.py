@@ -645,9 +645,10 @@ class TestTestEnvIsolation:
         monkeypatch.setenv("POSTGRES_PASSWORD", "")
         from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger
 
-        ledger = KalshiFillsLedger()
+        # Construction itself must fail fast — a test pointed at the prod DB
+        # never gets to the lazy _init_db write path.
         with pytest.raises(RuntimeError, match="production data"):
-            await ledger._init_db()
+            KalshiFillsLedger()
 
     def test_breaker_halt_write_refuses_default_path(self, monkeypatch):
         monkeypatch.setenv("MERID_ENV", "testing")

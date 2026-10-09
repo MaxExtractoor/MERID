@@ -130,6 +130,14 @@ def hard_sparse_ev_floor_c() -> float:
     return _env_float("MERID_EVIDENCE_HARD_SPARSE_EV_C", 10.0)
 
 
+def hard_sparse_tier_enabled() -> bool:
+    """``MERID_EVIDENCE_HARD_SPARSE_TIER`` gates the sparse-severe hard-block
+    tier (n_eff>=8 & LCB-EV<-10c).  It is a POLICY change, not a bug fix —
+    kept separately attributable and default-off until validated against
+    known histories (see AUDIT_2026_10_09_SUSPENSION_PROBATION.md §7)."""
+    return _env_flag("MERID_EVIDENCE_HARD_SPARSE_TIER", False)
+
+
 def evidence_stale_s() -> float:
     """Artifact older than this cannot hard-block; uplift is maxed."""
     return _env_float("MERID_EVIDENCE_STALE_S", 3600.0)
@@ -665,7 +673,8 @@ def evaluate(
                 and hb_ev < -abs(hard_ev_floor_c())
             )
             sparse_severe = (
-                hb_agg.n_eff < hard_min_neff()
+                hard_sparse_tier_enabled()
+                and hb_agg.n_eff < hard_min_neff()
                 and hb_ev < -abs(hard_sparse_ev_floor_c())
             )
             if (dense_toxic or sparse_severe) and recent_agrees:

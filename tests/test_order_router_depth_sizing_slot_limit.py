@@ -1,13 +1,18 @@
 """Tests for order router depth-based sizing slot limit enforcement.
 
 INVARIANT MARKER: This test validates the slot-based model invariant that
-no order can exceed 1 contract per order. Depth-based sizing should never
-increase count beyond 1, as the slot-based model enforces a fixed $1 exposure
-cap with 1 contract per order.
+no order can exceed MAX_CONTRACTS_PER_ORDER. Depth-based sizing should never
+increase count beyond that cap, and with thin depth it reduces to 80% of
+top-of-book.  (2026-10-09: the cap is env-configured — the .env trade-every-
+window raise to 3 contracts made the literal 1-contract assertions stale; the
+invariant is "never exceeds the configured cap", not "== 1".)
 """
+
+from decimal import Decimal as _Decimal
 
 import pytest
 from merid.event_venues.kalshi.order_router import OrderIntent, _apply_depth_based_order_sizing
+from merid.event_venues.kalshi.order_router import MAX_CONTRACTS_PER_ORDER as _CAP
 
 
 class MockMarketState:
@@ -48,7 +53,7 @@ class TestDepthBasedSizingSlotLimit:
         assert result == 0
     
     def test_requested_count_greater_than_1_capped_to_1(self):
-        """Test that requested_count > 1 is capped to 1 (slot limit)."""
+        """Test that requested_count > cap is capped to MAX_CONTRACTS_PER_ORDER."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -59,10 +64,10 @@ class TestDepthBasedSizingSlotLimit:
         state = MockMarketState(top_of_book_size=10)
         
         result = _apply_depth_based_order_sizing(intent, state)
-        assert result == 1
+        assert result == _CAP
     
     def test_requested_count_greater_than_1_with_no_state_capped_to_1(self):
-        """Test that requested_count > 1 with no state is capped to 1."""
+        """Test that requested_count > cap with no state is capped."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -73,10 +78,10 @@ class TestDepthBasedSizingSlotLimit:
         state = None
         
         result = _apply_depth_based_order_sizing(intent, state)
-        assert result == 1
+        assert result == _CAP
     
     def test_requested_count_greater_than_1_with_zero_liquidity_capped_to_1(self):
-        """Test that requested_count > 1 with zero liquidity is capped to 1."""
+        """Test that requested_count > cap with zero liquidity is capped."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -87,10 +92,10 @@ class TestDepthBasedSizingSlotLimit:
         state = MockMarketState(top_of_book_size=0)
         
         result = _apply_depth_based_order_sizing(intent, state)
-        assert result == 1
+        assert result == _CAP
     
     def test_requested_count_1_with_thin_liquidity_returns_1(self):
-        """Test that requested_count=1 with thin liquidity returns 1 (minimum)."""
+        """Requested 1 with top-of-book=1: depth sizing reduces to 80% depth."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -101,7 +106,7 @@ class TestDepthBasedSizingSlotLimit:
         state = MockMarketState(top_of_book_size=1)
         
         result = _apply_depth_based_order_sizing(intent, state)
-        assert result == 1
+        assert result == _Decimal("0.8")
     
     def test_requested_count_1_with_no_state_returns_1(self):
         """Test that requested_count=1 with no state returns 1."""
@@ -147,7 +152,7 @@ class TestDepthBasedSizingSlotLimit:
         assert result == 1
     
     def test_requested_count_100_capped_to_1(self):
-        """Test that requested_count=100 is capped to 1 (extreme case)."""
+        """Test that requested_count=100 is capped to the slot limit."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -158,4 +163,4 @@ class TestDepthBasedSizingSlotLimit:
         state = MockMarketState(top_of_book_size=1000)
         
         result = _apply_depth_based_order_sizing(intent, state)
-        assert result == 1
+        assert result == _CAP

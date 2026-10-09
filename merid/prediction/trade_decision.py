@@ -1677,6 +1677,15 @@ def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
             ),
             cap_shadow=_ind.get("cap_shadow"),
             side_verdicts=_ind.get("side_verdicts"),
+            yes_price_cents=(
+                float(_ind["yes_price_cents"])
+                if _ind.get("yes_price_cents") is not None else None
+            ),
+            no_price_cents=(
+                float(_ind["no_price_cents"])
+                if _ind.get("no_price_cents") is not None else None
+            ),
+            entry_price_basis=_ind.get("entry_price_basis"),
         )
     except Exception:
         pass
@@ -5436,6 +5445,13 @@ def compute_trade_decision(
                 ),
                 cap_shadow=indicators.get("cap_shadow"),
                 side_verdicts=indicators.get("side_verdicts"),
+                yes_price_cents=(
+                    float(yes_price_cents) if yes_price_cents is not None else None
+                ),
+                no_price_cents=(
+                    float(no_price_cents) if no_price_cents is not None else None
+                ),
+                entry_price_basis=entry_price_basis,
             )
 
     # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
@@ -5484,6 +5500,13 @@ def compute_trade_decision(
                     risk_reserve_cents=float(edge_breakdown.model_risk_reserve) * 100.0,
                     exit_cost_reserve_cents=float(edge_breakdown.exit_cost_reserve) * 100.0,
                     adverse_selection_reserve_cents=float(edge_breakdown.adverse_selection_reserve) * 100.0,
+                    yes_price_cents=(
+                        float(yes_price_cents) if yes_price_cents is not None else None
+                    ),
+                    no_price_cents=(
+                        float(no_price_cents) if no_price_cents is not None else None
+                    ),
+                    entry_price_basis=entry_price_basis,
                 )
                 selected_outcome = None
                 edge_breakdown = None
@@ -5672,6 +5695,13 @@ def compute_trade_decision(
                     risk_reserve_cents=float(edge_breakdown.model_risk_reserve) * 100.0,
                     exit_cost_reserve_cents=float(edge_breakdown.exit_cost_reserve) * 100.0,
                     adverse_selection_reserve_cents=float(edge_breakdown.adverse_selection_reserve) * 100.0,
+                    yes_price_cents=(
+                        float(yes_price_cents) if yes_price_cents is not None else None
+                    ),
+                    no_price_cents=(
+                        float(no_price_cents) if no_price_cents is not None else None
+                    ),
+                    entry_price_basis=entry_price_basis,
                 )
                 logger.info(
                     "[ENTRY-POLICY-SHADOW] asset=%s ticker=%s side=%s price_cents=%.2f "

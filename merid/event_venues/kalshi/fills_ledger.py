@@ -1489,6 +1489,21 @@ class KalshiFillsLedger:
         # redirect writes away from the production database.
         self._db_path = os.getenv("MERID_FILLS_DB_PATH", "data/kalshi_fills.db")
 
+        # TEST-ISOLATION GUARD (2026-10-09): fail fast at construction too —
+        # the same check in _init_db guards the write path, but a test that
+        # points the ledger at the production DB must not get that far.
+        if os.environ.get("MERID_ENV") == "testing" and not self._use_postgres:
+            _repo_data = (
+                Path(__file__).resolve().parents[3] / "data"
+            ).resolve()
+            _resolved = Path(self._db_path).resolve()
+            if _resolved == _repo_data / "kalshi_fills.db" or _repo_data in _resolved.parents:
+                raise RuntimeError(
+                    "MERID_ENV=testing but MERID_FILLS_DB_PATH resolves to the "
+                    f"production data dir: {_resolved}. Set MERID_FILLS_DB_PATH "
+                    "to a per-test temp path."
+                )
+
         # Async queue for single-writer pattern (prevents DB lock contention)
         # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
         self._persist_queue: Optional[asyncio.Queue[Optional[KalshiFill]]] = None
