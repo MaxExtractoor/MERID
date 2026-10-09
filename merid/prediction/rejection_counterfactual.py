@@ -167,6 +167,11 @@ def log_rejected_candidate(
     # price band, EV vs bound, depth, TTE).  Present only when the fixed
     # cap was a blocker.
     cap_shadow: Optional[dict] = None,
+    # 2026-10-09 (evidence-policy audit): the three-axis admission verdicts
+    # per side — economics_verdict / evidence_verdict / exploration_verdict
+    # plus the mutually-exclusive admission_verdict — so a bounded
+    # negative-floor admit never reads as a profitable production admit.
+    side_verdicts: Optional[dict] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
     if not _ENABLED or not should_log(reason):
@@ -231,6 +236,7 @@ def log_rejected_candidate(
             "reject_reason": reason,
             "canonical_reason": _canonical_reason(reason, net_edge),
             "cap_shadow": cap_shadow,
+            "side_verdicts": side_verdicts,
         }
         path = os.environ.get("MERID_REJECTED_CANDIDATES_LOG", _DEFAULT_PATH)
         line = json.dumps(record, default=str)

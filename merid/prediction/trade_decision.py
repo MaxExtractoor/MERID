@@ -1675,6 +1675,8 @@ def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
                 if breakdown is not None
                 else None
             ),
+            cap_shadow=_ind.get("cap_shadow"),
+            side_verdicts=_ind.get("side_verdicts"),
         )
     except Exception:
         pass
@@ -2787,6 +2789,222 @@ def _select_best_side(
     if yes_edge > no_edge:
         return "yes", yes_edge, "best_executable_edge_yes"
     return "no", no_edge, "best_executable_edge_no"
+
+
+# ---------------------------------------------------------------------------
+# Three-axis admission verdicts (2026-10-09 evidence-policy audit)
+# ---------------------------------------------------------------------------
+# Admission previously collapsed into yes_evidence_ok / *_qualifies booleans,
+# which made a bounded-exploration admit indistinguishable from a profitable
+# production admit.  These axes are deliberately independent:
+#
+#   economics_verdict   - PASS iff p_selected clears the full cost basis
+#                         (net_edge > 0 after entry fee + expected-exit +
+#                         model-risk + adverse-selection reserves).  A
+#                         negative provisional floor does NOT turn a FAIL
+#                         into a PASS.
+#   evidence_verdict    - the cell-aware policy's standalone answer:
+#                         SUFFICIENT / SPARSE_PASS / INSUFFICIENT:<code> /
+#                         STALE:<code> / HARD_BLOCK / NOT_EVALUATED.
+#   exploration_verdict - whether a *separately budgeted* bounded lane
+#                         (provisional cell, escape lane, threshold-cell
+#                         soft override, pooled transfer) authorizes the
+#                         trial, or why it cannot (CAP_EXHAUSTED /
+#                         LANE_DISABLED / FLOOR_FAIL / NONE).
+#
+# ``admission_verdict`` collapses the three axes into the required
+# mutually-exclusive terminal vocabulary:
+#   HARD_SAFETY_BLOCK                       - a matched toxic cell actually
+#                                           bound (not demoted to a label by
+#                                           a current-build lane).
+#   PRODUCTION_ECONOMICS_AND_EVIDENCE_PASS  - positive net EV AND a dense,
+#                                           non-escape evidence pass.
+#   EXPLORATION_AUTHORIZED                  - an explicit bounded lane
+#                                           permits the candidate (economics
+#                                           may be non-positive — that is
+#                                           the point of the experiment).
+#   ECONOMICS_PASS_EVIDENCE_INSUFFICIENT    - profitable-looking but the
+#                                           cohort has no adequate evidence
+#                                           and no lane authorizes a trial.
+#   ECONOMICS_FAIL                          - negative conservative net EV
+#                                           and no exploration lane admits.
+#
+# A candidate that qualifies only through a negative floor therefore reads
+# ``economics_verdict=FAIL, admission_verdict=EXPLORATION_AUTHORIZED`` —
+# "permitted by this exploration rule", never "profitable".
+
+_BOUNDED_ADMISSION_OWNERS = frozenset({
+    "current_build_provisional",
+    "evidence_escape",
+    "threshold_cell",
+    "evidence_pooled_transfer",
+})
+
+ADMISSION_VERDICT_PRODUCTION = "PRODUCTION_ECONOMICS_AND_EVIDENCE_PASS"
+ADMISSION_VERDICT_ECON_PASS_EV_INSUFF = "ECONOMICS_PASS_EVIDENCE_INSUFFICIENT"
+ADMISSION_VERDICT_EXPLORATION = "EXPLORATION_AUTHORIZED"
+ADMISSION_VERDICT_ECONOMICS_FAIL = "ECONOMICS_FAIL"
+ADMISSION_VERDICT_HARD_BLOCK = "HARD_SAFETY_BLOCK"
+
+
+def _assemble_side_verdict(
+    *,
+    side: str,
+    p_selected: Optional[float],
+    min_p_selected: Optional[float],
+    eff_edge_cents: Optional[float],
+    eff_bound_cents: Optional[float],
+    cbp_neg_floor: bool,
+    evidence_detail: Optional[Dict[str, Any]],
+    admission_owner: Optional[str],
+    admission_decision: Optional[str],
+    admission_reason: Optional[str],
+    gross_edge_cents: Optional[float] = None,
+    net_edge_cents: Optional[float] = None,
+    model_risk_reserve_cents: Optional[float] = None,
+    exit_cost_reserve_cents: Optional[float] = None,
+    adverse_selection_reserve_cents: Optional[float] = None,
+    entry_fee_cents: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Classify one side on the economics / evidence / exploration axes.
+
+    Pure function over already-computed decision locals — changes no
+    admission semantics, telemetry only.  See the module block above for the
+    axis definitions.
+    """
+    ev = evidence_detail if isinstance(evidence_detail, dict) else {}
+    ev_code = str(ev.get("code") or "")
+    ev_allowed = bool(ev.get("allowed"))
+    ev_escape = bool(ev.get("escape_required"))
+    ev_stale = bool(ev.get("evidence_stale"))
+    ev_hard = bool(
+        ev.get("matching_hard_block") or ev_code == "MATCHING_TOXIC_CELL"
+    )
+
+    # --- economics axis -----------------------------------------------------
+    econ_pass = bool(
+        p_selected is not None
+        and min_p_selected is not None
+        and float(p_selected) > float(min_p_selected)
+    )
+    economics_verdict = "PASS" if econ_pass else "FAIL"
+    net_c = float(net_edge_cents) if net_edge_cents is not None else None
+    # central EV = reserve-stacked net EV with the *uncertainty* reserves
+    # (model-risk + adverse-selection) added back; entry fee and the
+    # policy-weighted expected exit cost remain charged.
+    central_net_c = (
+        net_c + float(model_risk_reserve_cents or 0.0)
+        + float(adverse_selection_reserve_cents or 0.0)
+        if net_c is not None
+        else None
+    )
+
+    # --- evidence axis ------------------------------------------------------
+    if not ev:
+        evidence_verdict = "NOT_EVALUATED"
+    elif ev_hard:
+        evidence_verdict = "HARD_BLOCK"
+    elif ev_stale:
+        evidence_verdict = f"STALE:{ev_code or 'unknown'}"
+    elif ev_allowed and not ev_escape:
+        evidence_verdict = "SUFFICIENT"
+    elif ev_allowed and ev_escape:
+        # Passed the LCB test only on a sparse/pooled level — real support
+        # but not dense-cell evidence; admission rides a bounded lane.
+        evidence_verdict = "SPARSE_PASS"
+    else:
+        evidence_verdict = f"INSUFFICIENT:{ev_code or 'unknown'}"
+
+    # --- exploration axis ---------------------------------------------------
+    owner_bounded = admission_owner in _BOUNDED_ADMISSION_OWNERS
+    owner_allowed = bool(owner_bounded and admission_decision == "allowed")
+    floor_rule_ok = bool(
+        cbp_neg_floor
+        and eff_edge_cents is not None
+        and eff_bound_cents is not None
+        and float(eff_edge_cents) >= float(eff_bound_cents)
+    )
+    if owner_allowed:
+        exploration_verdict = f"AUTHORIZED:{admission_owner}"
+    elif floor_rule_ok:
+        # The negative-floor rule itself permits the trial even when another
+        # gate (depth, throttle, cap) still binds the candidate.
+        exploration_verdict = "AUTHORIZED:provisional_neg_floor"
+    elif ev_code in ("ESCAPE_CAP_EXHAUSTED", "CHALLENGE_CAP_EXHAUSTED"):
+        exploration_verdict = "CAP_EXHAUSTED"
+    elif ev_code in (
+        "ESCAPE_LANE_DISABLED",
+        "CHALLENGE_LANE_DISABLED",
+        "SOFT_PENALTY_LANE_DISABLED",
+    ):
+        exploration_verdict = "LANE_DISABLED"
+    elif cbp_neg_floor:
+        exploration_verdict = "FLOOR_FAIL"
+    else:
+        exploration_verdict = "NONE"
+
+    # --- terminal verdict ---------------------------------------------------
+    hard_binding = bool(
+        ev_hard
+        and not owner_allowed
+        and admission_decision != "allowed"
+    )
+    if hard_binding:
+        admission_verdict = ADMISSION_VERDICT_HARD_BLOCK
+    elif not econ_pass:
+        admission_verdict = (
+            ADMISSION_VERDICT_EXPLORATION
+            if exploration_verdict.startswith("AUTHORIZED")
+            else ADMISSION_VERDICT_ECONOMICS_FAIL
+        )
+    elif evidence_verdict == "SUFFICIENT":
+        admission_verdict = ADMISSION_VERDICT_PRODUCTION
+    elif exploration_verdict.startswith("AUTHORIZED"):
+        admission_verdict = ADMISSION_VERDICT_EXPLORATION
+    else:
+        admission_verdict = ADMISSION_VERDICT_ECON_PASS_EV_INSUFF
+
+    return {
+        "side": side,
+        "admission_verdict": admission_verdict,
+        "economics_verdict": economics_verdict,
+        "evidence_verdict": evidence_verdict,
+        "exploration_verdict": exploration_verdict,
+        "admission_owner": admission_owner,
+        "admission_decision": admission_decision,
+        "admission_reason": admission_reason,
+        "central_net_ev_cents": (
+            round(central_net_c, 2) if central_net_c is not None else None
+        ),
+        "conservative_net_ev_cents": (
+            round(net_c, 2) if net_c is not None else None
+        ),
+        "eff_ev_cents": (
+            round(float(eff_edge_cents), 2)
+            if eff_edge_cents is not None
+            else None
+        ),
+        "eff_bound_cents": (
+            round(float(eff_bound_cents), 2)
+            if eff_bound_cents is not None
+            else None
+        ),
+        "gross_edge_cents": (
+            round(float(gross_edge_cents), 2)
+            if gross_edge_cents is not None
+            else None
+        ),
+        "reserves_cents": (
+            round(
+                float(model_risk_reserve_cents or 0.0)
+                + float(exit_cost_reserve_cents or 0.0)
+                + float(adverse_selection_reserve_cents or 0.0),
+                2,
+            )
+        ),
+        "negative_floor_lane": bool(cbp_neg_floor),
+        "hard_safety_flag": ev_hard,
+    }
 
 
 def compute_trade_decision(
@@ -4633,6 +4851,74 @@ def compute_trade_decision(
         ),
     })
 
+    # ── Three-axis admission verdicts (2026-10-09 evidence audit) ────────
+    # Economics (positive net EV at the executable price), evidence (cohort
+    # support for that estimate), and exploration (explicit bounded-lane
+    # authorization) are reported as independent axes so a bounded
+    # negative-floor admit can never masquerade as a profitable production
+    # admit in telemetry.  Verdicts classify the *cohort admission*; which
+    # structural gate additionally binds this candidate stays in
+    # ``{side}_block``.
+    _side_verdicts: Dict[str, Dict[str, Any]] = {}
+    for _vs, _vbd, _vminp, _veff, _vbound, _vneg in (
+        (
+            "yes", yes_breakdown, yes_min_p, _yes_eff_edge,
+            _yes_edge_eff_bound, _yes_cbp_neg_floor,
+        ),
+        (
+            "no", no_breakdown, no_min_p, _no_eff_edge,
+            _no_edge_eff_bound, _no_cbp_neg_floor,
+        ),
+    ):
+        _side_verdicts[_vs] = _assemble_side_verdict(
+            side=_vs,
+            p_selected=(
+                float(_vbd.p_selected) if _vbd is not None else None
+            ),
+            min_p_selected=float(_vminp) if _vminp is not None else None,
+            eff_edge_cents=(
+                float(_veff) * 100.0 if _veff is not None else None
+            ),
+            eff_bound_cents=(
+                float(_vbound) * 100.0 if _vbound is not None else None
+            ),
+            cbp_neg_floor=bool(_vneg),
+            evidence_detail=indicators.get(f"evidence_{_vs}"),
+            admission_owner=indicators.get(f"{_vs}_admission_owner"),
+            admission_decision=indicators.get(f"{_vs}_admission_decision"),
+            admission_reason=indicators.get(f"{_vs}_admission_reason"),
+            gross_edge_cents=(
+                float(_vbd.gross_edge) * 100.0 if _vbd is not None else None
+            ),
+            net_edge_cents=(
+                float(_vbd.net_edge) * 100.0 if _vbd is not None else None
+            ),
+            model_risk_reserve_cents=(
+                float(_vbd.model_risk_reserve) * 100.0
+                if _vbd is not None
+                else None
+            ),
+            exit_cost_reserve_cents=(
+                float(_vbd.exit_cost_reserve) * 100.0
+                if _vbd is not None
+                else None
+            ),
+            adverse_selection_reserve_cents=(
+                float(_vbd.adverse_selection_reserve) * 100.0
+                if _vbd is not None
+                else None
+            ),
+            entry_fee_cents=(
+                float(_vbd.entry_fee) * 100.0 if _vbd is not None else None
+            ),
+        )
+    indicators["side_verdicts"] = _side_verdicts
+    for _vs, _vv in _side_verdicts.items():
+        indicators[f"{_vs}_admission_verdict"] = _vv["admission_verdict"]
+        indicators[f"{_vs}_economics_verdict"] = _vv["economics_verdict"]
+        indicators[f"{_vs}_evidence_verdict"] = _vv["evidence_verdict"]
+        indicators[f"{_vs}_exploration_verdict"] = _vv["exploration_verdict"]
+
     # ── 75c entry-cap shadow evaluation (2026-10-09) ─────────────────────
     # When the fixed selected-side cap is *a* blocker, evaluate every other
     # gate as though it did not exist and record the complete verdict set.
@@ -4699,10 +4985,23 @@ def compute_trade_decision(
             eff_bound = _no_edge_eff_bound
             min_p_s = no_min_p
             depth = no_depth_cc
+        _verdict = _side_verdicts.get(side) or {}
         return {
             "entry_price_cents": float(px) if px is not None else None,
             "price_band": _cap_band_lbl(float(px) if px is not None else None),
             "qualified_ex_cap": bool(qualified),
+            # qualified_ex_cap merely says every non-cap gate passed — on a
+            # negative-floor lane that means "exploration authorized", NOT
+            # profitable.  The verdict axes carry the honest classification.
+            "admission_verdict": _verdict.get("admission_verdict"),
+            "economics_verdict": _verdict.get("economics_verdict"),
+            "evidence_verdict": _verdict.get("evidence_verdict"),
+            "exploration_verdict": _verdict.get("exploration_verdict"),
+            "central_net_ev_cents": _verdict.get("central_net_ev_cents"),
+            "conservative_net_ev_cents": _verdict.get(
+                "conservative_net_ev_cents"
+            ),
+            "negative_floor_lane": _verdict.get("negative_floor_lane"),
             "other_failures": sorted(k for k, v in fails.items() if v),
             "p_selected": float(bd.p_selected),
             "eff_net_ev_cents": eff_edge * 100.0,
@@ -5073,6 +5372,7 @@ def compute_trade_decision(
                     else None
                 ),
                 cap_shadow=indicators.get("cap_shadow"),
+                side_verdicts=indicators.get("side_verdicts"),
             )
 
     # 2026-09-27: Market-lean fade gate.  Reject entries that trade AGAINST a
