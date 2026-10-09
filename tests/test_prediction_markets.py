@@ -875,6 +875,36 @@ class TestPredictionMarketRisk:
         assert self.risk.is_halted is True
         assert self.risk.unwind_requested is True
 
+    def test_drawdown_unwind_latch_not_downgraded(self):
+        """Once unwind is latched, a drawdown recovery into the halt-only band
+        must not downgrade it back to an ordinary halt."""
+        self.risk.record_fill("MKT-1", "EVT-1", "yes", 10, Decimal("55"))
+        # 20% drawdown -> unwind latched
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("800"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.unwind_requested is True
+        # Recovery to 12% (>= halt 10%, < unwind 15%) re-triggers an ordinary halt
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("880"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is True
+        assert "MKT-1" in self.risk.get_markets_to_unwind()
+
+    def test_unwind_latch_cleared_only_by_resume(self):
+        """resume() is the only path that clears the unwind latch."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("800"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.unwind_requested is True
+        self.risk.resume()
+        assert self.risk.is_halted is False
+        assert self.risk.unwind_requested is False
+
     def test_drawdown_ok(self):
         self.risk.check_drawdown(
             portfolio_value_usd=Decimal("950"),

@@ -574,7 +574,12 @@ def _run_agent_gauntlet(cycles: int = 10) -> tuple:
         if loop is not None:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                verdicts = pool.submit(asyncio.run, run_gauntlet(cycles=cycles)).result(timeout=120)
+                # Create the coroutine inside the worker thread so it is always
+                # awaited there; creating it eagerly here can leave it
+                # unawaited if submit/result raises (e.g. timeout).
+                verdicts = pool.submit(
+                    lambda: asyncio.run(run_gauntlet(cycles=cycles))
+                ).result(timeout=120)
         else:
             verdicts = asyncio.run(run_gauntlet(cycles=cycles))
         summary = gauntlet_summary(verdicts)
