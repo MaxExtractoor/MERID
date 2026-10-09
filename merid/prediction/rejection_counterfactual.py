@@ -76,6 +76,10 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "tte_entry_cutoff",
     "structural_risk_veto",
     "edge_below_dynamic_threshold",
+    # 2026-10-09: the fixed selected-side entry-price cap.  Cap rejections
+    # carry the shadow verdict (qualified_ex_cap + other_failures) so the
+    # marginal >75c cohort is measurable without submitting anything.
+    "entry_price_cap_",
 )
 
 
@@ -158,6 +162,11 @@ def log_rejected_candidate(
     quote_age_ms: Optional[float] = None,
     book_sequence: Optional[int] = None,
     intended_quantity: Optional[int] = None,
+    # 2026-10-09: entry-cap shadow evaluation — the complete ex-cap gate
+    # verdict for every cap-blocked side (qualified_ex_cap, other_failures,
+    # price band, EV vs bound, depth, TTE).  Present only when the fixed
+    # cap was a blocker.
+    cap_shadow: Optional[dict] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
     if not _ENABLED or not should_log(reason):
@@ -221,6 +230,7 @@ def log_rejected_candidate(
             "adverse_selection_reserve_cents": adverse_selection_reserve_cents,
             "reject_reason": reason,
             "canonical_reason": _canonical_reason(reason, net_edge),
+            "cap_shadow": cap_shadow,
         }
         path = os.environ.get("MERID_REJECTED_CANDIDATES_LOG", _DEFAULT_PATH)
         line = json.dumps(record, default=str)
