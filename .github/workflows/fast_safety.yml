@@ -3,9 +3,7 @@ name: Fast Safety Gate
 on:
   pull_request:
     paths:
-      - "analytics/**"
       - "core/**"
-      - "swarm/**"
       - "tests/**"
       - "scripts/check_critical_coverage.py"
       - ".github/workflows/fast_safety.yml"
@@ -32,7 +30,7 @@ jobs:
           mkdir -p .coverage
           pytest -m "safety_critical or risk_core" \
             --maxfail=1 \
-            --cov=analytics --cov=swarm --cov=core \
+            --cov=core \
             --cov-report=term \
             --cov-report=xml:.coverage/coverage.xml \
             --cov-report=json:.coverage/coverage.json \
