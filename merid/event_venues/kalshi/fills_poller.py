@@ -159,12 +159,30 @@ class FillsPoller:
         
         # Load any existing fills from DB
         # RE-ENABLED: Critical for fills persistence - was causing empty DB
+        # 2026-10-09: do NOT await this inside start() — the caller wraps
+        # start() in a 60s wait_for, and during CPU-starved startup the
+        # aiosqlite completion cannot be scheduled in time, so the whole
+        # poller failed to start (observed live: "P2.7 FillsPoller start
+        # failed", which then left provisional router fills unpromoted and
+        # blocked all entries via unresolved_fill_accounting).  The poll
+        # loops self-load via ensure_loaded() on first ingest anyway.
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
-            loaded = await ledger.load_from_db()
-            if loaded > 0:
-                logger.info(f"FillsPoller: Restored {loaded} fills from DB")
+            _restore = asyncio.create_task(
+                ledger.load_from_db(), name="fills-ledger-restore"
+            )
+
+            def _restore_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.warning("DB restore failed: %s", exc)
+                elif t.result() > 0:
+                    logger.info("FillsPoller: Restored %d fills from DB", t.result())
+
+            _restore.add_done_callback(_restore_done)
         except Exception as e:
             logger.warning(f"DB restore failed: {e}")
         
