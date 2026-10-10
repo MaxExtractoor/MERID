@@ -42,7 +42,7 @@ class TestKillSwitchUnitTests(unittest.TestCase):
     
     def test_kill_switch_initial_state_active(self):
         """Test that kill switch starts in ACTIVE state."""
-        self.assertEqual(self.controller.state, KillSwitchState.ACTIVE)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.ACTIVE)
     
     def test_can_trade_returns_true_when_active(self):
         """Test that can_trade returns True when kill switch is active."""
@@ -56,14 +56,14 @@ class TestKillSwitchUnitTests(unittest.TestCase):
     def test_emergency_stop_triggers_kill_switch(self):
         """Test that emergency_stop triggers the kill switch."""
         self.controller.emergency_stop("Manual test")
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
     
     def test_emergency_stop_records_reason(self):
         """Test that emergency_stop records the reason."""
         reason = "Test trigger"
         self.controller.emergency_stop(reason)
-        self.assertEqual(self.controller.reason, KillSwitchReason.MANUAL)
-        self.assertEqual(self.controller.details, reason)
+        self.assertTrue(self.controller.get_kill_reason().startswith("manual"))
+        self.assertEqual(self.controller.get_status()["kill_details"], reason)
     
     def test_emergency_stop_records_event(self):
         """Test that emergency_stop records a state change event."""
@@ -78,7 +78,7 @@ class TestKillSwitchUnitTests(unittest.TestCase):
         """Test that reset clears the kill switch."""
         self.controller.emergency_stop("Test trigger")
         self.controller.reset()
-        self.assertEqual(self.controller.state, KillSwitchState.ACTIVE)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.ACTIVE)
     
     def test_reset_records_event(self):
         """Test that reset records a state change event."""
@@ -99,8 +99,8 @@ class TestKillSwitchUnitTests(unittest.TestCase):
         self.controller.record_pnl(-150.0)
         
         # Should be triggered
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertEqual(self.controller.reason, KillSwitchReason.DAILY_LOSS)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertTrue(self.controller.get_kill_reason().startswith("daily_loss"))
     
     def test_record_pnl_does_not_trigger_below_limit(self):
         """Test that recording P&L does not trigger kill switch below limit."""
@@ -111,30 +111,35 @@ class TestKillSwitchUnitTests(unittest.TestCase):
         self.controller.record_pnl(-50.0)
         
         # Should still be active
-        self.assertEqual(self.controller.state, KillSwitchState.ACTIVE)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.ACTIVE)
     
-    def test_error_threshold_triggers_kill_switch(self):
-        """Test that error threshold triggers kill switch."""
+    def test_error_threshold_never_triggers_kill_switch(self):
+        """Error count must NEVER trigger kill switch.
+
+        ERROR_THRESHOLD kills were intentionally removed from production
+        (errors are observability-only). Pins that invariant so a regression
+        can't silently reintroduce error-based halts.
+        """
         self.controller.error_threshold = 10
         
         # Record errors exceeding threshold
         for _ in range(11):
             self.controller.record_error()
         
-        # Should be triggered
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertEqual(self.controller.reason, KillSwitchReason.ERROR_THRESHOLD)
+        # Must remain active — errors never kill
+        self.assertEqual(self.controller.get_state(), KillSwitchState.ACTIVE)
+        self.assertTrue(self.controller.can_trade())
     
     def test_position_limit_triggers_kill_switch(self):
         """Test that position limit triggers kill switch."""
         self.controller.max_position_value = 1000.0
         
         # Report position exceeding limit
-        self.controller.check_position_limit(1500.0)
+        self.assertFalse(self.controller.update_position_value(1500.0))
         
         # Should be triggered
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertEqual(self.controller.reason, KillSwitchReason.POSITION_LIMIT)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertTrue(self.controller.get_kill_reason().startswith("position_limit"))
 
 
 class TestKillSwitchIntegrationTests(unittest.TestCase):
@@ -166,7 +171,7 @@ class TestKillSwitchIntegrationTests(unittest.TestCase):
         new_controller = RiskController()
         
         # State should be persisted
-        self.assertEqual(new_controller.state, KillSwitchState.TRIGGERED)
+        self.assertEqual(new_controller.get_state(), KillSwitchState.TRIGGERED)
     
     def test_kill_switch_blocks_order_submission(self):
         """Test that triggered kill switch blocks order submission."""
@@ -193,7 +198,7 @@ class TestKillSwitchIntegrationTests(unittest.TestCase):
         
         # Verify cancellation would be triggered
         # (In real implementation, this would call order_router.cancel_all())
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
     
     def test_catastrophic_condition_triggers_kill_switch(self):
         """Test that catastrophic PnL condition triggers kill switch."""
@@ -202,8 +207,8 @@ class TestKillSwitchIntegrationTests(unittest.TestCase):
         self.controller.record_pnl(-5000.0)
         
         # Should trigger
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertEqual(self.controller.reason, KillSwitchReason.DAILY_LOSS)
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertTrue(self.controller.get_kill_reason().startswith("daily_loss"))
     
     def test_spec_mismatch_triggers_kill_switch(self):
         """Test that spec mismatch condition triggers kill switch."""
@@ -211,8 +216,8 @@ class TestKillSwitchIntegrationTests(unittest.TestCase):
         self.controller.emergency_stop("Kalshi spec mismatch detected")
         
         # Should trigger
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertIn("spec mismatch", self.controller.details.lower())
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertIn("spec mismatch", self.controller.get_status()["kill_details"].lower())
 
 
 class TestKillSwitchProgrammaticInterface(unittest.TestCase):
@@ -237,24 +242,25 @@ class TestKillSwitchProgrammaticInterface(unittest.TestCase):
     
     def test_trigger_with_reason_enum(self):
         """Test triggering kill switch with reason enum."""
-        self.controller.trigger(KillSwitchReason.MANUAL, "Operator intervention")
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
-        self.assertEqual(self.controller.reason, KillSwitchReason.MANUAL)
+        self.controller._trigger_kill(KillSwitchReason.MANUAL, "Operator intervention")
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertTrue(self.controller.get_kill_reason().startswith("manual"))
     
     def test_trigger_with_string_reason(self):
-        """Test triggering kill switch with string reason."""
-        self.controller.trigger("daily_loss", "Daily loss exceeded")
-        self.assertEqual(self.controller.state, KillSwitchState.TRIGGERED)
+        """Test triggering kill switch via enum value round-trip."""
+        self.controller._trigger_kill(KillSwitchReason("daily_loss"), "Daily loss exceeded")
+        self.assertEqual(self.controller.get_state(), KillSwitchState.TRIGGERED)
+        self.assertTrue(self.controller.get_kill_reason().startswith("daily_loss"))
     
     def test_get_status_returns_dict(self):
         """Test that get_status returns status dictionary."""
         status = self.controller.get_status()
         
         self.assertIn("state", status)
-        self.assertIn("reason", status)
-        self.assertIn("details", status)
+        self.assertIn("kill_reason", status)
+        self.assertIn("kill_details", status)
         self.assertIn("can_trade", status)
-        self.assertIn("timestamp", status)
+        self.assertIn("kill_timestamp", status)
     
     def test_get_events_returns_list(self):
         """Test that get_events returns list of events."""
@@ -268,8 +274,8 @@ class TestKillSwitchProgrammaticInterface(unittest.TestCase):
         self.assertIsInstance(events[0], KillSwitchEvent)
     
     def test_get_metrics_returns_dict(self):
-        """Test that get_metrics returns metrics dictionary."""
-        metrics = self.controller.get_metrics()
+        """Test that get_status returns metrics dictionary."""
+        metrics = self.controller.get_status()
         
         self.assertIn("state", metrics)
         self.assertIn("daily_pnl", metrics)
