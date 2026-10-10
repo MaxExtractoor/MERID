@@ -368,6 +368,14 @@ Write-Host "[start_15m] KALSHI_LIVE_PRIVATE_KEY_PATH=$($env:KALSHI_LIVE_PRIVATE_
 $env:MERID_LOOP_DIAG_FILE = "1"
 Write-Host "[start_15m] MERID_LOOP_DIAG_FILE=$($env:MERID_LOOP_DIAG_FILE) - loop diagnostics enabled" -ForegroundColor Cyan
 
+# 4b. Cycle-hang faulthandler threshold. Default 150s only catches near-total
+# freezes; production has shown ~60-100s event-loop starvations (fills-poller
+# wake lag, 55s reconciler snapshot timeouts) that slip under it. 80s stays
+# above the 75s legitimate cycle timeout while capturing those stalls to
+# logs/faulthandler_dump.log.
+$env:MERID_GRID_CYCLE_HANG_DUMP_S = "80"
+Write-Host "[start_15m] MERID_GRID_CYCLE_HANG_DUMP_S=$($env:MERID_GRID_CYCLE_HANG_DUMP_S) - stall dumps at 80s" -ForegroundColor Cyan
+
 # 5. CF Benchmarks RTI adapter is the canonical live settlement source.
 $env:MERID_CFB_RTI_ADAPTER = "true"
 Write-Host "[start_15m] MERID_CFB_RTI_ADAPTER=$($env:MERID_CFB_RTI_ADAPTER) - CF Benchmarks RTI enabled" -ForegroundColor Cyan
