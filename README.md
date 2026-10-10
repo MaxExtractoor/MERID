@@ -117,7 +117,7 @@ Dockerfile, docker-compose.yml, supervisor/, prometheus/, grafana/, merid_15m_le
 
 - `web/main.py` / `web/main.py.legacy`, `merid/loop.py`, `core/orchestrator.py` and related modules are **historical reference only** — forbidden in the 15m stack (boundaries enforced by `tests/test_15m_architectural_separation.py`; see [`ARCHITECTURE_15M.md`](ARCHITECTURE_15M.md)).
 - The pre-15m codebase is archived on branch [`archive/main-pre-15m`](../../tree/archive/main-pre-15m). Not a supported execution stack.
-- Older swarm/debate modules remain in the tree for reference; they are not on the production path.
+- Legacy top-level packages (old `swarm/`, `archive/`, flat `risk/`, `analytics/`, etc.) and unmounted `web/api/*` routers have been retired from the tree; they remain in git history and on the archive branch.
 
 ## Testing
 
