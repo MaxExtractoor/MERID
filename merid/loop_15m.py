@@ -1528,22 +1528,27 @@ class Kalshi15mLoop:
                     _decision_id = _cand_ctx.get("decision_id")
                     if _decision_id:
                         from merid.execution.decision_audit_ledger import get_decision_audit_ledger
-                        get_decision_audit_ledger().append_decision_event(
-                            decision_id=str(_decision_id),
-                            candidate_id=str(candidate_id) if candidate_id else None,
-                            event_type=_audit_terminal[0],
-                            stage=_audit_terminal[1],
-                            reason_code=str(reason)[:120] if reason else None,
-                            reason_detail={
-                                "to_state": to_state,
-                                "from_state": from_state,
-                                "side": _cand_ctx.get("side"),
-                                **(dict(context) if isinstance(context, dict) else {}),
-                            },
-                            trace_id=str(candidate_id) if candidate_id else None,
-                            run_id=_cand_ctx.get("run_id"),
-                            ticker=_cand_ctx.get("ticker") or (context or {}).get("ticker"),
-                            asset=_cand_ctx.get("asset") or (context or {}).get("asset"),
+                        from functools import partial as _partial
+                        _audit_ledger = get_decision_audit_ledger()
+                        _audit_ledger.submit_write(
+                            _partial(
+                                _audit_ledger.append_decision_event,
+                                decision_id=str(_decision_id),
+                                candidate_id=str(candidate_id) if candidate_id else None,
+                                event_type=_audit_terminal[0],
+                                stage=_audit_terminal[1],
+                                reason_code=str(reason)[:120] if reason else None,
+                                reason_detail={
+                                    "to_state": to_state,
+                                    "from_state": from_state,
+                                    "side": _cand_ctx.get("side"),
+                                    **(dict(context) if isinstance(context, dict) else {}),
+                                },
+                                trace_id=str(candidate_id) if candidate_id else None,
+                                run_id=_cand_ctx.get("run_id"),
+                                ticker=_cand_ctx.get("ticker") or (context or {}).get("ticker"),
+                                asset=_cand_ctx.get("asset") or (context or {}).get("asset"),
+                            )
                         )
                 except Exception:
                     pass

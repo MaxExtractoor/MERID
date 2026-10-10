@@ -80,6 +80,7 @@ except ImportError:
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
 
@@ -393,14 +394,18 @@ def _record_entry_fill_in_audit_ledger(fill: "KalshiFill") -> None:
         from merid.execution.decision_audit_ledger import (
             get_decision_audit_ledger,
         )
-        get_decision_audit_ledger().record_entry_fill(
-            decision_id=str(trace_id),
-            fill_id=fill.fill_id,
-            exchange_order_id=fill.order_id,
-            execution_outcome_side=fill.execution_outcome_side or fill.side,
-            execution_action=fill.execution_action or fill.action,
-            execution_price_cents=fill.execution_price_cents,
-            entry_fee_cents=float(fee_dollars_to_cents(fill.fee_cost)),
+        _audit = get_decision_audit_ledger()
+        _audit.submit_write(
+            partial(
+                _audit.record_entry_fill,
+                decision_id=str(trace_id),
+                fill_id=fill.fill_id,
+                exchange_order_id=fill.order_id,
+                execution_outcome_side=fill.execution_outcome_side or fill.side,
+                execution_action=fill.execution_action or fill.action,
+                execution_price_cents=fill.execution_price_cents,
+                entry_fee_cents=float(fee_dollars_to_cents(fill.fee_cost)),
+            )
         )
     except Exception as exc:
         logger.debug(

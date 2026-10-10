@@ -657,14 +657,22 @@ def _record_decision_audit(
         from merid.execution.decision_audit_ledger import get_decision_audit_ledger
 
         ledger = get_decision_audit_ledger()
-        ledger.record_trade_decision(
-            decision,
-            cycle_id=cycle_id,
-            market_state=market_state,
-            quote_age_ms=_quote_age_ms(market_state),
-            settlement_reference_price=settlement_input_price,
-            settlement_reference_source=settlement_reference,
-            settlement_reference_age_ms=_rti_age_ms(cfb_observation),
+        # Offload to the ledger writer thread: the BEGIN IMMEDIATE + INSERT on
+        # the multi-GB audit DB used to run inline here on the event loop and
+        # was the dominant starvation source (faulthandler samples). The
+        # return value is unused and this path is deliberately fail-open.
+        from functools import partial as _partial
+        ledger.submit_write(
+            _partial(
+                ledger.record_trade_decision,
+                decision,
+                cycle_id=cycle_id,
+                market_state=market_state,
+                quote_age_ms=_quote_age_ms(market_state),
+                settlement_reference_price=settlement_input_price,
+                settlement_reference_source=settlement_reference,
+                settlement_reference_age_ms=_rti_age_ms(cfb_observation),
+            )
         )
     except Exception as audit_exc:
         logger.warning(
@@ -10927,20 +10935,27 @@ class LeanAgent15m:
                 get_decision_audit_ledger,
             )
             ledger = get_decision_audit_ledger()
-            ledger.record_pre_decision_rejection(
-                cycle_id=str(tick),
-                run_id=run_id,
-                ticker=ticker or "",
-                asset=asset,
-                reason=reason,
-                seconds_to_expiry=tte,
-                spot_price=spot,
-                strike_price=strike,
-                decision_id=f"{candidate_id}:pre",
-                candidate_id=candidate_id,
-                trace_id=candidate_id,
-                event_type=event_type,
-                extra=detail,
+            # Offloaded: sqlite write ran inline on the event loop and was a
+            # measured starvation source; the rejection row is write-only
+            # audit so its bool return is unused here.
+            from functools import partial as _partial
+            ledger.submit_write(
+                _partial(
+                    ledger.record_pre_decision_rejection,
+                    cycle_id=str(tick),
+                    run_id=run_id,
+                    ticker=ticker or "",
+                    asset=asset,
+                    reason=reason,
+                    seconds_to_expiry=tte,
+                    spot_price=spot,
+                    strike_price=strike,
+                    decision_id=f"{candidate_id}:pre",
+                    candidate_id=candidate_id,
+                    trace_id=candidate_id,
+                    event_type=event_type,
+                    extra=detail,
+                )
             )
         except Exception as _pdr_err:
             logger.debug("[DECISION-AUDIT] pre-decision rejection emit failed (non-fatal): %s", _pdr_err)
@@ -10971,16 +10986,20 @@ class LeanAgent15m:
                 selected = context.get("selected_outcome")
                 model_reason = context.get("model_no_trade_reason")
                 if selected and reason != model_reason:
-                    ledger.append_decision_event(
-                        decision_id=str(did),
-                        event_type="RISK_REJECTED",
-                        stage="RISK",
-                        reason_code=str(reason),
-                        reason_detail={k: v for k, v in context.items() if isinstance(v, (str, int, float, bool, type(None)))},
-                        trace_id=str(did).split(":", 1)[0],
-                        run_id=context.get("run_id"),
-                        ticker=context.get("ticker") or context.get("market_id"),
-                        asset=context.get("asset"),
+                    from functools import partial as _partial
+                    ledger.submit_write(
+                        _partial(
+                            ledger.append_decision_event,
+                            decision_id=str(did),
+                            event_type="RISK_REJECTED",
+                            stage="RISK",
+                            reason_code=str(reason),
+                            reason_detail={k: v for k, v in context.items() if isinstance(v, (str, int, float, bool, type(None)))},
+                            trace_id=str(did).split(":", 1)[0],
+                            run_id=context.get("run_id"),
+                            ticker=context.get("ticker") or context.get("market_id"),
+                            asset=context.get("asset"),
+                        )
                     )
                 return
             ctx = getattr(self, "_pdr_ctx", None) or {}
@@ -11017,26 +11036,30 @@ class LeanAgent15m:
                 if reason_l.startswith(("cooldown", "reentry_guard"))
                 else "PRE_DECISION_REJECTED"
             )
-            ledger.record_pre_decision_rejection(
-                cycle_id=str(tick),
-                run_id=context.get("run_id") or run_id,
-                ticker=ticker or "",
-                asset=asset,
-                reason=str(reason),
-                event_type=event_type,
-                seconds_to_expiry=tte,
-                spot_price=spot,
-                strike_price=strike,
-                decision_id=f"{candidate_id}:pre",
-                candidate_id=ctx.get("candidate_id") or candidate_id,
-                trace_id=ctx.get("candidate_id") or candidate_id,
-                extra={
-                    "signal_rejection_context": {
-                        k: v
-                        for k, v in context.items()
-                        if isinstance(v, (str, int, float, bool, type(None)))
-                    }
-                },
+            from functools import partial as _partial
+            ledger.submit_write(
+                _partial(
+                    ledger.record_pre_decision_rejection,
+                    cycle_id=str(tick),
+                    run_id=context.get("run_id") or run_id,
+                    ticker=ticker or "",
+                    asset=asset,
+                    reason=str(reason),
+                    event_type=event_type,
+                    seconds_to_expiry=tte,
+                    spot_price=spot,
+                    strike_price=strike,
+                    decision_id=f"{candidate_id}:pre",
+                    candidate_id=ctx.get("candidate_id") or candidate_id,
+                    trace_id=ctx.get("candidate_id") or candidate_id,
+                    extra={
+                        "signal_rejection_context": {
+                            k: v
+                            for k, v in context.items()
+                            if isinstance(v, (str, int, float, bool, type(None)))
+                        }
+                    },
+                )
             )
         except Exception as _sig_audit_err:
             logger.debug("[DECISION-AUDIT] signal rejection audit failed: %s", _sig_audit_err)
@@ -20816,14 +20839,16 @@ def _reconcile_cycle_counters(
     # schema migration or stale database cannot stall the trading cadence.
     if _DECISION_AUDIT_LEDGER_AVAILABLE:
         try:
+            from functools import partial as _partial
             ledger = get_decision_audit_ledger()
-            threading.Thread(
-                target=ledger.log_cycle_heartbeat,
-                args=(str(tick),),
-                kwargs={"tick": tick, "assets_evaluated": assets_evaluated},
-                daemon=True,
-                name=f"audit_heartbeat_tick_{tick}",
-            ).start()
+            ledger.submit_write(
+                _partial(
+                    ledger.log_cycle_heartbeat,
+                    str(tick),
+                    tick=tick,
+                    assets_evaluated=assets_evaluated,
+                )
+            )
         except Exception as hb_exc:
             logger.warning("[DECISION-AUDIT-HEARTBEAT] failed for tick=%d: %s", tick, hb_exc)
 

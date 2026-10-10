@@ -141,11 +141,16 @@ class OrderDecisionLedger:
         record.order_status = "submitted"
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+            from functools import partial as _partial
 
-            get_decision_audit_ledger().record_outcome(
-                decision_id=decision_id,
-                order_intent_id=intent_id,
-                exchange_order_id=order_id,
+            _audit = get_decision_audit_ledger()
+            _audit.submit_write(
+                _partial(
+                    _audit.record_outcome,
+                    decision_id=decision_id,
+                    order_intent_id=intent_id,
+                    exchange_order_id=order_id,
+                )
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record submission failed: %s", audit_exc)
@@ -192,14 +197,22 @@ class OrderDecisionLedger:
             # record_entry_fill converts the venue-leg price into selected-side
             # space (a sell-YES@46 fill is a NO@54 entry) and is fail-closed
             # when the fill direction cannot be verified against the decision.
-            get_decision_audit_ledger().record_entry_fill(
-                decision_id=decision_id,
-                fill_id=fill.fill_id,
-                exchange_order_id=fill.order_id,
-                execution_outcome_side=fill.side,
-                execution_action=fill.action,
-                execution_price_cents=fill.price_cents,
-                entry_fee_cents=float(fill.fee_cents),
+            # Offloaded: its bool result is not consumed here and the sqlite
+            # write must not stall the caller's thread.
+            from functools import partial as _partial
+
+            _audit = get_decision_audit_ledger()
+            _audit.submit_write(
+                _partial(
+                    _audit.record_entry_fill,
+                    decision_id=decision_id,
+                    fill_id=fill.fill_id,
+                    exchange_order_id=fill.order_id,
+                    execution_outcome_side=fill.side,
+                    execution_action=fill.action,
+                    execution_price_cents=fill.price_cents,
+                    entry_fee_cents=float(fill.fee_cents),
+                )
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record fill failed: %s", audit_exc)
@@ -243,10 +256,16 @@ class OrderDecisionLedger:
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
 
-            get_decision_audit_ledger().record_outcome(
-                decision_id=decision_id,
-                actual_exit_price_cents=exit.exit_price_cents,
-                realized_net_pnl_cents=float(realized_pnl_cents) if realized_pnl_cents is not None else None,
+            from functools import partial as _partial
+
+            _audit = get_decision_audit_ledger()
+            _audit.submit_write(
+                _partial(
+                    _audit.record_outcome,
+                    decision_id=decision_id,
+                    actual_exit_price_cents=exit.exit_price_cents,
+                    realized_net_pnl_cents=float(realized_pnl_cents) if realized_pnl_cents is not None else None,
+                )
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record exit failed: %s", audit_exc)
