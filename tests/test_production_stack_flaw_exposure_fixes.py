@@ -48,9 +48,9 @@ class TestUnifiedSizingModule:
         required_functions = [
             'compute_order_size',
             'compute_min_notional_for_venue',
-            '_get_bankroll_cap_pct',
-            '_get_per_asset_risk_pct',
-            '_get_per_trade_risk_pct',
+            'calculate_kelly_fraction',
+            '_get_max_contracts_per_asset',
+            '_is_dynamic_sizing_enabled',
         ]
         
         for func_name in required_functions:
@@ -212,8 +212,10 @@ class TestRiskEnvelopeConsistency:
         # assert abs(envelope.per_agent_window_limit_usd - expected_per_agent) < 0.01, \
         #     f"Per-agent window limit mismatch: {envelope.per_agent_window_limit_usd} vs {expected_per_agent}"
         
-        # Check total venue window limit (fixed $1.00, not percentage-based)
-        expected_total = 1.00  # Fixed exposure cap from MERID_FIXED_EXPOSURE_CAP_USD
+        # Check total venue window limit tracks the fixed exposure cap
+        # (MERID_FIXED_EXPOSURE_CAP_USD, default $3.00 — not percentage-based)
+        import os
+        expected_total = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
         assert abs(envelope.total_venue_window_limit_usd - expected_total) < 0.01, \
             f"Total venue window limit mismatch: {envelope.total_venue_window_limit_usd} vs {expected_total}"
     

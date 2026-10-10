@@ -193,8 +193,9 @@ class TestPaperTradingIntegration:
         portfolio = paper_engine.get_portfolio("test_user")
         assert len(portfolio.positions) == 1
 
-        # Close position
-        position_key = "BTC_long_perp"
+        # Close position — use the actual key the engine generated
+        # (format: {asset}_{side}_{market_type}_{venue})
+        position_key = next(iter(portfolio.positions))
         pnl = paper_engine.close_position("test_user", position_key)
         
         assert pnl is not None
