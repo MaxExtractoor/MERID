@@ -207,17 +207,32 @@ def event_series_and_eligibility(raw: Dict[str, Any]) -> Tuple[bool, Optional[st
 # Existing-history loading (deterministic latest-event-wins)
 # ---------------------------------------------------------------------------
 
+_outcome_cache: Dict[str, Tuple[float, int, Dict[str, Dict[str, Any]], int]] = {}
+
+
 def load_existing_outcomes(path: str | Path) -> Tuple[Dict[str, Dict[str, Any]], int]:
     """Load the outcome history file, keyed by normalized ticker.
 
     Latest valid event wins (file order is append order). Malformed rows are
     skipped and counted. Returns (ticker -> latest row, malformed_count).
+
+    The settlement poller calls this once per settlement event on the event
+    loop; re-parsing the full append-only history each call starved asyncio
+    (faulthandler sample: loop thread inside json.loads here).  Results are
+    cached on (mtime_ns, size) — the file only changes when this process or
+    the exporter daemon appends, so a changed mtime forces a real re-parse.
     """
+    p = Path(path)
+    try:
+        st = p.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}, 0
+    cached = _outcome_cache.get(str(p))
+    if cached is not None and cached[0] == key[0] and cached[1] == key[1]:
+        return dict(cached[2]), cached[3]
     latest: Dict[str, Dict[str, Any]] = {}
     malformed = 0
-    p = Path(path)
-    if not p.exists():
-        return latest, malformed
     with open(p, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -237,6 +252,7 @@ def load_existing_outcomes(path: str | Path) -> Tuple[Dict[str, Dict[str, Any]],
                 malformed += 1
                 continue
             latest[str(ticker).strip().upper()] = row
+    _outcome_cache[str(p)] = (key[0], key[1], dict(latest), malformed)
     return latest, malformed
 
 

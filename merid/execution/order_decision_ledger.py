@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from utils.logger import get_logger
 
@@ -32,6 +33,14 @@ logger = get_logger("merid.execution.order_decision_ledger")
 
 # fsync'd append lock.
 _ledger_lock = threading.Lock()
+
+
+def _is_test_context() -> bool:
+    """Detect pytest/test runtime so tests read back events synchronously."""
+    return (
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("MERID_ENV", "").lower() in ("test", "ci")
+    )
 
 
 def _now_utc() -> datetime:
@@ -61,6 +70,15 @@ class OrderDecisionLedger:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._records: Dict[str, OrderDecisionRecord] = {}
         self._log_file = self.log_dir / "order_decisions.jsonl"
+        # File-append offload: _append_event used to open+dumps+fsync on the
+        # caller's thread — including the asyncio event loop, where bursts of
+        # per-candidate events starved the loop (faulthandler samples).
+        # Events now queue FIFO to a daemon writer that preserves ordering and
+        # still flushes+fsyncs each record; the crash-loss window shrinks to
+        # the writer's drain tail.
+        self._write_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._writer_thread: Optional[threading.Thread] = None
+        self._writer_started = False
 
     def start(self, record: OrderDecisionRecord) -> None:
         """Write the initial decision-time snapshot.
@@ -264,13 +282,29 @@ class OrderDecisionLedger:
         return self._records[decision_id]
 
     def _append_event(self, decision_id: str, event_type: str, payload: Dict[str, Any]) -> None:
-        """Persist an append-only ledger event with fsync."""
+        """Persist an append-only ledger event via the dedicated writer thread."""
         line = {
             "decision_id": decision_id,
             "event_type": event_type,
             "ts": time.time(),
             "payload": payload,
         }
+        if _is_test_context():
+            self._write_event_line(line)
+            return
+        if not self._writer_started:
+            with _ledger_lock:
+                if not self._writer_started:
+                    self._writer_thread = threading.Thread(
+                        target=self._writer_main,
+                        name="order-decision-ledger-writer",
+                        daemon=True,
+                    )
+                    self._writer_thread.start()
+                    self._writer_started = True
+        self._write_queue.put_nowait(line)
+
+    def _write_event_line(self, line: Dict[str, Any]) -> None:
         try:
             with _ledger_lock:
                 with open(self._log_file, "a", encoding="utf-8") as f:
@@ -279,6 +313,16 @@ class OrderDecisionLedger:
                     os.fsync(f.fileno())
         except Exception as exc:
             logger.warning("[ORDER-DECISION-LEDGER] failed to persist event: %s", exc)
+
+    def _writer_main(self) -> None:
+        while True:
+            line = self._write_queue.get()
+            try:
+                self._write_event_line(line)
+            except Exception as exc:  # defensive; _write_event_line swallows
+                logger.warning("[ORDER-DECISION-LEDGER] writer error: %s", exc)
+            finally:
+                self._write_queue.task_done()
 
 
 def _json_default(obj: Any) -> Any:

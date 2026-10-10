@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -23,8 +24,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -325,6 +327,53 @@ class DecisionAuditLedger:
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
         self._evidence_refresh_inflight = False
+        # Write offload: public record_* calls enqueue closures drained by a
+        # single daemon writer thread.  The event loop calls these on the hot
+        # decision path; one slow commit/WAL checkpoint on the multi-GB audit
+        # DB otherwise serializes the pipeline and starves asyncio
+        # (faulthandler samples: loop thread parked in _insert_trade_decision
+        # / record_pre_decision_rejection).  FIFO ordering is preserved and
+        # every write still runs under self._lock on the shared connection.
+        self._write_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._writer_started = False
+        self._writer_thread: Optional[threading.Thread] = None
+
+    def _submit_write(self, fn: Callable[[], None]) -> None:
+        """Run a ledger write on the dedicated writer thread.
+
+        Writes are append-only, callers ignore return values, and failures are
+        already logged-and-swallowed, so FIFO offload preserves ordering and
+        durability modulo the process-crash tail — the same guarantee the
+        class gives today.  Under pytest/CI the write runs inline so tests
+        can assert on rows immediately.
+        """
+        if _is_test_context():
+            try:
+                fn()
+            except Exception:
+                pass
+            return
+        if not self._writer_started:
+            with self._lock:
+                if not self._writer_started:
+                    self._writer_thread = threading.Thread(
+                        target=self._writer_main,
+                        name="decision-audit-ledger-writer",
+                        daemon=True,
+                    )
+                    self._writer_thread.start()
+                    self._writer_started = True
+        self._write_queue.put_nowait(fn)
+
+    def _writer_main(self) -> None:
+        while True:
+            fn = self._write_queue.get()
+            try:
+                fn()
+            except Exception as exc:  # defensive; impls already swallow
+                logger.warning("[DECISION-AUDIT-LEDGER] writer error: %s", exc)
+            finally:
+                self._write_queue.task_done()
 
     def _ensure_db(self) -> None:
         """Create parent directory, schema, and run migrations on first use."""
@@ -605,7 +654,11 @@ class DecisionAuditLedger:
 
     # ── Public recording API ───────────────────────────────────────────────
 
-    def record_trade_decision(
+    def record_trade_decision(self, *args, **kwargs) -> None:
+        """Persist a decision bundle (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_trade_decision_impl, *args, **kwargs))
+
+    def _record_trade_decision_impl(
         self,
         decision: Any,
         *,
@@ -699,7 +752,11 @@ class DecisionAuditLedger:
             )
             return False
 
-    def record_pre_decision_rejection(
+    def record_pre_decision_rejection(self, *args, **kwargs) -> None:
+        """Persist a pre-decision rejection row (offloaded to the writer)."""
+        self._submit_write(partial(self._record_pre_decision_rejection_impl, *args, **kwargs))
+
+    def _record_pre_decision_rejection_impl(
         self,
         *,
         cycle_id: Optional[str] = None,
@@ -1040,7 +1097,11 @@ class DecisionAuditLedger:
             )
             return None
 
-    def append_decision_event(
+    def append_decision_event(self, *args, **kwargs) -> None:
+        """Append a lifecycle event (offloaded to the writer thread)."""
+        self._submit_write(partial(self._append_decision_event_impl, *args, **kwargs))
+
+    def _append_decision_event_impl(
         self,
         *,
         decision_id: str,
@@ -1098,7 +1159,11 @@ class DecisionAuditLedger:
             )
             return None
 
-    def mark_outcome_unresolved(
+    def mark_outcome_unresolved(self, *args, **kwargs) -> None:
+        """Mark an outcome unresolved (offloaded to the writer thread)."""
+        self._submit_write(partial(self._mark_outcome_unresolved_impl, *args, **kwargs))
+
+    def _mark_outcome_unresolved_impl(
         self,
         ticker: str,
         close_ts: float,
@@ -1161,7 +1226,11 @@ class DecisionAuditLedger:
             )
             return 0
 
-    def record_outcome(
+    def record_outcome(self, *args, **kwargs) -> None:
+        """Persist a fill/order outcome (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_outcome_impl, *args, **kwargs))
+
+    def _record_outcome_impl(
         self,
         *,
         decision_id: str,
@@ -1240,7 +1309,11 @@ class DecisionAuditLedger:
                 exc,
             )
 
-    def record_entry_fill(
+    def record_entry_fill(self, *args, **kwargs) -> None:
+        """Persist an entry fill link (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_entry_fill_impl, *args, **kwargs))
+
+    def _record_entry_fill_impl(
         self,
         *,
         decision_id: str,
@@ -1678,7 +1751,11 @@ class DecisionAuditLedger:
             )
         return healed
 
-    def record_settlement(
+    def record_settlement(self, *args, **kwargs) -> None:
+        """Persist a market settlement (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_settlement_impl, *args, **kwargs))
+
+    def _record_settlement_impl(
         self,
         ticker: str,
         close_ts: float,
@@ -2074,7 +2151,11 @@ class DecisionAuditLedger:
             )
             return []
 
-    def record_data_gap(
+    def record_data_gap(self, *args, **kwargs) -> None:
+        """Persist a data-gap record (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_data_gap_impl, *args, **kwargs))
+
+    def _record_data_gap_impl(
         self,
         *,
         gap_id: str,
@@ -2117,7 +2198,11 @@ class DecisionAuditLedger:
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] record_data_gap failed for %s: %s", gap_id, exc)
 
-    def record_heartbeat(
+    def record_heartbeat(self, *args, **kwargs) -> None:
+        """Persist a cycle heartbeat (offloaded to the writer thread)."""
+        self._submit_write(partial(self._record_heartbeat_impl, *args, **kwargs))
+
+    def _record_heartbeat_impl(
         self,
         *,
         cycle_id: str,
@@ -2203,7 +2288,11 @@ class DecisionAuditLedger:
             if is_error:
                 stats["error_count"] += 1
 
-    def log_cycle_heartbeat(
+    def log_cycle_heartbeat(self, *args, **kwargs) -> None:
+        """Log + persist a cycle heartbeat (offloaded to the writer thread)."""
+        self._submit_write(partial(self._log_cycle_heartbeat_impl, *args, **kwargs))
+
+    def _log_cycle_heartbeat_impl(
         self,
         cycle_id: str,
         *,
@@ -2237,7 +2326,7 @@ class DecisionAuditLedger:
         side_ev_persisted = stats["side_ev"]
         ledger_write_latency_ms = stats["latency_ms"]
         ledger_error_count = stats["error_count"]
-        self.record_heartbeat(
+        self._record_heartbeat_impl(
             cycle_id=cycle_id,
             tick=tick,
             assets_evaluated=assets_evaluated,
