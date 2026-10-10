@@ -3726,6 +3726,38 @@ async def _run_full_startup_in_lifespan(app):
         faulthandler.cancel_dump_traceback_later()
         _trading_thread_alive = False
         logger.info("[STARTUP-STACK] EXIT - Full startup terminated")
+        # Runtime stack sampler: the loop is chronically starved in sub-80s
+        # bursts that slip under the cycle-hang watchdog, so periodic dumps
+        # catch the offending frame statistically (the freeze occupies most
+        # of the wall time during starvation). Uses a daemon thread calling
+        # dump_traceback directly because dump_traceback_later supports only
+        # one pending timer globally (owned by the cycle-hang watchdog).
+        # Env-gated; default off.
+        _periodic_s = float(os.getenv("MERID_FH_PERIODIC_DUMP_S", "0") or 0)
+        if _periodic_s > 0:
+            import threading as _fh_threading
+
+            def _fh_sampler() -> None:
+                while True:
+                    time.sleep(_periodic_s)
+                    try:
+                        _faulthandler_file.write(
+                            "\n===== periodic faulthandler sample =====\n"
+                        )
+                        _faulthandler_file.flush()
+                        faulthandler.dump_traceback(
+                            file=_faulthandler_file, all_threads=True
+                        )
+                    except Exception:
+                        pass
+
+            _fh_threading.Thread(
+                target=_fh_sampler, name="fh-periodic-sampler", daemon=True
+            ).start()
+            logger.info(
+                "[STARTUP-STACK] periodic faulthandler sampler armed: every %.0fs",
+                _periodic_s,
+            )
 
 @dataclass
 class UnifiedEdgeConfig:

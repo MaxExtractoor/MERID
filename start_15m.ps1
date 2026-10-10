@@ -376,6 +376,12 @@ Write-Host "[start_15m] MERID_LOOP_DIAG_FILE=$($env:MERID_LOOP_DIAG_FILE) - loop
 $env:MERID_GRID_CYCLE_HANG_DUMP_S = "80"
 Write-Host "[start_15m] MERID_GRID_CYCLE_HANG_DUMP_S=$($env:MERID_GRID_CYCLE_HANG_DUMP_S) - stall dumps at 80s" -ForegroundColor Cyan
 
+# 4c. Periodic faulthandler stack sampler. Chronic sub-80s loop starvations
+# escape the cycle-hang watchdog; a 20s sample cadence catches the offending
+# frame statistically. Bounded: ~25 threads x ~2KB per dump.
+$env:MERID_FH_PERIODIC_DUMP_S = "20"
+Write-Host "[start_15m] MERID_FH_PERIODIC_DUMP_S=$($env:MERID_FH_PERIODIC_DUMP_S) - stack sampler every 20s" -ForegroundColor Cyan
+
 # 5. CF Benchmarks RTI adapter is the canonical live settlement source.
 $env:MERID_CFB_RTI_ADAPTER = "true"
 Write-Host "[start_15m] MERID_CFB_RTI_ADAPTER=$($env:MERID_CFB_RTI_ADAPTER) - CF Benchmarks RTI enabled" -ForegroundColor Cyan
