@@ -90,24 +90,23 @@ class TestTimeframeFiltering:
         """Timeframe should be inferred from actual expiration, not series prefix."""
         from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
         
-        catalog = KalshiMarketCatalog()
-        
-        # Test the _detect_timeframe method with various expirations
+        # _detect_timeframe is a @staticmethod — call on the class so the test
+        # does not need Kalshi credentials for catalog construction.
         now = datetime.now(timezone.utc)
         
         # 15m market: expires in 15 minutes
         expiry_15m = now + timedelta(minutes=15)
-        tf_15m = catalog._detect_timeframe("KXBTC-TEST", expiry_15m, now)
+        tf_15m = KalshiMarketCatalog._detect_timeframe("KXBTC-TEST", expiry_15m, now)
         assert tf_15m == "15m", f"Expected 15m, got {tf_15m}"
         
         # 1h market: expires in 60 minutes
         expiry_1h = now + timedelta(minutes=60)
-        tf_1h = catalog._detect_timeframe("KXETH-TEST", expiry_1h, now)
+        tf_1h = KalshiMarketCatalog._detect_timeframe("KXETH-TEST", expiry_1h, now)
         assert tf_1h == "1h", f"Expected 1h, got {tf_1h}"
         
         # Daily market: expires in 12 hours
         expiry_daily = now + timedelta(hours=12)
-        tf_daily = catalog._detect_timeframe("KXETH-TEST", expiry_daily, now)
+        tf_daily = KalshiMarketCatalog._detect_timeframe("KXETH-TEST", expiry_daily, now)
         assert tf_daily == "daily", f"Expected daily, got {tf_daily}"
     
     @pytest.mark.skip(reason="kalshi_strike_selector module removed during 15m cleanup")
