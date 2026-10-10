@@ -8933,8 +8933,13 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 name=f"agent_grid_run_cycle_{tick}",
             )
             if hang_dump_s > 0:
+                # Dump to the dedicated forensics file when available so the
+                # stacks cannot interleave with normal logging output.
+                _fh_out = getattr(
+                    sys.modules.get("web.main_15m_lean"), "_faulthandler_file", None
+                ) or sys.stderr
                 faulthandler.dump_traceback_later(
-                    hang_dump_s, exit=False, file=sys.stderr
+                    hang_dump_s, exit=False, file=_fh_out
                 )
             orphans = getattr(self, "_grid_orphan_tasks", None)
             if orphans is None:

@@ -39,6 +39,19 @@ from utils.logger import get_logger, startup_log_cleanup
 startup_log_cleanup()
 logger = get_logger("web.main_15m_lean")
 
+# Fatal-crash + stall forensics. faulthandler.enable() catches Windows fatal
+# exceptions (e.g. the 0xC0000005 access violation that killed the process
+# silently) and prints every thread's Python stack for the faulting frame.
+# Dumps go to a dedicated file so stderr/stdout interleaving cannot corrupt
+# them — the same file is used by the dump_traceback_later stall watchdogs
+# below and in merid.loop_15m.
+import faulthandler as _faulthandler
+os.makedirs("logs", exist_ok=True)
+_faulthandler_file = open(
+    os.path.join("logs", "faulthandler_dump.log"), "a", buffering=1, encoding="utf-8"
+)
+_faulthandler.enable(file=_faulthandler_file, all_threads=True)
+
 # Import startup_state early for singleton reset during module import
 from web.startup_state import startup_state
 
@@ -3312,9 +3325,11 @@ async def _run_full_startup_in_lifespan(app):
     # Event-loop freeze watchdog: a synchronous block inside any coroutine
     # below starves asyncio (wait_for timeouts cannot fire on a frozen loop).
     # faulthandler's timer runs on a C-level watchdog thread, so it dumps all
-    # thread stacks to stderr even if the loop is dead. Cancelled on success.
+    # thread stacks even if the loop is dead. Cancelled on success. Writes to
+    # the dedicated dump file opened at module import so concurrent logging
+    # cannot interleave into the stacks.
     import faulthandler
-    faulthandler.dump_traceback_later(120.0, exit=False, repeat=True)
+    faulthandler.dump_traceback_later(120.0, exit=False, repeat=True, file=_faulthandler_file)
     
     logger.info("[STARTUP-STACK] ENTRY - Initializing P2.x in lifespan")
     
