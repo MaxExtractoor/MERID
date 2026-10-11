@@ -521,19 +521,31 @@ def _moneyness_min_abs_z() -> float:
     return _env_float("MERID_MONEYNESS_MIN_ABS_Z", 0.5)
 
 
-def moneyness_max_entry_price_cents(side: Optional[str] = None) -> float:
-    """Per-side entry price cap; falls back to the shared cap.
+def moneyness_max_entry_price_cents(
+    side: Optional[str] = None,
+    asset: Optional[str] = None,
+) -> float:
+    """Per-side, per-asset entry price cap; falls back to the shared cap.
 
     2026-10-11 audit (live decision_audit, post-Oct-7 cap): NO entries at
     60-75c ran -9.49 USD on 64 fills (55% win, -15c avg) while NO <60c ran
     +2.06 on 157 — the NO fade tail is left-skewed at 60c+.  YES 60-75c
-    ran +1.29 on 14, so the shared cap stays for YES.
+    ran +1.29 on 14, so the shared cap stays for YES.  XRP-NO loses in
+    every sub-75c band (-9.54 on 60 fills, claimed-vs-realized gap 24c vs
+    a 0.14c adverse-selection haircut), so per-asset overrides exist:
+    ``MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{SIDE}_{ASSET}``.
     """
     shared = _env_float("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS", 75.0)
-    if side == "no":
-        return _env_float("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO", shared)
-    if side == "yes":
-        return _env_float("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_YES", shared)
+    if side in ("yes", "no"):
+        side_cap = _env_float(
+            f"MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{side.upper()}", shared
+        )
+        if asset:
+            return _env_float(
+                f"MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{side.upper()}_{asset.upper()}",
+                side_cap,
+            )
+        return side_cap
     return shared
 
 
@@ -578,6 +590,7 @@ def coin_flip_block_reason(
 def entry_price_cap_block_reason(
     entry_price_cents: Optional[float],
     side: Optional[str] = None,
+    asset: Optional[str] = None,
 ) -> Optional[str]:
     """Reject extreme-price entries on the normal qualify path.
 
@@ -586,12 +599,12 @@ def entry_price_cap_block_reason(
     cap.  The trend_yes_hi lane (91-94c YES) is exempt: it keeps its own
     stricter admission (confirmed rally, p>=0.94, net EV>=3c, TTE window),
     so the caller applies this block only on the normal YES path while NO
-    applies it unconditionally.  ``side`` selects the per-side cap override
-    (``MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{YES,NO}``).
+    applies it unconditionally.  ``side``/``asset`` select the override
+    chain ``MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{YES,NO}_{ASSET}``.
     """
     if not moneyness_gate_enabled():
         return None
-    cap = moneyness_max_entry_price_cents(side)
+    cap = moneyness_max_entry_price_cents(side, asset)
     if cap <= 0.0:
         return None
     px = _finite_or_none(entry_price_cents)
