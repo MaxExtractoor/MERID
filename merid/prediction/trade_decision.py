@@ -4437,8 +4437,12 @@ def compute_trade_decision(
     _coinflip_block = _dr.coin_flip_block_reason(_dist_frac, z)
     # Price cap applies to NO unconditionally; YES applies it only on the
     # normal path — the trend_yes_hi lane (91-94c) is separately gated.
-    _yes_price_cap_block = _dr.entry_price_cap_block_reason(yes_price_cents, side="yes")
-    _no_price_cap_block = _dr.entry_price_cap_block_reason(no_price_cents, side="no")
+    _yes_price_cap_block = _dr.entry_price_cap_block_reason(
+        yes_price_cents, side="yes", asset=asset
+    )
+    _no_price_cap_block = _dr.entry_price_cap_block_reason(
+        no_price_cents, side="no", asset=asset
+    )
     # Experiment B cohort exception: BTC NO above the 75c cap is permitted
     # only when the individual candidate's conservative (reserve-stacked)
     # net EV at the fresh executable ask clears the cell bound (+2.0c) and
