@@ -352,6 +352,59 @@ def test_resolve_market_expiry_none_when_absent():
     assert ag._resolve_market_expiry_ts(object()) is None
 
 
+# ---------------------------------------------------------------------------
+# Price-band bypass (2026-10-12): every enabled regime band carries a min-TTE
+# floor >= 120s, so final-minute quotes were rejected by the classifier before
+# the lane could evaluate.  The bypass injects a pseudo-regime only inside the
+# lane's [min_tte, 60s] slice; the lane's own gates stay authoritative.
+# ---------------------------------------------------------------------------
+
+
+def test_lane_reachable_inside_window(monkeypatch):
+    import merid.prediction.agent_grid_15m as ag
+
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_ENABLED", "1")
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30")
+    assert ag._settlement_lane_reachable(45.0) is True
+    assert ag._settlement_lane_reachable(30.0) is True
+    assert ag._settlement_lane_reachable(60.0) is True
+
+
+def test_lane_not_reachable_outside_window(monkeypatch):
+    import merid.prediction.agent_grid_15m as ag
+
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_ENABLED", "1")
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30")
+    # Below the lane floor (engine's final-minute cutoff) and above the
+    # 60s settlement window (phase is never in_window there).
+    assert ag._settlement_lane_reachable(29.9) is False
+    assert ag._settlement_lane_reachable(60.1) is False
+    assert ag._settlement_lane_reachable(120.0) is False
+
+
+def test_lane_not_reachable_when_disabled_or_bad_input(monkeypatch):
+    import merid.prediction.agent_grid_15m as ag
+
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_ENABLED", "0")
+    assert ag._settlement_lane_reachable(45.0) is False
+    monkeypatch.delenv("MERID_SETTLEMENT_LANE_ENABLED")
+    assert ag._settlement_lane_reachable(45.0) is False
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_ENABLED", "1")
+    assert ag._settlement_lane_reachable(None) is False
+    assert ag._settlement_lane_reachable(float("nan")) is False
+
+
+def test_band_classifier_rejects_final_minute_without_bypass():
+    # Regression anchor for the ordering bug: with no bypass the classifier
+    # returns None for both sides at TTE<120s regardless of price.
+    from merid.event_venues.kalshi.market_regime import classify_market_regime
+
+    assert classify_market_regime(50, 45) is None
+    assert classify_market_regime(83, 40) is None
+    # Sanity: inside the normal TTE window the same prices classify.
+    assert classify_market_regime(50, 300) is not None
+
+
 def test_anchor_not_released_pre_window(monkeypatch):
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MIN_W", 0.5)
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MAX_W", 0.9)
