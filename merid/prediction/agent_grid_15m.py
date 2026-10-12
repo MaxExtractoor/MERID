@@ -1281,6 +1281,41 @@ def _settlement_lane_min_tte() -> float:
         return 30.0
 
 
+def _settlement_lane_max_price_cents() -> int:
+    try:
+        return int(
+            float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "97"))
+        )
+    except Exception:
+        return 97
+
+
+def _settlement_lane_reachable(seconds_to_expiry: Any) -> bool:
+    """True when the market sits inside the settlement lane's TTE slice and the
+    lane is armed.
+
+    Reachability check for the _generate_signal price-band bypass: every
+    enabled regime band carries a min-TTE floor >= 120s, so inside the final
+    settlement minute the classifier rejects both sides before
+    ``compute_trade_decision`` can apply the lane's own strict gates
+    (phase=in_window, observed_count, p_side, price cap).  The 60s upper bound
+    mirrors ``settlement_distribution._SETTLEMENT_WINDOW_SECONDS`` — outside
+    that window the distribution phase is never ``in_window`` so the lane can
+    never qualify anyway.
+    """
+    if not _settlement_lane_enabled():
+        return False
+    if seconds_to_expiry is None:
+        return False
+    try:
+        tte = float(seconds_to_expiry)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(tte):
+        return False
+    return _settlement_lane_min_tte() <= tte <= 60.0
+
+
 def _settlement_max_missing_samples() -> int:
     try:
         return max(0, int(os.environ.get("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "5")))
@@ -13654,6 +13689,52 @@ class LeanAgent15m:
                         min_time_to_expiry_seconds=120,
                         max_time_to_expiry_seconds=300,
                     )
+            except Exception:
+                pass
+
+        # 2026-10-12 (post_drawdown epoch): settlement-convergence lane bypass.
+        # Every enabled band carries a min-TTE floor >= 120s, so inside the
+        # final settlement minute the classifier rejects BOTH sides before
+        # compute_trade_decision can evaluate the lane's banked-samples gate
+        # (observed as raw_reason=price_band_both_sides_disabled at TTE 30-60s).
+        # When the lane is armed and the market sits inside its
+        # [min_tte, 60s window] slice, inject a pseudo-regime so the candidate
+        # reaches the decision engine, which applies the strict lane gates
+        # (phase=in_window, observed_count>=min, p_side>=min_p, price<=cap).
+        # Normal-path entries still fail closed on
+        # MERID_ENTRY_MIN_SECONDS_TO_EXPIRY inside the engine — this only
+        # removes the upstream ordering bug, it does not loosen any gate.
+        if _settlement_lane_reachable(seconds_to_expiry):
+            try:
+                from merid.event_venues.kalshi.market_regime import SkewRegime
+                _sd_min_tte = float(_settlement_lane_min_tte())
+                _sd_max_px = _settlement_lane_max_price_cents()
+                _settle_regime = SkewRegime(
+                    name="settlement_convergence",
+                    min_price_cents=1,
+                    max_price_cents=_sd_max_px,
+                    min_net_edge_cents=Decimal("2.0"),
+                    min_confidence=Decimal("0.80"),
+                    max_spread_cents=1,
+                    min_depth_multiple=Decimal("2.0"),
+                    size_multiplier=Decimal("0.50"),
+                    enabled=True,
+                    min_book_freshness_ms=1000,
+                    min_time_to_expiry_seconds=int(_sd_min_tte),
+                    max_time_to_expiry_seconds=60,
+                )
+                if (
+                    yes_regime is None
+                    and yes_price_cents
+                    and 1 <= yes_price_cents <= _sd_max_px
+                ):
+                    yes_regime = _settle_regime
+                if (
+                    no_regime is None
+                    and no_price_cents
+                    and 1 <= no_price_cents <= _sd_max_px
+                ):
+                    no_regime = _settle_regime
             except Exception:
                 pass
 
