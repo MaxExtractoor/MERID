@@ -1547,7 +1547,14 @@ exit_policy:
     # CRITICAL FIX (2026-08-10): upstream/midstream/downstream stop-loss kill switch.
     # Re-enabled 2026-08-28: research shows holding losers to expiry is the dominant P&L leak;
     # the dynamic_risk sl_cents values (6/8/10c) provide the actual stop distance.
-    stop_loss_enabled: true
+    # 2026-10-12: DISABLED again on resolved-exit evidence — the 6-10c whipsaw
+    # stops forfeited +$2.29 vs holding (5/13 stopped positions later settled
+    # for full payout), and the market gaps through the stop level anyway
+    # (realized stops -7c to -47c).  The catastrophic tail-loss floor
+    # (MERID_TAIL_LOSS_DROP_CENTS=30 / FLOOR_CENTS=18) stays armed — it is
+    # explicitly independent of this flag and is the salvage that actually
+    # paid.  Entry premium remains the true stop on a 15m binary.
+    stop_loss_enabled: false
 
     # ── Mean-Reversion Take-Profit (2026-08-25) ──────────────────────────────
     # Symmetric 50¢ TP for the price-based fade.  Positions are always long their

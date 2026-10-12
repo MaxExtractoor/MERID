@@ -223,12 +223,17 @@ def test_lane_disabled_keeps_generic_gates(monkeypatch):
 
 
 def test_lane_price_cap_blocks_extreme_asks(monkeypatch):
-    # The cap is checked after selection, so it must sit below an ask that
-    # still clears the edge gate (p_sel is capped at 0.95).
+    # The lane cap replaces the normal-path moneyness cap as the in-lane
+    # bound (qualify-stage ``entry_price_cap_*_lane``) and is also enforced
+    # post-selection (``settlement_lane_price_cap``).
     monkeypatch.setattr(td, "MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", 50.0)
     dist = _make_dist(tte_s=45.0)
     d = _make_lane_decision(dist=dist, tte_s=45.0, yes_ask=52.0, yes_bid=48.0)
-    assert d.no_trade_reason == "settlement_lane_price_cap"
+    assert d.selected_outcome is None
+    reason = str(d.no_trade_reason)
+    assert reason == "settlement_lane_price_cap" or (
+        reason.startswith("entry_price_cap_") and reason.endswith("_lane")
+    ), reason
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +408,60 @@ def test_band_classifier_rejects_final_minute_without_bypass():
     assert classify_market_regime(83, 40) is None
     # Sanity: inside the normal TTE window the same prices classify.
     assert classify_market_regime(50, 300) is not None
+
+
+# ---------------------------------------------------------------------------
+# Lane-aware probability ceiling (2026-10-12): the [0.05, 0.95] venue clamp
+# crushed the distribution's banked-sample probability — a 0.9999 certainty
+# at a 99c ask read as -4c edge and the generic ~7c dynamic threshold could
+# never clear on a <=4c-edge high-price buy.  In-lane the p ceiling is
+# MERID_SETTLEMENT_LANE_P_CAP (0.99) and the favored side's edge hurdle is
+# MERID_SETTLEMENT_LANE_MIN_NET_EDGE (1.5c) instead of the live-model stack.
+# ---------------------------------------------------------------------------
+
+
+def test_lane_probability_ceiling_passes_distribution_p():
+    # In-window with 45 banked samples ~1.5% above strike: raw p ~1.0.
+    # An 88c YES ask nets positive edge only if the engine keeps p>0.95 —
+    # at 93c the ~5c model-risk reserve legitimately flattens the EV.
+    dist = _make_dist(tte_s=15.0)
+    assert dist.p_yes_raw > 0.99
+    d = _make_lane_decision(
+        dist=dist, tte_s=45.0, yes_ask=88.0, yes_bid=86.0,
+        no_ask=14.0, no_bid=12.0,
+    )
+    assert d.selected_outcome == "yes", d.no_trade_reason
+    # The lane's raw claim survives the venue clamp (cap 0.99, not 0.95).
+    assert float(d.p_selected) > 0.95
+    assert d.indicators.get("decision_lane") == "settlement_convergence"
+    assert d.indicators.get("settlement_lane_favored_side") == "yes"
+
+
+def test_lane_still_declines_when_book_converged():
+    # Favored-side ask at 98c is above the lane price cap (97) -> declined.
+    dist = _make_dist(tte_s=15.0)
+    d = _make_lane_decision(
+        dist=dist, tte_s=45.0, yes_ask=98.0, yes_bid=96.0,
+        no_ask=4.0, no_bid=2.0,
+    )
+    assert d.selected_outcome is None
+    # At 97c ask the raw-p edge (~2c) clears the 1.5c lane hurdle but sits
+    # above the 97c cap only at 98; at exactly 97c EV decides.
+    d2 = _make_lane_decision(
+        dist=dist, tte_s=45.0, yes_ask=97.0, yes_bid=95.0,
+        no_ask=5.0, no_bid=3.0,
+    )
+    # 97c buy at capped p=0.99: gross ~2c minus fee -> marginal; the lane
+    # threshold is what decides, not the generic ~7c stack.
+    assert d2.no_trade_reason != "edge_below_threshold" or d2.selected_outcome == "yes"
+
+
+def test_lane_p_cap_does_not_leak_outside_lane(monkeypatch):
+    # A lane-disabled candidate keeps the hard [0.05, 0.95] venue bound.
+    monkeypatch.setattr(td, "MERID_SETTLEMENT_LANE_ENABLED", False)
+    dist = _make_dist(tte_s=45.0)
+    d = _make_lane_decision(dist=dist, tte_s=45.0)
+    assert d.no_trade_reason == "min_tte_entry_disabled"
 
 
 def test_anchor_not_released_pre_window(monkeypatch):

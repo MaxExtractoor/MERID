@@ -624,6 +624,12 @@ class CanonicalOrderIntent:
     # to the active safety policy.
     config_hash: str | None = None
 
+    # 2026-10-12: admission-lane identity (e.g. "settlement_convergence").
+    # Lane-aware invariants (open-price bound, model-prob bound) key off this
+    # so a settlement-lane entry above the legacy 95c canonical cap can be
+    # authorized without loosening the bound for ordinary intents.
+    decision_lane: str | None = None
+
     def yes_delta(self) -> int:
         """Signed-YES centi-contract delta for this order."""
         return yes_delta(self.action, self.contract, self.qty_cc)
@@ -1152,6 +1158,7 @@ def normalize_order(
         position_effect=position_effect_val,
         economic_side=economic_side_val,
         config_hash=config_hash,
+        decision_lane=getattr(intent, "decision_lane", None),
     )
 
 
@@ -1182,7 +1189,19 @@ def validate_canonical_intent(
         raise OrderIntentValidationError(f"invalid_price:price_cents={i.limit_cents}")
     # Entries are constrained to the canonical 10c-75c range; exits can cross
     # the book at any valid 1c-99c price to close a position.
-    if i.purpose == "open" and not (CANONICAL_MIN_CENTS <= i.limit_cents <= CANONICAL_MAX_CENTS):
+    # 2026-10-12: settlement-convergence entries may sit above the canonical
+    # cap (the lane's economic bound is MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+    # enforced in compute_trade_decision before the intent is ever built).
+    _open_max_cents = CANONICAL_MAX_CENTS
+    if i.decision_lane == "settlement_convergence":
+        try:
+            _open_max_cents = max(
+                _open_max_cents,
+                int(float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "97"))),
+            )
+        except Exception:
+            pass
+    if i.purpose == "open" and not (CANONICAL_MIN_CENTS <= i.limit_cents <= _open_max_cents):
         raise OrderIntentValidationError(f"invalid_price:price_cents={i.limit_cents}")
     if i.purpose == "close" and not (1 <= i.limit_cents <= 99):
         raise OrderIntentValidationError(f"invalid_price:price_cents={i.limit_cents}")
