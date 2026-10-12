@@ -1507,7 +1507,14 @@ def pytest_sessionstart(session):
     global _server_up_at_start
     _server_up_at_start = _live_server_running()
     _durable_snapshot.clear()
-    _durable_snapshot.update(_snapshot_durable_state())
+    # 2026-10-12: on the live production box the data/ tree is large enough
+    # that the fingerprint walk exceeds any sane session-start budget —
+    # allow an explicit env opt-out for focused local runs.  CI keeps the
+    # default (scan enabled).
+    if _os.environ.get("MERID_TEST_SKIP_DURABLE_SCAN", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        _durable_snapshot.update(_snapshot_durable_state())
 
 
 def _diff_dir_entries(before: _Tuple, after: _Tuple) -> _Tuple:
@@ -1522,6 +1529,10 @@ def _diff_dir_entries(before: _Tuple, after: _Tuple) -> _Tuple:
 
 
 def pytest_sessionfinish(session, exitstatus):
+    if _os.environ.get("MERID_TEST_SKIP_DURABLE_SCAN", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return
     after = _snapshot_durable_state()
     violations = []
     for path, sig in after.items():

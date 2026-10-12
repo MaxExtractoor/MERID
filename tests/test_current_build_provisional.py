@@ -43,10 +43,18 @@ def _isolate_lane(monkeypatch, tmp_path):
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
     monkeypatch.setattr(_td, "MERID_CALIBRATION_CAP_FULL_RANGE", False)
+    # The production .env carries the 2026-10-12 marginal-relief lever
+    # (3c at held >=35c); these tests assert raw formula bounds, so run
+    # with the lever off unless a test opts in explicitly.
+    monkeypatch.setattr(_td, "MERID_EDGE_MARGINAL_RELIEF_CENTS", 0.0)
+    # .env scopes the tail-LCB gate to >=80c; these tests exercise the code
+    # default (>=70c) at held prices 77c.
+    monkeypatch.setattr(_td, "MERID_TAIL_LCB_MIN_PRICE_CENTS", 70)
     monkeypatch.delenv("MERID_THRESHOLD_CELLS", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_LANE", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MAKER", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_EVIDENCE_OVERRIDE", raising=False)
+    monkeypatch.delenv("MERID_PROVISIONAL_COINFLIP_EXEMPT", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
     monkeypatch.delenv("MERID_CBP_MID_BAND_RELIEF_NO_CENTS", raising=False)
@@ -802,6 +810,95 @@ def test_rollup_includes_all_five_assets():
         assert f"{a}: cells=28" in s
     assert "lane: fills=0/3" in s
 
+
+# ---------------------------------------------------------------------------
+# Provisional coinflip exemption (2026-10-12 operator directive):
+# MERID_PROVISIONAL_COINFLIP_EXEMPT=1 lifts the moneyness_coin_flip veto for
+# current_build_provisional-owned sides only — the lane is a paid-telemetry
+# probe whose mandate includes pinned-to-strike cells.  Formula and
+# threshold-cell sides keep the veto; the raw block reason is preserved in
+# indicators["{side}_coinflip_exempt"].
+# ---------------------------------------------------------------------------
+
+# spot == strike -> dist_frac = 0 (< 5bp floor) and |z| ~ 1e-3 (< 0.5 floor),
+# so coin_flip_block_reason returns "moneyness_coin_flip" deterministically.
+# The moneyness gate is globally disabled in tests/conftest.py — each test
+# below re-enables it explicitly.
+_COINFLIP_SPOT = {"spot_price": 100.0, "strike_price": 100.0}
+# ETH YES @ 30c sits inside the cbp domain but outside the escape-valve
+# knife-edge band (40-60c) — that near-strike veto is a separate guard on
+# the evidence path and stays armed.  NO @ 95c is outside the cbp price
+# domain so the NO side stays formula-owned.
+_COINFLIP_BOOK = {
+    "asset": "ETH",
+    "yes_bid_cents": 28.0,
+    "yes_ask_cents": 30.0,
+    "no_bid_cents": 93.0,
+    "no_ask_cents": 95.0,
+}
+# p=0.62 clears the ETH conviction floor (|p-0.5| >= 0.06) while z stays ~0:
+# conviction keys on calibrated p, coinflip keys on the geometry z-score.
+_COINFLIP_P = 0.62
+
+
+def _coinflip_decision(monkeypatch, **kwargs):
+    monkeypatch.setenv("MERID_MONEYNESS_GATE_ENABLED", "1")
+    monkeypatch.setattr(_td, "MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
+    args = dict(_COINFLIP_BOOK)
+    args.update(kwargs)
+    return _decision(p_yes_model=_COINFLIP_P, **_COINFLIP_SPOT, **args)
+
+
+def test_coinflip_exemption_provisional_side_qualifies(monkeypatch):
+    monkeypatch.setenv("MERID_PROVISIONAL_COINFLIP_EXEMPT", "1")
+    # cbp owns the YES side.  Without the exemption the coinflip veto would
+    # block; with it the side qualifies.
+    d = _coinflip_decision(monkeypatch)
+    ind = d.indicators
+    assert ind["yes_thr_prov_cell_id"] == "cbp_eth_yes_30_40_t120_300"
+    assert ind["yes_coinflip_exempt"] == "moneyness_coin_flip"
+    assert ind["yes_coinflip_block"] is None
+    assert d.selected_outcome == "yes"
+
+
+def test_coinflip_exemption_default_off_keeps_veto(monkeypatch):
+    # Fixture delenv'd the flag: the same provisional candidate must still
+    # be vetoed when the operator switch is not set.
+    d = _coinflip_decision(monkeypatch)
+    ind = d.indicators
+    assert ind["yes_thr_prov_cell_id"] == "cbp_eth_yes_30_40_t120_300"
+    assert ind["yes_coinflip_block"] == "moneyness_coin_flip"
+    assert "yes_coinflip_exempt" not in ind
+    assert d.selected_outcome != "yes"
+    assert "moneyness_coin_flip" in (d.no_trade_reason or "")
+
+
+def test_coinflip_exemption_is_side_scoped(monkeypatch):
+    monkeypatch.setenv("MERID_PROVISIONAL_COINFLIP_EXEMPT", "1")
+    # The shared book already has NO @ 95c — outside the cbp price domain
+    # (<=90c), so formula path owns that side and its veto must survive
+    # while YES is exempted.
+    d = _coinflip_decision(monkeypatch)
+    ind = d.indicators
+    assert ind["yes_coinflip_exempt"] == "moneyness_coin_flip"
+    assert ind["yes_coinflip_block"] is None
+    assert ind["no_thr_prov_cell_id"] is None
+    assert ind["no_coinflip_block"] == "moneyness_coin_flip"
+    assert "no_coinflip_exempt" not in ind
+
+
+def test_coinflip_exemption_outside_provisional_domain(monkeypatch):
+    monkeypatch.setenv("MERID_PROVISIONAL_COINFLIP_EXEMPT", "1")
+    # TTE 700s is outside the cbp domain — both sides are formula-owned and
+    # the veto applies to both even with the flag on.
+    d = _coinflip_decision(monkeypatch, seconds_to_expiry=700.0)
+    ind = d.indicators
+    assert ind["yes_thr_prov_cell_id"] is None
+    assert ind["yes_coinflip_block"] == "moneyness_coin_flip"
+    assert "yes_coinflip_exempt" not in ind
+    assert d.selected_outcome != "yes"
+
+
 # ---------------------------------------------------------------------------
 # signal -> candidate -> intent identity propagation (2026-09-30 live audit:
 # CBP orders reached the router with lane="" / admission_owner="formula"
@@ -1302,7 +1399,15 @@ def test_audit_side_row_carries_adverse_selection():
 
     decision = _decision()
     assert decision.no_edge_breakdown is not None
-    decision = replace(decision, adverse_selection_reserve=Decimal("0.015"))
+    # The row reads the per-side breakdown reserve (the decision-level
+    # scalar is only the *selected* side's value), so set it there.
+    decision = replace(
+        decision,
+        no_edge_breakdown=replace(
+            decision.no_edge_breakdown,
+            adverse_selection_reserve=0.015,
+        ),
+    )
     row = dal._build_side_ev_row(
         decision, "no", decision.indicators, None, None
     )

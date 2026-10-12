@@ -104,6 +104,17 @@ MERID_EDGE_MARGINAL_RELIEF_LO_CENTS = float(
     os.environ.get("MERID_EDGE_MARGINAL_RELIEF_LO_CENTS", "35")
 )
 
+def _provisional_coinflip_exempt() -> bool:
+    """2026-10-12 operator directive: current_build_provisional lanes carry
+    explicit paid-telemetry negative-EV floors (ETH/SOL/XRP-YES -4.0c)
+    whose purpose is buying settlement data in unqualified regions —
+    which includes pinned-to-strike cells the coinflip veto otherwise
+    suppresses.  Exempt provisional-owned sides only; formula and
+    threshold-cell paths keep the veto.  Default off."""
+    return os.environ.get("MERID_PROVISIONAL_COINFLIP_EXEMPT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
 # the 0-19c tail.  Override with MERID_MIN_HELD_PRICE_CENTS to raise/lower.
@@ -4589,6 +4600,26 @@ def compute_trade_decision(
     except Exception:
         _dist_frac = None
     _coinflip_block = _dr.coin_flip_block_reason(_dist_frac, z)
+    # 2026-10-12 (operator directive): provisional-owned sides are exempt
+    # from the coinflip veto — the cbp lanes exist to buy settlement data
+    # in unqualified regions, pinned-to-strike cells included.  Formula
+    # and threshold-cell paths keep the veto; the raw block stays in
+    # telemetry via *_coinflip_exempt.
+    _yes_coinflip_eff = _coinflip_block
+    _no_coinflip_eff = _coinflip_block
+    if _coinflip_block is not None and _provisional_coinflip_exempt():
+        if (
+            _yes_edge_thr is not None
+            and _yes_edge_thr.provisional_cell_id is not None
+        ):
+            _yes_coinflip_eff = None
+            indicators["yes_coinflip_exempt"] = _coinflip_block
+        if (
+            _no_edge_thr is not None
+            and _no_edge_thr.provisional_cell_id is not None
+        ):
+            _no_coinflip_eff = None
+            indicators["no_coinflip_exempt"] = _coinflip_block
     # Price cap applies to NO unconditionally; YES applies it only on the
     # normal path — the trend_yes_hi lane (91-94c) is separately gated.
     _yes_price_cap_block = _dr.entry_price_cap_block_reason(
@@ -4667,8 +4698,8 @@ def compute_trade_decision(
         "no_ct_lane_block": _no_ct_lane_block,
         "yes_bookflow_block": _yes_bookflow_block,
         "no_bookflow_block": _no_bookflow_block,
-        "yes_coinflip_block": _coinflip_block,
-        "no_coinflip_block": _coinflip_block,
+        "yes_coinflip_block": _yes_coinflip_eff,
+        "no_coinflip_block": _no_coinflip_eff,
         "yes_price_cap_block": _yes_price_cap_block,
         "no_price_cap_block": _no_price_cap_block,
         "moneyness_dist_frac": _dist_frac,
@@ -4952,7 +4983,7 @@ def compute_trade_decision(
         and yes_evidence_ok
         and _yes_throttle_block is None
         and _yes_bookflow_block is None
-        and _coinflip_block is None
+        and _yes_coinflip_eff is None
         and (
             _yes_trend_hi_qualifies
             or (
@@ -4983,7 +5014,7 @@ def compute_trade_decision(
         and _no_throttle_block is None
         and _no_ct_lane_block is None
         and _no_bookflow_block is None
-        and _coinflip_block is None
+        and _no_coinflip_eff is None
         and _no_price_cap_block is None
     )
 
@@ -5090,7 +5121,7 @@ def compute_trade_decision(
             throttle_block_s=_yes_throttle_block,
             ct_lane_block_s=_yes_ct_lane_block,
             bookflow_block_s=_yes_bookflow_block,
-            coinflip_block_s=_coinflip_block,
+            coinflip_block_s=_yes_coinflip_eff,
             price_cap_block_s=(
                 None if _yes_trend_hi_qualifies else _yes_price_cap_block
             ),
@@ -5106,7 +5137,7 @@ def compute_trade_decision(
             throttle_block_s=_no_throttle_block,
             ct_lane_block_s=_no_ct_lane_block,
             bookflow_block_s=_no_bookflow_block,
-            coinflip_block_s=_coinflip_block,
+            coinflip_block_s=_no_coinflip_eff,
             price_cap_block_s=_no_price_cap_block,
             eff_edge_s=_no_eff_edge,
         ),
@@ -5203,7 +5234,7 @@ def compute_trade_decision(
                 "evidence": not yes_evidence_ok,
                 "throttle": _yes_throttle_block is not None,
                 "bookflow": _yes_bookflow_block is not None,
-                "coinflip": _coinflip_block is not None,
+                "coinflip": _yes_coinflip_eff is not None,
                 "edge": not (_yes_eff_edge >= _yes_edge_eff_bound),
                 "cost_basis": not (
                     _yes_cbp_neg_floor
@@ -5229,7 +5260,7 @@ def compute_trade_decision(
                 "evidence": not no_evidence_ok,
                 "throttle": _no_throttle_block is not None,
                 "bookflow": _no_bookflow_block is not None,
-                "coinflip": _coinflip_block is not None,
+                "coinflip": _no_coinflip_eff is not None,
                 "edge": not (_no_eff_edge >= _no_edge_eff_bound),
                 "cost_basis": not (
                     _no_cbp_neg_floor
@@ -5348,7 +5379,7 @@ def compute_trade_decision(
                     and _yes_throttle_block is None
                     and _yes_ct_lane_block is None
                     and _yes_bookflow_block is None
-                    and _coinflip_block is None
+                    and _yes_coinflip_eff is None
                     and _yes_price_cap_block is None
                     and not _yes_hi_price
                     and (
@@ -5366,7 +5397,7 @@ def compute_trade_decision(
                     and _no_throttle_block is None
                     and _no_ct_lane_block is None
                     and _no_bookflow_block is None
-                    and _coinflip_block is None
+                    and _no_coinflip_eff is None
                     and _no_price_cap_block is None
                     and (
                         _no_cbp_neg_floor
@@ -5387,7 +5418,7 @@ def compute_trade_decision(
                         ("throttle", _yes_throttle_block is None if _cs == "yes" else _no_throttle_block is None),
                         ("ct_lane", _yes_ct_lane_block is None if _cs == "yes" else _no_ct_lane_block is None),
                         ("bookflow", _yes_bookflow_block is None if _cs == "yes" else _no_bookflow_block is None),
-                        ("moneyness", _coinflip_block is None),
+                        ("moneyness", (_yes_coinflip_eff if _cs == "yes" else _no_coinflip_eff) is None),
                         ("price_cap", _yes_price_cap_block is None if _cs == "yes" else _no_price_cap_block is None),
                         ("hi_price", not _yes_hi_price if _cs == "yes" else True),
                         ("cost_basis", (
@@ -5539,7 +5570,8 @@ def compute_trade_decision(
             ) or (
                 _yes_bookflow_block if best_side == "yes" else _no_bookflow_block
             ) or (
-                _coinflip_block if best_side is not None else None
+                (_yes_coinflip_eff if best_side == "yes" else _no_coinflip_eff)
+                if best_side is not None else None
             ) or (
                 _yes_price_cap_block
                 if best_side == "yes" and not _yes_trend_hi_qualifies
@@ -5558,7 +5590,7 @@ def compute_trade_decision(
                         _yes_throttle_block,
                         _yes_ct_lane_block,
                         _yes_bookflow_block,
-                        _coinflip_block,
+                        _yes_coinflip_eff,
                         None if _yes_trend_hi_qualifies else _yes_price_cap_block,
                         _yes_lane_terminal,
                     )
@@ -5569,7 +5601,7 @@ def compute_trade_decision(
                         _no_throttle_block,
                         _no_ct_lane_block,
                         _no_bookflow_block,
-                        _coinflip_block,
+                        _no_coinflip_eff,
                         _no_price_cap_block,
                         None,
                     )
