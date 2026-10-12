@@ -84,6 +84,25 @@ MERID_EDGE_MID_BAND_HI_CENTS = float(
     os.environ.get("MERID_EDGE_MID_BAND_HI_CENTS", "89")
 )
 
+# 2026-10-12: marginal near-miss unlock (operator-directed).  Additional
+# bound relief for the cohort missing the gate by <=3c, scoped to held
+# prices >= MERID_EDGE_MARGINAL_RELIEF_LO_CENTS — the range where the
+# settled counterfactual (n=20,744 rejected candidates) showed the
+# below-gate marginal cohort profitable (+2.5c..+10c/trade).  Sub-35c is
+# excluded: the same join showed the marginal cohort toxic there
+# (-0.4c..-0.9c).  When the relief applies, the post-formula clamp floor
+# drops from 0.02 to 0.0 so the relief is not absorbed by the clamp;
+# claimed-negative-edge candidates are still vetoed downstream by
+# cost_basis / no_positive_executable_edge.  Formula path only —
+# threshold-cell, provisional-cell, and settlement-lane bounds untouched.
+# Default 0 (disabled); production sets 3.0 via .env.
+MERID_EDGE_MARGINAL_RELIEF_CENTS = max(
+    0.0, float(os.environ.get("MERID_EDGE_MARGINAL_RELIEF_CENTS", "0"))
+)
+MERID_EDGE_MARGINAL_RELIEF_LO_CENTS = float(
+    os.environ.get("MERID_EDGE_MARGINAL_RELIEF_LO_CENTS", "35")
+)
+
 # Hard entry-price floor for the held side.  Contracts with a held-side price
 # below this (in cents) are rejected because the 7-day data showed 0/16 wins in
 # the 0-19c tail.  Override with MERID_MIN_HELD_PRICE_CENTS to raise/lower.
@@ -1278,8 +1297,20 @@ def _decompose_dynamic_min_required_edge(
     ):
         band_relief = MERID_EDGE_MID_BAND_RELIEF_CENTS / 100.0
 
-    dynamic = base + price_adj + flb_adj - band_relief
-    total = max(0.02, min(dynamic, 0.15))
+    # 2026-10-12: operator-directed marginal unlock — an extra bounded
+    # relief at held prices >= the evidence floor (35c).  The 0.02 hard
+    # floor is scoped out for eligible prices so the relief reaches the
+    # bound; the clamp ceiling and formula composition are unchanged.
+    _marginal_eligible = (
+        MERID_EDGE_MARGINAL_RELIEF_CENTS > 0.0
+        and float(price_cents) >= MERID_EDGE_MARGINAL_RELIEF_LO_CENTS
+    )
+    marginal_relief = (
+        MERID_EDGE_MARGINAL_RELIEF_CENTS / 100.0 if _marginal_eligible else 0.0
+    )
+
+    dynamic = base + price_adj + flb_adj - band_relief - marginal_relief
+    total = max(0.0 if _marginal_eligible else 0.02, min(dynamic, 0.15))
 
     # 2026-09-30: conditional threshold cells (merid.prediction.threshold_cells)
     # replace the formula output inside the empirically-qualified
