@@ -33,6 +33,7 @@ from merid.prediction.threshold_cells import (
     get_cell_state,
     threshold_cell_admission_allowed,
     resolve_threshold_cell,
+    SOFT_EVIDENCE_CODES,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.prediction import empirical_price_calibration as _epc
@@ -4185,9 +4186,48 @@ def compute_trade_decision(
                             except Exception:
                                 pass
                         else:
-                            # The cell matched but could not admit — name the
-                            # owner and the true blocker for audit.
-                            if _d.cell_id is not None:
+                            # 2026-10-12: marginal-relief evidence bypass
+                            # (operator-directed).  A formula-path candidate
+                            # that clears its relieved bound at a held price
+                            # >=35c carries the settled counterfactual
+                            # (n=20,744 below-gate rejects; +2.5..+10c/trade
+                            # at >=35c) as its evidence basis — a soft or
+                            # insufficient cell verdict is a telemetry label
+                            # for this cohort, not a veto.  Registered cells
+                            # and provisional cells keep sole authority over
+                            # their bands (this path requires neither owner);
+                            # hard verdicts (dense adverse posterior,
+                            # MATCHING_TOXIC_CELL, matching_hard_block) keep
+                            # the veto.  Every downstream gate — cost_basis,
+                            # caps, depth, bookflow, coinflip, throttle,
+                            # regime — still applies unchanged.
+                            _mr_ok = (
+                                MERID_EDGE_MARGINAL_RELIEF_CENTS > 0.0
+                                and _d.cell_id is None
+                                and _d.provisional_cell_id is None
+                                and not _ed.matching_hard_block
+                                and _ed.code in SOFT_EVIDENCE_CODES
+                                and float(_px) >= MERID_EDGE_MARGINAL_RELIEF_LO_CENTS
+                                and _ne_c >= _d.total * 100.0
+                            )
+                            if _mr_ok:
+                                indicators[f"{_side}_admission_owner"] = (
+                                    "marginal_relief"
+                                )
+                                indicators[f"{_side}_admission_decision"] = (
+                                    "allowed"
+                                )
+                                indicators[f"{_side}_admission_reason"] = (
+                                    "marginal_relief_soft_evidence_bypass:"
+                                    + _ed.code.lower()
+                                )
+                                indicators[f"{_side}_evidence_override"] = (
+                                    "marginal_relief"
+                                )
+                                indicators[
+                                    f"{_side}_evidence_override_detail"
+                                ] = _ed.detail()
+                            elif _d.cell_id is not None:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "hard_block"
                                     if _ed.matching_hard_block
@@ -4234,29 +4274,30 @@ def compute_trade_decision(
                                     )
                                     else _ed.code.lower()
                                 )
-                            _reason_stem = {
-                                "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
-                                "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
-                                "MATCHING_TOXIC_CELL": "evidence_toxic_cell",
-                                "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
-                                "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
-                                "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
-                                "CHALLENGE_INSUFFICIENT": "evidence_challenge_insufficient",
-                                "CHALLENGE_LANE_DISABLED": "evidence_escape_disabled",
-                                "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
-                                "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
-                                "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
-                                "EVIDENCE_ARTIFACT_MISSING": "evidence_artifact_missing",
-                                "EVIDENCE_ARTIFACT_EMPTY": "evidence_artifact_empty",
-                            }.get(_ed.code, f"evidence_{_ed.code.lower()}")
-                            if _side == "yes" and yes_evidence_ok:
-                                yes_evidence_ok = False
-                                yes_evidence_reason = f"{_reason_stem}_yes"
-                                indicators[yes_evidence_reason] = _ed.detail()
-                            elif _side == "no" and no_evidence_ok:
-                                no_evidence_ok = False
-                                no_evidence_reason = f"{_reason_stem}_no"
-                                indicators[no_evidence_reason] = _ed.detail()
+                            if not _mr_ok:
+                                _reason_stem = {
+                                    "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
+                                    "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",
+                                    "MATCHING_TOXIC_CELL": "evidence_toxic_cell",
+                                    "EVIDENCE_EMPTY_INSUFFICIENT": "evidence_empty_insufficient",
+                                    "ESCAPE_CAP_EXHAUSTED": "evidence_escape_cap",
+                                    "ESCAPE_LANE_DISABLED": "evidence_escape_disabled",
+                                    "CHALLENGE_INSUFFICIENT": "evidence_challenge_insufficient",
+                                    "CHALLENGE_LANE_DISABLED": "evidence_escape_disabled",
+                                    "CHALLENGE_CAP_EXHAUSTED": "evidence_escape_cap",
+                                    "SOFT_PENALTY_INSUFFICIENT": "evidence_soft_penalty_insufficient",
+                                    "SOFT_PENALTY_LANE_DISABLED": "evidence_escape_disabled",
+                                    "EVIDENCE_ARTIFACT_MISSING": "evidence_artifact_missing",
+                                    "EVIDENCE_ARTIFACT_EMPTY": "evidence_artifact_empty",
+                                }.get(_ed.code, f"evidence_{_ed.code.lower()}")
+                                if _side == "yes" and yes_evidence_ok:
+                                    yes_evidence_ok = False
+                                    yes_evidence_reason = f"{_reason_stem}_yes"
+                                    indicators[yes_evidence_reason] = _ed.detail()
+                                elif _side == "no" and no_evidence_ok:
+                                    no_evidence_ok = False
+                                    no_evidence_reason = f"{_reason_stem}_no"
+                                    indicators[no_evidence_reason] = _ed.detail()
                     else:
                         # Evidence passed cleanly — name the owner so the
                         # admission lineage is explicit either way.
