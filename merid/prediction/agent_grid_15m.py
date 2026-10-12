@@ -9749,7 +9749,22 @@ class LeanAgent15m:
         # global allocator assumes candidates are already inside the 10c-75c
         # entry range; this prevents an out-of-range price from leaking into
         # the allocation phase.
-        if not is_price_in_canonical_range(price_cents, side):
+        # 2026-10-12: settlement-convergence entries may sit at 76-97c — the
+        # canonical range predates the lane and would re-veto a candidate the
+        # engine already admitted.  The lane's own price cap
+        # (MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS) is the bound here.
+        _canon_ok = is_price_in_canonical_range(price_cents, side)
+        if (
+            not _canon_ok
+            and _ind.get("entry_lane") == "settlement_convergence"
+        ):
+            try:
+                _lane_px_cap = int(float(os.environ.get(
+                    "MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "97")))
+            except Exception:
+                _lane_px_cap = 97
+            _canon_ok = 1 <= price_cents <= _lane_px_cap
+        if not _canon_ok:
             logger.info(
                 "[TRADE-DECISION] asset=%s side=%s price=%dc outside canonical range -> NO TRADE",
                 asset, side, price_cents,

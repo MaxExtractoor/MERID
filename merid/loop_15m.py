@@ -2523,6 +2523,48 @@ def _run_exit_price_guard(
         )
         return False, exit_price_cents, record, decision_id
 
+    # 2026-10-12 (scalping-asymmetry envelope): audit of 173 resolved exits
+    # showed model/price-driven exits OUTSIDE (own-bid >=85c or TTE <=120s)
+    # forfeited ~+$8 net vs holding to settlement — stopped-out positions
+    # recovered 58% of the time and sub-60c profit takes surrendered premium
+    # the settlement would have paid in full.  Inside the envelope exits
+    # saved ~+$8.5 (terminal-reversal dodge + dead-loser salvage), so
+    # protective/housekeeping reasons stay exempt.  The veto defers the exit;
+    # the next tick re-evaluates, and expiry liquidation still closes at T-0.
+    try:
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            exit_envelope_allows as _exit_envelope_allows,
+        )
+        _env_ok, _env_detail = _exit_envelope_allows(
+            canonical, best_bid, seconds_to_expiry
+        )
+        record["exit_envelope"] = {"allowed": _env_ok, "detail": _env_detail}
+        if not _env_ok:
+            record.update({
+                "status": "rejected",
+                "reject_reason": "exit_envelope_deferred",
+            })
+            persist_order_decision(record)
+            logger.info(
+                "[EXIT-GUARD-ENVELOPE-DEFER] position=%s market=%s reason=%s - "
+                "discretionary exit outside evidence envelope (%s); holding to settlement",
+                (getattr(position, "position_id", "") or "")[:8],
+                getattr(position, "market_id", None),
+                canonical,
+                _env_detail,
+            )
+            return False, exit_price_cents, record, decision_id
+    except Exception as _env_exc:
+        # Envelope is additive protection — a failure must never trap a
+        # legitimate exit (e.g. expiry liquidation) behind an eval bug.
+        record["exit_envelope_error"] = str(_env_exc)
+        logger.warning(
+            "[EXIT-GUARD-ENVELOPE-ERR] position=%s market=%s - %s",
+            (getattr(position, "position_id", "") or "")[:8],
+            getattr(position, "market_id", None),
+            _env_exc,
+        )
+
     entry_price = int(getattr(position, "avg_entry_price_cents", 0) or 0)
 
     # Determine slippage and whether this is a profit exit.

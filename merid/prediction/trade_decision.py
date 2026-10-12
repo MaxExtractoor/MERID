@@ -463,6 +463,19 @@ MERID_SETTLEMENT_LANE_MIN_P = float(os.environ.get("MERID_SETTLEMENT_LANE_MIN_P"
 MERID_SETTLEMENT_LANE_MIN_OBSERVED = int(os.environ.get("MERID_SETTLEMENT_LANE_MIN_OBSERVED", "10"))
 MERID_SETTLEMENT_LANE_MIN_TTE_S = float(os.environ.get("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30"))
 MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS = float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "97"))
+# 2026-10-12: the lane's probability claim is banked-sample arithmetic, not a
+# live-price forecast, so the generic [0.05, 0.95] venue clamp must not crush
+# it — a 0.9999 settlement probability at a 96c ask is exactly the edge the
+# lane exists to capture.  The ceiling stays below 1.0 so the EV gate still
+# prices residual model/feed error.  The router and intent contract apply the
+# same lane-aware bound to intents stamped decision_lane="settlement_convergence".
+MERID_SETTLEMENT_LANE_P_CAP = float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP", "0.99"))
+# Lane-specific net-edge floor (probability fraction): the dynamic threshold
+# charges live-model uncertainty reserves that double-count the distribution's
+# own bridge-variance term, so the favored side uses this fixed hurdle instead.
+MERID_SETTLEMENT_LANE_MIN_NET_EDGE = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "1.5")
+) / 100.0
 
 # In the settlement window the book prices the *terminal tick* while the
 # settlement distribution prices the *banked average* — the model is strictly
@@ -1747,9 +1760,30 @@ def apply_bounded_live_domain_gate(
 
     thr = yes_threshold if sel == "yes" else no_threshold
     required_cents = float(thr.total) * 100.0 if thr is not None else 0.0
-    lcb_cents = (
-        float(breakdown.net_edge) - float(breakdown.model_risk_reserve)
-    ) * 100.0
+    _is_settlement_lane = (
+        (decision.indicators or {}).get("entry_lane") == "settlement_convergence"
+    )
+    if _is_settlement_lane:
+        # Lane selections are admitted against the lane's own net-edge bound
+        # (default 1.5c), not the formula threshold the normal path uses —
+        # only when the selected side is the lane's favored side.
+        _favored = (decision.indicators or {}).get(
+            "settlement_lane_favored_side"
+        )
+        if _favored is None or sel == _favored:
+            required_cents = MERID_SETTLEMENT_LANE_MIN_NET_EDGE * 100.0
+    if _is_settlement_lane:
+        # 2026-10-12: in-lane the probability claim is the banked-sample
+        # settlement distribution — its remaining-window variance is already
+        # priced into p_sel, and model_risk_reserve was already charged once
+        # inside net_edge.  A second reserve subtraction double-charges the
+        # same tail risk the distribution quantifies; the lane LCB is the
+        # net edge itself against the same required bound.
+        lcb_cents = float(breakdown.net_edge) * 100.0
+    else:
+        lcb_cents = (
+            float(breakdown.net_edge) - float(breakdown.model_risk_reserve)
+        ) * 100.0
     # 2026-10-04 (EPC): when a validated empirical cell supplied the
     # probability, the model-side risk reserve double-charges estimation
     # uncertainty the cell's walk-forward LCB already encodes.  The gate
@@ -1770,6 +1804,10 @@ def apply_bounded_live_domain_gate(
         "required_cents": round(required_cents, 3),
         "epc_lcb_cents": _epc_lcb_used,
         "epc_cell": _ind.get(f"{sel}_epc_cell"),
+        "lcb_basis": (
+            "settlement_lane_net_edge" if _is_settlement_lane
+            else "net_edge_minus_model_risk_reserve"
+        ),
         "would_enter_at_prior": True,
     }
     if lcb_cents < required_cents - 1e-9:
@@ -3462,7 +3500,7 @@ def compute_trade_decision(
     tail_calibration_yes_configured = False
     tail_calibration_yes_applied = False
     tail_calibrator = None
-    if MERID_TAIL_CALIBRATION_ENABLED:
+    if MERID_TAIL_CALIBRATION_ENABLED and not settlement_lane:
         tail_calibrator = load_tail_calibrator()
         if tail_calibrator is not None and (
             MERID_CALIBRATION_CAP_FULL_RANGE
@@ -3474,8 +3512,13 @@ def compute_trade_decision(
             if abs(p_yes_for_yes - p_yes_for_yes_pre_cap) > 1e-9:
                 tail_calibration_yes_applied = True
     # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
-    # not reject high-confidence signals as invalid_model_prob.
-    p_yes_for_yes = max(0.05, min(0.95, p_yes_for_yes))
+    # not reject high-confidence signals as invalid_model_prob.  Settlement
+    # lane: the distribution's banked-sample probability is the honest claim —
+    # the 0.95 cap made a 0.9999 in-window certainty read as -4c edge at a 99c
+    # ask — so the lane applies its own ceiling (still <1.0).
+    _lane_p_hi = MERID_SETTLEMENT_LANE_P_CAP if settlement_lane else 0.95
+    _lane_p_lo = 1.0 - _lane_p_hi
+    p_yes_for_yes = max(_lane_p_lo, min(_lane_p_hi, p_yes_for_yes))
     p_no_for_yes = 1.0 - p_yes_for_yes
 
     # NO-held curve: calibrate p_no if NO is in the cheap tail.
@@ -3490,7 +3533,7 @@ def compute_trade_decision(
     tail_calibration_no_configured = False
     tail_calibration_no_applied = False
     tail_calibration_no_weight = 0.0
-    if MERID_TAIL_CALIBRATION_ENABLED:
+    if MERID_TAIL_CALIBRATION_ENABLED and not settlement_lane:
         tail_calibrator = load_tail_calibrator()
         # 2026-09-25: the real NO curve (non-dual) applies at any held price;
         # a dual NO curve remains a tail-only stop-gap.
@@ -3523,7 +3566,7 @@ def compute_trade_decision(
                 p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry, asset=asset)
                 if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
                     tail_calibration_no_applied = True
-    p_no_for_no = max(0.05, min(0.95, p_no_for_no))
+    p_no_for_no = max(_lane_p_lo, min(_lane_p_hi, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
 
     # Deviation guard: fail-closed on probability INFLATION only, outside the
@@ -3622,7 +3665,7 @@ def compute_trade_decision(
     no_evidence_ok = True
     yes_evidence_reason: Optional[str] = None
     no_evidence_reason: Optional[str] = None
-    if tail_calibrator is not None and MERID_CALIBRATION_CAP_FULL_RANGE:
+    if tail_calibrator is not None and MERID_CALIBRATION_CAP_FULL_RANGE and not settlement_lane:
         _ev_floor_yes = yes_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
         _ev_floor_no = no_entry + fee + MERID_CALIBRATION_EVIDENCE_MARGIN
         yes_evidence_ok = yes_entry <= 0 or (
@@ -3771,6 +3814,20 @@ def compute_trade_decision(
     )
     yes_min_edge = _yes_edge_thr.total
     no_min_edge = _no_edge_thr.total
+    if settlement_lane:
+        # The dynamic threshold prices live-model uncertainty; in-window the
+        # distribution's own bridge variance already encodes it, so the
+        # favored side pays the fixed lane hurdle instead (a 5-7c generic
+        # threshold can never clear on a <=4c-max-edge high-price buy even
+        # when the settlement claim is near-certain).  The unfavored side
+        # keeps its dynamic bound; its ~1-p claim fails edge regardless.
+        _lane_favored = "yes" if float(p_yes_raw) >= 0.5 else "no"
+        if _lane_favored == "yes":
+            yes_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+        else:
+            no_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+        indicators["settlement_lane_favored_side"] = _lane_favored
+        indicators["settlement_lane_min_edge"] = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
     indicators["yes_min_edge"] = yes_min_edge
     indicators["no_min_edge"] = no_min_edge
     # Threshold decomposition (probability points) — lets the audit answer
@@ -3899,6 +3956,31 @@ def compute_trade_decision(
                     indicators[f"evidence_{_side}"] = _ed.detail()
                     if _ed.escape_required:
                         indicators[f"evidence_escape_{_side}"] = True
+                    if settlement_lane:
+                        # 2026-10-12: no evidence cells exist at TTE<=60s by
+                        # design — the lane's claim is banked RTI settlement
+                        # samples + executable EV, not cohort history.  The
+                        # cell verdict stays in ``evidence_{side}`` as a
+                        # label; neither the evidence veto nor the generic
+                        # escape budget applies.  Admission is owned by the
+                        # lane gates (in_window phase, observed>=MIN_OBSERVED,
+                        # p>=MIN_P, <=MAX_PRICE, positive net EV).
+                        indicators[f"{_side}_admission_owner"] = (
+                            "settlement_convergence"
+                        )
+                        indicators[f"{_side}_admission_decision"] = "allowed"
+                        indicators[f"{_side}_admission_reason"] = (
+                            "settlement_lane_banked_samples"
+                            if not _ed.allowed
+                            else _ed.code.lower()
+                        )
+                        indicators[f"{_side}_evidence_override"] = (
+                            "settlement_lane"
+                        )
+                        indicators[f"{_side}_evidence_override_detail"] = (
+                            _ed.detail()
+                        )
+                        continue
                     if not _ed.allowed:
                         # 2026-09-30: bounded soft-evidence override for the
                         # threshold-cell lane.  A matched, historically
@@ -4230,7 +4312,7 @@ def compute_trade_decision(
                             elif _side == "no" and not no_evidence_ok:
                                 no_evidence_ok = True
                                 no_evidence_reason = None
-            elif not _artifact_missing:
+            elif not _artifact_missing and not settlement_lane:
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee
                 )
@@ -4443,6 +4525,37 @@ def compute_trade_decision(
     _no_price_cap_block = _dr.entry_price_cap_block_reason(
         no_price_cents, side="no", asset=asset
     )
+    if settlement_lane:
+        # 2026-10-12: the moneyness cap encodes normal-path cohort losses
+        # (model-vs-book divergence).  The settlement lane's claim is
+        # banked-sample arithmetic, not the live model — its own bound is
+        # MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS (also enforced post-selection
+        # as settlement_lane_price_cap).  An explicit per-asset override
+        # (e.g. MERID_..._NO_XRP=1) still applies in-lane: that veto came
+        # from realized asset-specific losses, not a price-band argument.
+        _lane_px_cap = float(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS)
+        for _cap_side, _cap_px in (
+            ("yes", yes_price_cents),
+            ("no", no_price_cents),
+        ):
+            _asset_key = (
+                "MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_"
+                f"{_cap_side.upper()}_{str(asset).upper()}"
+            )
+            _asset_raw = os.environ.get(_asset_key)
+            _cap_c = _lane_px_cap
+            if _asset_raw not in (None, ""):
+                try:
+                    _cap_c = min(_cap_c, float(_asset_raw))
+                except (TypeError, ValueError):
+                    pass
+            _cap_blk = None
+            if _cap_px is not None and _cap_c > 0.0 and float(_cap_px) > _cap_c:
+                _cap_blk = f"entry_price_cap_{float(_cap_px):.0f}c_gt_{_cap_c:.0f}c_lane"
+            if _cap_side == "yes":
+                _yes_price_cap_block = _cap_blk
+            else:
+                _no_price_cap_block = _cap_blk
     # Experiment B cohort exception: BTC NO above the 75c cap is permitted
     # only when the individual candidate's conservative (reserve-stacked)
     # net EV at the fresh executable ask clears the cell bound (+2.0c) and
@@ -5893,6 +6006,13 @@ def compute_trade_decision(
     # cell-matched selection is stamped ``threshold_cell`` first; the escape
     # stamp is considered only when no cell matched the selected side.
     if selected_outcome is not None:
+        # Settlement-convergence admissions carry their own lane id so the
+        # router's model-prob bound and the intent contract's price bound can
+        # apply lane-aware limits, and so the audit join can separate lane
+        # fills from formula traffic.  Not in BOUNDED_POST_ONLY_LANES — lane
+        # entries are taker IOCs (a resting order cannot fill in-window).
+        if settlement_lane and not indicators.get("decision_lane"):
+            indicators["decision_lane"] = "settlement_convergence"
         # Trend-aligned hi-price YES lane owns its region (91-94c): measured
         # separately so it cannot contaminate ordinary YES cell evidence.
         if (

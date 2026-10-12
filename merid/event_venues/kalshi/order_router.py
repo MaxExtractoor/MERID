@@ -8986,9 +8986,19 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         )
         if intent.model_prob is None:
             return "missing_model_prob"
-        if not (KALSHI_MIN_PROBABILITY <= intent.model_prob <= KALSHI_MAX_PROBABILITY):
+        # 2026-10-12: settlement-convergence intents carry a banked-sample
+        # probability claim that legitimately exceeds 0.95 in the final minute.
+        _p_hi = KALSHI_MAX_PROBABILITY
+        if getattr(intent, "decision_lane", None) == "settlement_convergence":
+            try:
+                _p_hi = max(_p_hi, float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP", "0.99")))
+            except Exception:
+                pass
+        _p_lo = 1.0 - _p_hi
+        if not (_p_lo <= intent.model_prob <= _p_hi):
             return f"invalid_model_prob:{intent.model_prob}"
-        intent.model_prob = clamp_probability(intent.model_prob)
+        if _p_hi == KALSHI_MAX_PROBABILITY:
+            intent.model_prob = clamp_probability(intent.model_prob)
 
         # Phase 1: Fee-aware edge gate for velocity orders
         # Check if edge clears Kalshi fees + minimum buffer
@@ -9662,9 +9672,17 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
     )
     if intent.model_prob is None:
         return "missing_model_prob"
-    if not (KALSHI_MIN_PROBABILITY <= intent.model_prob <= KALSHI_MAX_PROBABILITY):
+    _p_hi = KALSHI_MAX_PROBABILITY
+    if getattr(intent, "decision_lane", None) == "settlement_convergence":
+        try:
+            _p_hi = max(_p_hi, float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP", "0.99")))
+        except Exception:
+            pass
+    _p_lo = 1.0 - _p_hi
+    if not (_p_lo <= intent.model_prob <= _p_hi):
         return f"invalid_model_prob:{intent.model_prob}"
-    intent.model_prob = clamp_probability(intent.model_prob)
+    if _p_hi == KALSHI_MAX_PROBABILITY:
+        intent.model_prob = clamp_probability(intent.model_prob)
 
     # Get strategy policy (Phase 2: use strategy_type)
     # TEST FIX: If intent has no source or source is "manual", use default thresholds for test compatibility

@@ -279,6 +279,80 @@ _DISCRETIONARY_TRIGGER_REASONS = frozenset({
 })
 
 
+# ── Scalping-asymmetry exit envelope (2026-10-12) ────────────────────────────
+#
+# Audit of 173 resolved exits (decision_audit.db join against settled
+# outcomes): model/price-driven exits submitted OUTSIDE the evidence envelope
+# — held-side executable bid < 85c AND more than 120s to expiry — forfeited
+# ~+$8 net vs holding to settlement (58% of stopped-out positions later
+# recovered; profit-takes below 60c surrendered +$2.17).  Exits INSIDE the
+# envelope (bid >= 85c or TTE <= 120s) saved ~+$8.5 by dodging terminal-tick
+# reversals and dumping genuinely-dead losers.  Protective/housekeeping
+# reasons (expiry_liquidation, hard_profit_lock, loss_cap, reconciliation,
+# manual, market_close handling, scheduled closeouts) are never enveloped.
+_EXIT_ENVELOPE_GATED_REASONS = frozenset({
+    "take_profit",
+    "trailing_stop",
+    "time_exit",
+    "signal_reversal",
+    "model_invalidation",
+    "stop_loss",
+    "loss_cut",
+    "value_switch_exit",
+})
+
+
+def exit_envelope_enabled() -> bool:
+    """True when the scalping-asymmetry envelope may veto early exits."""
+    return _env_bool("MERID_EXIT_EVIDENCE_ENVELOPE", True)
+
+
+def exit_envelope_bid_cents() -> int:
+    """Own-side executable bid at/above which any exit is allowed (profit-lock)."""
+    return _env_int("MERID_EXIT_ENVELOPE_BID_CENTS", 85)
+
+
+def exit_envelope_tte_s() -> float:
+    """TTE at/below which any exit is allowed (terminal window)."""
+    return _env_float("MERID_EXIT_ENVELOPE_TTE_S", 120.0)
+
+
+def exit_envelope_allows(
+    canonical_reason: Any,
+    executable_bid_cents: Optional[int],
+    seconds_to_expiry: Optional[float],
+) -> Tuple[bool, str]:
+    """Evidence-envelope verdict for a gated exit reason.
+
+    Returns ``(allowed, detail)``.  Non-gated reasons always allow.  Gated
+    reasons allow only when the held-side bid is at the profit-lock level or
+    the contract is inside the terminal window; otherwise the position holds
+    to settlement instead of donating the remaining premium to the spread.
+    Missing bid/TTE defers (fail toward hold) — settlement itself is the
+    fallback exit, so a missing quote never forces a sell.
+    """
+    c = str(canonical_reason or "").lower()
+    if c not in _EXIT_ENVELOPE_GATED_REASONS:
+        return True, "not_gated"
+    if not exit_envelope_enabled():
+        return True, "envelope_disabled"
+    bid_ok = (
+        executable_bid_cents is not None
+        and int(executable_bid_cents) >= exit_envelope_bid_cents()
+    )
+    tte_ok = (
+        seconds_to_expiry is not None
+        and float(seconds_to_expiry) <= exit_envelope_tte_s()
+    )
+    if bid_ok or tte_ok:
+        return True, f"bid_ok={bid_ok} tte_ok={tte_ok}"
+    return (
+        False,
+        f"bid={executable_bid_cents}<{exit_envelope_bid_cents()} "
+        f"tte={seconds_to_expiry}>{exit_envelope_tte_s()}",
+    )
+
+
 def canonicalize_exit_reason(exit_reason: Any) -> Tuple[str, str]:
     """Return (original, canonical) exit-reason strings."""
     original = str(getattr(exit_reason, "value", exit_reason)).lower()
