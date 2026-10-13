@@ -102,7 +102,15 @@ function Write-StartupFingerprint {
     $circuitObserve = [Environment]::GetEnvironmentVariable("MERID_CIRCUIT_BREAKER_OBSERVE_ONLY", "Process")
     if ([string]::IsNullOrWhiteSpace($circuitObserve)) { $circuitObserve = "not_set" }
 
+    $interp = if (Test-Path ".\.venv\Scripts\python.exe") { (Resolve-Path ".\.venv\Scripts\python.exe").Path } else { "py (launcher fallback)" }
+    $gitSha = "unknown"
+    try { $gitSha = ((git rev-parse HEAD) 2>$null | Select-Object -First 1).Trim() } catch {}
+    $envHash = "absent"
+    if (Test-Path ".\.env") { $envHash = (Get-FileHash ".\.env" -Algorithm SHA256).Hash.Substring(0,16) }
+
     Write-Host "[start_15m] === Production startup fingerprint ===" -ForegroundColor Green
+    Write-Host "[start_15m] interpreter=$interp script_pid=$PID" -ForegroundColor Green
+    Write-Host "[start_15m] git_sha=$gitSha env_sha256=$envHash" -ForegroundColor Green
     Write-Host "[start_15m] MERID_ENV=$($env:MERID_ENV)" -ForegroundColor Green
     Write-Host "[start_15m] MERID_KALSHI_ENV=$($env:MERID_KALSHI_ENV)" -ForegroundColor Green
     Write-Host "[start_15m] KALSHI_ENV=$($env:KALSHI_ENV)" -ForegroundColor Green
@@ -436,9 +444,14 @@ $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
 # Prefer the project virtualenv so the exact package set is used.
 $python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "py" }
-& $python -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level info
+# Launch via Start-Process -PassThru so the serving PID is recorded in the
+# fingerprint trail (previously the blocking call gave us no PID until exit).
+$uvicornArgs = @("-m","uvicorn","web.main_15m_lean:app","--host","$ServerHost","--port","$Port","--log-level","info")
+$proc = Start-Process -FilePath $python -ArgumentList $uvicornArgs -NoNewWindow -PassThru
+Write-Host "[start_15m] uvicorn launched: pid=$($proc.Id) exe=$((Resolve-Path $python -ErrorAction SilentlyContinue).Path) at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Green
+$proc.WaitForExit()
 # 2026-09-23: capture the exit path — the server has died silently twice with
 # no traceback.  If uvicorn exits cleanly we get its code here; if this line
 # never appears in the console log, the process was terminated externally.
-$exitCode = $LASTEXITCODE
+$exitCode = $proc.ExitCode
 Write-Host "[start_15m] uvicorn process exited: LASTEXITCODE=$exitCode at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Red

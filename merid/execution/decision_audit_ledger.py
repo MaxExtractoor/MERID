@@ -303,6 +303,16 @@ CF_NOT_EXECUTABLE_NO_PRICE = "NOT_EXECUTABLE_NO_PRICE"
 CF_UNKNOWN_EXECUTABILITY = "UNKNOWN_EXECUTABILITY"
 CF_NOT_APPLICABLE = "NOT_APPLICABLE"
 
+# Scheduled WAL maintenance cadence (seconds).  The decision writer and any
+# analytics readers share the multi-GB WAL; without periodic checkpoints the
+# -wal grows unboundedly and every analytic scan pays merge + contention cost
+# on the live file.  PASSIVE checkpoints never wait for readers, so this is
+# safe to run from the serialized writer path.  Override with
+# MERID_AUDIT_WAL_CHECKPOINT_S; <=0 disables scheduled checkpoints.
+_WAL_CHECKPOINT_INTERVAL_S = float(
+    os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_S", "900")
+)
+
 
 @dataclass(frozen=True)
 class DecisionAuditClassification:
@@ -324,6 +334,8 @@ class DecisionAuditLedger:
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
+        self._last_wal_checkpoint = 0.0
+        self._startup_checkpoint_done = False
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
         self._evidence_refresh_inflight = False
@@ -395,6 +407,13 @@ class DecisionAuditLedger:
                 self._migrate(conn)
                 self._register_known_gaps(conn)
             self._db_ready = True
+            if not self._startup_checkpoint_done:
+                self._startup_checkpoint_done = True
+                # Drain the WAL once at startup: the only moment a TRUNCATE
+                # checkpoint is cheap (no analytics readers yet).  Runs on the
+                # writer thread, never the event loop, and gives up fast via
+                # busy_timeout if a reader does hold the WAL.
+                self._submit_write(lambda: self.wal_checkpoint("TRUNCATE"))
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
 
@@ -2236,6 +2255,52 @@ class DecisionAuditLedger:
                 )
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] record_heartbeat failed for %s: %s", cycle_id, exc)
+
+        # Scheduled WAL maintenance.  Heartbeats fire every cycle, so gate the
+        # checkpoint on wall-clock interval; PASSIVE never blocks on readers,
+        # so the trade path is never stalled while analytics hold the WAL.
+        if _WAL_CHECKPOINT_INTERVAL_S > 0:
+            now = time.time()
+            if now - self._last_wal_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
+                self._last_wal_checkpoint = now
+                self.wal_checkpoint("PASSIVE")
+
+    def wal_checkpoint(self, mode: str = "PASSIVE") -> None:
+        """Best-effort WAL checkpoint for the audit DB.
+
+        The decision writer and analytics readers share the multi-GB WAL; an
+        unchecked WAL grows unboundedly (observed: 1.5 GB alongside a 17 GB
+        db) and turns every analytic scan into a writer-contending merge.
+        PASSIVE copies every frame it can without waiting for readers, so it
+        is safe on the serialized writer path; TRUNCATE is only attempted
+        once at startup before analytics connections exist.  Failures are
+        logged, never raised to callers.
+        """
+        if not _is_enabled() or not self.db_path.exists():
+            return
+        if mode not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
+            mode = "PASSIVE"
+        try:
+            with self._lock:
+                conn = self._conn()
+                busy, wal_frames, ckpt_frames = conn.execute(
+                    "PRAGMA wal_checkpoint(%s)" % mode
+                ).fetchone()
+            if busy:
+                logger.info(
+                    "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s) deferred by readers "
+                    "(wal=%s frames, ckpt=%s)",
+                    mode, wal_frames, ckpt_frames,
+                )
+            else:
+                logger.info(
+                    "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s): %s/%s frames merged",
+                    mode, ckpt_frames, wal_frames,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s) failed: %s", mode, exc
+            )
 
     def _bump_cycle_stats(
         self,
