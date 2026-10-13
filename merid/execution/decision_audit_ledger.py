@@ -1704,43 +1704,64 @@ class DecisionAuditLedger:
                 # audit writer (observed: ~75min of queued decisions before
                 # drain).  Autocommit + one page per statement means the read
                 # txn is only held for the page's duration, so writers and
-                # checkpoints get slots between pages.  decision_id's UNIQUE
-                # index keeps each page an ordered range probe.
-                last_id = ""
+                # checkpoints get slots between pages.
+                #
+                # Paginate on rowid, not decision_id: idx_outcomes_status is
+                # effectively (outcome_status, rowid), so this is an ordered
+                # index scan whose table probes arrive in storage order —
+                # sequential I/O.  decision_id's alphabetical order instead
+                # randomizes the probes (one disk seek per row — unworkable
+                # at 2M rows on a cold file).
+                #
+                # Trusted fills ids are materialized once into a temp table:
+                # the fill-side predicates then reduce to a single O(1) temp
+                # PK probe per outcome row instead of re-evaluating the
+                # fills join predicates row-by-row.
+                scan_conn.execute(
+                    """
+                    CREATE TEMP TABLE _fill_ids AS
+                    SELECT DISTINCT decision_trace_id
+                    FROM fillsdb.kalshi_fills
+                    WHERE decision_trace_id IS NOT NULL
+                      AND COALESCE(is_exit, 0) = 0
+                      AND COALESCE(reduce_only, 0) = 0
+                      AND COALESCE(entry_or_exit, 'entry') = 'entry'
+                      AND execution_price_cents IS NOT NULL
+                      AND COALESCE(canonicalization_state,
+                                   'UNTRUSTED_LEGACY')
+                          NOT IN ('UNTRUSTED_LEGACY',
+                                  'UNTRUSTED_RAW',
+                                  'UNTRUSTED_SIDE_CONFLICT')
+                    """
+                )
+                scan_conn.execute(
+                    "CREATE UNIQUE INDEX _fill_ids_pk"
+                    " ON _fill_ids(decision_trace_id)"
+                )
+                last_rowid = 0
                 while True:
                     rows = scan_conn.execute(
                         """
-                        SELECT DISTINCT o.decision_id, o.settlement_value_cents
+                        SELECT DISTINCT o.decision_id,
+                               o.settlement_value_cents, o.rowid AS _rid
                         FROM strategy_decision_outcomes o
-                        LEFT JOIN fillsdb.kalshi_fills f
+                        LEFT JOIN temp._fill_ids f
                           ON f.decision_trace_id = o.decision_id
                         WHERE o.outcome_status = 'SETTLED'
                           AND o.realized_net_pnl_cents IS NULL
-                          AND o.decision_id > ?
+                          AND o.rowid > ?
                           AND (
                               o.actual_fill_price_cents IS NOT NULL
-                              OR (
-                                  f.fill_id IS NOT NULL
-                                  AND COALESCE(f.is_exit, 0) = 0
-                                  AND COALESCE(f.reduce_only, 0) = 0
-                                  AND COALESCE(f.entry_or_exit, 'entry')
-                                      = 'entry'
-                                  AND f.execution_price_cents IS NOT NULL
-                                  AND COALESCE(f.canonicalization_state,
-                                               'UNTRUSTED_LEGACY')
-                                      NOT IN ('UNTRUSTED_LEGACY',
-                                              'UNTRUSTED_RAW',
-                                              'UNTRUSTED_SIDE_CONFLICT')
-                              )
+                              OR f.decision_trace_id IS NOT NULL
                           )
-                        ORDER BY o.decision_id
+                        ORDER BY o.rowid
                         LIMIT 500
                         """,
-                        (last_id,),
+                        (last_rowid,),
                     ).fetchall()
                     if not rows:
                         break
-                    last_id = rows[-1]["decision_id"]
+                    last_rowid = rows[-1]["_rid"]
                     for row in rows:
                         decision_id = row["decision_id"]
                         with self._lock, self._conn() as conn:
