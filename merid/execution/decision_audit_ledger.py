@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import queue
@@ -464,6 +465,13 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decisions", "policy_epoch", "TEXT")
         _add_column(conn, "strategy_decisions", "dir_regime", "TEXT")
         _add_column(conn, "strategy_decision_outcomes", "policy_epoch", "TEXT")
+        # 2026-10-13: realized_net_pnl_cents is the THESIS value (hold to
+        # settlement, entry-vs-settle) and keeps feeding evidence.  The
+        # capital-realized value — exit proceeds for exited quantity plus
+        # settlement for the residual — feeds the capital-protection counters
+        # (lane suspension, cell/provisional windows, side loss streaks).
+        _add_column(conn, "strategy_decision_outcomes", "capital_realized_pnl_cents", "REAL")
+        _add_column(conn, "strategy_decision_outcomes", "exit_attribution", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "admission_owner", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "threshold_source", "TEXT")
         _add_column(conn, "strategy_decision_side_ev", "legacy_risk_label", "TEXT")
@@ -1525,6 +1533,53 @@ class DecisionAuditLedger:
             )
             return None
 
+    def _capital_realized_from_fills_db(
+        self,
+        *,
+        ticker: Optional[str],
+        fill_id: Optional[str],
+        held_side: str,
+        settle_value_yes_cents: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        """Capital-realized P&L for one entry lot from the Kalshi fills DB.
+
+        Returns None (callers fall back to the thesis value) when the fills
+        DB, the ticker's fills, or the lot cannot be resolved.
+        """
+        path = self._fills_db_path()
+        if not ticker or not fill_id or not path.exists():
+            return None
+        try:
+            fconn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+            try:
+                fconn.row_factory = sqlite3.Row
+                placeholders = ",".join("?" for _ in _UNTRUSTED_FILL_STATES)
+                rows = [
+                    dict(r)
+                    for r in fconn.execute(
+                        "SELECT fill_id, created_time, execution_outcome_side, "
+                        "execution_action, execution_price_cents, quantity_cc, "
+                        "fee_cost FROM kalshi_fills WHERE market_ticker = ? "
+                        "AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY') "
+                        f"NOT IN ({placeholders})",
+                        (ticker, *_UNTRUSTED_FILL_STATES),
+                    )
+                ]
+            finally:
+                fconn.close()
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] capital-realized fills lookup failed "
+                "for %s/%s: %s", ticker, fill_id, exc,
+            )
+            return None
+        return compute_capital_realized_pnl(
+            fills=rows,
+            target_fill_id=fill_id,
+            held_side=held_side,
+            settle_value_yes_cents=settle_value_yes_cents,
+        )
+
     def _attribute_settlement(
         self,
         conn: Any,
@@ -1545,7 +1600,7 @@ class DecisionAuditLedger:
         """
         orow = conn.execute(
             "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
-            "realized_net_pnl_cents, settlement_value_cents "
+            "realized_net_pnl_cents, settlement_value_cents, fill_id "
             "FROM strategy_decision_outcomes WHERE decision_id = ?",
             (decision_id,),
         ).fetchone()
@@ -1580,7 +1635,7 @@ class DecisionAuditLedger:
                     )
                 orow = conn.execute(
                     "SELECT actual_fill_price_cents, actual_entry_fee_cents, "
-                    "realized_net_pnl_cents FROM strategy_decision_outcomes "
+                    "realized_net_pnl_cents, fill_id FROM strategy_decision_outcomes "
                     "WHERE decision_id = ?",
                     (decision_id,),
                 ).fetchone()
@@ -1590,24 +1645,73 @@ class DecisionAuditLedger:
             return
 
         drow = conn.execute(
-            "SELECT selected_side, asset FROM strategy_decisions "
+            "SELECT selected_side, asset, ticker FROM strategy_decisions "
             "WHERE decision_id = ?",
             (decision_id,),
         ).fetchone()
         if drow is None or not drow["selected_side"]:
             return
+        _held = str(drow["selected_side"]).lower()
         _fill = float(orow["actual_fill_price_cents"])
         _fee = float(orow["actual_entry_fee_cents"] or 0.0)
-        _settle_leg = float(
-            settle_val
-            if str(drow["selected_side"]).lower() == "yes"
-            else (100 - settle_val)
-        )
+        _settle_leg = float(settle_val if _held == "yes" else (100 - settle_val))
+        # Thesis P&L: entry vs settlement, as if held.  Persisted in
+        # realized_net_pnl_cents (legacy name) — evidence keeps learning from
+        # this; it says whether the entry thesis was right.
         _net_pnl_cents = _settle_leg - _fill - _fee
+
+        # Capital-realized P&L: what the account actually booked for this
+        # lot (exit proceeds for exited qty + settlement for the residual).
+        # Capital-protection counters consume this; falls back to thesis when
+        # the lot's fills can't be resolved, so attribution never goes silent.
+        _cap = self._capital_realized_from_fills_db(
+            ticker=drow["ticker"],
+            fill_id=orow["fill_id"],
+            held_side=_held,
+            settle_value_yes_cents=settle_val,
+        )
+        if _cap is not None and _cap["attribution"] == "held_to_settlement":
+            # Held lots realize exactly the thesis value; keep one number.
+            _cap["realized_pnl_cents"] = _net_pnl_cents
+        _capital_pnl = _cap["realized_pnl_cents"] if _cap is not None else None
+        _attribution = _cap["attribution"] if _cap is not None else "unresolved"
         conn.execute(
             "UPDATE strategy_decision_outcomes "
-            "SET realized_net_pnl_cents = ? WHERE decision_id = ?",
-            (_net_pnl_cents, decision_id),
+            "SET realized_net_pnl_cents = ?, capital_realized_pnl_cents = ?, "
+            "exit_attribution = ? WHERE decision_id = ?",
+            (_net_pnl_cents, _capital_pnl, _attribution, decision_id),
+        )
+
+        _source = _safety_pnl_source()
+        if _source == "realized" and _capital_pnl is not None:
+            _safety_pnl = float(_capital_pnl)
+        else:
+            _safety_pnl = _net_pnl_cents
+            if _source == "realized":
+                _source = "thesis_fallback"
+        _diverged = _capital_pnl is not None and (
+            (_capital_pnl < 0.0) != (_net_pnl_cents < 0.0)
+        )
+        logger.log(
+            logging.WARNING if _diverged else logging.INFO,
+            "[%s] decision=%s ticker=%s side=%s attribution=%s "
+            "thesis_pnl=%.1fc capital_realized_pnl=%s safety_pnl=%.1fc "
+            "safety_source=%s exited_qty=%s exit_vwap=%s",
+            "SAFETY-PNL-DIVERGENCE" if _diverged else "SAFETY-PNL",
+            decision_id,
+            drow["ticker"],
+            _held,
+            _attribution,
+            _net_pnl_cents,
+            f"{_capital_pnl:.1f}c" if _capital_pnl is not None else "n/a",
+            _safety_pnl,
+            _source,
+            (f"{_cap['exited_qty']:.2f}" if _cap is not None else "n/a"),
+            (
+                f"{_cap['exit_vwap_cents']:.1f}c"
+                if _cap is not None and _cap["exit_vwap_cents"] is not None
+                else "n/a"
+            ),
         )
 
         if not allow_lane_attribution:
@@ -1630,12 +1734,12 @@ class DecisionAuditLedger:
             if _tc_cell:
                 record_cell_settlement(
                     decision_id=decision_id,
-                    net_pnl_cents=_net_pnl_cents,
+                    net_pnl_cents=_safety_pnl,
                 )
             if _cbp_cell:
                 record_provisional_settlement(
                     decision_id=decision_id,
-                    net_pnl_cents=_net_pnl_cents,
+                    net_pnl_cents=_safety_pnl,
                     cell_id=_cbp_cell,
                 )
             # 2026-10-12: marginal-band release lane — feed realized PnL into
@@ -1645,7 +1749,7 @@ class DecisionAuditLedger:
             if marginal_band_for_decision(decision_id):
                 _mb_record_settlement(
                     decision_id=decision_id,
-                    net_pnl_cents=_net_pnl_cents,
+                    net_pnl_cents=_safety_pnl,
                 )
         except Exception as exc:
             logger.debug(
@@ -1663,8 +1767,8 @@ class DecisionAuditLedger:
                 record_side_settlement,
             )
             record_side_settlement(
-                str(drow["selected_side"]).lower(),
-                _net_pnl_cents,
+                _held,
+                _safety_pnl,
                 ts=time.time(),
                 decision_id=decision_id,
                 asset=(str(drow["asset"]).lower() if drow["asset"] else None),
@@ -3632,6 +3736,130 @@ def _evidence_health_cols(indicators: Mapping[str, Any], side: str) -> Dict[str,
         "evidence_binding_gate": indicators.get(f"{side}_evidence_binding_gate"),
         "evidence_artifact_mtime": _to_float(evh.get("artifact_mtime")),
         "evidence_last_refresh_success_at": _to_float(evh.get("last_refresh_success_at")),
+    }
+
+
+_UNTRUSTED_FILL_STATES = (
+    "UNTRUSTED_LEGACY",
+    "UNTRUSTED_RAW",
+    "UNTRUSTED_SIDE_CONFLICT",
+)
+
+
+def _safety_pnl_source() -> str:
+    """Which P&L feeds capital-protection counters: ``realized`` | ``thesis``.
+
+    ``realized`` (default) is what the account actually booked — exit
+    proceeds for exited quantity plus settlement for the residual.
+    ``thesis`` is the legacy hold-to-settlement value (rollback switch).
+    """
+    v = os.environ.get("MERID_SAFETY_PNL_SOURCE", "realized").strip().lower()
+    return v if v in ("realized", "thesis") else "realized"
+
+
+def _fill_yes_delta_sign(side: Optional[str], action: Optional[str]) -> int:
+    """+1 when a fill adds YES exposure (buy YES / sell NO), -1 when it adds
+    NO exposure (buy NO / sell YES), 0 when undetermined."""
+    s, a = (side or "").lower(), (action or "").lower()
+    if s not in ("yes", "no") or a not in ("buy", "sell"):
+        return 0
+    return 1 if (s == "yes") == (a == "buy") else -1
+
+
+def compute_capital_realized_pnl(
+    *,
+    fills: Any,
+    target_fill_id: str,
+    held_side: str,
+    settle_value_yes_cents: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Realized P&L of one entry lot, as the account actually booked it.
+
+    ``fills`` are every trusted fill on the lot's ticker (dicts carrying
+    ``execution_outcome_side``/``execution_action``/``execution_price_cents``
+    in venue leg space, ``quantity_cc``, ``fee_cost`` dollars,
+    ``created_time``).  Kalshi nets each ticker, so opposite-direction fills
+    close held lots FIFO.  The target lot's realized P&L is
+
+        exit proceeds (held-side price x allocated qty) - allocated exit fees
+        + residual qty x held-side settlement value
+        - entry price x qty - entry fee
+
+    Returns None when the target lot is absent or its residual cannot be
+    valued (no settlement yet).
+    """
+    held = (held_side or "").lower()
+    if held not in ("yes", "no") or not target_fill_id:
+        return None
+    held_sign = 1 if held == "yes" else -1
+    ordered = sorted(
+        fills,
+        key=lambda f: (str(f.get("created_time") or ""), str(f.get("fill_id") or "")),
+    )
+    lots: List[Dict[str, Any]] = []
+    target: Optional[Dict[str, Any]] = None
+    for f in ordered:
+        side = (f.get("execution_outcome_side") or "").lower()
+        sign = _fill_yes_delta_sign(side, f.get("execution_action"))
+        px = f.get("execution_price_cents")
+        if sign == 0 or px is None:
+            continue
+        qty = float(f.get("quantity_cc") or 100) / 100.0
+        if qty <= 0:
+            continue
+        held_px = float(px) if side == held else 100.0 - float(px)
+        fee_c = float(f.get("fee_cost") or 0.0) * 100.0
+        if sign == held_sign:
+            lot = {
+                "qty": qty, "open": qty, "px": held_px, "fee": fee_c,
+                "exit_qty": 0.0, "exit_value": 0.0, "exit_fee": 0.0,
+            }
+            lots.append(lot)
+            if str(f.get("fill_id")) == str(target_fill_id):
+                target = lot
+            continue
+        remaining = qty
+        for lot in lots:
+            if remaining <= 1e-9:
+                break
+            take = min(lot["open"], remaining)
+            if take <= 1e-9:
+                continue
+            lot["open"] -= take
+            remaining -= take
+            lot["exit_qty"] += take
+            lot["exit_value"] += take * held_px
+            lot["exit_fee"] += fee_c * take / qty
+    if target is None:
+        return None
+    residual = max(0.0, target["open"])
+    settle_leg = 0.0
+    if residual > 1e-9:
+        if settle_value_yes_cents is None:
+            return None
+        sv = float(settle_value_yes_cents)
+        settle_leg = sv if held == "yes" else 100.0 - sv
+    pnl = (
+        target["exit_value"]
+        - target["exit_fee"]
+        + residual * settle_leg
+        - target["px"] * target["qty"]
+        - target["fee"]
+    )
+    if target["exit_qty"] <= 1e-9:
+        attribution = "held_to_settlement"
+    elif residual <= 1e-9:
+        attribution = "exited"
+    else:
+        attribution = "partial"
+    return {
+        "realized_pnl_cents": pnl,
+        "exited_qty": target["exit_qty"],
+        "held_qty": residual,
+        "exit_vwap_cents": (
+            target["exit_value"] / target["exit_qty"] if target["exit_qty"] > 1e-9 else None
+        ),
+        "attribution": attribution,
     }
 
 

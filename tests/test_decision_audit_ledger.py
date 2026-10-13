@@ -888,3 +888,255 @@ def test_pending_unsettled_tickers_skips_blank_ticker(tmp_db: Path) -> None:
         conn.commit()
     pending = ledger.pending_unsettled_tickers(now=time.time() + 3600)
     assert all(t and str(t).strip() for t, _ in pending)
+
+
+# ── Capital-realized vs thesis P&L (2026-10-13) ──────────────────────────────
+
+
+def _make_ticker_fills_db(path: Path, ticker: str, rows: List[Dict[str, Any]]) -> None:
+    """kalshi_fills with the per-ticker columns capital attribution reads."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE kalshi_fills (
+            fill_id TEXT PRIMARY KEY, order_id TEXT, market_ticker TEXT,
+            decision_trace_id TEXT, execution_outcome_side TEXT,
+            execution_action TEXT, execution_price_cents INTEGER,
+            quantity_cc INTEGER DEFAULT 100, fee_cost REAL DEFAULT 0,
+            is_exit INTEGER DEFAULT 0, reduce_only INTEGER DEFAULT 0,
+            entry_or_exit TEXT DEFAULT 'entry',
+            canonicalization_state TEXT DEFAULT 'TRUSTED_LIVE_V1',
+            created_time TEXT
+        )
+        """
+    )
+    for r in rows:
+        conn.execute(
+            "INSERT INTO kalshi_fills (fill_id, market_ticker, decision_trace_id, "
+            "execution_outcome_side, execution_action, execution_price_cents, "
+            "quantity_cc, fee_cost, is_exit, entry_or_exit, created_time) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                r["fill_id"], ticker, r.get("decision_trace_id"),
+                r["side"], r["action"], r["price"], r.get("qty_cc", 100),
+                r.get("fee_cost", 0.0), int(r.get("is_exit", 0)),
+                "exit" if r.get("is_exit") else "entry", r["created_time"],
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _settle_no_position(
+    tmp_db: Path,
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    dec_id: str,
+    exit_rows: List[Dict[str, Any]],
+    settled_yes: bool,
+) -> Dict[str, Any]:
+    """NO entry at 54 (venue sell-YES@46), optional exits, then settlement.
+
+    Returns the persisted outcome row plus what the safety consumers saw.
+    """
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    dec = _enter_decision_no()
+    dec.decision_id = dec_id
+    fills_db = tmp_path / f"{dec_id}_fills.db"
+    _make_ticker_fills_db(
+        fills_db,
+        dec.ticker,
+        [
+            {"fill_id": f"{dec_id}_entry", "decision_trace_id": dec_id,
+             "side": "yes", "action": "sell", "price": 46,
+             "created_time": "2026-10-13T10:00:00+00:00"},
+            *exit_rows,
+        ],
+    )
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+
+    seen: Dict[str, Any] = {}
+    import merid.prediction.directional_regime as _dr
+    import merid.prediction.marginal_band_lane as _mb
+
+    monkeypatch.setattr(
+        _dr, "record_side_settlement",
+        lambda side, pnl, **kw: seen.__setitem__("side_throttle", (side, pnl)),
+    )
+    monkeypatch.setattr(_mb, "marginal_band_for_decision", lambda did: {"asset": "btc"})
+    monkeypatch.setattr(
+        _mb, "record_settlement",
+        lambda *, decision_id, net_pnl_cents: seen.__setitem__("mband", net_pnl_cents),
+    )
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    ledger.record_trade_decision(dec)
+    assert ledger.record_entry_fill(
+        decision_id=dec_id,
+        fill_id=f"{dec_id}_entry",
+        execution_outcome_side="yes",
+        execution_action="sell",
+        execution_price_cents=46,
+        entry_fee_cents=0.0,
+    )
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=settled_yes,
+        settlement_value_cents=100 if settled_yes else 0,
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            "SELECT realized_net_pnl_cents, capital_realized_pnl_cents, "
+            "exit_attribution FROM strategy_decision_outcomes WHERE decision_id = ?",
+            (dec_id,),
+        ).fetchone())
+    row.update(seen)
+    return row
+
+
+def test_catastrophic_exit_books_realized_loss_and_keeps_thesis(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Stopped out of NO@54 at 9c (venue buy-YES@91, 1c fee); NO then wins.
+
+    Thesis (evidence) label stays +46 — the entry was right.  Capital
+    counters must see the -46 the account actually realized.
+    """
+    monkeypatch.delenv("MERID_SAFETY_PNL_SOURCE", raising=False)
+    row = _settle_no_position(
+        tmp_db, tmp_path, monkeypatch,
+        dec_id="dec_cap_stop",
+        exit_rows=[{"fill_id": "x1", "side": "yes", "action": "buy", "price": 91,
+                    "fee_cost": 0.01, "is_exit": True,
+                    "created_time": "2026-10-13T10:05:00+00:00"}],
+        settled_yes=False,
+    )
+    assert row["realized_net_pnl_cents"] == pytest.approx(46.0)
+    assert row["capital_realized_pnl_cents"] == pytest.approx(-46.0)
+    assert row["exit_attribution"] == "exited"
+    assert row["side_throttle"] == ("no", pytest.approx(-46.0))
+    assert row["mband"] == pytest.approx(-46.0)
+
+
+def test_profitable_early_exit_does_not_count_as_loss(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Exited NO@54 at 70c (venue buy-YES@30) before NO lost at settlement.
+
+    The thesis was wrong (-54) but the account realized +16: loss-streak
+    and suspension counters must receive the realized gain, not a loss.
+    """
+    monkeypatch.delenv("MERID_SAFETY_PNL_SOURCE", raising=False)
+    row = _settle_no_position(
+        tmp_db, tmp_path, monkeypatch,
+        dec_id="dec_cap_tp",
+        exit_rows=[{"fill_id": "x2", "side": "yes", "action": "buy", "price": 30,
+                    "is_exit": True, "created_time": "2026-10-13T10:05:00+00:00"}],
+        settled_yes=True,
+    )
+    assert row["realized_net_pnl_cents"] == pytest.approx(-54.0)
+    assert row["capital_realized_pnl_cents"] == pytest.approx(16.0)
+    assert row["side_throttle"][1] > 0
+    assert row["mband"] > 0
+
+
+def test_held_to_settlement_capital_equals_thesis(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("MERID_SAFETY_PNL_SOURCE", raising=False)
+    row = _settle_no_position(
+        tmp_db, tmp_path, monkeypatch,
+        dec_id="dec_cap_hold", exit_rows=[], settled_yes=True,
+    )
+    assert row["realized_net_pnl_cents"] == pytest.approx(-54.0)
+    assert row["capital_realized_pnl_cents"] == pytest.approx(-54.0)
+    assert row["exit_attribution"] == "held_to_settlement"
+    assert row["side_throttle"] == ("no", pytest.approx(-54.0))
+
+
+def test_safety_pnl_source_thesis_rollback(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """MERID_SAFETY_PNL_SOURCE=thesis restores legacy consumer inputs while
+    still persisting the capital-realized column."""
+    monkeypatch.setenv("MERID_SAFETY_PNL_SOURCE", "thesis")
+    row = _settle_no_position(
+        tmp_db, tmp_path, monkeypatch,
+        dec_id="dec_cap_rollback",
+        exit_rows=[{"fill_id": "x3", "side": "yes", "action": "buy", "price": 91,
+                    "is_exit": True, "created_time": "2026-10-13T10:05:00+00:00"}],
+        settled_yes=False,
+    )
+    assert row["capital_realized_pnl_cents"] == pytest.approx(-45.0)
+    assert row["side_throttle"] == ("no", pytest.approx(46.0))
+
+
+def test_capital_realized_falls_back_to_thesis_when_fills_unresolvable(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Legacy fills DB without market_ticker/quantity_cc: attribution must
+    not go silent — consumers get the thesis value, row marked unresolved."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    monkeypatch.delenv("MERID_SAFETY_PNL_SOURCE", raising=False)
+    fills_db = tmp_path / "legacy_fills.db"
+    _make_fills_db(fills_db, [{"fill_id": "lf1", "decision_trace_id": "dec_cap_legacy",
+                               "execution_price_cents": 46}])
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+    seen: Dict[str, Any] = {}
+    import merid.prediction.directional_regime as _dr
+    monkeypatch.setattr(
+        _dr, "record_side_settlement",
+        lambda side, pnl, **kw: seen.__setitem__("side_throttle", (side, pnl)),
+    )
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _enter_decision_no()
+    dec.decision_id = "dec_cap_legacy"
+    ledger.record_trade_decision(dec)
+    ledger.record_entry_fill(
+        decision_id=dec.decision_id, fill_id="lf1",
+        execution_outcome_side="yes", execution_action="sell",
+        execution_price_cents=46, entry_fee_cents=0.0,
+    )
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(ticker=dec.ticker, close_ts=close_ts,
+                             settled_yes=True, settlement_value_cents=100)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        row = conn.execute(
+            "SELECT realized_net_pnl_cents, capital_realized_pnl_cents, exit_attribution "
+            "FROM strategy_decision_outcomes WHERE decision_id = ?",
+            ("dec_cap_legacy",),
+        ).fetchone()
+    assert row[0] == pytest.approx(-54.0)
+    assert row[1] is None and row[2] == "unresolved"
+    assert seen["side_throttle"] == ("no", pytest.approx(-54.0))
+
+
+def test_compute_capital_realized_fifo_partial() -> None:
+    """Two YES lots, one exit contract: FIFO closes the first lot only."""
+    from merid.execution.decision_audit_ledger import compute_capital_realized_pnl
+
+    fills = [
+        {"fill_id": "e1", "execution_outcome_side": "yes", "execution_action": "buy",
+         "execution_price_cents": 40, "quantity_cc": 100, "created_time": "t1"},
+        {"fill_id": "e2", "execution_outcome_side": "yes", "execution_action": "buy",
+         "execution_price_cents": 50, "quantity_cc": 100, "created_time": "t2"},
+        # Sell YES @ 60 reported as buy NO @ 40 (same YES-delta direction).
+        {"fill_id": "x", "execution_outcome_side": "no", "execution_action": "buy",
+         "execution_price_cents": 40, "quantity_cc": 100, "created_time": "t3"},
+    ]
+    first = compute_capital_realized_pnl(
+        fills=fills, target_fill_id="e1", held_side="yes", settle_value_yes_cents=0)
+    second = compute_capital_realized_pnl(
+        fills=fills, target_fill_id="e2", held_side="yes", settle_value_yes_cents=0)
+    assert first["attribution"] == "exited"
+    assert first["realized_pnl_cents"] == pytest.approx(20.0)
+    assert first["exit_vwap_cents"] == pytest.approx(60.0)
+    assert second["attribution"] == "held_to_settlement"
+    assert second["realized_pnl_cents"] == pytest.approx(-50.0)
+    assert compute_capital_realized_pnl(
+        fills=fills, target_fill_id="missing", held_side="yes",
+        settle_value_yes_cents=0) is None
