@@ -1697,7 +1697,17 @@ class DecisionAuditLedger:
                 scan_conn.execute(
                     "ATTACH DATABASE ? AS fillsdb", (str(fills_path),)
                 )
-                try:
+                # 2026-10-13: keyset-paginate the candidate scan.  One giant
+                # fetchall() held a single read transaction across the whole
+                # ~1h scan on the 17GB live db — pinning the WAL read-mark
+                # (checkpoints deferred, -wal unshrinkable) and starving the
+                # audit writer (observed: ~75min of queued decisions before
+                # drain).  Autocommit + one page per statement means the read
+                # txn is only held for the page's duration, so writers and
+                # checkpoints get slots between pages.  decision_id's UNIQUE
+                # index keeps each page an ordered range probe.
+                last_id = ""
+                while True:
                     rows = scan_conn.execute(
                         """
                         SELECT DISTINCT o.decision_id, o.settlement_value_cents
@@ -1706,6 +1716,7 @@ class DecisionAuditLedger:
                           ON f.decision_trace_id = o.decision_id
                         WHERE o.outcome_status = 'SETTLED'
                           AND o.realized_net_pnl_cents IS NULL
+                          AND o.decision_id > ?
                           AND (
                               o.actual_fill_price_cents IS NOT NULL
                               OR (
@@ -1722,41 +1733,49 @@ class DecisionAuditLedger:
                                               'UNTRUSTED_SIDE_CONFLICT')
                               )
                           )
-                        """
+                        ORDER BY o.decision_id
+                        LIMIT 500
+                        """,
+                        (last_id,),
                     ).fetchall()
-                finally:
-                    scan_conn.execute("DETACH DATABASE fillsdb")
+                    if not rows:
+                        break
+                    last_id = rows[-1]["decision_id"]
+                    for row in rows:
+                        decision_id = row["decision_id"]
+                        with self._lock, self._conn() as conn:
+                            before = conn.execute(
+                                "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+                                "FROM strategy_decision_outcomes WHERE decision_id = ?",
+                                (decision_id,),
+                            ).fetchone()
+                            self._attribute_settlement(
+                                conn,
+                                decision_id=decision_id,
+                                settlement_value_cents=row["settlement_value_cents"],
+                            )
+                            after = conn.execute(
+                                "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+                                "FROM strategy_decision_outcomes WHERE decision_id = ?",
+                                (decision_id,),
+                            ).fetchone()
+                            if (
+                                after is not None
+                                and before is not None
+                                and (
+                                    after["actual_fill_price_cents"]
+                                    != before["actual_fill_price_cents"]
+                                    or after["realized_net_pnl_cents"]
+                                    != before["realized_net_pnl_cents"]
+                                )
+                            ):
+                                healed += 1
             finally:
+                try:
+                    scan_conn.execute("DETACH DATABASE fillsdb")
+                except Exception:
+                    pass
                 scan_conn.close()
-            for row in rows:
-                decision_id = row["decision_id"]
-                with self._lock, self._conn() as conn:
-                    before = conn.execute(
-                        "SELECT actual_fill_price_cents, realized_net_pnl_cents "
-                        "FROM strategy_decision_outcomes WHERE decision_id = ?",
-                        (decision_id,),
-                    ).fetchone()
-                    self._attribute_settlement(
-                        conn,
-                        decision_id=decision_id,
-                        settlement_value_cents=row["settlement_value_cents"],
-                    )
-                    after = conn.execute(
-                        "SELECT actual_fill_price_cents, realized_net_pnl_cents "
-                        "FROM strategy_decision_outcomes WHERE decision_id = ?",
-                        (decision_id,),
-                    ).fetchone()
-                    if (
-                        after is not None
-                        and before is not None
-                        and (
-                            after["actual_fill_price_cents"]
-                            != before["actual_fill_price_cents"]
-                            or after["realized_net_pnl_cents"]
-                            != before["realized_net_pnl_cents"]
-                        )
-                    ):
-                        healed += 1
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes failed: %s", exc
