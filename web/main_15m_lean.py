@@ -1202,6 +1202,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[LIFESPAN] Step 9k0b: Error stopping bankroll reconciler: {e}")
 
+    # Drain the decision-audit write queue before teardown.  Writers enqueue
+    # decisions/fills/outcomes/settlements onto a single background thread;
+    # without this step a planned restart silently drops whatever is queued
+    # (observed ~5.1k records lost on 2026-10-13).  Bounded by
+    # MERID_AUDIT_DRAIN_TIMEOUT_S (default 60s) so shutdown can't hang.
+    try:
+        logger.info("[LIFESPAN] Step 9k0c: Draining decision audit write queue")
+        from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+        audit_ledger = get_decision_audit_ledger()
+        drained = await asyncio.to_thread(audit_ledger.close)
+        if drained:
+            logger.info("[LIFESPAN] Step 9k0c: Decision audit write queue drained")
+        else:
+            logger.warning("[LIFESPAN] Step 9k0c: Decision audit drain timed out; some queued writes may be lost")
+    except ImportError as e:
+        logger.warning(f"[LIFESPAN] Step 9k0c: Failed to import decision audit ledger: {e}")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Step 9k0c: Error draining decision audit queue: {e}")
+
     # CRITICAL FIX: Close database connections if any
     try:
         logger.info("[LIFESPAN] Step 9k: Closing database connections")

@@ -12,6 +12,7 @@ live trading path.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
@@ -39,6 +40,8 @@ _WAL = os.environ.get("MERID_DECISION_AUDIT_LEDGER_WAL", "1").strip().lower() in
     "true",
     "yes",
 )
+# Sentinel distinguishing "caller precomputed this" from "compute inline".
+_PRECOMPUTE_UNSET = object()
 
 
 def _is_enabled() -> bool:
@@ -350,17 +353,122 @@ class DecisionAuditLedger:
         self._write_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self._writer_started = False
         self._writer_thread: Optional[threading.Thread] = None
+        # 2026-10-13: queue admission control.  When a long reader (startup
+        # reconcile, evidence rebuild) starves the single writer, arrivals
+        # outpace drains and the unbounded queue grows until process exit
+        # (observed: ~4.7k pending, ~45min of audit records held in memory).
+        # Shed by declared priority, never FIFO-collapse: HIGH (fills,
+        # settlements, order/risk events) is never dropped; NORMAL (decision
+        # rows, heartbeats) is sampled past the critical depth; LOW
+        # (pre-decision rejection telemetry, maintenance) is sampled past the
+        # soft depth and dropped past critical.
+        self._shed_seq = 0
+        self._shed_stats = {
+            "low_sampled": 0,
+            "low_dropped": 0,
+            "normal_dropped": 0,
+        }
+        self._last_shed_log = 0.0
+        # Graceful shutdown: close() stops admitting new writes then drains the
+        # queue so a planned restart cannot silently discard queued decisions/
+        # fills/outcomes (observed loss: ~5.1k records on the 2026-10-13
+        # restart).  Drain is bounded by MERID_AUDIT_DRAIN_TIMEOUT_S.
+        self._closed = False
+        self._closed_drop_logged = False
 
-    def submit_write(self, fn: Callable[[], None]) -> None:
+    def submit_write(self, fn: Callable[[], None], *, priority: str = "normal") -> None:
         """Public offload API: enqueue ``fn`` (a bound ledger write) onto the
         dedicated writer thread.  Call sites on the asyncio event loop use
         this when they do not need the write's return value — the ledger's
         sync methods keep their bool/row semantics for fail-closed callers
-        and tests.
+        and tests.  ``priority`` selects the admission-control tier:
+        "high" is never shed, "normal" is sampled at critical depth, "low"
+        is sampled at soft depth and dropped at critical depth.
         """
-        self._submit_write(fn)
+        self._submit_write(fn, priority=priority)
 
-    def _submit_write(self, fn: Callable[[], None]) -> None:
+    def _shed_admit(self, priority: str, depth: int) -> bool:
+        """Return False when a queued write should be dropped for load."""
+        if priority == "high":
+            return True
+        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "1500"))
+        crit = int(os.environ.get("MERID_AUDIT_SHED_CRIT_DEPTH", "5000"))
+        if depth < soft:
+            return True
+        self._shed_seq += 1
+        keep = True
+        if priority == "low":
+            if depth >= crit:
+                keep = False
+            else:
+                div = max(1, int(os.environ.get("MERID_AUDIT_LOW_SAMPLE_DIV", "10")))
+                keep = self._shed_seq % div == 0
+                if keep:
+                    self._shed_stats["low_sampled"] += 1
+        elif depth >= crit:
+            div = max(1, int(os.environ.get("MERID_AUDIT_NORMAL_SAMPLE_DIV", "4")))
+            keep = self._shed_seq % div == 0
+        if not keep:
+            self._shed_stats[
+                "low_dropped" if priority == "low" else "normal_dropped"
+            ] += 1
+            now = time.time()
+            if now - self._last_shed_log >= 30.0:
+                self._last_shed_log = now
+                logger.warning(
+                    "[AUDIT-Q-SHED] depth=%d: dropping %s-priority audit "
+                    "write; cumulative=%s",
+                    depth,
+                    priority,
+                    self._shed_stats,
+                )
+        return keep
+
+    def drain_write_queue(self, timeout_s: Optional[float] = None) -> bool:
+        """Best-effort bounded flush of pending audit writes.
+
+        Returns True when the queue fully drained within ``timeout_s``
+        (default: ``MERID_AUDIT_DRAIN_TIMEOUT_S``, 60s).  Called on graceful
+        shutdown paths; a killed process still drops the queue, this only
+        covers the planned-restart case.
+        """
+        if timeout_s is None:
+            timeout_s = float(os.environ.get("MERID_AUDIT_DRAIN_TIMEOUT_S", "60"))
+        if not self._writer_started:
+            return True
+        done = threading.Event()
+
+        def _wait_for_drain() -> None:
+            self._write_queue.join()
+            done.set()
+
+        waiter = threading.Thread(
+            target=_wait_for_drain, daemon=True, name="audit-drain-waiter"
+        )
+        waiter.start()
+        flushed = done.wait(timeout_s)
+        if flushed:
+            logger.info(
+                "[DECISION-AUDIT-LEDGER] write queue drained (timeout=%.1fs)",
+                timeout_s,
+            )
+        else:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] write queue drain timed out after "
+                "%.1fs; depth=%d remaining",
+                timeout_s,
+                self._write_queue.qsize(),
+            )
+        return flushed
+
+    def close(self, timeout_s: Optional[float] = None) -> bool:
+        """Stop admitting new writes, then drain pending ones."""
+        if self._closed:
+            return True
+        self._closed = True
+        return self.drain_write_queue(timeout_s)
+
+    def _submit_write(self, fn: Callable[[], None], *, priority: str = "normal") -> None:
         """Run a ledger write on the dedicated writer thread.
 
         Writes are append-only, callers ignore return values, and failures are
@@ -369,6 +477,14 @@ class DecisionAuditLedger:
         class gives today.  Under pytest/CI the write runs inline so tests
         can assert on rows immediately.
         """
+        if self._closed:
+            if not self._closed_drop_logged:
+                self._closed_drop_logged = True
+                logger.warning(
+                    "[DECISION-AUDIT-LEDGER] ledger closed; dropping queued "
+                    "audit writes (shutdown in progress)"
+                )
+            return
         if _is_test_context():
             try:
                 fn()
@@ -385,6 +501,8 @@ class DecisionAuditLedger:
                     )
                     self._writer_thread.start()
                     self._writer_started = True
+        if not self._shed_admit(priority, self._write_queue.qsize()):
+            return
         self._write_queue.put_nowait(fn)
 
     def _writer_main(self) -> None:
@@ -414,7 +532,9 @@ class DecisionAuditLedger:
                 # checkpoint is cheap (no analytics readers yet).  Runs on the
                 # writer thread, never the event loop, and gives up fast via
                 # busy_timeout if a reader does hold the WAL.
-                self._submit_write(lambda: self.wal_checkpoint("TRUNCATE"))
+                self._submit_write(
+                    lambda: self.wal_checkpoint("TRUNCATE"), priority="low"
+                )
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
 
@@ -1580,6 +1700,67 @@ class DecisionAuditLedger:
             settle_value_yes_cents=settle_value_yes_cents,
         )
 
+    def _reconcile_state_path(self) -> Path:
+        return Path(
+            os.environ.get(
+                "MERID_RECONCILE_STATE_PATH",
+                str(self.db_path.parent / "reconcile_fill_outcomes_state.json"),
+            )
+        )
+
+    def _reconcile_state_load(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self._reconcile_state_path().read_text())
+        except Exception:
+            return {}
+
+    def _reconcile_state_save(self, **fields: Any) -> None:
+        """Persist reconcile progress atomically (tmp file + os.replace)."""
+        state = self._reconcile_state_load()
+        state.update(fields)
+        state["updated_at"] = time.time()
+        path = self._reconcile_state_path()
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] reconcile state save failed: %s", exc
+            )
+
+    def _prepare_settlement_attr(
+        self,
+        *,
+        decision_id: str,
+        selected_side: Optional[str],
+        ticker: Optional[str],
+        actual_fill_price_cents: Any,
+        fill_id: Optional[str],
+        settle_value_yes_cents: Optional[float],
+    ) -> Any:
+        """Fills-DB reads for ``_attribute_settlement``, outside ``self._lock``.
+
+        Returns ``(entry_fill, capital)``.  ``entry_fill`` is the resolved
+        entry fill dict (or None) to hand to ``pre_entry_fill``; ``capital``
+        is the ``_capital_realized_from_fills_db`` result (dict or None) for
+        ``pre_capital``, or ``_PRECOMPUTE_UNSET`` when attribution is moot
+        (no selected side / no resolvable fill id).
+        """
+        entry_fill = None
+        if actual_fill_price_cents is None:
+            entry_fill = self._resolve_entry_fill_from_fills_db(decision_id)
+        held = str(selected_side or "").lower()
+        fid = fill_id or (entry_fill or {}).get("fill_id")
+        if held not in ("yes", "no") or not fid:
+            return entry_fill, _PRECOMPUTE_UNSET
+        return entry_fill, self._capital_realized_from_fills_db(
+            ticker=ticker,
+            fill_id=fid,
+            held_side=held,
+            settle_value_yes_cents=settle_value_yes_cents,
+        )
+
     def _attribute_settlement(
         self,
         conn: Any,
@@ -1587,6 +1768,8 @@ class DecisionAuditLedger:
         decision_id: str,
         settlement_value_cents: Optional[int],
         allow_lane_attribution: bool = True,
+        pre_entry_fill: Any = _PRECOMPUTE_UNSET,
+        pre_capital: Any = _PRECOMPUTE_UNSET,
     ) -> None:
         """Resolve the entry fill (if missing) and persist realized PnL.
 
@@ -1613,7 +1796,11 @@ class DecisionAuditLedger:
             return
 
         if orow["actual_fill_price_cents"] is None:
-            f = self._resolve_entry_fill_from_fills_db(decision_id)
+            f = (
+                self._resolve_entry_fill_from_fills_db(decision_id)
+                if pre_entry_fill is _PRECOMPUTE_UNSET
+                else pre_entry_fill
+            )
             if f is not None:
                 try:
                     self._record_entry_fill_locked(
@@ -1664,11 +1851,15 @@ class DecisionAuditLedger:
         # lot (exit proceeds for exited qty + settlement for the residual).
         # Capital-protection counters consume this; falls back to thesis when
         # the lot's fills can't be resolved, so attribution never goes silent.
-        _cap = self._capital_realized_from_fills_db(
-            ticker=drow["ticker"],
-            fill_id=orow["fill_id"],
-            held_side=_held,
-            settle_value_yes_cents=settle_val,
+        _cap = (
+            self._capital_realized_from_fills_db(
+                ticker=drow["ticker"],
+                fill_id=orow["fill_id"],
+                held_side=_held,
+                settle_value_yes_cents=settle_val,
+            )
+            if pre_capital is _PRECOMPUTE_UNSET
+            else pre_capital
         )
         if _cap is not None and _cap["attribution"] == "held_to_settlement":
             # Held lots realize exactly the thesis value; keep one number.
@@ -1851,15 +2042,50 @@ class DecisionAuditLedger:
                     "CREATE UNIQUE INDEX _fill_ids_pk"
                     " ON _fill_ids(decision_trace_id)"
                 )
-                last_rowid = 0
+                # 2026-10-13: durable resume watermark.  Three process
+                # restarts in one day each restarted this ~40min scan from
+                # rowid 0.  resume_rowid is persisted after each healed page
+                # so a killed scan continues where it stopped; on completion
+                # complete_through_rowid becomes the floor for future boots.
+                # Rows below the floor can still become candidates later if a
+                # fills-ledger repair backfills an old fill — a full rescan
+                # runs every MERID_RECONCILE_FULL_EVERY_S (default 24h) or on
+                # MERID_RECONCILE_FULL_SCAN=1 to catch those.
+                state = self._reconcile_state_load()
+                full_every_s = float(
+                    os.environ.get("MERID_RECONCILE_FULL_EVERY_S", str(24 * 3600))
+                )
+                force_full = os.environ.get(
+                    "MERID_RECONCILE_FULL_SCAN", "0"
+                ).strip().lower() in ("1", "true", "yes")
+                full_due = force_full or (
+                    time.time() - float(state.get("last_full_scan_ts") or 0.0)
+                    > full_every_s
+                )
+                last_rowid = 0 if full_due else max(
+                    int(state.get("resume_rowid") or 0),
+                    int(state.get("complete_through_rowid") or 0),
+                )
+                started_full = last_rowid == 0
+                logger.info(
+                    "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes starting "
+                    "at rowid %d (full_scan=%s)",
+                    last_rowid,
+                    started_full,
+                )
+                _last_progress_log = 0.0
                 while True:
                     rows = scan_conn.execute(
                         """
                         SELECT DISTINCT o.decision_id,
-                               o.settlement_value_cents, o.rowid AS _rid
+                               o.settlement_value_cents, o.rowid AS _rid,
+                               o.fill_id, o.actual_fill_price_cents,
+                               d.selected_side, d.ticker
                         FROM strategy_decision_outcomes o
                         LEFT JOIN temp._fill_ids f
                           ON f.decision_trace_id = o.decision_id
+                        LEFT JOIN strategy_decisions d
+                          ON d.decision_id = o.decision_id
                         WHERE o.outcome_status = 'SETTLED'
                           AND o.realized_net_pnl_cents IS NULL
                           AND o.rowid > ?
@@ -1877,6 +2103,21 @@ class DecisionAuditLedger:
                     last_rowid = rows[-1]["_rid"]
                     for row in rows:
                         decision_id = row["decision_id"]
+                        # Fills-DB reads outside self._lock: under disk
+                        # contention each lookup inside the lock stalled the
+                        # whole writer queue behind a fills scan.
+                        entry_fill, capital = self._prepare_settlement_attr(
+                            decision_id=decision_id,
+                            selected_side=row["selected_side"],
+                            ticker=row["ticker"],
+                            actual_fill_price_cents=row[
+                                "actual_fill_price_cents"
+                            ],
+                            fill_id=row["fill_id"],
+                            settle_value_yes_cents=row[
+                                "settlement_value_cents"
+                            ],
+                        )
                         with self._lock, self._conn() as conn:
                             before = conn.execute(
                                 "SELECT actual_fill_price_cents, realized_net_pnl_cents "
@@ -1887,6 +2128,8 @@ class DecisionAuditLedger:
                                 conn,
                                 decision_id=decision_id,
                                 settlement_value_cents=row["settlement_value_cents"],
+                                pre_entry_fill=entry_fill,
+                                pre_capital=capital,
                             )
                             after = conn.execute(
                                 "SELECT actual_fill_price_cents, realized_net_pnl_cents "
@@ -1904,6 +2147,31 @@ class DecisionAuditLedger:
                                 )
                             ):
                                 healed += 1
+                    self._reconcile_state_save(resume_rowid=last_rowid)
+                    now = time.time()
+                    if now - _last_progress_log >= 60.0:
+                        _last_progress_log = now
+                        logger.info(
+                            "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes "
+                            "progress: rowid=%d healed=%d",
+                            last_rowid,
+                            healed,
+                        )
+                self._reconcile_state_save(
+                    resume_rowid=last_rowid,
+                    complete_through_rowid=last_rowid,
+                    last_full_scan_ts=(
+                        time.time()
+                        if started_full
+                        else state.get("last_full_scan_ts")
+                    ),
+                )
+                logger.info(
+                    "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes scan "
+                    "complete: floor=%d healed=%d",
+                    last_rowid,
+                    healed,
+                )
             finally:
                 try:
                     scan_conn.execute("DETACH DATABASE fillsdb")
@@ -1942,7 +2210,10 @@ class DecisionAuditLedger:
             with self._lock, self._conn() as conn:
                 rows = conn.execute(
                     """
-                    SELECT d.decision_id, d.close_ts, d.asset, d.run_id, d.candidate_id
+                    SELECT d.decision_id, d.close_ts, d.asset, d.run_id, d.candidate_id,
+                           d.selected_side, d.ticker,
+                           o.fill_id, o.actual_fill_price_cents,
+                           o.realized_net_pnl_cents
                     FROM strategy_decisions d
                     JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
                     WHERE d.ticker = ?
@@ -1952,7 +2223,28 @@ class DecisionAuditLedger:
                     (ticker, close_ts),
                 ).fetchall()
 
-                for row in rows:
+            # Phase A (no lock): fills-DB reads for settlement attribution.
+            # _resolve_entry_fill / _capital_realized open their own read-only
+            # connections to kalshi_fills.db; keeping them inside self._lock
+            # serialized the audit writer behind per-ticker fills scans under
+            # disk contention (observed 2026-10-13).
+            prepared = []
+            for row in rows:
+                entry_fill = None
+                capital = _PRECOMPUTE_UNSET
+                if row["realized_net_pnl_cents"] is None:
+                    entry_fill, capital = self._prepare_settlement_attr(
+                        decision_id=row["decision_id"],
+                        selected_side=row["selected_side"],
+                        ticker=row["ticker"],
+                        actual_fill_price_cents=row["actual_fill_price_cents"],
+                        fill_id=row["fill_id"],
+                        settle_value_yes_cents=settlement_value_cents,
+                    )
+                prepared.append((row, entry_fill, capital))
+
+            with self._lock, self._conn() as conn:
+                for row, entry_fill, capital in prepared:
                     decision_id = row["decision_id"]
                     side_rows = conn.execute(
                         "SELECT * FROM strategy_decision_side_ev WHERE decision_id = ?",
@@ -2031,6 +2323,8 @@ class DecisionAuditLedger:
                             conn,
                             decision_id=decision_id,
                             settlement_value_cents=settlement_value_cents,
+                            pre_entry_fill=entry_fill,
+                            pre_capital=capital,
                         )
                     except Exception:
                         pass
@@ -2569,7 +2863,7 @@ class DecisionAuditLedger:
             "[DECISION-AUDIT-HEARTBEAT] cycle_id=%s tick=%d assets=%d "
             "decisions_expected=%d decisions_persisted=%d "
             "side_ev_expected=%d side_ev_persisted=%d "
-            "latency_ms=%.2f errors=%d queue_depth=%d",
+            "latency_ms=%.2f errors=%d queue_depth=%d shed=%s",
             cycle_id,
             tick,
             assets_evaluated,
@@ -2580,6 +2874,7 @@ class DecisionAuditLedger:
             ledger_write_latency_ms,
             ledger_error_count,
             queue_depth,
+            self._shed_stats,
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────
@@ -3080,6 +3375,22 @@ class DecisionAuditLedger:
 
 _ledger_instance: Optional[DecisionAuditLedger] = None
 _ledger_lock = threading.Lock()
+
+
+def _drain_ledger_at_exit() -> None:
+    """atexit backstop: flush queued audit writes on non-lifespan exits
+    (Ctrl+C, sys.exit, interpreter teardown).  The uvicorn lifespan calls
+    close() earlier; this covers every other graceful path."""
+    inst = _ledger_instance
+    if inst is None:
+        return
+    try:
+        inst.close()
+    except Exception:
+        pass
+
+
+atexit.register(_drain_ledger_at_exit)
 
 
 def get_decision_audit_ledger() -> DecisionAuditLedger:

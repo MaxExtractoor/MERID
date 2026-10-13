@@ -662,6 +662,7 @@ def _record_decision_audit(
         # was the dominant starvation source (faulthandler samples). The
         # return value is unused and this path is deliberately fail-open.
         from functools import partial as _partial
+        # Decision rows are audit spine: never shed.
         ledger.submit_write(
             _partial(
                 ledger.record_trade_decision,
@@ -672,7 +673,8 @@ def _record_decision_audit(
                 settlement_reference_price=settlement_input_price,
                 settlement_reference_source=settlement_reference,
                 settlement_reference_age_ms=_rti_age_ms(cfb_observation),
-            )
+            ),
+            priority="high",
         )
     except Exception as audit_exc:
         logger.warning(
@@ -11088,7 +11090,8 @@ class LeanAgent15m:
                     trace_id=candidate_id,
                     event_type=event_type,
                     extra=detail,
-                )
+                ),
+                priority="low",
             )
         except Exception as _pdr_err:
             logger.debug("[DECISION-AUDIT] pre-decision rejection emit failed (non-fatal): %s", _pdr_err)
@@ -11132,7 +11135,8 @@ class LeanAgent15m:
                             run_id=context.get("run_id"),
                             ticker=context.get("ticker") or context.get("market_id"),
                             asset=context.get("asset"),
-                        )
+                        ),
+                        priority="high",
                     )
                 return
             ctx = getattr(self, "_pdr_ctx", None) or {}
@@ -11192,7 +11196,8 @@ class LeanAgent15m:
                             if isinstance(v, (str, int, float, bool, type(None)))
                         }
                     },
-                )
+                ),
+                priority="low",
             )
         except Exception as _sig_audit_err:
             logger.debug("[DECISION-AUDIT] signal rejection audit failed: %s", _sig_audit_err)

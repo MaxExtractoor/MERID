@@ -1548,7 +1548,8 @@ class Kalshi15mLoop:
                                 run_id=_cand_ctx.get("run_id"),
                                 ticker=_cand_ctx.get("ticker") or (context or {}).get("ticker"),
                                 asset=_cand_ctx.get("asset") or (context or {}).get("asset"),
-                            )
+                            ),
+                            priority="high",
                         )
                 except Exception:
                     pass

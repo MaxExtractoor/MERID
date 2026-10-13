@@ -405,7 +405,8 @@ def _record_entry_fill_in_audit_ledger(fill: "KalshiFill") -> None:
                 execution_action=fill.execution_action or fill.action,
                 execution_price_cents=fill.execution_price_cents,
                 entry_fee_cents=float(fee_dollars_to_cents(fill.fee_cost)),
-            )
+            ),
+            priority="high",
         )
     except Exception as exc:
         logger.debug(

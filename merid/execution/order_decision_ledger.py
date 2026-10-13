@@ -150,7 +150,8 @@ class OrderDecisionLedger:
                     decision_id=decision_id,
                     order_intent_id=intent_id,
                     exchange_order_id=order_id,
-                )
+                ),
+                priority="high",
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record submission failed: %s", audit_exc)
@@ -212,7 +213,8 @@ class OrderDecisionLedger:
                     execution_action=fill.action,
                     execution_price_cents=fill.price_cents,
                     entry_fee_cents=float(fill.fee_cents),
-                )
+                ),
+                priority="high",
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record fill failed: %s", audit_exc)
@@ -265,7 +267,8 @@ class OrderDecisionLedger:
                     decision_id=decision_id,
                     actual_exit_price_cents=exit.exit_price_cents,
                     realized_net_pnl_cents=float(realized_pnl_cents) if realized_pnl_cents is not None else None,
-                )
+                ),
+                priority="high",
             )
         except Exception as audit_exc:
             logger.warning("[ORDER-DECISION-LEDGER] audit record exit failed: %s", audit_exc)
