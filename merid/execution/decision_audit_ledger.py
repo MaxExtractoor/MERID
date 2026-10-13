@@ -480,6 +480,15 @@ class DecisionAuditLedger:
         # is recorded — a bounded lane (canary_maker, threshold_cell, ...)
         # can admit a side below the full enforced-route bound.
         _add_column(conn, "strategy_decision_side_ev", "decision_lane", "TEXT")
+        # 2026-10-13: evidence-health tier per candidate side — makes "why
+        # was this side blocked/downsized?" queryable when the evidence
+        # artifact is DEGRADED/STALE/UNUSABLE.
+        _add_column(conn, "strategy_decision_side_ev", "evidence_state", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "evidence_age_s", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "evidence_action", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "evidence_binding_gate", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "evidence_artifact_mtime", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "evidence_last_refresh_success_at", "REAL")
 
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
@@ -2028,6 +2037,9 @@ class DecisionAuditLedger:
         """
         since = now - window_hours * 3600.0
         t0 = time.time()
+        from merid.prediction import evidence_health as _evh
+
+        _evh.record_refresh_attempt(t0)
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(str(self.db_path), timeout=30)
@@ -2065,9 +2077,10 @@ class DecisionAuditLedger:
                 (since - 3600.0, since),
             ).fetchall()
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
             )
+            _evh.record_refresh_result(False, f"query: {exc}")
             return
         finally:
             if conn is not None:
@@ -2151,10 +2164,12 @@ class DecisionAuditLedger:
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(json.dumps(out))
             os.replace(tmp, path)
+            _evh.record_refresh_result(True)
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence write failed: %s", exc
             )
+            _evh.record_refresh_result(False, f"write: {exc}")
 
     def pending_unsettled_tickers(
         self,
@@ -2846,8 +2861,11 @@ class DecisionAuditLedger:
                         counterfactual_slippage_model_version,
                         counterfactual_fill_model_version,
                         gate_ev_cents, enforced_edge_bound_cents,
-                        decision_lane
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        decision_lane,
+                        evidence_state, evidence_age_s, evidence_action,
+                        evidence_binding_gate, evidence_artifact_mtime,
+                        evidence_last_refresh_success_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -2891,6 +2909,12 @@ class DecisionAuditLedger:
                         side_row.get("gate_ev_cents"),
                         side_row.get("enforced_edge_bound_cents"),
                         side_row.get("decision_lane"),
+                        side_row.get("evidence_state"),
+                        side_row.get("evidence_age_s"),
+                        side_row.get("evidence_action"),
+                        side_row.get("evidence_binding_gate"),
+                        side_row.get("evidence_artifact_mtime"),
+                        side_row.get("evidence_last_refresh_success_at"),
                     ),
                 )
 
@@ -3212,6 +3236,7 @@ def _build_side_ev_row(
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
         **_exec,
+        **_evidence_health_cols(indicators, side),
     }
 
 
@@ -3323,6 +3348,7 @@ def _legacy_side_ev_row(
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
         **_exec,
+        **_evidence_health_cols(indicators, side),
     }
 
 
@@ -3592,6 +3618,21 @@ def _safe_attr(obj: Any, name: str) -> Optional[str]:
 def _policy_epoch() -> str:
     """Active policy epoch stamped on new decisions and settlements."""
     return os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01")
+
+
+def _evidence_health_cols(indicators: Mapping[str, Any], side: str) -> Dict[str, Any]:
+    """Per-side evidence-health columns from the decision's indicators."""
+    evh = indicators.get("evidence_health") or {}
+    return {
+        "evidence_state": indicators.get(f"{side}_evidence_state") or evh.get("evidence_state"),
+        "evidence_age_s": _to_float(
+            indicators.get(f"{side}_evidence_age_s", evh.get("evidence_age_seconds"))
+        ),
+        "evidence_action": indicators.get(f"{side}_evidence_action"),
+        "evidence_binding_gate": indicators.get(f"{side}_evidence_binding_gate"),
+        "evidence_artifact_mtime": _to_float(evh.get("artifact_mtime")),
+        "evidence_last_refresh_success_at": _to_float(evh.get("last_refresh_success_at")),
+    }
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:

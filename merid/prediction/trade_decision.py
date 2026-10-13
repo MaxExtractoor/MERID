@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 from merid.risk.probability.tail_calibrator import load_tail_calibrator
 from merid.prediction import evidence_policy
+from merid.prediction import evidence_health
 from merid.prediction import current_build_provisional as _cbp
 from merid.prediction.threshold_cells import (
     THRESHOLD_CELLS,
@@ -2794,6 +2795,15 @@ def _load_live_evidence() -> Optional[Dict[str, Any]]:
     return data
 
 
+def _live_evidence_mtime() -> Optional[float]:
+    try:
+        return os.path.getmtime(
+            os.environ.get("MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json")
+        )
+    except OSError:
+        return None
+
+
 def _clear_live_evidence_cache() -> None:
     _live_evidence_cache["mtime"] = None
     _live_evidence_cache["data"] = None
@@ -4006,18 +4016,33 @@ def compute_trade_decision(
         if _live_ev is not None:
             indicators["live_evidence_evaluated"] = True
             _artifact_missing = bool((_live_ev or {}).get("artifact_missing"))
+            # 2026-10-13: tiered evidence health.  Artifact age decides
+            # whether cells are scored (FRESH/DEGRADED), replaced by the
+            # bounded missing-artifact fallback (STALE), or fail closed for
+            # evidence-dependent admission (UNUSABLE).  See evidence_health.
+            _ev_health = evidence_health.assess(
+                _live_ev, artifact_mtime=_live_evidence_mtime()
+            )
+            _ev_state = _ev_health.state
+            indicators["evidence_health"] = _ev_health.detail()
             _cells_usable = (
                 not _artifact_missing
+                and _ev_health.score_cells
                 and isinstance(_live_ev.get("cells"), dict)
                 and bool(_live_ev.get("cells"))
+            )
+            _ev_margin = MERID_LIVE_EVIDENCE_MARGIN + _ev_health.margin_uplift_frac
+            _ev_artifact_state = (
+                "unusable" if _ev_state == evidence_health.UNUSABLE
+                else "missing" if _artifact_missing
+                else "stale" if _ev_state == evidence_health.STALE
+                else "empty"
             )
             # 2026-10-09: a missing/empty artifact is an explicit
             # insufficient-evidence state — both sides get a synthetic
             # bounded-lane-only decision instead of a silent pass.
             if evidence_policy.enabled() and not _cells_usable:
-                indicators["evidence_artifact_state"] = (
-                    "missing" if _artifact_missing else "empty"
-                )
+                indicators["evidence_artifact_state"] = _ev_artifact_state
             if evidence_policy.enabled() and (_cells_usable or _artifact_missing
                                             or isinstance(_live_ev.get("cells"), dict)):
                 indicators["evidence_policy_version"] = (
@@ -4027,7 +4052,21 @@ def compute_trade_decision(
                     ("yes", yes_price_cents, float(yes_breakdown.net_edge) * 100.0),
                     ("no", no_price_cents, float(no_breakdown.net_edge) * 100.0),
                 ):
-                    if _cells_usable:
+                    if _ev_state == evidence_health.UNUSABLE:
+                        _ed = evidence_policy.evaluate_unusable(
+                            asset,
+                            _side,
+                            _px,
+                            seconds_to_expiry,
+                            age_s=_ev_health.age_s,
+                            reason=(
+                                f"evidence UNUSABLE (age_s={_ev_health.age_s}, "
+                                f"parse_ok={_ev_health.artifact_parse_ok}, "
+                                f"mode={_ev_health.mode}); evidence-dependent "
+                                "admission fails closed"
+                            ),
+                        )
+                    elif _cells_usable:
                         _ed = evidence_policy.evaluate(
                             _live_ev,
                             asset,
@@ -4035,7 +4074,7 @@ def compute_trade_decision(
                             _px,
                             seconds_to_expiry,
                             fee,
-                            MERID_LIVE_EVIDENCE_MARGIN,
+                            _ev_margin,
                             _ne_c,
                         )
                     else:
@@ -4045,13 +4084,20 @@ def compute_trade_decision(
                             _px,
                             seconds_to_expiry,
                             fee,
-                            MERID_LIVE_EVIDENCE_MARGIN,
+                            _ev_margin,
                             _ne_c,
-                            artifact_state=(
-                                "missing" if _artifact_missing else "empty"
-                            ),
+                            artifact_state=_ev_artifact_state,
                         )
                     indicators[f"evidence_{_side}"] = _ed.detail()
+                    indicators[f"{_side}_evidence_state"] = _ev_state
+                    indicators[f"{_side}_evidence_age_s"] = _ev_health.age_s
+                    indicators[f"{_side}_evidence_binding_gate"] = _ed.code
+                    # allow / downsize / fallback by state; "block" when the
+                    # evidence verdict itself refused (a downstream lane may
+                    # still admit — see {side}_admission_owner).
+                    indicators[f"{_side}_evidence_action"] = (
+                        _ev_health.decision_action if _ed.allowed else "block"
+                    )
                     if _ed.escape_required:
                         indicators[f"evidence_escape_{_side}"] = True
                     if settlement_lane:
@@ -4450,7 +4496,31 @@ def compute_trade_decision(
                             elif _side == "no" and not no_evidence_ok:
                                 no_evidence_ok = True
                                 no_evidence_reason = None
-            elif not _artifact_missing and not settlement_lane:
+            elif (
+                _ev_state == evidence_health.UNUSABLE
+                and not settlement_lane
+            ):
+                # Legacy (non-cell-policy) path: same fail-closed semantics,
+                # with the provisional lane's label-not-veto exemption.
+                for _side, _d, _ne_c in (
+                    ("yes", _yes_edge_thr, float(yes_breakdown.net_edge) * 100.0),
+                    ("no", _no_edge_thr, float(no_breakdown.net_edge) * 100.0),
+                ):
+                    if _provisional_evidence_probe(
+                        _d, _side, _ne_c, "EVIDENCE_UNUSABLE", False, indicators,
+                    ):
+                        continue
+                    if _side == "yes" and yes_evidence_ok:
+                        yes_evidence_ok = False
+                        yes_evidence_reason = "evidence_unusable_yes"
+                    elif _side == "no" and no_evidence_ok:
+                        no_evidence_ok = False
+                        no_evidence_reason = "evidence_unusable_no"
+            elif (
+                not _artifact_missing
+                and not settlement_lane
+                and _ev_health.score_cells
+            ):
                 _yes_live_ok, _yes_live_det = _live_evidence_allows(
                     _live_ev, asset, "yes", yes_price_cents, fee
                 )
@@ -5857,6 +5927,22 @@ def compute_trade_decision(
         # 2026-08-29: Use the resolved live-config per-order contract cap as the
         # default approved size.  In canary mode this is one contract (100 cc).
         _max_contracts = _get_resolved_max_contracts()
+        # 2026-10-13: evidence-health size cap (DEGRADED/STALE/UNUSABLE).
+        _evh = indicators.get("evidence_health") or {}
+        _evh_state = _evh.get("evidence_state")
+        if _evh_state and _evh_state != evidence_health.FRESH:
+            _evh_cap = (
+                evidence_health.degraded_max_contracts()
+                if _evh_state == evidence_health.DEGRADED
+                else 1
+            )
+            if _max_contracts > _evh_cap:
+                indicators["evidence_size_cap"] = {
+                    "evidence_state": _evh_state,
+                    "requested_contracts": _max_contracts,
+                    "capped_contracts": _evh_cap,
+                }
+                _max_contracts = _evh_cap
         approved_size_cc = Decimal(str(_max_contracts * 100))
         p_selected = Decimal(str(edge_breakdown.p_selected))
         p_opposite = Decimal(str(edge_breakdown.p_opposite))

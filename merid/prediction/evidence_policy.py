@@ -525,23 +525,65 @@ def evaluate_missing_artifact(
     the max sparse-uncertainty uplift, escape-lane only) but re-codes the
     outcome so telemetry proves provenance: a missing artifact can admit a
     *bounded* trial, never an evidence-backed production entry.
-    ``artifact_state``: ``missing`` (no readable file) or ``empty``
-    (file present, no usable cells).
+    ``artifact_state``: ``missing`` (no readable file), ``empty`` (file
+    present, no usable cells) or ``stale`` (evidence_health STALE: cells
+    exist but are too old to score as veto or support).
     """
     d = evaluate(
         {}, asset, side, entry_price_cents, tte_seconds,
         fee_frac, margin_frac, net_edge_cents, now=now,
     )
-    tag = (
-        "EVIDENCE_ARTIFACT_MISSING" if artifact_state == "missing"
-        else "EVIDENCE_ARTIFACT_EMPTY"
-    )
+    tag = {
+        "missing": "EVIDENCE_ARTIFACT_MISSING",
+        "stale": "EVIDENCE_ARTIFACT_STALE",
+    }.get(artifact_state, "EVIDENCE_ARTIFACT_EMPTY")
     d.code = f"{tag}_PASS" if d.allowed else tag
     d.fallback_reason = (
         f"artifact {artifact_state}; treated as empty evidence — "
         "bounded-lane admission only, never production"
     )
     return d
+
+
+def evaluate_unusable(
+    asset: str,
+    side: str,
+    entry_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+    *,
+    age_s: Optional[float],
+    reason: str,
+) -> EvidenceDecision:
+    """Fail-closed verdict for evidence_health UNUSABLE.
+
+    No escape lane, not a soft code: no evidence-dependent admission path
+    (formula, escape, challenge, threshold-cell soft override, marginal
+    relief) may admit on it.  Lanes that never depended on the artifact keep
+    their own gates upstream of this verdict.
+    """
+    return EvidenceDecision(
+        allowed=False,
+        code="EVIDENCE_UNUSABLE",
+        cell_key=cell_key(asset, str(side).lower(), entry_price_cents, tte_seconds),
+        evidence_level_used="none",
+        parent_level=None,
+        effective_independent_n=0.0,
+        cell_n_eff=0.0,
+        wins_weighted=0.0,
+        losses_weighted=0.0,
+        n_raw=0,
+        posterior_mean=0.5,
+        posterior_lcb=0.5,
+        posterior_std=0.5,
+        lcb_net_ev_cents=None,
+        required_margin_cents=0.0,
+        sparse_uplift_cents=0.0,
+        matching_hard_block=False,
+        escape_required=False,
+        evidence_stale=True,
+        evidence_age_s=age_s,
+        fallback_reason=reason,
+    )
 
 
 def _pick_cells(evidence: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
