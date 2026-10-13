@@ -1593,6 +1593,10 @@ class DecisionAuditLedger:
                 provisional_cell_for_decision,
                 record_provisional_settlement,
             )
+            from merid.prediction.marginal_band_lane import (
+                marginal_band_for_decision,
+                record_settlement as _mb_record_settlement,
+            )
             _tc_cell = cell_for_decision(decision_id)
             _cbp_cell = provisional_cell_for_decision(decision_id)
             if _tc_cell:
@@ -1605,6 +1609,15 @@ class DecisionAuditLedger:
                     decision_id=decision_id,
                     net_pnl_cents=_net_pnl_cents,
                     cell_id=_cbp_cell,
+                )
+            # 2026-10-12: marginal-band release lane — feed realized PnL into
+            # the lane's daily loss / consecutive-loss suspension counters.
+            # ``marginal_band_for_decision`` only binds submissions the lane
+            # gate recorded, so primary-lane fills are never attributed here.
+            if marginal_band_for_decision(decision_id):
+                _mb_record_settlement(
+                    decision_id=decision_id,
+                    net_pnl_cents=_net_pnl_cents,
                 )
         except Exception as exc:
             logger.debug(

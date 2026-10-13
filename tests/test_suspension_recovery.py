@@ -44,6 +44,11 @@ def lanes(tmp_path, monkeypatch):
     pv_path = str(tmp_path / "cbp_lane.json")
     monkeypatch.setenv("MERID_THRESHOLD_CELL_STATE_PATH", tc_path)
     monkeypatch.setenv("MERID_PROVISIONAL_STATE_PATH", pv_path)
+    # Hermetic recovery policy: the live .env pins a Stage-A
+    # MERID_RECOVERY_ALLOWLIST, which would silently gate the recovery
+    # assertions below (unlisted cells can never auto-release).  Tests that
+    # exercise the allowlist set it explicitly themselves.
+    monkeypatch.delenv("MERID_RECOVERY_ALLOWLIST", raising=False)
     cbp._STATE_CACHE = None
     cbp._STATE_CACHE_PATH = None
     tc._STATE_CACHE = None

@@ -96,13 +96,31 @@ MERID_EDGE_MID_BAND_HI_CENTS = float(
 # claimed-negative-edge candidates are still vetoed downstream by
 # cost_basis / no_positive_executable_edge.  Formula path only —
 # threshold-cell, provisional-cell, and settlement-lane bounds untouched.
-# Default 0 (disabled); production sets 3.0 via .env.
+# Default 0 (disabled).  2026-10-14: superseded in production by the
+# bounded marginal-band lane (merid/prediction/marginal_band_lane.py) —
+# the global relief is an uncapped version of the same relaxation, so a
+# nonzero value shadows the bounded lane (warning below).
 MERID_EDGE_MARGINAL_RELIEF_CENTS = max(
     0.0, float(os.environ.get("MERID_EDGE_MARGINAL_RELIEF_CENTS", "0"))
 )
 MERID_EDGE_MARGINAL_RELIEF_LO_CENTS = float(
     os.environ.get("MERID_EDGE_MARGINAL_RELIEF_LO_CENTS", "35")
 )
+
+# Deployment guard: the bounded marginal-band lane rescues the same
+# near-miss population this relief admits unconditionally.  If both are
+# active the relief wins silently and the lane records nothing — warn at
+# startup so a future .env edit cannot shadow the lane unnoticed.
+if MERID_EDGE_MARGINAL_RELIEF_CENTS > 0.0 and os.environ.get(
+    "MERID_MBAND_LANE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes"):
+    logger.warning(
+        "[MBAND-LANE] MERID_EDGE_MARGINAL_RELIEF_CENTS=%.2f is active while "
+        "the bounded marginal-band lane is enabled — the global relief "
+        "admits near-misses first, so decision_lane=marginal_band stays "
+        "dormant. Set the relief to 0 to evaluate the bounded lane.",
+        MERID_EDGE_MARGINAL_RELIEF_CENTS,
+    )
 
 def _provisional_coinflip_exempt() -> bool:
     """2026-10-12 operator directive: current_build_provisional lanes carry
@@ -639,6 +657,13 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # exists at maker fees.  Rests post-only GTC at the bounded 1-contract
     # size; shares the canary daily cap and per-window dedupe.
     "canary_maker",
+    # 2026-10-12: marginal-band release lane — cohort-restricted 1c slack on
+    # the EDGE_BELOW_DYNAMIC_THRESHOLD near-miss (NO-side SOL/DOGE/XRP,
+    # taker or empirical-marginal-maker route, outside the final TTE tail).
+    # Admitted on authoritative executable economics like every bounded
+    # lane: 1-contract, lane-bound EV re-gate, lane-budget enforced by
+    # marginal_band_lane.py (daily caps + loss/coherence self-suspension).
+    "marginal_band",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -691,6 +716,36 @@ MERID_MARGINAL_BAND_MIN_CENTS = int(
 )
 MERID_MARGINAL_BAND_MAX_CENTS = int(
     os.environ.get("MERID_MARGINAL_BAND_MAX_CENTS", "89")
+)
+
+# 2026-10-12 (post-reject-counterfactual): cohort restriction on the release
+# band.  The 2026-10-11 window showed EDGE_BELOW_DYNAMIC_THRESHOLD rejects at
+# +2,043c counterfactual — but the profitable rejects concentrated in NO-side
+# SOL/DOGE/XRP near-misses during a 14/15-NO tape, while the YES control
+# (ETH-2045) proved YES-side rejects still need their own evidence.  The
+# release band therefore admits only ``MERID_MARGINAL_BAND_SIDES`` on
+# ``MERID_MARGINAL_BAND_LIVE_ASSETS``; every other cohort computes the
+# identical near-miss as *shadow* telemetry (never admitted) so BTC/ETH and
+# YES-side outcomes accrue evidence out-of-sample before promotion.
+# ``MERID_MARGINAL_BAND_MIN_TTE_S`` keeps the release out of the final tail —
+# entries below the normal entry-TTE floor (settlement-lane-bypassed
+# evaluations) are not rescued.
+MERID_MARGINAL_BAND_SIDES = frozenset(
+    s.strip().lower()
+    for s in os.environ.get("MERID_MARGINAL_BAND_SIDES", "no").split(",")
+    if s.strip()
+)
+MERID_MARGINAL_BAND_LIVE_ASSETS = frozenset(
+    s.strip().upper()
+    for s in os.environ.get(
+        "MERID_MARGINAL_BAND_LIVE_ASSETS", "SOL,DOGE,XRP"
+    ).split(",")
+    if s.strip()
+)
+# Every cohort not in LIVE_ASSETS is shadow by construction (BTC/ETH and any
+# side not in SIDES record the would-be rescue but are never admitted).
+MERID_MARGINAL_BAND_MIN_TTE_S = float(
+    os.environ.get("MERID_MARGINAL_BAND_MIN_TTE_S", "180")
 )
 
 
@@ -4813,33 +4868,65 @@ def compute_trade_decision(
     # 4-10min / 50-89c domain, and denied to evidence-escape-owned sides
     # (an escape override already consumed the side's evidence budget).
     _emm_on_route = route == "empirical_marginal_maker"
-    _mb_yes_slack = (
+    # 2026-10-12 cohort release rule (see MERID_MARGINAL_BAND_SIDES block):
+    #   allow_live = side in SIDES and asset in LIVE_ASSETS
+    #              and 0 < threshold - net_edge <= slack
+    #              and tte outside the final tail
+    #              and route in {taker, empirical_marginal_maker}.
+    # Denied cohorts keep computing the identical near-miss as shadow
+    # telemetry — recorded, never admitted — so BTC/ETH and YES-side
+    # outcomes accumulate out-of-sample evidence.
+    _mb_tte_ok = float(seconds_to_expiry) >= MERID_MARGINAL_BAND_MIN_TTE_S
+
+    def _mb_live(side: str) -> bool:
+        return (
+            side in MERID_MARGINAL_BAND_SIDES
+            and str(asset).upper() in MERID_MARGINAL_BAND_LIVE_ASSETS
+            and _mb_tte_ok
+        )
+
+    # Domain slack (price band + positive threshold + TTE floor) — computed
+    # for every side on a slack route so denied cohorts record the would-be
+    # rescue as shadow telemetry.
+    _yes_band_slack = (
         _marginal_band_slack(float(yes_breakdown.executable_entry_price) * 100.0)
-        if (_mb_on_route and yes_min_edge > 0.0)
+        if (_mb_on_route and _mb_tte_ok and yes_min_edge > 0.0)
         else 0.0
     )
-    _mb_no_slack = (
+    _no_band_slack = (
         _marginal_band_slack(float(no_breakdown.executable_entry_price) * 100.0)
-        if (_mb_on_route and no_min_edge > 0.0)
+        if (_mb_on_route and _mb_tte_ok and no_min_edge > 0.0)
         else 0.0
     )
     if _emm_on_route:
-        if (
-            yes_min_edge > 0.0
-            and indicators.get("yes_admission_owner") != "evidence_escape"
-        ):
-            _mb_yes_slack = _marginal_maker_slack(
+        # The EMM slack is its own domain (TTE 240-600s already clears the
+        # final-tail floor); the cohort restriction applies identically.
+        _yes_band_slack = (
+            _marginal_maker_slack(
                 float(yes_breakdown.executable_entry_price) * 100.0,
                 seconds_to_expiry,
             )
-        if (
-            no_min_edge > 0.0
-            and indicators.get("no_admission_owner") != "evidence_escape"
-        ):
-            _mb_no_slack = _marginal_maker_slack(
+            if (
+                yes_min_edge > 0.0
+                and _mb_tte_ok
+                and indicators.get("yes_admission_owner") != "evidence_escape"
+            )
+            else 0.0
+        )
+        _no_band_slack = (
+            _marginal_maker_slack(
                 float(no_breakdown.executable_entry_price) * 100.0,
                 seconds_to_expiry,
             )
+            if (
+                no_min_edge > 0.0
+                and _mb_tte_ok
+                and indicators.get("no_admission_owner") != "evidence_escape"
+            )
+            else 0.0
+        )
+    _mb_yes_slack = _yes_band_slack if _mb_live("yes") else 0.0
+    _mb_no_slack = _no_band_slack if _mb_live("no") else 0.0
     _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
     _no_edge_eff_bound = no_min_edge - _mb_no_slack
     # A "rescued" side is one that would have failed without the slack —
@@ -4847,18 +4934,44 @@ def compute_trade_decision(
     # measured, and so the rescue lane has its own outcome cohort.
     _yes_mb_rescued = (
         _mb_yes_slack > 0.0
+        and _yes_eff_edge > 0.0
         and _yes_eff_edge >= _yes_edge_eff_bound
         and _yes_eff_edge < yes_min_edge
     )
     _no_mb_rescued = (
         _mb_no_slack > 0.0
+        and _no_eff_edge > 0.0
         and _no_eff_edge >= _no_edge_eff_bound
         and _no_eff_edge < no_min_edge
     )
-    if _mb_yes_slack > 0.0 or _mb_no_slack > 0.0:
+    # Shadow rescue: a denied-cohort side that would have been admitted under
+    # the unrestricted slack rule.  Never lowers the bound — the record is
+    # the out-of-sample evidence BTC/ETH and YES-side cohorts must produce
+    # before any promotion.
+    _yes_mb_shadow_rescued = (
+        _yes_band_slack > 0.0
+        and not _mb_live("yes")
+        and _yes_eff_edge > 0.0
+        and _yes_eff_edge >= (yes_min_edge - _yes_band_slack)
+        and _yes_eff_edge < yes_min_edge
+    )
+    _no_mb_shadow_rescued = (
+        _no_band_slack > 0.0
+        and not _mb_live("no")
+        and _no_eff_edge > 0.0
+        and _no_eff_edge >= (no_min_edge - _no_band_slack)
+        and _no_eff_edge < no_min_edge
+    )
+    if (
+        _mb_yes_slack > 0.0
+        or _mb_no_slack > 0.0
+        or _yes_band_slack > 0.0
+        or _no_band_slack > 0.0
+    ):
         indicators["marginal_band"] = {
             "enabled": True,
             "route": route,
+            "asset": str(asset).upper(),
             "slack_cents": (
                 EMM_SLACK if _emm_on_route else MERID_MARGINAL_BAND_SLACK
             ) * 100.0,
@@ -4866,6 +4979,11 @@ def compute_trade_decision(
             "no_slack_cents": _mb_no_slack * 100.0,
             "yes_rescued": bool(_yes_mb_rescued),
             "no_rescued": bool(_no_mb_rescued),
+            "yes_live": bool(_mb_live("yes")),
+            "no_live": bool(_mb_live("no")),
+            "tte_floor_s": MERID_MARGINAL_BAND_MIN_TTE_S,
+            "yes_shadow_rescued": bool(_yes_mb_shadow_rescued),
+            "no_shadow_rescued": bool(_no_mb_shadow_rescued),
         }
     # A rescued side's admission bound IS the slackened threshold — every
     # downstream re-gate (loop lane-EV floor, router stale-decision check)
@@ -5666,6 +5784,7 @@ def compute_trade_decision(
                 ),
                 cap_shadow=indicators.get("cap_shadow"),
                 side_verdicts=indicators.get("side_verdicts"),
+                band_shadow=indicators.get("marginal_band"),
                 yes_price_cents=(
                     float(yes_price_cents) if yes_price_cents is not None else None
                 ),
@@ -5728,6 +5847,7 @@ def compute_trade_decision(
                         float(no_price_cents) if no_price_cents is not None else None
                     ),
                     entry_price_basis=entry_price_basis,
+                    band_shadow=indicators.get("marginal_band"),
                 )
                 selected_outcome = None
                 edge_breakdown = None
@@ -5923,6 +6043,7 @@ def compute_trade_decision(
                         float(no_price_cents) if no_price_cents is not None else None
                     ),
                     entry_price_basis=entry_price_basis,
+                    band_shadow=indicators.get("marginal_band"),
                 )
                 logger.info(
                     "[ENTRY-POLICY-SHADOW] asset=%s ticker=%s side=%s price_cents=%.2f "
@@ -6209,6 +6330,14 @@ def compute_trade_decision(
             selected_outcome == "no" and _no_mb_rescued
         ):
             indicators["marginal_band_rescue"] = True
+            # 2026-10-12: rescued candidates carry their own lane id so the
+            # audit ledger (admission_lane), the intent contract, and the
+            # router's pre-wire accounting can attribute fills/coherence
+            # rejects to the release cohort.  Only stamps when no bounded
+            # lane already owns the candidate (cell lanes and the EMM lane
+            # keep their own identity + accounting).
+            if not indicators.get("decision_lane"):
+                indicators["decision_lane"] = "marginal_band"
             if _emm_on_route:
                 indicators["empirical_marginal_maker"] = True
             # The admission bound carried downstream (intent.min_required_edge

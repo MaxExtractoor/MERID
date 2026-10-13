@@ -9385,6 +9385,89 @@ class LeanAgent15m:
                         _n,
                         MERID_CANARY_DAILY_CAP,
                     )
+            # 2026-10-12: marginal_band emission gate — the cohort-restricted
+            # EDGE_BELOW_DYNAMIC_THRESHOLD release.  The decision-side
+            # admission already ran (slack bound + cohort rule); here the
+            # lane budget applies: suspension state, daily caps (lane-wide +
+            # per-asset), and one admission per asset per 15m window.
+            if (
+                _decision_lane == "marginal_band"
+                and decision.selected_outcome is not None
+            ):
+                _ticker_now = str(getattr(decision, "ticker", "") or ticker or "")
+                _mb_suppress = None
+                try:
+                    from merid.prediction.marginal_band_lane import (
+                        MERID_MBAND_DAILY_CAP,
+                        lane_status as _mb_status,
+                        record_submission as _mb_record,
+                        suppression_reason as _mb_suppress,
+                    )
+                except Exception:
+                    pass
+                _mb_block = (
+                    _mb_suppress(asset, _ticker_now)
+                    if _mb_suppress is not None
+                    else "module_unavailable"
+                )
+                if _mb_block is not None:
+                    logger.info(
+                        "[MBAND-LANE] suppressed asset=%s side=%s ticker=%s "
+                        "reason=%s",
+                        asset,
+                        decision.selected_outcome,
+                        _ticker_now,
+                        _mb_block,
+                    )
+                    try:
+                        from merid.execution.decision_audit_ledger import (
+                            get_decision_audit_ledger,
+                        )
+                        get_decision_audit_ledger().append_decision_event(
+                            decision_id=str(
+                                getattr(decision, "decision_id", "") or ""
+                            ),
+                            event_type="LANE_SUPPRESSED",
+                            stage="ALLOCATION",
+                            reason_code=f"marginal_band_{_mb_block}"[:120],
+                            reason_detail={
+                                "side": decision.selected_outcome,
+                                "lane": _decision_lane,
+                                "ticker": _ticker_now,
+                                "mband": _mb_status() if _mb_suppress else {},
+                            },
+                            trace_id=str(
+                                getattr(decision, "decision_id", "") or ""
+                            ),
+                            run_id=decision.indicators.get("run_id"),
+                            ticker=_ticker_now,
+                            asset=asset,
+                        )
+                    except Exception:
+                        pass
+                    decision = replace(
+                        decision,
+                        selected_outcome=None,
+                        no_trade_reason=f"marginal_band_{_mb_block}"[:120],
+                    )
+                else:
+                    _n = _mb_record(
+                        asset=asset,
+                        ticker=_ticker_now,
+                        decision_id=str(
+                            getattr(decision, "decision_id", "") or ""
+                        ),
+                        side=decision.selected_outcome,
+                    )
+                    logger.info(
+                        "[MBAND-LANE] asset=%s side=%s ticker=%s "
+                        "lane submissions today=%d cap=%d",
+                        asset,
+                        decision.selected_outcome,
+                        _ticker_now,
+                        _n,
+                        MERID_MBAND_DAILY_CAP,
+                    )
 
         # Production-safe containment: compute a Bachelier-only shadow decision so
         # we can compare the live hybrid side against the baseline side on the same

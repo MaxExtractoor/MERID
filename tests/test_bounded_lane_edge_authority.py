@@ -100,6 +100,9 @@ class TestBoundedLaneMembership:
             # 2026-10-05: maker-route canary — marginal +EV at maker fees;
             # rests post-only at the bounded 1-contract size.
             "canary_maker",
+            # 2026-10-12: cohort-restricted marginal-band release lane —
+            # NO-side SOL/DOGE/XRP near-miss at <=1c shortfall.
+            "marginal_band",
         }
 
 

@@ -108,6 +108,53 @@ def _price_bucket(price_cents: Optional[float]) -> Optional[str]:
     return "100c"
 
 
+# 2026-10-12: STRUCTURAL_RISK_VETO decomposition.  The canonical code bundles
+# several unrelated risk conditions; the counterfactual join needs each
+# sub-condition scored separately before any one of them is relaxed (a
+# composite 43W/8L veto record cannot tell us WHICH guard is over/under
+# strict).  Map the raw reason stem onto the sub-gate family that owns it.
+# Prefixes matched against the emitted ``no_trade_reason`` stem (see
+# directional_regime.py / trade_decision.py for the source strings).
+_STRUCTURAL_SUBREASON_RULES = (
+    # price-band / moneyness restriction
+    ("moneyness_coin_flip", "moneyness_price_band"),
+    ("entry_price_cap", "moneyness_price_band"),
+    ("trend_yes_hi", "trend_hi_lane"),
+    # late-time-to-expiry / bounded-domain restriction
+    ("bounded_domain", "bounded_domain"),
+    ("ev_to_tail_ratio_below_min", "ev_tail_ratio"),
+    # spread / book-depth restriction
+    ("bookflow_", "book_flow"),
+    # countertrend / regime structure (regime_entry_block emits the
+    # countertrend_* family directly)
+    ("countertrend_", "countertrend_lane"),
+    # suspension / probation state (side_throttle_block emits
+    # side_suspended*; strip_concentration_block emits strip_same_side_*)
+    ("side_suspended", "side_suspension"),
+    ("strip_same_side_", "same_side_streak"),
+    # conviction floor (LOW_CONVICTION canonical code — a structural veto
+    # variant in the shared taxonomy)
+    ("low_conviction", "conviction"),
+)
+
+
+def structural_subreason(reason: Optional[str]) -> Optional[str]:
+    """Decompose a STRUCTURAL_RISK_VETO / LOW_CONVICTION reason into the
+    sub-gate family that produced it (price-band/moneyness, bounded-domain,
+    book-flow, countertrend/regime, suspension/probation, conviction).
+
+    Returns None for non-structural reasons so the field stays sparse —
+    scoring only needs the decomposition where the composite veto fired.
+    """
+    rl = (reason or "").strip().lower()
+    if not rl:
+        return None
+    for prefix, family in _STRUCTURAL_SUBREASON_RULES:
+        if rl.startswith(prefix):
+            return family
+    return None
+
+
 def _canonical_reason(reason: str, net_edge: Optional[float]) -> Optional[str]:
     """Resolve the mutually exclusive top-level rejection code.
 
@@ -182,6 +229,12 @@ def log_rejected_candidate(
     # bid-basis (maker lane) they are BIDS, not asks; band-matching on them
     # as asks would reintroduce the spread error this change removes.
     entry_price_basis: Optional[str] = None,
+    # 2026-10-12: marginal-band shadow verdict — the would-be rescue verdict
+    # for cohorts the release band does not yet admit (YES side, BTC/ETH).
+    # Present only when the marginal-band domain was evaluated; carries
+    # per-side shadow_rescued / live flags so the denied cohorts' outcomes
+    # can be scored out-of-sample.
+    band_shadow: Optional[dict] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
     if not _ENABLED or not should_log(reason):
@@ -207,7 +260,7 @@ def log_rejected_candidate(
 
         record = {
             "type": "rejected_candidate",
-            "schema_version": 2,
+            "schema_version": 3,
             "event_ts_utc": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id,
             "decision_id": decision_id,
@@ -248,8 +301,10 @@ def log_rejected_candidate(
             "adverse_selection_reserve_cents": adverse_selection_reserve_cents,
             "reject_reason": reason,
             "canonical_reason": _canonical_reason(reason, net_edge),
+            "structural_subreason": structural_subreason(reason),
             "cap_shadow": cap_shadow,
             "side_verdicts": side_verdicts,
+            "band_shadow": band_shadow,
         }
         path = os.environ.get("MERID_REJECTED_CANDIDATES_LOG", _DEFAULT_PATH)
         line = json.dumps(record, default=str)

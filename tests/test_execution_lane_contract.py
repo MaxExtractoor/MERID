@@ -49,6 +49,17 @@ def _isolate_lane_state(monkeypatch, tmp_path):
     # Pin the stale-decision ceiling to the contract default — the live .env
     # relaxes it and would mask the 3.5s gate these tests assert.
     monkeypatch.setenv("MERID_EXECUTION_DECISION_MAX_AGE_MS", "3500")
+    # Pin the lane cap surface to contract defaults — the live .env widens
+    # every one of these (fills/cell 24, fills/asset 24, fills/total 120,
+    # open/cell 2, open/total 5, submissions 120+40), which would silently
+    # disable the cap assertions in section 8.
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS", "2")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_PER_ASSET", "2")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_TOTAL", "3")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS", "1")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS_TOTAL", "1")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PER_CELL_MAX_SUBMISSIONS", "5")
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_DAILY_MAX_SUBMISSIONS", "15")
     reset_cell_state_cache()
 
 

@@ -44,6 +44,35 @@ from typing import Any, Dict, Optional
 _FLAT_EPS_CENTS = 1.0
 _DEFAULT_FEE_CENTS = 1.5
 
+# 2026-10-12: STRUCTURAL_RISK_VETO decomposition — score each sub-gate family
+# separately before any is relaxed.  Prefer the stamped field on schema>=3
+# records; re-derive from the raw reason for older rows so the whole history
+# decomposes consistently.
+try:
+    from merid.prediction.rejection_counterfactual import (
+        structural_subreason as _structural_subreason,
+    )
+except Exception:  # script runnable outside the package env
+    def _structural_subreason(reason):  # type: ignore[no-redef]
+        rl = (reason or "").strip().lower()
+        if not rl:
+            return None
+        for prefix, family in (
+            ("moneyness_coin_flip", "moneyness_price_band"),
+            ("entry_price_cap", "moneyness_price_band"),
+            ("trend_yes_hi", "trend_hi_lane"),
+            ("bounded_domain", "bounded_domain"),
+            ("ev_to_tail_ratio_below_min", "ev_tail_ratio"),
+            ("bookflow_", "book_flow"),
+            ("countertrend_", "countertrend_lane"),
+            ("side_suspended", "side_suspension"),
+            ("strip_same_side_", "same_side_streak"),
+            ("low_conviction", "conviction"),
+        ):
+            if rl.startswith(prefix):
+                return family
+        return None
+
 
 def _load_jsonl(path: str):
     if not os.path.exists(path):
@@ -133,6 +162,18 @@ def main() -> int:
     by_price_bucket: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     by_tte_bucket: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     by_shortfall: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    # 2026-10-12: STRUCTURAL_RISK_VETO decomposition + marginal-band shadow
+    # cohort.  The veto is composite; each sub-gate family gets its own
+    # W/L/P&L line so a demonstrably-stale sub-condition can be relaxed
+    # without touching the others.  The shadow cohort counts rejected
+    # candidates a denied cohort (BTC/ETH, YES side) *would* have admitted —
+    # the out-of-sample evidence for promotion.
+    by_structural: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    pnl_by_structural: Dict[str, float] = collections.defaultdict(float)
+    n_by_structural: Dict[str, int] = collections.defaultdict(int)
+    by_band_shadow: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    pnl_by_band_shadow: Dict[str, float] = collections.defaultdict(float)
+    n_by_band_shadow: Dict[str, int] = collections.defaultdict(int)
     pnl_by_price: Dict[str, float] = collections.defaultdict(float)
     pnl_by_shortfall: Dict[str, float] = collections.defaultdict(float)
     n_by_shortfall: Dict[str, int] = collections.defaultdict(int)
@@ -175,8 +216,34 @@ def main() -> int:
             band = _shortfall_band(_shortfall(d))
             pnl_by_shortfall[band] += cf_net
             n_by_shortfall[band] += 1
+            _sub = d.get("structural_subreason") or _structural_subreason(
+                d.get("reject_reason")
+            )
+            if _sub:
+                pnl_by_structural[_sub] += cf_net
+                n_by_structural[_sub] += 1
 
         by_reason[(d.get("reject_reason") or "unknown").split(":")[0]][label] += 1
+        _sub = d.get("structural_subreason") or _structural_subreason(
+            d.get("reject_reason")
+        )
+        if _sub:
+            by_structural[_sub][label] += 1
+        # Marginal-band shadow cohort: a rejected candidate whose evaluated
+        # side the release band would have admitted had the cohort been live
+        # (BTC/ETH assets, YES side).  Keyed asset:side so the cohorts that
+        # could be promoted next are individually scored.
+        _bs = d.get("band_shadow")
+        if (
+            isinstance(_bs, dict)
+            and side in ("yes", "no")
+            and _bs.get(f"{side}_shadow_rescued")
+        ):
+            _cohort = f"{d.get('asset') or '?'}:{side}"
+            by_band_shadow[_cohort][label] += 1
+            if cf_net is not None:
+                pnl_by_band_shadow[_cohort] += cf_net
+                n_by_band_shadow[_cohort] += 1
         by_price_bucket[_price_bucket(held)][label] += 1
         by_tte_bucket[_tte_bucket(d.get("tte_seconds"))][label] += 1
         by_shortfall[_shortfall_band(_shortfall(d))][label] += 1
@@ -198,6 +265,7 @@ def main() -> int:
             f"{total_cf_net_cents:+.1f}c total, {total_cf_net_cents / classified:+.2f}c/trade"
         )
     _render(by_reason, "By rejection gate")
+    _render(by_structural, "By structural-veto sub-gate (decomposed)")
     _render(by_price_bucket, "By held-price bucket")
     _render(by_tte_bucket, "By time-to-expiry bucket")
 
@@ -223,6 +291,34 @@ def main() -> int:
         "The comparison band is what you currently TAKE (executed fills above the "
         "gate); the question is whether the next slice in adds value."
     )
+
+    print("\n== Structural-veto sub-gate net counterfactual P&L (classified) ==")
+    print(f"{'sub_gate':<26} {'n':>6} {'net_cents_total':>16} {'net_cents/trade':>16}")
+    for key in sorted(pnl_by_structural):
+        n = n_by_structural[key]
+        tot = pnl_by_structural[key]
+        print(f"{key:<26} {n:>6} {tot:>16.1f} {tot / n:>16.2f}")
+    print(
+        "Score each sub-gate BEFORE touching STRUCTURAL_RISK_VETO: relax only "
+        "a family that is net-negative in counterfactual P&L with adequate n "
+        "(it is blocking losers, not winners). Positive net P&L families stay."
+    )
+
+    if by_band_shadow:
+        _render(
+            by_band_shadow,
+            "Marginal-band SHADOW cohort (denied cohorts' would-be admissions)",
+        )
+        print(f"{'cohort':<18} {'n':>6} {'net_cents_total':>16} {'net_cents/trade':>16}")
+        for key in sorted(pnl_by_band_shadow):
+            n = n_by_band_shadow[key]
+            tot = pnl_by_band_shadow[key]
+            print(f"{key:<18} {n:>6} {tot:>16.1f} {tot / n:>16.2f}")
+        print(
+            "Promotion rule: a shadow cohort earns live admission only when its "
+            "counterfactual P&L is positive with adequate n AND its fills are "
+            "corroborated by replayed/live evidence elsewhere in the lane."
+        )
 
     print("\n== Counterfactual net P&L by price bucket (cents/contract, all classified) ==")
     for key in sorted(pnl_by_price):

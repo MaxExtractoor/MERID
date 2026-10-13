@@ -9741,6 +9741,26 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             "net_ev": str(ev_result.net_ev),
                             "min_dollar_ev": str(ev_result.min_dollar_ev),
                         }
+                        # 2026-10-12: marginal-band lane coherence accounting —
+                        # a submit-time re-gate reject is the lane's primary
+                        # evidence that near-miss edge decays before the wire;
+                        # feed the lane's coherence-failure suspension budget.
+                        if candidate.get("decision_lane") == "marginal_band":
+                            try:
+                                from merid.prediction.marginal_band_lane import (
+                                    record_coherence_failure as _mb_coh_fail,
+                                )
+                                _mb_coh_fail(
+                                    decision_id=str(
+                                        candidate.get("decision_id") or ""
+                                    ),
+                                    reason="executable_cost_ev_gate:"
+                                    + "|".join(map(str, ev_result.reasons))[:120],
+                                    asset=candidate.get("asset"),
+                                    ticker=ticker,
+                                )
+                            except Exception:
+                                pass
                         logger.error(
                             "[15M-LOOP] EV gate REJECTS submitted price=%dc count=%s for ticker=%s reasons=%s",
                             price_cents, count, ticker, ev_result.reasons,

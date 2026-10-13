@@ -20530,6 +20530,43 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             intent, result.reason or "pre_wire_reject"
         )
 
+    # 2026-10-12: marginal-band release lane — a pre-wire terminal reject
+    # (edge decayed, not marketable, spread too wide, book not initialized)
+    # counts toward the lane's coherence-failure suspension budget.  The
+    # reject reason is recorded verbatim so the suspension ledger can tell
+    # "band edge stale at submit" apart from "infrastructure not ready" —
+    # both mean the admission did not survive to the wire, which is what the
+    # lane is measuring.
+    if (
+        getattr(intent, "decision_lane", None) == "marginal_band"
+        and result is not None
+        and result.status == "rejected"
+        and not getattr(result, "submission_attempted", False)
+    ):
+        try:
+            from merid.prediction.marginal_band_lane import (
+                record_coherence_failure as _mb_coherence_fail,
+            )
+
+            _mb_coherence_fail(
+                decision_id=(
+                    getattr(intent, "decision_id", None)
+                    or getattr(intent, "decision_trace_id", None)
+                ),
+                reason=str(result.reason or "pre_wire_reject"),
+                asset=(
+                    extract_asset_from_ticker(
+                        getattr(intent, "ticker", "") or ""
+                    )
+                    or None
+                ),
+                ticker=getattr(intent, "ticker", None),
+            )
+        except Exception as _mb_err:
+            logger.debug(
+                "[MBAND-LANE] pre-wire reject record failed: %s", _mb_err
+            )
+
     # 2026-08-25: Immutable terminal lifecycle record.
     _filled_count = 0
     _remaining_count = 0
