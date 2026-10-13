@@ -1534,6 +1534,49 @@ class PositionMonitor:
         except Exception as _rg_err:
             logger.debug("[REENTRY-GUARD] record_close failed for %s: %s", position.market_id, _rg_err)
 
+        # 2026-10-13: exit markout tracking — post-exit held-side drift at
+        # +5s/+15s/+60s scores whether the exit was *timed* right (positive =
+        # the market fell after the sell).  Registered only when an executed
+        # exit price exists; settlement-close positions have no markout to track.
+        if position.exit_price_cents is not None:
+            try:
+                from merid.observability.exit_markout import get_exit_markout_tracker
+                from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
+                _side = getattr(position, "outcome_side", None) or getattr(
+                    getattr(position, "side", None), "value", position.side
+                )
+                _reason = getattr(position, "exit_reason", None)
+                _reason = getattr(_reason, "value", _reason)
+                _exited = getattr(position, "exited_at", None)
+                # exited_at is written as naive utcnow() in most paths (aware
+                # UTC in Position.mark_exited).  Naive .timestamp() would be
+                # interpreted as local time — on a non-UTC host that shifts
+                # exit_ts by the UTC offset and the markout horizons never
+                # fire on time.  Treat naive as UTC.
+                if _exited is not None:
+                    if getattr(_exited, "tzinfo", None) is not None:
+                        _exit_ts = _exited.timestamp()
+                    else:
+                        _exit_ts = _exited.replace(tzinfo=timezone.utc).timestamp()
+                else:
+                    _exit_ts = None
+                get_exit_markout_tracker().record_exit_fill(
+                    ticker=position.market_id,
+                    position_id=position.position_id,
+                    asset=extract_asset_from_ticker(position.market_id) or "",
+                    side=str(_side or ""),
+                    exit_price_cents=float(position.exit_price_cents),
+                    count=float(position.size or 0),
+                    reason=str(_reason) if _reason else None,
+                    entry_price_cents=(
+                        float(position.avg_entry_price_cents)
+                        if position.avg_entry_price_cents else None
+                    ),
+                    exit_ts=_exit_ts,
+                )
+            except Exception as _xmk_err:
+                logger.debug("[EXIT-MARKOUT] record failed for %s: %s", position.market_id, _xmk_err)
+
         # Drop EV-gate persistence state for the removed position so a stale
         # breach streak cannot carry into a future position on the same key.
         try:
@@ -7381,6 +7424,13 @@ class PositionMonitor:
                     get_entry_markout_tracker().poll()
                 except Exception as _mk_err:
                     logger.debug("[ENTRY-MARKOUT] poll failed: %s", _mk_err)
+                # 2026-10-13: emit due post-exit markouts (+5s/+15s/+60s) on the
+                # same cadence — exits are timed against the held-side mid.
+                try:
+                    from merid.observability.exit_markout import get_exit_markout_tracker
+                    get_exit_markout_tracker().poll()
+                except Exception as _xmk_err:
+                    logger.debug("[EXIT-MARKOUT] poll failed: %s", _xmk_err)
 
                 # 2026-10-08: age-limit unsubmitted exit obligations.  Runs
                 # even with no open positions — orphaned INTENT_PERSISTED

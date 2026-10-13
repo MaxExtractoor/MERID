@@ -2257,27 +2257,34 @@ class DecisionAuditLedger:
             logger.warning("[DECISION-AUDIT-LEDGER] record_heartbeat failed for %s: %s", cycle_id, exc)
 
         # Scheduled WAL maintenance.  Heartbeats fire every cycle, so gate the
-        # checkpoint on wall-clock interval; PASSIVE never blocks on readers,
-        # so the trade path is never stalled while analytics hold the WAL.
+        # checkpoint on wall-clock interval.  TRUNCATE first so the -wal file
+        # actually shrinks (PASSIVE merges frames but leaves the file at its
+        # high-water size — observed: a 1.8GB container of already-merged
+        # frames).  TRUNCATE defers to readers via busy_timeout; on busy the
+        # PASSIVE fallback still merges what it can.  Both run on this writer
+        # thread, never the event loop.
         if _WAL_CHECKPOINT_INTERVAL_S > 0:
             now = time.time()
             if now - self._last_wal_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
                 self._last_wal_checkpoint = now
-                self.wal_checkpoint("PASSIVE")
+                if self.wal_checkpoint("TRUNCATE"):
+                    self.wal_checkpoint("PASSIVE")
 
-    def wal_checkpoint(self, mode: str = "PASSIVE") -> None:
+    def wal_checkpoint(self, mode: str = "PASSIVE") -> bool:
         """Best-effort WAL checkpoint for the audit DB.
 
         The decision writer and analytics readers share the multi-GB WAL; an
         unchecked WAL grows unboundedly (observed: 1.5 GB alongside a 17 GB
         db) and turns every analytic scan into a writer-contending merge.
         PASSIVE copies every frame it can without waiting for readers, so it
-        is safe on the serialized writer path; TRUNCATE is only attempted
-        once at startup before analytics connections exist.  Failures are
-        logged, never raised to callers.
+        is safe on the serialized writer path.  Failures are logged, never
+        raised to callers.
+
+        Returns True when the checkpoint was deferred (busy readers) or
+        failed, so callers can fall back to a weaker mode.
         """
         if not _is_enabled() or not self.db_path.exists():
-            return
+            return False
         if mode not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
             mode = "PASSIVE"
         try:
@@ -2297,10 +2304,12 @@ class DecisionAuditLedger:
                     "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s): %s/%s frames merged",
                     mode, ckpt_frames, wal_frames,
                 )
+            return bool(busy)
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s) failed: %s", mode, exc
             )
+            return True
 
     def _bump_cycle_stats(
         self,
@@ -2385,11 +2394,23 @@ class DecisionAuditLedger:
             ledger_write_latency_ms=ledger_write_latency_ms,
             ledger_error_count=ledger_error_count,
         )
+        # Backlog observability: the heartbeat itself runs on the writer
+        # thread, so qsize() here is the queue remaining at write time.  A
+        # sustained nonzero depth means writes are landing late (observed:
+        # ~75min of silence under disk saturation before draining).  Warn at
+        # depth so the gap is loud instead of inferred after the fact.
+        queue_depth = self._write_queue.qsize()
+        if queue_depth > 200:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] writer backlog: %d queued writes "
+                "pending; audit rows will land late",
+                queue_depth,
+            )
         logger.info(
             "[DECISION-AUDIT-HEARTBEAT] cycle_id=%s tick=%d assets=%d "
             "decisions_expected=%d decisions_persisted=%d "
             "side_ev_expected=%d side_ev_persisted=%d "
-            "latency_ms=%.2f errors=%d",
+            "latency_ms=%.2f errors=%d queue_depth=%d",
             cycle_id,
             tick,
             assets_evaluated,
@@ -2399,6 +2420,7 @@ class DecisionAuditLedger:
             side_ev_persisted,
             ledger_write_latency_ms,
             ledger_error_count,
+            queue_depth,
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────
