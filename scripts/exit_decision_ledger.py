@@ -113,6 +113,8 @@ def load_fills(fills_db: Path, since_ts: float):
         "SELECT fill_id, order_id, market_ticker, side, action, quantity_cc, "
         "execution_price_cents, fee_cost, liquidity_role, intent_id, "
         "client_order_id, decision_trace_id, canonical_position_side, "
+        "canonical_position_action, canonical_leg_price_cents, "
+        "canonical_yes_delta_cc, "
         "created_time, is_exit, entry_or_exit FROM kalshi_fills"
     ).fetchall()
     conn.close()
@@ -122,7 +124,10 @@ def load_fills(fills_db: Path, since_ts: float):
         d["ts"] = _iso_ts(d.get("created_time"))
         d["qty"] = (d.get("quantity_cc") or 0) / 100.0
         d["fee_c"] = (d.get("fee_cost") or 0.0) * 100.0
-        d["held_side"] = (d.get("canonical_position_side") or d.get("side") or "").lower()
+        _ds = held_side_from_entry(d) or ""
+        _is_exit = d.get("is_exit") == 1 or d.get("entry_or_exit") == "exit"
+        # An exit reduces the held side, so its YES-delta sign is inverted.
+        d["held_side"] = ({"yes": "no", "no": "yes"}.get(_ds, "") if _is_exit else _ds)
         if d["ts"] is None:
             continue
         (exits if d.get("is_exit") == 1 or d.get("entry_or_exit") == "exit" else entries).append(d)
@@ -131,6 +136,39 @@ def load_fills(fills_db: Path, since_ts: float):
     entries.sort(key=lambda e: e["ts"])
     exits.sort(key=lambda e: e["ts"])
     return entries, exits
+
+
+def yes_price(fill):
+    """YES-equivalent price of a fill.
+
+    The fills ledger's canonical fields are in YES-delta space: a long-NO
+    entry at 73c is stored as ``yes/sell @ 27`` and selling a held YES at 68c
+    as ``yes/buy @ 32``-style complements.  ``canonical_position_side`` is
+    therefore NOT the held side — hold-side must come from the entry's
+    ``canonical_yes_delta_cc`` sign (or the decision's selected_side).
+    """
+    leg = fill.get("canonical_leg_price_cents")
+    if leg is None:
+        leg = fill.get("execution_price_cents")
+    if leg is None:
+        return None
+    side = (fill.get("canonical_position_side") or "").lower()
+    return float(leg) if side == "yes" else 100.0 - float(leg)
+
+
+def held_side_from_entry(fill):
+    d = fill.get("canonical_yes_delta_cc")
+    if d:
+        return "yes" if d > 0 else "no"
+    return None
+
+
+def held_side_price(fill, held: str, economic_action: str = ""):
+    """Price of ``fill`` in the held side's terms (see ``yes_price``)."""
+    yp = yes_price(fill)
+    if yp is None:
+        return None
+    return yp if held == "yes" else 100.0 - yp
 
 
 def load_attempts(attempts_db: Path):
@@ -367,7 +405,7 @@ def main() -> int:
             next((a for a in ("BTC", "ETH", "SOL", "XRP", "DOGE")
                   if a in (ef["market_ticker"] or "")), "unknown"))
         xfills = entry_exits.get(ef["fill_id"], [])
-        entry_px = ef["execution_price_cents"]
+        entry_px = held_side_price(ef, side, "buy") if side else ef["execution_price_cents"]
         entry_fee = ef["fee_c"]
         qty = ef["qty"]
         settle_v = _held_value_at_settle(side, oc)
@@ -378,7 +416,7 @@ def main() -> int:
         if xfills:
             # aggregate this lot's allocated exit slices (usually a single fill)
             tot_px = sum(
-                x["execution_price_cents"] * x.get("alloc_map", {}).get(ef["fill_id"], x["qty"])
+                held_side_price(x, side, "sell") * x.get("alloc_map", {}).get(ef["fill_id"], x["qty"])
                 for x in xfills)
             tot_qty = sum(
                 x.get("alloc_map", {}).get(ef["fill_id"], x["qty"]) for x in xfills)
