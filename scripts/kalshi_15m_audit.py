@@ -66,6 +66,72 @@ DIST_LABELS = [
 ]
 MIN_BUCKET_N = 20           # min samples for a bucket to count in asserts
 
+# Live RTI tick archive (scripts/rti_archiver.py -> data/cf_rti_ticks.db).
+# Per-second cfbenchmarks_value frames give full-band coverage including the
+# terminal ~40-70s where decision snapshots lose settlement_reference_price.
+# When a window's 60s band is tick-covered it is the preferred source.
+TICK_DB_PATH = os.environ.get("MERID_RTI_TICK_DB", "data/cf_rti_ticks.db")
+TICK_BAND_MIN_SAMPLES = 10      # require decent in-band density
+TICK_BAND_MAX_GAP_S = 15.0      # newest tick must reach the band tail
+
+
+def _open_tick_db():
+    if not os.path.exists(TICK_DB_PATH):
+        return None
+    try:
+        con = sqlite3.connect(f"file:{TICK_DB_PATH}?mode=ro", uri=True)
+        con.execute("PRAGMA query_only=ON")
+        con.execute("SELECT 1 FROM rti_ticks LIMIT 1")
+        return con
+    except sqlite3.Error:
+        return None
+
+
+def _tick_band(tick_db, asset: str, boundary_ts_s):
+    """Per-second RTI TWAP over (boundary-60s, boundary] from the live archive.
+
+    Returns {mean, n, gap_s, avg60_edge} or None.  ``gap_s`` is the distance
+    from the band boundary to the newest tick — the same tail-coverage
+    semantic as ``_close_min_ttc`` on the snapshot path.  ``avg60_edge`` is
+    CF's own rolling-60s field on the last in-band tick (crosscheck).
+    """
+    if tick_db is None or boundary_ts_s is None:
+        return None
+    hi_ms = int(boundary_ts_s * 1000)
+    lo_ms = hi_ms - 60000
+    rows = tick_db.execute(
+        "SELECT COALESCE(src_ts_ms, recv_ts_ms, local_ts_ms) AS t, value, "
+        "avg_60s FROM rti_ticks WHERE asset=? "
+        "AND COALESCE(src_ts_ms, recv_ts_ms, local_ts_ms)>? "
+        "AND COALESCE(src_ts_ms, recv_ts_ms, local_ts_ms)<=? "
+        "AND value IS NOT NULL ORDER BY t",
+        (asset, lo_ms, hi_ms),
+    ).fetchall()
+    if len(rows) < TICK_BAND_MIN_SAMPLES:
+        return None
+    vals = [float(r[1]) for r in rows]
+    last = rows[-1]
+    gap_s = (hi_ms - last[0]) / 1000.0
+    # Tail gap AND leading-edge gap: a band whose first ticks start late
+    # (archiver restart mid-band) would otherwise pass on tail coverage
+    # alone and yield a partial mean masquerading as the 60s average.
+    lead_s = (rows[0][0] - lo_ms) / 1000.0
+    ts = [r[0] for r in rows]
+    max_gap_s = max(
+        [lead_s, gap_s] + [(b - a) / 1000.0 for a, b in zip(ts, ts[1:])]
+    )
+    if max_gap_s > TICK_BAND_MAX_GAP_S:
+        return None
+    return {
+        "mean": float(np.mean(vals)),
+        "n": len(vals),
+        "gap_s": gap_s,
+        "lead_s": lead_s,
+        "max_gap_s": max_gap_s,
+        "avg60_edge": float(last[2]) if last[2] is not None else None,
+        "vals": vals,
+    }
+
 
 def asset_of(ticker: str) -> str:
     for pref, a in ASSET_FROM_TICKER.items():
@@ -279,7 +345,11 @@ def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
     60s (a ~60-90s systematic offset that produced false mismatches).
     Pass 1 collects each window's close band; pass 2 maps each window's
     open to the prior same-asset window's close band.
+
+    Preferred source is the live RTI tick archive (full-band per-second
+    coverage through the boundary); the snapshot path is the fallback.
     """
+    tick_db = _open_tick_db()
     n_done = 0
     for ticker, w in windows.items():
         close_s, close_fb, basis_s = [], [], []
@@ -308,16 +378,26 @@ def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
         # what actually binds the TWAP, not the raw count
         w["_close_min_ttc"] = min(close_ttcs) if close_ttcs else None
         w["_basis"] = basis
-        if close_s:
+        tick_close = _tick_band(tick_db, w["asset"], w["close_ts"])
+        if tick_close is not None:
+            w["close_twap"] = tick_close["mean"]
+            w["close_twap_source"] = "rti_ticks"
+            w["_close_samples"] = tick_close["vals"]
+            w["_close_min_ttc"] = tick_close["gap_s"]
+            w["_tick_avg60_close"] = tick_close["avg60_edge"]
+            w["n_close_samples"] = tick_close["n"]
+        elif close_s:
             w["close_twap"] = float(np.mean(close_s))
             w["close_twap_source"] = "cf_rti_last60"
+            w["n_close_samples"] = len(close_s)
         elif close_fb:
             w["close_twap"] = float(np.mean(close_fb))
             w["close_twap_source"] = "ref_or_spot_le150"
+            w["n_close_samples"] = len(close_s)
         else:
             w["close_twap"] = None
             w["close_twap_source"] = None
-        w["n_close_samples"] = len(close_s)
+            w["n_close_samples"] = 0
         n_done += 1
         step = 200 if len(windows) > 400 else 20
         if progress and n_done % step == 0:
@@ -338,12 +418,21 @@ def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
                     prev = cands[0]
                     break
         open_s = (prev or {}).get("_close_samples") or []
-        w["n_open_samples"] = len(open_s)
-        w["open_min_ttc"] = (prev or {}).get("_close_min_ttc")
-        if open_s:
+        tick_open = _tick_band(tick_db, w["asset"], w["open_ts"])
+        if tick_open is not None:
+            w["open_twap"] = tick_open["mean"]
+            w["open_twap_source"] = "rti_ticks"
+            w["n_open_samples"] = tick_open["n"]
+            w["open_min_ttc"] = tick_open["gap_s"]
+            w["_tick_avg60_open"] = tick_open["avg60_edge"]
+        elif open_s:
+            w["n_open_samples"] = len(open_s)
+            w["open_min_ttc"] = (prev or {}).get("_close_min_ttc")
             w["open_twap"] = float(np.mean(open_s))
             w["open_twap_source"] = "cf_rti_pre60"
         elif w["strike"]:
+            w["n_open_samples"] = len(open_s)
+            w["open_min_ttc"] = (prev or {}).get("_close_min_ttc")
             w["open_twap"] = float(w["strike"])
             w["open_twap_source"] = "kalshi_strike"
         else:
@@ -362,7 +451,7 @@ def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
             c_min = w.get("_close_min_ttc")
             o_min = w.get("open_min_ttc")
             w["twap_confidence"] = "low" if (
-                w["close_twap_source"] != "cf_rti_last60"
+                w["close_twap_source"] not in ("cf_rti_last60", "rti_ticks")
                 or w["n_close_samples"] < 5
                 or (w["n_open_samples"] < 5
                     and w["open_twap_source"] != "kalshi_strike")
@@ -918,6 +1007,19 @@ def main():
     n_outcome_err = len(outcome_mismatches)
     n_outcome_err_hiconf = sum(
         1 for m in outcome_mismatches if m["confidence"] == "high")
+    # Live tick-archive coverage + crosscheck of our per-second TWAP vs CF's
+    # own rolling avg_60s sampled at the band edge (should differ by well
+    # under 1 tick size when the feed is healthy).
+    n_tick_close = sum(1 for w in settled.values()
+                       if w.get("close_twap_source") == "rti_ticks")
+    n_tick_open = sum(1 for w in settled.values()
+                      if w.get("open_twap_source") == "rti_ticks")
+    avg60_diffs = [
+        abs(w["close_twap"] - w["_tick_avg60_close"])
+        for w in settled.values()
+        if w.get("close_twap_source") == "rti_ticks"
+        and w.get("_tick_avg60_close") is not None
+    ]
     comp_err = sum(
         1 for f in feats if False)  # p_no stored as 1 - p_yes upstream
     report = {
@@ -930,6 +1032,13 @@ def main():
             if w["open_twap"] is not None and w["close_twap"] is not None),
         "settlement_outcome_mismatches": n_outcome_err,
         "settlement_outcome_mismatches_high_conf": n_outcome_err_hiconf,
+        "tick_band_coverage": {
+            "open": n_tick_open, "close": n_tick_close,
+            "avg60_xcheck_mean_abs_diff": (
+                float(np.mean(avg60_diffs)) if avg60_diffs else None),
+            "avg60_xcheck_max_abs_diff": (
+                float(np.max(avg60_diffs)) if avg60_diffs else None),
+        },
         "outcome_mismatch_detail": outcome_mismatches[:25],
         "feature_rows": len(feats),
         "atr_15m_final": atr_final,

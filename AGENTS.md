@@ -608,8 +608,25 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
   the open reference when that window wasn't sampled.  settlement_
   reference_price is absent on ':pre' rows in the final ~40-70s — close
   reconstruction there is coverage-limited (flagged low-confidence).
-
-## Test-running notes
+- **Live RTI tick archive** (2026-10-14): `scripts/rti_archiver.py` opens
+  its own authenticated Kalshi `cfbenchmarks_value` WebSocket (broadcast
+  channel, no order endpoints) and persists every per-second frame —
+  value, CF rolling `avg_60s`, windowed-15m field when present, src/recv/
+  local timestamps, seq — to `data/cf_rti_ticks.db` (WAL).  Filters to the
+  5 traded assets (`MERID_RTI_TICK_ASSETS`); 10-day retention pruned
+  hourly; logs to `data/rti_archiver.log` when run under pythonw.
+  Scheduled task `MERID RTI archiver` runs it at logon with restart-on-
+  failure — independent of the trading server, so server restarts don't
+  gap coverage.  Start manually: `Start-ScheduledTask -TaskName
+  'MERID RTI archiver'`; the task action runs `.venv\Scripts\pythonw.exe`.
+- **Audit prefers tick bands**: `kalshi_15m_audit.py` resolves each
+  window's open/close 60s band from rti_ticks when coverage is complete
+  (>=10 samples AND max inter-tick gap <=15s incl. band edges — a
+  mid-band archiver restart is rejected, not silently averaged).  CF's
+  own `avg_60s` at the band edge is stored as a crosscheck
+  (`tick_band_coverage.avg60_xcheck_*` in the report; observed agreement
+  ~0.01-0.7 ticks).  Snapshot `settlement_reference_price` and
+  `kalshi_strike` remain the fallbacks for pre-archive windows.
 
 - With the live server running, full-conftest pytest runs can hang on
   shared state; use `--noconftest` for targeted suites (EPC, terminal
