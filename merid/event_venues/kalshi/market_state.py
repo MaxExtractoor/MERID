@@ -2808,10 +2808,42 @@ class KalshiMarketStateStore:
         if state and getattr(state, "recovery_source", None) == "REST_FULL_ORDERBOOK":
             return True, ""
 
+        # 2026-10-14: steady-state REST-degraded operation.  On hosts where the
+        # WS orderbook consumer cannot keep the delta sequence contiguous
+        # (lagged/gapped deltas perpetually re-invalidate the WS leg), the
+        # effective book is owned by a fresh attested REST quote
+        # (REST_VERIFIED_DEGRADED + executable + GOOD).  This mirrors the
+        # identical carve-out in validate_trade_snapshot so a snapshot the
+        # decision layer already accepted is not vetoed at the wire.  Bound by
+        # the same entry TTL — a stale REST quote still fails closed.
+        _rest_age_s = float("inf")
+        if state is not None:
+            _owner = getattr(state, "quote_owner", "") or ""
+            _rest_ts = getattr(state, "last_rest_quote_update_ts", 0.0) or 0.0
+            _rest_age_s = (
+                time.monotonic() - _rest_ts if _rest_ts > 0 else float("inf")
+            )
+            _rest_ttl_s = (
+                float(os.getenv("MERID_REST_ENTRY_TTL_MS", "3000")) / 1000.0
+            )
+            _rest_degraded_ok = (
+                _owner == "REST_VERIFIED_DEGRADED"
+                and os.getenv("MERID_REST_DEGRADED_ENTRY_ENABLED", "1")
+                .lower() in ("1", "true", "yes")
+                and getattr(state, "executable", False)
+                and getattr(state, "data_quality", "") == "GOOD"
+                and getattr(state, "transition", "") != "CIRCUIT_BREAKER"
+                and _rest_age_s <= _rest_ttl_s
+            )
+            if _rest_degraded_ok:
+                return True, ""
+
         return False, (
             f"NOT-LIVE-SEQUENCE-CONFIRMED "
             f"data_source={getattr(state, 'data_source', 'UNKNOWN')} "
-            f"live_sequence_confirmed={getattr(state, 'live_sequence_confirmed', False)}"
+            f"live_sequence_confirmed={getattr(state, 'live_sequence_confirmed', False)} "
+            f"quote_owner={getattr(state, 'quote_owner', 'UNKNOWN')} "
+            f"rest_age_s={_rest_age_s:.1f}"
         )
 
     def is_quote_coherent(
