@@ -457,6 +457,25 @@ MERID_COUNTER_REGIME_MODE = os.environ.get(
 MERID_COUNTER_REGIME_MIN_EDGE = float(
     os.environ.get("MERID_COUNTER_REGIME_MIN_EDGE_CENTS", "8.0")
 ) / 100.0
+# 2026-10-14 (veto counterfactual): the countertrend veto is asymmetric —
+# countertrend_no_rally_regime forfeited +5.48c/tr (n=2775) while
+# countertrend_yes_selloff_regime saved -3.32c/tr (n=2320).  A per-side
+# floor lets the NO side clear at a lower hurdle; unset falls back to the
+# shared floor.
+MERID_COUNTER_REGIME_MIN_EDGE_NO = float(
+    os.environ.get(
+        "MERID_COUNTER_REGIME_MIN_EDGE_NO_CENTS",
+        os.environ.get("MERID_COUNTER_REGIME_MIN_EDGE_CENTS", "8.0"),
+    )
+) / 100.0
+# 2026-10-14: penalty mode also required a non-degraded quote owner — on a
+# host whose books are perpetually REST_VERIFIED_DEGRADED that clause makes
+# the countertrend block a de-facto veto regardless of edge.  REST-owned
+# quotes are already freshness/parity-gated upstream, so the ban is a
+# double-gate; env opt-out keeps the veto semantics available.
+MERID_COUNTER_REGIME_ALLOW_DEGRADED = os.environ.get(
+    "MERID_COUNTER_REGIME_ALLOW_DEGRADED", "0"
+).strip().lower() in ("1", "true", "yes")
 
 # 2026-10-05 (entry-throughput canary): evidence "transferrable" tier.  A
 # sparse exact cell whose price-matched pooled level already cleared its
@@ -4704,11 +4723,11 @@ def compute_trade_decision(
     # bookflow_* vetoes blocked 134 winners vs 74 losers at imb>=0.20.
     _bookflow_applies = route != "taker"
     _yes_bookflow_block = (
-        _dr.bookflow_block_reason(feature_snapshot, asset, "yes")
+        _dr.bookflow_block_reason(feature_snapshot, asset, "yes", yes_price_cents)
         if _bookflow_applies else None
     )
     _no_bookflow_block = (
-        _dr.bookflow_block_reason(feature_snapshot, asset, "no")
+        _dr.bookflow_block_reason(feature_snapshot, asset, "no", no_price_cents)
         if _bookflow_applies else None
     )
     # 2026-10-07 (moneyness audit): a candidate pinned to the strike is a
@@ -4908,12 +4927,12 @@ def compute_trade_decision(
     _yes_regime_ok = _yes_regime_block is None or (
         _cr_penalty
         and _yes_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE
-        and not indicators.get("quote_degraded_mode")
+        and (MERID_COUNTER_REGIME_ALLOW_DEGRADED or not indicators.get("quote_degraded_mode"))
     )
     _no_regime_ok = _no_regime_block is None or (
         _cr_penalty
-        and _no_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE
-        and not indicators.get("quote_degraded_mode")
+        and _no_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE_NO
+        and (MERID_COUNTER_REGIME_ALLOW_DEGRADED or not indicators.get("quote_degraded_mode"))
     )
     indicators.update({
         "counter_regime_mode": MERID_COUNTER_REGIME_MODE,

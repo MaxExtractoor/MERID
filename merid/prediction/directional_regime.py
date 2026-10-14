@@ -432,10 +432,15 @@ def _bookflow_imb_block() -> float:
     return _env_float("MERID_BOOKFLOW_IMB_BLOCK", 0.20)
 
 
+def _bookflow_exempt_min_price_cents() -> float:
+    return _env_float("MERID_BOOKFLOW_EXEMPT_MIN_PRICE_CENTS", 101.0)
+
+
 def bookflow_block_reason(
     feature_snapshot: Any,
     asset: str,
     side: str,
+    held_price_cents: Optional[float] = None,
 ) -> Optional[str]:
     """Require book-flow confirmation for resting entries.
 
@@ -444,8 +449,21 @@ def bookflow_block_reason(
     off into the move.  Missing features degrade to no-block (the regime and
     conviction gates still apply); the feature_missing_reasons telemetry on
     the slice records why.
+
+    2026-10-14 (veto counterfactual): the pick-off signal is measured on a
+    ~5s adverse-move horizon, but these entries ride to settlement — at held
+    prices >=50c the veto forfeited +2.1..+4.4c/tr over ~4.4k settled
+    candidates while it saved -0.7..-7.7c/tr below 50c.  Scope the veto to
+    the cheap entries where it actually protects; ``held_price_cents`` >=
+    the exempt floor skips it.
     """
     if not bookflow_enabled() or feature_snapshot is None:
+        return None
+    if (
+        held_price_cents is not None
+        and math.isfinite(float(held_price_cents))
+        and float(held_price_cents) >= _bookflow_exempt_min_price_cents()
+    ):
         return None
     try:
         sl = (feature_snapshot.by_asset or {}).get(str(asset).upper())
