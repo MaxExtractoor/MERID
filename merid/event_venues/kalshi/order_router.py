@@ -4202,6 +4202,46 @@ def _rest_cache_book_from_store(ticker: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _live_book_from_store(ticker: str) -> Optional[Dict[str, Any]]:
+    """Fresh executable book from the market-state store (WS-maintained).
+
+    2026-10-14: the stale-decision revalidation was paying a live REST
+    round-trip (~300-800ms) for a book the WS path already maintains
+    in-memory — during a window where edge decays in ~2s.  When the store
+    marks the state executable and the update is inside the same freshness
+    bound used for the REST cache, the in-memory book is strictly fresher
+    ground truth than any fetch.  Tagged ``source=live_store`` for audit.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        st = get_kalshi_market_state_store().get(ticker)
+    except Exception:
+        return None
+    if st is None or not getattr(st, "executable", False):
+        return None
+    bid = getattr(st, "best_bid_cents", None)
+    ask = getattr(st, "best_ask_cents", None)
+    upd = getattr(st, "last_update_ts", 0.0) or 0.0
+    if bid is None or ask is None or upd <= 0:
+        return None
+    if not (1 <= bid < ask <= 99):
+        return None
+    max_age_s = float(os.environ.get("MERID_REVALIDATE_REST_CACHE_MAX_AGE_S", "2.0"))
+    age_s = _time.monotonic() - upd
+    if age_s > max_age_s:
+        return None
+    return {
+        "yes_bid_cents": int(bid),
+        "yes_ask_cents": int(ask),
+        "no_bid_cents": 100 - int(ask),
+        "no_ask_cents": 100 - int(bid),
+        "timestamp": replay_time() - age_s,
+        "raw_yes_levels": 0,
+        "raw_no_levels": 0,
+        "source": "live_store",
+    }
+
+
 def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Dict[str, int]:
     """Return (bid, ask) in the outcome space of the requested side."""
     normalized_side = (side or "").strip().lower()
@@ -4953,16 +4993,26 @@ async def _revalidate_entry_economics(
             latency_ms=round((_time.monotonic() - t0) * 1000, 2),
         )
 
-    # 1) Fresh venue-valid BBO.
-    try:
-        from merid.event_venues.kalshi.port import get_kalshi_execution_port
-        _port = get_kalshi_execution_port()
-        _ob = await asyncio.wait_for(
-            _port.get_orderbook(intent.ticker), timeout=3.0
-        )
-    except Exception:
-        _ob = None
-    _book = _canonical_yes_book_from_port(_ob)
+    # 1) Fresh venue-valid BBO.  Prefer the in-memory executable book the
+    # WS path maintains (fresher than any round-trip), then the bounded
+    # REST-store cache; the ad-hoc REST fetch is the last resort.
+    _book = _live_book_from_store(getattr(intent, "ticker", "") or "")
+    if _book is not None:
+        setattr(intent, "_book_source_at_refresh", "live_store")
+    if _book is None:
+        _book = _rest_cache_book_from_store(getattr(intent, "ticker", "") or "")
+        if _book is not None:
+            setattr(intent, "_book_source_at_refresh", "rest_store_cache")
+    if _book is None:
+        try:
+            from merid.event_venues.kalshi.port import get_kalshi_execution_port
+            _port = get_kalshi_execution_port()
+            _ob = await asyncio.wait_for(
+                _port.get_orderbook(intent.ticker), timeout=3.0
+            )
+        except Exception:
+            _ob = None
+        _book = _canonical_yes_book_from_port(_ob)
     if _book is None:
         # 2026-10-02: the ad-hoc REST fetch timed out/failed — fall back to
         # the market-state store's cached REST quote when it is fresh enough
