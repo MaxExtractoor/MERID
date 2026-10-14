@@ -8563,6 +8563,15 @@ class LeanAgent15m:
 
         _rti_age_ms_for_decision = _rti_age_ms(cfb_observation)
         _quote_age_ms_for_decision = _quote_age_ms(market_state)
+        if _quote_age_ms_for_decision is not None:
+            try:
+                from merid.observability import latency_budget as _lat
+                _lat.record(
+                    "quote_age_at_decision_ms",
+                    float(_quote_age_ms_for_decision),
+                )
+            except Exception:
+                pass
         _rti_book_skew_ms_for_decision = (
             None
             if _rti_age_ms_for_decision is None or _quote_age_ms_for_decision is None

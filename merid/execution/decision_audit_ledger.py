@@ -66,6 +66,29 @@ def _is_production_db(path: Path) -> bool:
     return path.resolve() == _DB_PATH.resolve()
 
 
+def _latency_snapshot_field() -> str:
+    """Compact latency-budget summary for the audit heartbeat.
+
+    When latency is degraded we emit only the reasons (not full stats) —
+    under load the heartbeat sheds verbose extras itself.
+    """
+    try:
+        from merid.observability import latency_budget as _lat
+
+        snap = _lat.snapshot()
+        if not snap:
+            return "-"
+        if snap.get("degraded"):
+            return "DEGRADED:" + ";".join(snap.get("degraded_reasons") or [])
+        return ",".join(
+            "%s=%sms" % (k.replace("_ms", ""), v["p95_ms"])
+            for k, v in snap.items()
+            if isinstance(v, dict)
+        )
+    except Exception:
+        return "err"
+
+
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
@@ -367,8 +390,27 @@ class DecisionAuditLedger:
             "low_sampled": 0,
             "low_dropped": 0,
             "normal_dropped": 0,
+            "rejection_sampled": 0,
         }
         self._last_shed_log = 0.0
+        # 2026-10-14 (HDD-aware): per-key sampling for noise-class
+        # pre-decision rejections under queue pressure.  Keeps the first N
+        # full records per (reason, asset, minute) plus aggregate drop
+        # counts; beyond N the insert is skipped entirely, which is the
+        # real currency on a ~10-IOPS spindle.  Counterfactual-bearing
+        # reasons (edge gates, price band, evidence blocks) are NOT in the
+        # sample-eligible set — they keep full records.
+        self._sample_counts: Dict[tuple, int] = {}
+        self._sample_last_minute = -1
+        self._sample_reasons = frozenset(
+            r.strip()
+            for r in os.getenv(
+                "MERID_AUDIT_SAMPLE_REASONS",
+                "market_time,tte_entry_cutoff,book_not_trusted,"
+                "market_unavailable,book_stale,quote_stale",
+            ).split(",")
+            if r.strip()
+        )
         # Graceful shutdown: close() stops admitting new writes then drains the
         # queue so a planned restart cannot silently discard queued decisions/
         # fills/outcomes (observed loss: ~5.1k records on the 2026-10-13
@@ -423,6 +465,47 @@ class DecisionAuditLedger:
                     self._shed_stats,
                 )
         return keep
+
+    def _sampled_out_rejection(self, reason: str, asset: str) -> bool:
+        """Cap noise-class rejection telemetry under queue pressure.
+
+        Active only when the write queue is at/above the soft shed depth.
+        Eligible reasons keep the first ``MERID_AUDIT_SAMPLE_PER_MIN``
+        (default 10) full records per (reason, asset, minute); further
+        records are counted and skipped.  Reasons not in
+        ``MERID_AUDIT_SAMPLE_REASONS`` — edge gates, price-band, evidence
+        blocks, anything counterfactual-bearing — are never sampled.
+        """
+        if reason not in self._sample_reasons:
+            return False
+        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "1500"))
+        if self._write_queue.qsize() < soft:
+            return False
+        minute = int(time.time() // 60)
+        if minute != self._sample_last_minute:
+            # Minute rollover: drop stale keys so the map stays tiny.
+            self._sample_counts = {k: v for k, v in self._sample_counts.items() if k[2] >= minute}
+            self._sample_last_minute = minute
+        key = (reason, asset, minute)
+        cap = max(1, int(os.environ.get("MERID_AUDIT_SAMPLE_PER_MIN", "10")))
+        seen = self._sample_counts.get(key, 0)
+        self._sample_counts[key] = seen + 1
+        if seen < cap:
+            return False
+        self._shed_stats["rejection_sampled"] += 1
+        now = time.time()
+        if now - self._last_shed_log >= 30.0:
+            self._last_shed_log = now
+            logger.warning(
+                "[AUDIT-Q-SAMPLE] depth=%d: capped rejection telemetry "
+                "reason=%s asset=%s (>=%d/min); cumulative_sampled=%d",
+                self._write_queue.qsize(),
+                reason,
+                asset,
+                cap,
+                self._shed_stats["rejection_sampled"],
+            )
+        return True
 
     def drain_write_queue(self, timeout_s: Optional[float] = None) -> bool:
         """Best-effort bounded flush of pending audit writes.
@@ -503,13 +586,23 @@ class DecisionAuditLedger:
                     self._writer_started = True
         if not self._shed_admit(priority, self._write_queue.qsize()):
             return
-        self._write_queue.put_nowait(fn)
+        self._write_queue.put_nowait((fn, time.monotonic(), priority))
 
     def _writer_main(self) -> None:
+        from merid.observability import latency_budget as _lat
         while True:
-            fn = self._write_queue.get()
+            fn, enqueued_mono, _prio = self._write_queue.get()
             try:
+                _lat.record(
+                    "audit_write_wait_ms",
+                    (time.monotonic() - enqueued_mono) * 1000.0,
+                )
+                _t0 = time.monotonic()
                 fn()
+                _lat.record(
+                    "audit_write_exec_ms",
+                    (time.monotonic() - _t0) * 1000.0,
+                )
             except Exception as exc:  # defensive; impls already swallow
                 logger.warning("[DECISION-AUDIT-LEDGER] writer error: %s", exc)
             finally:
@@ -563,6 +656,20 @@ class DecisionAuditLedger:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA busy_timeout = 5000")
+            # 2026-10-14 (HDD-aware tiering): this DB is audit/telemetry —
+            # decisions, side-EV, rejection records, and re-healable
+            # settlement attribution.  Trading-critical state (fills,
+            # orders, positions) lives in separate DBs.  synchronous=NORMAL
+            # keeps WAL atomicity/consistency and survives process crashes;
+            # only OS crash / power loss can roll back commits since the
+            # last checkpoint.  On the production spindle (~100-200ms per
+            # fsync) per-commit FULL syncs were the dominant writer cost.
+            conn.execute("PRAGMA synchronous = NORMAL")
+            # Larger autocheckpoint amortizes checkpoint bursts on slow disk.
+            conn.execute(
+                "PRAGMA wal_autocheckpoint = %d"
+                % int(os.getenv("MERID_AUDIT_WAL_AUTOCHECKPOINT", "2000"))
+            )
             self._shared_conn = conn
         return self._shared_conn
 
@@ -947,6 +1054,9 @@ class DecisionAuditLedger:
                 "[DECISION-AUDIT-LEDGER] test context is writing to production db %s; refusing",
                 self.db_path,
             )
+            return False
+
+        if self._sampled_out_rejection(reason, asset):
             return False
 
         self._ensure_db()
@@ -2863,7 +2973,7 @@ class DecisionAuditLedger:
             "[DECISION-AUDIT-HEARTBEAT] cycle_id=%s tick=%d assets=%d "
             "decisions_expected=%d decisions_persisted=%d "
             "side_ev_expected=%d side_ev_persisted=%d "
-            "latency_ms=%.2f errors=%d queue_depth=%d shed=%s",
+            "latency_ms=%.2f errors=%d queue_depth=%d shed=%s lat=%s",
             cycle_id,
             tick,
             assets_evaluated,
@@ -2875,6 +2985,7 @@ class DecisionAuditLedger:
             ledger_error_count,
             queue_depth,
             self._shed_stats,
+            _latency_snapshot_field(),
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────

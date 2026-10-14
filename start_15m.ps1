@@ -384,11 +384,15 @@ Write-Host "[start_15m] MERID_LOOP_DIAG_FILE=$($env:MERID_LOOP_DIAG_FILE) - loop
 $env:MERID_GRID_CYCLE_HANG_DUMP_S = "80"
 Write-Host "[start_15m] MERID_GRID_CYCLE_HANG_DUMP_S=$($env:MERID_GRID_CYCLE_HANG_DUMP_S) - stall dumps at 80s" -ForegroundColor Cyan
 
-# 4c. Periodic faulthandler stack sampler. Chronic sub-80s loop starvations
-# escape the cycle-hang watchdog; a 20s sample cadence catches the offending
-# frame statistically. Bounded: ~25 threads x ~2KB per dump.
-$env:MERID_FH_PERIODIC_DUMP_S = "20"
-Write-Host "[start_15m] MERID_FH_PERIODIC_DUMP_S=$($env:MERID_FH_PERIODIC_DUMP_S) - stack sampler every 20s" -ForegroundColor Cyan
+# 4c. Periodic faulthandler stack sampler — DISABLED 2026-10-13: correlates
+# with three python311.dll 0xc0000005 crashes today (WER event 1000, dump
+# file write timestamp = crash second). dump_traceback(all_threads) is only
+# safe from CPython's watchdog thread; a plain thread calling it every 20s
+# under heavy thread churn is the classic access-violation vector. The
+# observability gain is not worth killing the process. The 80s cycle-hang
+# watchdog (dump_traceback_later) stays armed — it only fires on real hangs.
+$env:MERID_FH_PERIODIC_DUMP_S = "0"
+Write-Host "[start_15m] MERID_FH_PERIODIC_DUMP_S=$($env:MERID_FH_PERIODIC_DUMP_S) - periodic stack sampler DISABLED (crash risk)" -ForegroundColor Cyan
 
 # 5. CF Benchmarks RTI adapter is the canonical live settlement source.
 $env:MERID_CFB_RTI_ADAPTER = "true"

@@ -8599,9 +8599,15 @@ async def _run_one_cycle(self, tick: int) -> None:
 
     cycle_duration = time.time() - cycle_start
     self._cycle_count += 1
-    
+
     # METRIC: Observe cycle duration in histogram
     cycle_duration_hist.observe(cycle_duration)
+    try:
+        from merid.observability import latency_budget as _lat
+        _lat.record("decision_cycle_ms", cycle_duration * 1000.0)
+        _lat.maybe_emit()
+    except Exception:
+        pass
     
     # Track cycle duration history for rolling average
     self._cycle_duration_history.append(cycle_duration)

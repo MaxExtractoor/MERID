@@ -16,11 +16,13 @@ never alter or delay a trading decision.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import queue
 import threading
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -308,9 +310,100 @@ def log_rejected_candidate(
         }
         path = os.environ.get("MERID_REJECTED_CANDIDATES_LOG", _DEFAULT_PATH)
         line = json.dumps(record, default=str)
+        _enqueue_line(path, line + "\n")
+    except Exception as e:  # pragma: no cover - telemetry must never break trading
+        logger.debug("[REJECTED-CANDIDATE] failed to write record: %s", e)
+
+
+# ── Buffered async appender ────────────────────────────────────────────────
+# 2026-10-14 (HDD-aware): the previous implementation did open+write+close
+# per record synchronously on the decision thread — a ~100-200ms disk hit
+# per rejected candidate on the production spindle.  Records now queue to a
+# dedicated writer thread that drains bursts into one append+close per path
+# per burst.  Loss window: bounded by the flush cadence (process kill loses
+# <1s of telemetry; OS page-cache data survives process crash).  Queue
+# backpressure drops records rather than ever blocking the decision path.
+_LINE_Q: "queue.Queue[Tuple[str, str]]" = queue.Queue(
+    maxsize=int(os.environ.get("MERID_REJECTED_CANDIDATES_QSIZE", "20000"))
+)
+_WRITER_STARTED = False
+_WRITER_BOOT_LOCK = threading.Lock()
+_FLUSH_IDLE_S = 1.0
+_dropped_lines = 0
+
+
+def _is_test_env() -> bool:
+    return os.environ.get("MERID_ENV", "").lower() in ("testing", "test", "ci")
+
+
+def _writer_main() -> None:
+    pending: Dict[str, List[str]] = {}
+    pending_items = 0
+    while True:
+        try:
+            path, line = _LINE_Q.get(timeout=_FLUSH_IDLE_S)
+            pending.setdefault(path, []).append(line)
+            pending_items += 1
+            while True:
+                try:
+                    p2, l2 = _LINE_Q.get_nowait()
+                    pending.setdefault(p2, []).append(l2)
+                    pending_items += 1
+                except queue.Empty:
+                    break
+        except queue.Empty:
+            pass
+        if pending:
+            for p, lines in pending.items():
+                try:
+                    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.writelines(lines)
+                except Exception as exc:
+                    logger.debug("[REJECTED-CANDIDATE] writer flush failed: %s", exc)
+            pending.clear()
+            for _ in range(pending_items):
+                try:
+                    _LINE_Q.task_done()
+                except ValueError:
+                    break
+            pending_items = 0
+
+
+def _enqueue_line(path: str, line: str) -> None:
+    """Queue a line for the writer thread; synchronous under tests."""
+    global _WRITER_STARTED, _dropped_lines
+    if _is_test_env():
         with _lock:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-    except Exception as e:  # pragma: no cover - telemetry must never break trading
-        logger.debug("[REJECTED-CANDIDATE] failed to write record: %s", e)
+                f.write(line)
+        return
+    if not _WRITER_STARTED:
+        with _WRITER_BOOT_LOCK:
+            if not _WRITER_STARTED:
+                threading.Thread(
+                    target=_writer_main,
+                    name="rejected-candidates-writer",
+                    daemon=True,
+                ).start()
+                _WRITER_STARTED = True
+    try:
+        _LINE_Q.put_nowait((path, line))
+    except queue.Full:
+        _dropped_lines += 1
+        if _dropped_lines % 100 == 1:
+            logger.warning(
+                "[REJECTED-CANDIDATE] writer queue full; dropped=%d lines",
+                _dropped_lines,
+            )
+
+
+def _drain_at_exit() -> None:
+    try:
+        _LINE_Q.join()
+    except Exception:
+        pass
+
+
+atexit.register(_drain_at_exit)

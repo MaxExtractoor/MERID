@@ -8721,7 +8721,7 @@ class KalshiFillsLedger:
         async with aiosqlite.connect(self._db_path) as db:
             # WAL mode for better concurrency
             await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("PRAGMA synchronous=NORMAL;")
+            await db.execute("PRAGMA synchronous=FULL;")
             await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
             await db.execute("PRAGMA temp_store=MEMORY;")
             await db.execute("PRAGMA mmap_size=268435456;")  # 256MB mmap
@@ -9163,7 +9163,7 @@ class KalshiFillsLedger:
         db = await aiosqlite.connect(self._db_path)
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")
-        await db.execute("PRAGMA synchronous=NORMAL;")
+        await db.execute("PRAGMA synchronous=FULL;")
 
         # Create table if not exists
         # CRITICAL 2026-08-09: SQLite schema matches _flush_to_sqlite exactly.
@@ -9523,7 +9523,13 @@ class KalshiFillsLedger:
                 _writer_db = await aiosqlite.connect(self._db_path)
                 await _writer_db.execute("PRAGMA journal_mode=WAL;")
                 await _writer_db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")
-                await _writer_db.execute("PRAGMA synchronous=NORMAL;")
+                # 2026-10-14: synchronous=FULL — fills/orders/positions are
+                # the trading-critical tier; losing them can corrupt
+                # reconciliation.  Writes already run on this dedicated
+                # writer task off the order-ack path, so per-commit fsync
+                # (~100ms on the production spindle) costs latency nowhere
+                # hot.  Audit/telemetry DBs use NORMAL instead.
+                await _writer_db.execute("PRAGMA synchronous=FULL;")
                 logger.info("Fills writer: persistent SQLite connection established")
             except ImportError:
                 logger.warning("aiosqlite not installed — writer loop running in no-op mode")
