@@ -40,6 +40,9 @@ def _cell(side="no", lo=60, minute=4, p=0.75, validated=True):
 def _iso(monkeypatch, tmp_path):
     epc.reset_cache_for_tests()
     monkeypatch.setenv("MERID_EMPIRICAL_CAL_LOG_PATH", str(tmp_path / "obs.jsonl"))
+    # --noconftest runs (live server up) must not write production telemetry.
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_PATH", str(tmp_path / "model_cal_default.jsonl"))
+    monkeypatch.setenv("MERID_REJECTED_CANDIDATES_LOG", str(tmp_path / "rejected.jsonl"))
     yield
     epc.reset_cache_for_tests()
 
@@ -207,6 +210,109 @@ def test_tail_lcb_gate_shadow_mode_never_substitutes_epc_lcb():
     out = apply_bounded_live_domain_gate(d, no_threshold=_thr(0.02))
     assert out.selected_outcome is None
     assert out.indicators["bounded_domain_gate"]["epc_lcb_cents"] is None
+
+
+def test_model_calibration_log_is_independent_of_epc_artifact(monkeypatch, tmp_path, _neutral):
+    import merid.prediction.model_calibration_log as mcl
+    mcl.reset_for_tests()
+    log = tmp_path / "model_cal.jsonl"
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_PATH", str(log))
+    monkeypatch.setenv("MERID_EMPIRICAL_CAL_MODE", "off")
+    monkeypatch.setenv("MERID_EMPIRICAL_CAL_PATH", str(tmp_path / "missing.json"))
+    d = _decision()
+    _decision()  # same ticker/side/TTE minute -> deduped
+    recs = [json.loads(x) for x in log.read_text().splitlines()]
+    assert sorted(r["side"] for r in recs) == ["no", "yes"]
+    no = next(r for r in recs if r["side"] == "no")
+    assert no["entry_price_cents"] == pytest.approx(64.0)
+    assert no["seconds_to_expiry"] == pytest.approx(270.0)
+    yes = next(r for r in recs if r["side"] == "yes")
+    assert yes["p_model"] + no["p_model"] == pytest.approx(1.0, abs=1e-4)
+    assert no["p_model"] == pytest.approx(1.0 - float(d.indicators["p_yes_post_anchor"]), abs=0.05)
+    assert no["gross_edge_c"] == pytest.approx(100 * no["p_model"] - 64.0, abs=1e-3)
+
+
+def test_model_calibration_log_records_pre_epc_probability(monkeypatch, tmp_path, _neutral):
+    import merid.prediction.model_calibration_log as mcl
+    mcl.reset_for_tests()
+    log = tmp_path / "model_cal.jsonl"
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_PATH", str(log))
+    monkeypatch.setenv("MERID_EMPIRICAL_CAL_MODE", "live")
+    d = _decision()
+    assert d.indicators["no_epc_applied"] is True
+    no = next(json.loads(x) for x in log.read_text().splitlines() if '"no"' in x)
+    assert no["p_model"] == pytest.approx(d.indicators["no_epc_p_model"], abs=1e-5)
+    assert no["p_model"] < 0.75
+
+
+def test_model_calibration_log_disabled_and_never_raises(monkeypatch, tmp_path):
+    import merid.prediction.model_calibration_log as mcl
+    mcl.reset_for_tests()
+    log = tmp_path / "model_cal.jsonl"
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_PATH", str(log))
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_ENABLED", "0")
+    mcl.log_model_observation(ticker="T", asset="BTC", side="no", p_model=0.6,
+                              entry_price_cents=55.0, seconds_to_expiry=300.0, fee_cents=1.5)
+    assert not log.exists()
+    monkeypatch.setenv("MERID_MODEL_CAL_LOG_ENABLED", "1")
+    mcl.log_model_observation(ticker="T", asset="BTC", side="no", p_model=float("nan"),
+                              entry_price_cents=55.0, seconds_to_expiry=300.0, fee_cents=None)
+    mcl.log_model_observation(ticker="T", asset="BTC", side="maybe", p_model=0.6,
+                              entry_price_cents=55.0, seconds_to_expiry=300.0, fee_cents=None)
+    assert not log.exists()
+
+
+def _floor_decision(p_raw, *, price=0.70, lane=None):
+    d = _tail_decision(adj_lcb=0.0, applied=False, price=price)
+    ind = dict(d.indicators)
+    if p_raw is not None:
+        ind["p_no_model_raw"] = p_raw
+    if lane:
+        ind["entry_lane"] = lane
+    from dataclasses import replace
+    return replace(d, indicators=ind)
+
+
+def test_model_edge_floor_vetoes_sub_floor_claim(monkeypatch):
+    from merid.prediction.trade_decision import apply_model_edge_floor_gate
+    monkeypatch.setattr(_td, "MERID_MODEL_EDGE_FLOOR_CENTS", 4.0)
+    out = apply_model_edge_floor_gate(_floor_decision(0.72))  # 2c claim
+    assert out.selected_outcome is None
+    rec = out.indicators["bounded_domain_gate"]
+    assert rec["gate"] == "model_edge_floor" and rec["model_edge_c"] == pytest.approx(2.0)
+    assert out.no_trade_reason.startswith("model_edge_floor:")
+
+
+def test_model_edge_floor_passes_at_or_above_floor(monkeypatch):
+    from merid.prediction.trade_decision import apply_model_edge_floor_gate
+    monkeypatch.setattr(_td, "MERID_MODEL_EDGE_FLOOR_CENTS", 4.0)
+    out = apply_model_edge_floor_gate(_floor_decision(0.74))
+    assert out.selected_outcome == "no"
+    assert out.indicators["model_edge_floor"]["passed"] is True
+
+
+def test_model_edge_floor_exempts_settlement_lane_and_fails_open(monkeypatch):
+    from merid.prediction.trade_decision import apply_model_edge_floor_gate
+    monkeypatch.setattr(_td, "MERID_MODEL_EDGE_FLOOR_CENTS", 4.0)
+    assert apply_model_edge_floor_gate(
+        _floor_decision(0.70, lane="settlement_convergence")).selected_outcome == "no"
+    assert apply_model_edge_floor_gate(_floor_decision(None)).selected_outcome == "no"
+
+
+def test_model_edge_floor_disabled_by_default(monkeypatch):
+    from merid.prediction.trade_decision import apply_model_edge_floor_gate
+    monkeypatch.setattr(_td, "MERID_MODEL_EDGE_FLOOR_CENTS", 0.0)
+    assert apply_model_edge_floor_gate(_floor_decision(0.50)).selected_outcome == "no"
+
+
+def test_model_edge_floor_uses_pre_epc_probability_end_to_end(monkeypatch, _neutral):
+    # Live EPC lifts NO to 0.75 at 64c (an 11c "edge"); the raw model claim is
+    # what the floor must judge.
+    monkeypatch.setenv("MERID_EMPIRICAL_CAL_MODE", "live")
+    d = _decision()
+    raw = float(d.indicators["p_no_model_raw"])
+    assert raw == pytest.approx(float(d.indicators["no_epc_p_model"]), abs=1e-9)
+    assert raw < 0.75
 
 
 def test_adj_lcb_indicator_and_eff_edge_recorded(monkeypatch, _neutral):

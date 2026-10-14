@@ -38,6 +38,7 @@ from merid.prediction.threshold_cells import (
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.prediction import empirical_price_calibration as _epc
+from merid.prediction import model_calibration_log as _mcl
 from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
@@ -712,6 +713,17 @@ MERID_TAIL_LCB_GATE_ENABLED = os.environ.get(
 ).strip().lower() in ("1", "true", "yes")
 MERID_TAIL_LCB_MIN_PRICE_CENTS = int(
     os.environ.get("MERID_TAIL_LCB_MIN_PRICE_CENTS", "70")
+)
+# 2026-10-14 (model calibration audit, 2,121 settled ticker-sides): realized
+# net edge vs the model's claimed gross edge (p_model - executable price,
+# p_model before EPC substitution) was negative for every claim below ~4c
+# (0..2c: -4.0c, 2..4c: -0.4c net of taker fee) and +12.5c above it (95% LCB
+# +6.5c, t=4.1, positive in both halves and all assets).  Lanes with negative
+# EV floors still admitted sub-4c claims.  Final admission floor on the raw
+# model claim for every lane except settlement convergence (its probability
+# is the banked settlement average, not the model).  0 disables.
+MERID_MODEL_EDGE_FLOOR_CENTS = float(
+    os.environ.get("MERID_MODEL_EDGE_FLOOR_CENTS", "0")
 )
 
 # 2026-10-04 (counterfactual audit): marginal-band edge rescue.  The settled
@@ -1753,6 +1765,45 @@ def _downgrade_live_selection(
         ev_gate_allowed=False,
         indicators=new_indicators,
     )
+
+
+def apply_model_edge_floor_gate(decision: TradeDecision) -> TradeDecision:
+    """Veto selections whose raw model edge is below MERID_MODEL_EDGE_FLOOR_CENTS.
+
+    Raw model edge = ``p_{side}_model_raw`` (post market-anchor and
+    walk-forward calibration, pre EPC substitution / tail caps) minus the
+    selected breakdown's executable entry price.  Fails open when either
+    input is missing so a telemetry gap cannot halt trading.
+    """
+    if MERID_MODEL_EDGE_FLOOR_CENTS <= 0.0 or decision.selected_outcome is None:
+        return decision
+    sel = str(decision.selected_outcome)
+    ind = decision.indicators or {}
+    if ind.get("entry_lane") == "settlement_convergence":
+        return decision
+    breakdown = decision.edge_breakdown or (
+        decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
+    )
+    p_raw = ind.get(f"p_{sel}_model_raw")
+    if breakdown is None or p_raw is None:
+        return decision
+    price_c = float(breakdown.executable_entry_price) * 100.0
+    edge_c = float(p_raw) * 100.0 - price_c
+    if edge_c >= MERID_MODEL_EDGE_FLOOR_CENTS - 1e-9:
+        new_ind = dict(ind)
+        new_ind["model_edge_floor"] = {"edge_c": round(edge_c, 3), "floor_c": MERID_MODEL_EDGE_FLOOR_CENTS, "passed": True}
+        return replace(decision, indicators=new_ind)
+    record = {
+        "gate": "model_edge_floor",
+        "p_model_raw": round(float(p_raw), 5),
+        "price_cents": round(price_c, 2),
+        "model_edge_c": round(edge_c, 3),
+        "floor_c": MERID_MODEL_EDGE_FLOOR_CENTS,
+        "would_enter_at_prior": True,
+    }
+    _reason = f"model_edge_floor:{edge_c:.2f}c<{MERID_MODEL_EDGE_FLOOR_CENTS:.2f}c@{price_c:.0f}c"
+    _log_bounded_domain_reject(decision, _reason)
+    return _downgrade_live_selection(decision, _reason, record)
 
 
 def _log_bounded_domain_reject(decision: TradeDecision, reason: str) -> None:
@@ -3595,6 +3646,23 @@ def compute_trade_decision(
         p_no_for_no = 1.0 - p_yes_for_yes
     else:
         indicators["walkforward_cal_applied"] = False
+
+    # 2026-10-14: model-probability telemetry independent of the EPC
+    # artifact (see merid/prediction/model_calibration_log.py).  The raw
+    # values also feed apply_model_edge_floor_gate.
+    indicators["p_yes_model_raw"] = p_yes_for_yes
+    indicators["p_no_model_raw"] = p_no_for_no
+    for _mc_side, _mc_p, _mc_entry in (
+        ("yes", p_yes_for_yes, yes_entry),
+        ("no", p_no_for_no, no_entry),
+    ):
+        if _mc_entry is not None and seconds_to_expiry is not None:
+            _mcl.log_model_observation(
+                ticker=ticker, asset=asset, side=_mc_side, p_model=float(_mc_p),
+                entry_price_cents=float(_mc_entry) * 100.0,
+                seconds_to_expiry=float(seconds_to_expiry),
+                fee_cents=float(fee_per_contract_cents) if fee_per_contract_cents is not None else None,
+            )
 
     # 2026-10-04: empirical price-calibration overlay (favorite-longshot).
     # The market anchor above assumes the book is calibrated; the settled
@@ -6678,6 +6746,7 @@ def compute_trade_decision(
         yes_threshold=_yes_edge_thr,
         no_threshold=_no_edge_thr,
     )
+    decision = apply_model_edge_floor_gate(decision)
 
     record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 

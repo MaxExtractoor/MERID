@@ -120,6 +120,7 @@ for _env_key, _fname in {
     "MERID_REJECTED_CANDIDATES_LOG": "rejected_candidates.jsonl",
     "MERID_HYBRID_SIGNAL_AUDIT_PATH": "hybrid_signal_audit.jsonl",
     "MERID_TAIL_AB_SHADOW_LOG_PATH": "tail_ab_shadow.jsonl",
+    "MERID_MODEL_CAL_LOG_PATH": "model_calibration_observations.jsonl",
     "MERID_SHADOW_SIDE_TELEMETRY_PATH": "shadow_side_telemetry.jsonl",
     "MERID_DECISION_TELEMETRY_PATH": "decision_telemetry.jsonl",
     "MERID_DECISION_AUDIT_DB_PATH": "decision_audit.db",
