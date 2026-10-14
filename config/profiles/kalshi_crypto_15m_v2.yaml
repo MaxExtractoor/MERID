@@ -596,9 +596,9 @@ throttling:
   per_asset_cooldown_sec: 3  # 3s cooldown per asset (behavioral throttle, not exposure limit)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
   
-  cooldown_after_loss_cycles: 2  # No new entry for 2 cycles (30s) after a loss in that asset (relaxed from 4)
-  consecutive_loss_pause: 3  # Pause after 3 consecutive losses (industry standard for behavioral risk control)
-  max_session_risk_pct: 0.10  # Max 10% session risk (prevents overexposure in single session)
+  cooldown_after_loss_cycles: 1  # 2026-10-14: 2->1 cycle (15s) after a loss in that asset
+  consecutive_loss_pause: 6  # 2026-10-14: 3->6 consecutive losses before the 15m pause (trade-every-window)
+  max_session_risk_pct: 0.30  # 2026-10-14: 0.10->0.30; per-window risk budget ($0.72 capped ~1 entry/window at $7 bankroll)
 
 # ── Failsafe Configuration ───────────────────────────────────────────────────
 # Emergency brake when market data is degraded (catalog stuck but MD fresh).
@@ -737,24 +737,31 @@ time_of_day_risk_scaling:
 # More volatile assets get tighter limits, stable assets get looser limits
 asset_specific_rolling_pnl:
   enabled: true  # Enable asset-specific rolling PnL limits
+  # 2026-10-14 (trade-every-window): 4-8%/1h and 7-12%/4h were calibrated for a
+  # larger bankroll — at ~$7 capital one ordinary losing trade (-$0.30-0.50)
+  # tripped the 1h halt instantly.  Second pass 25/40 -> 40/60: at ~$7.4
+  # bankroll that is ~$2.9/1h (~6 losses) and ~$4.4/4h (~9-10 losses) —
+  # genuine streak scale, not variance.  This is the last per-asset loss
+  # brake; below this it is effectively disabled (directional-throttle
+  # catastrophes + the 6-loss consecutive pause still stand).
   # BTC/ETH: More stable, looser limits
   BTC:
-    rolling_1h_halt_pct: 0.04  # 4% halt (more stable)
-    rolling_4h_halt_pct: 0.07  # 7% halt
+    rolling_1h_halt_pct: 0.40  # ~$2.9 on $7.4 bankroll (~6 losses)
+    rolling_4h_halt_pct: 0.60  # ~$4.4 over 4h (~9-10 losses)
   ETH:
-    rolling_1h_halt_pct: 0.04  # 4% halt (more stable)
-    rolling_4h_halt_pct: 0.07  # 7% halt
+    rolling_1h_halt_pct: 0.40
+    rolling_4h_halt_pct: 0.60
   # SOL/XRP: Moderate volatility
   SOL:
-    rolling_1h_halt_pct: 0.06  # 6% halt
-    rolling_4h_halt_pct: 0.09  # 9% halt
+    rolling_1h_halt_pct: 0.40
+    rolling_4h_halt_pct: 0.60
   XRP:
-    rolling_1h_halt_pct: 0.06  # 6% halt
-    rolling_4h_halt_pct: 0.09  # 9% halt
+    rolling_1h_halt_pct: 0.40
+    rolling_4h_halt_pct: 0.60
   # DOGE: Most volatile, tightest limits
   DOGE:
-    rolling_1h_halt_pct: 0.08  # 8% halt (most volatile)
-    rolling_4h_halt_pct: 0.12  # 12% halt (most volatile)
+    rolling_1h_halt_pct: 0.40
+    rolling_4h_halt_pct: 0.60
   description: "Asset-specific rolling PnL limits: volatility-based adjustment"
 
 # 2026 OPTIMIZATION: Multi-timeframe trend filter (1h alignment)

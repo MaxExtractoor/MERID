@@ -138,6 +138,32 @@ def hard_sparse_tier_enabled() -> bool:
     return _env_flag("MERID_EVIDENCE_HARD_SPARSE_TIER", False)
 
 
+def hard_block_mode() -> str:
+    """``veto`` (default): a matched toxic cell returns MATCHING_TOXIC_CELL /
+    allowed=False — the last outright ban in the policy.
+
+    ``challenge``: evidence-as-reserve applied to toxic cells too — the
+    verdict still computes and stays in telemetry (``matching_hard_block``,
+    ``hard_block_level``, ``hard_block_ev_cents``), but instead of a veto the
+    cell admits a bounded trial when the *model's own* net edge clears
+    ``margin + max sparse uplift + hard_challenge_extra_c``, routed through
+    the shared escape lane (post-only, daily cap, microstructure vetoes).
+    A toxic cell the model cannot out-edge stays blocked — evidence prevents
+    weak entries, not opposed ones.  This also fixes the self-fulfilling
+    veto: a blocked cell could never collect fresh outcomes to overturn a
+    stale prior; challenge trials regenerate the cell's own evidence.
+    """
+    return os.environ.get(
+        "MERID_EVIDENCE_HARD_BLOCK_MODE", "veto"
+    ).strip().lower()
+
+
+def hard_challenge_extra_c() -> float:
+    """Extra model-edge margin (cents) demanded of a toxic-cell challenge —
+    on top of margin + the max sparse-uncertainty uplift."""
+    return _env_float("MERID_EVIDENCE_HARD_CHALLENGE_EXTRA_C", 2.0)
+
+
 def evidence_stale_s() -> float:
     """Artifact older than this cannot hard-block; uplift is maxed."""
     return _env_float("MERID_EVIDENCE_STALE_S", 3600.0)
@@ -721,6 +747,61 @@ def evaluate(
             )
             if (dense_toxic or sparse_severe) and recent_agrees:
                 tier = "dense" if dense_toxic else "sparse_severe"
+                if hard_block_mode() == "challenge":
+                    # Toxic verdict -> bounded challenge, not a veto: the
+                    # model's own net edge must clear an elevated reserve,
+                    # and the pass rides the shared escape lane.
+                    req = (
+                        margin_frac * 100.0
+                        + sparse_uplift_max_c()
+                        + hard_challenge_extra_c()
+                    )
+                    ok = (
+                        net_edge_cents is not None
+                        and float(net_edge_cents) >= req
+                    )
+                    if ok and not escape_lane_enabled():
+                        return _base(
+                            allowed=False,
+                            code="TOXIC_CHALLENGE_LANE_DISABLED",
+                            level=hb_name, n_eff=hb_agg.n_eff,
+                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
+                            lcb_ev=hb_ev, hard=True, escape=True,
+                            hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
+                            uplift=sparse_uplift_max_c(),
+                            fallback="toxic-cell challenge requires escape "
+                                     "lane; lane disabled",
+                        )
+                    if ok and escape_cap_remaining() <= 0:
+                        return _base(
+                            allowed=False,
+                            code="TOXIC_CHALLENGE_CAP_EXHAUSTED",
+                            level=hb_name, n_eff=hb_agg.n_eff,
+                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
+                            lcb_ev=hb_ev, hard=True, escape=True,
+                            hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
+                            uplift=sparse_uplift_max_c(),
+                            fallback="daily escape-lane submission cap reached",
+                        )
+                    if ok:
+                        return _base(
+                            allowed=True, code="TOXIC_CHALLENGE_PASS",
+                            level=hb_name, n_eff=hb_agg.n_eff,
+                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
+                            lcb_ev=hb_ev, hard=True, escape=True,
+                            hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
+                            uplift=sparse_uplift_max_c(),
+                            fallback=(
+                                f"toxic-cell challenge: model edge "
+                                f"{float(net_edge_cents):+.1f}c cleared "
+                                f"{req:.1f}c reserve vs {tier} toxic cell "
+                                f"(n_eff={hb_agg.n_eff:.1f}, "
+                                f"lcb_ev={hb_ev:+.1f}c)"
+                            ),
+                        )
                 return _base(
                     allowed=False, code="MATCHING_TOXIC_CELL",
                     level=hb_name, n_eff=hb_agg.n_eff, w=hb_agg.w, l=hb_agg.l,
