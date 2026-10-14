@@ -9741,10 +9741,28 @@ class LeanAgent15m:
 
         # CRITICAL FIX (2026-08-27): The consumed side must equal the dual-side
         # evaluator's best side.  A mismatch here would route the wrong order.
-        assert side == decision.best_side, (
-            f"DUAL-SIDE-CONTRADICTION asset={asset} side={side} "
-            f"best_side={decision.best_side} decision_id={decision.decision_id}"
-        )
+        # 2026-10-14: narrowed — selected_outcome is the side that passed all
+        # gates; best_side is the ungated net-edge argmax.  They legitimately
+        # diverge when the higher-edge side failed a non-edge gate (depth,
+        # regime, evidence, lane rules): the qualified side is still the
+        # correct route and edge_breakdown carries its economics.  Fail
+        # closed only on genuine incoherence — economics describing a
+        # different side than the one selected.
+        if side != decision.best_side:
+            _bd_side = getattr(decision.edge_breakdown, "selected_side", None)
+            if _bd_side != side:
+                raise ValueError(
+                    f"DUAL-SIDE-CONTRADICTION asset={asset} side={side} "
+                    f"best_side={decision.best_side} breakdown_side={_bd_side} "
+                    f"decision_id={decision.decision_id}"
+                )
+            logger.warning(
+                "[DUAL-SIDE-DIVERGENCE] asset=%s routing qualified side=%s "
+                "over ungated argmax=%s net_edge=%.4f decision_id=%s",
+                asset, side, decision.best_side,
+                float(decision.net_edge) if decision.net_edge is not None else 0.0,
+                decision.decision_id,
+            )
 
         action = "buy"
         price_cents = int(round(float(decision.selected_outcome_price) * 100.0))
