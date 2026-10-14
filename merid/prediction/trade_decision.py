@@ -5057,13 +5057,20 @@ def compute_trade_decision(
     _mw_no_relief = 0.0
     if (
         MERID_EDGE_MIDWIN_RELIEF_CENTS_NO > 0.0
+        and no_min_edge > 0.0
         and MERID_EDGE_MIDWIN_TTE_LO_S <= float(seconds_to_expiry) <= MERID_EDGE_MIDWIN_TTE_HI_S
         and no_breakdown.executable_entry_price * 100.0 >= MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO
     ):
         _mw_no_relief = MERID_EDGE_MIDWIN_RELIEF_CENTS_NO / 100.0
         indicators["no_midwin_relief_cents"] = _mw_no_relief * 100.0
     _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
-    _no_edge_eff_bound = max(0.0, no_min_edge - _mb_no_slack - _mw_no_relief)
+    # Negative-floor lanes own their bound — relief may lower a positive
+    # bound to 0.0 but must never raise a paid-exploration floor.
+    _no_edge_eff_bound = (
+        max(0.0, no_min_edge - _mb_no_slack - _mw_no_relief)
+        if no_min_edge >= 0.0
+        else no_min_edge
+    )
     # A "rescued" side is one that would have failed without the slack —
     # stamped so routing can realize the ask-priced fill the counterfactual
     # measured, and so the rescue lane has its own outcome cohort.
