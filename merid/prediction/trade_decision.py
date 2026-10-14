@@ -4799,6 +4799,16 @@ def compute_trade_decision(
             _cap_blk = None
             if _cap_px is not None and _cap_c > 0.0 and float(_cap_px) > _cap_c:
                 _cap_blk = f"entry_price_cap_{float(_cap_px):.0f}c_gt_{_cap_c:.0f}c_lane"
+            elif _cap_px is not None:
+                # 2026-10-14: the measured toxic pocket is a settlement-
+                # outcome finding — same evidence class as the per-asset
+                # overrides this lane already honors, so it applies in-lane.
+                _band = _dr.moneyness_blocked_band_cents(_cap_side, asset)
+                if _band is not None and _band[0] <= float(_cap_px) <= _band[1]:
+                    _cap_blk = (
+                        f"entry_price_cap_{float(_cap_px):.0f}c_band_"
+                        f"{_band[0]:.0f}-{_band[1]:.0f}c_lane"
+                    )
             if _cap_side == "yes":
                 _yes_price_cap_block = _cap_blk
             else:

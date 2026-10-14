@@ -577,6 +577,49 @@ def _finite_or_none(value: Optional[float]) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def moneyness_blocked_band_cents(
+    side: Optional[str] = None,
+    asset: Optional[str] = None,
+) -> Optional[Tuple[float, float]]:
+    """Optional toxic pocket inside the otherwise-allowed price range.
+
+    2026-10-14 veto counterfactual (278k settled rejected candidates): a
+    flat cap cannot express the measured structure — for the 50c-capped NO
+    assets the 51-64c pocket ran -7.6..-14.7c/tr while 65-79c ran
+    +7.0..+10.4c/tr, and the shapes are per-asset asymmetric (BTC-NO 80-84c
+    toxic -17.2c/tr, ETH-NO positive through 89c).  The pocket lets the cap
+    open over the profitable band while the measured-toxic slice stays
+    blocked.  Override chain mirrors ``moneyness_max_entry_price_cents``:
+    ``..._{SIDE}_{ASSET}`` -> ``..._{SIDE}`` -> shared.  Returns None when
+    unset or degenerate.
+    """
+    side_u = str(side).upper() if side in ("yes", "no") else ""
+    asset_u = str(asset).upper() if asset else ""
+
+    def _band_env(part: str) -> Optional[float]:
+        keys = []
+        if side_u and asset_u:
+            keys.append(f"MERID_MONEYNESS_BLOCK_BAND_{part}_CENTS_{side_u}_{asset_u}")
+        if side_u:
+            keys.append(f"MERID_MONEYNESS_BLOCK_BAND_{part}_CENTS_{side_u}")
+        keys.append(f"MERID_MONEYNESS_BLOCK_BAND_{part}_CENTS")
+        for k in keys:
+            raw = os.environ.get(k)
+            if raw in (None, ""):
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    lo = _band_env("LO")
+    hi = _band_env("HI")
+    if lo is None or hi is None or hi < lo or hi <= 0.0:
+        return None
+    return (lo, hi)
+
+
 def coin_flip_block_reason(
     distance_to_strike: Optional[float],
     zscore: Optional[float],
@@ -630,6 +673,9 @@ def entry_price_cap_block_reason(
         return None
     if px > cap:
         return f"entry_price_cap_{px:.0f}c_gt_{cap:.0f}c"
+    band = moneyness_blocked_band_cents(side, asset)
+    if band is not None and band[0] <= px <= band[1]:
+        return f"entry_price_cap_{px:.0f}c_band_{band[0]:.0f}-{band[1]:.0f}c"
     return None
 
 
