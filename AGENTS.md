@@ -596,7 +596,18 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
   monotonicity vs signed ATR distance (ATR_15m = rolling median
   |close-open| over prior 96 windows), symmetry, per-asset logistic fit,
   and maker/taker fee reconciliation. Writes `data/kalshi_15m_audit.db`
-  and `reports/kalshi_15m_audit_<ts>.json`.
+  and `reports/kalshi_15m_audit_<ts>.json`.  Runs in ~1-3min on 3d: one
+  idx_decisions_ts range scan + one sequential snapshots rowid-range
+  scan (snapshot rowid tracks insert order — no per-row PK probes).
+  `--snapshot PATH` copies the DB first if the live writer is hot.
+  Ledger quirks the audit corrects for: stored seconds_to_close is
+  stale/quantized and ':taker' records stamp ttc=0 while actually sitting
+  minutes before close — effective ttc is recomputed from the row-
+  consensus close_ts; stored close_ts drifts per row.  Kalshi's S_open
+  is the PRIOR window's last-60s band; the displayed strike is used as
+  the open reference when that window wasn't sampled.  settlement_
+  reference_price is absent on ':pre' rows in the final ~40-70s — close
+  reconstruction there is coverage-limited (flagged low-confidence).
 
 ## Test-running notes
 

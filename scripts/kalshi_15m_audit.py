@@ -51,6 +51,10 @@ ATR_WINDOWS = 96            # ~24h of 15m windows
 EDGE_OPEN_S = 60.0          # use ttc >= 900-60 for open-TWAP samples
 EDGE_CLOSE_S = 60.0         # use ttc <= 60 for close-TWAP samples
 EDGE_CLOSE_FALLBACK_S = 150.0  # wider band if last-60s has no ref samples
+# Feature-sampling horizons: dense in the last 3 min where the engine
+# operates, sparse mid-window.  ~18 probes/window vs ~430 dense rows.
+_TTE_MARKS = (15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 150.0,
+              180.0, 240.0, 300.0, 420.0, 540.0, 660.0, 780.0, 840.0, 870.0)
 
 DIST_EDGES = [
     (-float("inf"), -2.0), (-2.0, -1.0), (-1.0, -0.5), (-0.5, -0.05),
@@ -113,51 +117,72 @@ def ticker_candidates(since: float, until: float):
 
 
 def collect_windows(db: sqlite3.Connection, since: float, progress: bool):
-    """Per-ticker point queries via idx_decisions_ticker; group per ticker.
+    """Single idx_decisions_ts range scan, grouped per ticker.
+
+    Effective ttc is RECOMPUTED as consensus_close - decision_ts: the
+    stored seconds_to_close is stale/quantized and post-close ':taker'
+    records stamp ttc=0 while actually sitting ~2-3min before close —
+    that defect misplaced the settlement close band.  The ticker's display
+    label is US-Eastern, not UTC, so it is not authoritative either; the
+    consensus close is the median of close_ts over rows whose stored
+    close_ts is genuinely forward-looking (cts - dts > 5s converges to
+    the exact boundary).
 
     Returns {ticker: {asset, close_ts, open_ts, strike, edge_rows:[...],
                       decided_rows:[...], settled_yes}}.
     """
     windows = {}
     now = time.time()
-    cands = ticker_candidates(since, now)
-    n = 0
-    for ticker in cands:
-        rows = db.execute(
-            "SELECT decision_id, ticker, decision_ts, seconds_to_close, "
-            "strike, market_open_ts, close_ts, decision, selected_side, "
-            "admission_lane, record_environment "
-            "FROM strategy_decisions "
-            "WHERE ticker = ? AND decision_ts >= ? AND decision_ts <= ? "
-            "ORDER BY decision_ts",
-            (ticker, since - 900.0, now),
-        ).fetchall()
-        n += 1
-        if progress and n % 480 == 0:
-            print(f"[collect] {n}/{len(cands)} tickers probed, "
-                  f"{len(windows)} live")
-        for (did, _t, dts, ttc, strike, mo, cts, dec, sel, lane, env) in rows:
-            if env == "test":
-                continue
-            w = windows.get(ticker)
-            if w is None:
-                w = windows[ticker] = {
-                    "asset": asset_of(ticker), "close_ts": cts,
-                    "open_ts": mo, "strike": strike,
-                    "edge": [], "rows": [],
-                    "settled_yes": None,
-                }
-            if w["close_ts"] is None and cts:
-                w["close_ts"] = cts
-            if w["open_ts"] is None and mo:
-                w["open_ts"] = mo
-            if w["strike"] is None and strike:
-                w["strike"] = strike
+    cur = db.execute(
+        "SELECT decision_id, ticker, decision_ts, seconds_to_close, "
+        "strike, market_open_ts, close_ts, decision, selected_side, "
+        "admission_lane, record_environment "
+        "FROM strategy_decisions "
+        "WHERE decision_ts >= ? AND decision_ts <= ? "
+        "  AND ticker LIKE 'KX%15M-%' "
+        "ORDER BY decision_ts",
+        (since - 900.0, now),
+    )
+    n_rows = 0
+    for (did, ticker, dts, ttc, strike, mo, cts, dec, sel, lane, env) in cur:
+        n_rows += 1
+        if progress and n_rows % 50000 == 0:
+            print(f"[collect] {n_rows} decision rows, {len(windows)} live")
+        if env == "test" or not ticker or dts is None:
+            continue
+        asset = asset_of(ticker)
+        if asset == "UNKNOWN":
+            continue
+        w = windows.get(ticker)
+        if w is None:
+            w = windows[ticker] = {
+                "asset": asset, "close_ts": None, "open_ts": mo,
+                "strike": strike, "edge": [], "rows": [],
+                "settled_yes": None, "_raw": [], "_cts": [],
+            }
+        if w["open_ts"] is None and mo:
+            w["open_ts"] = mo
+        if w["strike"] is None and strike:
+            w["strike"] = strike
+        w["_raw"].append((did, dts, ttc))
+        if cts is not None and cts - dts > 5.0:
+            w["_cts"].append(cts)
+    # consensus close + effective ttc per row
+    for w in windows.values():
+        if w["_cts"]:
+            w["close_ts"] = float(np.median(w["_cts"]))
+        if w["close_ts"] is not None and w["open_ts"] is None:
+            w["open_ts"] = w["close_ts"] - 900.0
+        for (did, dts, ttc) in w["_raw"]:
             base = did.split(":")[0] if did else did
-            rec = (did, base, dts, ttc)
-            if ttc is not None and (ttc <= EDGE_CLOSE_FALLBACK_S or ttc >= 900 - EDGE_OPEN_S):
+            eff_ttc = (w["close_ts"] - dts) if w["close_ts"] else ttc
+            rec = (did, base, dts, eff_ttc)
+            if eff_ttc is not None and (
+                    0.0 <= eff_ttc <= EDGE_CLOSE_FALLBACK_S
+                    or eff_ttc >= 900 - EDGE_OPEN_S):
                 w["edge"].append(rec)
             w["rows"].append(rec)
+        del w["_raw"], w["_cts"]
     # dedupe rows per candidate (route rows share the same snapshot)
     for w in windows.values():
         seen, uniq_e, uniq_r = set(), [], []
@@ -170,6 +195,57 @@ def collect_windows(db: sqlite3.Connection, since: float, progress: bool):
                 seen.add(rec[1]); uniq_r.append(rec)
         w["edge"], w["rows"] = uniq_e, uniq_r
     return windows
+
+
+def scan_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
+    """One sequential rowid-range read of the snapshots slice covering all
+    collected windows; dispatch rows to windows by base decision_id.
+
+    strategy_decision_snapshots has no time index, but its implicit rowid
+    tracks insert/decision order (verified dense+contiguous per window), so
+    the whole N-day slice is one sequential scan instead of ~1M random PK
+    probes.  Bounds are found by probing a few boundary decisions' rowids
+    through the decision_id autoindex, padded for interleaved inserts.
+    """
+    rec_map = {}          # base_did -> (ticker, rec)
+    all_recs = []
+    for t, w in windows.items():
+        for rec in w["rows"]:
+            if rec[1] not in rec_map:
+                rec_map[rec[1]] = (t, rec)
+                all_recs.append(rec)
+    if not all_recs:
+        return
+    all_recs.sort(key=lambda r: (r[2] or 0))
+
+    def _rid(did):
+        r = db.execute(
+            "SELECT rowid FROM strategy_decision_snapshots "
+            "WHERE decision_id=?", (did,)).fetchone()
+        return r[0] if r and r[0] is not None else None
+
+    edge_dids = [r[0] for r in all_recs[:8] + all_recs[-8:]]
+    rids = [x for x in (_rid(d) for d in edge_dids) if x is not None]
+    lo = (min(rids) if rids else 0) - 50000
+    hi = (max(rids) if rids else (1 << 62)) + 50000
+    n_scanned = n_kept = 0
+    cur = db.execute(
+        "SELECT decision_id, spot_price, settlement_reference_price, "
+        "yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents, "
+        "raw_p_yes, calibrated_p_yes, vol_forecast, realized_vol_1m "
+        "FROM strategy_decision_snapshots "
+        "WHERE rowid BETWEEN ? AND ?",
+        (lo, hi))
+    for row in cur:
+        n_scanned += 1
+        if progress and n_scanned % 500000 == 0:
+            print(f"[scan] {n_scanned} snapshot rows, {n_kept} kept")
+        hit = rec_map.get(row[0]) or rec_map.get(row[0].split(":")[0])
+        if hit:
+            windows[hit[0]].setdefault("_snap", {})[hit[1][0]] = row[1:]
+            n_kept += 1
+    print(f"[scan] {n_scanned} rows scanned, {n_kept} kept for "
+          f"{len(windows)} windows")
 
 
 def fetch_outcomes(db: sqlite3.Connection, windows: dict, since: float):
@@ -196,37 +272,42 @@ def fetch_outcomes(db: sqlite3.Connection, windows: dict, since: float):
 
 
 def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
-    """Populate open/close TWAP samples from snapshot table PK lookups."""
+    """Populate open/close TWAP samples from the scanned snapshot slice.
+
+    Kalshi's S_open is the 60s average ENDING at window open — i.e. the
+    previous contiguous window's last-60s band, not this window's first
+    60s (a ~60-90s systematic offset that produced false mismatches).
+    Pass 1 collects each window's close band; pass 2 maps each window's
+    open to the prior same-asset window's close band.
+    """
     n_done = 0
     for ticker, w in windows.items():
-        open_s, close_s, close_fb, basis_s = [], [], [], []
+        close_s, close_fb, basis_s = [], [], []
+        close_ttcs = []
+        snap = w.get("_snap") or {}
         for (did, _base, dts, ttc) in w["edge"]:
-            r = db.execute(
-                "SELECT settlement_reference_price, spot_price "
-                "FROM strategy_decision_snapshots WHERE decision_id=?",
-                (did,)).fetchone()
+            r = snap.get(did)
             if r is None:
                 continue
-            ref, spot = r
+            spot, ref = r[0], r[1]
             if ref is not None and spot is not None:
                 basis_s.append(float(spot) - float(ref))
-            if ttc is not None and ttc >= 900 - EDGE_OPEN_S:
-                if ref:
-                    open_s.append(ref)
-            elif ttc is not None and ttc <= EDGE_CLOSE_S:
+            if ttc is not None and 0.0 <= ttc <= EDGE_CLOSE_S:
                 if ref:
                     close_s.append(ref)
+                    close_ttcs.append(ttc)
                 elif spot:
                     close_fb.append(float(spot))
-            elif ttc is not None and ttc <= EDGE_CLOSE_FALLBACK_S:
+            elif ttc is not None and 0.0 <= ttc <= EDGE_CLOSE_FALLBACK_S:
                 if ref:
                     close_fb.append(ref)
         basis = float(np.median(basis_s)) if basis_s else 0.0
         close_fb = [v - basis for v in close_fb]
-        w["open_twap"] = float(np.mean(open_s)) if open_s else (
-            float(w["strike"]) if w["strike"] else None)
-        w["open_twap_source"] = "cf_rti_first60" if open_s else (
-            "kalshi_strike" if w["strike"] else None)
+        w["_close_samples"] = [float(v) for v in close_s]
+        # nearest sample to the boundary — coverage of the band tail is
+        # what actually binds the TWAP, not the raw count
+        w["_close_min_ttc"] = min(close_ttcs) if close_ttcs else None
+        w["_basis"] = basis
         if close_s:
             w["close_twap"] = float(np.mean(close_s))
             w["close_twap_source"] = "cf_rti_last60"
@@ -236,26 +317,61 @@ def fetch_edge_snapshots(db: sqlite3.Connection, windows: dict, progress: bool):
         else:
             w["close_twap"] = None
             w["close_twap_source"] = None
-        w["n_open_samples"] = len(open_s)
         w["n_close_samples"] = len(close_s)
-        # Reconstruction confidence: close-TWAP is uncertain when we had to
-        # fall back to spot/wider band or when the open-close margin is a
-        # fraction of the sampled spread — near-ties are where sparse
-        # sampling flips signs.  Mismatches on low-confidence windows are
-        # reconstruction noise, not Kalshi-settlement bugs.
+        n_done += 1
+        step = 200 if len(windows) > 400 else 20
+        if progress and n_done % step == 0:
+            print(f"[twap] {n_done}/{len(windows)} windows (close band)")
+
+    # Pass 2: open TWAP = prior contiguous window's close band
+    # ([open-60, open]).  Kalshi tiles 15m windows back-to-back per asset.
+    by_close = {}
+    for w in windows.values():
+        if w["close_ts"] is not None:
+            by_close.setdefault((w["asset"], round(w["close_ts"])), []).append(w)
+    for w in windows.values():
+        prev = None
+        if w["open_ts"] is not None:
+            for dt in (0, -1, 1, -2, 2):
+                cands = by_close.get((w["asset"], round(w["open_ts"]) + dt))
+                if cands:
+                    prev = cands[0]
+                    break
+        open_s = (prev or {}).get("_close_samples") or []
+        w["n_open_samples"] = len(open_s)
+        w["open_min_ttc"] = (prev or {}).get("_close_min_ttc")
+        if open_s:
+            w["open_twap"] = float(np.mean(open_s))
+            w["open_twap_source"] = "cf_rti_pre60"
+        elif w["strike"]:
+            w["open_twap"] = float(w["strike"])
+            w["open_twap_source"] = "kalshi_strike"
+        else:
+            w["open_twap"] = None
+            w["open_twap_source"] = None
+        if w["open_twap"] is not None and w["strike"]:
+            w["open_target_error"] = abs(w["open_twap"] - float(w["strike"]))
+        else:
+            w["open_target_error"] = None
+        # Reconstruction confidence: the band tails bind the TWAP — if the
+        # nearest sample to a boundary is >20s away, the terminal move is
+        # unobserved.  Also low when the close band fell back to spot or
+        # when counts are sparse.  Near-tie margins are refined post-ATR.
         if w["open_twap"] is not None and w["close_twap"] is not None:
             margin = abs(w["close_twap"] - w["open_twap"])
-            atr_guess = margin  # placeholder; refined post-ATR
+            c_min = w.get("_close_min_ttc")
+            o_min = w.get("open_min_ttc")
             w["twap_confidence"] = "low" if (
                 w["close_twap_source"] != "cf_rti_last60"
-                or len(close_s) < 5) else "high"
+                or w["n_close_samples"] < 5
+                or (w["n_open_samples"] < 5
+                    and w["open_twap_source"] != "kalshi_strike")
+                or (c_min is not None and c_min > 20.0)
+                or (o_min is not None and o_min > 20.0)) else "high"
             w["twap_margin"] = margin
         else:
             w["twap_confidence"] = "none"
             w["twap_margin"] = None
-        n_done += 1
-        if progress and n_done % 200 == 0:
-            print(f"[twap] {n_done}/{len(windows)} windows")
     return windows
 
 
@@ -307,13 +423,24 @@ def collect_features(db: sqlite3.Connection, windows: dict, progress: bool):
         # where the |d|<0.05 bucket lives.  Estimate the basis in-window.
         basis_samples = []
         raw_rows = []
-        for (did, _b, dts, ttc) in w["rows"]:
-            r = db.execute(
-                "SELECT spot_price, settlement_reference_price, "
-                "yes_bid_cents, yes_ask_cents, no_bid_cents, no_ask_cents, "
-                "raw_p_yes, calibrated_p_yes, vol_forecast, realized_vol_1m "
-                "FROM strategy_decision_snapshots WHERE decision_id=?",
-                (did,)).fetchone()
+        # Thin to ~1 row per TTE mark: all rows in a window share one
+        # settled_yes label and near-collinear d, so probing all ~430
+        # snapshot rows/window buys nothing statistically while dominating
+        # scan IO (~1.2M random PK reads on the mmap'd DB for 3d).
+        chosen = {}
+        for rec in w["rows"]:
+            ttc = rec[3]
+            if ttc is None:
+                continue
+            m = min(_TTE_MARKS, key=lambda x: abs(x - ttc))
+            if abs(m - ttc) > 20.0:
+                continue
+            cur = chosen.get(m)
+            if cur is None or abs(ttc - m) < abs(cur[3] - m):
+                chosen[m] = rec
+        cache = w.get("_snap") or {}
+        for (did, _b, dts, ttc) in chosen.values():
+            r = cache.get(did)
             if r is None:
                 continue
             spot, ref = r[0], r[1]
@@ -338,7 +465,8 @@ def collect_features(db: sqlite3.Connection, windows: dict, progress: bool):
                 "settled_yes": w["settled_yes"],
             })
         n_done += 1
-        if progress and n_done % 100 == 0:
+        step = 100 if len(windows) > 200 else 20
+        if progress and n_done % step == 0:
             print(f"[features] {n_done}/{len(windows)} windows, "
                   f"{len(feats)} rows")
     return feats
@@ -372,7 +500,11 @@ def monotonicity_violations(agg):
                             a["psum"] / a["pn"] if a["pn"] else None, a["n"]))
         viol = []
         for j in range(1, len(seq)):
-            if seq[j][1] < seq[j - 1][1]:
+            # materiality floor: binomial sampling noise makes sub-~3pp
+            # dips meaningless — flag only drops beyond ~3pp + 2σ
+            n_lo, n_hi = seq[j - 1][3], seq[j][3]
+            tol = 0.03 + 2.0 * (0.25 / n_lo + 0.25 / n_hi) ** 0.5
+            if seq[j][1] < seq[j - 1][1] - tol:
                 viol.append({
                     "lo_bucket": DIST_LABELS[seq[j - 1][0]],
                     "hi_bucket": DIST_LABELS[seq[j][0]],
@@ -383,7 +515,7 @@ def monotonicity_violations(agg):
         pviol = []
         for j in range(1, len(seq)):
             if seq[j][2] is not None and seq[j - 1][2] is not None \
-                    and seq[j][2] < seq[j - 1][2]:
+                    and seq[j][2] < seq[j - 1][2] - 0.03:
                 pviol.append({
                     "lo_bucket": DIST_LABELS[seq[j - 1][0]],
                     "hi_bucket": DIST_LABELS[seq[j][0]],
@@ -465,7 +597,9 @@ def tte_banded_curves(feats):
                    for bi in range(len(DIST_EDGES))
                    if cell.get((asset, ti, bi)) and cell[(asset, ti, bi)]["n"] >= MIN_BUCKET_N]
             for j in range(1, len(seq)):
-                if seq[j][1] < seq[j - 1][1]:
+                n_lo, n_hi = seq[j - 1][2], seq[j][2]
+                tol = 0.03 + 2.0 * (0.25 / n_lo + 0.25 / n_hi) ** 0.5
+                if seq[j][1] < seq[j - 1][1] - tol:
                     band_viol.append({
                         "tte_band": lab,
                         "lo_bucket": DIST_LABELS[seq[j - 1][0]],
@@ -698,11 +832,28 @@ def main():
     ap.add_argument("--report", default=None)
     ap.add_argument("--limit-windows", type=int, default=0)
     ap.add_argument("--progress", action="store_true")
+    ap.add_argument(
+        "--snapshot", default=None,
+        help="Backup the audit DB to this path first, then scan the copy. "
+             "Removes WAL/cache contention with the live writer; the copy "
+             "is a consistent point-in-time view (sqlite3 backup API).")
     args = ap.parse_args()
 
     since = time.time() - args.days * 86400
+    db_path = args.audit_db
+    if args.snapshot:
+        t0 = time.time()
+        src = sqlite3.connect(
+            f"file:{args.audit_db}?mode=ro", uri=True)
+        src.execute("PRAGMA query_only=1")
+        dst = sqlite3.connect(args.snapshot)
+        src.backup(dst)
+        dst.close(); src.close()
+        print(f"[snapshot] copied to {args.snapshot} in "
+              f"{time.time()-t0:.0f}s")
+        db_path = args.snapshot
     db = sqlite3.connect(
-        f"file:{args.audit_db}?mode=ro", uri=True)
+        f"file:{db_path}?mode=ro", uri=True)
     db.execute("PRAGMA query_only=1")
 
     t0 = time.time()
@@ -713,6 +864,10 @@ def main():
     windows = fetch_outcomes(db, windows, since)
     settled = {k: w for k, w in windows.items() if w["settled_yes"] is not None}
     print(f"[outcomes] settled windows: {len(settled)}/{len(windows)}")
+
+    t0 = time.time()
+    scan_snapshots(db, settled, args.progress)
+    print(f"[scan] snapshot slice in {time.time()-t0:.0f}s")
 
     t0 = time.time()
     windows = fetch_edge_snapshots(db, settled, args.progress)
