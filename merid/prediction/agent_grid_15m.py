@@ -14035,6 +14035,90 @@ class LeanAgent15m:
                 feature_flags=f"signal_mode={self._resolve_runtime_signal_mode()} yes_price={yes_price_cents} no_price={no_price_cents}",
                 **_shadow,
             )
+
+            # 2026-10-13: counterfactual instrumentation for the two largest
+            # unscored funnel kills.  NO_ELIGIBLE_PRICE_BAND / TTE_ENTRY_CUTOFF
+            # reach the audit DB via record_pre_decision_rejection but that row
+            # carries no per-side model/price fields, so band false-negatives
+            # could not be measured.  Emit one rejected-candidate record per
+            # side (ask basis, band bounds, shadow EV when a market-level fair
+            # prob exists) so the counterfactual report scores them like every
+            # other gate.  Write-only; never affects the decision.
+            try:
+                from merid.prediction.rejection_counterfactual import (
+                    log_rejected_candidate as _log_band_rc,
+                )
+                _band_run_id, _band_cid = self._candidate_identity(
+                    asset, ticker, tick
+                )
+                _band_reason = (
+                    "tte_entry_cutoff" if _regime_reject_cause == "tte_floor"
+                    else "no_eligible_price_band"
+                )
+                _strike = (
+                    getattr(market, "strike", None)
+                    or getattr(getattr(market, "market", None), "strike", None)
+                    or getattr(market, "floor_strike", None)
+                    or getattr(getattr(market, "market", None), "floor_strike", None)
+                )
+                for _side, _px, _band, _breason, _mintte, _cmiss, _psel, _sev, _dep in (
+                    (
+                        "yes", yes_price_cents, _yes_band, _yes_band_reason,
+                        _yes_min_tte, _tc_miss_yes, _shadow_p,
+                        _shadow.get("shadow_yes_ev_cents"),
+                        getattr(market_state, "min_depth_yes", None),
+                    ),
+                    (
+                        "no", no_price_cents, _no_band, _no_band_reason,
+                        _no_min_tte, _tc_miss_no,
+                        (1.0 - _shadow_p) if _shadow_p is not None else None,
+                        _shadow.get("shadow_no_ev_cents"),
+                        getattr(market_state, "min_depth_no", None),
+                    ),
+                ):
+                    if not _px or float(_px) <= 0:
+                        continue  # no executable price: nothing to score
+                    _log_band_rc(
+                        reason=f"{_band_reason}:{_side}",
+                        run_id=_band_run_id,
+                        decision_id=f"{_band_cid}:pre",
+                        asset=asset,
+                        ticker=ticker,
+                        side=_side,
+                        model_p_selected=_psel,
+                        held_price_cents=float(_px),
+                        gross_edge=(_sev / 100.0) if _sev is not None else None,
+                        net_edge=(_sev / 100.0) if _sev is not None else None,
+                        tte_seconds=seconds_to_expiry,
+                        spot_price=spot_price,
+                        strike_price=_strike,
+                        depth_for_quantity_cc=_dep,
+                        quote_state=_quote_owner,
+                        quote_age_ms=(
+                            getattr(market_state, "quote_age_ms", None)
+                            if market_state else None
+                        ),
+                        yes_price_cents=yes_price_cents,
+                        no_price_cents=no_price_cents,
+                        entry_price_basis="ask",
+                        band_shadow={
+                            "band_lo": _band["lo"],
+                            "band_hi": _band["hi"],
+                            "band_enabled": _band["enabled"],
+                            "band_reason": _breason,
+                            "min_tte_s": _mintte,
+                            "regime_reject_cause": _regime_reject_cause,
+                            "threshold_cell_miss": _cmiss,
+                            "book_source_degraded": bool(
+                                getattr(market_state, "degraded_mode", False)
+                            ) if market_state else None,
+                            "shadow_selected_side": _shadow.get(
+                                "shadow_selected_side"
+                            ),
+                        },
+                    )
+            except Exception:
+                pass
             return None
 
         # Store regime context for downstream edge calculation

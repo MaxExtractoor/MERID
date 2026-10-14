@@ -265,6 +265,45 @@ def main() -> int:
             f"{total_cf_net_cents:+.1f}c total, {total_cf_net_cents / classified:+.2f}c/trade"
         )
     _render(by_reason, "By rejection gate")
+
+    # 2026-10-13: suspension shadow cohort.  Live suspension stays enforced;
+    # the rejected-candidate records (side_suspended:<trigger>) ARE the shadow
+    # log of what suspension blocked.  Split by full reason + asset:side so a
+    # systematically-wrong trigger (e.g. consecutive-loss window blocking
+    # positive-expectancy flow) is separable from small-sample noise.
+    _susp_reason: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    _susp_pnl: Dict[str, float] = collections.defaultdict(float)
+    _susp_n: Dict[str, int] = collections.defaultdict(int)
+    for d in _load_jsonl(args.candidates):
+        if d.get("type") != "rejected_candidate":
+            continue
+        _r = d.get("reject_reason") or ""
+        if not _r.startswith("side_suspended"):
+            continue
+        _ticker = d.get("ticker")
+        _side = (d.get("side") or "").lower()
+        _held = d.get("held_price_cents")
+        _fee = d.get("fee_cents") or _DEFAULT_FEE_CENTS
+        _key = f"{_r} | {d.get('asset') or '?'}:{_side or '?'}"
+        if not _ticker or _side not in ("yes", "no") or _held is None or _ticker not in outcomes:
+            _susp_reason[_key]["unclassifiable"] += 1
+            continue
+        _won = outcomes[_ticker] == _side
+        _cf = (100.0 - float(_held) if _won else -float(_held)) - float(_fee)
+        _susp_reason[_key]["missed" if _cf > _FLAT_EPS_CENTS else "saved" if _cf < -_FLAT_EPS_CENTS else "flat"] += 1
+        _susp_pnl[_key] += _cf
+        _susp_n[_key] += 1
+    if _susp_reason:
+        _render(_susp_reason, "Suspension shadow cohort (by trigger | asset:side)")
+        print(f"{'trigger|asset:side':<48} {'n':>6} {'net_cents':>12} {'c/trade':>9}")
+        for k in sorted(_susp_pnl):
+            print(f"{k:<48} {_susp_n[k]:>6} {_susp_pnl[k]:>12.1f} {_susp_pnl[k]/_susp_n[k]:>9.2f}")
+        print(
+            "Review rule: keep suspension live; a trigger earns revision only "
+            "when it stays net-positive counterfactually across multiple "
+            "out-of-sample windows with adequate n."
+        )
+
     _render(by_structural, "By structural-veto sub-gate (decomposed)")
     _render(by_price_bucket, "By held-price bucket")
     _render(by_tte_bucket, "By time-to-expiry bucket")
