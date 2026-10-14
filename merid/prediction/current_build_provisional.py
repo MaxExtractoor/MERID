@@ -1869,7 +1869,9 @@ def record_provisional_markout(
         outs.append(row)
         del outs[:-25]
     _save_state()
-    if horizon_s == 5:
+    # 30s arrival is when the first-fill markout rule can finally fire — a
+    # 5s-only evaluation predates the persistence evidence the rule needs.
+    if horizon_s in (5, 30):
         _evaluate_suspension(cell_id)
     _maybe_complete_probation(cell_id)
 
@@ -1994,23 +1996,51 @@ def _evaluate_suspension(cell_id: str) -> None:
     fills = [o for o in outs if o.get("kind") in ("fill", "settled")]
     if fills:
         first = fills[0]
+        # 2026-10-14 (suspension audit): the informed-flow signature is a
+        # markout that PERSISTS, not the first print — a single 5s markout on
+        # a thin 15m book is microstructure noise (DOGE 2026-10-14: -15c@5s
+        # settled +10c; the dip reverted inside the window).  The first-fill
+        # rule now keys on the >=30s markout; a 5s print can only fire at the
+        # deep hard floor where the move is unambiguous.  Cells whose fill
+        # never earns a 30s markout simply keep trading — settlement PnL
+        # still covers real losses.
+        m30 = first.get("markout_30s_cents")
         m5 = first.get("markout_5s_cents")
-        if m5 is not None and float(m5) <= -3.0:
-            _suspend_with_probation(f"first_fill_markout_5s={float(m5):+.2f}c <= -3.00c",
+        m_eval = None
+        m_hz = None
+        if m30 is not None:
+            m_eval, m_hz = float(m30), 30
+        elif m5 is not None and float(m5) <= _env_float(
+            "MERID_CBP_FIRST_FILL_M5_HARD_CENTS", -20.0
+        ):
+            m_eval, m_hz = float(m5), 5
+        if m_eval is not None and m_eval <= -3.0:
+            _suspend_with_probation(
+                f"first_fill_markout_{m_hz}s={m_eval:+.2f}c <= -3.00c",
             )
             # Side-level escalation only at the catastrophic depth — a -3c
-            # first-fill markout suspends the cell, a -5c one is a structural
-            # adverse-selection signature for the whole side.
-            if float(m5) <= _env_float("MERID_SIDE_CATASTROPHE_M5_CENTS", -5.0):
+            # persistent markout suspends the cell, a deeper one is a
+            # structural adverse-selection signature for the whole side.
+            if m_eval <= _env_float("MERID_SIDE_CATASTROPHE_M5_CENTS", -5.0):
                 _notify_side_catastrophe(
-                    cell_id, f"first_fill_markout_5s={float(m5):+.2f}c"
+                    cell_id, f"first_fill_markout_{m_hz}s={m_eval:+.2f}c"
                 )
             return
         fev = first.get("fill_ev_cents")
-        if fev is not None and float(fev) <= 0.0:
-            _suspend_with_probation(f"fill_ev_nonpositive={float(fev):+.2f}c")
+        # 2026-10-14 (coherence fix): a negative-floor lane admits
+        # negative-EV fills BY DESIGN — paying bounded EV for settlement
+        # evidence.  Suspending on fill_ev <= 0 made every paid-exploration
+        # fill self-destruct on arrival (DOGE 05:24: admitted at -0.014c
+        # under a -3c floor, suspended + side-catastrophe anyway).  The
+        # breach condition is fill_ev below the lane's own floor — i.e. we
+        # got a worse price than the admission bound paid for.
+        _cell = provisional_cell_for_id(cell_id)
+        _floor = cell_min_ev_cents(_cell) if _cell is not None else 0.0
+        _fev_breach = min(0.0, _floor)
+        if fev is not None and float(fev) <= _fev_breach:
+            _suspend_with_probation(f"fill_ev_below_floor={float(fev):+.2f}c <= {_fev_breach:+.2f}c")
             _notify_side_catastrophe(
-                cell_id, f"fill_ev_nonpositive={float(fev):+.2f}c"
+                cell_id, f"fill_ev_below_floor={float(fev):+.2f}c"
             )
             return
         pnl = first.get("net_pnl_cents")
@@ -2021,10 +2051,13 @@ def _evaluate_suspension(cell_id: str) -> None:
                 _suspend_with_probation(f"first_trade_pnl={float(pnl):+.2f}c < -(edge {float(cand):+.2f}c + 2c)",
                 )
                 return
+    _cell_all = provisional_cell_for_id(cell_id)
+    _floor_all = cell_min_ev_cents(_cell_all) if _cell_all is not None else 0.0
+    _fev_breach_all = min(0.0, _floor_all)
     for o in fills:
         fev = o.get("fill_ev_cents")
-        if fev is not None and float(fev) <= 0.0:
-            _suspend_with_probation(f"fill_ev_nonpositive={float(fev):+.2f}c")
+        if fev is not None and float(fev) <= _fev_breach_all:
+            _suspend_with_probation(f"fill_ev_below_floor={float(fev):+.2f}c <= {_fev_breach_all:+.2f}c")
             return
 
     # ── Rolling rules (default window: 3 fills).
@@ -2036,17 +2069,19 @@ def _evaluate_suspension(cell_id: str) -> None:
             )
             return
 
+    # 2026-10-14: longest-horizon markout per outcome (30s > 5s > 1s) — the
+    # informed-flow signal is drift that persists, not the first print.
     markouts = [
-        o["markout_5s_cents"] for o in outs if o.get("markout_5s_cents") is not None
+        v for v in (_markout_value(o) for o in outs) if v is not None
     ]
     if len(markouts) >= min_fills:
         window = markouts[-min_fills:]
         med = statistics.median(window)
         if med < _suspend_markout_median():
-            _suspend_with_probation(f"rolling_{min_fills}_median_markout_5s={med:+.2f}c < {_suspend_markout_median():+.2f}c",
+            _suspend_with_probation(f"rolling_{min_fills}_median_markout={med:+.2f}c < {_suspend_markout_median():+.2f}c",
             )
             return
-        # Two-of-N negative 5s markouts: repeated adverse selection.
+        # Two-of-N negative persistent markouts: repeated adverse selection.
         if sum(1 for m in window if m < 0.0) >= 2:
             _suspend_with_probation(f"rolling_{min_fills}_negative_markouts="
                 f"{sum(1 for m in window if m < 0.0)}/{len(window)}",
