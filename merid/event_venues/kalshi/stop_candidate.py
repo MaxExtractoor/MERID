@@ -200,6 +200,57 @@ _MANDATORY_RISK_TRIGGER_REASONS = frozenset({
     # market premium beats the settle value), so the EV hold must still apply.
 })
 
+# ── profit_only_v1 breakeven floor (2026-10-14) ─────────────────────────────
+# Operator directive: exits may take profit or ride to settlement — they may
+# never sell below the position's held-side entry price.  profit_only_v1
+# already strips the *armed* stop-loss from entry brackets; this floor is the
+# reactive counterpart, applied at the two places an exit can still become an
+# order: here (stop candidates) and in ``_emit_exit_intent`` (policy exits).
+# State-repair / emergency / terminal triggers are exempt — they fix broken
+# state or the position resolves anyway; they are not economic exits.
+LOSS_SELL_EXEMPT_TRIGGERS = frozenset({
+    "OPERATIONAL_RISK",
+    "RISK",
+    "POSITION_MISMATCH",
+    "STALE_DATA",
+    "RECONCILIATION",
+    "RECONCILE",
+    "MANUAL",
+    "POSITION_MONITOR_MANUAL",
+    "EXTERNAL_EXIT",
+    "MARKET_EXPIRED",
+    "MARKET_CLOSED",
+    "EMERGENCY",
+    "HARD_RISK",
+    "EXPIRY_LIQUIDATION",
+})
+
+
+def profit_only_exits_enabled() -> bool:
+    return _env_bool("MERID_PROFIT_ONLY_EXITS", True)
+
+
+def loss_sell_blocked(
+    trigger_reason: Any,
+    exit_price_cents: Optional[int],
+    entry_price_cents: Optional[int],
+) -> bool:
+    """True when profit-only exits are armed and this candidate would realize
+    a loss at ``exit_price_cents`` vs the held-side ``entry_price_cents``.
+
+    Exempt triggers and missing prices fail open — a state-repair exit or an
+    exit whose breakeven cannot be established is never silently held.
+    """
+    if not profit_only_exits_enabled():
+        return False
+    _tr = getattr(trigger_reason, "value", trigger_reason)
+    if str(_tr).upper() in LOSS_SELL_EXEMPT_TRIGGERS:
+        return False
+    if exit_price_cents is None or entry_price_cents is None:
+        return False
+    return int(exit_price_cents) < int(entry_price_cents)
+
+
 # Settlement-aware phase constants (seconds).
 SETTLEMENT_CLOSE_BUFFER_SECONDS = _env_int(
     "MERID_SETTLEMENT_CLOSE_BUFFER_SECONDS", 60
@@ -1227,6 +1278,19 @@ async def _maybe_degraded_stop_exit(
     record["degraded_limit_raw"] = raw_limit
     record["degraded_limit_cents"] = degraded_limit
 
+    # profit_only_v1 breakeven floor: a degraded IOC below the held-side entry
+    # still realizes a loss — same suppression as the primary path.  Recorded
+    # as an explicit hold so the decision stays auditable.
+    if loss_sell_blocked(
+        candidate.trigger_reason, degraded_limit, candidate.entry_price_cents
+    ):
+        _finish(
+            "HOLD_TO_SETTLEMENT_APPROVED",
+            "breakeven_floor_loss_sell_suppressed",
+            ResidualStatus.HOLD_APPROVED,
+        )
+        return
+
     if not enabled:
         _finish(
             "DEGRADED_EXIT_APPROVED",
@@ -1475,6 +1539,33 @@ async def maybe_submit_stop_candidate(
             reason=reason,
         )
 
+    # profit_only_v1 breakeven floor (early stage): the trigger-time executable
+    # bid is the ceiling of the exit limit (limit = bid - slippage), so if it
+    # is already below entry this candidate can only lock a loss.  Block here
+    # before the fresh-exposure REST fetch; a second check at order
+    # construction catches limits that cross below entry after repricing.
+    if loss_sell_blocked(
+        candidate.trigger_reason,
+        candidate.executable_exit_cents,
+        candidate.entry_price_cents,
+    ):
+        logger.warning(
+            "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
+            "exit_bid=%sc < entry=%sc - suppressing loss-sell; "
+            "position rides to settlement",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            candidate.executable_exit_cents,
+            candidate.entry_price_cents,
+        )
+        record_stop_candidate(candidate)
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason="breakeven_floor_loss_sell_suppressed",
+        )
+
     # 1. Fresh exchange position snapshot.
     t0 = time.monotonic()
     exchange_position_cc, position_avg_price_cents, position_side = (
@@ -1638,6 +1729,31 @@ async def maybe_submit_stop_candidate(
         STOP_MAX_SLIPPAGE_CENTS,
         candidate.seconds_to_expiry or -1.0,
     )
+
+    # profit_only_v1 breakeven floor: the exit limit is the realized price.
+    # If it is below the held-side entry, this candidate would lock a loss —
+    # suppress it and let the position ride to settlement.  The candidate is
+    # still recorded so the suppression is auditable.
+    _floor_entry = candidate.entry_price_cents
+    if _floor_entry is None:
+        _floor_entry = position_avg_price_cents
+    if loss_sell_blocked(candidate.trigger_reason, exit_price, _floor_entry):
+        logger.warning(
+            "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
+            "exit_limit=%dc < entry=%dc - suppressing loss-sell; "
+            "position rides to settlement",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            exit_price,
+            _floor_entry,
+        )
+        record_stop_candidate(candidate)
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason="breakeven_floor_loss_sell_suppressed",
+        )
 
     kalshi_side = to_kalshi_side(held_side, "sell")
 

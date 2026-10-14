@@ -43,6 +43,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     _get_model_fair_value_cents,
     build_stop_candidate,
     evaluate_edge_stop,
+    loss_sell_blocked,
     maybe_submit_stop_candidate_sync,
     record_stop_candidate,
 )
@@ -6418,6 +6419,36 @@ class PositionMonitor:
                     snapshot.own_side_bid_cents,
                 )
                 exit_price_cents = snapshot.own_side_bid_cents
+
+        # profit_only_v1 breakeven floor (2026-10-14): exits may take profit
+        # or ride to settlement — never sell below the held-side entry price.
+        # State-repair/terminal reasons (RISK, STALE_DATA, MANUAL,
+        # MARKET_EXPIRED) are exempt inside loss_sell_blocked; every other
+        # reason — stops, edge decay, settlement guard, time stops, loss caps —
+        # is suppressed here and the position rides to settlement.  Mirror of
+        # the stop-candidate floor in maybe_submit_stop_candidate.
+        _floor_entry = position.avg_entry_price_cents
+        if loss_sell_blocked(exit_reason, exit_price_cents, _floor_entry):
+            logger.warning(
+                "[BREAKEVEN-FLOOR] position=%s market=%s side=%s reason=%s "
+                "exit=%dc < entry=%dc - suppressing loss-sell; position rides "
+                "to settlement",
+                position.position_id[:8],
+                position.market_id,
+                position.side.value,
+                exit_reason.value,
+                exit_price_cents,
+                _floor_entry,
+            )
+            self._log_exit_eval(
+                position=position,
+                snapshot=snapshot,
+                decision="EXIT_BLOCKED",
+                reason_code="BREAKEVEN_FLOOR",
+                target_hit=False,
+                exit_reason=exit_reason,
+            )
+            return
 
         # AUDIT: Timing correctness - record trigger timestamp
         trigger_timestamp = __import__('time').monotonic()
