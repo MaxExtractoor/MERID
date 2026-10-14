@@ -6283,11 +6283,29 @@ def compute_trade_decision(
     # The consumed side must equal the dual-side evaluator's output whenever
     # both are non-None.  A mismatch means the candidate generator would use the
     # wrong side.
+    # 2026-10-14: narrowed — selected_outcome is the side that passed all
+    # gates; best_side is the ungated net-edge argmax.  They legitimately
+    # diverge when the argmax side failed a non-edge gate (depth, regime,
+    # evidence, lane rules) while the other side qualified: ~270 qualified
+    # candidates/day were being destroyed here.  The selected side is the
+    # correct route because edge_breakdown carries its economics.  Fail
+    # closed only on genuine incoherence — economics describing a different
+    # side than the one selected.
     if selected_outcome is not None and best_side is not None:
-        assert selected_outcome == best_side, (
-            f"DUAL-SIDE-CONTRADICTION: selected_outcome={selected_outcome} "
-            f"best_side={best_side} decision_id={decision_id}"
-        )
+        if selected_outcome != best_side:
+            _bd_side = getattr(edge_breakdown, "selected_side", None)
+            if _bd_side != selected_outcome:
+                raise ValueError(
+                    f"DUAL-SIDE-CONTRADICTION: selected_outcome={selected_outcome} "
+                    f"best_side={best_side} breakdown_side={_bd_side} "
+                    f"decision_id={decision_id}"
+                )
+            logger.warning(
+                "[DUAL-SIDE-DIVERGENCE] routing qualified side=%s over "
+                "ungated argmax=%s net_edge=%.4f decision_id=%s",
+                selected_outcome, best_side,
+                float(edge_breakdown.net_edge), decision_id,
+            )
 
     # Use the selected side's dynamic threshold for telemetry; fall back to the
     # global floor when no side was selected.
