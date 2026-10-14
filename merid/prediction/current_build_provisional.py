@@ -608,6 +608,7 @@ _REASON_SUBTYPE_RULES = (
     ("became_taker", SUSPENSION_CLASS_CONTRACT),
     ("mode_violation", SUSPENSION_CLASS_CONTRACT),
     ("markout", SUSPENSION_CLASS_EXEC_QUALITY),
+    ("fill_ev_below_floor", SUSPENSION_CLASS_EXEC_QUALITY),
     ("fill_ev_nonpositive", SUSPENSION_CLASS_EXEC_QUALITY),
     ("fill_time_ev", SUSPENSION_CLASS_EXEC_QUALITY),
     ("ev_drop", SUSPENSION_CLASS_EXEC_QUALITY),
@@ -1980,10 +1981,13 @@ def _evaluate_suspension(cell_id: str) -> None:
     # ── Immediate rules: a newly-live lane cannot wait for the rolling
     # window to discover adverse selection or contract breaches.
     consec = int((st.get("router_consecutive_rejects") or {}).get(cell_id) or 0)
-    if consec >= 2:
+    # 2026-10-14: on a degraded-WS box, stale-quote revalidation produces
+    # transient post-only-cross rejects in bursts — 2-in-a-row suspended
+    # cbp_eth_no_80_90 on timing noise, not a broken route.  Default 3.
+    if consec >= _env_int("MERID_CBP_ROUTER_CONSEC_SUSPEND", 3):
         _suspend_with_probation(
             f"consecutive_router_rejects={consec} (post-only cross/stale "
-            "revalidation twice in a row)",
+            "revalidation streak)",
         )
         return
 
@@ -2048,9 +2052,21 @@ def _evaluate_suspension(cell_id: str) -> None:
         if pnl is not None and cand is not None:
             bound = -(float(cand) + 2.0)
             if float(pnl) < bound:
-                _suspend_with_probation(f"first_trade_pnl={float(pnl):+.2f}c < -(edge {float(cand):+.2f}c + 2c)",
-                )
-                return
+                # 2026-10-14 (suspension audit): a settled binary loss is
+                # always -premium, which always breaches -(edge+2c) — the
+                # unmodified rule meant "first trade must win", a ~40%
+                # coin-flip death on every new cell (8/33 parked cells were
+                # exactly this).  A settled loss is only damning when
+                # corroborated: a persistent adverse markout shows the fill
+                # was toxic, not unlucky.  Variance losses fall through to
+                # the rolling 3-fill mean-PnL rule — 3 bounded fills is the
+                # experiment budget working as designed.
+                _m_persist = _markout_value(first)
+                if _m_persist is not None and float(_m_persist) < 0.0:
+                    _suspend_with_probation(
+                        f"first_trade_pnl={float(pnl):+.2f}c + persistent_markout={float(_m_persist):+.2f}c",
+                    )
+                    return
     _cell_all = provisional_cell_for_id(cell_id)
     _floor_all = cell_min_ev_cents(_cell_all) if _cell_all is not None else 0.0
     _fev_breach_all = min(0.0, _floor_all)
