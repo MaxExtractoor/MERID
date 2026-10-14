@@ -84,6 +84,10 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
         min_time_to_expiry_seconds=180,
         max_time_to_expiry_seconds=1500,
     ),
+    # 2026-10-14 (devin): skewed band floors 240s -> 180s so they align with
+    # the engine's MERID_ENTRY_MIN_SECONDS_TO_EXPIRY floor.  At 240s the
+    # bands vetoed candidates at TTE 180-240s *before* the decision engine's
+    # economics could evaluate them; now the edge/evidence gates decide.
     "skewed_low": SkewRegime(
         name="skewed_low",
         min_price_cents=10,
@@ -95,7 +99,7 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
         size_multiplier=Decimal("0.50"),
         enabled=True,
         min_book_freshness_ms=1000,
-        min_time_to_expiry_seconds=240,
+        min_time_to_expiry_seconds=180,
         max_time_to_expiry_seconds=1200,
     ),
     "skewed_high": SkewRegime(
@@ -109,7 +113,7 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
         size_multiplier=Decimal("0.50"),
         enabled=True,
         min_book_freshness_ms=1000,
-        min_time_to_expiry_seconds=240,
+        min_time_to_expiry_seconds=180,
         max_time_to_expiry_seconds=1200,
     ),
     "disabled_tail": SkewRegime(

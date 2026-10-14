@@ -630,6 +630,8 @@ def test_trend_yes_hi_disabled_by_default(regime_state, monkeypatch):
 
 def test_trend_yes_hi_strict_gate(regime_state, throttle_path, monkeypatch):
     monkeypatch.setenv("MERID_TREND_YES_HI_ENABLED", "1")
+    monkeypatch.setenv("MERID_TREND_YES_HI_MAX_TTE_S", "300")
+    monkeypatch.setenv("MERID_TREND_YES_HI_MIN_TTE_S", "120")
     rally = _snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001)
     reg = _drive(rally, ticks=3)
     assert reg.label == "RALLY_CONFIRMED"

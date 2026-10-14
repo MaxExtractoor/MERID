@@ -24,6 +24,7 @@ def _reset(monkeypatch):
         "MERID_EVIDENCE_DEGRADED_AFTER_S",
         "MERID_EVIDENCE_STALE_AFTER_S",
         "MERID_EVIDENCE_UNUSABLE_AFTER_S",
+        "MERID_EVIDENCE_DEGRADED_MAX_CONTRACTS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
@@ -159,6 +160,12 @@ def test_stale_fallback_is_coded_distinctly():
 @pytest.fixture
 def _evidence_path(monkeypatch, tmp_path):
     path = tmp_path / "live_entry_evidence.json"
+    # Pin the freshness tiers: the production .env now widens them (48h FRESH,
+    # 96h DEGRADED, 7d STALE) and dotenv leaks them into the test process.
+    monkeypatch.setenv("MERID_EVIDENCE_DEGRADED_AFTER_S", "900")
+    monkeypatch.setenv("MERID_EVIDENCE_STALE_AFTER_S", "3600")
+    monkeypatch.setenv("MERID_EVIDENCE_UNUSABLE_AFTER_S", "10800")
+    monkeypatch.setenv("MERID_EVIDENCE_DEGRADED_MAX_CONTRACTS", "1")
     monkeypatch.setenv("MERID_LIVE_EVIDENCE_PATH", str(path))
     monkeypatch.setattr(_td, "MERID_LIVE_EVIDENCE_GATE", True)
     monkeypatch.setattr(_td, "MERID_CALIBRATION_CAP_FULL_RANGE", False)
@@ -214,7 +221,10 @@ def test_unusable_evidence_blocks_evidence_dependent_entry(_evidence_path):
     _write(_evidence_path, 8 * 3600)
     d = _decide()
     assert d.selected_outcome is None
-    assert "evidence_unusable" in (d.no_trade_reason or "")
+    # Another gate (price-band) may own the headline no_trade_reason; the
+    # evidence assertion lives on the per-side binding gate.
+    assert d.indicators["yes_evidence_binding_gate"] == "EVIDENCE_UNUSABLE"
+    assert d.indicators["no_evidence_action"] == "block"
 
 
 def test_degraded_caps_size_to_one_contract(_evidence_path, monkeypatch):

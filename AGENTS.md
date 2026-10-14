@@ -465,10 +465,10 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   `MERID_PROVISIONAL_MIN_EV_C[_<ASSET>_<SIDE>]`. The threshold is residual
   margin measured AFTER fees, executable-side price, book/depth reserve,
   pre-submit revalidation, passive construction, and source-degradation
-  reserves — it never waives current costs.
+  reserves ï¿½ it never waives current costs.
 - **Evidence policy:** legacy/pre-change evidence (including old
   hard-block verdicts) is demoted to `LEGACY_RISK_LABEL` + uncertainty
-  reserve for this lane — it can change labels and monitoring intensity but
+  reserve for this lane ï¿½ it can change labels and monitoring intensity but
   cannot veto a current-build, current-market, positive-EV candidate.
   Current-build hard safety failures (untrusted book/spot, stale
   revalidation, non-passive construction, domain violation, mapping
@@ -476,7 +476,7 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   `MERID_PROVISIONAL_EVIDENCE_OVERRIDE=0` restores legacy vetoes as an
   emergency off-switch.
 - **Cell authority:** a registered `threshold_cells` cell owns its
-  asset x side x price x TTE region absolutely — even when SUSPENDED or
+  asset x side x price x TTE region absolutely ï¿½ even when SUSPENDED or
   when `MERID_THRESHOLD_CELLS=0` kills that lane (`cell_region_registered`
   is consulted state-blind). Provisional cells (`cbp_*`) claim only
   genuinely unregistered regions and never rescue a blocked registered band.
@@ -486,11 +486,11 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   is set to the lane lifetime (45s) so unfilled orders expire and free the
   global open-order slot promptly. `MERID_PROVISIONAL_MAKER=0` suppresses
   emission rather than coercing to taker.
-- **Suspension (fail-closed, per cell):** immediate — first fill with 5s
+- **Suspension (fail-closed, per cell):** immediate ï¿½ first fill with 5s
   markout <= -3c, fill-time revalidated EV <= 0, first-trade PnL
   < -(entry edge + 2c), post-only order filling as taker, side/mapping
   invariant violation, or two consecutive router rejects. Rolling
-  (default 3-fill window) — mean net PnL < -1c, median 5s markout < -1c,
+  (default 3-fill window) ï¿½ mean net PnL < -1c, median 5s markout < -1c,
   two-of-three negative 5s markouts, or router reject rate > 40% after
   >=5 attempts.
 - **Evidence separation:** records persist under
@@ -504,21 +504,21 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   `promotion_ready` only on current-build evidence (>=10 passive attempts,
   >=3 fills, non-negative mean PnL and median 5s markout, reject rate <=
   suspension ceiling, zero post-only breaches, not suspended). Promotion to
-  the permanent registry is an explicit review act — never automatic off a
+  the permanent registry is an explicit review act ï¿½ never automatic off a
   single winner.
 - **Kill switches:** `MERID_PROVISIONAL_LANE=0` disables the lane (all
   candidates fall back to the formula path); lane state lives in
   `data/current_build_provisional_lane.json` (test-isolated via
   `MERID_PROVISIONAL_STATE_PATH` / `_LIFECYCLE_PATH` / `_EVIDENCE_DIR`).
 - **Adverse-selection reserve (2026-10-01):** the authoritative EV gate's
-  `adverse_selection_reserve_per_contract` is now measured — the resolved
+  `adverse_selection_reserve_per_contract` is now measured ï¿½ the resolved
   cell's rolling 5s markouts (widened to the asset+side aggregate when the
   cell has < `MERID_ADV_SEL_MIN_SAMPLES`=2 samples), floored at
   `MERID_ADV_SEL_FLOOR_CENTS`=0.5 and capped at `MERID_ADV_SEL_CAP_CENTS`=5.
   `MERID_ADV_SEL_RESERVE_ENABLED`=0 restores the zero reserve.  The value
   rides `TradeDecision.adverse_selection_reserve` into the gate, the audit
   `adverse_selection_haircut_cents` column, the order-decision ledger, and
-  agent telemetry — previously all hardcoded to zero.
+  agent telemetry ï¿½ previously all hardcoded to zero.
 - **Entry rest bound (2026-10-01):** all entry lanes bound resting life at
   `MERID_ENTRY_MAX_REST_S`=45s (cbp binds its own policy value); exits keep
   the 180s `OrderIntent` default.  Unbounded resting life let stale orders
@@ -529,18 +529,18 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   AND settled fills >= `MERID_PROVISIONAL_REVIEW_MIN_FILLS`), recorded to
   the evidence store and `promotion_review_<cell>.json`.  Attempts and
   router counters accumulate in `submissions_total` /
-  `router_attempts_total` / `router_rejects_total` — the daily maps reset
+  `router_attempts_total` / `router_rejects_total` ï¿½ the daily maps reset
   per UTC day and could never reach the review threshold under the
   5/day per-cell submission cap.
 - **Audit lane provenance (2026-10-01):** `strategy_decisions` now carries
   `admission_lane`, `admission_owner`, `provisional_cell_id`, `build_sha`;
   `strategy_decision_side_ev` carries per-side `admission_owner`,
-  `threshold_source`, `legacy_risk_label` — current-build evidence is
+  `threshold_source`, `legacy_risk_label` ï¿½ current-build evidence is
   queryable apart from legacy rows.
 - **Live-evidence export guard (2026-10-01):** the settlement-triggered
   rebuild of `data/live_entry_evidence.json` skips writes under pytest
   unless `MERID_LIVE_EVIDENCE_PATH` is explicitly redirected, and the
-  export only counts `is_eligible_for_research=1` rows — test fixture
+  export only counts `is_eligible_for_research=1` rows ï¿½ test fixture
   settlements can never contaminate the live evidence floor.
 
 Tests: `tests/test_current_build_provisional.py` (grid/domain, thresholds,
@@ -575,6 +575,28 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
 - Other audit tools: `scripts/signal_quality_audit.py`,
   `scripts/market_calibration_audit.py`,
   `scripts/stop_settlement_counterfactual.py`.
+
+## Evidence freshness + 15m audit ops (2026-10-14)
+
+- **Evidence age tiers are widened** (`MERID_EVIDENCE_DEGRADED_AFTER_S`=
+  172800, `_STALE_AFTER_S`=345600, `_UNUSABLE_AFTER_S`=604800,
+  `_DEGRADED_MAX_CONTRACTS`=3): the entry-evidence artifact is a rolling
+  prior â€” an aging artifact now degrades gracefully instead of vetoing or
+  fail-closing flow. UNUSABLE (>7d or missing file) still blocks
+  evidence-dependent entries; `MERID_EVIDENCE_OPERATOR_OVERRIDE_UNTIL`
+  remains as a file-loss fail-safe.
+- **Artifact refresh runs out-of-process**: the 48h join takes ~56min on
+  the ~19GB decision_audit.db, so `MERID_LIVE_EVIDENCE_EXPORT=0` stays.
+  `scripts/live_evidence_refresh.py` runs it on a query_only connection;
+  scheduled task `MERID live evidence refresh` runs every 12h.
+- **Bounded-lane sizing**: `MERID_BOUNDED_LANE_MAX_CONTRACTS` (default 1)
+  caps BOUNDED_POST_ONLY_LANES per-order contracts; set to 3 in .env.
+- **15m market audit**: `scripts/kalshi_15m_audit.py --days N` replays
+  settlement (60s TWAP from archived CF-RTI snapshots), feature
+  monotonicity vs signed ATR distance (ATR_15m = rolling median
+  |close-open| over prior 96 windows), symmetry, per-asset logistic fit,
+  and maker/taker fee reconciliation. Writes `data/kalshi_15m_audit.db`
+  and `reports/kalshi_15m_audit_<ts>.json`.
 
 ## Test-running notes
 

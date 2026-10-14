@@ -78,6 +78,22 @@ def _default_entry_contracts() -> float:
     except Exception:
         return 3.0
 
+
+def _bounded_lane_max_contracts() -> float:
+    """Contract cap for BOUNDED_POST_ONLY_LANES (default 1.0).
+
+    Bounded lanes are designed as one-contract instruments so their canary
+    accounting (daily caps, per-window dedupe, loss self-suspension) prices a
+    probe cheaply.  MERID_BOUNDED_LANE_MAX_CONTRACTS raises the cap when the
+    operator wants bounded flow sized above one contract; the fixed exposure
+    cap still bounds the order's dollar risk regardless.
+    """
+    try:
+        v = float(os.environ.get("MERID_BOUNDED_LANE_MAX_CONTRACTS", "1"))
+    except Exception:
+        return 1.0
+    return max(0.01, min(v, 100.0))
+
 # Microstructure features for order-flow, book-imbalance, and cross-asset lead-lag.
 # Loaded defensively; if missing, the live path falls back to Bachelier-only.
 try:
@@ -9324,8 +9340,12 @@ class LeanAgent15m:
                 except Exception:
                     pass
             if _decision_lane in BOUNDED_POST_ONLY_LANES:
-                if int(decision.approved_size_cc) > 100:
-                    decision = replace(decision, approved_size_cc=Decimal("100"))
+                _bounded_cc = int(round(_bounded_lane_max_contracts() * 100))
+                if int(decision.approved_size_cc) > _bounded_cc:
+                    decision = replace(
+                        decision,
+                        approved_size_cc=Decimal(str(_bounded_cc)),
+                    )
             # 2026-10-05: canary_taker emission gate — the decision-side
             # admission already ran; here we enforce the lane's own budget:
             # daily submission cap and one canary per asset per 15m window.
@@ -20678,7 +20698,7 @@ class LeanAgentGrid15m:
                         or candidate.get('provisional_cell_id')
                     )
                     if _bounded_lane:
-                        _pre_count = 1.0
+                        _pre_count = _bounded_lane_max_contracts()
                     try:
                         from decimal import Decimal as _D, ROUND_DOWN as _RD
                         _cap_usd = _D(str(getattr(allocator, "venue_cap_usd", 0.0) or 0.0))
@@ -20692,7 +20712,11 @@ class LeanAgentGrid15m:
                     except Exception as _fit_err:
                         logger.debug("[GLOBAL-ALLOCATOR] cap pre-fit skipped: %s", _fit_err)
                         if _pre_count <= 0.0:
-                            _pre_count = 1.0 if _bounded_lane else _default_entry_contracts()
+                            _pre_count = (
+                                _bounded_lane_max_contracts()
+                                if _bounded_lane
+                                else _default_entry_contracts()
+                            )
                     candidate['count'] = _pre_count
 
                     # Effective-quote ownership for degraded-mode accounting:
