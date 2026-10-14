@@ -768,6 +768,27 @@ MERID_MARGINAL_BAND_MIN_TTE_S = float(
     os.environ.get("MERID_MARGINAL_BAND_MIN_TTE_S", "180")
 )
 
+# 2026-10-14 (veto counterfactual, TTE×miss-depth split): the dynamic bound
+# itself — not just the 0-1c marginal band — over-rejects NO-side mid-window.
+# Settled counterfactual on ~22.3k `no_edge_below_threshold` rejects:
+#   TTE 180-420s: +7.8c/tr   TTE 420-660s: +5.2c/tr   (all miss depths
+#   0-8c, all routes maker/taker).  TTE >660s misses LOST -1.2c/tr and the
+#   YES-side lane floor is protective (-2.9c/tr), so the relief is NO-side,
+#   mid-window-only, and floored at the FLB boundary (sub-35c stays
+#   premium-priced).  NPEE remains the economic floor below the bound.
+MERID_EDGE_MIDWIN_RELIEF_CENTS_NO = float(
+    os.environ.get("MERID_EDGE_MIDWIN_RELIEF_CENTS_NO", "0")
+)
+MERID_EDGE_MIDWIN_TTE_LO_S = float(
+    os.environ.get("MERID_EDGE_MIDWIN_TTE_LO_S", "180")
+)
+MERID_EDGE_MIDWIN_TTE_HI_S = float(
+    os.environ.get("MERID_EDGE_MIDWIN_TTE_HI_S", "660")
+)
+MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO = float(
+    os.environ.get("MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO", "35")
+)
+
 
 def _marginal_band_slack(entry_price_cents: Optional[float]) -> float:
     """Edge-threshold slack (probability units) for the profitable near-miss
@@ -5026,8 +5047,23 @@ def compute_trade_decision(
         )
     _mb_yes_slack = _yes_band_slack if _mb_live("yes") else 0.0
     _mb_no_slack = _no_band_slack if _mb_live("no") else 0.0
+    # 2026-10-14 (veto counterfactual, TTE split): NO-side sub-threshold
+    # misses settled +4.5..+5.1c/tr at every miss depth on every route in
+    # the mid-window (TTE 180-660s) — the dynamic bound over-rejects there.
+    # Early-window misses (TTE>660s) LOST -1.2c/tr, so the relief is
+    # TTE-scoped to the measured mid-window and price-scoped above the
+    # FLB-toxic sub-35c region.  The 0.0 floor keeps NPEE as the economic
+    # boundary; YES keeps its bound (yes_lane_floor veto was protective).
+    _mw_no_relief = 0.0
+    if (
+        MERID_EDGE_MIDWIN_RELIEF_CENTS_NO > 0.0
+        and MERID_EDGE_MIDWIN_TTE_LO_S <= float(seconds_to_expiry) <= MERID_EDGE_MIDWIN_TTE_HI_S
+        and no_breakdown.executable_entry_price * 100.0 >= MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO
+    ):
+        _mw_no_relief = MERID_EDGE_MIDWIN_RELIEF_CENTS_NO / 100.0
+        indicators["no_midwin_relief_cents"] = _mw_no_relief * 100.0
     _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
-    _no_edge_eff_bound = no_min_edge - _mb_no_slack
+    _no_edge_eff_bound = max(0.0, no_min_edge - _mb_no_slack - _mw_no_relief)
     # A "rescued" side is one that would have failed without the slack —
     # stamped so routing can realize the ask-priced fill the counterfactual
     # measured, and so the rescue lane has its own outcome cohort.
@@ -5194,6 +5230,33 @@ def compute_trade_decision(
                 )
             )
 
+    # 2026-10-14 (veto counterfactual): EPC-cell ownership exempts a side
+    # from the raw p_selected cost-basis floor.  When the cell's
+    # price-adjusted edge LCB independently clears the effective bound, the
+    # settled-history estimator — which already nets realized costs — is the
+    # admission basis; re-checking raw p against the reserve stack vetoes the
+    # admission with the weaker estimator.  The cost_basis_override cohort
+    # forfeited +4.5..+8.3c/tr on every route (n=2,540).  Non-EPC candidates
+    # keep the floor (edge clears bound but p fails reserves = thin-edge).
+    def _cb_epc_exempt(side: str, bd, bound_s: float, min_p_s: float) -> bool:
+        if not indicators.get(f"{side}_epc_applied"):
+            return False
+        if not (float(bd.p_selected) <= float(min_p_s)):
+            return False
+        _lcb = float(indicators.get(f"{side}_epc_adj_lcb_cents") or 0.0) / 100.0
+        return _lcb >= bound_s
+
+    _yes_cb_epc_exempt = _cb_epc_exempt(
+        "yes", yes_breakdown, _yes_edge_eff_bound, yes_min_p
+    )
+    _no_cb_epc_exempt = _cb_epc_exempt(
+        "no", no_breakdown, _no_edge_eff_bound, no_min_p
+    )
+    if _yes_cb_epc_exempt:
+        indicators["cost_basis_epc_overridden_yes"] = True
+    if _no_cb_epc_exempt:
+        indicators["cost_basis_epc_overridden_no"] = True
+
     yes_qualifies = (
         yes_depth_ok
         and not tail_guard_violation_yes
@@ -5208,6 +5271,7 @@ def compute_trade_decision(
                 and _yes_eff_edge >= _yes_edge_eff_bound
                 and (
                     _yes_cbp_neg_floor
+                    or _yes_cb_epc_exempt
                     or yes_breakdown.p_selected > yes_min_p
                 )
                 and _yes_regime_ok
@@ -5222,6 +5286,7 @@ def compute_trade_decision(
         and _no_eff_edge >= _no_edge_eff_bound
         and (
             _no_cbp_neg_floor
+            or _no_cb_epc_exempt
             or no_breakdown.p_selected > no_min_p
         )
         and not tail_guard_violation_no
@@ -5257,6 +5322,7 @@ def compute_trade_decision(
         hi_price_applies_s: bool = False,
         trend_hi_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
+        cb_epc_exempt_s: bool = False,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         if not depth_ok_s:
@@ -5279,7 +5345,7 @@ def compute_trade_decision(
                 if min_edge_s < 0.0
                 else f"edge_below_threshold_{side}"
             )
-        if min_edge_s >= 0.0 and bd.p_selected <= min_p_s:
+        if min_edge_s >= 0.0 and bd.p_selected <= min_p_s and not cb_epc_exempt_s:
             return f"cost_basis_{side}"
         # 91-94c YES window: the lane owns the terminal reason — the strict
         # gate's specific failure when armed, or `trend_yes_hi_disabled` when
@@ -5345,6 +5411,7 @@ def compute_trade_decision(
             hi_price_applies_s=_yes_hi_price,
             trend_hi_block_s=_yes_trend_hi_block,
             eff_edge_s=_yes_eff_edge,
+            cb_epc_exempt_s=_yes_cb_epc_exempt,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -5357,6 +5424,7 @@ def compute_trade_decision(
             coinflip_block_s=_no_coinflip_eff,
             price_cap_block_s=_no_price_cap_block,
             eff_edge_s=_no_eff_edge,
+            cb_epc_exempt_s=_no_cb_epc_exempt,
         ),
     })
 
@@ -5455,6 +5523,7 @@ def compute_trade_decision(
                 "edge": not (_yes_eff_edge >= _yes_edge_eff_bound),
                 "cost_basis": not (
                     _yes_cbp_neg_floor
+                    or _yes_cb_epc_exempt
                     or float(yes_breakdown.p_selected) > yes_min_p
                 ),
                 "regime": not _yes_regime_ok,
@@ -5481,6 +5550,7 @@ def compute_trade_decision(
                 "edge": not (_no_eff_edge >= _no_edge_eff_bound),
                 "cost_basis": not (
                     _no_cbp_neg_floor
+                    or _no_cb_epc_exempt
                     or float(no_breakdown.p_selected) > no_min_p
                 ),
                 "regime": not _no_regime_ok,
@@ -5737,6 +5807,14 @@ def compute_trade_decision(
             _best_gate_bound = (
                 _yes_edge_eff_bound if best_side == "yes" else _no_edge_eff_bound
             )
+            _cb_p = (
+                yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
+            )
+            _cb_epc_overrides = (
+                best_threshold >= 0
+                and _cb_p <= best_min_p
+                and (_yes_cb_epc_exempt if best_side == "yes" else _no_cb_epc_exempt)
+            )
             if _best_gate_ev <= 0 and best_threshold >= 0:
                 # 2026-09-30: both legs uneconomic is an EV rejection, not an
                 # evidence-policy veto.  Label it honestly so the funnel can
@@ -5758,18 +5836,15 @@ def compute_trade_decision(
                 no_trade_reason = f"insufficient_depth_{best_side}"
             elif (
                 best_threshold >= 0
-                and (
-                    yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
-                )
-                <= best_min_p
+                and _cb_p <= best_min_p
+                and not _cb_epc_overrides
             ):
                 # p_selected does not clear the side-aware positive-EV floor
                 # (entry + all-in cost reserve).  Checked before the
                 # structural safety gates to match _side_block_reason's
                 # ordering — a below-floor price is the deeper rejection.
-                best_p = yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
                 no_trade_reason = f"cost_basis_override_{best_side}"
-                indicators[f"cost_basis_override_{best_side}_p"] = best_p
+                indicators[f"cost_basis_override_{best_side}_p"] = _cb_p
                 indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
             elif (
                 # Under counter-regime *penalty* mode a cleared side is not a
