@@ -496,7 +496,12 @@ def test_daily_roll_resets_counters():
 def test_first_fill_bad_markout_suspends():
     c = _prov_cell(side="no", px=45.0)
     cbp.record_provisional_fill(c.cell_id, decision_id="d0")
+    # 2026-10-14 suspension audit: a lone 5s print is microstructure noise —
+    # only a persistent >=30s markout (or a 5s print past the -20c hard
+    # floor) proves the fill was toxic.
     cbp.record_provisional_markout(c.cell_id, "d0", 5, -3.5)
+    assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
+    cbp.record_provisional_markout(c.cell_id, "d0", 30, -3.5)
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
     ok, r = cbp.provisional_cell_admission(c.cell_id)
     assert not ok and r == "cell_suspended"
@@ -510,7 +515,7 @@ def test_markout_arriving_before_fill_row_merges_and_suspends():
     by up to 6s)."""
     c = _prov_cell(side="no", px=45.0)
     cbp.record_provisional_markout(c.cell_id, "d0", 1, -4.0)
-    cbp.record_provisional_markout(c.cell_id, "d0", 5, -3.5)
+    cbp.record_provisional_markout(c.cell_id, "d0", 30, -3.5)
     # Standalone markouts must not suspend before any fill exists.
     assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
     cbp.record_provisional_fill(c.cell_id, decision_id="d0")
@@ -518,7 +523,7 @@ def test_markout_arriving_before_fill_row_merges_and_suspends():
     outs = st["outcomes"][c.cell_id]
     assert not any(o.get("kind") == "markout" for o in outs)
     fills = [o for o in outs if o.get("kind") == "fill"]
-    assert len(fills) == 1 and fills[0]["markout_5s_cents"] == -3.5
+    assert len(fills) == 1 and fills[0]["markout_30s_cents"] == -3.5
     assert fills[0]["markout_1s_cents"] == -4.0
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
 
@@ -550,7 +555,11 @@ def test_first_fill_pnl_beyond_stress_suspends():
         c.cell_id, decision_id="d0", candidate_ev_cents=3.0
     )
     cbp.record_provisional_settlement("d0", net_pnl_cents=-5.5)
-    # -(3.0 + 2.0) = -5.0 bound breached -> SUSPENDED.
+    # -(3.0 + 2.0) = -5.0 bound breached, but 2026-10-14: a bare settled
+    # binary loss is variance — suspension needs a corroborating persistent
+    # adverse markout showing the fill was toxic, not unlucky.
+    assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
+    cbp.record_provisional_markout(c.cell_id, "d0", 30, -1.0)
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
 
 
@@ -583,6 +592,11 @@ def test_invariant_violation_suspends_immediately():
 def test_consecutive_router_rejects_suspend():
     c = _prov_cell(side="no", px=45.0)
     cbp.record_provisional_router_reject(c.cell_id)
+    assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
+    cbp.record_provisional_router_reject(c.cell_id)
+    # 2026-10-14: stale-quote revalidation rejects arrive in bursts on a
+    # degraded-WS box — the emergency streak is 3, not 2
+    # (MERID_CBP_ROUTER_CONSEC_SUSPEND default).
     assert cbp.get_cell_state(c.cell_id) != "SUSPENDED"
     cbp.record_provisional_router_reject(c.cell_id)
     assert cbp.get_cell_state(c.cell_id) == "SUSPENDED"
@@ -1114,8 +1128,11 @@ def _mk_live_decision(*, asset="BTC", side="yes", tte=300.0, exec_price=0.77,
     )
 
 
-def test_domain_gate_tte_ceiling_blocks_late_entry():
+def test_domain_gate_tte_ceiling_blocks_late_entry(monkeypatch):
     """Formula-lane selection at TTE 823s (the XRP NO@75 loss) is vetoed."""
+    # .env widened the live domain to 840s; pin the 600s bound this gate was
+    # built against so the assertion is env-independent.
+    monkeypatch.setattr(_td, "MERID_LIVE_ENTRY_MAX_TTE_S", 600.0)
     d = _mk_live_decision(tte=823.0, exec_price=0.75)
     out = apply_bounded_live_domain_gate(
         d,
@@ -1193,6 +1210,9 @@ def test_domain_gate_end_to_end_tte_ceiling(monkeypatch):
     # the deep-OTM Bachelier p this scenario relies on (p_no must stay
     # high enough for a +EV NO selection to reach the domain gate).
     monkeypatch.setattr(_td, "MERID_ANCHOR_VOL_TO_MARKET", False)
+    # .env widened the live domain to 840s; pin the 600s bound this test
+    # asserts (TTE 823 must clear the ceiling).
+    monkeypatch.setattr(_td, "MERID_LIVE_ENTRY_MAX_TTE_S", 600.0)
     d = _decision(
         asset="XRP",
         spot_price=1.4863, strike_price=1.4886,
