@@ -62,7 +62,10 @@ def get_loaded_legacy_modules() -> List[str]:
         List of module names that match legacy patterns.
     """
     loaded = []
-    for module_name in sys.modules:
+    # Snapshot: concurrent imports mutate sys.modules during startup; iterating
+    # the live dict raises RuntimeError("dictionary changed size during
+    # iteration") and failed the legacy check with a false-positive crash.
+    for module_name in list(sys.modules):
         # Check if any legacy pattern is a prefix of the module name
         for pattern in LEGACY_MODULE_PATTERNS:
             if module_name == pattern or module_name.startswith(pattern + "."):
