@@ -67,6 +67,20 @@ def _disable_market_anchor(monkeypatch, tmp_path):
         "MERID_THRESHOLD_CELL_DAILY_MAX_FILLS_PER_ASSET",
         "MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS",
         "MERID_THRESHOLD_CELL_MAX_OPEN_ORDERS_TOTAL",
+        # Recovery/probation knobs — .env pins an operator allowlist and
+        # market-cadence durations; tests assert default behavior.
+        "MERID_RECOVERY_ALLOWLIST",
+        "MERID_EXEC_CONTRACT_FIX_VERIFIED",
+        "MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S",
+        "MERID_THRESHOLD_CELL_PROBATION_EQ_MIN_S",
+        "MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_ECON_S",
+        "MERID_THRESHOLD_CELL_PROBATION_CONTRACT_MIN_S",
+        "MERID_THRESHOLD_CELL_PROBATION_MECH_PAUSE_S",
+        "MERID_THRESHOLD_CELL_PROBATION_RESET_COOLDOWN_S",
+        "MERID_THRESHOLD_CELL_PROBATION_MAX_SUBMISSIONS",
+        "MERID_THRESHOLD_CELL_PROBATION_MAX_FILLS",
+        "MERID_THRESHOLD_CELL_PROBATION_LOSS_BUDGET_CENTS",
+        "MERID_THRESHOLD_CELL_PROBATION_PASS_OBS",
     ):
         monkeypatch.delenv(_v, raising=False)
     # Provisional-lane env overrides must not leak from .env â€” these tests
