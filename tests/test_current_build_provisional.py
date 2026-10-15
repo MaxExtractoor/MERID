@@ -1000,12 +1000,14 @@ def test_rejection_context_survives_no_trade_decision():
     assert ctx["no_admission_owner"] == "current_build_provisional"
 
 
-def test_bounded_lane_normalizes_to_one_contract():
-    """_execute_candidate must force exactly 1.0 contract for bounded lanes.
+def test_bounded_lane_capped_at_configured_max():
+    """_execute_candidate must cap bounded lanes at MERID_BOUNDED_LANE_MAX_CONTRACTS.
 
-    Regression guard: the lane-cap block must restore a shrunk fractional
-    count to 1.0 (the allocator pre-fit and compute_order_size may emit
-    sub-contract quantities for cap-constrained accounts).
+    Regression guard (updated 2026-10-14): the lane-cap block used to
+    normalize every bounded/cell-tagged candidate to exactly 1.0, silently
+    overriding the configured cap (MERID_BOUNDED_LANE_MAX_CONTRACTS=3).
+    The cap is now a ceiling only — sized counts below it pass through,
+    and the cap value comes from _bounded_lane_max_contracts().
     """
     import inspect
 
@@ -1015,9 +1017,47 @@ def test_bounded_lane_normalizes_to_one_contract():
     # The clamp must cover every bounded post-only lane via the shared
     # constant — not just the two lanes that existed when this guard landed.
     assert "BOUNDED_POST_ONLY_LANES" in src
-    # Lane block must trigger on any non-1.0 count, not only count > 1.0.
-    assert "count != 1.0" in src
-    assert "count = 1.0" in src
+    # The cap must be the configured lane max, not a hardcoded 1.0.
+    assert "_bounded_lane_max_contracts" in src
+    assert "count != 1.0" not in src
+    assert "count = 1.0" not in src
+
+
+def test_cell_provenance_does_not_trigger_bounded_lane_logic():
+    """threshold_cell_id / provisional_cell_id are provenance, not lane identity.
+
+    trade_decision stamps cell ids on every cell-matched admission —
+    including unbounded lanes such as settlement_convergence.  Bounded-lane
+    treatment (count cap, maker coercion reject, parity deferral, cap
+    pre-fit) must key on decision_lane only, or cell-tagged normal
+    candidates get silently re-bounded — the 1-contract normalization bug
+    fixed 2026-10-14.
+    """
+    import inspect
+    import re
+
+    from merid import loop_15m
+    from merid.prediction import agent_grid_15m
+
+    loop_src = inspect.getsource(loop_15m._execute_candidate)
+    # The count clamp and the two _is_bounded_lane sites must not OR on the
+    # provenance fields.  (The fields still appear legitimately as intent
+    # provenance — assert only on their use as a lane-ownership trigger.)
+    assert not re.search(
+        r"in BOUNDED_POST_ONLY_LANES[^)]*threshold_cell_id", loop_src, re.S
+    ), "bounded-lane condition still triggers on threshold_cell_id provenance"
+    assert not re.search(
+        r"in BOUNDED_POST_ONLY_LANES[^)]*provisional_cell_id", loop_src, re.S
+    ), "bounded-lane condition still triggers on provisional_cell_id provenance"
+    assert "_is_tc_lane = _td_lane_for_coerce ==" in loop_src
+
+    grid_src = inspect.getsource(agent_grid_15m.LeanAgentGrid15m.run_cycle)
+    assert not re.search(
+        r"in BOUNDED_POST_ONLY_LANES[^)]*threshold_cell_id", grid_src, re.S
+    ), "allocator pre-fit still treats cell provenance as bounded lane"
+    assert not re.search(
+        r"in BOUNDED_POST_ONLY_LANES[^)]*provisional_cell_id", grid_src, re.S
+    ), "allocator pre-fit still treats cell provenance as bounded lane"
 
 
 def test_allocator_prefit_does_not_shrink_bounded_lane():

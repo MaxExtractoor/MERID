@@ -464,6 +464,10 @@ _ENV_OVERRIDES.update({
         ("MERID_EDGE_MARGINAL_RELIEF_CENTS", "float", 0, 15),
         ("MERID_EDGE_MARGINAL_RELIEF_LO_CENTS", "float", 0, 99),
         ("MERID_ENTRY_MAX_REQUOTES_PER_KEY", "int", 0, 5),
+        # Bounded-lane per-order contract ceiling (read directly by
+        # agent_grid_15m._bounded_lane_max_contracts; declared here so it is
+        # not reported as an unknown MERID_* variable).
+        ("MERID_BOUNDED_LANE_MAX_CONTRACTS", "float", 0.01, 100),
     )
 })
 

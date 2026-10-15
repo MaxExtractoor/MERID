@@ -166,7 +166,7 @@ class TestErrorResponseCompatibility:
         valid_reasons = [
             "non_positive_size",
             "price_out_of_range",
-            "order_exceeds_fixed_1usd_cap",
+            "order_exceeds_fixed_exposure_cap",
             "duplicate_order",
             "market_closed",
         ]

@@ -2553,12 +2553,13 @@ class DecisionAuditLedger:
             conn = sqlite3.connect(str(self.db_path), timeout=30)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = 1")
-            # Drive from decision_ts: rows are appended chronologically, so the
-            # index range reads contiguous pages; ENTER rows are then a handful
-            # of point lookups.  Driving from outcomes (status index, ~all rows
-            # SETTLED) random-read the whole decision table (575s vs 56s cold).
-            # A decision always precedes its settlement, and window_hours plus
-            # a one-hour pad covers decisions made just before the window.
+            # Drive from o.settled_at: the outcomes index range stays selective
+            # (only settled rows in the window), and each decision row is then a
+            # PK point lookup.  The inverse (decision_ts range) scans ~48h of the
+            # 19GB decisions table — measured 505s vs 5.8s on 2026-10-14.  The
+            # earlier comment favoring decision_ts pre-dated the table growth.
+            # A decision always precedes its settlement; the one-hour pad on
+            # decision_ts still covers decisions made just before the window.
             rows = conn.execute(
                 """
                 SELECT d.asset AS asset,
@@ -2570,19 +2571,19 @@ class DecisionAuditLedger:
                                 se.executable_entry_price_cents) AS entry_cents,
                        o.settled_yes AS settled_yes,
                        o.settled_at AS settled_at
-                FROM strategy_decisions d
-                JOIN strategy_decision_outcomes o ON o.decision_id = d.decision_id
+                FROM strategy_decision_outcomes o
+                JOIN strategy_decisions d ON d.decision_id = o.decision_id
                 LEFT JOIN strategy_decision_side_ev se
                   ON se.decision_id = d.decision_id
                  AND se.side = d.selected_side
-                WHERE d.decision_ts >= ?
+                WHERE o.outcome_status = 'SETTLED'
+                  AND o.settled_at >= ?
+                  AND d.decision_ts >= ?
                   AND d.decision = 'ENTER'
                   AND d.selected_side IN ('yes', 'no')
                   AND d.is_eligible_for_research = 1
-                  AND o.outcome_status = 'SETTLED'
-                  AND o.settled_at >= ?
                 """,
-                (since - 3600.0, since),
+                (since, since - 3600.0),
             ).fetchall()
         except Exception as exc:
             logger.warning(

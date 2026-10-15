@@ -288,7 +288,10 @@ class GlobalSlotAllocator:
                     tickers_with_slot.add(pos.market_id)
 
                     # Derive the actual fill price from position cache.
-                    pos_count = max(int(pos.contracts), 1)
+                    # Keep centi-contract precision: truncating to int both
+                    # undercounts multi-contract positions (2.5 -> 2, understates
+                    # cap usage) and over-counts fractional ones (0.5 -> 1).
+                    pos_count = max(round(float(pos.contracts), 2), 0.01)
                     if pos.avg_price_cents is not None and pos.avg_price_cents > 0:
                         fill_price_cents = int(pos.avg_price_cents)
                     elif pos.notional_usd and pos_count > 0:
@@ -306,8 +309,8 @@ class GlobalSlotAllocator:
                         slot.count = pos_count
                         logger.info(
                             "[SLOT-ALLOCATOR] Updated slot from position cache: "
-                            "slot_id=%s ticker=%s old_price=%dc old_count=%d "
-                            "new_price=%dc new_count=%d",
+                            "slot_id=%s ticker=%s old_price=%dc old_count=%s "
+                            "new_price=%dc new_count=%s",
                             slot_id, slot.ticker, old_price, old_count,
                             fill_price_cents, pos_count
                         )
@@ -332,7 +335,7 @@ class GlobalSlotAllocator:
                         )
                         continue
 
-                    pos_count = max(int(pos.contracts), 1)
+                    pos_count = max(round(float(pos.contracts), 2), 0.01)
                     if pos.avg_price_cents is not None and pos.avg_price_cents > 0:
                         fill_price_cents = int(pos.avg_price_cents)
                     elif pos.notional_usd and pos_count > 0:
@@ -360,7 +363,7 @@ class GlobalSlotAllocator:
                     self._total_allocations += 1
                     logger.info(
                         "[SLOT-ALLOCATOR] Created slot from position cache: "
-                        "slot_id=%s ticker=%s agent=%s price=%dc count=%d",
+                        "slot_id=%s ticker=%s agent=%s price=%dc count=%s",
                         new_slot_id, ticker, new_slot.agent_id,
                         fill_price_cents, pos_count
                     )

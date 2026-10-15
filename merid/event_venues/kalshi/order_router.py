@@ -11313,7 +11313,7 @@ def _apply_risk_based_order_sizing(
                 )
             else:
                 logger.warning(
-                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count_fp=%s)",
+                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds fixed exposure cap, requested_count_fp=%s)",
                     ticker, asset, float(bankroll_usd), price_cents, requested,
                 )
             return Decimal(0)
@@ -11326,7 +11326,7 @@ def _apply_risk_based_order_sizing(
 
         if sized < requested:
             logger.info(
-                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %s to %s contracts ($1 fixed exposure cap)",
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %s to %s contracts (fixed exposure cap)",
                 ticker, asset, float(bankroll_usd), price_cents, requested, sized,
             )
 
@@ -12680,18 +12680,18 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         intent.count_fp = sized_fp
         intent.count = float(sized_fp)
 
-    # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
+    # Reject order if slot-based sizing returned 0 (exceeds the fixed exposure cap)
     if sized_fp is None or sized_fp <= 0:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
-            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc mode=%s",
+            "[order-router] Order rejected — exceeds fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc mode=%s",
             intent.ticker, original_count_fp, intent.price_cents, _mode_value(mode)
         )
         _release_canonical_entry_idempotency(intent)
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={intent.price_cents}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_exposure_cap:requested={original_count_fp},price={intent.price_cents}c",
             latency_ms=round(latency, 2),
         )
     
@@ -13491,7 +13491,7 @@ def _prepare_order_for_gate(
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={intent.count_fp},price={intent.price_cents}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_exposure_cap:requested={intent.count_fp},price={intent.price_cents}c",
             latency_ms=round(latency, 2),
         ), None
 
@@ -13579,13 +13579,13 @@ def _prepare_order_for_gate(
     if qty_cc == 0 and not _is_exit:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
-            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
+            "[order-router] Order rejected — exceeds fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
             intent.ticker, original_count_fp, original_price
         )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={original_price}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_exposure_cap:requested={original_count_fp},price={original_price}c",
             latency_ms=round(latency, 2),
         ), None
 
@@ -14053,14 +14053,14 @@ async def _route_live(
         if qty_cc == 0 and not _is_exit_order(intent):
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
-                "[order-router] Live order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
+                "[order-router] Live order rejected — exceeds fixed exposure cap (global slot allocator): ticker=%s requested_count_fp=%s price=%dc",
                 intent.ticker, original_count_fp, original_price
             )
             _release_gate_record(intent, f"risk_limit_exceeded:{intent.ticker}")
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count_fp},price={original_price}c",
+                reason=f"risk_limit_exceeded:order_exceeds_fixed_exposure_cap:requested={original_count_fp},price={original_price}c",
                 latency_ms=round(latency, 2),
             )
 
@@ -20567,11 +20567,12 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # the router-reject suspension rule; on-wire outcomes are recorded by the
     # submission block in _route_live, so only pre-wire rejects are handled
     # here.
+    # Only lane-owned intents count: cell ids ride along as provenance on
+    # every cell-matched admission, so keying on them would charge the cell's
+    # router-reject suspension budget for another lane's pre-wire drop.
     if (
-        (
-            getattr(intent, "threshold_cell_id", None)
-            or getattr(intent, "provisional_cell_id", None)
-        )
+        getattr(intent, "decision_lane", None)
+        in ("threshold_cell", "current_build_provisional")
         and result is not None
         and result.status == "rejected"
         and not getattr(result, "submission_attempted", False)

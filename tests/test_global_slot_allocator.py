@@ -1,7 +1,7 @@
 """
 Test suite for Global Slot Allocator
 
-Tests the $2 hard limit enforcement across all 5 assets with slot-based position management.
+Tests the $3 hard limit enforcement across all 5 assets with slot-based position management.
 """
 
 import pytest
@@ -158,7 +158,7 @@ class TestGlobalSlotAllocator:
         )
         allocator = get_global_slot_allocator()
         
-        # Fill up to $2 capacity (BTC 75c + ETH 75c + SOL 50c = 200c)
+        # Fill $2.00 of the $3.00 capacity (BTC 75c + ETH 75c + SOL 50c = 200c)
         request1 = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
@@ -171,7 +171,7 @@ class TestGlobalSlotAllocator:
         allocated1, _, _ = allocator.request_allocation(request1)
         assert allocated1
         assert allocator.get_total_exposure() == 0.75
-        assert allocator.get_available_exposure() == 1.25
+        assert allocator.get_available_exposure() == 2.25
 
         request2 = AllocationRequest(
             agent_id="ETH_15M",
@@ -185,7 +185,7 @@ class TestGlobalSlotAllocator:
         allocated2, _, _ = allocator.request_allocation(request2)
         assert allocated2
         assert allocator.get_total_exposure() == 1.50
-        assert allocator.get_available_exposure() == 0.50
+        assert allocator.get_available_exposure() == 1.50
 
         request3 = AllocationRequest(
             agent_id="SOL_15M",
@@ -199,18 +199,19 @@ class TestGlobalSlotAllocator:
         allocated3, _, _ = allocator.request_allocation(request3)
         assert allocated3
         assert allocator.get_total_exposure() == 2.00
-        assert allocator.get_available_exposure() == 0.00
-        
-        # Entry order should be rejected due to insufficient exposure
-        # 2026-07-13: Correlation discount disabled - simple exposure check
+        assert allocator.get_available_exposure() == 1.00
+
+        # Entry order should be rejected when it exceeds the remaining $1.00.
+        # 3 contracts at 50c = $1.50 > $1.00 available.
         request_reject = AllocationRequest(
             agent_id="DOGE_15M",
             asset="DOGE",
             ticker="KXDOGE15M-TEST",
-            entry_price_cents=20,  # 20c > 0c available
+            entry_price_cents=50,
             edge_pct=2.0,
             spread_cents=5,
-            is_exit_order=False
+            is_exit_order=False,
+            count=3,
         )
         allocated_reject, reason_reject, _ = allocator.request_allocation(request_reject)
         assert not allocated_reject
@@ -261,7 +262,7 @@ class TestGlobalSlotAllocator:
         released = allocator.release_slot(slot_id, exit_price_cents=99)
         assert released
         assert allocator.get_total_exposure() == 0.0
-        assert allocator.get_available_exposure() == 2.0
+        assert allocator.get_available_exposure() == 3.0
         
         print("✓ Slot release on closure test passed")
     
@@ -273,7 +274,7 @@ class TestGlobalSlotAllocator:
         )
         allocator = get_global_slot_allocator()
 
-        # Scenario: BTC 75c + ETH 75c + SOL 50c = 200c used, 0c available
+        # Scenario: BTC 75c + ETH 75c + SOL 50c x3 = 300c used, 0c available
         request_btc = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
@@ -299,7 +300,8 @@ class TestGlobalSlotAllocator:
             entry_price_cents=50,
             edge_pct=2.0,
             spread_cents=5,
-            is_exit_order=False
+            is_exit_order=False,
+            count=3,
         )
 
         allocated_btc, _, slot_btc = allocator.request_allocation(request_btc)
@@ -307,7 +309,7 @@ class TestGlobalSlotAllocator:
         allocated_sol, _, slot_sol = allocator.request_allocation(request_sol)
 
         assert allocated_btc and allocated_eth and allocated_sol
-        assert abs(allocator.get_total_exposure() - 2.00) < 0.01  # Floating point tolerance
+        assert abs(allocator.get_total_exposure() - 3.00) < 0.01  # Floating point tolerance
         assert abs(allocator.get_available_exposure() - 0.00) < 0.01
 
         # Should reject DOGE 20c (would exceed $2)
@@ -340,13 +342,13 @@ class TestGlobalSlotAllocator:
 
         # BTC closes - release slot
         allocator.release_slot(slot_btc, exit_price_cents=50)
-        assert allocator.get_total_exposure() == 1.25
+        assert allocator.get_total_exposure() == 2.25
         assert allocator.get_available_exposure() == 0.75
 
         # Now DOGE 20c should be allowed
         allocated_doge2, _, slot_doge = allocator.request_allocation(request_doge)
         assert allocated_doge2
-        assert allocator.get_total_exposure() == 1.45
+        assert allocator.get_total_exposure() == 2.45
 
         print("✓ Sequential trading with exits test passed")
     

@@ -20684,18 +20684,18 @@ class LeanAgentGrid15m:
                     # even though 0.12 contracts is a perfectly valid Kalshi V2
                     # count_fp order.  ROUND_DOWN so the fit never exceeds the cap.
                     _pre_count = float(candidate.get('count', 0.0) or 0.0)
-                    # Bounded lanes (BOUNDED_POST_ONLY_LANES) are one-contract
+                    # Bounded lanes (BOUNDED_POST_ONLY_LANES) are capped-size
                     # instruments: never pre-shrink them to the cap fit.  The
                     # allocator evaluates the full contract and rejects when it
                     # does not fit — under-sizing here would let execution
                     # submit a non-canonical quantity the lane's bookkeeping
-                    # cannot attribute.  Reserve exactly 1 contract for these
-                    # lanes even if the generic seed target is higher.
+                    # cannot attribute.  Lane identity is decision_lane only:
+                    # cell ids are provenance stamped on cell-matched
+                    # admissions from any lane, so they must not switch a
+                    # non-lane candidate to the bounded reservation.
                     _bounded_lane = bool(
                         candidate.get('decision_lane')
                         in BOUNDED_POST_ONLY_LANES
-                        or candidate.get('threshold_cell_id')
-                        or candidate.get('provisional_cell_id')
                     )
                     if _bounded_lane:
                         _pre_count = _bounded_lane_max_contracts()

@@ -6,15 +6,15 @@ Replaces per-asset caps with a top-N edge knapsack allocator under venue cap.
 Core idea:
 - Collect all candidates from all agents in a cycle
 - Sort by edge (descending)
-- Greedy fill under venue cap ($1.00)
+- Optimal knapsack fill under the venue cap (resolved fixed_exposure_cap_usd, currently $3.00)
 - Only submit orders that fit under the cap
 
 This ensures:
 - Best edges get prioritized
-- Total exposure ≤ venue cap (shared $1 pool across all assets)
+- Total exposure ≤ venue cap (shared pool across all assets)
 - No artificial per-asset limits
 - Concentration on highest expected returns
-- 1 contract per asset per window
+- Up to the configured per-order contract max per asset per window
 - Entry prices must fall within [min_price_cents, max_price_cents] (default 10-75c)
 - Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.5% (industry standard)
 """
@@ -30,6 +30,25 @@ from utils.logger import get_logger
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
 logger = get_logger("merid.risk.profiles.global_allocator")
+
+
+def _default_venue_cap_usd() -> float:
+    """Resolved fixed exposure cap for the shared venue pool (USD).
+
+    Single authority: the resolved live config's ``fixed_exposure_cap_usd``
+    (currently $3.00).  Falls back to the env value, then a conservative $1.00.
+    """
+    try:
+        from merid.config.live_config import get_resolved_live_config
+        resolved = get_resolved_live_config(allow_unresolved=True)
+        if resolved is not None and getattr(resolved, "resolved", False):
+            return float(resolved.fixed_exposure_cap_usd)
+    except Exception:
+        pass
+    try:
+        return float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "1.00"))
+    except Exception:
+        return 1.00
 
 
 def _to_edge_fraction(edge: float) -> float:
@@ -259,12 +278,13 @@ def _mark_terminal(decision: AllocationDecision, stage: str, reason: str) -> Non
 class GlobalAllocator:
     """
     Global allocator for multi-asset position sizing.
-    
-    Implements top-N edge knapsack under venue cap with shared $1 pool.
-    
+
+    Implements top-N edge knapsack under venue cap with a shared exposure pool.
+
     CRITICAL RULES:
-    - $1 total exposure cap across ALL assets (shared pool, not per-asset)
-    - Up to 2 contracts per asset per window (capped by $1 exposure)
+    - Fixed total exposure cap across ALL assets (shared pool, not per-asset;
+      venue_cap_usd comes from the resolved live config, currently $3.00)
+    - Up to MAX_CONTRACTS_PER_ORDER contracts per order within the cap
     - Entry price must fall within [min_price_cents, max_price_cents] (default 10-75c)
     - Confidence must be ≥ 50% (matches signal generation range: 0.5 + edge)
     - Edge must be ≥ 2.5% (matches profile edge_bands - industry standard)
@@ -273,7 +293,7 @@ class GlobalAllocator:
     
     def __init__(
         self,
-        venue_cap_usd: float = 1.00,
+        venue_cap_usd: Optional[float] = None,  # resolves to the live fixed exposure cap when omitted
         min_edge_pct: float = 0.025,  # 2026-07-14: Changed to 2.5% to match profile edge_bands (industry standard)
                                       # 2026-07-25: CRITICAL - This is stored as FRACTION (0.025 = 2.5%), not percentage
                                       # Display multiplies by 100 for logging, but internal comparison uses fraction
@@ -288,6 +308,8 @@ class GlobalAllocator:
         # This ensures global allocator doesn't filter candidates that pass validate_edge()
         per_asset_min_edge_pct: dict = None,
     ):
+        if venue_cap_usd is None:
+            venue_cap_usd = _default_venue_cap_usd()
         self.venue_cap_usd = venue_cap_usd
         self.min_edge_pct = min_edge_pct  # Stored as fraction (0.025 = 2.5%)
         self.min_confidence = min_confidence
@@ -417,10 +439,10 @@ class GlobalAllocator:
         cycle_id: Any = None,
     ) -> List[OrderCandidate]:
         """
-        Allocate orders based on edge ranking under venue cap with shared $1 pool.
+        Allocate orders based on edge ranking under venue cap with shared exposure pool.
 
-        CRITICAL: This implements the shared $1 pool model where assets compete for capital.
-        No per-asset budgets - total exposure across all assets must be <= $1.00.
+        CRITICAL: This implements the shared-pool model where assets compete for capital.
+        No per-asset budgets - total exposure across all assets must be <= venue_cap_usd.
 
         One ``AllocationDecision`` is produced for every input candidate and keyed by
         ``cycle_id``.  Each candidate is evaluated through the fixed stage pipeline;
@@ -774,7 +796,7 @@ class GlobalAllocator:
             logger.info("[GLOBAL-ALLOCATOR] No candidates passed all filters (edge, confidence, price, position)")
             return []
 
-        # Optimal knapsack under $1 cap, preserving original candidate ordering.
+        # Optimal knapsack under the venue cap, preserving original candidate ordering.
         from itertools import combinations
 
         n = len(unique_candidates)
@@ -1076,15 +1098,19 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     """
     Create GlobalAllocator from risk envelope configuration.
     
-    CRITICAL: Uses shared $1 pool model with per-asset edge thresholds aligned with risk_parameters.py.
-    
+    CRITICAL: Uses a shared exposure pool with per-asset edge thresholds aligned with risk_parameters.py.
+
     Args:
         envelope: Risk envelope instance
-    
+
     Returns:
-        Configured GlobalAllocator with shared $1 pool parameters and per-asset edge thresholds
+        Configured GlobalAllocator with shared-pool parameters and per-asset edge thresholds
     """
-    venue_cap = envelope.max_total_notional_usd if hasattr(envelope, 'max_total_notional_usd') else 1.00
+    venue_cap = (
+        envelope.max_total_notional_usd
+        if hasattr(envelope, 'max_total_notional_usd')
+        else _default_venue_cap_usd()
+    )
     
     # CRITICAL: Use the shared $1 pool parameters (no per-asset rescaling)
     min_edge_pct = 0.025  # 2026-07-14: Changed from 0.5% to 2.5% to match profile edge_bands (industry standard)

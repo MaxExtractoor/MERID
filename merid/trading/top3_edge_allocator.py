@@ -3,13 +3,13 @@ Top-3 Edge Selector & Allocator — Production Implementation
 
 Implements the cross-agent "Top-3 Edge Selector & Allocator" that:
 1. Selects only the top 3 edge cases across 5 assets (BTC, ETH, SOL, XRP, DOGE)
-2. 2026-07-08 UPDATE: Allocates at most $1 total exposure across all new positions per cycle (fixed $1 model)
+2. Allocates at most the configured fixed exposure cap (MERID_FIXED_EXPOSURE_CAP_USD) across all new positions per cycle
 3. Dynamically sizes positions by relative edge (highest edge gets largest size)
 4. Enforces a position batch regime: no new trades until current top-3 are closed
 
 Invariants (see Top3SelectionSpec class docstring for formal contract):
 - len(selected_assets(t)) <= 3
-- sum(position_notional_for_new_entries(t)) <= $1.00 (fixed exposure cap)
+- sum(position_notional_for_new_entries(t)) <= fixed_exposure_cap_usd (resolved global cap)
 - At most one "open batch" can be ACTIVE at any time
 
 Uses existing infrastructure:
@@ -123,7 +123,7 @@ class Top3Batch:
     cycle_ts: datetime
     allocations: List[Top3Allocation]
     total_target_notional: int  # cents
-    cycle_risk_cap_pct: float  # DEPRECATED - using fixed $1 exposure cap
+    cycle_risk_cap_pct: float  # DEPRECATED - using fixed USD exposure cap
     bankroll_at_creation: int  # cents
     
     # Track which assets have been filled/closed
@@ -250,10 +250,13 @@ class Top3SelectionSpec:
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
     # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-    # 2026-07-08 UPDATE: Percentage-based cycle risk cap DISABLED in favor of fixed $1 exposure model
+    # 2026-07-08 UPDATE: Percentage-based cycle risk cap DISABLED in favor of a fixed USD exposure model
+    # 2026-10-14: the cap now tracks MERID_FIXED_EXPOSURE_CAP_USD (the global
+    # exposure authority) instead of a stale hardcoded $1.00 that let Edge #1
+    # consume the entire cycle budget before Edges #2/#3 were considered.
     # DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # DISABLED
     # DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # DISABLED
-    DEFAULT_CYCLE_RISK_CAP_USD: float = 1.00  # Fixed $1 exposure cap (replaces percentage-based)
+    DEFAULT_CYCLE_RISK_CAP_USD: float = float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "3.00"))  # Fixed exposure cap (replaces percentage-based)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
     MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))  # CRITICAL FIX: 3 (was 5) - enforce top-3 limit to prevent venue window bottleneck
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
@@ -268,7 +271,7 @@ class Top3SelectionSpec:
 
 def select_top3_allocations(
     bankroll_notional: int,  # cents
-    cycle_risk_cap_usd: float,  # 2026-07-08 UPDATE: Fixed $1 exposure cap instead of percentage
+    cycle_risk_cap_usd: float,  # 2026-07-08 UPDATE: Fixed exposure cap (USD) instead of percentage
     candidates: List[EdgeCandidate],
     eps: Optional[float] = None,  # Uses env MERID_TOP3_EDGE_EPS if None
     min_allocation_cents: Optional[int] = None,  # Uses env MERID_TOP3_MIN_ALLOCATION_CENTS if None
@@ -284,8 +287,8 @@ def select_top3_allocations(
     6. Never skip Edge #1 to take Edge #2 or #3
 
     Args:
-        bankroll_notional: Current bankroll in cents (unused in fixed $1 model)
-        cycle_risk_cap_usd: Fixed exposure cap in USD (default $1.00)
+        bankroll_notional: Current bankroll in cents (unused in fixed-cap model)
+        cycle_risk_cap_usd: Fixed exposure cap in USD (default: MERID_FIXED_EXPOSURE_CAP_USD)
         candidates: List of edge candidates (all 5 assets potentially)
         eps: Epsilon for floating point comparisons (uses env if None)
         min_allocation_cents: Minimum allocation in cents (uses env if None)
@@ -317,9 +320,9 @@ def select_top3_allocations(
     for i, c in enumerate(sorted_candidates[:3], 1):
         logger.info("  Edge#%d: %s | edge=%.4f | max_cap=%d¢", i, c.asset, c.edge, c.max_notional_cap)
 
-    # Step 3: Compute budgets (fixed $1 model, not percentage-based)
+    # Step 3: Compute budgets (fixed exposure cap, not percentage-based)
     total_budget_cents = int(cycle_risk_cap_usd * 100)  # Convert USD to cents
-    edge1_budget_cents = total_budget_cents  # Edge #1 gets full $1 budget
+    edge1_budget_cents = total_budget_cents  # Edge #1 gets first claim on the cycle budget
 
     # Step 4: SEQUENTIAL PRIORITY FILL - Edge #1 first, then #2, then #3
     allocations: List[Top3Allocation] = []
@@ -443,22 +446,27 @@ class Top3EdgeAllocator:
     
     def _load_cycle_risk_cap_usd(self) -> float:
         """Load cycle risk cap from environment/config.
-        
-        2026-07-08 UPDATE: Returns fixed $1 exposure cap instead of percentage-based.
+
+        2026-07-08 UPDATE: Fixed USD exposure cap instead of percentage-based.
+        2026-10-14: Default tracks MERID_FIXED_EXPOSURE_CAP_USD (the resolved
+        global exposure authority, $3.00) — the stale $1.00 default let Edge #1
+        exhaust the budget before later edges were considered.
         """
         env_val = os.getenv("TOP3_CYCLE_RISK_CAP_USD", "")
         if env_val:
             try:
                 usd = float(env_val)
-                # Clamp to valid range (min $0.50, max $5.00)
-                return max(0.50, min(usd, 5.00))
+                # Clamp: never below $0.50, never above the global fixed
+                # exposure cap — a top-3 cycle budget must not exceed the
+                # shared exposure authority downstream layers enforce anyway.
+                _ceiling = max(0.50, self.spec.DEFAULT_CYCLE_RISK_CAP_USD)
+                return max(0.50, min(usd, _ceiling))
             except ValueError:
                 logger.warning(
-                    "[TOP3-ALLOCATOR] Invalid TOP3_CYCLE_RISK_CAP_USD env value '%s', using default $1.00",
+                    "[TOP3-ALLOCATOR] Invalid TOP3_CYCLE_RISK_CAP_USD env value '%s', using default",
                     env_val,
                 )
-        
-        # Default to $1.00
+
         return self.spec.DEFAULT_CYCLE_RISK_CAP_USD
     
     def compute_allocations(

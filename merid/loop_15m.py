@@ -9619,9 +9619,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # Count is now fractional (centi-contract precision, 0.01 = one centi-contract).
         count = float(candidate.get("count", 1.0))
 
-        # 2026-08-22: Count is computed by unified_sizing under the $1 cap. Allow up to
-        # _get_max_contracts_per_order() as a defensive ceiling; compute_order_size will still
-        # reduce the count when price/exposure doesn't allow 2 contracts.
+        # 2026-08-22: Count is computed by unified_sizing under the fixed
+        # exposure cap.  Allow up to _get_max_contracts_per_order() as a
+        # defensive ceiling; compute_order_size still reduces the count when
+        # price/exposure doesn't allow the full size.
         max_per_order = float(_get_max_contracts_per_order())
         if count > max_per_order:
             logger.warning(
@@ -9630,22 +9631,32 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             )
             count = max_per_order
 
-        # 2026-09-30: threshold-cell lane is a bounded experiment — hard-capped
-        # at exactly 1 contract regardless of the global per-order ceiling.
-        # The current-build provisional lane carries the same one-contract cap.
-        # A fractional sizing estimate must also never shrink the lane below
-        # its contract: if the trading shard cannot collateralize 1 contract
+        # 2026-09-30: bounded lanes (threshold-cell, provisional, canary, escape,
+        # marginal/maker routes) are capped-size instruments.  2026-10-14: the
+        # cap is MERID_BOUNDED_LANE_MAX_CONTRACTS (default 1.0) — the previous
+        # hardcode normalized every cell-tagged candidate to exactly 1.0 and
+        # silently overrode the configured cap after the operator raised it to 3.
+        # The cap is a ceiling only: it never inflates a smaller unified_sizing
+        # result.  If the trading shard cannot collateralize the sized count,
         # the router's insufficient_shard_balance gate rejects locally.
+        # Only decision_lane selects the bounded contract: trade_decision stamps
+        # threshold_cell_id / provisional_cell_id as secondary provenance on
+        # every cell-matched admission (including unbounded lanes such as
+        # settlement_convergence), so those fields must not trigger the clamp.
         if (
             candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
-            or candidate.get("threshold_cell_id")
-            or candidate.get("provisional_cell_id")
-        ) and count != 1.0 and count >= 0.01:
-            logger.warning(
-                "[15M-LOOP] CELL-LANE count=%s != lane contract=1.0, normalizing. ticker=%s lane=%s",
-                count, ticker, candidate.get("decision_lane"),
-            )
-            count = 1.0
+        ) and count >= 0.01:
+            try:
+                from merid.prediction.agent_grid_15m import _bounded_lane_max_contracts
+                _lane_cap = float(_bounded_lane_max_contracts())
+            except Exception:
+                _lane_cap = 1.0
+            if count > _lane_cap:
+                logger.warning(
+                    "[15M-LOOP] CELL-LANE count=%s exceeds lane cap=%s, capping. ticker=%s lane=%s",
+                    count, _lane_cap, ticker, candidate.get("decision_lane"),
+                )
+                count = _lane_cap
 
         # Validate count is reasonable.  Anything below one centi-contract is effectively zero.
         if count < 0.01:
@@ -9707,10 +9718,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     # leftover cell bound.  The stamp is terminal at selection:
                     # canary lanes carry the canary floor, cell lanes their
                     # cell bound, gate passes the route bound.
+                    # decision_lane is the lane's identity; threshold_cell_id /
+                    # provisional_cell_id are secondary provenance stamped on
+                    # every cell-matched admission (even unbounded lanes), so
+                    # they must not pull non-lane candidates under the lane floor.
                     if (
                         candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
-                        or candidate.get("threshold_cell_id") is not None
-                        or candidate.get("provisional_cell_id") is not None
                         or candidate.get("marginal_band_rescue")
                     ) and _eff_edge_c is not None:
                         try:
@@ -10420,21 +10433,16 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 if trade_decision is not None
                 else None
             )
-            _is_tc_lane = (
-                _td_lane_for_coerce == "threshold_cell"
-                or candidate.get("threshold_cell_id") is not None
-            )
-            _is_cbp_lane = (
-                _td_lane_for_coerce == "current_build_provisional"
-                or candidate.get("provisional_cell_id") is not None
-            )
+            # Lane identity comes from decision_lane only.  Cell ids are
+            # provenance stamped on every cell-matched admission; treating them
+            # as lane ownership rejects unbounded candidates (e.g.
+            # settlement_convergence) under cell maker kill-switches and emits
+            # bogus cell lifecycle/funnel events for other lanes' traffic.
+            _is_tc_lane = _td_lane_for_coerce == "threshold_cell"
+            _is_cbp_lane = _td_lane_for_coerce == "current_build_provisional"
             _is_bounded_lane = (
                 entry_or_exit != "exit"
-                and (
-                    _td_lane_for_coerce in BOUNDED_POST_ONLY_LANES
-                    or _is_tc_lane
-                    or _is_cbp_lane
-                )
+                and _td_lane_for_coerce in BOUNDED_POST_ONLY_LANES
             )
             _tc_maker_ok = False
             _cbp_maker_ok = False
@@ -11059,13 +11067,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 if trade_decision is not None
                 else None
             )
+            # Bounded-lane identity is decision_lane only: cell ids are
+            # provenance, and treating them as lane ownership would let a
+            # provenance-tagged non-lane candidate defer the midpoint side
+            # recompute / reprice parity edges as if its economics had been
+            # enforced on the executable price upstream.
             _is_bounded_lane = (
                 entry_or_exit != "exit"
-                and (
-                    _td_lane in BOUNDED_POST_ONLY_LANES
-                    or candidate.get("threshold_cell_id") is not None
-                    or candidate.get("provisional_cell_id") is not None
-                )
+                and _td_lane in BOUNDED_POST_ONLY_LANES
             )
 
             # The canonical asset was already resolved at the top of _execute_candidate;

@@ -1,17 +1,18 @@
 """Unified order sizing for Kalshi 15m crypto trading.
 
 This module provides a single source of truth for order size computation
-under the fixed $1 total exposure model (global slot allocator).
+under the fixed-exposure-cap model (global slot allocator).  The cap is the
+resolved live config ``fixed_exposure_cap_usd`` (currently $3.00).
 
 The sizing function:
 - Applies Kelly-criterion edge filtering (rejects no-edge trades)
-- Reads existing exposure from the global slot allocator ($1 cap authority)
-- Allows up to the configured per-asset max (2 in production) while staying inside the $1 cap
-- Returns integer contract count and computed notional
+- Reads existing exposure from the global slot allocator (cap authority)
+- Allows up to the configured per-asset max (3 in production) while staying inside the cap
+- Returns fractional contract count (centi-contract precision) and notional
 
 2026-07-16: All percentage-based sizing (bankroll_cap_pct, per-asset
 max_notional_pct, max_single_order_pct, per_trade_risk_pct) has been PRUNED.
-The $1 global slot allocator (merid/risk/global_slot_allocator.py) is the
+The global slot allocator (merid/risk/global_slot_allocator.py) is the
 single source of truth for exposure allocation.
 
 This is the ONLY place where order size is computed for 15m agents.
@@ -555,7 +556,8 @@ def compute_ev_net(
 
 
 # 2026-07-16: _get_per_trade_risk_pct REMOVED (percentage-based sizing PRUNED).
-# The $1 global slot allocator enforces per-trade exposure (1 contract, 5c-85c).
+# The global slot allocator enforces per-trade exposure under the resolved
+# fixed_exposure_cap_usd (currently $3.00, up to 3 contracts, 10c-75c).
 
 
 def _is_dynamic_sizing_enabled() -> bool:
@@ -804,30 +806,31 @@ def compute_order_size(
     metadata: Optional[dict] = None,  # 2026-07-31: Metadata for sweet spot price adjustment tracking
     flb_position_multiplier: float = 1.0,  # 2026-08-01: FLB-aware position sizing multiplier
 ) -> Tuple[float, Decimal, dict]:
-    """Compute order size using fixed $2 total exposure model with Kelly filtering (2026-07-12).
-    
+    """Compute order size under the fixed-exposure-cap model with Kelly filtering.
+
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
-    All percentage-based sizing has been removed in favor of fixed $2 total exposure.
-    
+    All percentage-based sizing has been removed in favor of the resolved
+    fixed exposure cap (``fixed_exposure_cap_usd``, currently $3.00).
+
     NEW (2026-07-12): Kelly Criterion integration
     - Uses Kelly fraction to filter trades with no edge
     - Confidence-weighted Kelly for intelligent position sizing
-    - Still respects $1 global cap via slot allocation
-    
+    - Still respects the fixed global cap via slot allocation
+
     Formula:
         1. Calculate Kelly fraction from model_prob, price, confidence
         2. If Kelly fraction is 0, reject (no edge)
-        3. Use fixed $2 exposure cap from profile (fixed_exposure_cap_usd)
+        3. Use the resolved fixed exposure cap (fixed_exposure_cap_usd)
         4. Check existing total exposure from slot allocator
-        5. Available exposure = $2 - existing_exposure
-        6. If available_exposure >= contract_cost, allow up to 2 contracts
+        5. Available exposure = cap - existing_exposure
+        6. If available_exposure >= contract_cost, allow up to the configured
+           per-order contract max (3 in production)
         7. Otherwise, reject (no slots available)
-    
-    Example with existing_exposure=$0.65, price_cents=35:
-        available_exposure = $1.00 - $0.65 = $0.35
+
+    Example with existing_exposure=$0.65, price_cents=35, cap=$3.00:
+        available_exposure = $3.00 - $0.65 = $2.35
         contract_cost = $0.35
-        available_exposure >= contract_cost → allow 1 contract
-        new_total_exposure = $0.65 + $0.35 = $1.00 ✅ (at cap)
+        max_by_exposure = 6.7 -> capped by per-order max to 3 contracts
     
     Args:
         bankroll_usd: Current bankroll in USD (from Kalshi API) - kept for compatibility
@@ -908,10 +911,10 @@ def compute_order_size(
     # 2026-10-06 UPDATE: Fixed $3 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
     # New model: sum of all contract prices must be ≤ $3
-    
+
     # Step 1: Get fixed exposure cap from the resolved live config.
-    # The resolved config is the single source of truth for the $3 cap.
-    fixed_exposure_cap_usd = Decimal("3.00")  # Default
+    # The resolved config is the single source of truth for the cap.
+    fixed_exposure_cap_usd = Decimal("3.00")  # Fallback default; resolved config overrides
     try:
         from merid.config.live_config import get_resolved_live_config
 
@@ -1009,7 +1012,7 @@ def compute_order_size(
 
     # Step 6: Compute target contract count (fractional allowed, 2 decimals)
     # 2026-08-22: Size up to the configured per-asset max while staying inside the
-    # fixed $1 global exposure cap. The cap is position value ($1.00 per contract).
+    # fixed global exposure cap (resolved fixed_exposure_cap_usd, currently $3).
     if _is_dynamic_sizing_enabled():
         target_contracts = Decimal(str(_get_dynamic_sizing_base_contracts()))
         if target_contracts < CONTRACT_COUNT_QUANTUM:
