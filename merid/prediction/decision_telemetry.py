@@ -1066,10 +1066,10 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
                     f"NO_POSITIVE_EXECUTABLE_EDGE but best_ev={best_ev} > 0"
                 )
         if code == "EDGE_BELOW_DYNAMIC_THRESHOLD":
-            if best_ev is not None and float(best_ev) <= 0.0:
-                violations.append(
-                    f"EDGE_BELOW_DYNAMIC_THRESHOLD but best_ev={best_ev} <= 0"
-                )
+            # 2026-10-16: a negative best_ev under this code is NOT a
+            # violation — deep-ITM lanes carry negative bounds, so
+            # ev=-3.9c below bound=-3.0c is a true below-threshold
+            # rejection (observed as steady live false-positive spam).
             if (
                 best_ev is not None
                 and bound is not None
