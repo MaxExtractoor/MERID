@@ -4106,6 +4106,7 @@ async def _execute_exit_order(
                         self._position_monitor._mark_exit_intent_reconciled(
                             position.position_id,
                             "not_submitted_resubmit_limit_exhausted",
+                            intent.client_order_id,
                         )
                     self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
                     return
@@ -4182,6 +4183,7 @@ async def _execute_exit_order(
                 self._position_monitor._mark_exit_intent_reconciled(
                     position.position_id,
                     f"rejected:{_result_status} reason={_result_reason}",
+                    intent.client_order_id,
                 )
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
             return

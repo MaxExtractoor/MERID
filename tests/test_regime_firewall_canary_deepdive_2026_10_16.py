@@ -434,6 +434,70 @@ def test_sweep_leaves_fresh_submitting_alone(tmp_path):
     assert scheduled == []
 
 
+def test_mark_reconciled_uses_caller_coid_when_maps_empty(tmp_path):
+    """Observed live 2026-10-16: durable attempts older than the 30d rehydrate
+    lookback are swept into _reconcile_exit_intent, which terminalizes the
+    intent — but _mark_exit_intent_reconciled derived the coid only from the
+    in-memory maps.  With no rehydrated entry the coid was None and the
+    durable attempt stayed RESOLVING_ON_EXCHANGE forever, re-swept every
+    throttle interval."""
+    from merid.position_management.position_monitor import PositionMonitor
+    from merid.event_venues.kalshi.order_attempt_store import (
+        ExitOrderAttemptState,
+    )
+
+    mon = object.__new__(PositionMonitor)
+    mon._lock = __import__("threading").Lock()
+    mon._open_positions = {}
+    # No rehydrated in-flight entry — maps are empty.
+    mon._exit_intent_in_flight = {}
+    mon._position_to_client_order = {}
+    mon._save_exit_intent_in_flight = lambda: None
+
+    record = MagicMock()
+    record.attempt_id = "att_old_1"
+    store = MagicMock()
+    store.get_exit_attempt_by_client_order_id.return_value = record
+
+    with patch(
+        "merid.position_management.position_monitor.OrderAttemptStore",
+        return_value=store,
+    ):
+        mon._mark_exit_intent_reconciled(
+            "pos_gone_1", "position_closed", "exit_deadbeef"
+        )
+
+    store.get_exit_attempt_by_client_order_id.assert_called_once_with(
+        "exit_deadbeef"
+    )
+    store.transition_exit_attempt.assert_called_once()
+    _args, kwargs = store.transition_exit_attempt.call_args
+    assert kwargs["attempt_id"] == "att_old_1"
+    assert kwargs["new_state"] == ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
+
+
+def test_mark_reconciled_without_coid_and_empty_maps_is_noop(tmp_path):
+    """With no caller coid and no in-memory entry there is nothing to
+    terminalize — must not touch the store."""
+    from merid.position_management.position_monitor import PositionMonitor
+
+    mon = object.__new__(PositionMonitor)
+    mon._lock = __import__("threading").Lock()
+    mon._open_positions = {}
+    mon._exit_intent_in_flight = {}
+    mon._position_to_client_order = {}
+    mon._save_exit_intent_in_flight = lambda: None
+
+    store = MagicMock()
+    with patch(
+        "merid.position_management.position_monitor.OrderAttemptStore",
+        return_value=store,
+    ):
+        mon._mark_exit_intent_reconciled("pos_x", "position_closed")
+
+    store.transition_exit_attempt.assert_not_called()
+
+
 # ---------------------------------------------------------------- canary ---
 
 

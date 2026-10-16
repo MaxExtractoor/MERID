@@ -2545,14 +2545,29 @@ class PositionMonitor:
             return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
         return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
 
-    def _mark_exit_intent_reconciled(self, position_id: str, reason: str) -> None:
+    def _mark_exit_intent_reconciled(
+        self,
+        position_id: str,
+        reason: str,
+        client_order_id: Optional[str] = None,
+    ) -> None:
         """Mark an exit intent as reconciled (terminal). Safe to call idempotently.
 
         2026-09-02: Also terminalizes the durable ExitOrderAttempt.
+        2026-10-16: accept the caller's ``client_order_id`` as the primary
+        lookup key.  Sweep-driven reconciles can target durable attempts
+        whose in-memory in-flight entry was never rehydrated (e.g. records
+        older than the rehydrate lookback); deriving the coid only from
+        the in-memory maps silently skipped the durable transition and
+        left the attempt wedged in RESOLVING_ON_EXCHANGE forever.
         """
         with self._lock:
             flight = self._exit_intent_in_flight.get(position_id, {})
-            coid = flight.get("client_order_id") or self._position_to_client_order.get(position_id)
+            coid = (
+                client_order_id
+                or flight.get("client_order_id")
+                or self._position_to_client_order.get(position_id)
+            )
             if position_id in self._exit_intent_in_flight:
                 self._exit_intent_in_flight[position_id]["state"] = "RECONCILED"
                 logger.info(
@@ -3039,7 +3054,7 @@ class PositionMonitor:
                     "[EXIT-INTENT-RECONCILE] position_id=%s is no longer open; terminalizing exit intent",
                     position_id[:8]
                 )
-                self._mark_exit_intent_reconciled(position_id, "position_closed")
+                self._mark_exit_intent_reconciled(position_id, "position_closed", client_order_id)
                 return
 
             # If the position has zero canonical exposure, terminalize.
@@ -3048,7 +3063,7 @@ class PositionMonitor:
                     "[EXIT-INTENT-RECONCILE] position_id=%s size is zero; terminalizing exit intent",
                     position_id[:8]
                 )
-                self._mark_exit_intent_reconciled(position_id, "position_size_zero")
+                self._mark_exit_intent_reconciled(position_id, "position_size_zero", client_order_id)
                 return
 
             # CRITICAL FIX: Query exchange for order state to avoid permanent exit blocking.
@@ -3075,7 +3090,7 @@ class PositionMonitor:
                                 client_order_id[:8], position_id[:8]
                             )
                             self._update_order_attempt_status(client_order_id, "FILLED", reason="reconcile_order_filled")
-                            self._release_stale_exit_flags(position_id, "order_filled")
+                            self._release_stale_exit_flags(position_id, "order_filled", client_order_id)
                             return
 
                         if status in ("canceled", "rejected"):
@@ -3084,7 +3099,7 @@ class PositionMonitor:
                                 client_order_id[:8], status, position_id[:8]
                             )
                             self._update_order_attempt_status(client_order_id, status.upper(), reason=f"reconcile_order_{status}")
-                            self._release_stale_exit_flags(position_id, f"order_{status}")
+                            self._release_stale_exit_flags(position_id, f"order_{status}", client_order_id)
                             return
 
                         if status in ("open", "resting", "active"):
@@ -3102,7 +3117,7 @@ class PositionMonitor:
                                         cancel_res = await client.cancel_order_result(order.order_id, market_id=position.market_id)
                                         if cancel_res and getattr(cancel_res, "success", False):
                                             self._update_order_attempt_status(client_order_id, "CANCELLED", reason="reconcile_force_cancel_stale_price")
-                                            self._release_stale_exit_flags(position_id, "order_cancelled_stale_price")
+                                            self._release_stale_exit_flags(position_id, "order_cancelled_stale_price", client_order_id)
                                             return
                                         else:
                                             logger.warning(
@@ -3163,7 +3178,7 @@ class PositionMonitor:
                             position_id[:8], position.market_id
                         )
                         self.remove_position(position_id)
-                        self._mark_exit_intent_reconciled(position_id, "expired_no_client_order_id")
+                        self._mark_exit_intent_reconciled(position_id, "expired_no_client_order_id", client_order_id)
                         return
 
                     # 2) If there is still an open order on this market, the prior
@@ -3188,7 +3203,7 @@ class PositionMonitor:
                             position_id[:8], position.market_id
                         )
                         self.remove_position(position_id)
-                        self._mark_exit_intent_reconciled(position_id, "exchange_position_missing")
+                        self._mark_exit_intent_reconciled(position_id, "exchange_position_missing", client_order_id)
                         return
 
                     # 4) Exchange position still exists and no open order.  The prior
@@ -3258,13 +3273,18 @@ class PositionMonitor:
                 client_order_id[:8] if client_order_id else "",
             )
 
-    def _release_stale_exit_flags(self, position_id: str, reason: str) -> None:
+    def _release_stale_exit_flags(
+        self,
+        position_id: str,
+        reason: str,
+        client_order_id: Optional[str] = None,
+    ) -> None:
         """Clear the in-flight lock and any stale terminal flags on the Position.
 
         This is the safe release path used when an exit order is proven terminal
         or not-submitted and the monitor needs to re-emit the exit.
         """
-        self._mark_exit_intent_reconciled(position_id, reason)
+        self._mark_exit_intent_reconciled(position_id, reason, client_order_id)
         self._clear_exit_intent_in_flight(position_id)
         with self._lock:
             stale_position = self._open_positions.get(position_id)
