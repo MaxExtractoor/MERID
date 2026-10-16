@@ -79,6 +79,11 @@ class BookDepth:
     best_ask_cents: Optional[int]
     book_age_ms: int
     book_sequence: Optional[int]
+    # Price of the deepest level the requested quantity must consume.
+    # A limit at this price is guaranteed to fill the whole request (IOC
+    # semantics), whereas ``vwap_cents`` is only the average — a sell limit
+    # exactly at VWAP can still leave the marginal fills unexecuted.
+    marginal_price_cents: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -284,10 +289,48 @@ class ExecutionRiskFirewall:
 
         # 7. Limit must be executable at the requested size (VWAP check).
         if not self._limit_executable(canonical, book):
-            return self._rejected(
-                f"limit_not_executable:limit={canonical.limit_cents}:vwap={book.vwap_cents}",
-                canonical,
-            )
+            # 2026-10-16 (loss audit): a forced/safety exit must not wedge on a
+            # limit that sits inside the book's walk — the BTC hard stop at
+            # limit=44 vs vwap=43 was deferred ~15s and filled -4c worse.
+            # Reprice to the depth-aware marginal level (the deepest level the
+            # full quantity needs): for a sell, limit <= marginal guarantees
+            # the IOC consumes every needed level.  Steps 8-9 still run on the
+            # repriced limit, and the slippage bound (vwap vs best_bid) is
+            # enforced independently of the limit, so this cannot widen the
+            # loss budget — it only stops a *rejection* from bleeding the
+            # position further while the book falls.
+            if (
+                _env_bool("MERID_FIREWALL_FORCED_EXIT_REPRICE", True)
+                and self._is_forced_exit(original_intent, canonical)
+                and book.marginal_price_cents is not None
+            ):
+                _old_limit = int(canonical.limit_cents)
+                if canonical.action == "sell":
+                    _new_limit = max(
+                        1, min(_old_limit, int(book.marginal_price_cents))
+                    )
+                else:
+                    _new_limit = min(
+                        99, max(_old_limit, int(book.marginal_price_cents))
+                    )
+                logger.warning(
+                    "[FIREWALL-REPRICE-FORCED-EXIT] ticker=%s intent_id=%s "
+                    "limit=%dc -> %dc (vwap=%dc marginal=%dc depth_cc=%d) - "
+                    "forced exit repriced to executable depth, not rejected",
+                    ticker,
+                    canonical.intent_id,
+                    _old_limit,
+                    _new_limit,
+                    book.vwap_cents,
+                    book.marginal_price_cents,
+                    book.available_qty_cc,
+                )
+                canonical = replace(canonical, limit_cents=_new_limit)
+            else:
+                return self._rejected(
+                    f"limit_not_executable:limit={canonical.limit_cents}:vwap={book.vwap_cents}",
+                    canonical,
+                )
 
         # 8. Recompute expected realized PnL from fresh state.
         from merid.event_venues.kalshi.order_intent_contract import (
@@ -619,6 +662,9 @@ class ExecutionRiskFirewall:
 
         best_bid = levels[0][0] if not is_buy else None
         best_ask = levels[0][0] if is_buy else None
+        # Deepest level consumed by the requested quantity — the price an
+        # aggressive limit must reach to guarantee the full fill.
+        marginal_price = walked_levels[-1][0] if walked_levels else None
 
         return BookDepth(
             vwap_cents=vwap_cents,
@@ -628,6 +674,7 @@ class ExecutionRiskFirewall:
             best_ask_cents=best_ask,
             book_age_ms=book_age_ms,
             book_sequence=seq,
+            marginal_price_cents=marginal_price,
         )
 
     def _limit_executable(self, canonical: "CanonicalOrderIntent", book: BookDepth) -> bool:

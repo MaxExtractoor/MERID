@@ -317,19 +317,42 @@ def exit_envelope_tte_s() -> float:
     return _env_float("MERID_EXIT_ENVELOPE_TTE_S", 120.0)
 
 
+def exit_envelope_profit_lock_cents() -> float:
+    """Bid-minus-entry gain (cents/contract) at which a gated exit is a
+    locked-win rather than a discretionary mid-book exit.
+
+    2026-10-16 (loss audit): the envelope deferred three take_profit exits
+    on a +23c winner (bid 61-70c vs 47c entry) because the bid never
+    reached the 85c profit-lock arm before expiry.  The position later
+    hard-stopped at 11c — a -$1.16 loss on a +$0.69 available gain.  The
+    envelope protects *bleeding* mid-book exits; vetoing a locked win
+    manufactures the exact "profitable position forfeited" failure it was
+    measured to prevent.  ``MERID_EXIT_ENVELOPE_PROFIT_LOCK_C`` sets the
+    per-contract gain that exempts the exit (default 10c); set <=0 to
+    disable the arm.
+    """
+    return _env_float("MERID_EXIT_ENVELOPE_PROFIT_LOCK_C", 10.0)
+
+
 def exit_envelope_allows(
     canonical_reason: Any,
     executable_bid_cents: Optional[int],
     seconds_to_expiry: Optional[float],
+    entry_price_cents: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """Evidence-envelope verdict for a gated exit reason.
 
     Returns ``(allowed, detail)``.  Non-gated reasons always allow.  Gated
-    reasons allow only when the held-side bid is at the profit-lock level or
-    the contract is inside the terminal window; otherwise the position holds
-    to settlement instead of donating the remaining premium to the spread.
+    reasons allow when any arm holds:
+      * bid arm  — held-side bid >= ``MERID_EXIT_ENVELOPE_BID_CENTS``;
+      * tte arm  — inside ``MERID_EXIT_ENVELOPE_TTE_S`` of expiry;
+      * profit-lock arm — bid >= entry + ``MERID_EXIT_ENVELOPE_PROFIT_LOCK_C``
+        (a locked gain may be banked; the envelope exists to stop *bleeding*
+        exits, not to veto winners back into losers).
     Missing bid/TTE defers (fail toward hold) — settlement itself is the
-    fallback exit, so a missing quote never forces a sell.
+    fallback exit, so a missing quote never forces a sell.  A missing entry
+    price simply leaves the profit-lock arm unarmed; the envelope's
+    protection is unchanged.
     """
     c = str(canonical_reason or "").lower()
     if c not in _EXIT_ENVELOPE_GATED_REASONS:
@@ -344,12 +367,38 @@ def exit_envelope_allows(
         seconds_to_expiry is not None
         and float(seconds_to_expiry) <= exit_envelope_tte_s()
     )
-    if bid_ok or tte_ok:
-        return True, f"bid_ok={bid_ok} tte_ok={tte_ok}"
+    lock_ok = False
+    lock_gain: Optional[float] = None
+    _lock_c = exit_envelope_profit_lock_cents()
+    if (
+        _lock_c > 0.0
+        and executable_bid_cents is not None
+        and entry_price_cents is not None
+    ):
+        try:
+            lock_gain = float(executable_bid_cents) - float(entry_price_cents)
+            lock_ok = lock_gain >= _lock_c
+        except (TypeError, ValueError):
+            lock_ok = False
+    if bid_ok or tte_ok or lock_ok:
+        return (
+            True,
+            f"bid_ok={bid_ok} tte_ok={tte_ok} lock_ok={lock_ok}"
+            + (
+                f" lock_gain={lock_gain:.1f}c"
+                if lock_gain is not None
+                else ""
+            ),
+        )
     return (
         False,
         f"bid={executable_bid_cents}<{exit_envelope_bid_cents()} "
-        f"tte={seconds_to_expiry}>{exit_envelope_tte_s()}",
+        f"tte={seconds_to_expiry}>{exit_envelope_tte_s()}"
+        + (
+            f" lock_gain={lock_gain:.1f}<{_lock_c}"
+            if lock_gain is not None
+            else ""
+        ),
     )
 
 

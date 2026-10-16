@@ -818,6 +818,51 @@ def _get_executable_exit_cents(
     return bid
 
 
+def _get_depth_marginal_exit_cents(
+    state: Any,
+    held_contract: Literal["yes", "no"],
+    qty_cc: int,
+) -> Optional[int]:
+    """Price of the deepest held-side bid level needed to fill ``qty_cc``.
+
+    2026-10-16 (loss audit): ``bid - STOP_MAX_SLIPPAGE_CENTS`` anchors the
+    limit to top-of-book only — a BTC hard stop at limit=44 was rejected by
+    the execution firewall as ``limit_not_executable:limit=44:vwap=43`` and
+    filled ~15s later at 40c, materially worsening the loss.  Walking the
+    actual depth tells the submit path the price an aggressive IOC must
+    reach to consume the full quantity: the deepest walked level.  Returns
+    None when the level ladder is unreadable or insufficient (the firewall
+    independently rejects insufficient depth either way).
+    """
+    if state is None or qty_cc <= 0:
+        return None
+    book = getattr(state, "book", None)
+    raw_levels = None
+    if book is not None:
+        raw_levels = getattr(book, f"{held_contract}_bids", None) or None
+    if raw_levels is None:
+        raw_levels = getattr(state, f"{held_contract}_bids", None) or None
+    if not raw_levels:
+        return None
+    remaining = Decimal(qty_cc) / Decimal("100")
+    for lvl in raw_levels:
+        try:
+            if isinstance(lvl, (tuple, list)) and len(lvl) >= 2:
+                price, size = int(lvl[0]), float(lvl[1])
+            elif hasattr(lvl, "price_cents") and hasattr(lvl, "size"):
+                price, size = int(lvl.price_cents), float(lvl.size)
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if size <= 0 or price <= 0:
+            continue
+        remaining -= Decimal(size)
+        if remaining <= 0:
+            return price
+    return None
+
+
 def _locked_ws_divergent_rest_bid(
     state: Any, held_contract: Literal["yes", "no"]
 ) -> Optional[int]:
@@ -1758,16 +1803,36 @@ async def maybe_submit_stop_candidate(
 
     # Bounded liquidation: cross at most STOP_MAX_SLIPPAGE_CENTS through the
     # observed best bid so a stale trigger cannot sweep the book to the floor.
-    exit_price = max(1, exit_bid - STOP_MAX_SLIPPAGE_CENTS)
+    # 2026-10-16: also cap the limit at the depth-aware marginal level — the
+    # deepest bid level the full quantity consumes.  A limit that sits above
+    # that level is guaranteed to be rejected by the execution firewall as
+    # limit_not_executable, costing one reject->resubmit round-trip while the
+    # book falls (BTC stop: limit=44 vs vwap=43 -> -4c and ~15s).  Pricing at
+    # the marginal level submits executable on the first attempt; the VWAP
+    # fill is no worse than the marginal bound, and the firewall still
+    # enforces vwap-vs-best_bid slippage independently.
+    _marginal_c: Optional[int] = None
+    try:
+        _kalshi_st, _unified_st = _get_market_state(candidate.market_ticker)
+        _marginal_c = _get_depth_marginal_exit_cents(
+            _unified_st or _kalshi_st, held_side, qty_cc
+        )
+    except Exception:
+        _marginal_c = None
+    if _marginal_c is not None:
+        exit_price = max(1, min(exit_bid - STOP_MAX_SLIPPAGE_CENTS, _marginal_c))
+    else:
+        exit_price = max(1, exit_bid - STOP_MAX_SLIPPAGE_CENTS)
     logger.info(
         "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger=%s "
-        "entry=%dc bid=%dc fair=%dc entry_edge=%dc current_edge=%dc "
+        "entry=%dc bid=%dc marginal=%s fair=%dc entry_edge=%dc current_edge=%dc "
         "stop_level=%dc submitted_limit=%dc slippage_cap=%dc tte=%.1fs",
         candidate.candidate_id,
         candidate.market_ticker,
         candidate.trigger_reason,
         candidate.entry_price_cents or -1,
         exit_bid,
+        str(_marginal_c) if _marginal_c is not None else "n/a",
         candidate.fair_value_cents or -1,
         candidate.entry_edge_cents or -99,
         candidate.current_edge_cents or -99,
@@ -1942,6 +2007,103 @@ async def maybe_submit_stop_candidate(
         )
 
     # 7. Route the reduce-only IOC close.
+    # 2026-10-16: persist the attempt chain BEFORE routing — durable
+    # exit_order_attempts row + in-memory EV resolver registration.  Without
+    # these the fill resolved as EV-EXIT-FILL-UNMATCHED /
+    # POSITION-CACHE-EXTERNAL-TRADE (no attempt owned the client_order_id).
+    # Retries reuse the same intent/client_order_id, so the durable row is
+    # recovered rather than duplicated (client_order_id is UNIQUE).
+    _ev_attempt_id: Optional[str] = None
+    _exit_attempt = None
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import (
+            OrderAttemptStore,
+            ExitOrderAttemptState,
+            ExitOrderAttemptConflict,
+        )
+        _attempt_store = OrderAttemptStore()
+        _pos_key = (
+            getattr(cached_position, "position_key", None)
+            or getattr(cached_position, "position_id", None)
+            or candidate.market_ticker
+        )
+        _exit_attempt = _attempt_store.get_exit_attempt_by_client_order_id(
+            intent.client_order_id
+        )
+        if _exit_attempt is None:
+            try:
+                _exit_attempt = _attempt_store.create_exit_attempt(
+                    exit_intent_id=intent.intent_id,
+                    position_key=str(_pos_key),
+                    ticker=candidate.market_ticker,
+                    reason=str(exit_reason),
+                    client_order_id=intent.client_order_id,
+                    requested_quantity=qty_cc,
+                    requested_limit_cents=int(exit_price),
+                    payload={
+                        "source": "stop_candidate",
+                        "candidate_id": candidate.candidate_id,
+                        "trigger_reason": candidate.trigger_reason,
+                        "exit_bid_cents": exit_bid,
+                        "marginal_depth_cents": _marginal_c,
+                        "parentage_status": parentage_status,
+                        "parent_entry_fill_id": parent_entry_fill_id,
+                        "parent_entry_order_id": parent_entry_order_id,
+                        "entry_or_exit": "exit",
+                    },
+                )
+            except ExitOrderAttemptConflict:
+                # An active attempt already exists for this position (e.g. a
+                # guard-path exit is in flight) — the fill still resolves via
+                # our order_attempts identity row; log and continue.
+                logger.warning(
+                    "[STOP-ATTEMPT-CONFLICT] candidate=%s ticker=%s - active "
+                    "exit attempt exists for position_key=%s",
+                    candidate.candidate_id,
+                    candidate.market_ticker,
+                    _pos_key,
+                )
+        if _exit_attempt is not None:
+            _attempt_store.transition_exit_attempt(
+                _exit_attempt.attempt_id,
+                ExitOrderAttemptState.SUBMITTING.value,
+                actor="stop_candidate",
+                reason="submit_ioc",
+            )
+            _ev_attempt_id = _exit_attempt.attempt_id
+    except Exception as _att_exc:
+        # Attempt persistence must never block a protective exit.
+        logger.warning(
+            "[STOP-ATTEMPT-PERSIST] candidate=%s ticker=%s failed "
+            "(non-blocking): %s",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            _att_exc,
+        )
+    try:
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            get_exit_attempt_resolver,
+        )
+        # The resolver matches fills by client_order_id/order_id on open
+        # attempts — register under the durable attempt id when we have one.
+        _ev_attempt_id = get_exit_attempt_resolver().begin_attempt(
+            attempt_id=_ev_attempt_id,
+            market_key=candidate.market_ticker,
+            position_id=str(
+                getattr(cached_position, "position_id", "") or ""
+            ),
+            intent_id=intent.intent_id,
+            client_order_id=intent.client_order_id,
+        )
+    except Exception as _res_exc:
+        logger.warning(
+            "[STOP-ATTEMPT-RESOLVER] candidate=%s ticker=%s failed "
+            "(non-blocking): %s",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            _res_exc,
+        )
+
     from merid.event_venues.kalshi.order_router import route_order_async
     result = await route_order_async(intent)
     get_stop_candidate_ledger().record_submission(
@@ -1950,6 +2112,41 @@ async def maybe_submit_stop_candidate(
         submitted_price_cents=exit_price,
         reference_bid_cents=exit_bid,
     )
+
+    # Post-submit: land the exchange order_id on the durable attempt so fills
+    # that quote only order_id still resolve, and reflect the route outcome.
+    if _exit_attempt is not None:
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore as _OAStore,
+                ExitOrderAttemptState as _EAS,
+            )
+            _oid = getattr(result, "order_id", None)
+            _rstatus = str(getattr(result, "status", "") or "").lower()
+            if _oid:
+                _OAStore().transition_exit_attempt(
+                    _exit_attempt.attempt_id,
+                    _EAS.ACKNOWLEDGED.value,
+                    actor="stop_candidate",
+                    reason=f"route_ack:{_rstatus}",
+                    exchange_order_id=_oid,
+                )
+            elif _rstatus in ("rejected", "error"):
+                _OAStore().transition_exit_attempt(
+                    _exit_attempt.attempt_id,
+                    _EAS.REJECTED_EXCHANGE.value,
+                    actor="stop_candidate",
+                    reason=f"route_rejected:{getattr(result, 'reason', '')}",
+                )
+            elif _rstatus in ("submission_unknown", "not_submitted"):
+                _OAStore().transition_exit_attempt(
+                    _exit_attempt.attempt_id,
+                    _EAS.SUBMISSION_UNKNOWN.value,
+                    actor="stop_candidate",
+                    reason=f"route_unknown:{getattr(result, 'reason', '')}",
+                )
+        except Exception:
+            pass
     # 8. Residual-exposure branch: a non-executable protective exit is not a
     #    terminal state — reevaluate hold-vs-exit at the firewall's actual
     #    depth VWAP and record an explicit downstream decision.

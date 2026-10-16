@@ -94,6 +94,52 @@ def _bounded_lane_max_contracts() -> float:
         return 1.0
     return max(0.01, min(v, 100.0))
 
+
+def _probe_lane_max_contracts() -> float:
+    """Hard cap for *evidence-refused* probes (default 1.0 contract).
+
+    2026-10-16 (loss audit): two post-restart losses were evidence-blocked
+    cells admitted through ``current_build_provisional`` — BTC NO ~78c at
+    1.91 contracts and ETH NO 47c at 3 contracts, together ~$3 of a $3.14
+    account.  A probe whose cell the evidence verdict refused
+    (``{side}_evidence_action == "block"``) or whose lower confidence bound
+    on net EV is non-positive is paid-telemetry, not a sized position; it
+    must never consume more than ``MERID_PROBE_LANE_MAX_CONTRACTS``.
+    """
+    try:
+        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "1"))
+    except Exception:
+        return 1.0
+    return max(0.01, min(v, 100.0))
+
+
+def _probe_restricted_evidence(decision: Any) -> Tuple[bool, str]:
+    """True when the selected side entered on *refused* evidence.
+
+    The evidence gate issued ``action=block`` (CELL_EVIDENCE_INSUFFICIENT
+    et al.) or the side's net-EV lower confidence bound is non-positive —
+    the admission is an evidence-buying probe and must stay minimal.
+    """
+    try:
+        sel = str(getattr(decision, "selected_outcome", "") or "").lower()
+        ind = getattr(decision, "indicators", None) or {}
+        ev_action = str(ind.get(f"{sel}_evidence_action") or "").lower()
+        if ev_action == "block":
+            return True, f"evidence_action=block:{ind.get(f'{sel}_evidence_binding_gate')}"
+        bd = getattr(decision, "edge_breakdown", None) or (
+            getattr(decision, f"{sel}_edge_breakdown", None)
+        )
+        if bd is not None:
+            lcb_c = (
+                float(getattr(bd, "net_edge", 0.0))
+                - float(getattr(bd, "model_risk_reserve", 0.0))
+            ) * 100.0
+            if lcb_c <= 0.0:
+                return True, f"lcb_ev={lcb_c:.2f}c<=0"
+    except Exception:
+        pass
+    return False, ""
+
 # Microstructure features for order-flow, book-imbalance, and cross-asset lead-lag.
 # Loaded defensively; if missing, the live path falls back to Bachelier-only.
 try:
@@ -9124,6 +9170,13 @@ class LeanAgent15m:
         # admitted by a data-qualified cell (threshold_cells.py), enters only
         # as a one-contract post-only order.
         _decision_lane = decision.indicators.get("decision_lane")
+        # 2026-10-16 (loss audit): an evidence-refused / non-positive-LCB
+        # admission is a paid-telemetry probe — it may never size above
+        # MERID_PROBE_LANE_MAX_CONTRACTS and may not cross the spread as a
+        # taker (a refused cell's claimed edge does not justify taker cost).
+        _probe_restricted, _probe_restricted_why = _probe_restricted_evidence(
+            decision
+        )
         if (
             decision.selected_outcome is not None
             and _decision_lane in BOUNDED_POST_ONLY_LANES
@@ -9142,7 +9195,18 @@ class LeanAgent15m:
             _bounded_taker_cross = os.environ.get(
                 "MERID_BOUNDED_TAKER_CROSS", "1"
             ).strip().lower() in ("1", "true", "yes")
-            _cross_as_taker = _bounded_taker_cross and liquidity_role == "taker"
+            _cross_as_taker = (
+                _bounded_taker_cross
+                and liquidity_role == "taker"
+                and not _probe_restricted
+            )
+            if _bounded_taker_cross and liquidity_role == "taker" and _probe_restricted:
+                logger.info(
+                    "[PROBE-NO-TAKER] asset=%s side=%s lane=%s - taker cross "
+                    "suppressed for evidence-refused probe (%s); post-only",
+                    asset, decision.selected_outcome, _decision_lane,
+                    _probe_restricted_why,
+                )
             logger.info(
                 "[CANARY-ORDER-STYLE] asset=%s side=%s price_cents=%s lane=%s "
                 "liquidity_role=%s -> %s post_only=%s tif=%s fee_cents=%.3f",
@@ -9390,8 +9454,22 @@ class LeanAgent15m:
                 except Exception:
                     pass
             if _decision_lane in BOUNDED_POST_ONLY_LANES:
-                _bounded_cc = int(round(_bounded_lane_max_contracts() * 100))
+                _lane_cap = _bounded_lane_max_contracts()
+                if _probe_restricted:
+                    # Evidence-refused / non-positive-LCB probes are capped at
+                    # the probe size, not the (possibly operator-raised)
+                    # bounded-lane cap — BTC@1.91t and ETH@3c on a $3.14
+                    # account (2026-10-16) were this exact failure.
+                    _lane_cap = min(_lane_cap, _probe_lane_max_contracts())
+                _bounded_cc = int(round(_lane_cap * 100))
                 if int(decision.approved_size_cc) > _bounded_cc:
+                    decision.indicators["probe_size_cap"] = {
+                        "lane": _decision_lane,
+                        "requested_contracts": float(decision.approved_size_cc) / 100.0,
+                        "capped_contracts": _lane_cap,
+                        "probe_restricted": _probe_restricted,
+                        "why": _probe_restricted_why,
+                    }
                     decision = replace(
                         decision,
                         approved_size_cc=Decimal(str(_bounded_cc)),

@@ -19420,6 +19420,24 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
 
             intent.firewall_decision_id = decision.decision_id
             intent.firewall_client_order_id = decision.client_order_id
+            # 2026-10-16: the firewall's approved_limit_cents is the price the
+            # exit may submit at (full-qty VWAP clamp; forced-exit depth
+            # reprice).  It was computed but never propagated — the wire order
+            # still used intent.price_cents, so a repriced stop would have
+            # gone out with its original non-executable limit.  Apply it here;
+            # for exits that were not repriced this is a no-op
+            # (approved == canonical.limit_cents == intent.price_cents).
+            _approved_px = int(getattr(decision, "approved_limit_cents", 0) or 0)
+            if 1 <= _approved_px <= 99 and _approved_px != int(intent.price_cents):
+                logger.info(
+                    "[FIREWALL-APPLY-LIMIT] intent_id=%s ticker=%s %dc -> %dc "
+                    "(firewall-approved exit price)",
+                    intent.intent_id,
+                    intent.ticker,
+                    int(intent.price_cents),
+                    _approved_px,
+                )
+                intent.price_cents = _approved_px
             if decision.status == "observe_only":
                 logger.warning(
                     "[FIREWALL-OBSERVE-ONLY] intent_id=%s ticker=%s reason=%s "

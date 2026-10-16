@@ -4995,6 +4995,7 @@ def compute_trade_decision(
     if _dir_reg is not None:
         indicators["dir_regime"] = _dir_reg.label
         indicators["dir_regime_score"] = _dir_reg.score
+        indicators["dir_regime_label_age_s"] = _dir_reg.label_age_s
         indicators["breadth60_pos"] = _dir_reg.breadth60_pos
         indicators["breadth60_total"] = _dir_reg.breadth60_total
         indicators["btc_r60"] = _dir_reg.btc_r60
@@ -5047,6 +5048,32 @@ def compute_trade_decision(
 
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
     _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
+    # 2026-10-16 (whipsaw audit): trend-side exhaustion guard — fresh-label
+    # persistence, extreme-extension, and fast-leg reversal.  The fast leg
+    # is this asset's own 10s (fallback 30s) RTI return: a V-bottom shows
+    # there minutes before the 60s regime label turns.
+    _rti_fast = None
+    try:
+        _sl = (feature_snapshot.by_asset or {}).get(str(asset).upper())
+        if _sl is not None:
+            _rets = getattr(_sl, "rti_returns", None) or {}
+            for _lb in ("rti_return_10s", "rti_return_30s", "rti_return_3s"):
+                _v = _rets.get(_lb)
+                if _v is not None:
+                    _rti_fast = float(_v)
+                    break
+    except Exception:
+        _rti_fast = None
+    _yes_trendside_block = _dr.trendside_entry_block(
+        _dir_reg, "yes", z, yes_price_cents, _rti_fast
+    )
+    _no_trendside_block = _dr.trendside_entry_block(
+        _dir_reg, "no", z, no_price_cents, _rti_fast
+    )
+    if _yes_trendside_block is not None:
+        indicators["yes_trendside_block"] = _yes_trendside_block
+    if _no_trendside_block is not None:
+        indicators["no_trendside_block"] = _no_trendside_block
     _yes_conv_block = _dr.conviction_block_reason(asset, float(yes_breakdown.p_selected))
     _no_conv_block = _dr.conviction_block_reason(asset, float(no_breakdown.p_selected))
     _yes_throttle_block = _dr.side_throttle_block("yes", now.timestamp(), asset=asset) or _dr.strip_concentration_block(
@@ -5633,6 +5660,10 @@ def compute_trade_decision(
         and _yes_throttle_block is None
         and _yes_bookflow_block is None
         and _yes_coinflip_eff is None
+        # Trend-side whipsaw guard binds ALL yes-admission paths, including
+        # the 91-94c trend_yes_hi window — paying the extreme trend premium
+        # in a fresh/extending rally is precisely what this gate exists for.
+        and _yes_trendside_block is None
         and (
             _yes_trend_hi_qualifies
             or (
@@ -5668,6 +5699,7 @@ def compute_trade_decision(
         and _no_bookflow_block is None
         and _no_coinflip_eff is None
         and _no_price_cap_block is None
+        and _no_trendside_block is None
     )
 
     # Candidate-surface export: per-side executable economics and the first
@@ -5691,6 +5723,7 @@ def compute_trade_decision(
         price_cap_block_s: Optional[str] = None,
         hi_price_applies_s: bool = False,
         trend_hi_block_s: Optional[str] = None,
+        trendside_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
         cb_epc_exempt_s: bool = False,
         dir_veto_s: Optional[str] = None,
@@ -5732,6 +5765,8 @@ def compute_trade_decision(
         # countertrend lane, and adverse book flow.
         if regime_block_s:
             return regime_block_s
+        if trendside_block_s:
+            return trendside_block_s
         if conv_block_s:
             return f"{conv_block_s}_{side}"
         if throttle_block_s:
@@ -5786,6 +5821,7 @@ def compute_trade_decision(
             ),
             hi_price_applies_s=_yes_hi_price,
             trend_hi_block_s=_yes_trend_hi_block,
+            trendside_block_s=_yes_trendside_block,
             eff_edge_s=_yes_eff_edge,
             cb_epc_exempt_s=_yes_cb_epc_exempt,
             dir_veto_s=_yes_dir_veto,
@@ -5800,6 +5836,7 @@ def compute_trade_decision(
             bookflow_block_s=_no_bookflow_block,
             coinflip_block_s=_no_coinflip_eff,
             price_cap_block_s=_no_price_cap_block,
+            trendside_block_s=_no_trendside_block,
             eff_edge_s=_no_eff_edge,
             cb_epc_exempt_s=_no_cb_epc_exempt,
             dir_veto_s=_no_dir_veto,

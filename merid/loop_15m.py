@@ -2536,8 +2536,16 @@ def _run_exit_price_guard(
         from merid.event_venues.kalshi.settlement_aligned_exit import (
             exit_envelope_allows as _exit_envelope_allows,
         )
+        _entry_for_envelope = int(
+            getattr(position, "avg_entry_price_cents", 0) or 0
+        )
         _env_ok, _env_detail = _exit_envelope_allows(
-            canonical, best_bid, seconds_to_expiry
+            canonical,
+            best_bid,
+            seconds_to_expiry,
+            entry_price_cents=(
+                _entry_for_envelope if _entry_for_envelope > 0 else None
+            ),
         )
         record["exit_envelope"] = {"allowed": _env_ok, "detail": _env_detail}
         if not _env_ok:

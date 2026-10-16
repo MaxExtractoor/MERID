@@ -114,6 +114,11 @@ class DirectionalRegime:
     score: float = 0.0       # EMA of the instant directional vote [-1, 1]
     up_ticks: int = 0        # consecutive rally-aligned observations
     down_ticks: int = 0      # consecutive selloff-aligned observations
+    # Seconds the current label has been in force (ts - label_since_ts).
+    # None when the state carries no transition timestamp (cold start or
+    # hysteresis disabled) — persistence gates must treat None as unknown,
+    # not as a fresh flip.
+    label_age_s: Optional[float] = None
 
 
 def _min_breadth_assets() -> int:
@@ -167,6 +172,8 @@ def _default_regime_state() -> Dict[str, Any]:
         "down_ticks": 0,
         "label": "NEUTRAL",
         "last_ts": 0.0,
+        # 0 = "no transition recorded" -> label age is unknown, never fresh.
+        "label_since_ts": 0.0,
     }
 
 
@@ -262,6 +269,11 @@ def _update_regime_state(
             label = "SELL_OFF_WEAKENING"
         else:
             label = "NEUTRAL"
+        if label != prev_label:
+            # Record the transition so trend-side entries can require the
+            # label to persist — a just-confirmed regime inside a whipsaw is
+            # statistically the top/bottom, not the trend (2026-10-16).
+            st["label_since_ts"] = ts
         st["label"] = label
         st["last_ts"] = ts
         _save_regime_state(st)
@@ -336,14 +348,23 @@ def compute_directional_regime(
 
     score = 0.0
     up_ticks = down_ticks = 0
+    label_age_s: Optional[float] = None
     if regime_hysteresis_enabled():
         st = _update_regime_state(instant_dir, btc_r60, ts)
         label = str(st.get("label") or "NEUTRAL")
         score = float(st.get("score") or 0.0)
         up_ticks = int(st.get("up_ticks") or 0)
         down_ticks = int(st.get("down_ticks") or 0)
+        _since = float(st.get("label_since_ts") or 0.0)
+        if _since > 0.0 and ts >= _since:
+            label_age_s = ts - _since
         reason = (
             f"{reason} score={score:+.3f} up={up_ticks} down={down_ticks}"
+            + (
+                f" label_age={label_age_s:.0f}s"
+                if label_age_s is not None
+                else ""
+            )
         )
 
     return DirectionalRegime(
@@ -357,6 +378,7 @@ def compute_directional_regime(
         score=score,
         up_ticks=up_ticks,
         down_ticks=down_ticks,
+        label_age_s=label_age_s,
     )
 
 
@@ -392,8 +414,116 @@ def regime_entry_block(
 
 
 # ---------------------------------------------------------------------------
-# Side-aware conviction distance gate
+# Trend-side whipsaw guard (2026-10-16)
 # ---------------------------------------------------------------------------
+#
+# The 60s hysteresis proves a regime *changed*; it does not prove the move
+# still has room.  Both 2026-10-16 losses bought the trend side after the
+# move was done: BTC NO @78c with z=5.9 (SELL_OFF_CONFIRMED, V-bottomed
+# 47s later) and ETH NO during a NEUTRAL->SELL_OFF->RALLY->SELL_OFF label
+# oscillation.  Three orthogonal, decision-time-only checks — label age,
+# extension, and fast-leg divergence:
+
+_TREND_SIDE_BY_LABEL = {
+    "RALLY_CONFIRMED": "yes",
+    "SELL_OFF_CONFIRMED": "no",
+}
+
+
+def trendside_guard_enabled() -> bool:
+    return _env_flag("MERID_REGIME_TREND_GUARD_ENABLED", True)
+
+
+def _trend_min_label_age_s() -> float:
+    """Seconds a confirmed label must persist before trend-side entries."""
+    return _env_float("MERID_REGIME_TREND_MIN_AGE_S", 60.0)
+
+
+def _trend_extreme_z() -> float:
+    """|z| beyond which paying a trend premium is exhaustion-buying."""
+    return _env_float("MERID_REGIME_EXTREME_Z", 4.0)
+
+
+def _trend_extreme_price_c() -> float:
+    """Trend-side price (cents) above which the extension arm applies."""
+    return _env_float("MERID_REGIME_EXTREME_PRICE_C", 60.0)
+
+
+def _trend_bounce_frac() -> float:
+    """Opposite-direction fast-leg return (fraction) that marks a reversal."""
+    return _env_float("MERID_REGIME_BOUNCE_BP", 10.0) / 10000.0
+
+
+def trendside_entry_block(
+    regime: Optional[DirectionalRegime],
+    side: str,
+    zscore: Optional[float],
+    price_cents: Optional[float] = None,
+    rti_fast: Optional[float] = None,
+) -> Optional[str]:
+    """Trend-side entry guard — only arms on the *confirmed* trend side.
+
+    Returns a veto reason when buying WITH the confirmed regime is the
+    exhaustion/whipsaw case:
+
+    * ``trend_regime_fresh`` — the label changed within
+      ``MERID_REGIME_TREND_MIN_AGE_S`` (a just-flipped regime in a whipsaw
+      tape is the reversal top/bottom, not the trend).
+    * ``trend_extreme_extension`` — ``|z| >= MERID_REGIME_EXTREME_Z`` while
+      paying >= ``MERID_REGIME_EXTREME_PRICE_C`` for the trend side (paying
+      78c for a 5.9-sigma move is buying the completed move, not the trend).
+    * ``trend_bounce_detected`` — the fastest RTI leg (10s/30s, caller
+      supplied) has reversed against the regime direction by at least
+      ``MERID_REGIME_BOUNCE_BP``; the driftless model cannot see the
+      V-bottom, the tape can.
+
+    Non-confirmed labels and the countertrend side are untouched — those
+    are handled by ``regime_entry_block``.  Missing label_age / z / fast
+    leg degrade to no-block for that arm only.
+    """
+    if regime is None or not directional_regime_enabled():
+        return None
+    if not trendside_guard_enabled():
+        return None
+    trend_side = _TREND_SIDE_BY_LABEL.get(regime.label)
+    if trend_side is None or side != trend_side:
+        return None
+
+    # Arm 1 — regime persistence: a just-confirmed label is unproven.
+    age = getattr(regime, "label_age_s", None)
+    min_age = _trend_min_label_age_s()
+    if age is not None and min_age > 0.0 and age < min_age:
+        return (
+            f"trend_regime_fresh:{regime.label}:age={age:.0f}s"
+            f"<min={min_age:.0f}s"
+        )
+
+    # Arm 2 — extreme extension: paying up for an already-exhausted move.
+    z = zscore if (zscore is not None and math.isfinite(zscore)) else None
+    if (
+        z is not None
+        and abs(z) >= _trend_extreme_z()
+        and price_cents is not None
+        and float(price_cents) >= _trend_extreme_price_c()
+    ):
+        return (
+            f"trend_extreme_extension:z={z:+.2f}"
+            f" price={float(price_cents):.0f}c"
+        )
+
+    # Arm 3 — fast-leg divergence: the short-horizon return has reversed
+    # against the 60s regime direction (V-bottom/blow-off-top signature).
+    if rti_fast is not None and math.isfinite(rti_fast):
+        thr = _trend_bounce_frac()
+        if regime.label == "SELL_OFF_CONFIRMED" and rti_fast >= thr:
+            return (
+                f"trend_bounce_detected:r_fast={rti_fast:+.5f}"
+            )
+        if regime.label == "RALLY_CONFIRMED" and rti_fast <= -thr:
+            return (
+                f"trend_bounce_detected:r_fast={rti_fast:+.5f}"
+            )
+    return None
 
 _CONVICTION_DEFAULTS = {"BTC": 0.06, "ETH": 0.06, "SOL": 0.07, "XRP": 0.07, "DOGE": 0.08}
 
