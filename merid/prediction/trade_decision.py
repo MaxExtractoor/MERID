@@ -3899,15 +3899,21 @@ def compute_trade_decision(
     # lane keeps its own in-window probability ceiling.
     _stream_bound_yes = None
     _stream_bound_no = None
+    _stream_bound_src_yes = None
+    _stream_bound_src_no = None
     if not settlement_lane:
         try:
             from merid.prediction import streaming_calibration as _sc
-            _stream_bound_yes = _sc.streaming_bound(
+            _bnd_yes = _sc.streaming_bound_detail(
                 asset, "yes", yes_entry * 100.0, seconds_to_expiry
             )
-            _stream_bound_no = _sc.streaming_bound(
+            _bnd_no = _sc.streaming_bound_detail(
                 asset, "no", no_entry * 100.0, seconds_to_expiry
             )
+            _stream_bound_yes = (_bnd_yes or {}).get("bound")
+            _stream_bound_no = (_bnd_no or {}).get("bound")
+            _stream_bound_src_yes = (_bnd_yes or {}).get("source")
+            _stream_bound_src_no = (_bnd_no or {}).get("source")
             if _stream_bound_yes is not None and p_yes_for_yes > _stream_bound_yes:
                 p_yes_for_yes = _stream_bound_yes
                 p_no_for_yes = 1.0 - p_yes_for_yes
@@ -3916,8 +3922,11 @@ def compute_trade_decision(
                 p_yes_for_no = 1.0 - p_no_for_no
         except Exception:
             _stream_bound_yes = _stream_bound_no = None
+            _stream_bound_src_yes = _stream_bound_src_no = None
     indicators["streaming_cal_bound_yes"] = _stream_bound_yes
     indicators["streaming_cal_bound_no"] = _stream_bound_no
+    indicators["streaming_cal_bound_source_yes"] = _stream_bound_src_yes
+    indicators["streaming_cal_bound_source_no"] = _stream_bound_src_no
     indicators["streaming_cal_applied"] = bool(
         _stream_bound_yes is not None or _stream_bound_no is not None
     )
@@ -3942,13 +3951,24 @@ def compute_trade_decision(
             )
         except Exception:
             _drift_alarm_yes = _drift_alarm_no = None
+    # 2026-10-16 (no-trade audit): when the streaming bound came from the
+    # candidate's OWN exact slice, an "over" alarm on that cell was already
+    # priced twice upstream — the alarmed cell contributes its shrunk mean
+    # with NO honesty buffer and drags the isotonic cap down.  Charging the
+    # flat reserve on top triple-counts the same residual evidence.  The
+    # reserve remains for the pooled/unmeasured paths, where the bound is
+    # alarm-blind (pooled aggregates carry no cusum_hi).
     _drift_res_yes = (
         _drift_reserve
-        if (_drift_alarm_yes or {}).get("direction") == "over" else 0.0
+        if (_drift_alarm_yes or {}).get("direction") == "over"
+        and _stream_bound_src_yes != "exact"
+        else 0.0
     )
     _drift_res_no = (
         _drift_reserve
-        if (_drift_alarm_no or {}).get("direction") == "over" else 0.0
+        if (_drift_alarm_no or {}).get("direction") == "over"
+        and _stream_bound_src_no != "exact"
+        else 0.0
     )
     indicators["yes_drift_alarm"] = _drift_alarm_yes
     indicators["no_drift_alarm"] = _drift_alarm_no
@@ -5233,8 +5253,28 @@ def compute_trade_decision(
     # 2026-09-30: side-specific depth eligibility.  A side whose executable
     # book cannot absorb one contract is ineligible on its own; it must not
     # poison the opposite side via the (now both-empty-only) confidence floor.
-    yes_depth_ok = yes_depth_cc >= 100.0
-    no_depth_ok = no_depth_cc >= 100.0
+    # 2026-10-16 (no-trade audit): ``yes_depth_cc``/``no_depth_cc`` measure
+    # the ask-side liquidity a TAKER consumes when crossing the spread.
+    # Post-only routes (maker/maker_bid/empirical_marginal_maker) rest a
+    # limit order at their price and ADD liquidity — requiring own-side
+    # ask depth for them is a category error that rejected otherwise
+    # eligible resting candidates on thin asks while the bid queue they
+    # would join was healthy.  Book non-emptiness is still enforced by the
+    # confidence floor (either side >= 1 contract) and quote-coherence
+    # gates upstream; fill risk stays priced via the ASR/fill-prob terms.
+    _posts_liquidity = route in (
+        "maker",
+        "maker_bid",
+        "empirical_marginal_maker",
+    )
+    yes_depth_ok = _posts_liquidity or yes_depth_cc >= 100.0
+    no_depth_ok = _posts_liquidity or no_depth_cc >= 100.0
+    if _posts_liquidity and (yes_depth_cc < 100.0 or no_depth_cc < 100.0):
+        indicators["depth_gate_post_only_bypass"] = {
+            "route": route,
+            "yes_depth_cc": float(yes_depth_cc),
+            "no_depth_cc": float(no_depth_cc),
+        }
     # Audit vector: stamp every primitive gate flag so the decision-audit
     # ledger can persist the complete gate evaluation (not just the first
     # live blocker).  Purely additive — no gate reads these keys.
@@ -6252,6 +6292,15 @@ def compute_trade_decision(
                 # absorb a contract — label it a liquidity rejection.
                 no_trade_reason = f"insufficient_depth_{best_side}"
             elif (
+                tail_guard_violation_yes
+                if best_side == "yes"
+                else tail_guard_violation_no
+            ):
+                # 2026-10-16: mirrors _side_block_reason's ordering — the
+                # held-side tail-calibration veto owns the rejection.  Was
+                # previously unnamed and surfaced as no_qualifying_side.
+                no_trade_reason = f"tail_guard_{best_side}"
+            elif (
                 best_threshold >= 0
                 and _cb_p <= best_min_p
                 and not _cb_epc_overrides
@@ -6270,6 +6319,10 @@ def compute_trade_decision(
                  else _no_regime_block if best_side == "no" and not _no_regime_ok
                  else None)
                 if best_side is not None else None
+            ) or (
+                _yes_trendside_block
+                if best_side == "yes"
+                else _no_trendside_block
             ) or (
                 _yes_conv_block if best_side == "yes" else _no_conv_block
             ) or (
@@ -6292,9 +6345,15 @@ def compute_trade_decision(
                 # gate owns the rejection — report the gate, not evidence.
                 _eff_regime_yes = _yes_regime_block if not _yes_regime_ok else None
                 _eff_regime_no = _no_regime_block if not _no_regime_ok else None
+                # 2026-10-16: ``*_trendside_block`` joins the cascade —
+                # _side_block_reason already names it after regime, but the
+                # terminal tuple dropped it, so whipsaw-guard vetoes surfaced
+                # as the no_qualifying_side catch-all and hid the guard's
+                # true suppression rate from the audit funnel.
                 _gate_blocks = (
                     (
                         _eff_regime_yes,
+                        _yes_trendside_block,
                         _yes_conv_block,
                         _yes_throttle_block,
                         _yes_ct_lane_block,
@@ -6306,6 +6365,7 @@ def compute_trade_decision(
                     if best_side == "yes"
                     else (
                         _eff_regime_no,
+                        _no_trendside_block,
                         _no_conv_block,
                         _no_throttle_block,
                         _no_ct_lane_block,

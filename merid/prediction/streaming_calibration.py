@@ -345,12 +345,36 @@ def streaming_bound(
     plus ``MERID_STREAM_CAL_BUFFER``, PAV-isotonized over the price axis
     within the (asset, side, tte) slice.
     """
+    detail = streaming_bound_detail(asset, side, price_cents, tte_seconds, now)
+    return (detail or {}).get("bound")
+
+
+def streaming_bound_detail(
+    asset: str,
+    side: str,
+    price_cents: float,
+    tte_seconds: Optional[float],
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """``streaming_bound`` plus the bound's provenance.
+
+    ``source`` is ``"exact"`` when the bound came from the candidate's own
+    (asset, side, price, tte) slice — the path where a CUSUM-alarmed exact
+    cell already contributes its shrunk mean *without* the honesty buffer
+    and drags the isotonic curve down, so the alarm's correction is fully
+    priced into ``p``.  ``"pooled"`` marks every fallback path (TTE-pooled
+    aggregates carry no ``cusum_hi`` and the slice-mean fallback only
+    dilutes the alarmed cell across the slice) — the bound is alarm-blind
+    there, so an ``over`` drift alarm still warrants its own charge.
+    ``source=None`` means no measured cohort applied.
+    """
+    empty: Dict[str, Any] = {"bound": None, "source": None}
     if not enabled():
-        return None
+        return empty
     state = load_state()
     cells = (state or {}).get("cells")
     if not cells:
-        return None
+        return empty
     now_ts = float(now if now is not None else time.time())
     eff = _decayed_cells(state, now_ts)
     a = str(asset).upper()
@@ -374,6 +398,7 @@ def streaming_bound(
 
     # Exact-slice too thin?  Pool across TTE within the same price bucket so
     # the candidate still sees the asset's measured curve.
+    slice_is_pooled = False
     if not slice_cells or (
         slice_cells.get(pb) is None or slice_cells[pb]["n"] < min_n
     ):
@@ -387,8 +412,9 @@ def streaming_bound(
             rec["wp"] += c["wp"]
             rec["n"] += c["n"]
         if not pooled:
-            return None
+            return empty
         slice_cells = pooled
+        slice_is_pooled = True
 
     xs: List[float] = []
     ws: List[float] = []
@@ -410,13 +436,14 @@ def streaming_bound(
         ws.append(c["n"] + K)
         present.append(b)
     if not present:
-        return None
+        return empty
     iso = _pav(xs, ws)
     bound_map = dict(zip(present, iso))
 
     exact = slice_cells.get(pb)
     if exact is not None and exact["n"] >= min_n and pb in bound_map:
         bound = bound_map[pb]
+        source = "pooled" if slice_is_pooled else "exact"
     else:
         # Sparse exact bucket: fall back to the pooled asset-level mean so a
         # thin cell still inherits the measured direction.
@@ -424,11 +451,12 @@ def streaming_bound(
         tot_wp = sum(c["wp"] for c in slice_cells.values())
         tot_n = sum(c["n"] for c in slice_cells.values())
         if tot_n <= 0.0:
-            return None
+            return empty
         claimed = tot_wp / tot_n
         alarmed = float(exact.get("cusum_hi") or 0.0) >= h if exact else False
         bound = (tot_wy + K * claimed) / (tot_n + K) + (0.0 if alarmed else buf)
-    return max(0.01, min(0.99, bound))
+        source = "pooled"
+    return {"bound": max(0.01, min(0.99, bound)), "source": source}
 
 
 def drift_alarm(

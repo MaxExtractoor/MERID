@@ -146,6 +146,26 @@ def test_cusum_no_alarm_when_model_matches():
     assert sc.drift_alarm("ETH", "yes", 30.0, 400.0, now=1_000_100.0) is None
 
 
+def test_bound_detail_provenance():
+    """``streaming_bound_detail`` names whether the bound came from the
+    candidate's own slice (alarm-aware) or a pooled/alarm-blind fallback."""
+    # Dense exact cell (n>=8) -> "exact".
+    rows = [
+        _row(ticker=f"KXP-{i}", p=0.55, won=(i < 4), sat=1_000_000.0 + i)
+        for i in range(10)
+    ]
+    sc.update_from_rows(rows, now=1_000_100.0)
+    d = sc.streaming_bound_detail("ETH", "yes", 30.0, 400.0, now=1_000_100.0)
+    assert d == {"bound": d["bound"], "source": "exact"}
+    assert d["bound"] is not None
+    # Sparse exact cell -> pooled fallback -> "pooled".
+    d2 = sc.streaming_bound_detail("ETH", "yes", 70.0, 400.0, now=1_000_100.0)
+    assert d2["source"] == "pooled" and d2["bound"] is not None
+    # Unmeasured cohort -> pass-through, no source.
+    d3 = sc.streaming_bound_detail("BTC", "yes", 30.0, 400.0, now=1_000_100.0)
+    assert d3 == {"bound": None, "source": None}
+
+
 def test_decay_shrinks_stale_evidence():
     """A stale cell's influence decays with the configured halflife."""
     rows = [_row(ticker=f"KXD-{i}", p=0.55, won=False,
