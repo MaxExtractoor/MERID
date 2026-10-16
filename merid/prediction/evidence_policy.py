@@ -398,6 +398,129 @@ def implementation_shortfall_cents(
 
 
 # ---------------------------------------------------------------------------
+# Edge-bias correction (2026-10-16): measured claim-vs-realized error
+# ---------------------------------------------------------------------------
+#
+# The evidence artifact's ``edge_bias.by_source`` block carries the decayed,
+# per-market-normalized mean of ``expected_net_ev_cents - cf_pnl_cents`` per
+# ``ASSET|side|entry_source`` cohort — computed on EVERY settled candidate
+# (fills *and* vetoed evals), so it sees the selection bias the gate itself
+# induces: cohorts the model over-claims sit on the veto side of the gate
+# with negative realized PnL, and cohorts it under-claims sit there with
+# positive realized PnL.  A flat reserve cannot represent opposite-signed
+# biases; this correction can.
+#
+# Sign convention: positive correction = the cohort historically over-claims
+# (charged as extra reserve, suppressing phantom edge); negative correction
+# = measured under-claim (bounded rebate into net edge, admitting the missed
+# winners the argmax was ranking below their over-claiming siblings).  The
+# rebate direction additionally requires the under-claim to clear a
+# one-sided significance bound so a lucky small sample cannot bank itself.
+
+def edge_bias_enabled() -> bool:
+    return _env_flag("MERID_EDGE_BIAS_CORRECTION", True)
+
+
+def edge_bias_min_neff() -> float:
+    """Effective market count before a cohort's measured bias is trusted."""
+    return _env_float("MERID_EDGE_BIAS_MIN_NEFF", 12.0)
+
+
+def edge_bias_prior_k() -> float:
+    """Empirical-Bayes shrinkage prior toward zero bias."""
+    return _env_float("MERID_EDGE_BIAS_PRIOR_K", 8.0)
+
+
+def edge_bias_cap_cents() -> float:
+    """Max extra reserve a measured over-claim can add."""
+    return _env_float("MERID_EDGE_BIAS_CAP_CENTS", 8.0)
+
+
+def edge_bias_rebate_cap_cents() -> float:
+    """Max rebate a confidently-measured under-claim can earn — tighter than
+    the charge cap because rebates admit flow."""
+    return _env_float("MERID_EDGE_BIAS_REBATE_CAP_CENTS", 4.0)
+
+
+def edge_bias_rebate_z() -> float:
+    """One-sided significance the under-claim must clear before any rebate.
+    z=1.0 ~ 84% one-sided confidence that the true gap is negative."""
+    return _env_float("MERID_EDGE_BIAS_REBATE_Z", 1.0)
+
+
+def _edge_bias_source(asset: str, side: str, basis: str) -> str:
+    """Decision-side entry-source key matching counterfactual_entry_source:
+    ask-basis evals price at ``{side}_ask``; bid-basis (post-only maker)
+    evals price at the opposite bid's complement."""
+    s = str(side).lower()
+    if str(basis).lower() == "bid":
+        return "no_bid_complement" if s == "yes" else "yes_bid_complement"
+    return f"{s}_ask"
+
+
+def _edge_bias_rec(
+    evidence: Optional[Dict[str, Any]], asset: str, side: str, basis: str
+) -> Optional[Dict[str, Any]]:
+    block = (evidence or {}).get("edge_bias")
+    recs = (block or {}).get("by_source")
+    if not isinstance(recs, dict):
+        return None
+    a = (str(asset).upper()) or "UNKNOWN"
+    s = str(side).lower()
+    for key in (
+        f"{a}|{s}|{_edge_bias_source(a, s, basis)}",
+        f"{a}|{s}|*",
+    ):
+        rec = recs.get(key)
+        if isinstance(rec, dict):
+            return rec
+    return None
+
+
+def edge_bias_correction_cents(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+) -> float:
+    """Signed claim-vs-realized correction for this cohort (cents).
+
+    Returns a positive value when the cohort's measured ``claimed net -
+    realized pnl`` gap is positive (over-claim -> extra reserve) and a
+    negative value when the gap is confidently negative (under-claim ->
+    bounded rebate).  Standing follows the same epoch rule as the toxic
+    cells: when ``MERID_EVIDENCE_EPOCH_TS`` is set only post-epoch mass
+    counts; unset, the full window applies (legacy).
+    """
+    if not edge_bias_enabled():
+        return 0.0
+    rec = _edge_bias_rec(evidence, asset, side, basis)
+    if rec is None:
+        return 0.0
+    if evidence_epoch_ts() > 0.0:
+        n_eff = float(rec.get("n_eff_post") or 0.0)
+        wsum = float(rec.get("gap_wsum_post") or 0.0)
+        sqsum = float(rec.get("gap_sq_wsum_post") or 0.0)
+    else:
+        n_eff = float(rec.get("n_eff") or 0.0)
+        wsum = float(rec.get("gap_wsum") or 0.0)
+        sqsum = float(rec.get("gap_sq_wsum") or 0.0)
+    if n_eff < edge_bias_min_neff() or n_eff <= 0.0:
+        return 0.0
+    mean = wsum / n_eff
+    var = max(0.0, sqsum / n_eff - mean * mean)
+    se = math.sqrt(var / n_eff) if n_eff > 0.0 else 0.0
+    shrunk = wsum / (n_eff + edge_bias_prior_k())
+    if shrunk > 0.0:
+        return min(edge_bias_cap_cents(), shrunk)
+    # Rebate only on a confident under-claim: the upper significance bound
+    # of the measured gap must still sit below zero.
+    if mean + edge_bias_rebate_z() * se < 0.0:
+        return -min(edge_bias_rebate_cap_cents(), -shrunk)
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Cell dimensions
 # ---------------------------------------------------------------------------
 

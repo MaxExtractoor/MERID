@@ -2383,6 +2383,12 @@ class EdgeBreakdown:
     # exchange actually filled at (live_entry_evidence.implementation_
     # shortfall, per asset x side x price-basis).  Positive-only.
     implementation_shortfall_reserve: float = 0.0
+    # 2026-10-16: signed claim-vs-realized correction measured per
+    # asset x side x entry-source cohort (live_entry_evidence.edge_bias).
+    # Positive = the cohort historically over-claims (extra reserve);
+    # negative = measured under-claim (bounded rebate into net edge so the
+    # argmax stops ranking it below over-claiming siblings).
+    edge_bias_correction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -2416,6 +2422,11 @@ class EntryCostStack:
     policy_giveback_prob: float = 0.0
     # 2026-10-15 (FIX 13): measured implementation shortfall reserve.
     implementation_shortfall_prob: float = 0.0
+    # 2026-10-16: signed edge-bias correction (positive = measured
+    # over-claim charge, negative = measured under-claim rebate).  Part of
+    # pi_star so the p_selected - pi_star == net_edge - required identity
+    # holds in both directions.
+    edge_bias_prob: float = 0.0
 
     @property
     def pi_star(self) -> float:
@@ -2427,6 +2438,7 @@ class EntryCostStack:
             + self.adverse_selection_prob
             + self.policy_giveback_prob
             + self.implementation_shortfall_prob
+            + self.edge_bias_prob
             + self.required_net_edge_prob
         )
 
@@ -2439,6 +2451,7 @@ class EntryCostStack:
             + self.adverse_selection_prob
             + self.policy_giveback_prob
             + self.implementation_shortfall_prob
+            + self.edge_bias_prob
         )
 
     def net_edge_after_required(self, p_selected: float) -> float:
@@ -2683,6 +2696,7 @@ def compute_edge(
     adverse_selection_reserve: float = 0.0,
     policy_giveback_reserve: float = 0.0,
     implementation_shortfall_reserve: float = 0.0,
+    edge_bias_correction: float = 0.0,
 ) -> EdgeBreakdown:
     """Compute a fully explained net edge for one side.
 
@@ -2713,6 +2727,7 @@ def compute_edge(
         - adverse_selection_reserve
         - policy_giveback_reserve
         - implementation_shortfall_reserve
+        - edge_bias_correction
     )
 
     return EdgeBreakdown(
@@ -2730,6 +2745,7 @@ def compute_edge(
         adverse_selection_reserve=adverse_selection_reserve,
         policy_giveback_reserve=policy_giveback_reserve,
         implementation_shortfall_reserve=implementation_shortfall_reserve,
+        edge_bias_correction=edge_bias_correction,
     )
 
 
@@ -2747,6 +2763,7 @@ def entry_cost_stack_from_breakdown(
         adverse_selection_prob=breakdown.adverse_selection_reserve,
         policy_giveback_prob=breakdown.policy_giveback_reserve,
         implementation_shortfall_prob=breakdown.implementation_shortfall_reserve,
+        edge_bias_prob=breakdown.edge_bias_correction,
     )
 
 
@@ -4246,6 +4263,29 @@ def compute_trade_decision(
     indicators["yes_impl_shortfall_cents"] = _impl_sf_yes * 100.0
     indicators["no_impl_shortfall_cents"] = _impl_sf_no * 100.0
 
+    # 2026-10-16: measured claim-vs-realized edge bias.  The artifact's
+    # edge_bias block tracks ``expected_net_ev - cf_pnl`` per
+    # asset x side x entry-source on fills *and* vetoed evals — the honest
+    # selection-bias term a flat reserve cannot express: over-claiming
+    # cohorts (SOL, ETH-no, DOGE-no measured +6..+19c) get charged extra,
+    # confidently under-claiming cohorts (ETH-yes -29c, XRP -10..-19c,
+    # maker-basis DOGE-no -54c) get a bounded rebate so the argmax stops
+    # ranking them beneath their over-claiming siblings.  Signed: positive
+    # subtracts from net edge, negative adds back.
+    _bias_yes = 0.0
+    _bias_no = 0.0
+    try:
+        _bias_yes = evidence_policy.edge_bias_correction_cents(
+            _cal_ev, asset, "yes", entry_price_basis
+        ) / 100.0
+        _bias_no = evidence_policy.edge_bias_correction_cents(
+            _cal_ev, asset, "no", entry_price_basis
+        ) / 100.0
+    except Exception:
+        _bias_yes = _bias_no = 0.0
+    indicators["yes_edge_bias_correction_cents"] = _bias_yes * 100.0
+    indicators["no_edge_bias_correction_cents"] = _bias_no * 100.0
+
     yes_breakdown = compute_edge(
         p_yes=p_yes_for_yes,
         selected_side="yes",
@@ -4258,6 +4298,7 @@ def compute_trade_decision(
         adverse_selection_reserve=_asr_yes,
         policy_giveback_reserve=_policy_gb_yes,
         implementation_shortfall_reserve=_impl_sf_yes,
+        edge_bias_correction=_bias_yes,
     )
     no_breakdown = compute_edge(
         p_yes=p_yes_for_no,
@@ -4271,6 +4312,7 @@ def compute_trade_decision(
         ),
         policy_giveback_reserve=_policy_gb_no,
         implementation_shortfall_reserve=_impl_sf_no,
+        edge_bias_correction=_bias_no,
     )
 
     # 2026-08-30: Fee-aware, asset-tiered, spread-aware edge threshold.

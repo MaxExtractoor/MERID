@@ -2560,6 +2560,7 @@ class DecisionAuditLedger:
             # earlier comment favoring decision_ts pre-dated the table growth.
             # A decision always precedes its settlement; the one-hour pad on
             # decision_ts still covers decisions made just before the window.
+            ebias_rows: List[sqlite3.Row] = []
             rows = conn.execute(
                 """
                 SELECT d.asset AS asset,
@@ -2643,6 +2644,44 @@ class DecisionAuditLedger:
                     (since, since - 3600.0),
                 ).fetchall()
                 rows = list(rows) + list(veto_rows)
+            # 2026-10-16: claim-vs-realized edge bias.  For every settled
+            # side eval with an executable counterfactual, the artifact
+            # measures ``expected_net_ev - cf_pnl/contract`` — the realized
+            # error of the gate's own claim on that cohort, including the
+            # selection bias the gate induces on the veto side.  Feeds the
+            # ``edge_bias`` block consumed by
+            # evidence_policy.edge_bias_correction_cents.  Runs regardless
+            # of INCLUDE_VETOES: fills-side bias is signal too.
+            ebias_rows = conn.execute(
+                """
+                SELECT d.asset AS asset,
+                       se.side AS side,
+                       d.ticker AS ticker,
+                       se.expected_net_ev_cents AS net_ev,
+                       se.counterfactual_entry_source AS esrc,
+                       se.counterfactual_execution_status AS cf_status,
+                       se.counterfactual_assumed_filled_contracts AS q_assumed,
+                       o.counterfactual_yes_pnl_cents AS cf_yes,
+                       o.counterfactual_no_pnl_cents AS cf_no,
+                       o.settled_at AS settled_at,
+                       d.decision_ts AS decision_ts,
+                       d.ticker || '|' || se.side AS mkey
+                FROM strategy_decision_outcomes o
+                JOIN strategy_decisions d ON d.decision_id = o.decision_id
+                JOIN strategy_decision_side_ev se
+                  ON se.decision_id = d.decision_id
+                WHERE o.outcome_status = 'SETTLED'
+                  AND o.settled_at >= ?
+                  AND d.decision_ts >= ?
+                  AND se.side IN ('yes', 'no')
+                  AND se.expected_net_ev_cents IS NOT NULL
+                  AND (se.counterfactual_execution_status IS NULL
+                       OR se.counterfactual_execution_status IN
+                          ('FULLY_EXECUTABLE', 'PARTIALLY_EXECUTABLE'))
+                  AND d.is_eligible_for_research = 1
+                """,
+                (since, since - 3600.0),
+            ).fetchall()
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
@@ -2920,6 +2959,72 @@ class DecisionAuditLedger:
             },
         }
 
+        # 2026-10-16: edge_bias — the decayed, market-normalized mean of
+        # ``expected_net_ev_cents - cf_pnl_cents/contract`` per
+        # ``ASSET|side|entry_source`` cohort.  Positive mean = the cohort's
+        # claim historically outran what settlement paid (over-claim);
+        # negative = the gate undervalued it.  Executable-only CFs, deduped
+        # to the newest eval per market-side, epoch-split like the cells.
+        _cf_ok_eb = {None, "FULLY_EXECUTABLE", "PARTIALLY_EXECUTABLE"}
+        _eb_latest: Dict[str, Any] = {}
+        for r in ebias_rows:
+            if r["cf_status"] not in _cf_ok_eb:
+                continue
+            _mk = str(r["mkey"])
+            _prev = _eb_latest.get(_mk)
+            if _prev is None or float(
+                r["decision_ts"] or 0.0
+            ) >= float(_prev["decision_ts"] or 0.0):
+                _eb_latest[_mk] = r
+        _hl_s = h1 * 86400.0
+        _eb: Dict[str, Dict[str, float]] = {}
+        for r in _eb_latest.values():
+            q = float(r["q_assumed"] or 1.0)
+            if q <= 0.0:
+                continue
+            cf = r["cf_yes"] if r["side"] == "yes" else r["cf_no"]
+            if cf is None or r["net_ev"] is None:
+                continue
+            gap = float(r["net_ev"]) - float(cf) / q
+            w = (
+                0.5 ** (max(0.0, now - float(r["decision_ts"] or now)) / _hl_s)
+                if _hl_s > 0
+                else 1.0
+            )
+            asset = (str(r["asset"] or "").upper()) or "UNKNOWN"
+            side = str(r["side"] or "").lower()
+            src = str(r["esrc"] or "?")
+            post = (
+                epoch_ts <= 0.0
+                or float(r["decision_ts"] or 0.0) >= epoch_ts
+            )
+            for key in (f"{asset}|{side}|{src}", f"{asset}|{side}|*"):
+                rec = _eb.setdefault(
+                    key,
+                    {
+                        "n_eff": 0.0, "gap_wsum": 0.0, "gap_sq_wsum": 0.0,
+                        "n_eff_post": 0.0, "gap_wsum_post": 0.0,
+                        "gap_sq_wsum_post": 0.0,
+                    },
+                )
+                rec["n_eff"] += w
+                rec["gap_wsum"] += w * gap
+                rec["gap_sq_wsum"] += w * gap * gap
+                if post:
+                    rec["n_eff_post"] += w
+                    rec["gap_wsum_post"] += w * gap
+                    rec["gap_sq_wsum_post"] += w * gap * gap
+        edge_bias_block: Dict[str, Any] = {
+            "definition": (
+                "expected_net_ev_cents - cf_pnl_cents/contract; positive = "
+                "cohort over-claims its realized settlement edge"
+            ),
+            "by_source": {
+                k: {kk: round(vv, 4) for kk, vv in rec.items()}
+                for k, rec in sorted(_eb.items())
+            },
+        }
+
         def _rollup(src_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             rolled: Dict[str, Any] = {}
             for asset, sides in src_map.items():
@@ -2957,6 +3062,9 @@ class DecisionAuditLedger:
             "veto_assets": _rollup(veto_assets),
             "calibration_monitor": cal_monitor,
             "implementation_shortfall": implementation_shortfall,
+            # Claim-vs-realized edge bias per entry-source cohort — the
+            # measured selection-bias correction charged back into net edge.
+            "edge_bias": edge_bias_block,
             # Gate-level veto calibration: reason -> "ASSET|side|bucket" ->
             # {n, wr, avg_px}; compare wr vs avg_px to price each gate's
             # ex-post cost per cohort.
