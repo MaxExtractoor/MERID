@@ -2624,6 +2624,7 @@ class DecisionAuditLedger:
                            d.decision_ts AS decision_ts,
                            se.exclusion_reason AS exclusion_reason,
                            se.passed_edge_gate AS passed_edge_gate,
+                           se.counterfactual_execution_status AS cf_status,
                            'veto' AS src,
                            d.ticker || '|' || se.side AS mkey
                     FROM strategy_decision_outcomes o
@@ -2743,11 +2744,33 @@ class DecisionAuditLedger:
         h1 = float(os.environ.get("MERID_EVIDENCE_HALFLIFE_DAYS", "7"))
         h2 = float(os.environ.get("MERID_EVIDENCE_HALFLIFE_DAYS_ALT", "21"))
         recent_days = float(os.environ.get("MERID_EVIDENCE_RECENT_DAYS", "14"))
+        # "Recent" must be a strict sub-window of the artifact itself: when
+        # the artifact window is 48h and recent_days=14, every row is
+        # "recent" and the contradiction check compares the window against
+        # itself.  Clamp to the newest quarter of the window (~12h for the
+        # default 48h artifact) so recent_wr can actually diverge.
+        recent_days = min(
+            recent_days, max(window_hours / 96.0, 1.0 / 24.0)
+        )
+        # Hard-block evidence epoch: rows settled before this boundary are
+        # retained as priors but cannot sustain a toxic-cell veto.
+        epoch_ts = float(os.environ.get("MERID_EVIDENCE_EPOCH_TS", "0") or 0.0)
         if _ep is not None:
-            dict_rows = [{k: r[k] for k in r.keys()} for r in rows]
+            # Counterfactual hygiene: a vetoed candidate only generates
+            # outcome evidence when the fill it implies could actually have
+            # existed.  NOT_EXECUTABLE_* / UNKNOWN / N/A statuses describe
+            # hypothetical fills at prices nobody could take — they are
+            # kept in the audit rollups above but must not write cells.
+            _cf_ok = {None, "FULLY_EXECUTABLE", "PARTIALLY_EXECUTABLE"}
+            dict_rows = [
+                {k: r[k] for k in r.keys()}
+                for r in rows
+                if r["src"] != "veto" or r["cf_status"] in _cf_ok
+            ]
             for h in (h1, h2):
                 cells_by_halflife[f"{h:g}"] = _ep.build_cells(
-                    dict_rows, h, now=now, recent_days=recent_days
+                    dict_rows, h, now=now,
+                    recent_days=recent_days, epoch_ts=epoch_ts,
                 )
 
         # Rolling calibration monitor: per-asset ECE / Brier / signed bias on
@@ -2949,6 +2972,12 @@ class DecisionAuditLedger:
                 for reason, cells_rec in veto_reasons.items()
             },
             "cells": cells_by_halflife,
+            # Provenance for the hard-block epoch gate: cells carry
+            # post-epoch mass; evaluate() refuses hard-block standing on
+            # pre-epoch evidence alone.
+            "evidence_epoch_ts": epoch_ts,
+            "recent_days_effective": recent_days,
+            "cf_status_filter": "executable_only",
         }
 
         path = Path(

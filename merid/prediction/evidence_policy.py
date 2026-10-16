@@ -174,6 +174,44 @@ def escape_lane_enabled() -> bool:
     return _env_flag("MERID_EVIDENCE_ESCAPE_LANE", True)
 
 
+def evidence_epoch_ts() -> float:
+    """Hard-block evidence epoch boundary (unix ts).
+
+    Only outcomes settled at/after this timestamp count toward a toxic-cell
+    hard block.  Pre-epoch outcomes remain in the artifact and still feed
+    parent priors and the soft margin/challenge paths — they just cannot
+    *sustain* a hard block on their own.  Bump the epoch after a decision-
+    layer code change so blocks must re-prove themselves on current-code
+    counterfactuals instead of vetoing forever on stale-regime evidence.
+    ``0`` disables epoch filtering (all rows count).
+    """
+    return _env_float("MERID_EVIDENCE_EPOCH_TS", 0.0)
+
+
+def rehab_probe_enabled() -> bool:
+    """Guaranteed-exploration arm for toxic cells (half-open recovery).
+
+    Safe-exploration counterpart to the hard block: a cell stays blocked,
+    but once per ``rehab_probe_interval_s`` the model may place ONE bounded
+    escape-lane probe when its own net edge clears the normal evidence
+    margin (not the elevated challenge reserve).  Real fills are the only
+    evidence that can measure current-code execution quality; veto
+    counterfactuals only measure settlement outcomes at the vetoed price.
+    """
+    return _env_flag("MERID_EVIDENCE_REHAB_PROBE", True)
+
+
+def rehab_probe_interval_s() -> float:
+    """Per-cell cooldown between toxic-cell rehabilitation probes."""
+    return _env_float("MERID_EVIDENCE_REHAB_PROBE_S", 21600.0)
+
+
+def rehab_state_path() -> str:
+    return os.environ.get(
+        "MERID_EVIDENCE_REHAB_STATE_PATH", "data/evidence_rehab_probes.json"
+    )
+
+
 def escape_daily_max() -> int:
     """Per-day cap on escape-lane order submissions (post-only canary)."""
     return _env_int("MERID_EVIDENCE_ESCAPE_DAILY_MAX", 12)
@@ -449,6 +487,11 @@ class CellAgg:
     recent_w: float = 0.0
     recent_l: float = 0.0
     recent_n: int = 0
+    n_eff_post: float = 0.0
+    n_raw_post: int = 0
+    w_post: float = 0.0
+    l_post: float = 0.0
+    entry_wsum_post: float = 0.0
 
     @property
     def n(self) -> float:
@@ -461,6 +504,14 @@ class CellAgg:
     @property
     def avg_entry_cents(self) -> float:
         return self.entry_wsum / self.n_eff if self.n_eff > 0 else 0.0
+
+    @property
+    def avg_entry_cents_post(self) -> float:
+        return (
+            self.entry_wsum_post / self.n_eff_post
+            if self.n_eff_post > 0
+            else self.avg_entry_cents
+        )
 
     @property
     def recent_wr(self) -> Optional[float]:
@@ -476,6 +527,11 @@ class CellAgg:
         self.recent_w += float(cell.get("recent_w") or 0.0)
         self.recent_l += float(cell.get("recent_l") or 0.0)
         self.recent_n += int(cell.get("recent_n") or 0)
+        self.w_post += float(cell.get("w_post") or 0.0)
+        self.l_post += float(cell.get("l_post") or 0.0)
+        self.n_eff_post += float(cell.get("n_eff_post") or 0.0)
+        self.n_raw_post += int(cell.get("n_raw_post") or 0)
+        self.entry_wsum_post += float(cell.get("entry_wsum_post") or 0.0)
 
     def minus(self, other: "CellAgg") -> "CellAgg":
         """Leave-one-out aggregate: this level excluding ``other``'s cells."""
@@ -488,6 +544,13 @@ class CellAgg:
             recent_w=max(0.0, self.recent_w - other.recent_w),
             recent_l=max(0.0, self.recent_l - other.recent_l),
             recent_n=max(0, self.recent_n - other.recent_n),
+            w_post=max(0.0, self.w_post - other.w_post),
+            l_post=max(0.0, self.l_post - other.l_post),
+            n_eff_post=max(0.0, self.n_eff_post - other.n_eff_post),
+            n_raw_post=max(0, self.n_raw_post - other.n_raw_post),
+            entry_wsum_post=max(
+                0.0, self.entry_wsum_post - other.entry_wsum_post
+            ),
         )
 
 
@@ -865,36 +928,56 @@ def evaluate(
     # floor; a sparse matched cell (n_eff>=8) can still hard-block, but only
     # when toxicity is severe (LCB net EV < -10c at its own cost basis).
     if not stale:
+        _epoch = evidence_epoch_ts()
         for hb_name in _HARD_BLOCK_LEVELS:
             hb_dims = dict(_HIERARCHY)[hb_name]
             hb_agg = aggregate_at_level(cells, asset, side_l, pb, tb, hb_dims)
-            if hb_agg.n_eff < hard_sparse_min_neff():
+            # Standing to hard-block requires current-epoch evidence:
+            # outcomes settled before MERID_EVIDENCE_EPOCH_TS remain in the
+            # artifact — they feed priors and soft margins — but cannot
+            # sustain a veto on their own.  With the epoch unset the
+            # observation is the full aggregate (legacy behavior).
+            if _epoch > 0.0:
+                hb_obs = CellAgg(
+                    w=hb_agg.w_post, l=hb_agg.l_post,
+                    n_eff=hb_agg.n_eff_post, n_raw=hb_agg.n_raw_post,
+                )
+            else:
+                hb_obs = hb_agg
+            if hb_obs.n_eff < hard_sparse_min_neff():
                 continue
-            # Parent prior = nearest broader level, leave-one-out.
+            # Parent prior = nearest broader level, leave-one-out.  The
+            # prior legitimately carries pre-epoch context; the likelihood
+            # is current-epoch only.
             idx = [n for n, _ in _HIERARCHY].index(hb_name)
             _hb_pname, hb_parent = _find_loo_parent(
                 chain, idx, hb_dims, hb_agg
             )
             if hb_parent is None and global_agg.n > 0:
                 hb_parent = global_agg.minus(hb_agg)
-            ha, hb_, hm, hlcb = _posterior(hb_agg, hb_parent)
+            ha, hb_, hm, hlcb = _posterior(hb_obs, hb_parent)
             # Toxicity measured at the prices the cohort actually traded:
             # LCB win prob must stay meaningfully below its own cost basis.
+            hb_cost = (
+                hb_agg.avg_entry_cents_post
+                if _epoch > 0.0
+                else hb_agg.avg_entry_cents
+            )
             hb_ev = (
-                (hlcb - hb_agg.avg_entry_cents / 100.0 - float(fee_frac)) * 100.0
+                (hlcb - hb_cost / 100.0 - float(fee_frac)) * 100.0
             )
             recent_wr = hb_agg.recent_wr
             recent_agrees = (
                 recent_wr is None
-                or recent_wr < hb_agg.avg_entry_cents / 100.0 + float(fee_frac)
+                or recent_wr < hb_cost / 100.0 + float(fee_frac)
             )
             dense_toxic = (
-                hb_agg.n_eff >= hard_min_neff()
+                hb_obs.n_eff >= hard_min_neff()
                 and hb_ev < -abs(hard_ev_floor_c())
             )
             sparse_severe = (
                 hard_sparse_tier_enabled()
-                and hb_agg.n_eff < hard_min_neff()
+                and hb_obs.n_eff < hard_min_neff()
                 and hb_ev < -abs(hard_sparse_ev_floor_c())
             )
             if (dense_toxic or sparse_severe) and recent_agrees:
@@ -912,12 +995,45 @@ def evaluate(
                         net_edge_cents is not None
                         and float(net_edge_cents) >= req
                     )
+                    if not ok and rehab_probe_enabled():
+                        # Half-open recovery: a blocked cell gets ONE bounded
+                        # escape-lane probe per interval when the model's net
+                        # edge merely clears the normal margin.  Guaranteed
+                        # exploration is the only channel that produces
+                        # current-code *fill* evidence; veto counterfactuals
+                        # alone can never measure fill quality and can leave
+                        # a cell permanently blocked on stale-regime data.
+                        if (
+                            net_edge_cents is not None
+                            and float(net_edge_cents) >= margin_frac * 100.0
+                            and escape_lane_enabled()
+                            and escape_cap_remaining() > 0
+                            and _rehab_probe_due(ck, hb_name, now)
+                        ):
+                            _record_rehab_probe(ck, hb_name, now)
+                            return _base(
+                                allowed=True,
+                                code="TOXIC_REHAB_PROBE",
+                                level=hb_name, n_eff=hb_obs.n_eff,
+                                w=hb_obs.w, l=hb_obs.l,
+                                n_raw=hb_obs.n_raw,
+                                p_mean=hm, p_lcb=hlcb,
+                                p_std=_beta_std(ha, hb_),
+                                lcb_ev=hb_ev, hard=True, escape=True,
+                                hb_level=hb_name, hb_ev=hb_ev,
+                                req_margin=margin_frac * 100.0,
+                                uplift=0.0,
+                                fallback=(
+                                    "toxic-cell rehabilitation probe; "
+                                    "bounded escape-lane exploration"
+                                ),
+                            )
                     if ok and not escape_lane_enabled():
                         return _base(
                             allowed=False,
                             code="TOXIC_CHALLENGE_LANE_DISABLED",
-                            level=hb_name, n_eff=hb_agg.n_eff,
-                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            level=hb_name, n_eff=hb_obs.n_eff,
+                            w=hb_obs.w, l=hb_obs.l, n_raw=hb_obs.n_raw,
                             p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
                             lcb_ev=hb_ev, hard=True, escape=True,
                             hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
@@ -929,8 +1045,8 @@ def evaluate(
                         return _base(
                             allowed=False,
                             code="TOXIC_CHALLENGE_CAP_EXHAUSTED",
-                            level=hb_name, n_eff=hb_agg.n_eff,
-                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            level=hb_name, n_eff=hb_obs.n_eff,
+                            w=hb_obs.w, l=hb_obs.l, n_raw=hb_obs.n_raw,
                             p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
                             lcb_ev=hb_ev, hard=True, escape=True,
                             hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
@@ -940,8 +1056,8 @@ def evaluate(
                     if ok:
                         return _base(
                             allowed=True, code="TOXIC_CHALLENGE_PASS",
-                            level=hb_name, n_eff=hb_agg.n_eff,
-                            w=hb_agg.w, l=hb_agg.l, n_raw=hb_agg.n_raw,
+                            level=hb_name, n_eff=hb_obs.n_eff,
+                            w=hb_obs.w, l=hb_obs.l, n_raw=hb_obs.n_raw,
                             p_mean=hm, p_lcb=hlcb, p_std=_beta_std(ha, hb_),
                             lcb_ev=hb_ev, hard=True, escape=True,
                             hb_level=hb_name, hb_ev=hb_ev, req_margin=req,
@@ -950,19 +1066,19 @@ def evaluate(
                                 f"toxic-cell challenge: model edge "
                                 f"{float(net_edge_cents):+.1f}c cleared "
                                 f"{req:.1f}c reserve vs {tier} toxic cell "
-                                f"(n_eff={hb_agg.n_eff:.1f}, "
+                                f"(n_eff={hb_obs.n_eff:.1f}, "
                                 f"lcb_ev={hb_ev:+.1f}c)"
                             ),
                         )
                 return _base(
                     allowed=False, code="MATCHING_TOXIC_CELL",
-                    level=hb_name, n_eff=hb_agg.n_eff, w=hb_agg.w, l=hb_agg.l,
-                    n_raw=hb_agg.n_raw, p_mean=hm, p_lcb=hlcb,
+                    level=hb_name, n_eff=hb_obs.n_eff, w=hb_obs.w, l=hb_obs.l,
+                    n_raw=hb_obs.n_raw, p_mean=hm, p_lcb=hlcb,
                     p_std=_beta_std(ha, hb_), lcb_ev=hb_ev, hard=True,
                     hb_level=hb_name, hb_ev=hb_ev,
                     fallback=(
                         f"matched {tier} toxic cell "
-                        f"(n_eff={hb_agg.n_eff:.1f}, lcb_ev={hb_ev:+.1f}c) "
+                        f"(n_eff={hb_obs.n_eff:.1f}, lcb_ev={hb_ev:+.1f}c) "
                         "with no contrary recent evidence"
                     ),
                 )
@@ -1208,6 +1324,7 @@ def build_cells(
     half_life_days: float,
     now: Optional[float] = None,
     recent_days: float = 14.0,
+    epoch_ts: float = 0.0,
 ) -> Dict[str, Dict[str, Any]]:
     """Aggregate settled-entry rows into finest-grain cells.
 
@@ -1257,7 +1374,9 @@ def build_cells(
                 {"w": 0.0, "l": 0.0, "n_eff": 0.0, "n_raw": 0,
                  "_markets": set(), "entry_wsum": 0.0,
                  "recent_w": 0.0, "recent_l": 0.0, "recent_n": 0,
-                 "n_veto": 0, "n_fill": 0},
+                 "n_veto": 0, "n_fill": 0,
+                 "w_post": 0.0, "l_post": 0.0, "n_eff_post": 0.0,
+                 "n_raw_post": 0, "entry_wsum_post": 0.0},
             )
             c["w"] += rw * won
             c["l"] += rw * (1.0 - won)
@@ -1269,7 +1388,19 @@ def build_cells(
                 c["n_fill"] += 1
             c["_markets"].add(mkey)
             c["entry_wsum"] += rw * entry_cents
-            if now - float(r.get("settled_at") or now) <= recent_days * 86400.0:
+            settled_at = float(r.get("settled_at") or now)
+            # Epoch membership is judged on when the candidate was
+            # *decided* — the code that evaluated it — not when the market
+            # happened to settle.  A pre-fix decision settling after the
+            # boundary is still old-regime evidence.
+            epoch_ref = float(r.get("decision_ts") or settled_at)
+            if epoch_ref >= float(epoch_ts or 0.0):
+                c["w_post"] += rw * won
+                c["l_post"] += rw * (1.0 - won)
+                c["n_eff_post"] += rw
+                c["n_raw_post"] += 1
+                c["entry_wsum_post"] += rw * entry_cents
+            if now - settled_at <= recent_days * 86400.0:
                 c["recent_w"] += won
                 c["recent_l"] += 1.0 - won
                 c["recent_n"] += 1
@@ -1394,3 +1525,59 @@ def record_escape_submission(
     except Exception:
         pass
     return count
+
+
+# ---------------------------------------------------------------------------
+# Toxic-cell rehabilitation probes (per-cell cooldown, durable)
+# ---------------------------------------------------------------------------
+
+def _rehab_state(path: Optional[str] = None) -> Dict[str, float]:
+    try:
+        with open(path or rehab_state_path(), "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if isinstance(rec, dict):
+            return {
+                str(k): float(v)
+                for k, v in rec.get("cells", {}).items()
+                if isinstance(v, (int, float))
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _rehab_probe_due(
+    cell_key: str,
+    level: str,
+    now: float,
+    path: Optional[str] = None,
+) -> bool:
+    """True when this cell has not consumed a rehab probe inside the
+    configured cooldown.  Missing/corrupt state defaults to *due* — the
+    probe is exploration, worst case it spends one bounded escape slot."""
+    last = _rehab_state(path).get(f"{level}|{cell_key}")
+    return last is None or (float(now) - last) >= rehab_probe_interval_s()
+
+
+def _record_rehab_probe(
+    cell_key: str,
+    level: str,
+    now: Optional[float] = None,
+    path: Optional[str] = None,
+) -> None:
+    now = time.time() if now is None else float(now)
+    p = path or rehab_state_path()
+    rec = _rehab_state(p)
+    rec[f"{level}|{cell_key}"] = float(now)
+    # Bound the map: drop entries beyond 30d so the file cannot grow with
+    # the number of distinct cells ever seen.
+    cutoff = float(now) - 30.0 * 86400.0
+    rec = {k: v for k, v in rec.items() if v >= cutoff}
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"cells": rec}))
+        os.replace(tmp, p)
+    except Exception:
+        pass

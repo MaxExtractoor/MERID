@@ -69,6 +69,14 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_TIER", "0")
     monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_EV_C", "10.0")
     monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "veto")
+    # 2026-10-16: .env pins an evidence epoch for production (pre-epoch rows
+    # cannot sustain a hard block); synthetic cells carry no post-epoch
+    # mass, so the epoch must default off here — epoch tests opt in below.
+    # Same for the rehab-probe state file: never touch production state.
+    monkeypatch.setenv("MERID_EVIDENCE_EPOCH_TS", "0")
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_REHAB_STATE_PATH", str(tmp_path / "rehab.json")
+    )
     yield
 
 
@@ -591,3 +599,172 @@ def test_implementation_shortfall_reserve(monkeypatch):
     # Kill switch.
     monkeypatch.setenv("MERID_IMPL_SHORTFALL_RESERVE", "0")
     assert ep.implementation_shortfall_cents(ev, "XRP", "no", "bid") == 0.0
+
+# --------------------------------------------------------------------------
+# Evidence epoch + rehabilitation probes (2026-10-16 toxic-cell reset)
+# --------------------------------------------------------------------------
+
+def _epoch_cell(w, l, w_post=None, l_post=None, entry=50.0, **kw):
+    """Synthetic cell with post-epoch mass (defaults: all mass post-epoch)."""
+    c = _cell(w, l, entry=entry, **kw)
+    wp = w if w_post is None else w_post
+    lp = l if l_post is None else l_post
+    c.update({
+        "w_post": float(wp), "l_post": float(lp),
+        "n_eff_post": float(wp + lp),
+        "n_raw_post": int(wp + lp),
+        "entry_wsum_post": float(entry) * float(wp + lp),
+    })
+    return c
+
+
+def test_build_cells_post_epoch_split():
+    """Rows settled before the epoch land in legacy mass only; rows at/after
+    the boundary land in the post-epoch mass a hard block must use."""
+    now = time.time()
+    rows = [
+        {"asset": "SOL", "side": "no", "ticker": "T1", "entry_cents": 35,
+         "settled_yes": 0, "settled_at": now - 7200, "seconds_to_close": 400,
+         "decision_ts": now - 7500},
+        {"asset": "SOL", "side": "no", "ticker": "T2", "entry_cents": 36,
+         "settled_yes": 0, "settled_at": now - 3600, "seconds_to_close": 400,
+         "decision_ts": now - 3900},
+        # Settled post-epoch but DECIDED pre-epoch: old-regime evidence must
+        # not count toward the current-epoch hard-block mass.
+        {"asset": "SOL", "side": "no", "ticker": "T3", "entry_cents": 37,
+         "settled_yes": 0, "settled_at": now - 60, "seconds_to_close": 400,
+         "decision_ts": now - 2000},
+        {"asset": "SOL", "side": "no", "ticker": "T4", "entry_cents": 38,
+         "settled_yes": 0, "settled_at": now - 30, "seconds_to_close": 400,
+         "decision_ts": now - 100},
+    ]
+    epoch = now - 1800
+    cells = ep.build_cells(rows, 7.0, now=now, epoch_ts=epoch)
+    c = cells["SOL|no|25-49|mid"]
+    assert c["n_raw"] == 4
+    # Only the post-epoch *decision* counts: T3 settled post-epoch but was
+    # decided before it and must not carry current-code standing.
+    assert c["n_raw_post"] == 1
+    assert c["n_eff_post"] > 0 and c["n_eff_post"] < c["n_eff"]
+    # side=no + settled_yes=0 -> win: post mass lands on w_post, not l_post.
+    assert c["w_post"] == pytest.approx(c["n_eff_post"])
+    assert c["l_post"] == pytest.approx(0.0)
+
+
+def test_epoch_unset_post_fields_track_full():
+    """With every row post-epoch (epoch=0), post fields mirror the cell."""
+    now = time.time()
+    rows = [
+        {"asset": "BTC", "side": "yes", "ticker": "T1", "entry_cents": 60,
+         "settled_yes": 1, "settled_at": now - 100, "seconds_to_close": 500},
+    ]
+    cells = ep.build_cells(rows, 7.0, now=now, epoch_ts=0.0)
+    c = cells["BTC|yes|50-74|mid"]
+    assert c["n_eff_post"] == pytest.approx(c["n_eff"])
+    assert c["w_post"] == pytest.approx(c["w"])
+
+
+def test_pre_epoch_evidence_cannot_hard_block(monkeypatch):
+    """A cohort toxic only on pre-epoch evidence loses hard-block standing:
+    it falls back to the soft margin path instead of MATCHING_TOXIC_CELL."""
+    monkeypatch.setenv("MERID_EVIDENCE_EPOCH_TS", str(time.time()))
+    cells = {
+        "XRP|yes|75-89|late": _epoch_cell(
+            w=10, l=90, w_post=0, l_post=0, entry=77),
+        "XRP|yes|75-89|mid": _epoch_cell(
+            w=4, l=10, w_post=0, l_post=0, entry=77),
+    }
+    d = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+              tte_seconds=200.0)
+    assert d.code != "MATCHING_TOXIC_CELL"
+    assert not d.matching_hard_block
+
+
+def test_post_epoch_evidence_restores_hard_block(monkeypatch):
+    """Post-epoch mass re-earns the block on its own."""
+    monkeypatch.setenv("MERID_EVIDENCE_EPOCH_TS", str(time.time()))
+    cells = {
+        "XRP|yes|75-89|late": _epoch_cell(w=10, l=90, entry=77),
+    }
+    d = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+              tte_seconds=200.0)
+    assert not d.allowed
+    assert d.code == "MATCHING_TOXIC_CELL"
+    assert d.matching_hard_block
+
+
+def test_rehab_probe_admits_once_then_cools_down(monkeypatch, tmp_path):
+    """Challenge mode + a blocked cell: one probe per interval at normal
+    margin, then the veto returns until the cooldown lapses."""
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "challenge")
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_REHAB_STATE_PATH", str(tmp_path / "rehab.json")
+    )
+    monkeypatch.setenv("MERID_EVIDENCE_REHAB_PROBE", "1")
+    # Toxic dense cohort: w=10,l=90 @77c -> deep negative hb_ev; net_edge 4c
+    # clears the 3c margin but not the ~7c challenge reserve.
+    cells = {"XRP|yes|75-89|late": _cell(w=10, l=90, entry=77)}
+    d1 = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+               tte_seconds=200.0, net_edge_cents=4.0)
+    assert d1.allowed
+    assert d1.code == "TOXIC_REHAB_PROBE"
+    assert d1.escape_required
+    # Same cell immediately after -> probe consumed; veto returns.
+    d2 = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+               tte_seconds=200.0, net_edge_cents=4.0)
+    assert not d2.allowed
+    assert d2.code == "MATCHING_TOXIC_CELL"
+
+
+def test_rehab_probe_requires_normal_margin(monkeypatch, tmp_path):
+    """The probe is bounded exploration, not a free pass: net edge below the
+    normal evidence margin stays blocked even when the probe is due."""
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "challenge")
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_REHAB_STATE_PATH", str(tmp_path / "rehab.json")
+    )
+    cells = {"XRP|yes|75-89|late": _cell(w=10, l=90, entry=77)}
+    d = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+              tte_seconds=200.0, net_edge_cents=1.0)  # margin=3c
+    assert not d.allowed
+    assert d.code == "MATCHING_TOXIC_CELL"
+
+
+def test_rehab_probe_disabled_stays_blocked(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "challenge")
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_REHAB_STATE_PATH", str(tmp_path / "rehab.json")
+    )
+    monkeypatch.setenv("MERID_EVIDENCE_REHAB_PROBE", "0")
+    cells = {"XRP|yes|75-89|late": _cell(w=10, l=90, entry=77)}
+    d = _eval(cells, asset="XRP", side="yes", entry_price_cents=77.0,
+              tte_seconds=200.0, net_edge_cents=4.0)
+    assert not d.allowed
+    assert d.code == "MATCHING_TOXIC_CELL"
+
+
+def test_rehab_probe_interval_respected(monkeypatch, tmp_path):
+    """Cooldown is per cell+level and expires on schedule."""
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "challenge")
+    state = tmp_path / "rehab.json"
+    monkeypatch.setenv("MERID_EVIDENCE_REHAB_STATE_PATH", str(state))
+    monkeypatch.setenv("MERID_EVIDENCE_REHAB_PROBE_S", "600")
+    key = "asset_side_price_tte|XRP|yes|75-89|late"
+    now = time.time()
+    assert ep._rehab_probe_due("XRP|yes|75-89|late",
+                               "asset_side_price_tte", now, str(state))
+    ep._record_rehab_probe("XRP|yes|75-89|late",
+                           "asset_side_price_tte", now, str(state))
+    assert not ep._rehab_probe_due("XRP|yes|75-89|late",
+                                   "asset_side_price_tte",
+                                   now + 300, str(state))
+    assert ep._rehab_probe_due("XRP|yes|75-89|late",
+                               "asset_side_price_tte",
+                               now + 601, str(state))
+    # A different level/cell is not covered by the stamp.
+    assert ep._rehab_probe_due("XRP|yes|75-89|late",
+                               "asset_side_price",
+                               now + 300, str(state))
+    assert ep._rehab_probe_due("XRP|yes|50-74|late",
+                               "asset_side_price_tte",
+                               now + 300, str(state))
