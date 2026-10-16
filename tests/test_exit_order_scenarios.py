@@ -227,7 +227,10 @@ class TestExitOrderScenarios:
         assert ratchet_config.get('enabled') is True, "Ratchet should be enabled"
         assert ratchet_config.get('activation_threshold_cents') == 85, "Activation threshold should be 85c"
         assert ratchet_config.get('floor_offset_cents') == 5, "Floor offset should be 5c"
-        assert ratchet_config.get('force_exit_on_floor_breach') is True, "Force exit on floor breach should be True"
+        # 2026-08-01: force-exit on floor breach was deliberately removed —
+        # floor breach now requires thesis validation before exiting.
+        assert ratchet_config.get('force_exit_on_floor_breach') is False, "Force exit on floor breach should be False (thesis-validated exit)"
+        assert ratchet_config.get('thesis_validation_enabled') is True, "Thesis validation should gate floor-breach exits"
         assert ratchet_config.get('trim_position_enabled') is True, "Trim position should be enabled"
         assert ratchet_config.get('trim_threshold_cents') == 80, "Trim threshold should be 80c"
         assert ratchet_config.get('trim_to_contracts') == 1, "Trim to contracts should be 1"

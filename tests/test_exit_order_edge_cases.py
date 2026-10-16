@@ -69,26 +69,33 @@ class TestExitOrderEdgeCases:
         print("✓ Entry order rejects boundary prices test passed")
     
     def test_exit_order_at_exact_capacity(self):
-        """Test exit order behavior when exactly at $1 capacity."""
+        """Test exit order behavior when exactly at the configured cap.
+
+        The cap is env-configured (MERID_FIXED_EXPOSURE_CAP_USD); fill to
+        whatever the allocator resolved rather than a hardcoded $1.00.
+        One slot per asset (max_positions_per_asset=1), so spread the cap
+        evenly across the five assets: price_cents = cap*100/5 per slot.
+        """
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
-        
-        # Fill to exactly $1.00
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, is_exit_order=False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, is_exit_order=False)
-        req3 = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, is_exit_order=False)
-        req4 = AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, is_exit_order=False)
-        
-        allocated1, _, _ = allocator.request_allocation(req1)
-        allocated2, _, _ = allocator.request_allocation(req2)
-        allocated3, _, _ = allocator.request_allocation(req3)
-        allocated4, _, _ = allocator.request_allocation(req4)
-        
-        assert allocated1 and allocated2 and allocated3 and allocated4
-        assert abs(allocator.get_total_exposure() - 1.00) < 0.01
+        cap_usd = float(allocator.max_exposure_usd)
+        price_cents = int(round(cap_usd * 100.0 / 5.0))
+        assert 10 <= price_cents <= 75
+
+        assets = [("BTC_15M", "BTC", "KXBTC15M-1"), ("ETH_15M", "ETH", "KXETH15M-1"),
+                  ("SOL_15M", "SOL", "KXSOL15M-1"), ("XRP_15M", "XRP", "KXXRP15M-1"),
+                  ("DOGE_15M", "DOGE", "KXDOGE15M-1")]
+        allocated = []
+        for agent, asset, ticker in assets:
+            req = AllocationRequest(agent, asset, ticker, price_cents, 2.0, 5, is_exit_order=False)
+            ok, _, _ = allocator.request_allocation(req)
+            allocated.append(ok)
+
+        assert all(allocated)
+        assert abs(allocator.get_total_exposure() - cap_usd) < 0.01
         assert abs(allocator.get_available_exposure() - 0.00) < 0.01
         
         # Exit order should still bypass

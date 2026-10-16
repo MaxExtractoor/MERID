@@ -64,6 +64,9 @@ def _isolate_lane(monkeypatch, tmp_path):
                 f"MERID_PROVISIONAL_MIN_EV_C_{_a}_{_s}", raising=False
             )
     for _cap in (
+        "MERID_ADV_SEL_CAP_CENTS",
+        "MERID_ADV_SEL_FLOOR_CENTS",
+        "MERID_ADV_SEL_MIN_SAMPLES",
         "MERID_PROVISIONAL_DAILY_MAX_FILLS_PER_ASSET",
         "MERID_PROVISIONAL_DAILY_MAX_FILLS_TOTAL",
         "MERID_PROVISIONAL_DAILY_MAX_FILLS_YES",
@@ -866,7 +869,15 @@ def _coinflip_decision(monkeypatch, **kwargs):
 def test_coinflip_exemption_provisional_side_qualifies(monkeypatch):
     monkeypatch.setenv("MERID_PROVISIONAL_COINFLIP_EXEMPT", "1")
     # cbp owns the YES side.  Without the exemption the coinflip veto would
-    # block; with it the side qualifies.
+    # block; with it the side qualifies.  The pinned-to-strike mandate also
+    # needs the directional-gate opt-in: calibrated p lands below the
+    # counter-model floor.
+    monkeypatch.setenv("MERID_COUNTER_MODEL_PROV_EXEMPT", "1")
+    # The 2026-10-15 tail-curve refit caps ETH YES@30c at p~0.33 -> net edge
+    # ~+1.7c, under the default 2.5c ETH-YES provisional floor.  Pin the
+    # production floor (-4c) so the test exercises the exemption path rather
+    # than the cell's EV bound.
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
     d = _coinflip_decision(monkeypatch)
     ind = d.indicators
     assert ind["yes_thr_prov_cell_id"] == "cbp_eth_yes_30_40_t120_300"
@@ -877,7 +888,10 @@ def test_coinflip_exemption_provisional_side_qualifies(monkeypatch):
 
 def test_coinflip_exemption_default_off_keeps_veto(monkeypatch):
     # Fixture delenv'd the flag: the same provisional candidate must still
-    # be vetoed when the operator switch is not set.
+    # be vetoed when the operator switch is not set.  Same floor pin as the
+    # qualifying variant — the refit curve leaves only ~+1.7c net edge, so
+    # without it the edge bound, not the coinflip veto, owns the rejection.
+    monkeypatch.setenv("MERID_PROVISIONAL_MIN_EV_C_ETH_YES", "-4.0")
     d = _coinflip_decision(monkeypatch)
     ind = d.indicators
     assert ind["yes_thr_prov_cell_id"] == "cbp_eth_yes_30_40_t120_300"
@@ -1351,10 +1365,28 @@ def test_adverse_selection_reserve_from_cell_evidence():
         {"kind": "fill", "decision_id": "b", "markout_5s_cents": -6.0},
     ]
     cbp._save_state()
-    # costs [4,6] -> Q75 = 5.5 -> capped at 5.0
+    # costs [4,6] -> Q75 = 5.5 -> charged honestly under the 25c cap
+    # (2026-10-15: cap was 5c and truncated measured toxic-cell evidence,
+    # then 15c which still clipped the worst observed cell Q75 of 18c).
     assert cbp.adverse_selection_reserve_cents(
         "XRP", "no", 75.0, 400.0
-    ) == pytest.approx(5.0)
+    ) == pytest.approx(5.5)
+
+
+def test_adverse_selection_reserve_cap_still_bounds_extreme_window():
+    """A catastrophic markout window is still bounded by the cap."""
+    cell = cbp.resolve_provisional_cell("XRP", "no", 75.0, 400.0)
+    st = cbp._load_state()
+    st.setdefault("outcomes", {})[cell.cell_id] = [
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -38.0},
+        {"kind": "fill", "decision_id": "b", "markout_5s_cents": -30.0},
+        {"kind": "fill", "decision_id": "c", "markout_5s_cents": -22.0},
+    ]
+    cbp._save_state()
+    # costs [38,30,22] -> Q75 = 34 -> capped at 25.0
+    assert cbp.adverse_selection_reserve_cents(
+        "XRP", "no", 75.0, 400.0
+    ) == pytest.approx(25.0)
 
 
 def test_adverse_selection_reserve_widens_to_asset_side():
@@ -1391,22 +1423,25 @@ def test_adverse_selection_reserve_regime_stratified():
     cell = cbp.resolve_provisional_cell("SOL", "no", 40.0, 400.0)
     st = cbp._load_state()
     st.setdefault("outcomes", {})[cell.cell_id] = [
-        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -8.0,
+        {"kind": "fill", "decision_id": "a", "markout_5s_cents": -9.0,
          "regime": "RALLY_CONFIRMED"},
         {"kind": "fill", "decision_id": "b", "markout_5s_cents": -7.0,
+         "regime": "RALLY_CONFIRMED"},
+        {"kind": "fill", "decision_id": "d", "markout_5s_cents": -5.0,
          "regime": "RALLY_CONFIRMED"},
         {"kind": "fill", "decision_id": "c", "markout_5s_cents": 3.0,
          "regime": "NEUTRAL"},
     ]
     cbp._save_state()
-    # rally-conditioned: costs [8,7] -> Q75 7.75 -> cap 5.0
+    # rally-conditioned (n=3 >= min_samples): costs [9,7,5] -> Q75 = 8.0
+    # charged honestly (the old 5c cap truncated this; 2026-10-15 cap 25c)
     assert cbp.adverse_selection_reserve_cents(
         "SOL", "no", 40.0, 400.0, regime_label="RALLY_CONFIRMED"
-    ) == pytest.approx(5.0)
-    # no regime requested -> all marks: costs [8,7,-3] -> Q75 = 7.5 -> cap 5.0
+    ) == pytest.approx(8.0)
+    # no regime requested -> all marks: costs [9,7,5,-3] -> Q75 = 7.5
     assert cbp.adverse_selection_reserve_cents(
         "SOL", "no", 40.0, 400.0
-    ) == pytest.approx(5.0)
+    ) == pytest.approx(7.5)
 
 
 def test_adverse_selection_reserve_regime_softens_when_warm():

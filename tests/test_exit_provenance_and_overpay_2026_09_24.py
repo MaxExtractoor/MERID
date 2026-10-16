@@ -218,8 +218,10 @@ class TestTakeProfitOverpayGate:
         return Position(**defaults)
 
     def _stub_fair_value(self, monkeypatch, fair_cents):
+        # Production calls _get_model_fair_value_cents (model-only fair,
+        # 2026-10-05) — the legacy _get_fair_value_cents is dead code here.
         monkeypatch.setattr(
-            "merid.position_management.position_monitor._get_fair_value_cents",
+            "merid.position_management.position_monitor._get_model_fair_value_cents",
             lambda state, held: fair_cents,
         )
         stub_state = SimpleNamespace()
@@ -311,6 +313,61 @@ class TestTakeProfitOverpayGate:
         result = asyncio.run(monitor._legacy_check_position(position, 85))
         assert result is not None
         assert result.reason == ExitReason.TAKE_PROFIT
+
+    def test_tp_prefers_live_fair_over_stale_entry_prob(self, monkeypatch):
+        """DOGE-1315 regression: entry prob 0.77 frozen; live model fair fell
+        to 0.60; bid=80.  Floor must anchor to live fair (60+cost) so the TP
+        fires — the frozen entry estimate was the stale one."""
+        monitor = self._monitor()
+        self._stub_fair_value(monkeypatch, 60)  # live model fair, NO space
+        emitted = []
+
+        async def _capture(position, reason, exit_price_cents, **kwargs):
+            emitted.append(reason)
+
+        monkeypatch.setattr(monitor, "_emit_exit_intent", _capture)
+        position = self._position(
+            market_id="KXDOGE15M-TP-LIVE",
+            series_ticker="KXDOGE15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=64,
+            all_in_entry_basis_cents=64,
+            take_profit_price_cents=75,
+            entry_model_probability=0.77,
+        )
+        monitor.add_position(position)
+        # bid 80 >= live fair 60 + cost -> fires despite frozen entry fair 77
+        result = asyncio.run(monitor._legacy_check_position(position, 80))
+        assert result is not None
+        assert result.reason == ExitReason.TAKE_PROFIT
+
+    def test_tp_still_suppressed_when_live_fair_rich(self, monkeypatch):
+        """Mirror: entry prob 0.55 but live fair rose to 0.90, bid=78.
+        Live fair says the position is still underpriced -> TP suppressed."""
+        monitor = self._monitor()
+        self._stub_fair_value(monkeypatch, 90)
+        emitted = []
+
+        async def _capture(position, reason, exit_price_cents, **kwargs):
+            emitted.append(reason)
+
+        monkeypatch.setattr(monitor, "_emit_exit_intent", _capture)
+        position = self._position(
+            market_id="KXDOGE15M-TP-LIVE2",
+            series_ticker="KXDOGE15M",
+            side=PositionSide.NO,
+            size=1,
+            avg_entry_price_cents=50,
+            all_in_entry_basis_cents=50,
+            take_profit_price_cents=75,
+            entry_model_probability=0.55,
+        )
+        monitor.add_position(position)
+        # bid 78 < live fair 90 + cost -> suppressed despite cheap entry prob
+        result = asyncio.run(monitor._legacy_check_position(position, 78))
+        assert result is None or result.reason != ExitReason.TAKE_PROFIT
+        assert ExitReason.TAKE_PROFIT not in emitted
 
 
 class TestEdgeDecayProfitOverpayGate:

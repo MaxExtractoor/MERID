@@ -208,6 +208,158 @@ def soft_penalty_extra_c() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Calibration-gap reserve (2026-10-15)
+# ---------------------------------------------------------------------------
+
+def calibration_gap_enabled() -> bool:
+    """Charge the measured per-asset calibration error into the edge reserve.
+
+    The artifact's ``calibration_monitor`` block carries per-asset decile
+    bins of (mean calibrated_p, realized win-rate) measured on the merged
+    fill + veto cohort.  A positive ``mean_p - wr`` gap is demonstrated
+    overconfidence at exactly the probability the model is quoting — the
+    honest replacement for heuristic ``model_risk_reserve`` bumps.
+    """
+    return _env_flag("MERID_CALIBRATION_GAP_RESERVE", True)
+
+
+def calibration_gap_min_bin_n() -> int:
+    return _env_int("MERID_CALIBRATION_GAP_MIN_BIN_N", 30)
+
+
+def calibration_gap_max() -> float:
+    return _env_float("MERID_CALIBRATION_GAP_MAX", 0.15)
+
+
+def calibration_gap_frac(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    p_selected: Optional[float],
+) -> float:
+    """Measured overconfidence (probability fraction) for this asset at the
+    calibrated-probability decile containing ``p_selected``.
+
+    Positive only: an underconfident bin does not manufacture edge, it is
+    just uncharged.  Missing/sparse bins fall back to the asset's positive
+    ``mean_bias`` (0 when the asset is net-underconfident); a missing monitor
+    block or missing probability charges nothing.
+    """
+    if not calibration_gap_enabled() or p_selected is None:
+        return 0.0
+    mon = (evidence or {}).get("calibration_monitor")
+    if not isinstance(mon, dict):
+        return 0.0
+    rec = mon.get(str(asset).upper())
+    if not isinstance(rec, dict):
+        return 0.0
+    bins = rec.get("bins")
+    if not isinstance(bins, dict):
+        return 0.0
+    p = max(0.0, min(1.0, float(p_selected)))
+    b = min(int(p * 10), 9)
+    gap: Optional[float] = None
+    rb = bins.get(str(b))
+    if isinstance(rb, dict) and int(rb.get("n") or 0) >= calibration_gap_min_bin_n():
+        gap = float(rb.get("mean_p") or 0.0) - float(rb.get("wr") or 0.0)
+    else:
+        # Sparse/absent bin: fall back to the asset-wide signed bias so a
+        # systematically overconfident asset still pays a charge outside its
+        # well-sampled region.
+        mb = rec.get("mean_bias")
+        gap = float(mb) if mb is not None else 0.0
+    return max(0.0, min(calibration_gap_max(), float(gap)))
+
+
+# ---------------------------------------------------------------------------
+# Implementation-shortfall reserve (2026-10-15)
+# ---------------------------------------------------------------------------
+
+def impl_shortfall_enabled() -> bool:
+    """Charge the measured decision-price -> fill-price gap into the reserve.
+
+    The artifact's ``implementation_shortfall.by_basis`` block carries the
+    realized ``fill - decision_executable_price`` distribution per
+    ``ASSET|side|basis`` cohort (positive = the fill cost more than the
+    price the EV gate assumed).  The spread/slippage forecast column is a
+    *model*; this is the measured truth of what execution actually cost,
+    and it is not otherwise represented in the edge decomposition.
+    """
+    return _env_flag("MERID_IMPL_SHORTFALL_RESERVE", True)
+
+
+def impl_shortfall_min_n() -> int:
+    """Minimum cohort fills before its measured Q75 is trusted."""
+    return _env_int("MERID_IMPL_SHORTFALL_MIN_N", 8)
+
+
+def impl_shortfall_cap_cents() -> float:
+    return _env_float("MERID_IMPL_SHORTFALL_CAP_CENTS", 10.0)
+
+
+def impl_shortfall_prior_cents() -> float:
+    """Cold-start charge when no measured cohort exists yet."""
+    return _env_float("MERID_IMPL_SHORTFALL_PRIOR_CENTS", 1.0)
+
+
+def measured_implementation_shortfall_cents(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+) -> Optional[float]:
+    """Measured Q75 decision->fill price gap, or ``None`` when unmeasured.
+
+    Fallback order inside the artifact: ``ASSET|side|basis`` ->
+    ``ASSET|*|basis`` -> ``*|*|basis``.  Sparse keys fall through rather
+    than trusting a handful of fills; a wholly unmeasured cohort returns
+    ``None`` so callers can choose their own cold-start behavior.
+    """
+    if not impl_shortfall_enabled():
+        return None
+    block = (evidence or {}).get("implementation_shortfall")
+    recs = (block or {}).get("by_basis")
+    if not isinstance(recs, dict):
+        return None
+    a = (str(asset).upper()) or "UNKNOWN"
+    s = str(side).lower()
+    b = "bid" if str(basis).lower() == "bid" else "ask"
+    for key in (f"{a}|{s}|{b}", f"{a}|*|{b}", f"*|*|{b}"):
+        rec = recs.get(key)
+        if isinstance(rec, dict) and int(rec.get("n") or 0) >= impl_shortfall_min_n():
+            return max(
+                0.0,
+                min(impl_shortfall_cap_cents(), float(rec.get("q75_cents") or 0.0)),
+            )
+    return None
+
+
+def implementation_shortfall_cents(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+    *,
+    fill_quality_meas: Optional[float] = None,
+) -> float:
+    """Charged implementation-shortfall reserve (cents) for this cohort.
+
+    Merges the two measured sources — the audit-artifact cohort stats and,
+    for bid-basis fills, the near-real-time ``fill_quality`` log — taking
+    the larger measured Q75 (a cost reserve is conservative, not averaged).
+    Positive-only: a cohort whose fills arrive *under* the decision price
+    earns no reserve credit — the favorable tail is not bankable edge.
+    Unmeasured cohorts pay the static prior.
+    """
+    if not impl_shortfall_enabled():
+        return 0.0
+    meas = measured_implementation_shortfall_cents(evidence, asset, side, basis)
+    vals = [v for v in (meas, fill_quality_meas) if v is not None]
+    if not vals:
+        return impl_shortfall_prior_cents()
+    return max(0.0, min(impl_shortfall_cap_cents(), max(vals)))
+
+
+# ---------------------------------------------------------------------------
 # Cell dimensions
 # ---------------------------------------------------------------------------
 
@@ -1075,7 +1227,12 @@ def build_cells(
         entry_cents = row.get("entry_cents")
         if entry_cents is None or not (0 < int(entry_cents) <= 100):
             continue
-        mkey = str(row.get("ticker") or row.get("decision_id") or id(row))
+        mkey = str(
+            row.get("mkey")
+            or row.get("ticker")
+            or row.get("decision_id")
+            or id(row)
+        )
         rows_by_market.setdefault(mkey, []).append(row)
 
     cells: Dict[str, Dict[str, Any]] = {}
@@ -1099,12 +1256,17 @@ def build_cells(
                 ck,
                 {"w": 0.0, "l": 0.0, "n_eff": 0.0, "n_raw": 0,
                  "_markets": set(), "entry_wsum": 0.0,
-                 "recent_w": 0.0, "recent_l": 0.0, "recent_n": 0},
+                 "recent_w": 0.0, "recent_l": 0.0, "recent_n": 0,
+                 "n_veto": 0, "n_fill": 0},
             )
             c["w"] += rw * won
             c["l"] += rw * (1.0 - won)
             c["n_eff"] += rw
             c["n_raw"] += 1
+            if r.get("src") == "veto":
+                c["n_veto"] += 1
+            elif r.get("src") == "fill":
+                c["n_fill"] += 1
             c["_markets"].add(mkey)
             c["entry_wsum"] += rw * entry_cents
             if now - float(r.get("settled_at") or now) <= recent_days * 86400.0:

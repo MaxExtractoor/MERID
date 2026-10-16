@@ -14,6 +14,7 @@ replacing the previous dual-mirror NO curve (no_source=yes_dual).  This lets
 the settlement-aligned exit evaluator approve justified NO-side salvage exits
 (model_inputs_satisfactory clears when the artifact is not dual-provisional).
 """
+import argparse
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 sys.path.insert(0, ".")
@@ -45,7 +47,24 @@ def _asset_of_ticker(ticker: str) -> str:
     return m.group(1) if m else ""
 
 
-def _load_outcomes(path):
+def _parse_iso(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(ts).replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        return None
+
+
+def _load_outcomes(path, since_ts=None):
+    """ticker -> outcome, optionally restricted to settlements >= since_ts.
+
+    ``settlement_timestamp_utc`` is the exchange's settlement instant; the
+    window keys on it (not observation time) so a refit sees exactly the
+    markets whose outcomes belong to the current regime.
+    """
     outcomes = {}
     if not os.path.exists(path):
         return outcomes
@@ -56,6 +75,10 @@ def _load_outcomes(path):
             except Exception:
                 continue
             if d.get("event_type") == "settlement_outcome" and d.get("outcome") in SIDES:
+                if since_ts is not None:
+                    st = _parse_iso(d.get("settlement_timestamp_utc"))
+                    if st is None or st < since_ts:
+                        continue
                 outcomes[d["ticker"]] = d["outcome"]
     return outcomes
 
@@ -155,8 +178,23 @@ def _fit_side_shrunk(pairs, pooled_xs, pooled_ys, kappa):
 
 
 def main():
-    outcomes = _load_outcomes("logs/settlement_outcomes.jsonl")
-    print(f"settled tickers: {len(outcomes)}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--days", type=float, default=None,
+        help="Fit only markets settled within the last N days "
+             "(settlement_timestamp_utc).  Default: full history.",
+    )
+    ap.add_argument(
+        "--out", default=OUT_PATH,
+        help="Output path (default: the live artifact path).",
+    )
+    args = ap.parse_args()
+    since = time.time() - args.days * 86400.0 if args.days else None
+    outcomes = _load_outcomes(
+        "logs/settlement_outcomes.jsonl", since_ts=since
+    )
+    print(f"settled tickers: {len(outcomes)}"
+          + (f" (window={args.days}d)" if since else ""))
 
     obs = list(_iter_rejected("logs/rejected_candidates.jsonl", outcomes))
     obs += list(_iter_fills("data/kalshi_fills.db", outcomes))
@@ -212,12 +250,13 @@ def main():
             "per_asset_shrink_kappa": ASSET_SHRINK_KAPPA,
             "per_asset_min_obs": MIN_ASSET_OBS,
             "per_asset_assets": sorted(per_asset),
+            "window_days": args.days,
             "fit_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
     }
-    with open(OUT_PATH, "w") as f:
+    with open(args.out, "w") as f:
         json.dump(artifact, f, indent=1)
-    print(f"wrote {OUT_PATH}: yes_knots={len(yes_x)} no_knots={len(no_x)} n_total={n_total}")
+    print(f"wrote {args.out}: yes_knots={len(yes_x)} no_knots={len(no_x)} n_total={n_total}")
     for label, kx, ky in (("YES", yes_x, yes_y), ("NO", no_x, no_y)):
         print(f"--- {label} curve (sampled) ---")
         for i in range(0, len(kx), max(1, len(kx) // 12)):

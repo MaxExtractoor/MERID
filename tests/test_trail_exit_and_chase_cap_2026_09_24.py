@@ -77,7 +77,11 @@ def _seed_canonical_position_cache():
     cache._positions.pop(market_id, None)
 
 
-def _make_state(*, yes_bid=None, yes_ask=None, age_ms=1000, seconds_to_expiry=300.0):
+def _make_state(*, yes_bid=None, yes_ask=None, age_ms=1000, seconds_to_expiry=90.0):
+    # Default TTE sits inside the evidence-envelope terminal window (<=120s).
+    # Since 2026-10-12 the scalping-asymmetry envelope defers trailing_stop
+    # exits with own-bid <85c and TTE >120s before the price guard runs, so
+    # the anchoring/hold-veto mechanics under test only execute in-window.
     state = Mock()
     state.book_updated_ts = time.monotonic() - (age_ms / 1000.0)
     state.seconds_to_expiry = seconds_to_expiry

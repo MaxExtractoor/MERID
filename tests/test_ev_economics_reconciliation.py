@@ -362,7 +362,10 @@ def test_ev_gate_uses_breakdown_asr_not_a_second_recompute(monkeypatch):
 @pytest.mark.parametrize("asset", ["BTC", "ETH", "SOL", "XRP", "DOGE"])
 def test_accepted_decision_has_zero_identity_difference(monkeypatch, asset):
     """pi_star_identity_difference must be float noise, not a hidden reserve."""
-    d = _make_decision(monkeypatch, asset=asset)
+    # 2026-10-15: p_yes=0.40 makes NO the model-aligned favorite — the
+    # counter-model gate (p_selected < 0.5 on the selected side) does not
+    # bind and the accepted NO decision still exercises the pi* identity.
+    d = _make_decision(monkeypatch, asset=asset, p_yes_model=0.40)
     assert d.selected_outcome == "no"
     diff = float(d.indicators["pi_star_identity_difference"])
     assert abs(diff) < 1e-9

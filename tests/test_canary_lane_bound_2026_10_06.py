@@ -60,6 +60,14 @@ def _patch_economics_isolation(monkeypatch) -> None:
     # EPC off -> the effective edge compared at the gate is exactly net_edge,
     # keeping the fixture inside the canary window deterministically.
     monkeypatch.setenv("MERID_EMPIRICAL_CAL_MODE", "off")
+    # 2026-10-15: a marginal-edge candidate on a 17c contract is structurally
+    # counter-model (p_no < 0.5), so the directional gate vetoes it before the
+    # canary window is reached.  This suite isolates the admission-bound
+    # restamping + allocator comparison, not directional policy — the gate is
+    # covered in tests/test_trade_decision_release_gates.py.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_MODEL_GATE", False
+    )
     # No live evidence / tail calibrator -> evidence_ok stays True; the
     # production calibrator blocks every canary-window edge in this fixture.
     monkeypatch.setattr(

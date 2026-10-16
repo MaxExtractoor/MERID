@@ -137,6 +137,13 @@ def _patch_economics_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MAX_W", 0.0
     )
+    # 2026-10-15: these fixtures exercise the pi* cost-stack math on cheap
+    # NO contracts with p_no < 0.5 — structurally counter-model selections
+    # the directional gate vetoes upstream of pi*.  Disabled here; the gate
+    # is covered in tests/test_trade_decision_release_gates.py.
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_MODEL_GATE", False
+    )
 
 
 @pytest.mark.parametrize(

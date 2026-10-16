@@ -416,15 +416,45 @@ class FillQualityTracker:
                     edge_at_fill = round(float(rec.p_selected) * 100.0 - float(fill_px), 2)
                 except Exception:
                     edge_at_fill = None
+            # 2026-10-15 (FIX 13): implementation shortfall — the gap between
+            # the book the decision priced and the price we actually filled
+            # at.  In the intent's outcome space: vs ask measures taker
+            # slippage, vs bid measures quote drift on a resting limit.
+            _own_bid = None
+            _own_ask = None
+            try:
+                if rec.yes_bid_cents is not None and rec.yes_ask_cents is not None:
+                    if _is_no:
+                        _own_bid = 100.0 - float(rec.yes_ask_cents)
+                        _own_ask = 100.0 - float(rec.yes_bid_cents)
+                    else:
+                        _own_bid = float(rec.yes_bid_cents)
+                        _own_ask = float(rec.yes_ask_cents)
+            except Exception:
+                _own_bid = _own_ask = None
+            _impl_vs_bid = (
+                round(fill_px - _own_bid, 2)
+                if fill_px is not None and _own_bid is not None else None
+            )
+            _impl_vs_ask = (
+                round(fill_px - _own_ask, 2)
+                if fill_px is not None and _own_ask is not None else None
+            )
             _append_event({
                 "event": "fill",
                 "ts": now,
                 "client_order_id": rec.client_order_id,
                 "order_id": rec.order_id,
                 "ticker": rec.ticker,
+                "side": rec.side,
+                "action": rec.action,
                 "resting_ms": round((rec.fill_ts - (rec.submit_ts or rec.fill_ts)) * 1000.0, 1),
                 "limit_price_cents": rec.limit_price_cents,
                 "fill_price_cents": fill_px,
+                "decision_side_bid_cents": _own_bid,
+                "decision_side_ask_cents": _own_ask,
+                "impl_shortfall_vs_bid_cents": _impl_vs_bid,
+                "impl_shortfall_vs_ask_cents": _impl_vs_ask,
                 "edge_pct_at_candidate": rec.edge_pct,
                 "ev_net_cents_at_candidate": rec.ev_net_cents,
                 "gross_edge_cents_at_fill": edge_at_fill,
@@ -644,3 +674,115 @@ def get_fill_quality_tracker() -> FillQualityTracker:
         if _tracker is None:
             _tracker = FillQualityTracker()
         return _tracker
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-15 (FIX 13): measured implementation shortfall reader.
+#
+# Fill events carry ``impl_shortfall_vs_bid_cents``/``_vs_ask_cents`` � the
+# gap between the book the decision priced and the executed fill, in the
+# intent's outcome space.  This tail-reader aggregates them per asset x side
+# so the decision path can charge the *measured* decision->fill cost rather
+# than assuming the quoted executable price is what we paid.
+# ---------------------------------------------------------------------------
+
+_IMPL_CACHE: Dict[str, Any] = {"ts": 0.0, "stats": {}}
+_IMPL_CACHE_TTL_S = 300.0
+_IMPL_TAIL_ROWS = 2000
+
+
+def _impl_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return default
+
+
+def measured_impl_shortfall_cents(
+    asset: Optional[str] = None,
+    side: Optional[str] = None,
+    basis: str = "bid",
+) -> Optional[float]:
+    """Q75 of the recorded fill-vs-decision-price gap (cents) for the cohort.
+
+    ``basis`` selects which decision-time quote the gap is measured against:
+    ``"bid"`` for resting post-only fills (the tracker's population) and
+    ``"ask"`` for any taker-basis fill that lands here.  Returns ``None``
+    when the cohort has fewer than ``MERID_IMPL_SHORTFALL_MIN_N`` samples so
+    callers can fall through to the audit-artifact estimate or the prior.
+    Positive-only upstream: callers floor at 0 since a fill under the
+    decision price is not a cost.
+    """
+    field = (
+        "impl_shortfall_vs_bid_cents"
+        if str(basis).lower() == "bid"
+        else "impl_shortfall_vs_ask_cents"
+    )
+    now = time.time()
+    if now - float(_IMPL_CACHE["ts"]) < _IMPL_CACHE_TTL_S:
+        stats = _IMPL_CACHE["stats"]
+    else:
+        stats = {}
+        try:
+            path = _logs_path()
+            rows = []
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    rows.append(line)
+                    if len(rows) > _IMPL_TAIL_ROWS:
+                        rows.pop(0)
+            by_key: Dict[str, list] = {}
+            for line in rows:
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("event") != "fill":
+                    continue
+                gap = ev.get(field)
+                if gap is None:
+                    continue
+                tick = str(ev.get("ticker") or "")
+                a = (tick.split("-")[0] or "").upper()
+                if not a:
+                    continue
+                s = _fill_side_space(ev)
+                if not s:
+                    continue
+                key = f"{a}|{s}"
+                by_key.setdefault(key, []).append(float(gap))
+                by_key.setdefault(f"{a}|*", []).append(float(gap))
+                by_key.setdefault("*|*", []).append(float(gap))
+            for k, vals in by_key.items():
+                vals.sort()
+                n = len(vals)
+                stats[k] = {
+                    "n": n,
+                    "q75": vals[min(n - 1, max(0, int(round(0.75 * (n - 1)))))],
+                }
+        except Exception as e:
+            logger.debug("[FILL-QUALITY] impl-shortfall read failed: %s", e)
+        _IMPL_CACHE["ts"] = now
+        _IMPL_CACHE["stats"] = stats
+    min_n = max(
+        1, int(_impl_env_float("MERID_IMPL_SHORTFALL_MIN_N", 8))
+    )
+    a = (str(asset or "").upper()) or "*"
+    s = str(side or "*").lower()
+    for key in (f"{a}|{s}", f"{a}|*", "*|*"):
+        rec = stats.get(key)
+        if rec and rec["n"] >= min_n:
+            return float(rec["q75"])
+    return None
+
+
+def _fill_side_space(ev: Dict[str, Any]) -> Optional[str]:
+    """Outcome side of a fill event ('yes'/'no'), normalized to lowercase."""
+    s = str(ev.get("side") or "").lower()
+    if s in ("yes", "no"):
+        return s
+    if s.endswith("_no"):
+        return "no"
+    if s.endswith("_yes"):
+        return "yes"
+    return None

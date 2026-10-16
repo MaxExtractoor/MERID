@@ -2569,8 +2569,16 @@ class DecisionAuditLedger:
                        d.seconds_to_close AS seconds_to_close,
                        COALESCE(o.actual_fill_price_cents,
                                 se.executable_entry_price_cents) AS entry_cents,
+                       o.actual_fill_price_cents AS fill_px_cents,
+                       se.executable_entry_price_cents AS decision_px_cents,
+                       se.expected_entry_slippage_cents AS exp_slip_cents,
+                       COALESCE(se.decision_lane, d.admission_lane) AS lane,
+                       se.calibrated_probability AS calibrated_probability,
                        o.settled_yes AS settled_yes,
-                       o.settled_at AS settled_at
+                       o.settled_at AS settled_at,
+                       'fill' AS src,
+                       d.decision_ts AS decision_ts,
+                       d.ticker AS mkey
                 FROM strategy_decision_outcomes o
                 JOIN strategy_decisions d ON d.decision_id = o.decision_id
                 LEFT JOIN strategy_decision_side_ev se
@@ -2585,6 +2593,55 @@ class DecisionAuditLedger:
                 """,
                 (since, since - 3600.0),
             ).fetchall()
+            # 2026-10-15: survivorship-bias repair.  Vetoed candidates are
+            # evidence too — scoring only ENTER fills filters the cohort to
+            # whatever yesterday's gates already allowed, so a bad gate can
+            # never accumulate the evidence that would clear it and a good
+            # gate's cost is invisible.  Every settled NO_TRADE decision
+            # contributes each side_ev row that carried an executable price:
+            # "would this side have won at the quoted entry?"  Normalization
+            # keys on (ticker, side) inside build_cells so repeated evals of
+            # one market-side pair collapse to ~1 observation.  Disable with
+            # MERID_EVIDENCE_INCLUDE_VETOES=0.
+            if os.environ.get(
+                "MERID_EVIDENCE_INCLUDE_VETOES", "1"
+            ).strip().lower() in ("1", "true", "yes", "on"):
+                veto_rows = conn.execute(
+                    """
+                    SELECT d.asset AS asset,
+                           se.side AS side,
+                           d.ticker AS ticker,
+                           d.decision_id AS decision_id,
+                           d.seconds_to_close AS seconds_to_close,
+                           se.executable_entry_price_cents AS entry_cents,
+                           NULL AS fill_px_cents,
+                           NULL AS decision_px_cents,
+                           NULL AS exp_slip_cents,
+                           NULL AS lane,
+                           se.calibrated_probability AS calibrated_probability,
+                           o.settled_yes AS settled_yes,
+                           o.settled_at AS settled_at,
+                           d.decision_ts AS decision_ts,
+                           se.exclusion_reason AS exclusion_reason,
+                           se.passed_edge_gate AS passed_edge_gate,
+                           'veto' AS src,
+                           d.ticker || '|' || se.side AS mkey
+                    FROM strategy_decision_outcomes o
+                    JOIN strategy_decisions d ON d.decision_id = o.decision_id
+                    JOIN strategy_decision_side_ev se
+                      ON se.decision_id = d.decision_id
+                    WHERE o.outcome_status = 'SETTLED'
+                      AND o.settled_at >= ?
+                      AND d.decision_ts >= ?
+                      AND d.decision = 'NO_TRADE'
+                      AND se.side IN ('yes', 'no')
+                      AND se.executable_entry_price_cents IS NOT NULL
+                      AND se.executable_entry_price_cents BETWEEN 1 AND 100
+                      AND d.is_eligible_for_research = 1
+                    """,
+                    (since, since - 3600.0),
+                ).fetchall()
+                rows = list(rows) + list(veto_rows)
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
@@ -2602,15 +2659,67 @@ class DecisionAuditLedger:
             len(rows), time.time() - t0,
         )
 
+        # The coarse asset rollup is a *fills tripwire*: its consumers
+        # hard-block an asset x side cohort when the EXECUTED entry cohort's
+        # win rate no longer covers its cost basis.  Vetoed candidates must
+        # not enter it — the unconditional candidate-surface win rate sits
+        # at ~price/100 by market efficiency, which would read as -EV and
+        # block every cohort.  Vetoed candidates feed the normalized v2
+        # cells (below) instead, and get their own audit rollup under
+        # ``veto_assets`` so gate-leak analysis can compare the cohorts.
         assets: Dict[str, Dict[str, Any]] = {}
+        veto_assets: Dict[str, Dict[str, Any]] = {}
+        # Veto rollup is deduped to the newest eval per (ticker, side) so a
+        # market sampled 200x contributes one candidate observation — eval
+        # density must not overweight volatile markets in the audit numbers.
+        _veto_latest: Dict[str, Any] = {}
         for row in rows:
+            if row["src"] == "veto":
+                _mk = str(row["mkey"])
+                _prev = _veto_latest.get(_mk)
+                if _prev is None or float(
+                    row["decision_ts"] or 0.0
+                ) >= float(_prev["decision_ts"] or 0.0):
+                    _veto_latest[_mk] = row
+                continue
+        _veto_rows = list(_veto_latest.values())
+        # Gate-level veto calibration: per (blocking reason, side, 10c price
+        # bucket) cohort stats on deduped vetoed candidates.  ``reason`` is
+        # ``passed_not_selected`` for candidates that cleared every gate but
+        # lost argmax — the missed-opportunity cohort.
+        veto_reasons: Dict[str, Dict[str, Any]] = {}
+        for row in _veto_rows:
+            entry_cents = row["entry_cents"]
+            if entry_cents is None or not (0 < int(entry_cents) <= 100):
+                continue
+            asset = (str(row["asset"] or "").upper()) or "UNKNOWN"
+            side = str(row["side"]).lower()
+            reason = row["exclusion_reason"]
+            if not reason:
+                reason = (
+                    "passed_not_selected"
+                    if row["passed_edge_gate"]
+                    else "unscored"
+                )
+            won = 1.0 if ((side == "yes") == bool(row["settled_yes"])) else 0.0
+            bucket = min(int(entry_cents) // 10 * 10, 90)
+            rec = veto_reasons.setdefault(str(reason), {}).setdefault(
+                f"{asset}|{side}|{bucket}", {"n": 0, "wins": 0.0, "px_sum": 0.0}
+            )
+            rec["n"] += 1
+            rec["wins"] += won
+            rec["px_sum"] += float(entry_cents)
+        for row in _veto_rows + [
+            r for r in rows if r["src"] != "veto"
+        ]:
             entry_cents = row["entry_cents"]
             if entry_cents is None or not (0 < int(entry_cents) <= 100):
                 continue
             asset = (str(row["asset"] or "").upper()) or "UNKNOWN"
             side = str(row["side"]).lower()
             won = 1 if ((side == "yes") == bool(row["settled_yes"])) else 0
-            rec = assets.setdefault(asset, {}).setdefault(
+            target = veto_assets if row["src"] == "veto" else assets
+            rec = target.setdefault(asset, {}).setdefault(
                 side, {"n": 0, "wins": 0, "entry_cents_sum": 0.0, "buckets": {}}
             )
             rec["n"] += 1
@@ -2641,29 +2750,206 @@ class DecisionAuditLedger:
                     dict_rows, h, now=now, recent_days=recent_days
                 )
 
+        # Rolling calibration monitor: per-asset ECE / Brier / signed bias on
+        # deduped candidates (one obs per market-side).  Vetoes count the
+        # same as fills — a candidate's calibrated_probability is scored
+        # against the settlement outcome regardless of whether a gate
+        # admitted it.  This is the drift signal: when an asset's ECE or
+        # bias climbs, its cells are stale before any audit reads them.
+        cal_rows = [
+            r for r in _veto_rows + [x for x in rows if x["src"] != "veto"]
+            if r["calibrated_probability"] is not None
+        ]
+        cal_monitor: Dict[str, Any] = {}
+        cal_by_asset: Dict[str, list] = {}
+        for r in cal_rows:
+            cal_by_asset.setdefault(
+                (str(r["asset"] or "").upper()) or "UNKNOWN", []
+            ).append(r)
+        for asset, arows in sorted(cal_by_asset.items()):
+            bins: Dict[int, list] = {}
+            brier = 0.0
+            bias = 0.0
+            n = 0
+            for r in arows:
+                p = float(r["calibrated_probability"])
+                if not (0.0 <= p <= 1.0):
+                    continue
+                y = 1.0 if (
+                    (str(r["side"]).lower() == "yes") == bool(r["settled_yes"])
+                ) else 0.0
+                b = min(int(p * 10), 9)
+                bb = bins.setdefault(b, [0.0, 0.0, 0])
+                bb[0] += p
+                bb[1] += y
+                bb[2] += 1
+                brier += (p - y) ** 2
+                bias += p - y
+                n += 1
+            if not n:
+                continue
+            ece = sum(
+                (bb[2] / n) * abs(bb[0] / bb[2] - bb[1] / bb[2])
+                for bb in bins.values()
+                if bb[2]
+            )
+            cal_monitor[asset] = {
+                "n": n,
+                "ece": round(ece, 4),
+                "brier": round(brier / n, 4),
+                "mean_bias": round(bias / n, 4),
+                "bins": {
+                    str(b): {
+                        "n": bb[2],
+                        "mean_p": round(bb[0] / bb[2], 4),
+                        "wr": round(bb[1] / bb[2], 4),
+                    }
+                    for b, bb in sorted(bins.items())
+                    if bb[2]
+                },
+            }
+
+        # 2026-10-15 (FIX 13): implementation shortfall — the realized gap
+        # between the executable price the EV gate assumed
+        # (``executable_entry_price_cents``) and the exchange fill
+        # (``actual_fill_price_cents``), positive = we paid more than
+        # modeled.  Per asset x side x admission lane, plus a coarse
+        # price-basis rollup (post-only lanes -> "bid", the rest -> "ask")
+        # so the decision path can charge the matching cohort at gate time.
+        # Expected-vs-realized slippage (``exp_slip_cents``) is emitted for
+        # audit of the slippage model itself.
+        _MAKER_LANES = frozenset({
+            "maker_bid", "canary_maker", "empirical_marginal_maker",
+            "threshold_cell", "current_build_provisional",
+            "evidence_cell_escape",
+        })
+        impl_by_lane: Dict[str, list] = {}
+        impl_by_basis: Dict[str, list] = {}
+        slippage_model_err: Dict[str, list] = {}
+        for r in rows:
+            if r["src"] != "fill":
+                continue
+            fp = r["fill_px_cents"]
+            dp = r["decision_px_cents"]
+            if fp is None or dp is None:
+                continue
+            asset = (str(r["asset"] or "").upper()) or "UNKNOWN"
+            side = str(r["side"] or "").lower()
+            lane = str(r["lane"] or "core")
+            basis = "bid" if lane in _MAKER_LANES else "ask"
+            gap = float(fp) - float(dp)
+            impl_by_lane.setdefault(f"{asset}|{side}|{lane}", []).append(gap)
+            # Exact cohort plus coarser fallbacks so a sparse asset/side can
+            # still charge the measured asset-level or global price gap.
+            impl_by_basis.setdefault(f"{asset}|{side}|{basis}", []).append(gap)
+            impl_by_basis.setdefault(f"{asset}|*|{basis}", []).append(gap)
+            impl_by_basis.setdefault(f"*|*|{basis}", []).append(gap)
+            es = r["exp_slip_cents"]
+            if es is not None:
+                slippage_model_err.setdefault(
+                    f"{asset}|{side}|{basis}", []
+                ).append(float(es) - gap)
+
+        def _q75(vals: list) -> float:
+            s = sorted(vals)
+            return s[min(len(s) - 1, max(0, int(round(0.75 * (len(s) - 1)))))]
+
+        # 2026-10-15 (FIX 14): fold this settled cohort (fills AND vetoed
+        # candidates — same rows the cells/monitor just consumed) into the
+        # streaming calibration overlay.  One observation per market-side,
+        # watermark-deduped so repeated window scans don't re-apply rows.
+        try:
+            from merid.prediction import streaming_calibration as _sc
+            _sc.update_from_rows(
+                [{k: r[k] for k in r.keys()} for r in rows], now=now
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] streaming calibration update failed: %s",
+                exc,
+            )
+
+        implementation_shortfall: Dict[str, Any] = {
+            "definition": "actual_fill_price_cents - executable_entry_price_cents; positive = overpaid vs decision price",
+            "by_lane": {
+                k: {
+                    "n": len(v),
+                    "mean_cents": round(sum(v) / len(v), 3),
+                    "q75_cents": round(_q75(v), 3),
+                }
+                for k, v in sorted(impl_by_lane.items())
+            },
+            "by_basis": {
+                k: {
+                    "n": len(v),
+                    "mean_cents": round(sum(v) / len(v), 3),
+                    "q75_cents": round(_q75(v), 3),
+                }
+                for k, v in sorted(impl_by_basis.items())
+            },
+            # positive => the modeled slippage expectation was optimistic
+            "slippage_model_error": {
+                k: {
+                    "n": len(v),
+                    "mean_cents": round(sum(v) / len(v), 3),
+                }
+                for k, v in sorted(slippage_model_err.items())
+            },
+        }
+
+        def _rollup(src_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+            rolled: Dict[str, Any] = {}
+            for asset, sides in src_map.items():
+                asset_rec: Dict[str, Any] = {}
+                for side, rec in sides.items():
+                    n = rec["n"]
+                    asset_rec[side] = {
+                        "n": n,
+                        "wr": rec["wins"] / n if n else 0.0,
+                        "avg_entry_cents": (
+                            rec["entry_cents_sum"] / n if n else 0.0
+                        ),
+                        "buckets": {
+                            k: {
+                                "n": b["n"],
+                                "wr": (b["wins"] / b["n"] if b["n"] else 0.0),
+                            }
+                            for k, b in rec["buckets"].items()
+                        },
+                    }
+                rolled[asset] = asset_rec
+            return rolled
+
         out: Dict[str, Any] = {
             "version": 2,
             "generated_at": now,
             "window_hours": window_hours,
             "halflife_days_primary": h1,
             "halflife_days_alt": h2,
-            "assets": {},
+            "assets": _rollup(assets),
+            # Candidate-surface (vetoed) rollup, deduped per market-side.
+            # Audit-only: compare ``wr`` against ``avg_entry_cents`` per
+            # cohort — a vetoed cohort that beats its quoted price is a
+            # gate leaking +EV candidates, the inverse is a working gate.
+            "veto_assets": _rollup(veto_assets),
+            "calibration_monitor": cal_monitor,
+            "implementation_shortfall": implementation_shortfall,
+            # Gate-level veto calibration: reason -> "ASSET|side|bucket" ->
+            # {n, wr, avg_px}; compare wr vs avg_px to price each gate's
+            # ex-post cost per cohort.
+            "veto_reasons": {
+                reason: {
+                    cell: {
+                        "n": rec["n"],
+                        "wr": rec["wins"] / rec["n"] if rec["n"] else 0.0,
+                        "avg_px": rec["px_sum"] / rec["n"] if rec["n"] else 0.0,
+                    }
+                    for cell, rec in cells_rec.items()
+                }
+                for reason, cells_rec in veto_reasons.items()
+            },
             "cells": cells_by_halflife,
         }
-        for asset, sides in assets.items():
-            asset_rec: Dict[str, Any] = {}
-            for side, rec in sides.items():
-                n = rec["n"]
-                asset_rec[side] = {
-                    "n": n,
-                    "wr": rec["wins"] / n if n else 0.0,
-                    "avg_entry_cents": rec["entry_cents_sum"] / n if n else 0.0,
-                    "buckets": {
-                        k: {"n": b["n"], "wr": (b["wins"] / b["n"] if b["n"] else 0.0)}
-                        for k, b in rec["buckets"].items()
-                    },
-                }
-            out["assets"][asset] = asset_rec
 
         path = Path(
             os.environ.get("MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json")

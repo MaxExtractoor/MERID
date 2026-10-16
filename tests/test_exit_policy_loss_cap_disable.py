@@ -336,8 +336,14 @@ def test_exit_cost_reserve_zeroed_when_exits_disabled(monkeypatch):
 
 
 def test_exit_cost_reserve_charged_when_exits_enabled(monkeypatch):
-    """Flag absent -> exit reserve still charged (behavior unchanged)."""
+    """Flag absent -> exit reserve still charged (behavior unchanged).
+
+    The reserve is policy-aware (MERID_EXPECTED_EXIT_COST, 2026-10-05):
+    p_trigger x fee.  A YES entry at 60c sits at the profit-lock proximity
+    band (MERID_EXPECTED_EXIT_LOCK_PROXIMITY_CENTS=60) -> trigger prob 0.30;
+    NO at 40c uses the base trigger prob 0.10.
+    """
     d = _td_decision(monkeypatch, exits_disabled=False)
-    # fee_per_contract_cents=1.0 -> fee=0.01 charged as the exit reserve.
-    assert float(d.exit_cost_reserve_yes) == pytest.approx(0.01)
-    assert float(d.exit_cost_reserve_no) == pytest.approx(0.01)
+    # fee_per_contract_cents=1.0 -> fee=0.01 scaled by the trigger prob.
+    assert float(d.exit_cost_reserve_yes) == pytest.approx(0.01 * 0.30)
+    assert float(d.exit_cost_reserve_no) == pytest.approx(0.01 * 0.10)

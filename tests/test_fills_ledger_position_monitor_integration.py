@@ -1,8 +1,12 @@
 """
-Test for fills_ledger to PositionMonitor integration fix.
+Test for fills_ledger to PositionMonitor integration.
 
-This test verifies that fills_ledger.on_fill(, canonicalization_state="TRUSTED_LIVE_V1") now adds positions to PositionMonitor,
-ensuring exit policies execute on every trade regardless of which component tracks the position.
+Position registration moved out of fills_ledger: entry/refresh upserts flow
+through the canonical position cache
+(``KalshiPositionCache._upsert_monitor_position`` -> ``monitor.upsert_position``),
+which is the single path for creating or updating a monitored position after a
+fill.  fills_ledger.on_fill retains the close-path integration — it removes
+closed positions from the monitor so exit policies never fire on flat markets.
 """
 
 import pytest
@@ -57,11 +61,21 @@ class TestFillsLedgerPositionMonitorIntegration:
         import inspect
         source = inspect.getsource(fills_ledger_module.KalshiFillsLedger.on_fill)
         
-        # Verify key integration markers exist
+        # Verify key integration markers exist: on_fill must still drop closed
+        # positions from the monitor (the close-path integration).
         assert "get_position_monitor" in source, "Missing PositionMonitor integration"
-        assert "monitor.add_position" in source, "Missing monitor.add_position call"
         assert "monitor.remove_position" in source, "Missing monitor.remove_position call"
-        
+
+        # Entry-side registration lives in the canonical position cache, which
+        # upserts the monitored Position after every fill.
+        import merid.event_venues.kalshi.position_cache as position_cache_module
+
+        cache_source = inspect.getsource(
+            position_cache_module.KalshiPositionCache._upsert_monitor_position
+        )
+        assert "get_position_monitor" in cache_source, "Missing monitor bridge in position_cache"
+        assert "monitor.upsert_position" in cache_source, "Missing monitor.upsert_position call"
+
         print("[PASS] fills_ledger integration code path verified")
     
     def test_position_monitor_singleton_accessible(self):

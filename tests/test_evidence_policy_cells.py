@@ -62,6 +62,13 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "MERID_EVIDENCE_ESCAPE_STATE_PATH", str(tmp_path / "escape.json")
     )
+    # Sparse-severe tier is an explicit per-test opt-in below; the repo .env
+    # enables it for production, which must not leak into these fixtures.
+    # Same for hard-block mode: .env runs challenge; these tests assert the
+    # veto-mode verdict unless they opt in explicitly.
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_TIER", "0")
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_EV_C", "10.0")
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "veto")
     yield
 
 
@@ -189,6 +196,45 @@ def test_dense_toxic_cell_hard_blocks():
     assert d.code == "MATCHING_TOXIC_CELL"
     assert d.matching_hard_block
     assert d.hard_block_level == "asset_side_price_tte"
+
+
+def test_sparse_severe_tier_hard_blocks(monkeypatch):
+    """2026-10-15: the sparse-severe tier is the production eligibility gate —
+    a matched cell with n_eff>=8 and LCB net EV below the severe floor is a
+    hard block even under the unreachable dense n_eff bar."""
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_TIER", "1")
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_EV_C", "6.0")
+    # n_eff=12, wr ~14% at ~62c avg entry -> hb_ev ~ -50c: severely toxic.
+    cells = {"XRP|yes|50-74|mid": _cell(w=2, l=12, entry=62)}
+    d = _eval(cells, asset="XRP", side="yes", entry_price_cents=62.0,
+              tte_seconds=400.0)
+    assert not d.allowed
+    assert d.code == "MATCHING_TOXIC_CELL"
+    assert d.matching_hard_block
+    assert d.hard_block_level == "asset_side_price_tte"
+
+
+def test_sparse_severe_tier_respects_floor_and_recent_contradiction(
+    monkeypatch,
+):
+    """Cells between the dense floor and the severe floor, and cells whose
+    recent window contradicts the stale posterior, are not hard-blocked."""
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_TIER", "1")
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_SPARSE_EV_C", "6.0")
+    # Mild/non-toxic: 75% wr at 62c -> the LCB-based hb_ev stays well above
+    # the -6c severe floor -> margin path, not a hard block.
+    mild = {"XRP|yes|50-74|mid": _cell(w=9, l=3, entry=62)}
+    d = _eval(mild, asset="XRP", side="yes", entry_price_cents=62.0,
+              tte_seconds=400.0)
+    assert d.code != "MATCHING_TOXIC_CELL"
+    assert not d.matching_hard_block
+    # Severe posterior but the recent window wins above breakeven -> spared.
+    contra = {"XRP|yes|50-74|mid": _cell(w=2, l=12, entry=62,
+                                         recent_w=20, recent_l=4)}
+    d = _eval(contra, asset="XRP", side="yes", entry_price_cents=62.0,
+              tte_seconds=400.0)
+    assert d.code != "MATCHING_TOXIC_CELL"
+    assert not d.matching_hard_block
 
 
 def test_toxic_cell_needs_minimum_samples(monkeypatch):
@@ -441,3 +487,107 @@ def test_toxic_cell_still_hard_blocks_despite_adaptive():
               net_edge_cents=9.0)
     assert d.code == "MATCHING_TOXIC_CELL"
     assert not d.allowed
+
+def test_calibration_gap_reserve(monkeypatch):
+    """FIX 12: the measured overconfidence of the quoting bin becomes a
+    reserve charge; underconfident bins charge nothing; sparse bins fall
+    back to positive asset mean_bias; cap and kill-switch bind."""
+    monkeypatch.delenv("MERID_CALIBRATION_GAP_RESERVE", raising=False)
+    monkeypatch.delenv("MERID_CALIBRATION_GAP_MIN_BIN_N", raising=False)
+    monkeypatch.delenv("MERID_CALIBRATION_GAP_MAX", raising=False)
+    ev = {
+        "calibration_monitor": {
+            "ETH": {
+                "n": 600,
+                "mean_bias": 0.02,
+                "bins": {
+                    "3": {"n": 120, "mean_p": 0.38, "wr": 0.33},  # +0.05 gap
+                    "6": {"n": 80, "mean_p": 0.65, "wr": 0.68},   # underconf.
+                    "8": {"n": 10, "mean_p": 0.85, "wr": 0.40},   # sparse
+                },
+            },
+            "BTC": {"n": 500, "mean_bias": -0.07, "bins": {}},
+        }
+    }
+    assert ep.calibration_gap_frac(ev, "ETH", 0.35) == pytest.approx(0.05)
+    # Underconfident bin -> zero charge.
+    assert ep.calibration_gap_frac(ev, "ETH", 0.65) == 0.0
+    # Sparse bin -> asset mean_bias fallback (positive part).
+    assert ep.calibration_gap_frac(ev, "ETH", 0.85) == pytest.approx(0.02)
+    # Negative-bias asset -> nothing to charge anywhere.
+    assert ep.calibration_gap_frac(ev, "BTC", 0.35) == 0.0
+    # Missing asset/monitor/None -> no charge (fail-open on measurement).
+    assert ep.calibration_gap_frac(ev, "SOL", 0.35) == 0.0
+    assert ep.calibration_gap_frac(ev, "ETH", None) == 0.0
+    assert ep.calibration_gap_frac({}, "ETH", 0.35) == 0.0
+    # Cap binds on extreme measured gaps.
+    monkeypatch.setenv("MERID_CALIBRATION_GAP_MAX", "0.03")
+    assert ep.calibration_gap_frac(ev, "ETH", 0.35) == pytest.approx(0.03)
+    monkeypatch.delenv("MERID_CALIBRATION_GAP_MAX")
+    # Kill switch restores the pre-charge behavior entirely.
+    monkeypatch.setenv("MERID_CALIBRATION_GAP_RESERVE", "0")
+    assert ep.calibration_gap_frac(ev, "ETH", 0.35) == 0.0
+
+
+def test_implementation_shortfall_reserve(monkeypatch):
+    """FIX 13: the measured fill-vs-decision-price gap becomes a reserve —
+    exact cohort -> asset rollup -> global -> static prior; negative Q75
+    (price improvement) earns no credit; cap and kill-switch bind."""
+    for k in (
+        "MERID_IMPL_SHORTFALL_RESERVE", "MERID_IMPL_SHORTFALL_MIN_N",
+        "MERID_IMPL_SHORTFALL_CAP_CENTS", "MERID_IMPL_SHORTFALL_PRIOR_CENTS",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    ev = {
+        "implementation_shortfall": {
+            "by_basis": {
+                "XRP|no|bid": {"n": 40, "mean_cents": 1.2, "q75_cents": 6.0},
+                "XRP|*|bid": {"n": 60, "mean_cents": 1.0, "q75_cents": 4.5},
+                "ETH|*|ask": {"n": 30, "mean_cents": -0.8, "q75_cents": -2.0},
+                "*|*|ask": {"n": 200, "mean_cents": 0.4, "q75_cents": 2.0},
+                "SOL|yes|bid": {"n": 3, "mean_cents": 9.0, "q75_cents": 12.0},
+            }
+        }
+    }
+    # Exact cohort measured -> charge the Q75.
+    assert ep.implementation_shortfall_cents(
+        ev, "XRP", "no", "bid"
+    ) == pytest.approx(6.0)
+    # Missing side falls back to the asset rollup, then global.
+    assert ep.implementation_shortfall_cents(
+        ev, "XRP", "yes", "bid"
+    ) == pytest.approx(4.5)
+    assert ep.implementation_shortfall_cents(
+        ev, "BTC", "yes", "ask"
+    ) == pytest.approx(2.0)
+    # Sparse exact cohort falls through to asset/global, not its own n=3.
+    assert ep.implementation_shortfall_cents(
+        ev, "SOL", "yes", "bid"
+    ) == pytest.approx(1.0)  # no SOL rollup/global bid -> static prior
+    # Negative measured Q75 (fills arrive under decision price) floors at 0.
+    assert ep.implementation_shortfall_cents(ev, "ETH", "no", "ask") == 0.0
+    # No block at all -> static prior.
+    assert ep.implementation_shortfall_cents({}, "ETH", "no", "ask") == 1.0
+    assert ep.implementation_shortfall_cents(
+        None, "ETH", "no", "ask"
+    ) == 1.0
+    # fill_quality.jsonl measurement merges as max (a cost reserve is
+    # conservative): log beats an absent artifact, loses to a larger one.
+    assert ep.implementation_shortfall_cents(
+        {}, "XRP", "no", "bid", fill_quality_meas=4.0
+    ) == pytest.approx(4.0)
+    assert ep.implementation_shortfall_cents(
+        ev, "XRP", "no", "bid", fill_quality_meas=4.0
+    ) == pytest.approx(6.0)
+    assert ep.implementation_shortfall_cents(
+        ev, "XRP", "no", "bid", fill_quality_meas=9.0
+    ) == pytest.approx(9.0)
+    # Cap binds on extreme measured gaps.
+    monkeypatch.setenv("MERID_IMPL_SHORTFALL_CAP_CENTS", "3.0")
+    assert ep.implementation_shortfall_cents(
+        ev, "XRP", "no", "bid"
+    ) == pytest.approx(3.0)
+    monkeypatch.delenv("MERID_IMPL_SHORTFALL_CAP_CENTS")
+    # Kill switch.
+    monkeypatch.setenv("MERID_IMPL_SHORTFALL_RESERVE", "0")
+    assert ep.implementation_shortfall_cents(ev, "XRP", "no", "bid") == 0.0

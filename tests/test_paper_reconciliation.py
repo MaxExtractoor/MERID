@@ -33,19 +33,24 @@ class TestCanonicalTradeMode(unittest.TestCase):
 
     def test_default_mode_is_paper(self):
         from trading.trade_mode import TradeMode, _resolve_initial_mode
+        # MERID_PM_TRADING_MODE (pinned "mock" in conftest) takes precedence
+        # over the legacy MERID_TRADE_MODE fallback under test — clear it.
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "paper"}):
+            os.environ.pop("MERID_PM_TRADING_MODE", None)
             mode = _resolve_initial_mode()
             self.assertEqual(mode, TradeMode.PAPER)
 
     def test_env_override_mock(self):
         from trading.trade_mode import TradeMode, _resolve_initial_mode
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "mock"}):
+            os.environ.pop("MERID_PM_TRADING_MODE", None)
             mode = _resolve_initial_mode()
             self.assertEqual(mode, TradeMode.MOCK)
 
     def test_invalid_env_defaults_to_paper(self):
         from trading.trade_mode import TradeMode, _resolve_initial_mode
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "garbage"}):
+            os.environ.pop("MERID_PM_TRADING_MODE", None)
             mode = _resolve_initial_mode()
             self.assertEqual(mode, TradeMode.PAPER)
 
@@ -377,8 +382,10 @@ class TestVenueGateAlignment(unittest.TestCase):
 
     def test_venue_gate_modes_exist(self):
         from merid.prediction.venue_gate import TradingMode
-        # ZT2: SIM is now aliased to MOCK (value="mock")
-        self.assertEqual(TradingMode.SIM.value, "mock")
+        # venue_gate keeps SIM as a distinct member ("sim"); the SIM->MOCK
+        # alias lives in trading.trade_mode.TradeMode.
+        self.assertEqual(TradingMode.SIM.value, "sim")
+        self.assertEqual(TradingMode.MOCK.value, "mock")
         self.assertEqual(TradingMode.PAPER.value, "paper")
         self.assertEqual(TradingMode.LIVE.value, "live")
 
@@ -395,9 +402,12 @@ class TestVenueGateAlignment(unittest.TestCase):
 
     def test_venue_gate_blocks_live_without_flag(self):
         from merid.prediction.venue_gate import VenueGate, TradingMode
+        # MERID_ALLOW_LIVE_TRADES=false in the test env: a LIVE request is
+        # force-downgraded to PAPER so no live order can ever be submitted.
         gate = VenueGate(mode=TradingMode.LIVE, live_enabled=False)
-        with self.assertRaises(gate.ModeBlockedError):
-            gate.check_can_trade()
+        self.assertEqual(gate.mode, TradingMode.PAPER)
+        # Paper trading itself is permitted (simulated fills only).
+        gate.check_can_trade()
 
     def test_venue_gate_simulates_in_paper(self):
         from merid.prediction.venue_gate import VenueGate, TradingMode
@@ -427,6 +437,7 @@ class TestRuntimeConfigAlignment(unittest.TestCase):
         from trading.mode_controller import TradingModeController
 
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "paper"}):
+            os.environ.pop("MERID_PM_TRADING_MODE", None)
             tm._reset_for_tests()
             ctrl = TradingModeController()
             self.assertTrue(ctrl.is_paper)
@@ -437,6 +448,7 @@ class TestRuntimeConfigAlignment(unittest.TestCase):
         from trading.mode_controller import TradingModeController
 
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "paper"}):
+            os.environ.pop("MERID_PM_TRADING_MODE", None)
             tm._reset_for_tests()
             ctrl = TradingModeController()
             can_exec, reason = ctrl.can_execute_live("BTC/USD", 100.0)

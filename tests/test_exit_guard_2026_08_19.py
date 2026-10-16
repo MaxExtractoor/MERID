@@ -185,7 +185,9 @@ def test_stop_loss_vetoed_observe_only_when_gate_disabled():
     replayable, but the order is vetoed at the approval point.
     """
     position = _make_position(stop_loss_price_cents=70)
-    state = _make_state(no_bid=70, no_ask=72)
+    # TTE inside the evidence-envelope terminal window: a mid-book stop only
+    # reaches the discretionary veto here (outside it the envelope defers).
+    state = _make_state(no_bid=70, no_ask=72, seconds_to_expiry=90.0)
 
     approved, price, record, _did = _run_guard(
         position, "stop_loss", exit_price_cents=70, state=state
@@ -205,7 +207,8 @@ def test_stop_loss_rejected_when_market_gapped_through_slippage():
     """If the best bid is worse than stop - slippage, do not chase the market."""
     position = _make_position(stop_loss_price_cents=70)
     # Market has already fallen to 67; stop - 2 = 68, so the bid is worse.
-    state = _make_state(no_bid=67, no_ask=69)
+    # Inside the envelope terminal window so the slippage check is reached.
+    state = _make_state(no_bid=67, no_ask=69, seconds_to_expiry=90.0)
 
     approved, _price, record, _did = _run_guard(
         position, "stop_loss", exit_price_cents=70, state=state
@@ -219,7 +222,9 @@ def test_take_profit_approved_when_gate_disabled():
     """Take-profit is operational again (2026-09-23): it submits through the
     mechanical guard even while the EV gate is disabled."""
     position = _make_position()
-    state = _make_state(no_bid=84, no_ask=86)
+    # Terminal window: the evidence envelope admits this take-profit so the
+    # operational path under test executes.
+    state = _make_state(no_bid=84, no_ask=86, seconds_to_expiry=90.0)
 
     approved, _price, record, _did = _run_guard(
         position, "take_profit", exit_price_cents=84, state=state
@@ -235,7 +240,7 @@ def test_take_profit_approved_when_gate_disabled():
 def test_take_profit_rejected_when_not_profitable():
     """A take-profit priced at a loss is rejected."""
     position = _make_position()
-    state = _make_state(no_bid=70, no_ask=72)
+    state = _make_state(no_bid=70, no_ask=72, seconds_to_expiry=90.0)
 
     approved, _price, record, _did = _run_guard(
         position, "take_profit", exit_price_cents=70, state=state
@@ -263,7 +268,8 @@ def test_time_exit_with_small_loss_approved():
     approved so a stale position cannot ride to settlement."""
     position = _make_position()
     # 1c gross loss -> net -7 with mocked 4c round-trip fee; forced exit still approves.
-    state = _make_state(no_bid=73, no_ask=75)
+    # Inside the envelope terminal window: time_exit is envelope-gated.
+    state = _make_state(no_bid=73, no_ask=75, seconds_to_expiry=90.0)
 
     approved, _price, record, _did = _run_guard(
         position, "time_stop", exit_price_cents=73, state=state
@@ -280,7 +286,7 @@ def test_time_exit_with_small_loss_approved():
 def test_time_exit_break_even_approved():
     """Break-even time exit is operational too; approved through the guard."""
     position = _make_position()
-    state = _make_state(no_bid=74, no_ask=76)
+    state = _make_state(no_bid=74, no_ask=76, seconds_to_expiry=90.0)
 
     approved, _price, record, _did = _run_guard(
         position, "time_stop", exit_price_cents=74, state=state
@@ -297,19 +303,22 @@ def test_quote_freshness_uses_age_threshold():
     position = _make_position()
     from merid.loop_15m import MERID_EXIT_MAX_QUOTE_AGE_MS
 
+    # Bid 85c admits the take-profit through the evidence envelope's
+    # profit-lock arm (bid >= 85), keeping TTE outside the terminal window so
+    # the 10,000 ms quote-freshness tier is what the test exercises.
     # Just under the 10,000 ms default: the quote passes freshness and the
     # operational take-profit is approved (policy exits are no longer EV-gated).
-    state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS - 1)
+    state = _make_state(no_bid=85, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS - 1)
     approved, _price, record, _did = _run_guard(
-        position, "take_profit", exit_price_cents=84, state=state
+        position, "take_profit", exit_price_cents=85, state=state
     )
     assert approved is True
     assert record["status"] == "approved"
 
     # Just over the threshold: a profitable exit is rejected for stale quote.
-    state = _make_state(no_bid=84, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS + 100)
+    state = _make_state(no_bid=85, no_ask=86, age_ms=MERID_EXIT_MAX_QUOTE_AGE_MS + 100)
     approved, _price, record, _did = _run_guard(
-        position, "take_profit", exit_price_cents=84, state=state
+        position, "take_profit", exit_price_cents=85, state=state
     )
     assert approved is False
     assert record["reject_reason"] == "stale_quote"
@@ -318,7 +327,8 @@ def test_quote_freshness_uses_age_threshold():
 def test_current_edge_reversal_approved():
     """current_edge_reversal canonicalizes to signal_reversal (operational)."""
     position = _make_position()
-    state = _make_state(no_bid=84, no_ask=86)
+    # Inside the envelope terminal window: signal_reversal is envelope-gated.
+    state = _make_state(no_bid=84, no_ask=86, seconds_to_expiry=90.0)
     state.book_updated_ts = time.monotonic()  # avoid stale quote after slow module import
 
     approved, _price, record, _did = _run_guard(

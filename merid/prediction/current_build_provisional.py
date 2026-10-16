@@ -841,13 +841,21 @@ def adverse_selection_reserve_cents(
     time so a rally-side estimate does not contaminate a selloff lane.
 
     Floor = ``MERID_ADV_SEL_FLOOR_CENTS`` (default 1.0c — the forensic floor
-    per the loss audit), cap = ``MERID_ADV_SEL_CAP_CENTS`` (5c) so one bad
-    window cannot veto a lane; suspension rules own that authority.
+    per the loss audit), cap = ``MERID_ADV_SEL_CAP_CENTS`` (default 25.0c) so
+    one bad window cannot veto a lane without bound; suspension/probation
+    rules own the harder shutdown authority.  2026-10-15: the cap was raised
+    from 5c — measured per-cell Q75 pickoff costs run 7-18c on the live
+    maker-bid book (e.g. xrp_no_50_60_t120 q75=18c, eth_no_40_50 q75=15.5c),
+    so a 5c cap systematically undercharged every toxic cell ~3x — and
+    raised again 15c -> 25c because a 15c cap still clipped the worst
+    measured cell Q75 (18c) while individual markouts run to -39c.  The cap
+    remains a bound against unbounded single-window veto, not the charge;
+    cells whose measured Q75 exceeds it belong to suspension anyway.
     """
     if not adverse_selection_reserve_enabled():
         return 0.0
     floor = max(0.0, _env_float("MERID_ADV_SEL_FLOOR_CENTS", 1.0))
-    cap = max(floor, _env_float("MERID_ADV_SEL_CAP_CENTS", 5.0))
+    cap = max(floor, _env_float("MERID_ADV_SEL_CAP_CENTS", 25.0))
     min_samples = max(1, _env_int("MERID_ADV_SEL_MIN_SAMPLES", 3))
     try:
         st = _load_state()

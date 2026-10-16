@@ -63,6 +63,7 @@ def _make_decision(
     settlement_reference: str = "cfb_rti_live",
     p_yes_model: Optional[float] = None,
     p_no_model: Optional[float] = None,
+    directional_regime=None,
 ):
     """Helper to create a decision with sensible defaults."""
     return compute_trade_decision(
@@ -88,6 +89,7 @@ def _make_decision(
         settlement_reference=settlement_reference,
         p_yes_model=p_yes_model,
         p_no_model=p_no_model,
+        directional_regime=directional_regime,
     )
 
 
@@ -185,7 +187,15 @@ def test_rejects_cost_basis_override_no(monkeypatch):
     # cost-basis gate is the rejection reason.
     d = _make_decision(spot=100.009, strike=100.0, yes_ask=65.0, no_ask=36.0)
     assert d.selected_outcome is None
-    assert d.no_trade_reason == "cost_basis_override_no"
+    # 2026-10-15: the counter-model directional gate now owns the p<0.5
+    # rejection class when the cost-basis floor is EPC-exempted or cleared —
+    # "claimed-positive edge on the model's underdog side" is vetoed as a
+    # directional invariant violation, which is the more informative label.
+    assert d.no_trade_reason in (
+        "cost_basis_override_no",
+        "counter_model_below_p_floor_no",
+        "counter_model_edge_below_premium_no",
+    )
 
 
 def test_rejects_insufficient_edge():
@@ -531,6 +541,209 @@ def test_canary_off_leaves_decision_unchanged(monkeypatch):
     )
     assert d.selected_outcome == "yes"
     assert "shadow_cohort" not in d.indicators
+
+
+# ---------------------------------------------------------------------------
+# Counter-model directional gate (2026-10-15).
+#
+# Last-96 fill alignment audit: argmax(net_edge) selected the model's own
+# underdog side in 14/96 entries; 11 were model-right/exec-wrong (~-$5.5).
+# The gate vetoes a selected side whose calibrated p_selected < 0.5 unless
+# its effective edge clears the counter-model premium; p < 0.45 is a hard
+# floor regardless of claimed edge.
+# ---------------------------------------------------------------------------
+
+
+def test_counter_model_no_below_hard_floor_vetoed(monkeypatch):
+    """Model says UP (p_yes=0.62) but NO@28c looks +10c cheap -> veto.
+
+    Reproduces the ETH-1315 loss shape: p_yes=0.616, NO bought at 33c on a
+    phantom bid-basis edge, market resolved YES.
+    """
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    d = _make_decision(
+        p_yes_model=0.62,
+        yes_bid=66.0,
+        yes_ask=68.0,
+        no_bid=27.0,
+        no_ask=28.0,
+        min_edge=0.02,
+        model_uncertainty=0.02,
+    )
+    assert d.selected_outcome is None
+    assert d.indicators.get("directional_veto_no") == "counter_model_below_p_floor"
+
+
+def test_counter_model_no_below_premium_vetoed(monkeypatch):
+    """Premium band: p_no in [0.45, 0.5) with ordinary edge -> veto."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    d = _make_decision(
+        p_yes_model=0.54,          # p_no = 0.46 -> premium band
+        yes_bid=50.0,
+        yes_ask=54.0,              # no YES edge
+        no_bid=37.0,
+        no_ask=40.0,               # ~6c gross edge — clears lane bound, not premium
+        min_edge=0.02,
+        model_uncertainty=0.02,
+    )
+    assert d.selected_outcome is None
+    veto = d.indicators.get("directional_veto_no")
+    assert veto is not None
+    assert veto.startswith("counter_model_")
+
+
+def test_counter_model_underdog_with_large_edge_can_pass(monkeypatch):
+    """Premium-band underdog with >=8c effective edge clears the dir gate.
+
+    Tail calibration is disabled so the asserted p stays in the [0.45, 0.5)
+    premium band; other gates may still veto — the assertion is only that
+    the directional gate itself is not the blocker.
+    """
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TAIL_CALIBRATION_ENABLED", False
+    )
+    d = _make_decision(
+        p_yes_model=0.53,          # p_no = 0.47 -> premium band
+        yes_bid=55.0,
+        yes_ask=60.0,
+        no_bid=27.0,
+        no_ask=30.0,               # ~17c gross edge — clears the 8c premium
+        min_edge=0.02,             #   even after measured giveback/shortfall
+        model_uncertainty=0.02,    #   reserves tighten the effective edge
+    )
+    assert d.indicators.get("directional_veto_no") is None
+
+
+def test_counter_model_gate_disabled_restores_argmax(monkeypatch):
+    """MERID_COUNTER_MODEL_GATE=0 restores pure net-edge argmax."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_MODEL_GATE", False
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    d = _make_decision(
+        p_yes_model=0.62,
+        yes_bid=66.0,
+        yes_ask=68.0,
+        no_bid=27.0,
+        no_ask=28.0,
+        min_edge=0.02,
+        model_uncertainty=0.02,
+    )
+    assert d.indicators.get("directional_veto_no") is None
+    reason = d.no_trade_reason or ""
+    assert not reason.startswith("counter_model_")
+
+
+def test_model_aligned_side_unaffected(monkeypatch):
+    """p_selected >= 0.5 sides pass the directional gate unconditionally."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    d = _make_decision(
+        p_yes_model=0.62,
+        yes_bid=60.0,
+        yes_ask=62.0,              # YES is favorite-priced; edge ~0
+        no_bid=30.0,
+        no_ask=38.0,               # NO underdog with p_no=0.38 -> vetoed
+        min_edge=0.02,
+        model_uncertainty=0.02,
+    )
+    assert d.indicators.get("directional_veto_yes") is None
+
+
+# ---------------------------------------------------------------------------
+# Per-side counter-regime mode (2026-10-15, FIX 8).
+#
+# Veto counterfactual on 278k settled rejected candidates measured the two
+# countertrend directions asymmetrically: countertrend YES into a confirmed
+# selloff ran -3.32c/tr (veto is the honest policy) while countertrend NO
+# into a rally forfeited +5.48c/tr (bounded penalty admission is honest).
+# MERID_COUNTER_REGIME_MODE_{YES,NO} let each side pick veto vs penalty.
+# ---------------------------------------------------------------------------
+
+
+def _selloff_regime():
+    from merid.prediction.directional_regime import DirectionalRegime
+
+    return DirectionalRegime(
+        label="SELL_OFF_CONFIRMED",
+        breadth60_pos=0,
+        breadth60_total=5,
+        btc_r60=-0.004,
+        asset_r60={"BTC": -0.004},
+        ts=0.0,
+        reason="test",
+    )
+
+
+def _selloff_yes_candidate(directional_regime):
+    """YES candidate with a claimed edge, buying into a confirmed selloff.
+
+    spot < strike -> p_yes < 0.5 for a driftless model, so give the model a
+    modest YES lean via p_yes_model and price the ask below it.  Not deep-ITM
+    (|z| small), so regime_entry_block fires for side=yes.
+    """
+    return _make_decision(
+        p_yes_model=0.60,
+        yes_bid=48.0,
+        yes_ask=50.0,              # ~10c gross edge — clears the 4c penalty
+        no_bid=45.0,
+        no_ask=50.0,
+        min_edge=0.02,
+        model_uncertainty=0.02,
+        directional_regime=directional_regime,
+    )
+
+
+def test_counter_regime_yes_veto_mode_blocks_selloff_catch(monkeypatch):
+    """MODE_YES=veto makes the YES floor irrelevant — the block is
+    categorical regardless of claimed edge."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_REGIME_MODE_YES", "veto"
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_REGIME_MODE_NO", "penalty"
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_REGIME_ALLOW_DEGRADED", True
+    )
+    d = _selloff_yes_candidate(_selloff_regime())
+    ind = d.indicators or {}
+    assert ind.get("yes_counter_regime_admitted") is False
+    # The YES side may still lose to another gate; the assertion is that
+    # the regime block was NOT penalty-admitted.
+    assert d.selected_outcome != "yes"
+
+
+def test_counter_regime_yes_penalty_mode_admits_large_edge(monkeypatch):
+    """Shared penalty mode still admits the same candidate at >=4c eff edge."""
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_REGIME_MODE_YES", "penalty"
+    )
+    monkeypatch.setattr(
+        "merid.prediction.trade_decision.MERID_COUNTER_REGIME_ALLOW_DEGRADED", True
+    )
+    d = _selloff_yes_candidate(_selloff_regime())
+    ind = d.indicators or {}
+    assert ind.get("yes_counter_regime_admitted") is True
+    # The counter-model NO underdog is still vetoed even though YES is the
+    # model-aligned side here.
+    assert d.indicators.get("directional_veto_no") is not None
 
 
 def test_pi_star_uses_exact_fractional_fee(monkeypatch):

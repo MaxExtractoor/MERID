@@ -234,7 +234,15 @@ class TestMarketLeanFadeGate:
         assert d.selected_outcome is None, (
             f"fade into +21c market lean must be blocked, got {d.selected_outcome}"
         )
-        assert d.no_trade_reason == "market_fade_blocked_no", d.no_trade_reason
+        # 2026-10-15: the entry is still blocked.  The counter-model
+        # directional gate (p_no < 0.5 on a strong-YES lean) vetoes the side
+        # inside qualifies before the post-selection fade gate can label it —
+        # either label is a valid rejection of the same entry.
+        assert d.no_trade_reason in (
+            "market_fade_blocked_no",
+            "counter_model_below_p_floor_no",
+            "counter_model_edge_below_premium_no",
+        ), d.no_trade_reason
 
     def test_eth_fade_allowed_by_cohort(self, monkeypatch):
         monkeypatch.setattr(_td, "MERID_FADE_ALLOWED_ASSETS", {"ETH", "SOL"})
@@ -250,9 +258,15 @@ class TestMarketLeanFadeGate:
             model_uncertainty=0.0, data_quality="live", regime="normal",
             min_required_edge=0.02, settlement_reference="cfb_rti_live",
         )
-        assert d.selected_outcome == "no", (
-            f"ETH fade cohort is profitable; entry should survive, got {d.no_trade_reason}"
+        # 2026-10-15: the fade-cohort exemption does not override the
+        # counter-model directional gate — p_no < 0.5 on a +26c YES lean is
+        # vetoed before the post-selection fade gate runs.  The old cohort
+        # evidence that allowed these fades is precisely the stale-evidence
+        # problem the gate addresses (ETH fades were the worst realized lane).
+        assert d.selected_outcome is None, (
+            f"counter-model fade must be vetoed, got {d.selected_outcome}"
         )
+        assert (d.indicators or {}).get("directional_veto_no") is not None
 
     def test_thin_lean_not_gated(self, monkeypatch):
         """Below the lean threshold the gate must not fire."""

@@ -51,7 +51,10 @@ def _patch_get_market_state(monkeypatch, state):
 
 def test_exit_guard_allows_profitable_take_profit(monkeypatch):
     """A fresh, profitable take-profit within slippage (zero) and profit floor is approved."""
-    state = _make_state(best_bid_cents=60)  # 10c gross, well above fees + profit floor
+    # Inside the evidence-envelope terminal window (TTE<=120): the envelope
+    # defers mid-book discretionary exits, so the guard's price-bound checks
+    # only execute in-window.
+    state = _make_state(best_bid_cents=60, seconds_to_expiry=90.0)  # 10c gross, well above fees + profit floor
     _patch_get_market_state(monkeypatch, state)
 
     position = _make_position(entry_price=50)
@@ -70,8 +73,9 @@ def test_exit_guard_allows_profitable_take_profit(monkeypatch):
 def test_exit_guard_rejects_stop_loss_beyond_max_loss(monkeypatch):
     """A discretionary stop whose worst-case net PnL exceeds the max loss bound is rejected."""
     # The market has fallen far below the entry; without a stop_price on the
-    # position the guard falls back to the global max-loss bound.
-    state = _make_state(best_bid_cents=30)
+    # position the guard falls back to the global max-loss bound.  Inside the
+    # envelope terminal window so the max-loss check is reached.
+    state = _make_state(best_bid_cents=30, seconds_to_expiry=90.0)
     _patch_get_market_state(monkeypatch, state)
 
     position = _make_position(entry_price=50)

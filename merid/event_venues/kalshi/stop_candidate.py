@@ -208,6 +208,9 @@ _MANDATORY_RISK_TRIGGER_REASONS = frozenset({
 # order: here (stop candidates) and in ``_emit_exit_intent`` (policy exits).
 # State-repair / emergency / terminal triggers are exempt — they fix broken
 # state or the position resolves anyway; they are not economic exits.
+# HARD_STOP and LOSS_CAP are exempt too: they are operational capital-
+# protection triggers in the settlement-aligned taxonomy, and anchoring them
+# to the entry price converts a mandated risk exit into a ride to zero.
 LOSS_SELL_EXEMPT_TRIGGERS = frozenset({
     "OPERATIONAL_RISK",
     "RISK",
@@ -223,6 +226,8 @@ LOSS_SELL_EXEMPT_TRIGGERS = frozenset({
     "EMERGENCY",
     "HARD_RISK",
     "EXPIRY_LIQUIDATION",
+    "HARD_STOP",
+    "LOSS_CAP",
 })
 
 
@@ -230,16 +235,35 @@ def profit_only_exits_enabled() -> bool:
     return _env_bool("MERID_PROFIT_ONLY_EXITS", True)
 
 
+# 2026-10-16: bid-vs-hold-EV salvage.  The entry-price anchor alone made every
+# below-entry bid unthinkable, so positions watched 70c->44c->27c salvage bids
+# pass and settled at zero (DOGE-1315).  When a trustworthy hold value exists,
+# a below-entry sell that still beats ``hold_value + margin`` is +EV vs the
+# ride and is allowed.  Missing hold data fails closed to the anchor floor.
+# Breakeven ratchet: once the executable bid has traded ARM cents above entry,
+# the floor rises to ``peak - TRAIL`` so a winner cannot round-trip into a
+# loss through a discretionary exit.  The ratchet only raises the floor; the
+# EV-salvage check still overrides when the bid beats the hold value.
+# All three knobs are read per call so operators can retune without a restart.
 def loss_sell_blocked(
     trigger_reason: Any,
     exit_price_cents: Optional[int],
     entry_price_cents: Optional[int],
+    *,
+    hold_value_cents: Optional[int] = None,
+    peak_price_cents: Optional[int] = None,
 ) -> bool:
     """True when profit-only exits are armed and this candidate would realize
     a loss at ``exit_price_cents`` vs the held-side ``entry_price_cents``.
 
     Exempt triggers and missing prices fail open — a state-repair exit or an
     exit whose breakeven cannot be established is never silently held.
+
+    ``hold_value_cents`` replaces the pure entry anchor with the same
+    bid-vs-calibrated-hold-EV test the settlement-aligned evaluator uses:
+    a below-floor bid that still pays ``hold + margin`` is worth more than
+    holding, so the sell is allowed.  ``peak_price_cents`` arms the
+    breakeven ratchet (floor = max(entry, peak - trail)).
     """
     if not profit_only_exits_enabled():
         return False
@@ -248,7 +272,28 @@ def loss_sell_blocked(
         return False
     if exit_price_cents is None or entry_price_cents is None:
         return False
-    return int(exit_price_cents) < int(entry_price_cents)
+    exit_price = int(exit_price_cents)
+    entry_price = int(entry_price_cents)
+    floor = entry_price
+    if peak_price_cents is not None:
+        peak = int(peak_price_cents)
+        arm = _env_int("MERID_BREAKEVEN_RATCET_ARM_CENTS", 8)
+        if peak >= entry_price + arm:
+            floor = max(
+                entry_price,
+                peak - _env_int("MERID_BREAKEVEN_RATCET_TRAIL_CENTS", 12),
+            )
+    if exit_price >= floor:
+        return False
+    if (
+        hold_value_cents is not None
+        and _env_bool("MERID_LOSS_SELL_EV_SALVAGE", True)
+        and exit_price
+        >= int(hold_value_cents)
+        + _env_int("MERID_LOSS_SELL_SALVAGE_MARGIN_CENTS", 5)
+    ):
+        return False
+    return True
 
 
 # Settlement-aware phase constants (seconds).
@@ -1282,7 +1327,8 @@ async def _maybe_degraded_stop_exit(
     # still realizes a loss — same suppression as the primary path.  Recorded
     # as an explicit hold so the decision stays auditable.
     if loss_sell_blocked(
-        candidate.trigger_reason, degraded_limit, candidate.entry_price_cents
+        candidate.trigger_reason, degraded_limit, candidate.entry_price_cents,
+        hold_value_cents=candidate.fair_value_cents,
     ):
         _finish(
             "HOLD_TO_SETTLEMENT_APPROVED",
@@ -1548,6 +1594,7 @@ async def maybe_submit_stop_candidate(
         candidate.trigger_reason,
         candidate.executable_exit_cents,
         candidate.entry_price_cents,
+        hold_value_cents=candidate.fair_value_cents,
     ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
@@ -1737,7 +1784,10 @@ async def maybe_submit_stop_candidate(
     _floor_entry = candidate.entry_price_cents
     if _floor_entry is None:
         _floor_entry = position_avg_price_cents
-    if loss_sell_blocked(candidate.trigger_reason, exit_price, _floor_entry):
+    if loss_sell_blocked(
+        candidate.trigger_reason, exit_price, _floor_entry,
+        hold_value_cents=candidate.fair_value_cents,
+    ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
             "exit_limit=%dc < entry=%dc - suppressing loss-sell; "

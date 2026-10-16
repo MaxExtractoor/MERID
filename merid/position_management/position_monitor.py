@@ -4763,15 +4763,20 @@ class PositionMonitor:
         if position.should_trigger_take_profit(current_price_cents):
             # 2026-09-24: Remaining-edge gate on the take-profit.  The TP level
             # is frozen at entry-time and can lag the thesis (or be a partial
-            # edge-capture target).  Selling while the entry thesis still
+            # edge-capture target).  Selling while the CURRENT thesis still
             # prices the contract above bid + exit costs donates the remaining
             # edge — settlement is free, so the correct comparison is
-            # thesis_fair - bid vs exit_cost.  Prefer the frozen entry-model
-            # probability (the plan) as the fair anchor; fall back to the live
-            # book/model fair when entry provenance is missing, and to the
-            # static TP when neither is available.  A separate overpay exit
-            # still fires when the market bids above live fair + costs, so
-            # suppressing the TP here cannot strand an overpriced position.
+            # live_fair - bid vs exit_cost.
+            # 2026-10-15: anchor the floor to the LIVE model fair, not the
+            # frozen entry probability.  The entry prob is the estimate that
+            # was already wrong when the position needs this gate — DOGE-1315
+            # TP suppressed at bid=80 because frozen fair=77 + cost > 80 while
+            # live fair had repriced far lower; the position then rode to a
+            # full settlement loss.  Entry prob remains only as the fallback
+            # when live fair is unavailable; the static TP governs when
+            # neither exists.  A separate overpay exit still fires when the
+            # market bids above live fair + costs, so suppressing the TP here
+            # cannot strand an overpriced position.
             _tp_suppressed = False
             # 2026-10-09 durable exit obligation: a take-profit that already
             # fired and was rejected/unfilled re-arms with exit_retry_count>0.
@@ -4790,9 +4795,9 @@ class PositionMonitor:
             if _entry_prob is not None and 0.0 < float(_entry_prob) < 1.0:
                 _thesis_fair_cents = int(round(float(_entry_prob) * 100))
             _gate_fair_cents = (
-                _thesis_fair_cents
-                if _thesis_fair_cents is not None
-                else _fair_value_cents
+                _fair_value_cents
+                if _fair_value_cents is not None
+                else _thesis_fair_cents
             )
             if _tp_retry_outstanding:
                 logger.info(
@@ -4817,7 +4822,7 @@ class PositionMonitor:
                         current_price_cents,
                         position.take_profit_price_cents,
                         _gate_fair_cents,
-                        "thesis" if _thesis_fair_cents is not None else "model",
+                        "model" if _fair_value_cents is not None else "thesis",
                         _overpay_floor,
                         _exit_cost_cents,
                     )
@@ -6423,12 +6428,41 @@ class PositionMonitor:
         # profit_only_v1 breakeven floor (2026-10-14): exits may take profit
         # or ride to settlement — never sell below the held-side entry price.
         # State-repair/terminal reasons (RISK, STALE_DATA, MANUAL,
-        # MARKET_EXPIRED) are exempt inside loss_sell_blocked; every other
-        # reason — stops, edge decay, settlement guard, time stops, loss caps —
-        # is suppressed here and the position rides to settlement.  Mirror of
-        # the stop-candidate floor in maybe_submit_stop_candidate.
+        # MARKET_EXPIRED) and hard capital-protection reasons (HARD_STOP,
+        # LOSS_CAP) are exempt inside loss_sell_blocked; every other reason —
+        # stops, edge decay, settlement guard, time stops — is suppressed here
+        # and the position rides to settlement UNLESS the executable bid still
+        # beats the model's hold value by the salvage margin (the EV test the
+        # settlement-aligned evaluator already applies to discretionary exits).
+        # Missing hold data fails closed to the entry anchor.  Mirror of the
+        # stop-candidate floor in maybe_submit_stop_candidate.
         _floor_entry = position.avg_entry_price_cents
-        if loss_sell_blocked(exit_reason, exit_price_cents, _floor_entry):
+        _hold_value_cents: Optional[int] = None
+        try:
+            from merid.event_venues.kalshi.market_state import (
+                get_kalshi_market_state_store,
+            )
+            _store = get_kalshi_market_state_store()
+            _ustate = (
+                _store.get_unified(position.market_id)
+                if _store is not None and hasattr(_store, "get_unified")
+                else None
+            )
+            _kstate = _store.get(position.market_id) if _store is not None else None
+            _mstate = _ustate or _kstate
+            if _mstate is not None:
+                _hold_value_cents = _get_model_fair_value_cents(
+                    _mstate, position.side.value
+                )
+        except Exception:
+            _hold_value_cents = None
+        if loss_sell_blocked(
+            exit_reason,
+            exit_price_cents,
+            _floor_entry,
+            hold_value_cents=_hold_value_cents,
+            peak_price_cents=position.high_watermark_cents,
+        ):
             logger.warning(
                 "[BREAKEVEN-FLOOR] position=%s market=%s side=%s reason=%s "
                 "exit=%dc < entry=%dc - suppressing loss-sell; position rides "

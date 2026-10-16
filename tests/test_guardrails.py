@@ -727,6 +727,5 @@ class TestModuleWiring:
         assert "place_order" in names
         assert "trigger_halt" in names
 
-    def test_api_endpoint_file_exists(self):
-        path = os.path.join(os.path.dirname(__file__), "..", "web", "api", "guardrails_api.py")
-        assert os.path.exists(path)
+    # test_api_endpoint_file_exists removed: web/api/guardrails_api.py was
+    # retired in the legacy unmounted-module cleanup (commit 9025b860).

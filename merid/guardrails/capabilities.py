@@ -105,6 +105,8 @@ class AgentCapabilityMap:
     agent_id: str
     # Tools this agent is allowed to invoke
     allowed_tools: Set[str] = field(default_factory=set)
+    # Symbols this agent can trade / observe
+    allowed_symbols: Set[str] = field(default_factory=lambda: {"*"})  # "*" = all
     # Venues this agent can interact with
     allowed_venues: Set[str] = field(default_factory=lambda: {"*"})
     # Maximum notional per single trade (USD)

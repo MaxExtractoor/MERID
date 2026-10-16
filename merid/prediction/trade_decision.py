@@ -58,6 +58,29 @@ MIN_REGIME_POSTERIOR = Decimal(os.environ.get("MERID_MIN_REGIME_POSTERIOR", "0.5
 # old unconditional 0.5 directional-confidence veto.
 TRADE_DECISION_MIN_P_SELECTED = float(os.environ.get("MERID_TRADE_DECISION_MIN_P_SELECTED", "0.0"))
 
+# 2026-10-15: Counter-model directional gate (last-96 fill alignment audit).
+# The economic argmax may select the side the model scores as the underdog
+# (p_selected < 0.5) whenever its executable price sits below model fair.
+# Realized over the last 96 fills: 14 opposite-side executions, 11 of them
+# model-right/exec-wrong (~-$5.5 combined); underdog fills won 22% vs a ~35%
+# average breakeven.  The gate makes a counter-model side eligible only under
+# an explicit premium rather than banning it outright:
+#   p_selected < MERID_COUNTER_MODEL_P_FLOOR   -> side ineligible outright
+#   0.45 <= p < 0.5 and eff_edge < bound + MERID_COUNTER_MODEL_EDGE_MIN
+#                                              -> ineligible
+# The 8c premium default covers the measured 2-5pp underdog calibration
+# inflation plus the normal margin.  Disable with MERID_COUNTER_MODEL_GATE=0
+# (restores the pre-gate pure-argmax behavior).
+MERID_COUNTER_MODEL_GATE = os.environ.get(
+    "MERID_COUNTER_MODEL_GATE", "1"
+).strip().lower() in ("1", "true", "yes")
+MERID_COUNTER_MODEL_P_FLOOR = float(
+    os.environ.get("MERID_COUNTER_MODEL_P_FLOOR", "0.45")
+)
+MERID_COUNTER_MODEL_EDGE_MIN = float(
+    os.environ.get("MERID_COUNTER_MODEL_EDGE_MIN", "0.08")
+)
+
 # Minimum net edge (as a fraction of notional) for a side to be selected.
 # 2026-08-30: Lowered to 0.02 (2%) as the hard global floor.  The actual
 # threshold used at decision time is computed by ``_compute_dynamic_min_required_edge``,
@@ -123,6 +146,17 @@ if MERID_EDGE_MARGINAL_RELIEF_CENTS > 0.0 and os.environ.get(
         "dormant. Set the relief to 0 to evaluate the bounded lane.",
         MERID_EDGE_MARGINAL_RELIEF_CENTS,
     )
+
+def _counter_model_prov_exempt() -> bool:
+    """``MERID_COUNTER_MODEL_PROV_EXEMPT=1`` lifts the directional gate for
+    current_build_provisional-owned sides only — the same operator opt-in
+    pattern as ``MERID_PROVISIONAL_COINFLIP_EXEMPT`` for the moneyness veto.
+    Default off: the probe's pinned-to-strike mandate does not silently
+    re-open the counter-model loss class for the rest of the book."""
+    return os.environ.get(
+        "MERID_COUNTER_MODEL_PROV_EXEMPT", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
 
 def _provisional_coinflip_exempt() -> bool:
     """2026-10-12 operator directive: current_build_provisional lanes carry
@@ -477,6 +511,18 @@ MERID_COUNTER_REGIME_MIN_EDGE_NO = float(
 MERID_COUNTER_REGIME_ALLOW_DEGRADED = os.environ.get(
     "MERID_COUNTER_REGIME_ALLOW_DEGRADED", "0"
 ).strip().lower() in ("1", "true", "yes")
+# 2026-10-15 (FIX 8): per-side counter-regime mode.  The veto counterfactual
+# measured the directions asymmetrically — countertrend YES into a confirmed
+# selloff cohort ran -3.32c/tr (a categorical veto is the honest policy for
+# that side) while countertrend NO into a rally forfeited +5.48c/tr (bounded
+# penalty-mode admission is honest).  Each override falls back to the shared
+# mode; "veto" restores the categorical block for that side only.
+MERID_COUNTER_REGIME_MODE_YES = os.environ.get(
+    "MERID_COUNTER_REGIME_MODE_YES", MERID_COUNTER_REGIME_MODE
+).strip().lower()
+MERID_COUNTER_REGIME_MODE_NO = os.environ.get(
+    "MERID_COUNTER_REGIME_MODE_NO", MERID_COUNTER_REGIME_MODE
+).strip().lower()
 
 # 2026-10-05 (entry-throughput canary): evidence "transferrable" tier.  A
 # sparse exact cell whose price-matched pooled level already cleared its
@@ -1556,6 +1602,8 @@ def _min_p_for_side(breakdown: EdgeBreakdown, floor: float) -> float:
         + breakdown.exit_cost_reserve
         + breakdown.model_risk_reserve
         + breakdown.adverse_selection_reserve
+        + getattr(breakdown, "policy_giveback_reserve", 0.0)
+        + getattr(breakdown, "implementation_shortfall_reserve", 0.0)
     )
     return max(floor, cost_basis)
 
@@ -2306,6 +2354,8 @@ class EdgeBreakdown:
         gross_edge = p_selected - executable_entry_price
         net_edge   = gross_edge - entry_fee - exit_cost_reserve
                      - model_risk_reserve - adverse_selection_reserve
+                     - policy_giveback_reserve
+                     - implementation_shortfall_reserve
 
     No hidden constants are permitted.  If a cost cannot be explained, the
     decision must be ``no_trade``.
@@ -2322,6 +2372,17 @@ class EdgeBreakdown:
     gross_edge: float
     net_edge: float
     adverse_selection_reserve: float = 0.0
+    # 2026-10-15 (FIX 11): measured policy give-back.  gross_edge prices a
+    # {0,100} settlement but the armed exit policy pays {0,TP,100} — profit
+    # exits leave a measured ~4-9c on the table (exit_markouts.jsonl, 60s).
+    # The reserve is p_trigger * E[giveback | trigger]; see
+    # merid/prediction/exit_giveback.py.
+    policy_giveback_reserve: float = 0.0
+    # 2026-10-15 (FIX 13): measured implementation shortfall — the realized
+    # gap between the executable price this EV assumed and the price the
+    # exchange actually filled at (live_entry_evidence.implementation_
+    # shortfall, per asset x side x price-basis).  Positive-only.
+    implementation_shortfall_reserve: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -2349,6 +2410,12 @@ class EntryCostStack:
     model_uncertainty_prob: float
     required_net_edge_prob: float
     adverse_selection_prob: float = 0.0
+    # 2026-10-15 (FIX 11): measured policy give-back (trigger prob x
+    # per-trigger exit give-back).  Part of pi_star so the
+    # p_selected - pi_star == net_edge - required_net_edge identity holds.
+    policy_giveback_prob: float = 0.0
+    # 2026-10-15 (FIX 13): measured implementation shortfall reserve.
+    implementation_shortfall_prob: float = 0.0
 
     @property
     def pi_star(self) -> float:
@@ -2358,6 +2425,8 @@ class EntryCostStack:
             + self.spread_slippage_prob
             + self.model_uncertainty_prob
             + self.adverse_selection_prob
+            + self.policy_giveback_prob
+            + self.implementation_shortfall_prob
             + self.required_net_edge_prob
         )
 
@@ -2368,6 +2437,8 @@ class EntryCostStack:
             + self.spread_slippage_prob
             + self.model_uncertainty_prob
             + self.adverse_selection_prob
+            + self.policy_giveback_prob
+            + self.implementation_shortfall_prob
         )
 
     def net_edge_after_required(self, p_selected: float) -> float:
@@ -2610,6 +2681,8 @@ def compute_edge(
     exit_cost_reserve: float,
     model_risk_reserve: float,
     adverse_selection_reserve: float = 0.0,
+    policy_giveback_reserve: float = 0.0,
+    implementation_shortfall_reserve: float = 0.0,
 ) -> EdgeBreakdown:
     """Compute a fully explained net edge for one side.
 
@@ -2638,6 +2711,8 @@ def compute_edge(
         - exit_cost_reserve
         - model_risk_reserve
         - adverse_selection_reserve
+        - policy_giveback_reserve
+        - implementation_shortfall_reserve
     )
 
     return EdgeBreakdown(
@@ -2653,6 +2728,8 @@ def compute_edge(
         gross_edge=gross_edge,
         net_edge=net_edge,
         adverse_selection_reserve=adverse_selection_reserve,
+        policy_giveback_reserve=policy_giveback_reserve,
+        implementation_shortfall_reserve=implementation_shortfall_reserve,
     )
 
 
@@ -2668,6 +2745,8 @@ def entry_cost_stack_from_breakdown(
         model_uncertainty_prob=breakdown.model_risk_reserve,
         required_net_edge_prob=required_net_edge,
         adverse_selection_prob=breakdown.adverse_selection_reserve,
+        policy_giveback_prob=breakdown.policy_giveback_reserve,
+        implementation_shortfall_prob=breakdown.implementation_shortfall_reserve,
     )
 
 
@@ -3039,6 +3118,32 @@ def _select_best_side(
     if yes_edge > no_edge:
         return "yes", yes_edge, "best_executable_edge_yes"
     return "no", no_edge, "best_executable_edge_no"
+
+
+def _counter_model_veto(
+    breakdown: EdgeBreakdown,
+    eff_edge: float,
+    eff_bound: float,
+) -> Optional[str]:
+    """Return the directional-gate veto reason for one side, or None.
+
+    A side the model scores below 0.5 is the *counter-model* side: the
+    model's own probability says it is less likely to win.  It may still be
+    selected only when its effective (EPC-adjusted) edge clears the larger of
+    the lane bound and the counter-model premium — plain "cheap vs fair" is
+    not sufficient evidence the model is wrong.  Below the hard p floor no
+    edge size admits the side.
+    """
+    if not MERID_COUNTER_MODEL_GATE:
+        return None
+    p = float(breakdown.p_selected)
+    if p >= 0.5:
+        return None
+    if p < MERID_COUNTER_MODEL_P_FLOOR:
+        return "counter_model_below_p_floor"
+    if float(eff_edge) < max(float(eff_bound), MERID_COUNTER_MODEL_EDGE_MIN):
+        return "counter_model_edge_below_premium"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3785,6 +3890,71 @@ def compute_trade_decision(
     p_no_for_no = max(_lane_p_lo, min(_lane_p_hi, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
 
+    # 2026-10-15 (FIX 14): streaming calibration overlay.  The artifact cap
+    # is only as fresh as its last manual refit; the streaming state updates
+    # on every settlement from the merged fill+veto cohort.  Applied as a
+    # tighten-only bound on the artifact-capped claim (never inflates, so
+    # the deviation guard's semantics are preserved), per asset x side x
+    # price x TTE with PAV monotonicity over the price axis.  The settlement
+    # lane keeps its own in-window probability ceiling.
+    _stream_bound_yes = None
+    _stream_bound_no = None
+    if not settlement_lane:
+        try:
+            from merid.prediction import streaming_calibration as _sc
+            _stream_bound_yes = _sc.streaming_bound(
+                asset, "yes", yes_entry * 100.0, seconds_to_expiry
+            )
+            _stream_bound_no = _sc.streaming_bound(
+                asset, "no", no_entry * 100.0, seconds_to_expiry
+            )
+            if _stream_bound_yes is not None and p_yes_for_yes > _stream_bound_yes:
+                p_yes_for_yes = _stream_bound_yes
+                p_no_for_yes = 1.0 - p_yes_for_yes
+            if _stream_bound_no is not None and p_no_for_no > _stream_bound_no:
+                p_no_for_no = _stream_bound_no
+                p_yes_for_no = 1.0 - p_no_for_no
+        except Exception:
+            _stream_bound_yes = _stream_bound_no = None
+    indicators["streaming_cal_bound_yes"] = _stream_bound_yes
+    indicators["streaming_cal_bound_no"] = _stream_bound_no
+    indicators["streaming_cal_applied"] = bool(
+        _stream_bound_yes is not None or _stream_bound_no is not None
+    )
+
+    # 2026-10-15 (FIX 15): calibration-drift alarm.  A cell whose CUSUM of
+    # (claim - outcome) trips the threshold carries systematic overconfidence
+    # — charge an extra risk reserve on the drifted side until fresh
+    # agreement lets the accumulator decay back below the threshold.
+    _drift_alarm_yes = None
+    _drift_alarm_no = None
+    _drift_reserve = float(
+        os.environ.get("MERID_DRIFT_ALARM_RESERVE_CENTS", "2.0")
+    ) / 100.0
+    if not settlement_lane and _drift_reserve > 0.0:
+        try:
+            from merid.prediction import streaming_calibration as _sc_d
+            _drift_alarm_yes = _sc_d.drift_alarm(
+                asset, "yes", yes_entry * 100.0, seconds_to_expiry
+            )
+            _drift_alarm_no = _sc_d.drift_alarm(
+                asset, "no", no_entry * 100.0, seconds_to_expiry
+            )
+        except Exception:
+            _drift_alarm_yes = _drift_alarm_no = None
+    _drift_res_yes = (
+        _drift_reserve
+        if (_drift_alarm_yes or {}).get("direction") == "over" else 0.0
+    )
+    _drift_res_no = (
+        _drift_reserve
+        if (_drift_alarm_no or {}).get("direction") == "over" else 0.0
+    )
+    indicators["yes_drift_alarm"] = _drift_alarm_yes
+    indicators["no_drift_alarm"] = _drift_alarm_no
+    indicators["yes_drift_reserve_cents"] = _drift_res_yes * 100.0
+    indicators["no_drift_reserve_cents"] = _drift_res_no * 100.0
+
     # Deviation guard: fail-closed on probability INFLATION only, outside the
     # cheap tail.  A large upward move from the raw model probability on a
     # non-tail held side is a calibration-inflation red flag (model-market
@@ -3943,6 +4113,28 @@ def compute_trade_decision(
         settlement_lane=settlement_lane,
     )
 
+    # 2026-10-15 (FIX 12): measured calibration gap.  The heuristic bumps
+    # above cover *input* quality; the artifact's calibration_monitor bins
+    # measure the residual output error per asset x calibrated-p decile on
+    # the merged fill+veto cohort.  Charge the demonstrated overconfidence
+    # of the exact bin each side quotes into that side's reserve — the 2-5pp
+    # underdog inflation is what manufactured the phantom edge the
+    # directional gate now also vetoes.
+    _calib_gap_yes = 0.0
+    _calib_gap_no = 0.0
+    try:
+        _cal_ev = _load_live_evidence()
+    except Exception:
+        _cal_ev = None
+    _calib_gap_yes = evidence_policy.calibration_gap_frac(
+        _cal_ev, asset, p_yes_for_yes
+    )
+    _calib_gap_no = evidence_policy.calibration_gap_frac(
+        _cal_ev, asset, p_no_for_no
+    )
+    indicators["yes_calibration_gap_cents"] = _calib_gap_yes * 100.0
+    indicators["no_calibration_gap_cents"] = _calib_gap_no * 100.0
+
     # 2026-10-06 (EV reconciliation): the adverse-selection reserve is the
     # realized pick-off cost of a *resting* fill — measured from the
     # provisional lane's post-only markouts.  It therefore applies only to
@@ -3982,14 +4174,70 @@ def compute_trade_decision(
     indicators["yes_adverse_selection_measured_cents"] = _asr_meas_yes * 100.0
     indicators["no_adverse_selection_measured_cents"] = _asr_meas_no * 100.0
 
+    # 2026-10-15 (FIX 11): policy-aware EV — measured profit-exit give-back.
+    # The {0,100} settlement edge overstates what the armed exit policy can
+    # return: a triggered TP/lock sells below the settlement payoff.  Charge
+    # each side p_trigger * E[max(0,-markout_60s) | profit exit], measured
+    # from logs/exit_markouts.jsonl per asset (global fallback).
+    _giveback_per_trigger = 0.0
+    try:
+        from merid.prediction import exit_giveback as _xg
+        _giveback_per_trigger = float(_xg.giveback_per_trigger_cents(asset)) / 100.0
+    except Exception:
+        _giveback_per_trigger = 0.0
+    _policy_gb_yes = _exit_p_yes * _giveback_per_trigger
+    _policy_gb_no = _exit_p_no * _giveback_per_trigger
+    indicators["yes_policy_giveback_cents"] = _policy_gb_yes * 100.0
+    indicators["no_policy_giveback_cents"] = _policy_gb_no * 100.0
+    indicators["policy_giveback_per_trigger_cents"] = _giveback_per_trigger * 100.0
+
+    # 2026-10-15 (FIX 13): implementation shortfall — the realized gap
+    # between the executable price the EV assumed and the price the
+    # exchange actually filled at, per asset x side x price-basis.  The
+    # ASR charges *post-fill* markout drift on resting fills; this charges
+    # the decision->fill leg itself (taker latency slippage on the ask
+    # basis, quote drift between decision and order landing on the bid
+    # basis) — a disjoint, previously uncharged cost.
+    _impl_sf_yes = 0.0
+    _impl_sf_no = 0.0
+    try:
+        # fill_quality.jsonl only observes post-only (bid-basis) fills; on
+        # that basis its near-real-time Q75 merges with the audit cohort.
+        _impl_log_yes = _impl_log_no = None
+        if entry_price_basis == "bid":
+            try:
+                from merid.execution.fill_quality_tracker import (
+                    measured_impl_shortfall_cents as _fq_impl,
+                )
+                _impl_log_yes = _fq_impl(asset, "yes", "bid")
+                _impl_log_no = _fq_impl(asset, "no", "bid")
+            except Exception:
+                _impl_log_yes = _impl_log_no = None
+        _impl_sf_yes = evidence_policy.implementation_shortfall_cents(
+            _cal_ev, asset, "yes", entry_price_basis,
+            fill_quality_meas=_impl_log_yes,
+        ) / 100.0
+        _impl_sf_no = evidence_policy.implementation_shortfall_cents(
+            _cal_ev, asset, "no", entry_price_basis,
+            fill_quality_meas=_impl_log_no,
+        ) / 100.0
+    except Exception:
+        _impl_sf_yes = _impl_sf_no = 0.0
+    indicators["yes_impl_shortfall_cents"] = _impl_sf_yes * 100.0
+    indicators["no_impl_shortfall_cents"] = _impl_sf_no * 100.0
+
     yes_breakdown = compute_edge(
         p_yes=p_yes_for_yes,
         selected_side="yes",
         entry_price=yes_entry,
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_yes,
-        model_risk_reserve=model_risk_reserve,
+        model_risk_reserve=min(
+            1.0, model_risk_reserve + _calib_gap_yes + _drift_res_yes
+        ),
         adverse_selection_reserve=_asr_yes,
+        policy_giveback_reserve=_policy_gb_yes,
+        implementation_shortfall_reserve=_impl_sf_yes,
     )
     no_breakdown = compute_edge(
         p_yes=p_yes_for_no,
@@ -3998,7 +4246,11 @@ def compute_trade_decision(
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_no,
         adverse_selection_reserve=_asr_no,
-        model_risk_reserve=model_risk_reserve,
+        model_risk_reserve=min(
+            1.0, model_risk_reserve + _calib_gap_no + _drift_res_no
+        ),
+        policy_giveback_reserve=_policy_gb_no,
+        implementation_shortfall_reserve=_impl_sf_no,
     )
 
     # 2026-08-30: Fee-aware, asset-tiered, spread-aware edge threshold.
@@ -5022,19 +5274,22 @@ def compute_trade_decision(
     # clears the absolute floor AND the quote owner is not degraded; the
     # ordinary economics bound still applies on top.  Same-direction and
     # deep-ITM sides are unaffected (``regime_entry_block`` returns None).
-    _cr_penalty = MERID_COUNTER_REGIME_MODE == "penalty"
+    _yes_cr_penalty = MERID_COUNTER_REGIME_MODE_YES == "penalty"
+    _no_cr_penalty = MERID_COUNTER_REGIME_MODE_NO == "penalty"
     _yes_regime_ok = _yes_regime_block is None or (
-        _cr_penalty
+        _yes_cr_penalty
         and _yes_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE
         and (MERID_COUNTER_REGIME_ALLOW_DEGRADED or not indicators.get("quote_degraded_mode"))
     )
     _no_regime_ok = _no_regime_block is None or (
-        _cr_penalty
+        _no_cr_penalty
         and _no_eff_edge >= MERID_COUNTER_REGIME_MIN_EDGE_NO
         and (MERID_COUNTER_REGIME_ALLOW_DEGRADED or not indicators.get("quote_degraded_mode"))
     )
     indicators.update({
         "counter_regime_mode": MERID_COUNTER_REGIME_MODE,
+        "counter_regime_mode_yes": MERID_COUNTER_REGIME_MODE_YES,
+        "counter_regime_mode_no": MERID_COUNTER_REGIME_MODE_NO,
         "counter_regime_min_edge_cents": MERID_COUNTER_REGIME_MIN_EDGE * 100.0,
         "yes_counter_regime_admitted": bool(
             _yes_regime_block is not None and _yes_regime_ok
@@ -5332,8 +5587,47 @@ def compute_trade_decision(
     if _no_cb_epc_exempt:
         indicators["cost_basis_epc_overridden_no"] = True
 
+    # 2026-10-15: counter-model directional gate.  A side the model itself
+    # scores below 0.5 needs the counter-model premium edge (or clears the
+    # hard floor at all); applied on the same effective edge the lane gates
+    # consume so EPC/cbp edge adjustments count toward the premium.
+    _yes_dir_veto = _counter_model_veto(
+        yes_breakdown, _yes_eff_edge, _yes_edge_eff_bound
+    )
+    _no_dir_veto = _counter_model_veto(
+        no_breakdown, _no_eff_edge, _no_edge_eff_bound
+    )
+    # current_build_provisional-owned sides may opt out of the directional
+    # gate under MERID_COUNTER_MODEL_PROV_EXEMPT: the lane is a bounded
+    # paid-telemetry probe whose per-cell min-EV (operator-set, possibly
+    # negative) is the precise instrument — a hard p floor would dead-zone
+    # every pinned-to-strike underdog cell it exists to explore, and its
+    # fills are the execution-cost data the streaming calibrator needs for
+    # exactly these buckets.  Default OFF: the gate binds every lane unless
+    # the operator explicitly authorizes counter-model probing.  The
+    # would-be veto reason is preserved under {side}_counter_model_exempt
+    # for counterfactual scoring (label-not-veto, same shape as the
+    # coinflip exemption).
+    for _pfx, _d in (("yes", _yes_edge_thr), ("no", _no_edge_thr)):
+        if _d.cell_id is None and _d.provisional_cell_id is not None:
+            _dv = _yes_dir_veto if _pfx == "yes" else _no_dir_veto
+            if _dv is not None:
+                if _counter_model_prov_exempt():
+                    indicators[f"{_pfx}_counter_model_exempt"] = _dv
+                    if _pfx == "yes":
+                        _yes_dir_veto = None
+                    else:
+                        _no_dir_veto = None
+                else:
+                    indicators[f"{_pfx}_counter_model_probe_blocked"] = _dv
+    if _yes_dir_veto is not None:
+        indicators["directional_veto_yes"] = _yes_dir_veto
+    if _no_dir_veto is not None:
+        indicators["directional_veto_no"] = _no_dir_veto
+
     yes_qualifies = (
         yes_depth_ok
+        and _yes_dir_veto is None
         and not tail_guard_violation_yes
         and yes_evidence_ok
         and _yes_throttle_block is None
@@ -5358,6 +5652,7 @@ def compute_trade_decision(
     )
     no_qualifies = (
         no_depth_ok
+        and _no_dir_veto is None
         and _no_eff_edge >= _no_edge_eff_bound
         and (
             _no_cbp_neg_floor
@@ -5398,6 +5693,7 @@ def compute_trade_decision(
         trend_hi_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
         cb_epc_exempt_s: bool = False,
+        dir_veto_s: Optional[str] = None,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         if not depth_ok_s:
@@ -5448,6 +5744,11 @@ def compute_trade_decision(
             return f"{coinflip_block_s}_{side}"
         if price_cap_block_s:
             return price_cap_block_s
+        # 2026-10-15: the counter-model veto labels a side that cleared every
+        # structural gate — "would have traded but for the directional
+        # invariant" — keeping the marginal veto cohort greppable.
+        if dir_veto_s:
+            return f"{dir_veto_s}_{side}"
         if not evidence_ok_s:
             return (
                 yes_evidence_reason if side == "yes" else no_evidence_reason
@@ -5487,6 +5788,7 @@ def compute_trade_decision(
             trend_hi_block_s=_yes_trend_hi_block,
             eff_edge_s=_yes_eff_edge,
             cb_epc_exempt_s=_yes_cb_epc_exempt,
+            dir_veto_s=_yes_dir_veto,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -5500,6 +5802,7 @@ def compute_trade_decision(
             price_cap_block_s=_no_price_cap_block,
             eff_edge_s=_no_eff_edge,
             cb_epc_exempt_s=_no_cb_epc_exempt,
+            dir_veto_s=_no_dir_veto,
         ),
     })
 
@@ -5734,6 +6037,7 @@ def compute_trade_decision(
             if _cs == "yes":
                 _gates_ok = (
                     yes_depth_ok
+                    and _yes_dir_veto is None
                     and not tail_guard_violation_yes
                     and yes_evidence_ok
                     and _yes_regime_ok
@@ -5752,6 +6056,7 @@ def compute_trade_decision(
             else:
                 _gates_ok = (
                     no_depth_ok
+                    and _no_dir_veto is None
                     and not tail_guard_violation_no
                     and no_evidence_ok
                     and _no_regime_ok
@@ -5979,6 +6284,16 @@ def compute_trade_decision(
                     if _first_gate in ("low_conviction", "moneyness_coin_flip")
                     else _first_gate
                 )
+            elif (
+                # 2026-10-15: the economic argmax picked the model's underdog
+                # side and it failed the counter-model premium.  Ordered after
+                # the structural safety gates so `counter_model_*` labels only
+                # candidates that would otherwise have traded — the marginal
+                # veto cohort for the counterfactual join.
+                _yes_dir_veto if best_side == "yes" else _no_dir_veto
+            ) is not None:
+                _dir_v = _yes_dir_veto if best_side == "yes" else _no_dir_veto
+                no_trade_reason = f"{_dir_v}_{best_side}"
             elif not best_evidence_ok:
                 # The observed win-rate evidence at this held-side price does
                 # not clear price + fee + margin: the cell is unprofitable for

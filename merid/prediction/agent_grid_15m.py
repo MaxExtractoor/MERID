@@ -903,6 +903,17 @@ MERID_MAKER_BID_MIN_SPREAD_CENTS = float(
 MERID_MAKER_BID_DAILY_CAP = int(
     os.environ.get("MERID_MAKER_BID_DAILY_CAP", "24")
 )
+# 2026-10-15 (FIX 7): when a cell's measured adverse-selection reserve is at
+# or above this level the markout tape has demonstrated extreme pick-off
+# (live Q75 costs reach 7-18c).  Such cells may still emit a resting bid,
+# but only when opposing-side book pressure is NOT dominant — measured
+# toxicity earns a microstructure confirmation at any held price (the >=50c
+# bookflow exemption in the shared veto does not apply to proven-toxic
+# cells).  Missing book features degrade to no-block, matching the shared
+# bookflow veto's fail-open posture.
+MERID_MAKER_BID_TOXIC_ASR_CENTS = float(
+    os.environ.get("MERID_MAKER_BID_TOXIC_ASR_CENTS", "10.0")
+)
 MERID_MAKER_BID_DAILY_FILE = os.environ.get(
     "MERID_MAKER_BID_DAILY_FILE", "data/maker_bid_lane.json"
 )
@@ -8864,7 +8875,35 @@ class LeanAgent15m:
                             if _mb_side == "no"
                             else (float(yes_ask) - float(yes_bid))
                         )
-                        if _mb_spread >= MERID_MAKER_BID_MIN_SPREAD_CENTS:
+                        # 2026-10-15 (FIX 7): in a measured-toxic cell
+                        # (reserve >= TOXIC_ASR) require book-flow
+                        # confirmation at any held price — the >=50c
+                        # exemption inside the shared veto assumes
+                        # unproven cells; measured pick-off overrides it.
+                        _mb_asr_meas = 0.0
+                        try:
+                            _mb_asr_meas = float(
+                                (decision_maker_bid.indicators or {}).get(
+                                    f"{_mb_side}_adverse_selection_measured_cents"
+                                ) or 0.0
+                            )
+                        except Exception:
+                            _mb_asr_meas = 0.0
+                        _mb_toxic_bf = None
+                        if _mb_asr_meas >= MERID_MAKER_BID_TOXIC_ASR_CENTS:
+                            try:
+                                from merid.prediction.directional_regime import (
+                                    bookflow_block_reason as _mb_bf_reason,
+                                )
+                                _mb_toxic_bf = _mb_bf_reason(
+                                    getattr(self, "_feature_snapshot", None),
+                                    asset,
+                                    _mb_side,
+                                    held_price_cents=None,
+                                )
+                            except Exception:
+                                _mb_toxic_bf = None
+                        if _mb_spread >= MERID_MAKER_BID_MIN_SPREAD_CENTS and not _mb_toxic_bf:
                             decision = decision_maker_bid
                             liquidity_role = "maker"
                             aggressiveness = 0.0
@@ -8875,10 +8914,21 @@ class LeanAgent15m:
                             _n_mb = _record_maker_bid_submission()
                             logger.info(
                                 "[MAKER-BID-LANE] asset=%s side=%s spread=%.1fc "
-                                "net_edge=%.2fc lane submissions today=%d",
+                                "net_edge=%.2fc asr_meas=%.1fc lane submissions today=%d",
                                 asset, _mb_side, _mb_spread,
                                 float(decision_maker_bid.net_edge or 0) * 100.0,
+                                _mb_asr_meas,
                                 _n_mb,
+                            )
+                        elif _mb_toxic_bf:
+                            decision.indicators["maker_bid_block"] = (
+                                f"toxic_bookflow:{_mb_toxic_bf} asr={_mb_asr_meas:.1f}c"
+                            )
+                            logger.info(
+                                "[MAKER-BID-LANE] asset=%s side=%s blocked "
+                                "toxic-cell bookflow=%s asr_meas=%.1fc >= %.1fc",
+                                asset, _mb_side, _mb_toxic_bf,
+                                _mb_asr_meas, MERID_MAKER_BID_TOXIC_ASR_CENTS,
                             )
                         else:
                             # Keep the failed ask-priced decision for the
