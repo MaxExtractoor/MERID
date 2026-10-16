@@ -427,6 +427,7 @@ def test_label_age_tracked_through_state(tmp_path, monkeypatch):
         "MERID_DIRECTIONAL_REGIME_STATE_PATH", str(tmp_path / "r.json")
     )
     monkeypatch.setenv("MERID_REGIME_MIN_TICK_S", "1.0")
+    monkeypatch.setenv("MERID_REGIME_CONFIRM_TICKS", "2")
     dr._regime_cache = (0.0, {})
 
     class _Sl:

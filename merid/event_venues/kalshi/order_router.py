@@ -19438,6 +19438,26 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
                     _approved_px,
                 )
                 intent.price_cents = _approved_px
+            # 2026-10-16: a forced exit resized to visible book depth must go
+            # out at the APPROVED quantity — the firewall's qty_cc is the
+            # bound it validated (position, delta, loss policy all ran on it).
+            _approved_cc = int(getattr(decision, "qty_cc", 0) or 0)
+            _intent_cc = (
+                int(Decimal(str(intent.count_fp)) * Decimal("100"))
+                if intent.count_fp is not None
+                else int(Decimal(str(intent.count or 0)) * Decimal("100"))
+            )
+            if 0 < _approved_cc < _intent_cc:
+                logger.warning(
+                    "[FIREWALL-APPLY-QTY] intent_id=%s ticker=%s qty_cc=%d -> %d "
+                    "(firewall resized exit to book depth)",
+                    intent.intent_id,
+                    intent.ticker,
+                    _intent_cc,
+                    _approved_cc,
+                )
+                intent.count_fp = Decimal(str(_approved_cc)) / Decimal("100")
+                intent.count = float(intent.count_fp)
             if decision.status == "observe_only":
                 logger.warning(
                     "[FIREWALL-OBSERVE-ONLY] intent_id=%s ticker=%s reason=%s "

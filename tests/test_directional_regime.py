@@ -48,6 +48,10 @@ def regime_state(tmp_path, monkeypatch):
     """Isolated regime-EMA state file per test + clean module cache."""
     p = tmp_path / "regime_state.json"
     monkeypatch.setenv("MERID_DIRECTIONAL_REGIME_STATE_PATH", str(p))
+    # These tests predate the 2026-10-16 churn audit which raised the confirm
+    # default to 4; the EMA/hysteresis semantics they cover are tick-count
+    # agnostic, so pin the legacy cadence.
+    monkeypatch.setenv("MERID_REGIME_CONFIRM_TICKS", "2")
     dr._regime_cache = (0.0, {})
     yield str(p)
     dr._regime_cache = (0.0, {})

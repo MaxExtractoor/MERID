@@ -25,7 +25,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from utils.logger import get_logger
@@ -280,12 +280,28 @@ class ExecutionRiskFirewall:
         if book.book_age_ms > self._max_quote_age_ms():
             return self._rejected(f"stale_book:age_ms={book.book_age_ms}", canonical)
 
-        # 6. Depth must cover the entire requested quantity.
+        # 6. Depth must cover the requested quantity.  For a forced/safety
+        # exit, a partial close strictly dominates a deferred full close —
+        # resize to the visible depth and let the residual position re-fire
+        # its trigger next tick.  Discretionary exits keep the hard reject.
         if book.available_qty_cc < qty_cc:
-            return self._rejected(
-                f"insufficient_depth:requested={qty_cc}:available={book.available_qty_cc}",
-                canonical,
-            )
+            if self._is_forced_exit(original_intent, canonical) and book.available_qty_cc > 0:
+                new_qty_cc = int(book.available_qty_cc)
+                logger.warning(
+                    "[FIREWALL-RESIZE-FORCED-EXIT] ticker=%s intent_id=%s "
+                    "qty_cc=%d -> %d (book depth shortfall) - partial close "
+                    "approved, residual re-triggers next tick",
+                    ticker, canonical.intent_id, qty_cc, new_qty_cc,
+                )
+                canonical = replace(canonical, qty_cc=new_qty_cc)
+                qty_cc = new_qty_cc
+                order_yes_delta = yes_delta(canonical.action, canonical.contract, qty_cc)
+                expected_after = pos.position_cc + order_yes_delta
+            else:
+                return self._rejected(
+                    f"insufficient_depth:requested={qty_cc}:available={book.available_qty_cc}",
+                    canonical,
+                )
 
         # 7. Limit must be executable at the requested size (VWAP check).
         if not self._limit_executable(canonical, book):
@@ -412,8 +428,11 @@ class ExecutionRiskFirewall:
         return self._decisions.get(client_order_id)
 
     def consume_decision(self, client_order_id: str) -> Optional[FirewallDecision]:
-        """Return the decision for this coid; the venue client consumes it."""
-        return self._decisions.get(client_order_id)
+        """Return and clear the decision for this coid; the venue client
+        consumes it exactly once.  2026-10-16 audit: the previous get()
+        left every decision resident forever — the map grew unbounded over
+        a run and a stale coid could be re-read after routing."""
+        return self._decisions.pop(client_order_id, None)
 
     # ── Internals ───────────────────────────────────────────────────────────
 
@@ -652,13 +671,22 @@ class ExecutionRiskFirewall:
         if filled_contracts <= 0:
             return None
 
+        # VWAP rounding must err against the exit's proceeds: a SELL
+        # underestimates (FLOOR) so executability is judged on the worst-case
+        # fill price; a BUY overestimates cost (CEIL). 2026-10-16 audit:
+        # unconditional CEILING overstated sell-side VWAP by up to 1c.
+        _vwap_round = ROUND_CEILING if canonical.action == "buy" else ROUND_FLOOR
         vwap_cents = int(
-            (filled_value / filled_contracts).to_integral_value(rounding=ROUND_CEILING)
+            (filled_value / filled_contracts).to_integral_value(rounding=_vwap_round)
         )
 
-        book_age_ms = 0
+        # A book with no timestamp is UNKNOWN-stale, not fresh: market_state
+        # treats ts<=0 as infinitely old, and reading it as age 0 here let an
+        # uninitialized book pass the staleness check (2026-10-16 audit).
         if ts > 0:
-            book_age_ms = int((time.monotonic() - ts) * 1000)
+            book_age_ms = max(0, int((time.monotonic() - ts) * 1000))
+        else:
+            book_age_ms = 2**31 - 1
 
         best_bid = levels[0][0] if not is_buy else None
         best_ask = levels[0][0] if is_buy else None
@@ -897,6 +925,16 @@ class ExecutionRiskFirewall:
 
     def _persist_decision(self, decision: FirewallDecision) -> None:
         self._decisions[decision.client_order_id] = decision
+        # Bound the token map — drop anything older than an hour.  Decisions
+        # are consumed on route; survivors are wedges the sweeper owns.
+        try:
+            if len(self._decisions) > 512:
+                cutoff = time.time() - 3600.0
+                for k in [k for k, d in self._decisions.items()
+                          if d.created_at < cutoff]:
+                    self._decisions.pop(k, None)
+        except Exception:
+            pass
         try:
             # 2026-09-30: quarantine test writes — pytest runs must never
             # append to the production decision ledger.
@@ -966,7 +1004,14 @@ class ExecutionRiskFirewall:
                     return attempt
             return None
         except Exception as exc:
-            logger.debug("[FIREWALL] in_flight_exit check failed: %s", exc)
+            # Fail-open is the intended fallback, but silently degrading the
+            # duplicate-exit guard is exactly the 2026-09-01 incident class —
+            # make it loud so the wedge is visible in telemetry.
+            logger.warning(
+                "[FIREWALL-INFLIGHT-CHECK-FAILED] ticker=%s intent_id=%s "
+                "duplicate-exit dedup unavailable, proceeding fail-open: %s",
+                canonical.market_ticker, canonical.intent_id, exc,
+            )
             return None
 
     def _attempt_is_exit_for(

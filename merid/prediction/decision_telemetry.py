@@ -1023,17 +1023,42 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
     if not economics_evaluated:
         return violations
     try:
+        # 2026-10-16: resolve the bound of the side that produced best_ev —
+        # best_required_edge_cents is the cross-side MINIMUM, so comparing
+        # the best side's EV/shortfall against it false-positives whenever
+        # the two sides carry different bounds (observed: best_ev=4.70 vs
+        # thr=2.0 flagged while the yes-side bound was really 8c).
+        best_side: Optional[str] = None
+        bound: Optional[float] = None
+        if yes_ev is not None and no_ev is not None:
+            best_side = "yes" if float(yes_ev) >= float(no_ev) else "no"
+            for _k in (
+                f"{best_side}_effective_required_edge_cents",
+                f"{best_side}_route_required_edge_cents",
+                f"{best_side}_cell_required_edge_cents",
+                f"{best_side}_formula_required_edge_cents",
+                f"required_edge_{best_side}_cents",
+            ):
+                _bv = record.get(_k)
+                if _bv is not None:
+                    try:
+                        bound = float(_bv)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+        if bound is None:
+            bound = float(thr) if thr is not None else None
         if best_ev is not None and yes_ev is not None and no_ev is not None:
             if abs(float(best_ev) - max(float(yes_ev), float(no_ev))) > 0.51:
                 violations.append(
                     f"best_executable_ev_cents={best_ev} != max(yes,no)= "
                     f"{max(float(yes_ev), float(no_ev))}"
                 )
-        if best_ev is not None and thr is not None and shortfall is not None:
-            if abs(float(shortfall) - max(0.0, float(thr) - float(best_ev))) > 0.51:
+        if best_ev is not None and bound is not None and shortfall is not None:
+            if abs(float(shortfall) - max(0.0, bound - float(best_ev))) > 0.51:
                 violations.append(
                     f"edge_shortfall_cents={shortfall} != "
-                    f"thr({thr}) - best_ev({best_ev})"
+                    f"side_bound({bound}) - best_ev({best_ev})"
                 )
         if code == "NO_POSITIVE_EXECUTABLE_EDGE" and best_ev is not None:
             if float(best_ev) > 0.05:
@@ -1047,12 +1072,12 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
                 )
             if (
                 best_ev is not None
-                and thr is not None
-                and float(best_ev) >= float(thr) + 0.51
+                and bound is not None
+                and float(best_ev) >= float(bound) + 0.51
             ):
                 violations.append(
                     f"EDGE_BELOW_DYNAMIC_THRESHOLD but best_ev={best_ev} "
-                    f">= thr={thr}"
+                    f">= side_bound={bound} (side={best_side})"
                 )
     except (TypeError, ValueError):
         pass

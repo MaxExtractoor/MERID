@@ -2783,32 +2783,95 @@ class PositionMonitor:
         except (TypeError, ValueError):
             return 120.0
 
+    def _unresolved_exit_reconcile_age_seconds(self) -> float:
+        """Age after which a durable attempt stuck in an unresolved
+        submission state gets pushed through exchange reconciliation.
+
+        The in-memory in-flight path normally catches these first; this is
+        the durable backstop for when the callback/task died, the flight map
+        was lost across a restart, or the transition write never ran
+        (observed live: DOGE take_profit wedged SUBMITTING >15min,
+        2026-10-16)."""
+        try:
+            return float(os.environ.get("MERID_EXIT_UNRESOLVED_RECONCILE_S", "180"))
+        except (TypeError, ValueError):
+            return 180.0
+
     def _sweep_stale_exit_obligations(self) -> int:
-        """Terminalize exit obligations that never reached dispatch.
+        """Terminalize/reconcile exit obligations whose progress stalled.
 
-        An INTENT_PERSISTED record older than ``MERID_EXIT_UNSUBMITTED_AGE_S``
-        is an obligation that was created but whose submit was never invoked —
-        worker not dispatched, dispatch exception, process kill, or a
-        legacy-migrated record.  Each is terminalized as TERMINAL_UNFILLED
-        with a classified stall reason, and the in-memory flight is released
-        so a still-open position mints a fresh attempt on next evaluation.
+        Two durable failure classes are swept:
 
-        Returns the number of obligations terminalized.
+        * ``INTENT_PERSISTED`` older than ``MERID_EXIT_UNSUBMITTED_AGE_S`` —
+          created but the submit was never invoked (worker not dispatched,
+          dispatch exception, process kill, legacy-migrated record).  These
+          terminalize as TERMINAL_UNFILLED with a classified stall reason.
+
+        * ``SUBMITTING`` / ``SUBMISSION_UNKNOWN`` / ``RESOLVING_ON_EXCHANGE``
+          older than ``MERID_EXIT_UNRESOLVED_RECONCILE_S`` — the submission
+          was claimed but the outcome was never written back.  These are NOT
+          terminalized blindly: the venue may hold or have filled the order,
+          so each is pushed through ``_reconcile_exit_intent`` which resolves
+          from exchange evidence (filled→FILLED, resting→re-arm, absent→
+          release for retry).
+
+        Returns the number of obligations actioned.
         """
         try:
             store = OrderAttemptStore()
-            pending = [
-                r for r in store.list_nonterminal_exit_attempts()
-                if r.state == ExitOrderAttemptState.INTENT_PERSISTED.value
-            ]
+            records = store.list_nonterminal_exit_attempts()
         except Exception as exc:
             logger.debug("[EXIT-OBLIGATION-SWEEP] store listing failed: %s", exc)
             return 0
-        if not pending:
+        if not records:
             return 0
         now = time.time()
         limit = self._unsubmitted_exit_age_seconds()
-        swept = 0
+        reconcile_age = self._unresolved_exit_reconcile_age_seconds()
+        pending = [
+            r for r in records
+            if r.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+        ]
+        unresolved_states = {
+            ExitOrderAttemptState.SUBMITTING.value,
+            ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+            ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
+        }
+        unresolved = [
+            r for r in records
+            if r.state in unresolved_states
+            and (now - r.created_at) >= reconcile_age
+        ]
+        # Throttle repeat reconciles per attempt — a record that stays
+        # unresolved (venue unreachable, genuinely ambiguous) must not spawn
+        # a probe every 30s cycle.
+        scheduled = getattr(self, "_swept_reconcile_at", None)
+        if scheduled is None:
+            scheduled = {}
+            self._swept_reconcile_at = scheduled
+        for k, t in list(scheduled.items()):
+            if now - t > 900.0:
+                scheduled.pop(k, None)
+        for record in unresolved:
+            key = record.client_order_id or record.attempt_id
+            if now - scheduled.get(key, 0.0) < reconcile_age:
+                continue
+            scheduled[key] = now
+            try:
+                logger.warning(
+                    "[EXIT-OBLIGATION-SWEEP] attempt=%s position=%s client_order_id=%s "
+                    "state=%s age=%.1fs - unresolved submission; scheduling exchange reconcile",
+                    record.attempt_id[:8], record.position_key[:8],
+                    (record.client_order_id or "")[:12], record.state,
+                    now - record.created_at,
+                )
+                self._schedule_exit_reconcile(record.position_key, record.client_order_id)
+            except Exception as exc:
+                logger.warning(
+                    "[EXIT-OBLIGATION-SWEEP] reconcile schedule failed attempt=%s: %s",
+                    record.attempt_id[:8], exc,
+                )
+        swept = len(unresolved)
         for record in pending:
             age = now - record.created_at
             if age < limit:
@@ -6915,7 +6978,23 @@ class PositionMonitor:
             except Exception as e:
                 # 2026-08-11 CRITICAL FIX: clear in-flight guard so a failed callback does
                 # not permanently block exit re-evaluation.
+                # 2026-10-16: capture the coid BEFORE clearing — the durable
+                # attempt is already SUBMITTING and must not wedge.  Push it to
+                # SUBMISSION_UNKNOWN (the callback may have dispatched the route
+                # task before raising, so venue truth is unproven) and schedule
+                # the exchange reconcile to resolve it.  Observed live: DOGE
+                # take_profit wedged SUBMITTING >15min with no wire traffic.
+                with self._lock:
+                    _cb_coid = self._position_to_client_order.get(position.position_id) or \
+                        (self._exit_intent_in_flight.get(position.position_id) or {}).get("client_order_id")
                 self._clear_exit_intent_in_flight(position.position_id)
+                if _cb_coid:
+                    self._transition_exit_attempt(
+                        _cb_coid,
+                        ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+                        "dispatch_callback_failed",
+                    )
+                    self._schedule_exit_reconcile(position.position_id, _cb_coid)
                 logger.error(
                     "[POSITION-MONITOR] Exit intent callback failed: %s",
                     e,
@@ -6946,7 +7025,22 @@ class PositionMonitor:
                 # monitored so the exit re-fires on the next poll instead of orphaning a
                 # live position with no exit enforcement. Also clear the in-flight guard
                 # so a later poll can re-attempt the exit.
+                # 2026-10-16: resolve the durable SUBMITTING attempt too —
+                # _mark_exit_intent_in_flight already wrote it, so clearing
+                # only memory would wedge the durable record (the exception
+                # path above already handled its own case; when no callback
+                # exists this is the only transition).
+                with self._lock:
+                    _nd_coid = self._position_to_client_order.get(position.position_id) or \
+                        (self._exit_intent_in_flight.get(position.position_id) or {}).get("client_order_id")
                 self._clear_exit_intent_in_flight(position.position_id)
+                if _nd_coid:
+                    self._transition_exit_attempt(
+                        _nd_coid,
+                        ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+                        "dispatch_callback_unavailable",
+                    )
+                    self._schedule_exit_reconcile(position.position_id, _nd_coid)
                 logger.error(
                     "[POSITION-MONITOR] Exit intent NOT dispatched for position=%s (reason=%s) - "
                     "keeping position monitored for retry on next poll",

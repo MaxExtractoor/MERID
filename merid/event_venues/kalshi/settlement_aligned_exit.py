@@ -334,6 +334,21 @@ def exit_envelope_profit_lock_cents() -> float:
     return _env_float("MERID_EXIT_ENVELOPE_PROFIT_LOCK_C", 10.0)
 
 
+def exit_envelope_trail_lock_cents() -> float:
+    """Profit-lock threshold specific to ``trailing_stop`` (default 1c).
+
+    A trailing stop is not a directional claim — it fires because the held
+    bid already retraced from its peak.  Deferring a profitable trail
+    converts a ratcheted win into an unprotected hold: 2026-10-16 audit
+    showed 163 trailing_stop deferrals averaging only +3.0c locked (below
+    the 10c profit arm) with deferral outcomes roughly coin-flip and a
+    naked left tail.  Any gain above this floor (i.e. covering the ~1c
+    round-trip cost) exempts the trail; losing trails stay gated — the
+    settlement-reversion evidence genuinely applies to them.
+    """
+    return _env_float("MERID_EXIT_ENVELOPE_TRAIL_LOCK_C", 1.0)
+
+
 def exit_envelope_allows(
     canonical_reason: Any,
     executable_bid_cents: Optional[int],
@@ -370,6 +385,8 @@ def exit_envelope_allows(
     lock_ok = False
     lock_gain: Optional[float] = None
     _lock_c = exit_envelope_profit_lock_cents()
+    if c == "trailing_stop":
+        _lock_c = min(_lock_c, exit_envelope_trail_lock_cents())
     if (
         _lock_c > 0.0
         and executable_bid_cents is not None

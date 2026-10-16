@@ -149,11 +149,35 @@ def _regime_weaken_score() -> float:
 
 
 def _regime_confirm_ticks() -> int:
-    return _env_int("MERID_REGIME_CONFIRM_TICKS", 2)
+    # 2026-10-16 audit: 57 label flips/hour with median CONFIRMED dwell of
+    # ~22s — 2 ticks (~3s of aligned breadth) confirms mostly noise near the
+    # boundary.  Require ~6s of unbroken alignment before calling a regime.
+    return _env_int("MERID_REGIME_CONFIRM_TICKS", 4)
 
 
 def _regime_min_tick_s() -> float:
     return _env_float("MERID_REGIME_MIN_TICK_S", 1.5)
+
+
+def _regime_min_dwell_s() -> float:
+    """Minimum seconds a *_CONFIRMED label must hold before it may collapse
+    to NEUTRAL.  Whipsaw hysteresis: while younger than this the label
+    demotes to the same-side *_WEAKENING (releasing protective blocks
+    immediately) instead of forgetting the trend outright."""
+    return _env_float("MERID_REGIME_MIN_DWELL_S", 30.0)
+
+
+# A confirmed label may never flip directly to the opposite confirmed label —
+# a hard reversal must decay through *_WEAKENING first, so one bad tick cannot
+# both release the old trend's blocks and arm the opposite side's at once.
+_CONFIRMED_TO_WEAKENING = {
+    "RALLY_CONFIRMED": "RALLY_WEAKENING",
+    "SELL_OFF_CONFIRMED": "SELL_OFF_WEAKENING",
+}
+_CONFIRMED_OPPOSITE = {
+    "RALLY_CONFIRMED": "SELL_OFF_CONFIRMED",
+    "SELL_OFF_CONFIRMED": "RALLY_CONFIRMED",
+}
 
 
 def _regime_stale_s() -> float:
@@ -269,6 +293,13 @@ def _update_regime_state(
             label = "SELL_OFF_WEAKENING"
         else:
             label = "NEUTRAL"
+        if prev_label in _CONFIRMED_TO_WEAKENING:
+            weakening = _CONFIRMED_TO_WEAKENING[prev_label]
+            label_age = ts - float(st.get("label_since_ts") or 0.0)
+            if label == _CONFIRMED_OPPOSITE[prev_label]:
+                label = weakening
+            elif label == "NEUTRAL" and label_age < _regime_min_dwell_s():
+                label = weakening
         if label != prev_label:
             # Record the transition so trend-side entries can require the
             # label to persist — a just-confirmed regime inside a whipsaw is

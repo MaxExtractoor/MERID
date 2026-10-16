@@ -95,6 +95,24 @@ def _bounded_lane_max_contracts() -> float:
     return max(0.01, min(v, 100.0))
 
 
+def _canary_lane_max_contracts() -> float:
+    """Hard per-order cap for the canary_taker/canary_maker throughput lanes
+    (default 1.0 contract).
+
+    2026-10-16 audit: the canary lanes are documented and accounted as
+    one-contract probes (daily-cap + per-window dedupe price a probe), but
+    they inherited the generic ``MERID_BOUNDED_LANE_MAX_CONTRACTS`` which the
+    operator had raised to 3 — a marginal-edge canary could quietly take 3x
+    its intended size.  Canary size is pinned independently; raise only via
+    ``MERID_CANARY_LANE_MAX_CONTRACTS`` alongside an accounting review.
+    """
+    try:
+        v = float(os.environ.get("MERID_CANARY_LANE_MAX_CONTRACTS", "1"))
+    except Exception:
+        return 1.0
+    return max(0.01, min(v, 3.0))
+
+
 def _probe_lane_max_contracts() -> float:
     """Hard cap for *evidence-refused* probes (default 1.0 contract).
 
@@ -9455,6 +9473,10 @@ class LeanAgent15m:
                     pass
             if _decision_lane in BOUNDED_POST_ONLY_LANES:
                 _lane_cap = _bounded_lane_max_contracts()
+                if _decision_lane in ("canary_taker", "canary_maker"):
+                    # Canary probes are priced and accounted at one contract;
+                    # they must not inherit a raised generic bounded cap.
+                    _lane_cap = min(_lane_cap, _canary_lane_max_contracts())
                 if _probe_restricted:
                     # Evidence-refused / non-positive-LCB probes are capped at
                     # the probe size, not the (possibly operator-raised)
