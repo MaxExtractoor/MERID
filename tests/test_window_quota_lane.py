@@ -143,6 +143,28 @@ class TestAllocatorQuotaLane:
         chosen = self._allocator().allocate([cand])
         assert cand not in chosen
 
+    def test_quota_yields_when_cap_exhausted(self, monkeypatch):
+        """Quota rides residual capacity only — a real trade that fills the
+        venue cap must crowd the telemetry probe out, never vice versa."""
+        monkeypatch.setenv("MERID_WINDOW_QUOTA_ENABLED", "1")
+        from merid.risk.profiles.global_allocator import GlobalAllocator
+        a = GlobalAllocator(venue_cap_usd=1.0)  # $1 cap
+        real = self._candidate(
+            price_cents=50, count=1.0, edge_pct=0.10,  # $0.50 notional, +edge
+        )
+        real2 = self._candidate(
+            asset="ETH", ticker="KXETH15M-TEST",
+            price_cents=50, count=1.0, edge_pct=0.09,
+        )
+        quota = self._candidate(
+            asset="SOL", ticker="KXSOL15M-Q",
+            price_cents=80, count=1.0, edge_pct=-0.09,  # $0.80 > residual
+            decision_lane="window_quota",
+            effective_required_edge_cents=-25.0, gate_ev_cents=-9.0,
+        )
+        chosen = a.allocate([real, real2, quota])
+        assert quota not in chosen
+
     def test_non_lane_candidate_unchanged(self, monkeypatch):
         """A normal candidate at YES@80 with -9c claim is still rejected —
         the quota bound must not leak into the generic path."""

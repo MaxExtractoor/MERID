@@ -842,6 +842,38 @@ class GlobalAllocator:
         chosen = best_combination
         used_notional = best_total_notional if best_total_notional != float('inf') else 0.0
 
+        # 2026-10-17 (window-quota): quota candidates are paid telemetry —
+        # the knapsack maximizes edge, so a negative-claim candidate can
+        # never be selected (an empty combo beats it).  Quota rides
+        # alongside the optimal combo instead: it is chosen iff it fits
+        # residual venue capacity and the per-asset bound, so it can never
+        # crowd out a real trade (the durable per-ticker/daily caps bound
+        # the spend upstream).
+        _wq_residual = float(self.venue_cap_usd) - float(used_notional)
+        _wq_asset_max = (
+            float(self.venue_cap_usd) * float(self.max_single_asset_fraction)
+        )
+        for c in unique_candidates:
+            if getattr(c, "decision_lane", None) != "window_quota":
+                continue
+            if c in chosen:
+                continue
+            if use_canonical:
+                _wq_cur = self._current_notional_for_ticker(
+                    c, canonical_live_positions
+                )
+            else:
+                _wq_cur = float(
+                    current_positions.get(c.asset, 0.0) or 0.0
+                )
+            _wq_fits = (
+                c.position_value_usd <= _wq_residual
+                and (_wq_cur + c.position_value_usd) <= _wq_asset_max
+            )
+            if _wq_fits:
+                chosen.append(c)
+                _wq_residual -= float(c.position_value_usd)
+
         # Determine knapsack feasibility for each unique candidate for precise telemetry.
         max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
         feasible_by_candidate: Dict[str, bool] = {c.candidate_id or f"oc-{id(c)}": False for c in unique_candidates}
