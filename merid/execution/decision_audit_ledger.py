@@ -2725,6 +2725,14 @@ class DecisionAuditLedger:
             # earlier comment favoring decision_ts pre-dated the table growth.
             # A decision always precedes its settlement; the one-hour pad on
             # decision_ts still covers decisions made just before the window.
+            #
+            # 2026-10-17: INDEXED BY is load-bearing.  The DB has no ANALYZE
+            # stats, and the planner was choosing idx_outcomes_status
+            # (outcome_status='SETTLED' — nearly the whole table) then
+            # filtering settled_at row-by-row: every refresh scanned the full
+            # settled history (~620s timeouts on 48h AND 12h windows).  With
+            # the settled_at range forced, the scan is proportional to the
+            # window.
             ebias_rows: List[sqlite3.Row] = []
             rows = conn.execute(
                 """
@@ -2745,7 +2753,7 @@ class DecisionAuditLedger:
                        'fill' AS src,
                        d.decision_ts AS decision_ts,
                        d.ticker AS mkey
-                FROM strategy_decision_outcomes o
+                FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
                 JOIN strategy_decisions d ON d.decision_id = o.decision_id
                 LEFT JOIN strategy_decision_side_ev se
                   ON se.decision_id = d.decision_id
@@ -2793,7 +2801,7 @@ class DecisionAuditLedger:
                            se.counterfactual_execution_status AS cf_status,
                            'veto' AS src,
                            d.ticker || '|' || se.side AS mkey
-                    FROM strategy_decision_outcomes o
+                    FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
                     JOIN strategy_decisions d ON d.decision_id = o.decision_id
                     JOIN strategy_decision_side_ev se
                       ON se.decision_id = d.decision_id
@@ -2831,7 +2839,7 @@ class DecisionAuditLedger:
                        o.settled_at AS settled_at,
                        d.decision_ts AS decision_ts,
                        d.ticker || '|' || se.side AS mkey
-                FROM strategy_decision_outcomes o
+                FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
                 JOIN strategy_decisions d ON d.decision_id = o.decision_id
                 JOIN strategy_decision_side_ev se
                   ON se.decision_id = d.decision_id
