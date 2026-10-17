@@ -3076,6 +3076,33 @@ def _intent_requires_post_only(intent: "OrderIntent") -> bool:
     ) and bool(getattr(intent, "post_only", False))
 
 
+def _lane_model_prob_hi(intent: "OrderIntent") -> float:
+    """Lane-aware model-probability ceiling for router-side checks.
+
+    The venue invariant clamps ordinary intents to KALSHI_MAX_PROBABILITY
+    (0.95).  Two lanes legitimately claim above it: settlement_convergence
+    (banked-sample distribution can be ~0.9999 in the final minute) and
+    pinned_fav (a 92-98c entry needs p >= price + reserves).  Both read
+    their cap from the same env knob the decision layer used, so the
+    router bound can never be looser than the admission bound.
+    """
+    from merid.event_venues.kalshi.invariants import KALSHI_MAX_PROBABILITY
+
+    _hi = KALSHI_MAX_PROBABILITY
+    _lane = getattr(intent, "decision_lane", None)
+    _env = (
+        "MERID_SETTLEMENT_LANE_P_CAP" if _lane == "settlement_convergence"
+        else "MERID_PINNED_FAV_P_CAP" if _lane == "pinned_fav"
+        else None
+    )
+    if _env is not None:
+        try:
+            _hi = max(_hi, float(os.environ.get(_env, "0.99")))
+        except Exception:
+            pass
+    return _hi
+
+
 def _record_cell_pre_wire_reject(intent: "OrderIntent", code: str) -> None:
     """Feed a pre-wire terminal reject into cell-lane bookkeeping.
 
@@ -5194,6 +5221,11 @@ async def _revalidate_entry_economics(
 
             _entry_frac = _exec_px / 100.0
             _tc = load_tail_calibrator() if MERID_TAIL_CALIBRATION_ENABLED else None
+            # Lane-aware p ceiling: a pinned_fav (or settlement) intent was
+            # admitted at p up to the lane cap (~0.99); clamping the fresh
+            # recompute at the generic 0.95 would manufacture a ~3-4c
+            # phantom probability decay and veto a still-valid decision.
+            _fresh_p_hi = _lane_model_prob_hi(intent)
             if _side_l == "no":
                 _p_raw_side = 1.0 - _p_yes_raw_f
                 _p_side = 1.0 - _p_yes_f
@@ -5209,7 +5241,7 @@ async def _revalidate_entry_economics(
                         )
                     else:
                         _p_side = _tc.cap_p_no(_p_side, _entry_frac, asset=_asset)
-                _p_sel_fresh = max(0.05, min(0.95, _p_side))
+                _p_sel_fresh = max(0.05, min(_fresh_p_hi, _p_side))
             else:
                 _p_raw_side = _p_yes_raw_f
                 _p_side = _p_yes_f
@@ -5218,7 +5250,7 @@ async def _revalidate_entry_economics(
                     or _entry_frac < MERID_TAIL_CALIBRATION_PRICE_FLOOR
                 ):
                     _p_side = _tc.cap_p_yes(_p_side, _entry_frac, asset=_asset)
-                _p_sel_fresh = max(0.05, min(0.95, _p_side))
+                _p_sel_fresh = max(0.05, min(_fresh_p_hi, _p_side))
             _p_yes_fresh = _p_yes_f if _side_l == "yes" else 1.0 - _p_sel_fresh
 
             # Calibration-inflation guard (same rule as the decision layer):
@@ -9039,9 +9071,15 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         # 2026-10-12: settlement-convergence intents carry a banked-sample
         # probability claim that legitimately exceeds 0.95 in the final minute.
         _p_hi = KALSHI_MAX_PROBABILITY
-        if getattr(intent, "decision_lane", None) == "settlement_convergence":
+        _intent_lane = getattr(intent, "decision_lane", None)
+        if _intent_lane == "settlement_convergence":
             try:
                 _p_hi = max(_p_hi, float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP", "0.99")))
+            except Exception:
+                pass
+        elif _intent_lane == "pinned_fav":
+            try:
+                _p_hi = max(_p_hi, float(os.environ.get("MERID_PINNED_FAV_P_CAP", "0.99")))
             except Exception:
                 pass
         _p_lo = 1.0 - _p_hi
@@ -9723,9 +9761,15 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
     if intent.model_prob is None:
         return "missing_model_prob"
     _p_hi = KALSHI_MAX_PROBABILITY
-    if getattr(intent, "decision_lane", None) == "settlement_convergence":
+    _intent_lane_g = getattr(intent, "decision_lane", None)
+    if _intent_lane_g == "settlement_convergence":
         try:
             _p_hi = max(_p_hi, float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP", "0.99")))
+        except Exception:
+            pass
+    elif _intent_lane_g == "pinned_fav":
+        try:
+            _p_hi = max(_p_hi, float(os.environ.get("MERID_PINNED_FAV_P_CAP", "0.99")))
         except Exception:
             pass
     _p_lo = 1.0 - _p_hi
@@ -10623,6 +10667,17 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = get_canonical_price_range(
             outcome_side
         )
+        if getattr(intent, "decision_lane", None) == "pinned_fav":
+            # 2026-10-17: pinned-favorite entries sit at 92-98c — above the
+            # canonical YES/NO allocator ceiling (95c).  Clamping to 95c
+            # would silently reprice a lane order under the ask (unmarketable)
+            # or below its evaluated economics; the lane band is the bound.
+            try:
+                from merid.prediction import directional_regime as _dr_alloc
+                ALLOCATOR_MIN_PRICE = int(_dr_alloc._pinned_fav_lo())
+                ALLOCATOR_MAX_PRICE = int(_dr_alloc._pinned_fav_hi())
+            except Exception:
+                ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 92, 98
 
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             logger.warning(
@@ -10648,8 +10703,22 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         side_lower = intent.side.lower() if intent.side else ""
         is_no_side = "no" in side_lower
         canonical_side = "no" if is_no_side else "yes"
-        
-        if not is_price_in_canonical_range(adjusted_price, canonical_side):
+        _in_canonical = is_price_in_canonical_range(adjusted_price, canonical_side)
+        if (
+            not _in_canonical
+            and getattr(intent, "decision_lane", None) == "pinned_fav"
+        ):
+            # 2026-10-17: pinned-favorite entries at 92-98c sit outside the
+            # canonical ceiling; the lane band is the validity bound.
+            try:
+                from merid.prediction import directional_regime as _dr_crng
+                _in_canonical = _dr_crng.pinned_fav_band_match(
+                    float(adjusted_price)
+                )
+            except Exception:
+                _in_canonical = False
+
+        if not _in_canonical:
             logger.warning(
                 "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc outside canonical range for side=%s - suppressing adjustment, using original price %dc",
                 intent.ticker, adjusted_price, canonical_side, original_price
@@ -15909,6 +15978,15 @@ async def _route_live(
         _is_reduce = bool(getattr(intent, "reduce_only", False)) or _is_exit_order(intent)
         _min_price = 1 if _is_reduce else 5
         _max_price = 99 if _is_reduce else 95
+        if not _is_reduce and getattr(intent, "decision_lane", None) == "pinned_fav":
+            # 2026-10-17: the pinned-favorite lane admits at 92-98c; the flat
+            # 95c ceiling would reject the top of its own measured band.
+            # Band hi comes from the same env knob the decision layer used.
+            try:
+                _max_price = int(float(os.environ.get(
+                    "MERID_PINNED_FAV_PRICE_HI", "98")))
+            except Exception:
+                _max_price = 98
         if (
             intent.count <= 0
             or intent.price_cents < _min_price

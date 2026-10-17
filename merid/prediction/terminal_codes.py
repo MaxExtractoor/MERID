@@ -237,6 +237,21 @@ def canonical_terminal_code(
     # economics fallback relabelled these as EV failures.
     if rl.startswith("low_conviction"):
         return TerminalCode.LOW_CONVICTION.value
+    # 2026-10-17: pinned-favorite lane codes — TTE window miss is a timing
+    # cutoff, the lane EV floor miss is a threshold failure, and the
+    # band/disabled residuals are structural lane vetoes.
+    if rl.startswith("pinned_fav_tte"):
+        return TerminalCode.TTE_ENTRY_CUTOFF.value
+    if rl.startswith("pinned_fav_low_ev"):
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    if rl.startswith("pinned_fav_daily_cap") or rl.startswith(
+        "pinned_fav_cap_exceeded"
+    ):
+        # Lane-budget exhaustion — same visibility treatment as the escape
+        # lane's cap so capacity issues stay greppable.
+        return TerminalCode.EVIDENCE_HARD_BLOCK.value
+    if rl.startswith("pinned_fav"):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
     if (
         rl.startswith("countertrend_")
         or rl.startswith("bookflow_")

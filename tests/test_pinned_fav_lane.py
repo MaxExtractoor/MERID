@@ -1,0 +1,281 @@
+"""Regression coverage for the pinned-favorite lane (2026-10-17).
+
+The extreme-band audit found the market-regime classifier hard-disabled
+both sides at >=91c / <=9c before economics ran — yet the measured
+counterfactual showed 92-98c favorites at TTE 300-900s realizing
++1.9..+7.3c/contract (97.5-98.8% win, all five assets, both sides).
+
+The lane removes only the *pre-economics* vetoes for that window; normal
+economics (net-EV floor, reserves, evidence, throttle, book-flow,
+edge-bias correction, model-edge floor) still decide admission.  These
+tests pin the lane's window, terminal codes, precedence, and the
+single-charge tail-LCB semantics — and confirm non-pinned candidates keep
+the generic bounds.
+"""
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import merid.prediction.trade_decision as _td
+from merid.prediction import directional_regime as dr
+from merid.prediction.trade_decision import compute_trade_decision
+
+
+@pytest.fixture(autouse=True)
+def _iso(tmp_path, monkeypatch):
+    """Isolated durable-state + evidence env per test."""
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_ESCAPE_STATE_PATH", str(tmp_path / "escape.json")
+    )
+    monkeypatch.setenv(
+        "MERID_DIRECTIONAL_THROTTLE_PATH", str(tmp_path / "throttle.json")
+    )
+    # The lane's own durable daily counter must never read production state.
+    monkeypatch.setenv(
+        "MERID_PINNED_FAV_STATE_PATH", str(tmp_path / "pinned_fav.json")
+    )
+    yield
+
+
+def _decision(asset: str = "ETH", **over):
+    """Decision for a strongly pinned market: YES ask 93c, spot well clear
+    of strike (raw Bachelier p_yes ~0.9999 -> capped at the lane p-cap)."""
+    args = dict(
+        run_id="pf_test",
+        decision_id=f"pf_{asset}",
+        ticker=f"KX{asset}15M-TEST",
+        asset=asset,
+        spot_price=101.0,
+        strike_price=100.0,
+        seconds_to_expiry=600.0,
+        yes_bid_cents=91.0,
+        yes_ask_cents=93.0,
+        no_bid_cents=7.0,
+        no_ask_cents=9.0,
+        yes_depth_cc=200.0,
+        no_depth_cc=200.0,
+        fee_per_contract_cents=1.0,
+        annualized_vol=0.60,
+        model_uncertainty=0.05,
+        data_quality="live",
+        regime="normal",
+        min_required_edge=0.02,
+        settlement_reference="cfb_rti_live",
+        route="taker",
+    )
+    args.update(over)
+    return compute_trade_decision(**args)
+
+
+# ------------------------------------------------------------ gate unit ----
+
+def test_band_match_flag_independent():
+    """Band match is flag-independent: the engine uses it to disable the
+    normal qualify path at 92-98c even with the lane off."""
+    assert dr.pinned_fav_band_match(92.0) is True
+    assert dr.pinned_fav_band_match(98.0) is True
+    assert dr.pinned_fav_band_match(95.5) is True
+    assert dr.pinned_fav_band_match(91.9) is False   # 91c is break-even
+    assert dr.pinned_fav_band_match(99.0) is False   # no payoff headroom
+    assert dr.pinned_fav_band_match(None) is False
+    assert dr.pinned_fav_band_match(50.0) is False
+
+
+def test_reachable_requires_armed_band_tte(monkeypatch):
+    monkeypatch.delenv("MERID_PINNED_FAV_ENABLED", raising=False)
+    assert dr.pinned_fav_reachable(93.0, 600.0) is False
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    assert dr.pinned_fav_reachable(93.0, 600.0) is True
+    assert dr.pinned_fav_reachable(93.0, 299.0) is False   # below lane TTE
+    assert dr.pinned_fav_reachable(93.0, 841.0) is False   # above live bound
+    assert dr.pinned_fav_reachable(90.0, 600.0) is False   # out of band
+    assert dr.pinned_fav_reachable(93.0, None) is False
+
+
+def test_block_inert_when_disabled():
+    blk = dr.pinned_fav_block(side_price_cents=93.0, net_ev_cents=5.0,
+                              tte_seconds=600.0)
+    assert blk is None
+
+
+def test_block_each_failure_named(monkeypatch):
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "2.0")
+    assert dr.pinned_fav_block(91.0, 5.0, 600.0) == "pinned_fav_band"
+    assert dr.pinned_fav_block(99.0, 5.0, 600.0) == "pinned_fav_band"
+    assert dr.pinned_fav_block(93.0, 5.0, 200.0) == "pinned_fav_tte"
+    assert dr.pinned_fav_block(93.0, 5.0, None) == "pinned_fav_tte"
+    assert dr.pinned_fav_block(93.0, 1.5, 600.0) == "pinned_fav_low_ev"
+    assert dr.pinned_fav_block(93.0, None, 600.0) == "pinned_fav_low_ev"
+    assert dr.pinned_fav_block(93.0, 2.5, 600.0) is None
+
+
+def test_block_negative_floor_probe(monkeypatch):
+    """Bounded-probe semantics: a negative lane floor admits negative-net
+    candidates down to the floor (the probe domain), vetoes below it."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    assert dr.pinned_fav_block(93.0, -4.0, 600.0) is None
+    assert dr.pinned_fav_block(93.0, -6.0, 600.0) is None
+    assert dr.pinned_fav_block(93.0, -6.5, 600.0) == "pinned_fav_low_ev"
+
+
+def test_block_daily_cap(monkeypatch):
+    """The lane's own durable daily cap: an otherwise-clean gate reports
+    pinned_fav_daily_cap once the submission counter reaches the max."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", "3")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    import os as _os
+    _p = _os.environ["MERID_PINNED_FAV_STATE_PATH"]
+    for _ in range(3):
+        dr.record_pinned_fav_submission(_p)
+    assert dr.pinned_fav_fills_today(_p) == 3
+    assert dr.pinned_fav_cap_remaining(_p) == 0
+    assert dr.pinned_fav_block(93.0, 5.0, 600.0) == "pinned_fav_daily_cap"
+    # Counter resets on a new UTC day.
+    import time as _t
+    _tomorrow = _t.time() + 90000.0
+    assert dr.pinned_fav_cap_remaining(_p, now=_tomorrow) == 3
+
+
+def test_lane_in_bounded_set():
+    """Bounded sizing is non-negotiable for a probe lane whose claimed edge
+    can be negative — membership gives the 1-contract cap + probe
+    restriction (post-only when evidence-refused or LCB<=0)."""
+    assert "pinned_fav" in _td.BOUNDED_POST_ONLY_LANES
+
+
+# ------------------------------------------------------- engine admission ----
+
+def test_lane_disabled_owns_terminal_reason():
+    """conftest pins the lane off — a 92-98c candidate still reports the
+    lane's reserved-window label, never an ordinary-gate reason."""
+    d = _decision()
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_block") == "pinned_fav_disabled"
+
+
+def _write_live_evidence(tmp_path, cells):
+    """Minimal live-evidence artifact so the evidence loop runs in tests."""
+    import json, time
+    p = tmp_path / "live_evidence.json"
+    p.write_text(json.dumps({
+        "version": 2,
+        "generated_at": time.time(),
+        "halflife_days_primary": 7,
+        "cells": {"7": cells},
+    }))
+    return str(p)
+
+
+def test_lane_admits_strong_pin(tmp_path, monkeypatch):
+    """Armed lane + strong pin (spot >> strike): the 93c YES ask admits,
+    stamps both lane fields, and survives the tail-LCB bounded-domain gate
+    (single model-risk charge).  The claimed net is negative under the
+    legacy reserve stack (~-4c) — the bounded negative floor is exactly
+    the probe domain the lane exists to evaluate."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), d.no_trade_reason,
+        d.indicators.get("bounded_domain_gate"),
+        d.indicators.get("yes_admission_reason"),
+        d.indicators.get("evidence_yes"),
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("entry_lane") == "pinned_fav"
+    assert d.indicators.get("yes_pinned_fav_qualifies") is True
+    bdg = d.indicators.get("bounded_domain_gate") or {}
+    # Single-charge LCB: basis is net_edge, not net_edge - model_risk.
+    assert bdg.get("lcb_basis") == "pinned_fav_net_edge"
+    # Lane admission owner must attribute to pinned_fav, not the shared
+    # escape lane.
+    assert d.indicators.get("yes_admission_owner") == "pinned_fav"
+
+
+def test_lane_probe_floor_still_binds(monkeypatch):
+    """Floor +2c (legacy default): the same strong pin stays vetoed —
+    the probe only exists because the operator set a negative floor."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "2.0")
+    d = _decision()
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_block") == "pinned_fav_low_ev"
+
+
+def test_lane_rejects_short_tte(monkeypatch):
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    d = _decision(seconds_to_expiry=200.0)
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_block") == "pinned_fav_tte"
+
+
+def test_lane_rejects_weak_ev(monkeypatch):
+    """A pin where the model barely clears the ask fails the lane's own
+    net-EV floor — spot barely above strike keeps p ~0.95-0.96 so the
+    claimed net edge is below 2c."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    d = _decision(spot_price=100.05)   # p_yes ~0.5-0.6: no edge at 93c
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_block") in (
+        "pinned_fav_low_ev", "edge_below_threshold_yes",
+        "model_edge_floor", "evidence_soft_penalty_insufficient_yes",
+        "evidence_challenge_insufficient_yes",
+    )
+
+
+def test_no_side_mirror(monkeypatch):
+    """NO at 93c (yes_bid=7 -> no_price=93) uses the same lane machinery."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    d = _decision(
+        spot_price=99.0,              # spot well below strike: p_no ~0.99
+        yes_bid_cents=7.0, yes_ask_cents=9.0,
+        no_bid_cents=91.0, no_ask_cents=93.0,
+    )
+    assert d.selected_outcome == "no", (
+        d.indicators.get("no_block"), d.no_trade_reason,
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("no_pinned_fav_qualifies") is True
+
+
+def test_normal_band_candidates_unaffected(monkeypatch):
+    """A balanced-market candidate keeps the generic p-cap and formula
+    lane — the pinned lane's machinery never touches 10-75c prices."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    d = _decision(
+        spot_price=100.05,
+        yes_bid_cents=40.0, yes_ask_cents=42.0,
+        no_bid_cents=58.0, no_ask_cents=60.0,
+    )
+    # Whatever the economics decide, the pinned lane fields must be absent.
+    assert d.indicators.get("decision_lane") != "pinned_fav"
+    assert d.indicators.get("entry_lane") != "pinned_fav"
+    assert d.indicators.get("yes_pinned_fav_price") is False
+    assert d.indicators.get("no_pinned_fav_price") is False
+
+
+def test_pcap_headroom_only_in_band(monkeypatch):
+    """The lane p-cap applies only inside the band: a pinned YES admits
+    p_selected > 0.95 while a normal-band decision never exceeds 0.95."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    d = _decision()
+    yes_bd = d.yes_edge_breakdown
+    assert yes_bd is not None and yes_bd.p_selected > 0.95
+    d2 = _decision(
+        spot_price=100.05,
+        yes_bid_cents=40.0, yes_ask_cents=42.0,
+        no_bid_cents=58.0, no_ask_cents=60.0,
+    )
+    for bd in (d2.yes_edge_breakdown, d2.no_edge_breakdown):
+        if bd is not None:
+            assert bd.p_selected <= 0.95 + 1e-9

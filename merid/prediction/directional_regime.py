@@ -49,6 +49,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import logging
@@ -1616,3 +1617,194 @@ def trend_yes_hi_block(
     if m5s and any(v < 0.0 for v in m5s):
         return "trend_yes_hi_adverse_markout"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pinned-favorite lane (92-98c own-side price, TTE >= 300s)
+# ---------------------------------------------------------------------------
+#
+# 2026-10-17 (extreme-band counterfactual audit): the market regime
+# classifier hard-disables every own-side price >=91c, so ~92% of live
+# evals (markets pinned at an extreme) never reach the decision engine.
+# The joined rejection/settlement audit shows that veto forfeits the only
+# structurally positive cohort on the tape: own-side asks of 92-98c at
+# TTE 300-900s settled in the favorite's direction 97.5-98.8% of the time
+# across all five assets and both sides — net of exact taker fees
+# +1.9..+7.3c per contract (TTE 300-600s: +2.1c avg n=2525; TTE 600-900s:
+# +5.5c avg n=322).  The 91c boundary and the 120-300s window are
+# break-even, and the <=9c longshot mirror is correctly-priced negative —
+# so the lane owns only [92,98]c at TTE >= 300s, never re-opens 99-100c
+# (no payoff gap) and never buys the longshot.
+#
+# The lane removes the three *pre-economics* vetoes for that window
+# (classifier disabled-tail, the dormant trend_yes_hi reservation at
+# 92-94c YES, and the moneyness entry-price cap); normal economics still
+# decides admission — net EV >= the lane floor after the full reserve
+# stack, evidence cells, throttle, book-flow, and the measured edge-bias
+# correction.  ``decision_lane="pinned_fav"`` keeps its fills/vetoes in a
+# separate evidence pool so the 10-90c cells are not contaminated.
+
+
+def pinned_fav_enabled() -> bool:
+    return _env_flag("MERID_PINNED_FAV_ENABLED", False)
+
+
+def _pinned_fav_lo() -> float:
+    # 92c, not 91c: measured edge at 91c/TTE 300-600s is ~0 (-0.05c avg).
+    return _env_float("MERID_PINNED_FAV_PRICE_LO", 92.0)
+
+
+def _pinned_fav_hi() -> float:
+    # 98c, not 99c: 99-100c has <=1c of payoff headroom before fees.
+    return _env_float("MERID_PINNED_FAV_PRICE_HI", 98.0)
+
+
+def _pinned_fav_min_tte() -> float:
+    # 300s, not 120s: the measured edge lives at TTE >= 300s; the 120-300s
+    # bucket realized ~0 (-0.05c) and the settlement lane owns <120s.
+    return _env_float("MERID_PINNED_FAV_MIN_TTE_S", 300.0)
+
+
+def _pinned_fav_max_tte() -> float:
+    return _env_float("MERID_PINNED_FAV_MAX_TTE_S", 840.0)
+
+
+def _pinned_fav_min_ev_cents() -> float:
+    return _env_float("MERID_PINNED_FAV_MIN_EV_CENTS", 2.0)
+
+
+def pinned_fav_band_match(price_cents: Optional[float]) -> bool:
+    """True when the own-side executable price sits inside the lane window.
+
+    Flag-independent on purpose: ``compute_trade_decision`` uses this to
+    disable the *normal* qualify path at 92-98c even when the lane is off,
+    so a high-price candidate that somehow reaches the decision engine
+    without the band filter cannot slip through the ordinary gates.
+    """
+    if price_cents is None:
+        return False
+    try:
+        p = float(price_cents)
+    except (TypeError, ValueError):
+        return False
+    return _pinned_fav_lo() <= p <= _pinned_fav_hi()
+
+
+def pinned_fav_reachable(
+    side_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> bool:
+    """Reachability check for the agent_grid band bypass.
+
+    Lets an own-side 92-98c price pass the disabled-tail reject so
+    ``compute_trade_decision`` can apply the strict lane gate.  False
+    unless the lane is armed AND price/TTE are inside the lane window.
+    """
+    if not pinned_fav_enabled():
+        return False
+    if not pinned_fav_band_match(side_price_cents):
+        return False
+    if tte_seconds is None:
+        return False
+    try:
+        tte = float(tte_seconds)
+    except (TypeError, ValueError):
+        return False
+    return _pinned_fav_min_tte() <= tte <= _pinned_fav_max_tte()
+
+
+def pinned_fav_block(
+    side_price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> Optional[str]:
+    """Strict pinned-favorite admission gate.
+
+    Applies only when the lane is armed and the own-side price is in the
+    lane window; returns ``None`` in both the inert case and when every
+    strict condition passes.  Each failure names the violated condition.
+    The gate owns band/TTE/EV; the engine's normal economics (reserves,
+    evidence, throttle, book-flow, conviction, edge-bias) wrap it — the
+    lane's job is to stop the pre-economics vetoes, not to weaken the
+    economics that remain.
+    """
+    if not pinned_fav_enabled():
+        return None
+    if not pinned_fav_band_match(side_price_cents):
+        # Fail closed when armed: a caller that forgot the band pre-check
+        # must get a veto, not a pass.
+        return "pinned_fav_band"
+    if tte_seconds is None or not (
+        _pinned_fav_min_tte() <= float(tte_seconds) <= _pinned_fav_max_tte()
+    ):
+        return "pinned_fav_tte"
+    if net_ev_cents is None or float(net_ev_cents) < _pinned_fav_min_ev_cents():
+        return "pinned_fav_low_ev"
+    if pinned_fav_cap_remaining() <= 0:
+        return "pinned_fav_daily_cap"
+    return None
+
+
+def pinned_fav_daily_max() -> int:
+    """Per-day cap on pinned-fav lane order submissions (bounded probe).
+
+    The lane is an evidence-buying instrument for a cohort the legacy
+    economics have never admitted: its claimed net EV is structurally
+    negative under the current reserve stack while the settled-outcome
+    counterfactual measured +1.9..+7.3c/contract.  A fixed daily budget
+    keeps the probe bounded while its own fills replace the counterfactual
+    basis.
+    """
+    return int(_env_float("MERID_PINNED_FAV_DAILY_MAX", 12.0))
+
+
+def pinned_fav_state_path() -> str:
+    return os.environ.get(
+        "MERID_PINNED_FAV_STATE_PATH", "data/pinned_fav_fills.json"
+    )
+
+
+def pinned_fav_fills_today(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    """Pinned-fav submissions recorded for the current UTC day."""
+    now = time.time() if now is None else float(now)
+    day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+    try:
+        with open(path or pinned_fav_state_path(), "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        if rec.get("date") == day:
+            return int(rec.get("count") or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def pinned_fav_cap_remaining(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    return max(0, pinned_fav_daily_max() - pinned_fav_fills_today(path, now))
+
+
+def record_pinned_fav_submission(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    """Increment today's pinned-fav submission counter; returns new count.
+
+    Same durable one-line counter discipline as the escape lane: counting
+    submissions (not fills) is the stricter bound — a post-only probe that
+    never fills still consumes the slot.
+    """
+    now = time.time() if now is None else float(now)
+    p = path or pinned_fav_state_path()
+    day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+    count = pinned_fav_fills_today(p, now) + 1
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"date": day, "count": count}))
+        os.replace(tmp, p)
+    except Exception:
+        pass
+    return count

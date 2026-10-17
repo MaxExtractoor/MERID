@@ -731,6 +731,15 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # lane: 1-contract, lane-bound EV re-gate, lane-budget enforced by
     # marginal_band_lane.py (daily caps + loss/coherence self-suspension).
     "marginal_band",
+    # 2026-10-17: pinned-favorite lane (92-98c own-side, TTE 300-840s) —
+    # bounded probe for the classifier-vetoed favorite cohort whose settled
+    # counterfactual measured +1.9..+7.3c/contract while the legacy reserve
+    # stack claims -3..-7c.  Bounded sizing is non-negotiable: claimed edge
+    # can be negative, so every admission caps at the bounded lane size and
+    # probe-restricted ones (evidence-refused or non-positive LCB) cap at
+    # the probe size and stay post-only.  Positive-LCB admissions may cross
+    # as taker IOC under MERID_BOUNDED_TAKER_CROSS.
+    "pinned_fav",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -1973,15 +1982,25 @@ def apply_bounded_live_domain_gate(
     sel = str(decision.selected_outcome)
 
     tte = float(decision.seconds_to_expiry) if decision.seconds_to_expiry is not None else None
-    if tte is not None and tte > MERID_LIVE_ENTRY_MAX_TTE_S:
+    # 2026-10-17: the pinned-fav lane owns its TTE window (300-840s — the
+    # measured-edge band; its strongest cohort is 600-900s which the shared
+    # 600s ceiling would clip).  The ceiling stays fail-closed against the
+    # lane's own max, not the formula domain's.
+    _lane = str((decision.indicators or {}).get("decision_lane") or "")
+    if _lane == "pinned_fav":
+        from merid.prediction import directional_regime as _dr_g
+        _max_tte_s = _dr_g._pinned_fav_max_tte()
+    else:
+        _max_tte_s = MERID_LIVE_ENTRY_MAX_TTE_S
+    if tte is not None and tte > _max_tte_s:
         record = {
             "gate": "tte_ceiling",
             "seconds_to_expiry": tte,
-            "max_tte_s": MERID_LIVE_ENTRY_MAX_TTE_S,
+            "max_tte_s": _max_tte_s,
             "would_enter_at_prior": True,
         }
         _reason = (
-            f"bounded_domain_tte:{tte:.0f}s>{MERID_LIVE_ENTRY_MAX_TTE_S:.0f}s"
+            f"bounded_domain_tte:{tte:.0f}s>{_max_tte_s:.0f}s"
         )
         _log_bounded_domain_reject(decision, _reason)
         return _downgrade_live_selection(decision, _reason, record)
@@ -1998,9 +2017,9 @@ def apply_bounded_live_domain_gate(
 
     thr = yes_threshold if sel == "yes" else no_threshold
     required_cents = float(thr.total) * 100.0 if thr is not None else 0.0
-    _is_settlement_lane = (
-        (decision.indicators or {}).get("entry_lane") == "settlement_convergence"
-    )
+    _entry_lane = (decision.indicators or {}).get("entry_lane")
+    _is_settlement_lane = _entry_lane == "settlement_convergence"
+    _is_pinned_fav = _entry_lane == "pinned_fav"
     if _is_settlement_lane:
         # Lane selections are admitted against the lane's own net-edge bound
         # (default 1.5c), not the formula threshold the normal path uses —
@@ -2010,7 +2029,20 @@ def apply_bounded_live_domain_gate(
         )
         if _favored is None or sel == _favored:
             required_cents = MERID_SETTLEMENT_LANE_MIN_NET_EDGE * 100.0
-    if _is_settlement_lane:
+    if _is_pinned_fav:
+        # 2026-10-17: same single-charge rule as the settlement lane — the
+        # pinned-favorite lane was admitted against its own 2c net-edge
+        # floor with model_risk_reserve already inside net_edge.  Charging
+        # the reserve a second time needs net_edge >= ~5c, unreachable at
+        # 92-98c (gross caps at 8c minus the reserve stack) — the double
+        # charge would silently disable the lane.  The lane floor is the
+        # honest bound; model_edge_floor still requires raw gap >= 4c.
+        try:
+            from merid.prediction import directional_regime as _dr_tail
+            required_cents = float(_dr_tail._pinned_fav_min_ev_cents())
+        except Exception:
+            required_cents = 200.0
+    if _is_settlement_lane or _is_pinned_fav:
         # 2026-10-12: in-lane the probability claim is the banked-sample
         # settlement distribution — its remaining-window variance is already
         # priced into p_sel, and model_risk_reserve was already charged once
@@ -2044,6 +2076,7 @@ def apply_bounded_live_domain_gate(
         "epc_cell": _ind.get(f"{sel}_epc_cell"),
         "lcb_basis": (
             "settlement_lane_net_edge" if _is_settlement_lane
+            else "pinned_fav_net_edge" if _is_pinned_fav
             else "net_edge_minus_model_risk_reserve"
         ),
         "would_enter_at_prior": True,
@@ -3855,6 +3888,22 @@ def compute_trade_decision(
     # the 0.95 cap made a 0.9999 in-window certainty read as -4c edge at a 99c
     # ask — so the lane applies its own ceiling (still <1.0).
     _lane_p_hi = MERID_SETTLEMENT_LANE_P_CAP if settlement_lane else 0.95
+    # 2026-10-17: pinned-favorite window needs headroom above 0.95 — a 92-98c
+    # entry requires p_selected >= price + reserves, unreachable under the
+    # flat 0.95 cap (max claimable gross at 92c = 3c < reserve stack).  The
+    # router validates the lane-aware cap for decision_lane=pinned_fav.
+    try:
+        from merid.prediction import directional_regime as _dr_pf_cap
+        if not settlement_lane and _dr_pf_cap.pinned_fav_enabled() and (
+            _dr_pf_cap.pinned_fav_band_match(yes_entry * 100.0)
+            or _dr_pf_cap.pinned_fav_band_match(no_entry * 100.0)
+        ):
+            _lane_p_hi = max(
+                _lane_p_hi,
+                float(os.environ.get("MERID_PINNED_FAV_P_CAP", "0.99")),
+            )
+    except Exception:
+        pass
     _lane_p_lo = 1.0 - _lane_p_hi
     p_yes_for_yes = max(_lane_p_lo, min(_lane_p_hi, p_yes_for_yes))
     p_no_for_yes = 1.0 - p_yes_for_yes
@@ -4098,6 +4147,44 @@ def compute_trade_decision(
             tail_calibrator.no_curve_is_dual
             or tail_calibrator.p_no(no_entry, asset=asset) >= _ev_floor_no
         )
+        # 2026-10-17: pinned-fav window exemption.  The static artifact
+        # blends every TTE — including the sub-300s tail where pinned
+        # favorites genuinely lose (settlement-approaching stale pins) —
+        # so its pooled 92-94c curve reads adverse (obs ~0.91 vs price
+        # 0.93) even though the TTE>=300s cohort the lane admits measured
+        # +1.9..+7.3c/contract.  Inside the armed lane window this gate's
+        # pooled-stale basis is exactly what the bounded probe exists to
+        # re-measure at the right TTE granularity; the fresh TTE-keyed
+        # cell evidence in evidence_policy.evaluate() still blocks
+        # measured-adverse posteriors (lcb_ev < 0), and the curve still
+        # caps p_selected conservatively.  Telemetry keeps both the
+        # observed rate and the would-be verdict.
+        try:
+            from merid.prediction import directional_regime as _dr_cal
+            _pf_yes = (
+                _dr_cal.pinned_fav_enabled()
+                and _dr_cal.pinned_fav_band_match(yes_entry * 100.0)
+            )
+            _pf_no = (
+                _dr_cal.pinned_fav_enabled()
+                and _dr_cal.pinned_fav_band_match(no_entry * 100.0)
+            )
+        except Exception:
+            _pf_yes = _pf_no = False
+        if _pf_yes and not yes_evidence_ok:
+            indicators["calibration_evidence_pinned_bypass_yes"] = {
+                "obs": tail_calibrator.p_yes(yes_entry, asset=asset),
+                "floor": _ev_floor_yes,
+            }
+            yes_evidence_ok = True
+            yes_evidence_reason = None
+        if _pf_no and not no_evidence_ok:
+            indicators["calibration_evidence_pinned_bypass_no"] = {
+                "obs": tail_calibrator.p_no(no_entry, asset=asset),
+                "floor": _ev_floor_no,
+            }
+            no_evidence_ok = True
+            no_evidence_reason = None
         indicators.update({
             "calibration_evidence_floor_yes": _ev_floor_yes,
             "calibration_evidence_floor_no": _ev_floor_no,
@@ -4836,6 +4923,25 @@ def compute_trade_decision(
                         # Evidence passed cleanly — name the owner so the
                         # admission lineage is explicit either way.
                         _d = _yes_edge_thr if _side == "yes" else _no_edge_thr
+                        # 2026-10-17: inside the pinned-fav window the lane's
+                        # own floor is the side's active edge bound — the
+                        # formula bound (~+2c) would re-veto the cohort the
+                        # lane exists to evaluate.  The bound only relaxes
+                        # the *margin* checks; the escape lane's structural
+                        # vetoes (late-window, knife-edge, book-flow,
+                        # counter-move) apply unchanged.
+                        from merid.prediction import (
+                            directional_regime as _dr_bound,
+                        )
+                        _pf_bound = (
+                            _dr_bound.pinned_fav_enabled()
+                            and _dr_bound.pinned_fav_band_match(float(_px))
+                        )
+                        _side_bound_c = (
+                            _dr_bound._pinned_fav_min_ev_cents()
+                            if _pf_bound
+                            else float(_d.total) * 100.0
+                        )
                         # 2026-10-05 (pooled-transfer tier): a sparse exact
                         # cell backed by an adequately-sampled price-matched
                         # pooled level (CELL_EVIDENCE_PASS on a scored level)
@@ -4854,8 +4960,7 @@ def compute_trade_decision(
                         if _transfer:
                             if (
                                 float(_ne_c)
-                                < float(_d.total) * 100.0
-                                + MERID_EVIDENCE_TRANSFER_EXTRA_C
+                                < _side_bound_c + MERID_EVIDENCE_TRANSFER_EXTRA_C
                             ):
                                 _escape_veto = "evidence_transfer_margin"
                             else:
@@ -4868,7 +4973,7 @@ def compute_trade_decision(
                                 side=_side,
                                 price_cents=float(_px),
                                 net_ev_cents=float(_ne_c),
-                                required_edge_cents=float(_d.total) * 100.0,
+                                required_edge_cents=_side_bound_c,
                                 seconds_to_expiry=seconds_to_expiry,
                                 spot_price=spot_price,
                                 strike_price=strike_price,
@@ -4899,6 +5004,7 @@ def compute_trade_decision(
                                 "threshold_cell" if _d.cell_id is not None
                                 else "current_build_provisional"
                                 if _d.provisional_cell_id is not None
+                                else "pinned_fav" if _pf_bound
                                 else "evidence_pooled_transfer" if _transfer
                                 else "evidence_escape" if _ed.escape_required
                                 else "formula"
@@ -5108,6 +5214,43 @@ def compute_trade_decision(
         and _yes_trend_hi_block is None
     )
 
+    # 2026-10-17: pinned-favorite lane (92-98c own-side price, TTE 300-840s).
+    # The disabled-tail classifier vetoed this whole cohort before economics;
+    # the settled-outcome counterfactual shows it is the only structurally
+    # positive band on the tape (+1.9..+7.3c/contract, 97.5-98.8% realized
+    # win).  ``_pf_*_price`` is flag-independent — while the own-side price
+    # sits in the lane window the *normal* qualify path is disabled, so a
+    # >=92c candidate can never ride ordinary gates through an admission
+    # path that skipped the upstream band filter.  The lane owns the full
+    # 92-98c window when armed, including the 92-94c YES overlap with the
+    # dormant trend_yes_hi reservation.
+    _yes_pf_price = _dr.pinned_fav_band_match(yes_price_cents)
+    _no_pf_price = _dr.pinned_fav_band_match(no_price_cents)
+    _yes_pf_block = _dr.pinned_fav_block(
+        side_price_cents=float(yes_price_cents) if yes_price_cents else None,
+        net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+    ) if _yes_pf_price else None
+    _no_pf_block = _dr.pinned_fav_block(
+        side_price_cents=float(no_price_cents) if no_price_cents else None,
+        net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+    ) if _no_pf_price else None
+    _yes_pf_qualifies = (
+        _yes_pf_price
+        and _dr.pinned_fav_enabled()
+        and _yes_pf_block is None
+    )
+    _no_pf_qualifies = (
+        _no_pf_price
+        and _dr.pinned_fav_enabled()
+        and _no_pf_block is None
+    )
+
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
     _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
     # 2026-10-16 (whipsaw audit): trend-side exhaustion guard — fresh-label
@@ -5290,6 +5433,12 @@ def compute_trade_decision(
         "yes_trend_hi_price": _yes_hi_price,
         "yes_trend_hi_block": _yes_trend_hi_block,
         "yes_trend_hi_qualifies": bool(_yes_trend_hi_qualifies),
+        "yes_pinned_fav_price": _yes_pf_price,
+        "no_pinned_fav_price": _no_pf_price,
+        "yes_pinned_fav_block": _yes_pf_block,
+        "no_pinned_fav_block": _no_pf_block,
+        "yes_pinned_fav_qualifies": bool(_yes_pf_qualifies),
+        "no_pinned_fav_qualifies": bool(_no_pf_qualifies),
     })
 
     # 2026-09-30: side-specific depth eligibility.  A side whose executable
@@ -5747,9 +5896,11 @@ def compute_trade_decision(
         # in a fresh/extending rally is precisely what this gate exists for.
         and _yes_trendside_block is None
         and (
-            _yes_trend_hi_qualifies
+            _yes_pf_qualifies
+            or _yes_trend_hi_qualifies
             or (
-                not _yes_hi_price
+                not _yes_pf_price
+                and not _yes_hi_price
                 and _yes_eff_edge >= _yes_edge_eff_bound
                 and (
                     _yes_cbp_neg_floor
@@ -5766,22 +5917,28 @@ def compute_trade_decision(
     no_qualifies = (
         no_depth_ok
         and _no_dir_veto is None
-        and _no_eff_edge >= _no_edge_eff_bound
-        and (
-            _no_cbp_neg_floor
-            or _no_cb_epc_exempt
-            or no_breakdown.p_selected > no_min_p
-        )
         and not tail_guard_violation_no
         and no_evidence_ok
-        and _no_regime_ok
-        and _no_conv_block is None
         and _no_throttle_block is None
-        and _no_ct_lane_block is None
         and _no_bookflow_block is None
         and _no_coinflip_eff is None
-        and _no_price_cap_block is None
         and _no_trendside_block is None
+        and (
+            _no_pf_qualifies
+            or (
+                not _no_pf_price
+                and _no_eff_edge >= _no_edge_eff_bound
+                and (
+                    _no_cbp_neg_floor
+                    or _no_cb_epc_exempt
+                    or no_breakdown.p_selected > no_min_p
+                )
+                and _no_regime_ok
+                and _no_conv_block is None
+                and _no_ct_lane_block is None
+                and _no_price_cap_block is None
+            )
+        )
     )
 
     # Candidate-surface export: per-side executable economics and the first
@@ -5805,6 +5962,8 @@ def compute_trade_decision(
         price_cap_block_s: Optional[str] = None,
         hi_price_applies_s: bool = False,
         trend_hi_block_s: Optional[str] = None,
+        pf_price_applies_s: bool = False,
+        pinned_block_s: Optional[str] = None,
         trendside_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
         cb_epc_exempt_s: bool = False,
@@ -5815,28 +5974,47 @@ def compute_trade_decision(
             return f"insufficient_depth_{side}"
         if tail_violation_s:
             return f"tail_guard_{side}"
-        # 2026-09-30: economics first — a side that never had positive
-        # executable EV is an EV rejection, not an evidence-policy block.
-        # Evidence only owns the terminal code when the economics cleared.
-        # 2026-10-04: a NEGATIVE min_edge means the side lives in a
-        # bounded evidence-buying lane — non-positive EV is the domain,
-        # not the failure.  The honest labels are edge_below_lane_floor
-        # (missed the lane's own bound) and the structural gates; the
-        # positive-EV / cost-basis labels only apply on >=0 floors.
-        if min_edge_s >= 0.0 and _edge_s <= 0:
-            return f"no_positive_executable_edge_{side}"
-        if _edge_s < min_edge_s:
-            return (
-                f"edge_below_lane_floor_{side}"
-                if min_edge_s < 0.0
-                else f"edge_below_threshold_{side}"
-            )
-        if min_edge_s >= 0.0 and bd.p_selected <= min_p_s and not cb_epc_exempt_s:
-            return f"cost_basis_{side}"
+        # 92-98c window (either side): the pinned-favorite lane owns the
+        # terminal reason before the economics cascade — when armed, its
+        # strict gate's specific failure (its own net-EV floor is the
+        # honest EV label); when off, the reserved-window label.  Without
+        # the lane's p-cap headroom the generic economics read ~-2c on a
+        # strong pin, so EV labels here would misreport a structural veto
+        # as an economic one.  Checked before the trend_yes_hi window so
+        # the armed lane also owns the 92-94c YES overlap.
+        if pf_price_applies_s:
+            if pinned_block_s:
+                return pinned_block_s
+            if not _dr.pinned_fav_enabled():
+                return "pinned_fav_disabled"
+            # Lane gate passed — skip the formula-bound economics labels
+            # (the lane's own 2c floor is its bound, not thr.total) and
+            # continue to the structural gates below.
+        else:
+            # 2026-09-30: economics first — a side that never had positive
+            # executable EV is an EV rejection, not an evidence-policy block.
+            # Evidence only owns the terminal code when the economics cleared.
+            # 2026-10-04: a NEGATIVE min_edge means the side lives in a
+            # bounded evidence-buying lane — non-positive EV is the domain,
+            # not the failure.  The honest labels are edge_below_lane_floor
+            # (missed the lane's own bound) and the structural gates; the
+            # positive-EV / cost-basis labels only apply on >=0 floors.
+            if min_edge_s >= 0.0 and _edge_s <= 0:
+                return f"no_positive_executable_edge_{side}"
+            if _edge_s < min_edge_s:
+                return (
+                    f"edge_below_lane_floor_{side}"
+                    if min_edge_s < 0.0
+                    else f"edge_below_threshold_{side}"
+                )
+            if min_edge_s >= 0.0 and bd.p_selected <= min_p_s and not cb_epc_exempt_s:
+                return f"cost_basis_{side}"
         # 91-94c YES window: the lane owns the terminal reason — the strict
         # gate's specific failure when armed, or `trend_yes_hi_disabled` when
-        # the price sits in the reserved window with the lane off.
-        if hi_price_applies_s:
+        # the price sits in the reserved window with the lane off.  Skipped
+        # inside the pinned window: pinned_fav owns 92-98c including the
+        # 92-94c overlap, so a pinned-gate pass must not relabel.
+        if not pf_price_applies_s and hi_price_applies_s:
             if trend_hi_block_s:
                 return trend_hi_block_s
             if not _dr.trend_yes_hi_enabled():
@@ -5899,10 +6077,14 @@ def compute_trade_decision(
             bookflow_block_s=_yes_bookflow_block,
             coinflip_block_s=_yes_coinflip_eff,
             price_cap_block_s=(
-                None if _yes_trend_hi_qualifies else _yes_price_cap_block
+                None
+                if (_yes_trend_hi_qualifies or _yes_pf_qualifies)
+                else _yes_price_cap_block
             ),
             hi_price_applies_s=_yes_hi_price,
             trend_hi_block_s=_yes_trend_hi_block,
+            pf_price_applies_s=_yes_pf_price,
+            pinned_block_s=_yes_pf_block,
             trendside_block_s=_yes_trendside_block,
             eff_edge_s=_yes_eff_edge,
             cb_epc_exempt_s=_yes_cb_epc_exempt,
@@ -5917,7 +6099,11 @@ def compute_trade_decision(
             ct_lane_block_s=_no_ct_lane_block,
             bookflow_block_s=_no_bookflow_block,
             coinflip_block_s=_no_coinflip_eff,
-            price_cap_block_s=_no_price_cap_block,
+            price_cap_block_s=(
+                None if _no_pf_qualifies else _no_price_cap_block
+            ),
+            pf_price_applies_s=_no_pf_price,
+            pinned_block_s=_no_pf_block,
             trendside_block_s=_no_trendside_block,
             eff_edge_s=_no_eff_edge,
             cb_epc_exempt_s=_no_cb_epc_exempt,
@@ -6873,6 +7059,18 @@ def compute_trade_decision(
         _side_min_edge = (
             yes_min_edge if selected_outcome == "yes" else no_min_edge
         )
+        # 2026-10-17: a pinned-fav selection's bound is the lane's own
+        # floor (bounded negative probe) — the formula threshold total
+        # (~+2c) would re-veto the exact cohort the lane exists to
+        # evaluate.  The EV gate's negative-floor passthrough then bounds
+        # the spend at the lane floor and vacates the EV/tail ratio.
+        _sel_pf_lane = (
+            _yes_pf_qualifies if selected_outcome == "yes"
+            else _no_pf_qualifies
+        )
+        if _sel_pf_lane:
+            from merid.prediction import directional_regime as _dr_evg
+            _side_min_edge = _dr_evg._pinned_fav_min_ev_cents() / 100.0
         _ev_gate_min_dollar = (
             Decimal(str(_side_min_edge)) if float(_side_min_edge) < 0.0 else None
         )
@@ -6977,6 +7175,21 @@ def compute_trade_decision(
             indicators["decision_lane"] = "settlement_convergence"
         # Trend-aligned hi-price YES lane owns its region (91-94c): measured
         # separately so it cannot contaminate ordinary YES cell evidence.
+        # 2026-10-17: pinned-favorite lane owns its window (92-98c either
+        # side): measured separately so it cannot contaminate ordinary
+        # 10-90c cell evidence.  Precedence over trend_yes_hi in the 92-94c
+        # YES overlap when both qualify — the pinned gate is the wider,
+        # economics-driven admission for that region.
+        _sel_pf = (
+            _yes_pf_qualifies if selected_outcome == "yes"
+            else _no_pf_qualifies
+        )
+        if _sel_pf and not indicators.get("decision_lane"):
+            indicators["decision_lane"] = "pinned_fav"
+            # entry_lane marks the selection for the bounded-domain tail_LCB
+            # gate (single model-risk charge) and the pre-allocation
+            # canonical-range check (92-98c is outside the 10-75c range).
+            indicators["entry_lane"] = "pinned_fav"
         if (
             selected_outcome == "yes"
             and _yes_trend_hi_qualifies

@@ -26,7 +26,7 @@ class SkewRegime:
     spread, and sizing to account for different risk profiles across the
     probability spectrum.
     """
-    name: Literal["balanced", "transition_low", "transition_high", "skewed_low", "skewed_high", "disabled_tail"]
+    name: Literal["balanced", "transition_low", "transition_high", "skewed_low", "skewed_high", "disabled_tail", "trend_yes_hi", "settlement_convergence", "pinned_fav"]
     min_price_cents: int
     max_price_cents: int
     min_net_edge_cents: Decimal

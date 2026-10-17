@@ -86,6 +86,32 @@ _os.environ["MERID_CONVICTION_GATE_ENABLED"] = "0"
 # off here so legacy decision tests keep their expected terminal reasons;
 # it is exercised explicitly in tests/test_directional_regime.py.
 _os.environ["MERID_MONEYNESS_GATE_ENABLED"] = "0"
+# 2026-11 (pinned-favorite lane): production .env arms the bounded 92-98c
+# favorite lane; pin it off here so legacy decision tests keep their
+# expected terminal reasons.  Exercised explicitly in
+# tests/test_pinned_fav_lane.py.
+_os.environ["MERID_PINNED_FAV_ENABLED"] = "0"
+# 2026-10-17: production .env arms negative per-cohort provisional floors
+# (MERID_PROVISIONAL_MIN_EV_C_*) — they change no-edge terminal labels to
+# edge_below_lane_floor.  Restore the code defaults (positive bounds) via
+# explicit sets — popping does not work because merid.settings runs
+# load_dotenv(override=False) at its first import and re-fills absent
+# vars from .env.  Lane tests opt in explicitly.
+_os.environ["MERID_PROVISIONAL_MIN_EV_FLOOR_C"] = "0"
+_os.environ.pop("MERID_PROVISIONAL_MIN_EV_C", None)
+for _pf_k, _pf_v in {
+    "MERID_PROVISIONAL_MIN_EV_C_BTC_YES": "2.5",
+    "MERID_PROVISIONAL_MIN_EV_C_BTC_NO": "2.0",
+    "MERID_PROVISIONAL_MIN_EV_C_ETH_YES": "2.5",
+    "MERID_PROVISIONAL_MIN_EV_C_ETH_NO": "2.0",
+    "MERID_PROVISIONAL_MIN_EV_C_SOL_YES": "3.0",
+    "MERID_PROVISIONAL_MIN_EV_C_SOL_NO": "2.5",
+    "MERID_PROVISIONAL_MIN_EV_C_XRP_YES": "3.0",
+    "MERID_PROVISIONAL_MIN_EV_C_XRP_NO": "2.5",
+    "MERID_PROVISIONAL_MIN_EV_C_DOGE_YES": "3.0",
+    "MERID_PROVISIONAL_MIN_EV_C_DOGE_NO": "2.5",
+}.items():
+    _os.environ[_pf_k] = _pf_v
 # Markout telemetry must not write into production logs during tests.
 _os.environ["MERID_ENTRY_MARKOUT_LOG"] = str(
     __import__("pathlib").Path(

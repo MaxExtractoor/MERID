@@ -77,6 +77,11 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "MERID_EVIDENCE_REHAB_STATE_PATH", str(tmp_path / "rehab.json")
     )
+    # 2026-10-17: pinned-fav lane durable counter must never read
+    # production state.
+    monkeypatch.setenv(
+        "MERID_PINNED_FAV_STATE_PATH", str(tmp_path / "pinned_fav.json")
+    )
     yield
 
 
@@ -768,3 +773,148 @@ def test_rehab_probe_interval_respected(monkeypatch, tmp_path):
     assert ep._rehab_probe_due("XRP|yes|50-74|late",
                                "asset_side_price_tte",
                                now + 300, str(state))
+
+
+# --------------------------------------------------------------------------
+# 2026-10-17: pinned-favorite bounded-probe evidence domain
+# --------------------------------------------------------------------------
+#
+# The 92-98c own-side cohort was classifier-vetoed for the entire evidence
+# history, so the positive-uplift bound could never admit it.  Inside the
+# armed lane window the lane's own floor substitutes for the uplift bound,
+# the lane's durable daily cap substitutes for the shared escape budget,
+# and a scored level admits on lcb_ev >= 0 (non-adverse posterior) instead
+# of the margin+uplift hurdle.
+
+def _pf_env(monkeypatch, floor="-6.0", daily_max="12"):
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", floor)
+    monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", daily_max)
+
+
+def test_pinned_empty_cells_floor_substitution(monkeypatch):
+    """No cells at all: a pinned candidate's bound is the lane floor, not
+    the sparse uplift � net -4c passes as EVIDENCE_EMPTY_PASS where the
+    normal bound would refuse."""
+    _pf_env(monkeypatch)
+    ev = _artifact({})
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is True
+    assert d.code == "EVIDENCE_EMPTY_PASS"
+    assert d.escape_required is True
+
+
+def test_pinned_empty_cells_below_floor_blocks(monkeypatch):
+    _pf_env(monkeypatch)
+    ev = _artifact({})
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-8.0,
+    )
+    assert d.allowed is False
+    assert d.code == "EVIDENCE_EMPTY_INSUFFICIENT"
+
+
+def test_pinned_floor_does_not_leak_out_of_band(monkeypatch):
+    """The lane floor applies only inside the 92-98c window � a 50c
+    candidate at the same -4c claim keeps the uplift bound."""
+    _pf_env(monkeypatch)
+    ev = _artifact({})
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=50.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is False
+    assert d.code == "EVIDENCE_EMPTY_INSUFFICIENT"
+
+
+def test_pinned_lane_disabled_keeps_normal_bound(monkeypatch):
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "0")
+    ev = _artifact({})
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is False
+    assert d.code == "EVIDENCE_EMPTY_INSUFFICIENT"
+
+
+def test_pinned_daily_cap_exhaustion(monkeypatch):
+    """The lane's own durable cap substitutes for the shared escape
+    budget � and does not consume escape submissions."""
+    _pf_env(monkeypatch, daily_max="2")
+    from merid.prediction import directional_regime as _dr
+    _p = os.environ["MERID_PINNED_FAV_STATE_PATH"]
+    _dr.record_pinned_fav_submission(_p)
+    _dr.record_pinned_fav_submission(_p)
+    ev = _artifact({})
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is False
+    assert d.code == "PINNED_FAV_CAP_EXHAUSTED"
+    # The shared escape budget is untouched.
+    assert ep.escape_cap_remaining() == ep.escape_daily_max()
+
+
+def test_pinned_scored_positive_posterior_passes(monkeypatch):
+    """A scored 90-100c cell with a non-adverse posterior LCB admits the
+    probe at lcb_ev >= 0 � the margin+uplift hurdle is for unproven model
+    claims, not measured cohorts."""
+    _pf_env(monkeypatch)
+    cells = {"SOL|yes|90-100|mid": _cell(w=98, l=2, entry=93)}
+    ev = _artifact(cells)
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is True
+    assert d.code == "CELL_EVIDENCE_PASS"
+
+
+def test_pinned_scored_adverse_posterior_blocks(monkeypatch):
+    """A measured-adverse posterior must still block the probe � the lane
+    tests an unproven cohort, not a measured loser."""
+    _pf_env(monkeypatch)
+    cells = {"SOL|yes|90-100|mid": _cell(w=30, l=70, entry=93)}
+    ev = _artifact(cells)
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is False
+    # A dense measured-loser cell is a toxic-cell hard block — the
+    # strongest form of "measured adverse" the lane must never bypass.
+    assert d.code in (
+        "CELL_EVIDENCE_INSUFFICIENT",
+        "CHALLENGE_INSUFFICIENT",
+        "SOFT_PENALTY_INSUFFICIENT",
+        "MATCHING_TOXIC_CELL",
+    )
+
+
+def test_pinned_scored_sparse_adverse_not_soft_probed(monkeypatch):
+    """A *sparse* measured-adverse cell cannot use the soft-penalty lane —
+    lcb_ev < 0 with no recent contradiction is a measured loser, and the
+    pinned probe only exists for unproven cohorts."""
+    _pf_env(monkeypatch)
+    cells = {"SOL|yes|90-100|mid": _cell(w=2, l=6, entry=93)}
+    ev = _artifact(cells)
+    d = ep.evaluate(
+        ev, asset="SOL", side="yes", entry_price_cents=93.0,
+        tte_seconds=600.0, fee_frac=0.01, margin_frac=0.03,
+        net_edge_cents=-4.0,
+    )
+    assert d.allowed is False
+    assert d.code == "CELL_EVIDENCE_INSUFFICIENT"

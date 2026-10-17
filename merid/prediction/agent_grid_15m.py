@@ -9314,6 +9314,65 @@ class LeanAgent15m:
                         )
                 except Exception:
                     pass
+            if _decision_lane == "pinned_fav":
+                try:
+                    from merid.prediction import directional_regime as _dr_lane
+                    # 2026-10-17: same consume-then-suppress discipline as the
+                    # escape lane — the decision-time cap_remaining read is a
+                    # check-then-act race across parallel asset decisions, so
+                    # the durable counter is the single source of truth and an
+                    # over-cap emission becomes a LANE_SUPPRESSED event rather
+                    # than a silent budget leak.
+                    _n = _dr_lane.record_pinned_fav_submission()
+                    _cap = _dr_lane.pinned_fav_daily_max()
+                    if _n > _cap:
+                        try:
+                            from merid.execution.decision_audit_ledger import (
+                                get_decision_audit_ledger,
+                            )
+                            _ticker_now = str(
+                                getattr(decision, "ticker", "") or ticker or ""
+                            )
+                            get_decision_audit_ledger().append_decision_event(
+                                decision_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                event_type="LANE_SUPPRESSED",
+                                stage="ALLOCATION",
+                                reason_code="pinned_fav_cap_exceeded_at_emission",
+                                reason_detail={
+                                    "side": decision.selected_outcome,
+                                    "lane": _decision_lane,
+                                    "ticker": _ticker_now,
+                                    "pinned_fav_count_today": int(_n),
+                                    "pinned_fav_daily_cap": int(_cap),
+                                },
+                                trace_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                run_id=decision.indicators.get("run_id"),
+                                ticker=_ticker_now,
+                                asset=asset,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[PINNED-FAV] asset=%s side=%s suppressed — "
+                            "emission count=%d exceeded daily cap=%d",
+                            asset, decision.selected_outcome, _n, _cap,
+                        )
+                        decision = replace(
+                            decision,
+                            selected_outcome=None,
+                            no_trade_reason="pinned_fav_cap_exceeded_at_emission",
+                        )
+                    else:
+                        logger.info(
+                            "[PINNED-FAV] asset=%s side=%s lane submissions today=%d",
+                            asset, decision.selected_outcome, _n,
+                        )
+                except Exception:
+                    pass
             if _decision_lane == "threshold_cell":
                 try:
                     from merid.prediction import threshold_cells as _tc
@@ -10046,6 +10105,19 @@ class LeanAgent15m:
             except Exception:
                 _lane_px_cap = 97
             _canon_ok = 1 <= price_cents <= _lane_px_cap
+        if (
+            not _canon_ok
+            and _ind.get("entry_lane") == "pinned_fav"
+        ):
+            # 2026-10-17: pinned-favorite lane entries sit at 92-98c — the
+            # 10-75c canonical range predates the lane and would re-veto a
+            # candidate the engine already admitted.  The lane's own band
+            # bounds are the check here.
+            try:
+                from merid.prediction import directional_regime as _dr_canon
+                _canon_ok = _dr_canon.pinned_fav_band_match(price_cents)
+            except Exception:
+                _canon_ok = False
         if not _canon_ok:
             logger.info(
                 "[TRADE-DECISION] asset=%s side=%s price=%dc outside canonical range -> NO TRADE",
@@ -13991,6 +14063,59 @@ class LeanAgent15m:
                     )
             except Exception:
                 pass
+
+        # 2026-10-17 (extreme-band audit): pinned-favorite lane bypass.
+        # Own-side executable prices of 92-98c sit in the disabled tail, so
+        # the classifier rejected them before the decision engine could run
+        # economics — forfeiting the measured +1.9..+7.3c favorite cohort
+        # (97.5-98.8% realized win at TTE 300-900s, all assets/sides).  When
+        # the lane is armed and the own-side price/TTE are inside its
+        # window, inject a pseudo-regime so the candidate reaches the
+        # engine, which applies the strict lane gate plus normal economics.
+        # Only the band/TTE reachability check lives here; the admission
+        # gate itself is directional_regime.pinned_fav_block inside
+        # compute_trade_decision.  Does not re-open 99-100c or <=9c.
+        try:
+            from merid.prediction import directional_regime as _dr_pf
+            from merid.event_venues.kalshi.market_regime import SkewRegime
+
+            _pf_tte = float(seconds_to_expiry) if seconds_to_expiry is not None else None
+            if yes_regime is None and _dr_pf.pinned_fav_reachable(
+                yes_price_cents, _pf_tte
+            ):
+                yes_regime = SkewRegime(
+                    name="pinned_fav",
+                    min_price_cents=92,
+                    max_price_cents=98,
+                    min_net_edge_cents=Decimal("2.0"),
+                    min_confidence=Decimal("0.80"),
+                    max_spread_cents=2,
+                    min_depth_multiple=Decimal("1.0"),
+                    size_multiplier=Decimal("0.50"),
+                    enabled=True,
+                    min_book_freshness_ms=1000,
+                    min_time_to_expiry_seconds=120,
+                    max_time_to_expiry_seconds=840,
+                )
+            if no_regime is None and _dr_pf.pinned_fav_reachable(
+                no_price_cents, _pf_tte
+            ):
+                no_regime = SkewRegime(
+                    name="pinned_fav",
+                    min_price_cents=92,
+                    max_price_cents=98,
+                    min_net_edge_cents=Decimal("2.0"),
+                    min_confidence=Decimal("0.80"),
+                    max_spread_cents=2,
+                    min_depth_multiple=Decimal("1.0"),
+                    size_multiplier=Decimal("0.50"),
+                    enabled=True,
+                    min_book_freshness_ms=1000,
+                    min_time_to_expiry_seconds=120,
+                    max_time_to_expiry_seconds=840,
+                )
+        except Exception:
+            pass
 
         # 2026-10-12 (post_drawdown epoch): settlement-convergence lane bypass.
         # Every enabled band carries a min-TTE floor >= 120s, so inside the

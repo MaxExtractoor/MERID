@@ -1046,6 +1046,26 @@ def evaluate(
             fallback="no executable price; evidence gate skipped",
         )
 
+    # 2026-10-17: pinned-favorite bounded-probe domain.  The 92-98c own-side
+    # cohort was classifier-vetoed for the entire evidence history, so the
+    # positive-uplift bound below can never admit it — a never-seen bucket
+    # always reads *_INSUFFICIENT.  Inside the armed lane window the
+    # admission bound becomes the lane's own floor (bounded negative probe,
+    # 1-contract bounded size, own durable daily cap) instead of the sparse
+    # uplift; a measured-adverse posterior (lcb_ev < 0) still blocks, and
+    # toxic/hard blocks above are untouched.  The lane's own durable daily
+    # cap substitutes for the shared escape budget — both are read-side
+    # checks; the lane counter is consumed at order emission.
+    try:
+        from merid.prediction import directional_regime as _pf_dr
+        _pf = bool(
+            _pf_dr.pinned_fav_enabled()
+            and _pf_dr.pinned_fav_band_match(entry_price_cents)
+        )
+    except Exception:
+        _pf_dr = None  # type: ignore[assignment]
+        _pf = False
+
     # -- Hard block: matched cell, toxic, uncontradicted.  Two tiers -------
     # (2026-10-09): dense tier n_eff>=50 needs only the -5c demonstrated-loss
     # floor; a sparse matched cell (n_eff>=8) can still hard-block, but only
@@ -1211,23 +1231,35 @@ def evaluate(
         # uncertainty reserve is economic: the side's own net edge must clear
         # the max sparse uplift rather than a posterior bound.
         uplift = sparse_uplift_max_c()
-        ok = net_edge_cents is not None and float(net_edge_cents) >= uplift
-        if ok and not escape_lane_enabled():
+        req_edge = (
+            _pf_dr._pinned_fav_min_ev_cents() if _pf else uplift
+        )
+        ok = (
+            net_edge_cents is not None
+            and float(net_edge_cents) >= req_edge
+        )
+        if ok and not _pf and not escape_lane_enabled():
             return _base(
                 allowed=False, code="ESCAPE_LANE_DISABLED", level="none",
-                uplift=uplift, req_margin=uplift, escape=True,
+                uplift=uplift, req_margin=req_edge, escape=True,
                 fallback="no cell evidence; escape lane disabled",
             )
-        if ok and escape_cap_remaining() <= 0:
+        if ok and _pf and _pf_dr.pinned_fav_cap_remaining() <= 0:
+            return _base(
+                allowed=False, code="PINNED_FAV_CAP_EXHAUSTED", level="none",
+                uplift=uplift, req_margin=req_edge, escape=True,
+                fallback="daily pinned-fav lane submission cap reached",
+            )
+        if ok and not _pf and escape_cap_remaining() <= 0:
             return _base(
                 allowed=False, code="ESCAPE_CAP_EXHAUSTED", level="none",
-                uplift=uplift, req_margin=uplift, escape=True,
+                uplift=uplift, req_margin=req_edge, escape=True,
                 fallback="daily escape-lane submission cap reached",
             )
         return _base(
             allowed=bool(ok),
             code="EVIDENCE_EMPTY_PASS" if ok else "EVIDENCE_EMPTY_INSUFFICIENT",
-            level="none", uplift=uplift, req_margin=uplift,
+            level="none", uplift=uplift, req_margin=req_edge,
             escape=True,
             fallback="no cell evidence; required max uncertainty uplift on model edge",
         )
@@ -1248,23 +1280,35 @@ def evaluate(
         # uncertainty reserve is economic: the model's own net edge must
         # clear the max sparse uplift, and the pass is escape-lane only.
         uplift = sparse_uplift_max_c()
-        ok = net_edge_cents is not None and float(net_edge_cents) >= uplift
-        if ok and not escape_lane_enabled():
+        req_edge = (
+            _pf_dr._pinned_fav_min_ev_cents() if _pf else uplift
+        )
+        ok = (
+            net_edge_cents is not None
+            and float(net_edge_cents) >= req_edge
+        )
+        if ok and not _pf and not escape_lane_enabled():
             return _base(
                 allowed=False, code="ESCAPE_LANE_DISABLED", level="none",
-                uplift=uplift, req_margin=uplift, escape=True,
+                uplift=uplift, req_margin=req_edge, escape=True,
                 fallback="no adequately-sampled price-matched cell; escape lane disabled",
             )
-        if ok and escape_cap_remaining() <= 0:
+        if ok and _pf and _pf_dr.pinned_fav_cap_remaining() <= 0:
+            return _base(
+                allowed=False, code="PINNED_FAV_CAP_EXHAUSTED", level="none",
+                uplift=uplift, req_margin=req_edge, escape=True,
+                fallback="daily pinned-fav lane submission cap reached",
+            )
+        if ok and not _pf and escape_cap_remaining() <= 0:
             return _base(
                 allowed=False, code="ESCAPE_CAP_EXHAUSTED", level="none",
-                uplift=uplift, req_margin=uplift, escape=True,
+                uplift=uplift, req_margin=req_edge, escape=True,
                 fallback="daily escape-lane submission cap reached",
             )
         return _base(
             allowed=bool(ok),
             code="SPARSE_MATCHED_PASS" if ok else "SPARSE_MATCHED_INSUFFICIENT",
-            level="none", uplift=uplift, req_margin=uplift, escape=True,
+            level="none", uplift=uplift, req_margin=req_edge, escape=True,
             fallback="no adequately-sampled price-matched cell; "
                      "required max uncertainty uplift on model edge",
         )
@@ -1294,12 +1338,35 @@ def evaluate(
     # 2026-10-09: a stale artifact can never authorize production.  Any pass
     # on stale evidence is escape-lane only (bounded, separately capped).
     escape = exact_cell.n_eff < sparse_full_neff() or stale
-    ok = lcb_ev >= req_margin
+    if _pf:
+        # Pinned-fav probe bound on a scored level: the measured posterior
+        # LCB itself is the evidence — the lane asks only that the cohort
+        # is not a *measured loser* (lcb_ev >= 0), not that it clear the
+        # margin+uplift hurdle built for unproven model claims.  Adverse
+        # measured evidence still routes to the adaptive/block paths below.
+        ok = lcb_ev >= 0.0
+    else:
+        ok = lcb_ev >= req_margin
 
     def _escape_gate(ok_pass: bool, code_off: str, code_cap: str,
                      fb_off: str, fb_cap: str) -> Optional[EvidenceDecision]:
         """Shared bounded-lane gate for sparse/challenge/soft-penalty passes."""
         if not ok_pass:
+            return None
+        if _pf:
+            # The pinned lane is its own bounded route — the shared escape
+            # lane's enable flag and daily budget do not apply; the lane's
+            # durable counter does.
+            if _pf_dr.pinned_fav_cap_remaining() <= 0:
+                return _base(
+                    allowed=False, code="PINNED_FAV_CAP_EXHAUSTED",
+                    level=used_name, parent_level=parent_name,
+                    n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
+                    n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
+                    lcb_ev=lcb_ev, req_margin=req_margin, uplift=uplift,
+                    escape=True,
+                    fallback="daily pinned-fav lane submission cap reached",
+                )
             return None
         if not escape_lane_enabled():
             return _base(
@@ -1372,10 +1439,13 @@ def evaluate(
         if contradicts:
             # The stale posterior disagrees, so the model must still clear the
             # ordinary all-in margin (base margin + uncertainty uplift) on its
-            # own edge — the challenge is bounded, not free.
+            # own edge — the challenge is bounded, not free.  Pinned-fav
+            # candidates test against the lane's own floor instead.
             ch_ok = (
                 net_edge_cents is not None
-                and float(net_edge_cents) >= req_margin
+                and float(net_edge_cents) >= (
+                    _pf_dr._pinned_fav_min_ev_cents() if _pf else req_margin
+                )
             )
             gated = _escape_gate(
                 ch_ok, "CHALLENGE_LANE_DISABLED", "CHALLENGE_CAP_EXHAUSTED",
@@ -1398,30 +1468,41 @@ def evaluate(
                     f"breakeven={breakeven_wr:.2f}); bounded challenge"
                 ),
             )
-        soft_req = margin_frac * 100.0 + uplift + soft_penalty_extra_c()
-        soft_ok = (
-            net_edge_cents is not None and float(net_edge_cents) >= soft_req
-        )
-        gated = _escape_gate(
-            soft_ok, "SOFT_PENALTY_LANE_DISABLED", "ESCAPE_CAP_EXHAUSTED",
-            "soft-penalty pass requires escape lane; lane disabled",
-            "daily escape-lane submission cap reached",
-        )
-        if gated is not None:
-            return gated
-        return _base(
-            allowed=bool(soft_ok),
-            code="SOFT_PENALTY_PASS" if soft_ok else "SOFT_PENALTY_INSUFFICIENT",
-            level=used_name, parent_level=parent_name,
-            n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
-            n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
-            lcb_ev=lcb_ev, req_margin=soft_req, uplift=uplift,
-            escape=True,
-            fallback=(
-                "matched cell LCB insufficient; model edge tested against "
-                "elevated soft-penalty reserve"
-            ),
-        )
+        if not _pf:
+            soft_req = (
+                margin_frac * 100.0 + uplift + soft_penalty_extra_c()
+            )
+            soft_ok = (
+                net_edge_cents is not None
+                and float(net_edge_cents) >= soft_req
+            )
+            gated = _escape_gate(
+                soft_ok, "SOFT_PENALTY_LANE_DISABLED", "ESCAPE_CAP_EXHAUSTED",
+                "soft-penalty pass requires escape lane; lane disabled",
+                "daily escape-lane submission cap reached",
+            )
+            if gated is not None:
+                return gated
+            return _base(
+                allowed=bool(soft_ok),
+                code=(
+                    "SOFT_PENALTY_PASS" if soft_ok
+                    else "SOFT_PENALTY_INSUFFICIENT"
+                ),
+                level=used_name, parent_level=parent_name,
+                n_eff=used_agg.n_eff, w=used_agg.w, l=used_agg.l,
+                n_raw=used_agg.n_raw, p_mean=mean, p_lcb=lcb, p_std=std,
+                lcb_ev=lcb_ev, req_margin=soft_req, uplift=uplift,
+                escape=True,
+                fallback=(
+                    "matched cell LCB insufficient; model edge tested against "
+                    "elevated soft-penalty reserve"
+                ),
+            )
+        # Pinned-fav: lcb_ev < 0 with no recent contradiction is a measured
+        # adverse posterior, not "insufficient evidence" — the lane probes
+        # an unproven cohort, never a measured loser (that is survivorship
+        # bias).  Falls through to CELL_EVIDENCE_INSUFFICIENT.
 
     return _base(
         allowed=False, code="CELL_EVIDENCE_INSUFFICIENT",
