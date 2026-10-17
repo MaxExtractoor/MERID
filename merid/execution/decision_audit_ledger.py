@@ -2362,112 +2362,30 @@ class DecisionAuditLedger:
                     )
                 prepared.append((row, entry_fill, capital))
 
-            with self._lock, self._conn() as conn:
-                for row, entry_fill, capital in prepared:
-                    decision_id = row["decision_id"]
-                    side_rows = conn.execute(
-                        "SELECT * FROM strategy_decision_side_ev WHERE decision_id = ?",
-                        (decision_id,),
-                    ).fetchall()
-
-                    yes_pnl: Optional[float] = None
-                    no_pnl: Optional[float] = None
-                    for srow in side_rows:
-                        side = srow["side"]
-                        entry_cents = srow["executable_entry_price_cents"]
-                        entry_fee = srow["entry_fee_cents"] or 0.0
-                        exit_fee = srow["exit_or_settlement_fee_cents"] or 0.0
-                        if entry_cents is None:
-                            continue
-                        # Conservative fill assumption: only the quantity that
-                        # was actually visible at top-of-book at decision time
-                        # earns counterfactual P&L.  Rows written before the
-                        # executability columns existed keep the historical
-                        # one-contract convention (q=1.0).
-                        _srow_keys = set(srow.keys())
-                        q_assumed = (
-                            srow["counterfactual_assumed_filled_contracts"]
-                            if "counterfactual_assumed_filled_contracts" in _srow_keys
-                            else None
-                        )
-                        if q_assumed is None:
-                            q_assumed = 1.0
-                        if side == "yes":
-                            if settlement_value_cents is not None:
-                                yes_pnl = q_assumed * (
-                                    settlement_value_cents
-                                    - entry_cents
-                                    - entry_fee
-                                    - exit_fee
-                                )
-                        elif side == "no":
-                            if settlement_value_cents is not None:
-                                no_pnl = q_assumed * (
-                                    (100 - settlement_value_cents)
-                                    - entry_cents
-                                    - entry_fee
-                                    - exit_fee
-                                )
-
-                    conn.execute(
-                        """
-                        UPDATE strategy_decision_outcomes
-                        SET settled_at = ?, settled_yes = ?, settlement_value_cents = ?,
-                            counterfactual_yes_pnl_cents = ?,
-                            counterfactual_no_pnl_cents = ?,
-                            outcome_status = ?, policy_epoch = ?
-                        WHERE decision_id = ?
-                        """,
-                        (
-                            time.time(),
-                            1 if settled_yes else 0,
-                            settlement_value_cents,
-                            yes_pnl,
-                            no_pnl,
-                            "SETTLED",
-                            _policy_epoch(),
-                            decision_id,
-                        ),
-                    )
-
-                    # 2026-09-30: for a decision that actually filled,
-                    # settlement IS the realized PnL when no exit order
-                    # already booked it (held-to-settlement).  Backfills the
-                    # entry fill from the Kalshi fills ledger when the
-                    # ingest-time bridge missed it (post-only async fills),
-                    # persists realized_net_pnl_cents, then attributes to the
-                    # bound threshold-cell / current-build-provisional lane.
-                    try:
-                        self._attribute_settlement(
-                            conn,
-                            decision_id=decision_id,
-                            settlement_value_cents=settlement_value_cents,
-                            pre_entry_fill=entry_fill,
-                            pre_capital=capital,
-                        )
-                    except Exception:
-                        pass
-
-                    # Terminal lifecycle event: official exchange outcome joined
-                    # to this decision.  Emitted once per resolved decision;
-                    # duplicate settlement deliveries dedupe on event_id.
-                    self._append_decision_event_locked(
+            # 2026-10-17: batch the write phase.  One monolithic
+            # BEGIN IMMEDIATE across a ticker's whole pending-decision set
+            # held self._lock and its WAL read-mark for 40+ minutes on a
+            # contended disk: checkpoints froze at the txn's start mark
+            # (observed: wal_checkpoint merged exactly 186058/322665 frames —
+            # a frozen reader boundary), the WAL grew past 1.4 GB, queued
+            # decision writes starved, and the evidence-refresh queries timed
+            # out against the same saturated pages.  Per-batch commits release
+            # the read-mark and the lock between chunks so checkpoints and the
+            # writer queue get slots; every row write is idempotent (event_id
+            # dedup, deterministic UPDATE by decision_id) so a partially
+            # applied settlement is safe to re-deliver.
+            _settle_batch = max(
+                1,
+                int(os.environ.get("MERID_SETTLEMENT_WRITE_BATCH", "25")),
+            )
+            for _b0 in range(0, len(prepared), _settle_batch):
+                with self._lock, self._conn() as conn:
+                    self._settle_prepared_batch(
                         conn,
-                        decision_id=decision_id,
-                        candidate_id=row["candidate_id"],
-                        event_type=DECISION_EVENT_SETTLEMENT_RESOLVED,
-                        stage=DECISION_STAGE_OUTCOME,
-                        event_ts=time.time(),
-                        reason_code="settled_yes" if settled_yes else "settled_no",
-                        reason_detail={
-                            "settled_yes": bool(settled_yes),
-                            "settlement_value_cents": settlement_value_cents,
-                            "counterfactual_yes_pnl_cents": yes_pnl,
-                            "counterfactual_no_pnl_cents": no_pnl,
-                        },
-                        run_id=row["run_id"],
+                        prepared[_b0:_b0 + _settle_batch],
+                        settled_yes=settled_yes,
+                        settlement_value_cents=settlement_value_cents,
                         ticker=ticker,
-                        asset=row["asset"],
                     )
         except Exception as exc:
             logger.warning(
@@ -2479,6 +2397,128 @@ class DecisionAuditLedger:
             self._maybe_refresh_live_entry_evidence(background=True)
         except Exception as exc:
             logger.debug("[DECISION-AUDIT-LEDGER] live evidence refresh failed: %s", exc)
+
+    def _settle_prepared_batch(
+        self,
+        conn: sqlite3.Connection,
+        prepared: List[Any],
+        *,
+        settled_yes: bool,
+        settlement_value_cents: Optional[float],
+        ticker: str,
+    ) -> None:
+        """Write one batch of settlement rows inside the caller's txn/lock.
+
+        Extracted from ``record_settlement`` so the caller can commit/release
+        between batches — see its 2026-10-17 note.  Caller must hold
+        ``self._lock`` and pass a write transaction on the shared connection.
+        """
+        for row, entry_fill, capital in prepared:
+            decision_id = row["decision_id"]
+            side_rows = conn.execute(
+                "SELECT * FROM strategy_decision_side_ev WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchall()
+
+            yes_pnl: Optional[float] = None
+            no_pnl: Optional[float] = None
+            for srow in side_rows:
+                side = srow["side"]
+                entry_cents = srow["executable_entry_price_cents"]
+                entry_fee = srow["entry_fee_cents"] or 0.0
+                exit_fee = srow["exit_or_settlement_fee_cents"] or 0.0
+                if entry_cents is None:
+                    continue
+                # Conservative fill assumption: only the quantity that
+                # was actually visible at top-of-book at decision time
+                # earns counterfactual P&L.  Rows written before the
+                # executability columns existed keep the historical
+                # one-contract convention (q=1.0).
+                _srow_keys = set(srow.keys())
+                q_assumed = (
+                    srow["counterfactual_assumed_filled_contracts"]
+                    if "counterfactual_assumed_filled_contracts" in _srow_keys
+                    else None
+                )
+                if q_assumed is None:
+                    q_assumed = 1.0
+                if side == "yes":
+                    if settlement_value_cents is not None:
+                        yes_pnl = q_assumed * (
+                            settlement_value_cents
+                            - entry_cents
+                            - entry_fee
+                            - exit_fee
+                        )
+                elif side == "no":
+                    if settlement_value_cents is not None:
+                        no_pnl = q_assumed * (
+                            (100 - settlement_value_cents)
+                            - entry_cents
+                            - entry_fee
+                            - exit_fee
+                        )
+
+            conn.execute(
+                """
+                UPDATE strategy_decision_outcomes
+                SET settled_at = ?, settled_yes = ?, settlement_value_cents = ?,
+                    counterfactual_yes_pnl_cents = ?,
+                    counterfactual_no_pnl_cents = ?,
+                    outcome_status = ?, policy_epoch = ?
+                WHERE decision_id = ?
+                """,
+                (
+                    time.time(),
+                    1 if settled_yes else 0,
+                    settlement_value_cents,
+                    yes_pnl,
+                    no_pnl,
+                    "SETTLED",
+                    _policy_epoch(),
+                    decision_id,
+                ),
+            )
+
+            # 2026-09-30: for a decision that actually filled,
+            # settlement IS the realized PnL when no exit order
+            # already booked it (held-to-settlement).  Backfills the
+            # entry fill from the Kalshi fills ledger when the
+            # ingest-time bridge missed it (post-only async fills),
+            # persists realized_net_pnl_cents, then attributes to the
+            # bound threshold-cell / current-build-provisional lane.
+            try:
+                self._attribute_settlement(
+                    conn,
+                    decision_id=decision_id,
+                    settlement_value_cents=settlement_value_cents,
+                    pre_entry_fill=entry_fill,
+                    pre_capital=capital,
+                )
+            except Exception:
+                pass
+
+            # Terminal lifecycle event: official exchange outcome joined
+            # to this decision.  Emitted once per resolved decision;
+            # duplicate settlement deliveries dedupe on event_id.
+            self._append_decision_event_locked(
+                conn,
+                decision_id=decision_id,
+                candidate_id=row["candidate_id"],
+                event_type=DECISION_EVENT_SETTLEMENT_RESOLVED,
+                stage=DECISION_STAGE_OUTCOME,
+                event_ts=time.time(),
+                reason_code="settled_yes" if settled_yes else "settled_no",
+                reason_detail={
+                    "settled_yes": bool(settled_yes),
+                    "settlement_value_cents": settlement_value_cents,
+                    "counterfactual_yes_pnl_cents": yes_pnl,
+                    "counterfactual_no_pnl_cents": no_pnl,
+                },
+                run_id=row["run_id"],
+                ticker=ticker,
+                asset=row["asset"],
+            )
 
     def _maybe_refresh_live_entry_evidence(self, background: bool = False) -> None:
         """Rebuild the trailing-window live entry-evidence artifact.
@@ -2823,6 +2863,20 @@ class DecisionAuditLedger:
             return
         finally:
             if conn is not None:
+                # A deadline-killed statement can leave the connection holding
+                # its read snapshot (and an unfinalized statement can make
+                # close() defer via sqlite3_close_v2 — a zombie conn that pins
+                # WAL frames indefinitely).  Roll back any half-open state and
+                # interrupt anything still running before closing so the WAL
+                # read-mark releases deterministically.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    conn.interrupt()
+                except Exception:
+                    pass
                 try:
                     conn.close()
                 except Exception:

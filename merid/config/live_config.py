@@ -461,6 +461,10 @@ _ENV_OVERRIDES.update({
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),
         ("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "int", 0, 60),
+        # Rows committed per batch in record_settlement's write phase;
+        # batching bounds the WAL read-mark pin and writer-queue starvation
+        # a ticker's settlement can impose on a contended disk.
+        ("MERID_SETTLEMENT_WRITE_BATCH", "int", 1, 10000),
         ("MERID_EDGE_MARGINAL_RELIEF_CENTS", "float", 0, 15),
         ("MERID_EDGE_MARGINAL_RELIEF_LO_CENTS", "float", 0, 99),
         ("MERID_ENTRY_MAX_REQUOTES_PER_KEY", "int", 0, 5),
