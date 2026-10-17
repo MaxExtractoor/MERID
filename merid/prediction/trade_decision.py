@@ -740,6 +740,13 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # the probe size and stay post-only.  Positive-LCB admissions may cross
     # as taker IOC under MERID_BOUNDED_TAKER_CROSS.
     "pinned_fav",
+    # 2026-10-17: window-quota lane — paid-telemetry fallback that emits
+    # the ungated best side as a 1-contract taker IOC when every upstream
+    # lane declined the window.  Bounded by durable per-ticker/daily caps
+    # (window_quota.py), lane-floor EV re-gate (-25c claim sanity, not an
+    # edge bar), and its own price band [5,97c]/TTE [120,600s].  Always
+    # taker: the quota claim is evaluated at the ask.
+    "window_quota",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).

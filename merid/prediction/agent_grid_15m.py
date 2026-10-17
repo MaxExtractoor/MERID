@@ -9124,6 +9124,108 @@ class LeanAgent15m:
             execution_mode = "taker"
             fee_cents = taker_fee_cents
 
+        # Window-quota lane (bounded paid telemetry, opt-in): when every
+        # upstream lane declined this evaluation, force-select the ungated
+        # best side as a bounded taker IOC inside the lane's own
+        # price/TTE/spread/depth band.  Economics vetoes are intentionally
+        # bypassed — the spend is bounded by durable per-ticker/daily caps
+        # consumed at emission — but book sanity is still enforced and the
+        # router revalidates the live book at submit.  Normal selections
+        # always take precedence: this only fires on an otherwise
+        # no-trade evaluation.
+        try:
+            from merid.prediction import window_quota as _wq_quota
+        except Exception:
+            _wq_quota = None
+        if (
+            _wq_quota is not None
+            and decision.selected_outcome is None
+            and _wq_quota.quota_enabled()
+            and seconds_to_expiry is not None
+            and _wq_quota.quota_tte_lo()
+            <= float(seconds_to_expiry)
+            <= _wq_quota.quota_tte_hi()
+            and decision.best_side is not None
+            and not _wq_quota.quota_ticker_exhausted(
+                str(getattr(decision, "ticker", "") or ticker or "")
+            )
+        ):
+            _wq_side = decision.best_side
+            _wq_ask = (
+                float(no_ask) if _wq_side == "no" else float(yes_ask)
+            )
+            _wq_bid = (
+                float(no_bid) if _wq_side == "no" else float(yes_bid)
+            )
+            _wq_depth = (
+                float(decision.no_depth_cc) if _wq_side == "no"
+                else float(decision.yes_depth_cc)
+            )
+            _wq_ev_frac = (
+                decision.no_net_edge if _wq_side == "no"
+                else decision.yes_net_edge
+            )
+            _wq_ev_c = float(_wq_ev_frac or 0) * 100.0
+            if (
+                _wq_ask > 0.0
+                and _wq_bid > 0.0
+                and _wq_quota.quota_band_match(_wq_ask)
+                and (_wq_ask - _wq_bid)
+                <= _wq_quota.quota_max_spread_cents()
+                and _wq_depth >= 100.0
+                and _wq_ev_c >= _wq_quota.quota_min_ev_cents()
+            ):
+                from decimal import Decimal as _DQ
+                _wq_p = (
+                    decision.p_no_calibrated if _wq_side == "no"
+                    else decision.p_yes_calibrated
+                )
+                decision = replace(
+                    decision,
+                    selected_outcome=_wq_side,
+                    selected_action="buy",
+                    selected_outcome_price=_DQ(str(_wq_ask)) / _DQ(100),
+                    p_selected=_DQ(str(float(_wq_p or 0))),
+                    net_edge=_DQ(str(_wq_ev_c)) / _DQ(100),
+                    min_required_edge=_DQ(
+                        str(_wq_quota.quota_min_ev_cents() / 100.0)
+                    ),
+                    no_trade_reason=None,
+                )
+                _ind_q = decision.indicators
+                _ind_q["decision_lane"] = "window_quota"
+                _ind_q["entry_lane"] = "window_quota"
+                _ind_q[f"{_wq_side}_admission_owner"] = "window_quota"
+                _ind_q[
+                    f"{_wq_side}_effective_required_edge_cents"
+                ] = _wq_quota.quota_min_ev_cents()
+                _ind_q[f"{_wq_side}_gate_ev_cents"] = _wq_ev_c
+                _ind_q["window_quota"] = {
+                    "ask_cents": _wq_ask,
+                    "bid_cents": _wq_bid,
+                    "claim_ev_cents": _wq_ev_c,
+                    "tte_s": float(seconds_to_expiry),
+                    "depth_cc": _wq_depth,
+                }
+                liquidity_role = "taker"
+                aggressiveness = 1.0
+                post_only = False
+                time_in_force = "ioc"
+                execution_mode = "taker"
+                fee_cents = taker_fee_cents
+                logger.info(
+                    "[WINDOW-QUOTA] asset=%s side=%s ask=%.1fc "
+                    "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f — "
+                    "forcing bounded taker emit",
+                    asset, _wq_side, _wq_ask, _wq_ev_c,
+                    float(seconds_to_expiry), _wq_depth,
+                )
+            else:
+                decision.indicators["window_quota_block"] = (
+                    f"ask={_wq_ask:.0f} bid={_wq_bid:.0f} "
+                    f"ev={_wq_ev_c:.1f}c depth={_wq_depth:.0f}"
+                )
+
         # Cheap-NO research shadow lane (read-only): score every evaluation
         # whose executable NO ask sits in the research band so the
         # post-settlement join can validate or kill the conditioned cohort
@@ -9262,16 +9364,28 @@ class LeanAgent15m:
                     "MERID_PINNED_FAV_TAKER_PROBE", "1"
                 ).strip().lower() in ("1", "true", "yes")
             )
+            # 2026-10-17 (window-quota): quota emissions are paid telemetry
+            # evaluated at the ask — the claim never priced a passive fill,
+            # so probe/evidence state must not flip the order post-only
+            # (a resting quota order would simply expire unfilled).  Kill
+            # switch: MERID_WINDOW_QUOTA_TAKER=0 restores probe handling.
+            _wq_taker = (
+                _decision_lane == "window_quota"
+                and os.environ.get(
+                    "MERID_WINDOW_QUOTA_TAKER", "1"
+                ).strip().lower() in ("1", "true", "yes")
+            )
             _cross_as_taker = (
                 _bounded_taker_cross
                 and liquidity_role == "taker"
-                and (not _probe_restricted or _pf_taker_probe)
+                and (not _probe_restricted or _pf_taker_probe or _wq_taker)
             )
             if (
                 _bounded_taker_cross
                 and liquidity_role == "taker"
                 and _probe_restricted
                 and not _pf_taker_probe
+                and not _wq_taker
             ):
                 logger.info(
                     "[PROBE-NO-TAKER] asset=%s side=%s lane=%s - taker cross "
@@ -9424,6 +9538,76 @@ class LeanAgent15m:
                         logger.info(
                             "[PINNED-FAV] asset=%s side=%s lane submissions today=%d",
                             asset, decision.selected_outcome, _n,
+                        )
+                except Exception:
+                    pass
+            if (
+                _decision_lane == "window_quota"
+                and decision.selected_outcome is not None
+            ):
+                try:
+                    from merid.prediction import window_quota as _wq_lane
+                    # 2026-10-17: same consume-then-suppress discipline as
+                    # pinned_fav/escape — the durable counter is the single
+                    # source of truth; an over-budget emission becomes a
+                    # LANE_SUPPRESSED event rather than a silent leak.  The
+                    # per-ticker counter doubles as the per-window budget
+                    # (each ticker lives exactly one 15m window); a filled
+                    # attempt stops further retries upstream via the
+                    # position gate.
+                    _ticker_q = str(
+                        getattr(decision, "ticker", "") or ticker or ""
+                    )
+                    _n_t, _n_d = _wq_lane.record_quota_submission(_ticker_q)
+                    _cap_t = _wq_lane.quota_max_per_ticker()
+                    _cap_d = _wq_lane.quota_daily_max()
+                    if _n_t > _cap_t or _n_d > _cap_d:
+                        try:
+                            from merid.execution.decision_audit_ledger import (
+                                get_decision_audit_ledger,
+                            )
+                            get_decision_audit_ledger().append_decision_event(
+                                decision_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                event_type="LANE_SUPPRESSED",
+                                stage="ALLOCATION",
+                                reason_code="window_quota_cap_exceeded_at_emission",
+                                reason_detail={
+                                    "side": decision.selected_outcome,
+                                    "lane": _decision_lane,
+                                    "ticker": _ticker_q,
+                                    "quota_ticker_attempts": int(_n_t),
+                                    "quota_ticker_cap": int(_cap_t),
+                                    "quota_count_today": int(_n_d),
+                                    "quota_daily_cap": int(_cap_d),
+                                },
+                                trace_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                run_id=decision.indicators.get("run_id"),
+                                ticker=_ticker_q,
+                                asset=asset,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[WINDOW-QUOTA] asset=%s side=%s suppressed — "
+                            "ticker attempts=%d cap=%d day=%d cap=%d",
+                            asset, decision.selected_outcome,
+                            _n_t, _cap_t, _n_d, _cap_d,
+                        )
+                        decision = replace(
+                            decision,
+                            selected_outcome=None,
+                            no_trade_reason="window_quota_cap_exceeded_at_emission",
+                        )
+                    else:
+                        logger.info(
+                            "[WINDOW-QUOTA] asset=%s side=%s ticker=%s "
+                            "attempt=%d/%d day=%d/%d",
+                            asset, decision.selected_outcome, _ticker_q,
+                            _n_t, _cap_t, _n_d, _cap_d,
                         )
                 except Exception:
                     pass
@@ -10170,6 +10354,20 @@ class LeanAgent15m:
             try:
                 from merid.prediction import directional_regime as _dr_canon
                 _canon_ok = _dr_canon.pinned_fav_band_match(price_cents)
+            except Exception:
+                _canon_ok = False
+        if (
+            not _canon_ok
+            and _ind.get("entry_lane") == "window_quota"
+        ):
+            # 2026-10-17: window-quota emissions span the lane's own band
+            # (MERID_WINDOW_QUOTA_PRICE_LO..HI) — the canonical side-aware
+            # range predates the lane and would re-veto e.g. a YES@80 quota
+            # the emission guard already admitted.  The lane band is the
+            # check here.
+            try:
+                from merid.prediction import window_quota as _wq_canon
+                _canon_ok = _wq_canon.quota_band_match(price_cents)
             except Exception:
                 _canon_ok = False
         if not _canon_ok:

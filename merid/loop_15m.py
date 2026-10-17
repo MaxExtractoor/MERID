@@ -9456,9 +9456,23 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             return False
         _candidate_price_cents = int(candidate.get("price_cents", 0) or 0)
         min_price_cents, max_price_cents = get_canonical_price_range(_candidate_side)
+        # 2026-10-17: window-quota candidates span the lane's own band —
+        # the canonical side-aware range predates it and would silently
+        # substitute a market-mid price for the evaluated ask.
+        _wq_lane_cand = candidate.get("decision_lane") == "window_quota"
+        def _cand_in_range(_px: int) -> bool:
+            if is_price_in_canonical_range(_px, _candidate_side):
+                return True
+            if _wq_lane_cand:
+                try:
+                    from merid.prediction import window_quota as _wq_loop
+                    return _wq_loop.quota_band_match(_px)
+                except Exception:
+                    return False
+            return False
         if (
             approved_price_cents is not None
-            and is_price_in_canonical_range(approved_price_cents, _candidate_side)
+            and _cand_in_range(approved_price_cents)
         ):
             if _candidate_price_cents != approved_price_cents:
                 logger.warning(
@@ -9469,7 +9483,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             candidate["price_cents"] = price_cents
         elif (
             _candidate_price_cents > 0
-            and is_price_in_canonical_range(_candidate_price_cents, _candidate_side)
+            and _cand_in_range(_candidate_price_cents)
         ):
             # Signal's price is valid - use it directly
             price_cents = _candidate_price_cents

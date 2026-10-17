@@ -3093,6 +3093,7 @@ def _lane_model_prob_hi(intent: "OrderIntent") -> float:
     _env = (
         "MERID_SETTLEMENT_LANE_P_CAP" if _lane == "settlement_convergence"
         else "MERID_PINNED_FAV_P_CAP" if _lane == "pinned_fav"
+        else "MERID_WINDOW_QUOTA_P_CAP" if _lane == "window_quota"
         else None
     )
     if _env is not None:
@@ -9082,6 +9083,11 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                 _p_hi = max(_p_hi, float(os.environ.get("MERID_PINNED_FAV_P_CAP", "0.99")))
             except Exception:
                 pass
+        elif _intent_lane == "window_quota":
+            try:
+                _p_hi = max(_p_hi, float(os.environ.get("MERID_WINDOW_QUOTA_P_CAP", "0.99")))
+            except Exception:
+                pass
         _p_lo = 1.0 - _p_hi
         if not (_p_lo <= intent.model_prob <= _p_hi):
             return f"invalid_model_prob:{intent.model_prob}"
@@ -9649,6 +9655,23 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             min_no_depth=profile.market_microstructure_min_no_depth,
                             min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
                         )
+                    if (
+                        not passes
+                        and getattr(intent, "decision_lane", None)
+                        == "window_quota"
+                    ):
+                        # 2026-10-17: quota is paid telemetry, not an edge
+                        # claim — the edge-aware microstructure gate's
+                        # spread-to-edge ratio is meaningless for it.  Book
+                        # sanity still applies: the A5 degenerate-book /
+                        # spread / range checks and the emit-side depth
+                        # guard are the operative bounds.
+                        logger.info(
+                            "[MICROSTRUCTURE-GATE] ticker=%s window_quota "
+                            "bypasses edge-aware gate: %s",
+                            intent.ticker, reason,
+                        )
+                        passes = True
                     if not passes:
                         logger.warning(
                             "[MICROSTRUCTURE-GATE] ticker=%s %s",
@@ -9770,6 +9793,11 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
     elif _intent_lane_g == "pinned_fav":
         try:
             _p_hi = max(_p_hi, float(os.environ.get("MERID_PINNED_FAV_P_CAP", "0.99")))
+        except Exception:
+            pass
+    elif _intent_lane_g == "window_quota":
+        try:
+            _p_hi = max(_p_hi, float(os.environ.get("MERID_WINDOW_QUOTA_P_CAP", "0.99")))
         except Exception:
             pass
     _p_lo = 1.0 - _p_hi
@@ -9918,6 +9946,14 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     # canonical range (YES 1-85, NO 15-99). This matches agent_grid's range
     # gate and prevents false rejection of late-expiry one-sided markets.
     _in_range = is_price_in_canonical_range(intent.price_cents, _canonical_side)
+    if not _in_range and getattr(intent, "decision_lane", None) == "window_quota":
+        # 2026-10-17: quota emissions span the lane's own [5,97c] band; the
+        # canonical side-aware ceiling predates the lane.
+        try:
+            from merid.prediction import window_quota as _wq_otm
+            _in_range = _wq_otm.quota_band_match(intent.price_cents)
+        except Exception:
+            _in_range = False
 
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
     logger.info(
@@ -10678,6 +10714,15 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                 ALLOCATOR_MAX_PRICE = int(_dr_alloc._pinned_fav_hi())
             except Exception:
                 ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 92, 98
+        elif getattr(intent, "decision_lane", None) == "window_quota":
+            # 2026-10-17: quota emissions span the lane's own band; clamping
+            # to the canonical ceiling would silently reprice under the ask.
+            try:
+                from merid.prediction import window_quota as _wq_alloc
+                ALLOCATOR_MIN_PRICE = int(_wq_alloc.quota_price_lo())
+                ALLOCATOR_MAX_PRICE = int(_wq_alloc.quota_price_hi())
+            except Exception:
+                ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 5, 97
 
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             logger.warning(
@@ -10713,6 +10758,18 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             try:
                 from merid.prediction import directional_regime as _dr_crng
                 _in_canonical = _dr_crng.pinned_fav_band_match(
+                    float(adjusted_price)
+                )
+            except Exception:
+                _in_canonical = False
+        if (
+            not _in_canonical
+            and getattr(intent, "decision_lane", None) == "window_quota"
+        ):
+            # 2026-10-17: quota emissions span the lane band.
+            try:
+                from merid.prediction import window_quota as _wq_crng
+                _in_canonical = _wq_crng.quota_band_match(
                     float(adjusted_price)
                 )
             except Exception:
@@ -11789,6 +11846,14 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
     _side = (_side or "").lower()
 
     _in_range = is_price_in_canonical_range(intent.price_cents, _side)
+    if not _in_range and getattr(intent, "decision_lane", None) == "window_quota":
+        # 2026-10-17: quota emissions span the lane's own band; the
+        # canonical side-aware range predates the lane.
+        try:
+            from merid.prediction import window_quota as _wq_dep
+            _in_range = _wq_dep.quota_band_match(intent.price_cents)
+        except Exception:
+            _in_range = False
     if not _in_range:
         # Allow deep OTM/ITM only if edge is exceptional (> threshold)
         if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):
@@ -15119,14 +15184,40 @@ async def _route_live(
 
                 # Canonical executable range (matches agent_grid: YES 1-85, NO 15-99).
                 # Prevents false rejection of one-sided late-expiry markets.
-                if _target_price > 0 and not is_price_in_canonical_range(_target_price, _canonical_side):
+                _tgt_in_range = is_price_in_canonical_range(_target_price, _canonical_side)
+                if (
+                    not _tgt_in_range
+                    and getattr(intent, "decision_lane", None)
+                    == "window_quota"
+                ):
+                    # 2026-10-17: quota emissions span the lane's own band.
+                    try:
+                        from merid.prediction import window_quota as _wq_a5
+                        _tgt_in_range = _wq_a5.quota_band_match(_target_price)
+                    except Exception:
+                        _tgt_in_range = False
+                if _target_price > 0 and not _tgt_in_range:
                     logger.warning(
                         "[order-router] A5: market %s price %dc outside side-aware executable range for side=%s",
                         intent.ticker, _target_price, _canonical_side,
                     )
                     return _a5_reject(f"market_condition:price_out_of_side_aware_range:{_target_price}:{_canonical_side}")
-                if _spread > 0 and _spread > _cfg.max_spread_cents:
-                    logger.warning("[order-router] A5: market %s spread too wide (%d > %d)", intent.ticker, _spread, _cfg.max_spread_cents)
+                _a5_spread_cap = _cfg.max_spread_cents
+                if getattr(intent, "decision_lane", None) == "window_quota":
+                    # 2026-10-17: quota pays the spread by design — the lane
+                    # bound (MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS) replaces
+                    # the edge-calibrated cap, which exists to protect
+                    # economics the lane does not claim.
+                    try:
+                        from merid.prediction import window_quota as _wq_a5s
+                        _a5_spread_cap = max(
+                            _a5_spread_cap,
+                            int(_wq_a5s.quota_max_spread_cents()),
+                        )
+                    except Exception:
+                        pass
+                if _spread > 0 and _spread > _a5_spread_cap:
+                    logger.warning("[order-router] A5: market %s spread too wide (%d > %d)", intent.ticker, _spread, _a5_spread_cap)
                     return _a5_reject(f"market_condition:spread_too_wide:{_spread}")
                 if _vol > 0 and _vol < _cfg.min_volume:
                     logger.warning("[order-router] A5: market %s volume too low (%d < %d)", intent.ticker, _vol, _cfg.min_volume)
@@ -15987,6 +16078,14 @@ async def _route_live(
                     "MERID_PINNED_FAV_PRICE_HI", "98")))
             except Exception:
                 _max_price = 98
+        if not _is_reduce and getattr(intent, "decision_lane", None) == "window_quota":
+            # 2026-10-17: quota emissions span the lane's own band; the flat
+            # 95c ceiling predates it.
+            try:
+                from merid.prediction import window_quota as _wq_mp
+                _max_price = int(_wq_mp.quota_price_hi())
+            except Exception:
+                _max_price = 97
         if (
             intent.count <= 0
             or intent.price_cents < _min_price

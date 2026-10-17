@@ -648,10 +648,18 @@ class GlobalAllocator:
         for c, d in conf_passed:
             _pmin = _pmax = None
             try:
-                from merid.event_venues.kalshi.binary_price_space import (
-                    get_canonical_price_range,
-                )
-                _pmin, _pmax = get_canonical_price_range(c.side)
+                if getattr(c, "decision_lane", None) == "window_quota":
+                    # 2026-10-17: window-quota spans the lane's own band —
+                    # the canonical side-aware range predates it and would
+                    # re-veto e.g. a YES@80 quota the lane admitted.
+                    from merid.prediction import window_quota as _wq_alloc
+                    _pmin = int(_wq_alloc.quota_price_lo())
+                    _pmax = int(_wq_alloc.quota_price_hi())
+                else:
+                    from merid.event_venues.kalshi.binary_price_space import (
+                        get_canonical_price_range,
+                    )
+                    _pmin, _pmax = get_canonical_price_range(c.side)
             except Exception:
                 _pmin, _pmax = None, None
             if _pmin is not None and _pmin <= c.price_cents <= _pmax:
