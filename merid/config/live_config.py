@@ -531,6 +531,7 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_CBP_",        # current-build provisional recovery/probation tunables (bounded admission policy)
     "MERID_THRESHOLD_CELL_",  # threshold-cell lane caps/suspension/probation tunables (bounded admission policy)
     "MERID_MBAND_",       # marginal-band lane caps/suspension/cohort knobs (bounded admission tunables)
+    "MERID_PINNED_FAV_",  # pinned-favorite lane band/tte/floor/cap knobs (bounded admission tunables)
     "MERID_EMPIRICAL_",   # empirical price-calibration overlay mode/path/age knobs (bounded admission policy)
     "MERID_TRADE_DECISION_ALLOW_HYBRID_",
     "MERID_MIN_REGIME_POSTERIOR",
