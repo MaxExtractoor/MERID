@@ -340,6 +340,12 @@ _WAL_CHECKPOINT_INTERVAL_S = float(
     os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_S", "900")
 )
 
+# VM instructions between progress-handler callbacks on the evidence-refresh
+# read connection (sqlite3_progress_handler N parameter).  Small enough that a
+# runaway query is aborted promptly after its deadline, large enough that the
+# callback cost is noise.
+_EVIDENCE_PROGRESS_STEPS = 100000
+
 
 @dataclass(frozen=True)
 class DecisionAuditClassification:
@@ -366,6 +372,9 @@ class DecisionAuditLedger:
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
         self._evidence_refresh_inflight = False
+        # Consecutive refresh failures; doubles the retry interval so a sick
+        # disk is not re-scanned at the nominal cadence forever.
+        self._evidence_refresh_strikes = 0
         # Write offload: public record_* calls enqueue closures drained by a
         # single daemon writer thread.  The event loop calls these on the hot
         # decision path; one slow commit/WAL checkpoint on the multi-GB audit
@@ -2504,7 +2513,35 @@ class DecisionAuditLedger:
             return
         now = time.time()
         refresh_s = float(os.environ.get("MERID_LIVE_EVIDENCE_REFRESH_S", "120"))
-        if now - self._last_evidence_refresh < refresh_s:
+        # 2026-10-17: failure backoff + writer backpressure.  On 2026-10-16/17 a
+        # refresh query ran ~4.5h against the contended 21GB DB while holding a
+        # WAL read snapshot: checkpointing stalled (612MB WAL), the writer fell
+        # ~14min behind, record_settlement starved, and the artifact aged past
+        # UNUSABLE so evidence-dependent entries failed closed.  Consecutive
+        # failures double the retry interval (capped); a writer queue at
+        # critical depth defers the scan entirely — a minutes-long analytics
+        # read against a drowning DB cannot succeed anyway and its snapshot
+        # pins exactly the frames the writer needs to checkpoint.
+        interval = refresh_s
+        if self._evidence_refresh_strikes > 0:
+            interval = min(
+                refresh_s * (2 ** self._evidence_refresh_strikes),
+                max(
+                    refresh_s,
+                    float(os.environ.get(
+                        "MERID_LIVE_EVIDENCE_MAX_BACKOFF_S", "1800")),
+                ),
+            )
+        if now - self._last_evidence_refresh < interval:
+            return
+        defer_depth = int(os.environ.get(
+            "MERID_LIVE_EVIDENCE_DEFER_QUEUE_DEPTH", "4000"))
+        if self._writer_started and self._write_queue.qsize() >= defer_depth:
+            logger.info(
+                "[DECISION-AUDIT-LEDGER] live evidence refresh deferred: "
+                "writer queue depth=%d >= %d",
+                self._write_queue.qsize(), defer_depth,
+            )
             return
         self._last_evidence_refresh = now
         window_hours = float(os.environ.get("MERID_LIVE_EVIDENCE_WINDOW_HOURS", "48"))
@@ -2525,16 +2562,73 @@ class DecisionAuditLedger:
             try:
                 self._refresh_live_entry_evidence(now, window_hours)
             except Exception as exc:
+                # Unexpected failure outside the function's own query/write
+                # handlers (aggregation etc.) — still bump backoff strikes and
+                # persist the failure so a stale artifact is diagnosable.
                 logger.warning(
                     "[DECISION-AUDIT-LEDGER] live evidence refresh failed: %s", exc
+                )
+                self._evidence_refresh_strikes += 1
+                self._write_evidence_refresh_status(
+                    event="failure", ok=False, attempt_at=now,
+                    finished_at=time.time(), error=f"refresh: {exc}",
+                    fail_streak=self._evidence_refresh_strikes,
+                    pid=os.getpid(),
                 )
             finally:
                 with self._evidence_refresh_guard:
                     self._evidence_refresh_inflight = False
+                # The refresh's read snapshot pins WAL frames while it runs;
+                # once it releases, nudge a PASSIVE checkpoint onto the writer
+                # so the WAL is reclaimed promptly rather than waiting for the
+                # next heartbeat-interval checkpoint.
+                try:
+                    self._submit_write(
+                        lambda: self.wal_checkpoint("PASSIVE"), priority="low"
+                    )
+                except Exception:
+                    pass
 
         threading.Thread(
             target=_run, name="live-evidence-refresh", daemon=True
         ).start()
+
+    def _wal_size_bytes(self) -> Optional[int]:
+        try:
+            return (self.db_path.parent / (self.db_path.name + "-wal")).stat().st_size
+        except OSError:
+            return None
+
+    def _evidence_refresh_status_path(self) -> Path:
+        """Sidecar path for durable refresh bookkeeping.
+
+        ``MERID_LIVE_EVIDENCE_STATUS_PATH`` overrides; otherwise the artifact
+        path's ``.refresh.json`` sibling (``live_entry_evidence.refresh.json``).
+        """
+        override = os.environ.get("MERID_LIVE_EVIDENCE_STATUS_PATH", "").strip()
+        if override:
+            return Path(override)
+        artifact = Path(os.environ.get(
+            "MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json"))
+        return artifact.with_suffix(".refresh.json")
+
+    def _write_evidence_refresh_status(self, **fields: Any) -> None:
+        """Durable refresh bookkeeping beside the evidence artifact.
+
+        ``evidence_health`` keeps the live view in-process; this sidecar is
+        the cross-restart record — last attempt/success/failure, error,
+        duration, queue depth, WAL size at attempt — so a stale artifact is
+        diagnosable without the exporter's process memory.  Best-effort and
+        single-writer (only the refresh thread calls it): never raises.
+        """
+        try:
+            path = self._evidence_refresh_status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(fields))
+            os.replace(tmp, path)
+        except Exception:
+            pass
 
     def _refresh_live_entry_evidence(self, now: float, window_hours: float) -> None:
         """Query settled ENTER outcomes and atomically rewrite the artifact.
@@ -2548,11 +2642,42 @@ class DecisionAuditLedger:
         from merid.prediction import evidence_health as _evh
 
         _evh.record_refresh_attempt(t0)
+        self._write_evidence_refresh_status(
+            event="attempt",
+            attempt_at=t0,
+            pid=os.getpid(),
+            queue_depth=(
+                self._write_queue.qsize() if self._writer_started else 0
+            ),
+            wal_size_bytes=self._wal_size_bytes(),
+            window_hours=window_hours,
+        )
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(str(self.db_path), timeout=30)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = 1")
+            # Bound the analytics phase.  An unbounded query here held a WAL
+            # read snapshot for ~4.5h on 2026-10-17 (disk-saturated 21GB DB):
+            # checkpoints starved, the WAL grew to 612MB, and every write
+            # slowed further — a self-reinforcing stall.  The progress handler
+            # fires every ~100k VM instructions; past the deadline it returns
+            # non-zero and the running statement aborts with
+            # OperationalError("interrupted"), recorded as a refresh failure
+            # in the except below.  One deadline covers all three queries on
+            # this connection.  (sqlite.org/c3ref/progress_handler.html)
+            # A zero/negative budget aborts on the first VM step — a
+            # deterministic kill-switch and test hook.
+            q_budget_s = max(
+                0.0,
+                float(os.environ.get(
+                    "MERID_LIVE_EVIDENCE_QUERY_TIMEOUT_S", "300")),
+            )
+            q_deadline = time.monotonic() + q_budget_s
+            conn.set_progress_handler(
+                lambda: 1 if time.monotonic() >= q_deadline else 0,
+                _EVIDENCE_PROGRESS_STEPS,
+            )
             # Drive from o.settled_at: the outcomes index range stays selective
             # (only settled rows in the window), and each decision row is then a
             # PK point lookup.  The inverse (decision_ts range) scans ~48h of the
@@ -2686,7 +2811,15 @@ class DecisionAuditLedger:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc
             )
+            self._evidence_refresh_strikes += 1
             _evh.record_refresh_result(False, f"query: {exc}")
+            self._write_evidence_refresh_status(
+                event="failure", ok=False, attempt_at=t0,
+                finished_at=time.time(), duration_s=time.time() - t0,
+                error=f"query: {exc}",
+                fail_streak=self._evidence_refresh_strikes,
+                pid=os.getpid(),
+            )
             return
         finally:
             if conn is not None:
@@ -3096,12 +3229,26 @@ class DecisionAuditLedger:
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(json.dumps(out))
             os.replace(tmp, path)
+            self._evidence_refresh_strikes = 0
             _evh.record_refresh_result(True)
+            self._write_evidence_refresh_status(
+                event="success", ok=True, attempt_at=t0,
+                finished_at=time.time(), duration_s=time.time() - t0,
+                rows=len(rows), fail_streak=0, pid=os.getpid(),
+            )
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence write failed: %s", exc
             )
+            self._evidence_refresh_strikes += 1
             _evh.record_refresh_result(False, f"write: {exc}")
+            self._write_evidence_refresh_status(
+                event="failure", ok=False, attempt_at=t0,
+                finished_at=time.time(), duration_s=time.time() - t0,
+                error=f"write: {exc}",
+                fail_streak=self._evidence_refresh_strikes,
+                pid=os.getpid(),
+            )
 
     def pending_unsettled_tickers(
         self,

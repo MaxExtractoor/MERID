@@ -21443,6 +21443,16 @@ def _reconcile_cycle_counters(
                     assets_evaluated=assets_evaluated,
                 )
             )
+            # 2026-10-17: the evidence-artifact refresh was triggered only by
+            # record_settlement, so when settlement joins starved behind the
+            # audit writer queue the artifact silently aged past UNUSABLE and
+            # evidence-dependent entries failed closed.  Trigger it from the
+            # cycle path instead: O(1) (interval check + single-flight flag)
+            # and the refresh itself runs on its own thread.
+            try:
+                ledger._maybe_refresh_live_entry_evidence(background=True)
+            except Exception:
+                pass
         except Exception as hb_exc:
             logger.warning("[DECISION-AUDIT-HEARTBEAT] failed for tick=%d: %s", tick, hb_exc)
 

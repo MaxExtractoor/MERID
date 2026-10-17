@@ -346,3 +346,152 @@ def test_background_refresh_never_holds_ledger_lock(_isolate_evidence, tmp_path,
         assert calls["n"] == 1, "a second refresh must not start while one is in flight"
     finally:
         release.set()
+
+
+# ── refresh robustness (2026-10-17) ──────────────────────────────────
+#
+# Production incident: an unbounded refresh query held a WAL read snapshot
+# for ~4.5h on the 21GB audit DB — checkpointing starved, the WAL grew to
+# 612MB, the writer fell ~14min behind, record_settlement starved, and the
+# artifact aged past UNUSABLE so evidence-dependent entries failed closed.
+# These tests pin the watchdog, backoff, backpressure, and durable status
+# bookkeeping that prevent recurrence.
+
+
+def test_refresh_query_deadline_aborts_and_records_failure(
+    _isolate_evidence, tmp_path, monkeypatch
+):
+    """A refresh query that blows its deadline is aborted by the progress
+    handler, recorded as a failure, and bumps the backoff strike counter —
+    it must never hold a WAL snapshot for hours again."""
+    import merid.execution.decision_audit_ledger as _dal
+    from merid.prediction import evidence_health as _evh
+
+    _evh._reset_for_tests()
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_QUERY_TIMEOUT_S", "0")
+    # Fire the handler on every VM instruction so the abort is deterministic
+    # even on a tiny test DB whose queries finish in microseconds.
+    monkeypatch.setattr(_dal, "_EVIDENCE_PROGRESS_STEPS", 1)
+    ledger = DecisionAuditLedger(db_path=tmp_path / "audit.db")
+    ledger._ensure_db()
+    _seed_audit_db(ledger)
+
+    ledger._refresh_live_entry_evidence(time.time(), 48.0)
+
+    assert ledger._evidence_refresh_strikes == 1
+    assert _evh.refresh_status()["failure_streak"] >= 1
+    assert not _isolate_evidence.exists(), "timed-out refresh must not write an artifact"
+    sidecar = _isolate_evidence.with_suffix(".refresh.json")
+    status = json.loads(sidecar.read_text())
+    assert status["ok"] is False
+    assert status["event"] == "failure"
+    assert "query" in status["error"]
+    assert status["fail_streak"] == 1
+
+
+def test_refresh_backoff_interval_after_failures(
+    _isolate_evidence, tmp_path, monkeypatch
+):
+    """Consecutive failures double the retry interval (capped), so a sick
+    disk is not re-scanned at the nominal cadence."""
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_REFRESH_S", "120")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_MAX_BACKOFF_S", "1800")
+    ledger = DecisionAuditLedger(db_path=tmp_path / "audit.db")
+    ledger._ensure_db()
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        ledger, "_refresh_live_entry_evidence", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1)
+    )
+    ledger._evidence_refresh_strikes = 3  # interval = 120 * 2^3 = 960s
+
+    ledger._last_evidence_refresh = time.time() - 500  # inside backoff window
+    ledger._maybe_refresh_live_entry_evidence()
+    assert calls["n"] == 0
+
+    ledger._last_evidence_refresh = time.time() - 1000  # past backoff window
+    ledger._maybe_refresh_live_entry_evidence()
+    assert calls["n"] == 1
+
+
+def test_refresh_deferred_under_critical_writer_backlog(
+    _isolate_evidence, tmp_path, monkeypatch
+):
+    """Do not start a minutes-long analytics scan while the writer queue is
+    at critical depth — its WAL snapshot pins the frames the writer needs to
+    checkpoint.  The trigger retries on the next cycle once the queue drains."""
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_REFRESH_S", "0")
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_DEFER_QUEUE_DEPTH", "3")
+    ledger = DecisionAuditLedger(db_path=tmp_path / "audit.db")
+    ledger._ensure_db()
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        ledger, "_refresh_live_entry_evidence", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1)
+    )
+
+    ledger._writer_started = True
+    for _ in range(3):
+        ledger._write_queue.put_nowait((lambda: None, time.monotonic(), "low"))
+
+    ledger._maybe_refresh_live_entry_evidence()
+    assert calls["n"] == 0, "refresh must defer while writer queue is critical"
+
+    for _ in range(3):
+        ledger._write_queue.get_nowait()
+    ledger._maybe_refresh_live_entry_evidence()
+    assert calls["n"] == 1
+
+
+def test_refresh_success_writes_sidecar_and_resets_strikes(
+    _isolate_evidence, tmp_path, monkeypatch
+):
+    """A successful refresh clears the strike counter and leaves a durable
+    status record next to the artifact."""
+    from merid.prediction import evidence_health as _evh
+
+    _evh._reset_for_tests()
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_EXPORT", "1")
+    ledger = DecisionAuditLedger(db_path=tmp_path / "audit.db")
+    ledger._ensure_db()
+    _seed_audit_db(ledger)
+    ledger._evidence_refresh_strikes = 2
+
+    ledger._refresh_live_entry_evidence(time.time(), 48.0)
+
+    assert _isolate_evidence.exists()
+    assert ledger._evidence_refresh_strikes == 0
+    status = json.loads(
+        _isolate_evidence.with_suffix(".refresh.json").read_text()
+    )
+    assert status["ok"] is True
+    assert status["event"] == "success"
+    assert status["rows"] > 0
+    assert status["duration_s"] >= 0
+    assert status["fail_streak"] == 0
+
+
+def test_evidence_health_seeds_refresh_status_from_sidecar(
+    _isolate_evidence, tmp_path, monkeypatch
+):
+    """A restarted process still reports the previous process's last refresh
+    result instead of 'no attempt observed'."""
+    from merid.prediction import evidence_health as _evh
+
+    success_ts = time.time() - 300
+    _isolate_evidence.with_suffix(".refresh.json").write_text(json.dumps({
+        "event": "success",
+        "ok": True,
+        "attempt_at": success_ts - 2.0,
+        "finished_at": success_ts,
+        "duration_s": 2.0,
+    }))
+    _evh._reset_for_tests()
+    status = _evh.refresh_status()
+    assert status["last_success_at"] == pytest.approx(success_ts)
+    assert status["last_attempt_at"] == pytest.approx(success_ts - 2.0)
+    assert status["failure_streak"] == 0
+

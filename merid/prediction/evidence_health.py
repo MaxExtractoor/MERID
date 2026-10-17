@@ -32,11 +32,13 @@ are independent of this module and never relaxed by it.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
@@ -145,7 +147,68 @@ def record_refresh_result(ok: bool, error: Optional[str] = None,
             _refresh_status["last_error"] = error
 
 
+_status_seeded = False
+
+
+def _status_sidecar_path() -> Path:
+    """Durable refresh-bookkeeping file written by the audit ledger's
+    exporter — the artifact path's ``.refresh.json`` sibling unless
+    ``MERID_LIVE_EVIDENCE_STATUS_PATH`` overrides."""
+    override = os.environ.get("MERID_LIVE_EVIDENCE_STATUS_PATH", "").strip()
+    if override:
+        return Path(override)
+    artifact = Path(os.environ.get(
+        "MERID_LIVE_EVIDENCE_PATH", "data/live_entry_evidence.json"))
+    return artifact.with_suffix(".refresh.json")
+
+
+def _seed_refresh_status_from_disk() -> None:
+    """One-time seed of refresh bookkeeping from the durable sidecar.
+
+    Without this a restarted process reports "no attempt observed" even when
+    the previous process's exporter was mid-failure-loop, hiding the reason a
+    stale artifact went stale.  Best-effort; only fills fields that are still
+    unset so in-process records always win.
+    """
+    global _status_seeded
+    if _status_seeded:
+        return
+    _status_seeded = True
+    try:
+        data = json.loads(_status_sidecar_path().read_text())
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    try:
+        ts = float(data.get("finished_at") or data.get("attempt_at") or 0.0)
+    except (TypeError, ValueError):
+        return
+    if ts <= 0:
+        return
+    with _refresh_lock:
+        attempt_at = data.get("attempt_at")
+        if _refresh_status["last_attempt_at"] is None and attempt_at:
+            try:
+                _refresh_status["last_attempt_at"] = float(attempt_at)
+            except (TypeError, ValueError):
+                pass
+        if data.get("ok") is True:
+            if _refresh_status["last_success_at"] is None:
+                _refresh_status["last_success_at"] = ts
+        elif data.get("ok") is False:
+            if not _refresh_status["failure_streak"]:
+                try:
+                    _refresh_status["failure_streak"] = max(
+                        1, int(data.get("fail_streak") or 1))
+                except (TypeError, ValueError):
+                    _refresh_status["failure_streak"] = 1
+            if _refresh_status["last_error"] is None:
+                _refresh_status["last_error"] = data.get("error")
+
+
 def refresh_status() -> Dict[str, Any]:
+    _seed_refresh_status_from_disk()
     with _refresh_lock:
         return dict(_refresh_status)
 
@@ -327,6 +390,8 @@ def _note_transition(h: EvidenceHealth, now: float) -> None:
 
 
 def _reset_for_tests() -> None:
+    global _status_seeded
+    _status_seeded = False
     with _transition_lock:
         _last.update({"state": None, "mode": None, "alert_at": 0.0})
     with _refresh_lock:
