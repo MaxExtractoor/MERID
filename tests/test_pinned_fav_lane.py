@@ -435,3 +435,57 @@ def test_escape_bookflow_respects_price_exemption(monkeypatch):
         _td._evidence_escape_veto_reason(price_cents=35.0, **kw)
         == "evidence_escape_bookflow"
     )
+
+
+def test_pf_admission_stamps_lane_bound_pair(tmp_path, monkeypatch):
+    """2026-10-17: a lane-admitted side must stamp the pair it was actually
+    enforced on — (net_ev, lane floor) — into the fields the allocator's
+    EDGE re-check compares.  Stamping the generic route bound + EPC-LCB
+    re-vetoed the emitted cohort live (SOL no@93: cap consumed, then
+    EXPECTED_VALUE_BELOW_MINIMUM with gate_ev=-1.9c vs bound=+4.0c)."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-8.0")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), d.no_trade_reason,
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    # Allocator-facing pair: bound is the lane floor, compared quantity is
+    # the net_ev the lane's pinned_fav_block enforced — not the generic
+    # route bound and not the EPC-LCB.
+    assert d.indicators.get("yes_effective_required_edge_cents") == -8.0
+    yes_bd = d.yes_edge_breakdown
+    assert yes_bd is not None
+    assert d.indicators.get("yes_gate_ev_cents") == pytest.approx(
+        float(yes_bd.net_edge) * 100.0, abs=1e-6
+    )
+    assert d.indicators.get("yes_effective_gate_edge_cents") == -8.0
+    assert d.indicators.get("yes_true_shortfall_cents") == pytest.approx(
+        max(0.0, -8.0 - float(yes_bd.net_edge) * 100.0), abs=1e-6
+    )
+
+
+def test_non_pf_side_keeps_generic_stamps(tmp_path, monkeypatch):
+    """The lane stamp substitution is lane-scoped: a normal-band decision's
+    effective bound stays the generic post-caution bound."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision(
+        spot_price=100.05,
+        yes_bid_cents=40.0, yes_ask_cents=42.0,
+        no_bid_cents=58.0, no_ask_cents=60.0,
+    )
+    assert d.indicators.get("decision_lane") != "pinned_fav"
+    # Neither side sits in the lane band, so the lane floor must not leak
+    # into the allocator-facing bound: generic bounds are non-negative.
+    assert d.indicators.get("yes_pinned_fav_qualifies") is False
+    assert d.indicators.get("no_pinned_fav_qualifies") is False
+    for pfx in ("yes", "no"):
+        bound = d.indicators.get(f"{pfx}_effective_required_edge_cents")
+        if bound is not None:
+            assert bound >= 0.0

@@ -9267,7 +9267,12 @@ class LeanAgent15m:
                 and liquidity_role == "taker"
                 and (not _probe_restricted or _pf_taker_probe)
             )
-            if _bounded_taker_cross and liquidity_role == "taker" and _probe_restricted:
+            if (
+                _bounded_taker_cross
+                and liquidity_role == "taker"
+                and _probe_restricted
+                and not _pf_taker_probe
+            ):
                 logger.info(
                     "[PROBE-NO-TAKER] asset=%s side=%s lane=%s - taker cross "
                     "suppressed for evidence-refused probe (%s); post-only",

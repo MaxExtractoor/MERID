@@ -5850,18 +5850,35 @@ def compute_trade_decision(
     ):
         _min_e = yes_min_edge if _pfx == "yes" else no_min_edge
         _rescued = _yes_mb_rescued if _pfx == "yes" else _no_mb_rescued
+        _pf_admitted_s = (
+            _yes_pf_qualifies if _pfx == "yes" else _no_pf_qualifies
+        )
         # effective_required_edge is the admission bound downstream re-gates
         # must keep comparing against: slackened iff this side was rescued,
         # else the full post-caution route bound.  The gate-comparison bound
         # (always slack-adjusted) is exposed separately as *_gate_edge.
-        indicators[f"{_pfx}_effective_required_edge_cents"] = (
-            _bnd if _rescued else _min_e
-        ) * 100.0
+        # 2026-10-17 (pinned-fav): a lane-admitted side was enforced on the
+        # lane's own pair — net_ev >= lane floor — so the downstream stamps
+        # must carry that pair.  Stamping the generic bound + EPC-LCB here
+        # re-vetoed the exact cohort the lane admitted (observed live
+        # 2026-10-17 11:22 UTC: SOL no@93 emitted, daily cap consumed, then
+        # the allocator EDGE stage rejected gate_ev=-1.9c against the
+        # un-substituted +4.0c route bound).
+        if _pf_admitted_s:
+            _req_c = _dr._pinned_fav_min_ev_cents()
+            _gev_c = float(_bd.net_edge) * 100.0
+        else:
+            _req_c = (_bnd if _rescued else _min_e) * 100.0
+            _gev_c = _eff * 100.0
+        indicators[f"{_pfx}_effective_required_edge_cents"] = _req_c
         indicators[f"{_pfx}_route_required_edge_cents"] = _min_e * 100.0
-        indicators[f"{_pfx}_effective_gate_edge_cents"] = _bnd * 100.0
-        indicators[f"{_pfx}_gate_ev_cents"] = _eff * 100.0
+        indicators[f"{_pfx}_effective_gate_edge_cents"] = (
+            _req_c if _pf_admitted_s else _bnd * 100.0
+        )
+        indicators[f"{_pfx}_gate_ev_cents"] = _gev_c
         indicators[f"{_pfx}_true_shortfall_cents"] = max(
-            0.0, (_bnd - _eff) * 100.0
+            0.0,
+            (_req_c if _pf_admitted_s else _bnd * 100.0) - _gev_c,
         )
         indicators[f"{_pfx}_fee_reserve_cents"] = float(_bd.entry_fee) * 100.0
         indicators[f"{_pfx}_impact_reserve_cents"] = (
