@@ -8844,6 +8844,33 @@ class LeanAgent15m:
             and decision_maker.selected_outcome is not None
         )
 
+        # 2026-10-17 (pinned-fav route audit): the lane's measured cohort is
+        # the ask-taker distribution — 92-98c asks at TTE 300-840s settled
+        # favorite-direction 97.5-98.8% (+1.9..+7.3c net of taker fees).
+        # The ask-priced maker pass reports a cheaper-looking net edge
+        # (maker fee on the same ask) but is not realizable: a post-only
+        # order cannot rest at the ask, and the realizable own-side bid sits
+        # below the lane band (a 92c YES ask implies a <=91c YES bid).  A
+        # pinned admission therefore emits taker/IOC only.  When the taker
+        # pass failed the lane floor but the ask-priced maker pass cleared
+        # it, suppress the maker selection so the candidate does not emit a
+        # resting bid outside the measured band.
+        _pf_lane = (
+            (decision_taker.indicators or {}).get("decision_lane")
+            == "pinned_fav"
+        ) or (
+            decision_maker is not None
+            and (decision_maker.indicators or {}).get("decision_lane")
+            == "pinned_fav"
+        )
+        if _pf_lane and not _taker_sel and _maker_sel:
+            decision_maker = replace(
+                decision_maker,
+                selected_outcome=None,
+                no_trade_reason="pinned_fav_taker_only",
+            )
+            _maker_sel = False
+
         if not maker_entries_enabled:
             # Maker lane disabled: the taker EV gate is the sole arbiter — if
             # the trade does not clear executable-cost economics at taker fees
@@ -8851,10 +8878,15 @@ class LeanAgent15m:
             use_taker = _taker_sel
         elif not _taker_sel:
             use_taker = False
-        elif is_late or is_high_edge or _taker_rescued or not _maker_sel:
+        elif (
+            is_late or is_high_edge or _taker_rescued or not _maker_sel
+            or _pf_lane
+        ):
             # Positive taker surplus + no qualified passive alternative:
             # forcing this candidate to rest forfeits a certain fill for the
             # maker-fee delta.  Route IOC (bounded by the economic cap).
+            # Pinned-fav selections route taker unconditionally — see the
+            # _pf_lane note above.
             use_taker = True
         else:
             # Both routes qualify: prefer maker only when its

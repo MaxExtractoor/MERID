@@ -163,5 +163,48 @@ class TestRouteSelectionIntegration(unittest.TestCase):
         self.assertIn("post_only = False", src)
 
 
+class TestPinnedFavTakerRouting(unittest.TestCase):
+    """2026-10-17: pinned_fav selections must route taker/IOC.
+
+    The lane's measured cohort is the ask-taker distribution (92-98c asks,
+    TTE 300-840s, +1.9..+7.3c net of taker fees).  The ask-priced maker pass
+    shows a cheaper net edge (maker fee on the same ask) but is not
+    realizable: post-only cannot rest at the ask, and the own-side bid sits
+    below the lane band.  These guards pin:
+
+      * ``_pf_lane`` detection on either route pass;
+      * ``_pf_lane`` in the force-taker condition;
+      * maker-only lane admissions suppressed as ``pinned_fav_taker_only``;
+      * evidence-refused pinned probes keep the taker cross
+        (``MERID_PINNED_FAV_TAKER_PROBE``).
+    """
+
+    def _src(self):
+        import inspect
+        from merid.prediction import agent_grid_15m as ag
+        return inspect.getsource(ag)
+
+    def test_pf_lane_forces_taker_route(self):
+        src = self._src()
+        assert 'or _pf_lane' in src
+        # The force-taker condition must sit in the use_taker chain.
+        seg = src[src.find('_taker_sel = decision_taker.selected_outcome'):]
+        sel_block = seg[:seg.find('if use_taker:')]
+        assert 'or _pf_lane' in sel_block
+
+    def test_maker_only_pinned_admission_suppressed(self):
+        src = self._src()
+        assert 'pinned_fav_taker_only' in src
+        # Suppression must null the maker selection before route choice.
+        seg = src[src.find('_pf_lane and not _taker_sel and _maker_sel'):]
+        assert '_maker_sel = False' in seg[:800]
+
+    def test_pinned_probe_keeps_taker_cross(self):
+        src = self._src()
+        assert 'MERID_PINNED_FAV_TAKER_PROBE' in src
+        assert '_pf_taker_probe' in src
+        assert 'not _probe_restricted or _pf_taker_probe' in src
+
+
 if __name__ == "__main__":
     unittest.main()
