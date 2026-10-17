@@ -248,6 +248,122 @@ def test_no_side_mirror(monkeypatch):
     assert d.indicators.get("no_pinned_fav_qualifies") is True
 
 
+def _refused_cells():
+    """Scored-level refusal shaped like the live DOGE@92c observation:
+    the matched price cell is sparse-but-winning while the cross-price
+    side prior drags the pooled posterior far below the 93c breakeven —
+    CELL_EVIDENCE_INSUFFICIENT, non-toxic."""
+    return {
+        # Scored price-matched cell: the cohort's own record is winning
+        # (~95.5% like the live DOGE@92 cell) but thin.
+        "ETH|yes|90-100|mid": {"w": 10.0, "l": 0.5, "n_eff": 10.5,
+                               "n_raw": 60},
+        # Dense cheap-side losers: drag the LOO `side` parent mean toward
+        # ~0.3 so the sparse pinned cell's posterior lands far below its
+        # own cost basis (the pooled-prior contamination observed live).
+        "ETH|yes|40-60|mid": {"w": 20.0, "l": 40.0, "n_eff": 60.0,
+                              "n_raw": 300},
+        "BTC|yes|40-60|mid": {"w": 8.0, "l": 22.0, "n_eff": 30.0,
+                              "n_raw": 150},
+    }
+
+
+def test_refused_evidence_demotes_to_probe(tmp_path, monkeypatch):
+    """Inside the armed band a non-toxic evidence refusal demotes to the
+    lane's bounded probe (commit 3ef44817 design): admission owner is
+    pinned_fav, the refusal is recorded as an override label, and the
+    decision still clears the lane gate (floor/TTE/cap)."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-8.0")
+    monkeypatch.setenv("MERID_EVIDENCE_MIN_CELL_NEFF", "4")
+    monkeypatch.setenv("MERID_EVIDENCE_MIN_PARENT_NEFF", "8")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, _refused_cells()),
+    )
+    d = _decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), d.no_trade_reason,
+        d.indicators.get("yes_admission_reason"),
+        d.indicators.get("evidence_yes"),
+    )
+    assert d.indicators.get("yes_admission_owner") == "pinned_fav"
+    assert d.indicators.get("yes_admission_decision") == "allowed"
+    assert str(
+        d.indicators.get("yes_admission_reason") or ""
+    ).startswith("pinned_fav_probe:")
+    assert (
+        d.indicators.get("yes_evidence_override")
+        == "pinned_fav_refused_probe"
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("entry_lane") == "pinned_fav"
+
+
+def test_refused_evidence_demotion_lane_disabled(tmp_path, monkeypatch):
+    """Same refused cell with the lane OFF stays a hard block owned by
+    evidence_escape — the demotion is lane-scoped, not a global evidence
+    bypass."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "0")
+    monkeypatch.setenv("MERID_EVIDENCE_MIN_CELL_NEFF", "4")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, _refused_cells()),
+    )
+    d = _decision()
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_admission_owner") != "pinned_fav"
+    assert "pinned_fav_probe" not in str(
+        d.indicators.get("yes_admission_reason") or ""
+    )
+
+
+def test_refused_evidence_hard_block_not_demoted(tmp_path, monkeypatch):
+    """A dense toxic cell (matching_hard_block) must NOT demote — the lane
+    probes unproven cohorts, never measured losers."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-8.0")
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "veto")
+    monkeypatch.setenv("MERID_EVIDENCE_MIN_CELL_NEFF", "4")
+    toxic = {
+        # Dense measured loser at the candidate's own price bucket.
+        "ETH|yes|90-100|mid": {"w": 15.0, "l": 45.0, "n_eff": 60.0,
+                               "n_raw": 400},
+    }
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, toxic),
+    )
+    d = _decision()
+    assert d.selected_outcome is None
+    # The lane owns the terminal reason: the scored level's own measured
+    # win rate (25% at a ~93c breakeven) is a demonstrated loss, so the
+    # refusal is NOT demoted to a probe — reported as the lane's measured
+    # -loss veto (or the toxic-cell veto if the hard block fired first).
+    assert d.indicators.get("yes_admission_reason") in (
+        "pinned_fav_measured_loss",
+        "matching_toxic_cell",
+    )
+    assert "pinned_fav_probe" not in str(
+        d.indicators.get("yes_admission_reason") or ""
+    )
+
+
+def test_refused_probe_still_hits_lane_floor(tmp_path, monkeypatch):
+    """The demotion lifts only the evidence veto — a weak pin whose claim
+    misses the lane floor is still vetoed by pinned_fav_low_ev."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-8.0")
+    monkeypatch.setenv("MERID_EVIDENCE_MIN_CELL_NEFF", "4")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, _refused_cells()),
+    )
+    d = _decision(spot_price=100.02)  # p_yes ~ coin flip: deeply negative claim
+    assert d.selected_outcome is None
+    assert d.indicators.get("yes_block") == "pinned_fav_low_ev"
+
+
 def test_normal_band_candidates_unaffected(monkeypatch):
     """A balanced-market candidate keeps the generic p-cap and formula
     lane — the pinned lane's machinery never touches 10-75c prices."""

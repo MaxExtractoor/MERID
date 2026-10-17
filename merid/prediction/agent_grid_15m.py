@@ -9213,10 +9213,27 @@ class LeanAgent15m:
             _bounded_taker_cross = os.environ.get(
                 "MERID_BOUNDED_TAKER_CROSS", "1"
             ).strip().lower() in ("1", "true", "yes")
+            # 2026-10-17 (pinned-fav): the lane's measured cohort is the
+            # *ask-taker* cohort — 92-98c asks at TTE 300-900s settled
+            # favorite-direction 97.5-98.8% (+1.9..+7.3c net of taker
+            # fees).  A post-only favorite bid cannot replicate that
+            # measurement: at a 1c spread (bid 91/ask 92) no in-band
+            # resting price exists — >=92 crosses, <=91 is below the lane
+            # band and fails the canonical check.  Evidence-refused pinned
+            # probes therefore keep the taker cross; probe sizing
+            # (1 contract) and the daily cap still bound them.  Kill
+            # switch: MERID_PINNED_FAV_TAKER_PROBE=0 restores the generic
+            # post-only probe restriction for this lane.
+            _pf_taker_probe = (
+                _decision_lane == "pinned_fav"
+                and os.environ.get(
+                    "MERID_PINNED_FAV_TAKER_PROBE", "1"
+                ).strip().lower() in ("1", "true", "yes")
+            )
             _cross_as_taker = (
                 _bounded_taker_cross
                 and liquidity_role == "taker"
-                and not _probe_restricted
+                and (not _probe_restricted or _pf_taker_probe)
             )
             if _bounded_taker_cross and liquidity_role == "taker" and _probe_restricted:
                 logger.info(

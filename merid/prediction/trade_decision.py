@@ -4831,6 +4831,7 @@ def compute_trade_decision(
                                 and float(_px) >= MERID_EDGE_MARGINAL_RELIEF_LO_CENTS
                                 and _ne_c >= _d.total * 100.0
                             )
+                            _pf_admit = False
                             if _mr_ok:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "marginal_relief"
@@ -4881,21 +4882,126 @@ def compute_trade_decision(
                                     f"{_side}_evidence_override_denied"
                                 ] = _d.provisional_block_reason or _ed.code
                             else:
-                                indicators[f"{_side}_admission_owner"] = (
-                                    "evidence_escape"
-                                )
-                                indicators[f"{_side}_admission_decision"] = (
-                                    "blocked"
-                                )
-                                indicators[f"{_side}_admission_reason"] = (
-                                    "generic_escape_budget_exhausted"
-                                    if _ed.code in (
-                                        "ESCAPE_CAP_EXHAUSTED",
-                                        "CHALLENGE_CAP_EXHAUSTED",
+                                # 2026-10-17 (pinned-fav refused-evidence
+                                # probe): inside the armed lane window the
+                                # cohort was classifier-vetoed for its entire
+                                # history, so a non-toxic refusal
+                                # (CELL_EVIDENCE_INSUFFICIENT et al.) is the
+                                # steady-state label the lane exists to
+                                # measure — per commit 3ef44817 it demotes
+                                # to the lane's bounded probe instead of a
+                                # veto.  Admission then belongs to the
+                                # lane's own gates (``pinned_fav_block``:
+                                # floor/TTE/daily cap, evaluated below) and
+                                # the escape lane's *structural* vetoes
+                                # (bookflow, counter-move, knife, late
+                                # window) still run here.  Hard/toxic blocks
+                                # and EVIDENCE_UNUSABLE keep vetoing.
+                                _pf_reach = False
+                                try:
+                                    from merid.prediction import (
+                                        directional_regime as _dr_pf,
                                     )
-                                    else _ed.code.lower()
-                                )
-                            if not _mr_ok:
+                                    _pf_reach = bool(
+                                        _dr_pf.pinned_fav_reachable(
+                                            float(_px), seconds_to_expiry
+                                        )
+                                    )
+                                except Exception:
+                                    _dr_pf = None  # type: ignore[assignment]
+                                _pf_veto = None
+                                if _pf_reach:
+                                    # Measured-loser check on the scored
+                                    # level's *own* weighted win rate, not
+                                    # the pooled posterior: a sparse 92-98c
+                                    # cell's posterior is shrunk toward the
+                                    # cross-price parent (~0.50), so the
+                                    # lane's lcb_ev test can never pass —
+                                    # the contamination that turned the
+                                    # 95.5%-win DOGE@92 cohort into a
+                                    # "-44.8c measured loss" verdict.  The
+                                    # honest discriminator is the level's
+                                    # own w/l vs the entry's breakeven.
+                                    _pf_wn = float(
+                                        _ed.wins_weighted or 0.0
+                                    ) + float(_ed.losses_weighted or 0.0)
+                                    _pf_measured_loss = (
+                                        _pf_wn > 0.0
+                                        and (
+                                            float(_ed.wins_weighted or 0.0)
+                                            / _pf_wn
+                                        )
+                                        < float(_px) / 100.0 + float(fee)
+                                    )
+                                    if _pf_measured_loss:
+                                        _pf_veto = "pinned_fav_measured_loss"
+                                    elif _ed.matching_hard_block or _ed.code in (
+                                        "MATCHING_TOXIC_CELL",
+                                        "EVIDENCE_UNUSABLE",
+                                        "PINNED_FAV_CAP_EXHAUSTED",
+                                    ):
+                                        _pf_veto = _ed.code.lower()
+                                    else:
+                                        _pf_veto = _evidence_escape_veto_reason(
+                                            asset=asset,
+                                            side=_side,
+                                            price_cents=float(_px),
+                                            net_ev_cents=float(_ne_c),
+                                            required_edge_cents=(
+                                                _dr_pf._pinned_fav_min_ev_cents()
+                                            ),
+                                            seconds_to_expiry=seconds_to_expiry,
+                                            spot_price=spot_price,
+                                            strike_price=strike_price,
+                                            annualized_vol=resolved_vol,
+                                            feature_snapshot=feature_snapshot,
+                                            dir_regime=directional_regime,
+                                        )
+                                _pf_admit = bool(_pf_reach and _pf_veto is None)
+                                if _pf_admit:
+                                    if _side == "yes":
+                                        yes_evidence_ok = True
+                                        yes_evidence_reason = None
+                                    else:
+                                        no_evidence_ok = True
+                                        no_evidence_reason = None
+                                    indicators[f"{_side}_admission_owner"] = (
+                                        "pinned_fav"
+                                    )
+                                    indicators[
+                                        f"{_side}_admission_decision"
+                                    ] = "allowed"
+                                    indicators[f"{_side}_admission_reason"] = (
+                                        f"pinned_fav_probe:{_ed.code.lower()}"
+                                    )
+                                    indicators[
+                                        f"{_side}_evidence_override"
+                                    ] = "pinned_fav_refused_probe"
+                                    indicators[
+                                        f"{_side}_evidence_override_detail"
+                                    ] = _ed.detail()
+                                else:
+                                    indicators[f"{_side}_admission_owner"] = (
+                                        "pinned_fav"
+                                        if _pf_reach
+                                        else "evidence_escape"
+                                    )
+                                    indicators[
+                                        f"{_side}_admission_decision"
+                                    ] = "blocked"
+                                    indicators[f"{_side}_admission_reason"] = (
+                                        _pf_veto
+                                        or (
+                                            "generic_escape_budget_exhausted"
+                                            if _ed.code
+                                            in (
+                                                "ESCAPE_CAP_EXHAUSTED",
+                                                "CHALLENGE_CAP_EXHAUSTED",
+                                            )
+                                            else _ed.code.lower()
+                                        )
+                                    )
+                            if not _mr_ok and not _pf_admit:
                                 _reason_stem = {
                                     "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
                                     "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",

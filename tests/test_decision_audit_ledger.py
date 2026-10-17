@@ -717,6 +717,11 @@ def test_reconcile_fill_outcomes_heals_settled_rows(
         ],
     )
     monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+    # tmp_db lives in the shared system temp dir, so the default reconcile
+    # state sidecar leaks watermarks across tests/runs — pin it per-test.
+    monkeypatch.setenv(
+        "MERID_RECONCILE_STATE_PATH", str(tmp_path / "reconcile_state.json")
+    )
 
     ledger = DecisionAuditLedger(db_path=tmp_db)
     dec = _enter_decision_no()
