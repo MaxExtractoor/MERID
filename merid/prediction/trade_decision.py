@@ -970,12 +970,19 @@ def _evidence_escape_veto_reason(
                     return "evidence_escape_knife_edge"
         except (TypeError, ValueError):
             pass
-    # One-sided book pressure opposite the held side.
+    # One-sided book pressure opposite the held side.  ``held_price_cents``
+    # carries the measured >=50c exemption into the escape path — the main
+    # gate already passes it, and the 2026-10-14 counterfactual showed the
+    # veto forfeiting +2.1..+4.4c/tr above the floor.  Without this the
+    # pinned-fav band (92-98c) was vetoed by a protection measured
+    # net-negative in its entire domain.
     if MERID_ESCAPE_BOOKFLOW_VETO:
         try:
             from merid.prediction import directional_regime as _dreg
 
-            _bf = _dreg.bookflow_block_reason(feature_snapshot, asset, side)
+            _bf = _dreg.bookflow_block_reason(
+                feature_snapshot, asset, side, held_price_cents=_px
+            )
         except Exception:
             _bf = None
         if _bf is not None:

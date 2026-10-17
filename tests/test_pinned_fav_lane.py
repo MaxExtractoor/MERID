@@ -395,3 +395,43 @@ def test_pcap_headroom_only_in_band(monkeypatch):
     for bd in (d2.yes_edge_breakdown, d2.no_edge_breakdown):
         if bd is not None:
             assert bd.p_selected <= 0.95 + 1e-9
+
+
+# ------------------------------------------------- escape-path plumbing ----
+
+class _Slice:
+    def __init__(self, yes_imb=None, no_imb=None):
+        self.rti_returns = {}
+        self.book_imbalance_yes = yes_imb
+        self.book_imbalance_no = no_imb
+
+
+class _Snap:
+    def __init__(self, slices):
+        self.by_asset = slices
+
+
+def test_escape_bookflow_respects_price_exemption(monkeypatch):
+    """2026-10-17: the escape path omitted ``held_price_cents`` when calling
+    ``bookflow_block_reason``, silently dropping the measured >=50c
+    exemption the main gate applies (SOL no@92c/TTE339 vetoed
+    evidence_escape_bookflow).  In-band pinned candidates must see the
+    exemption; below-floor candidates keep the veto."""
+    monkeypatch.setenv("MERID_BOOKFLOW_EXEMPT_MIN_PRICE_CENTS", "50")
+    monkeypatch.setenv("MERID_BOOKFLOW_IMB_BLOCK", "0.45")
+    snap = _Snap({"SOL": _Slice(yes_imb=0.60)})
+    kw = dict(
+        asset="SOL", side="no",
+        net_ev_cents=-6.0, required_edge_cents=-8.0,
+        seconds_to_expiry=339.0,       # outside escape late-window 120-240
+        spot_price=None, strike_price=None, annualized_vol=None,
+        feature_snapshot=snap, dir_regime=None,
+    )
+    # In the pinned band (92c >= 50c floor): exempt, no bookflow veto.
+    assert _td._evidence_escape_veto_reason(price_cents=92.0, **kw) is None
+    # Below the exemption floor (35c < 50c, outside the 40-60c knife band):
+    # the measured-protective veto still applies.
+    assert (
+        _td._evidence_escape_veto_reason(price_cents=35.0, **kw)
+        == "evidence_escape_bookflow"
+    )
