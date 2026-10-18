@@ -122,19 +122,21 @@ class IntegrityMonitor:
                 logger.warning("[INTEGRITY-MONITOR] WS bridge not available")
                 return
             
-            # Get forwarder stats from simpler bridge
-            stats = bridge.stats()
-            events_processed = stats.get('messages_received', 0)
-            last_event_ts = stats.get('last_message_time', 0.0) / 1000 if stats.get('last_message_time') else 0.0
-            
-            if last_event_ts == 0.0:
+            # Use the forwarder's own health view — same monotonic-clock
+            # source the entry gate consumes.  (The previous stats() path
+            # mixed units/clocks: last_message_time is epoch seconds from
+            # replay_time(), it was divided by 1000 as if ms, then compared
+            # against time.monotonic() — producing bogus ~600k-second
+            # "stalled" CRITICALs on every check.)
+            health = bridge.get_forward_loop_health() or {}
+            events_processed = health.get('event_count_total', 0)
+            time_since_last = health.get('time_since_last_event')
+            if health.get('first_event_ts', 0.0) == 0.0 or not events_processed:
                 # Never received events - check if we've been running long enough
                 logger.info("[INTEGRITY-MONITOR] WS forwarder idle (no events yet)")
                 return
-            
-            # Check stall
-            import time
-            time_since_last = time.monotonic() - last_event_ts
+            if time_since_last is None:
+                time_since_last = float("inf")
             
             if time_since_last > self._ws_stall_threshold:
                 await self._send_critical_alert(

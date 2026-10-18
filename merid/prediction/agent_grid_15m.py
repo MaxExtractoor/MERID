@@ -8558,11 +8558,14 @@ class LeanAgent15m:
                     max_missing_samples=_settlement_max_missing_samples(),
                 )
             except Exception as sd_exc:
+                # Expected near the settlement-sample window boundary: elapsed
+                # slots exist before the sampler has recorded any values.
+                # Fail-closed refuse is correct; the reason is already in the
+                # message and the durable reject record — no stack spam.
                 logger.warning(
                     "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but distribution build failed; refusing entry: %s",
                     asset,
                     sd_exc,
-                    exc_info=True,
                 )
                 self._record_signal_rejection(
                     "settlement_distribution_unavailable",
