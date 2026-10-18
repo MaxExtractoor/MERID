@@ -5926,12 +5926,23 @@ async def _run_loop(self) -> None:
                             # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
                             # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
                             from merid.event_venues.kalshi.risk_parameters import validate_edge
-                            
-                            # Validate edge using unified 2.5% threshold from profile edge_bands
-                            is_valid, reason = validate_edge(edge, asset, confidence=0.5)
-                            
+
+                            # Validate edge using unified 2.5% threshold from profile edge_bands.
+                            # 2026-10-18: bounded lanes (window_quota, pinned_fav, cells, canary)
+                            # are admitted under their own stamped floors — the generic 2.5% abs
+                            # floor is structurally unreachable for them (a quota emit fires only
+                            # when normal lanes declined, i.e. edge is by construction weak).
+                            # Their floor is enforced at _validate_candidate_edge and the
+                            # executable-cost EV re-gate downstream; skipping here removes only
+                            # the duplicate, unreachable barrier.
+                            _bounded_lane = candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
+                            if _bounded_lane:
+                                is_valid, reason = True, "bounded_lane_floor_deferred"
+                            else:
+                                is_valid, reason = validate_edge(edge, asset, confidence=0.5)
+
                             if not is_valid:
-                                logger.debug(
+                                logger.info(
                                     "[15m-LOOP] Edge validation failed: asset=%s edge=%.6f reason=%s",
                                     asset, edge, reason
                                 )
