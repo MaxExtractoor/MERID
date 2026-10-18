@@ -2730,11 +2730,6 @@ class PositionMonitor:
 
             if state == "SUBMISSION_UNKNOWN":
                 # Already timed out. Block duplicate exits until reconciled.
-                logger.warning(
-                    "[EXIT-INTENT-IN-FLIGHT] Exit in SUBMISSION_UNKNOWN: position_id=%s client_order_id=%s; "
-                    "reconciliation required before re-arm",
-                    position_id[:8], client_order_id
-                )
                 # CRITICAL FIX (2026-08-27): A single failed reconcile must not leave the
                 # lock stuck forever.  Re-attempt reconciliation every few seconds, with a
                 # cap, so network or pagination hiccups do not permanently block exits.
@@ -2748,9 +2743,14 @@ class PositionMonitor:
                 if now - last_reconcile > retry_interval:
                     flight["last_reconcile_at"] = now
                     flight["reconcile_count"] = reconcile_count + 1
+                    # 2026-10-18: merged the per-poll "reconciliation required"
+                    # warning into the reconcile-cadence log — the old line
+                    # emitted ~10x/s under eval polling while the retry logic
+                    # above already paces actual probes.
                     logger.warning(
-                        "[EXIT-INTENT-IN-FLIGHT] Re-attempting reconcile %d for position=%s client_order_id=%s",
-                        reconcile_count + 1, position_id[:8], client_order_id
+                        "[EXIT-INTENT-IN-FLIGHT] Exit in SUBMISSION_UNKNOWN: position_id=%s client_order_id=%s; "
+                        "re-attempting reconcile %d (blocked until reconciled)",
+                        position_id[:8], client_order_id, reconcile_count + 1,
                     )
                     self._schedule_exit_reconcile(position_id, client_order_id)
                 return True

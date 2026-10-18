@@ -206,6 +206,12 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
         ExitOrderAttemptState.PARTIALLY_FILLED,
         ExitOrderAttemptState.FILLED,
+        # The submit call can die mid-dispatch before any bytes reach the
+        # wire (exception inside route_order_async — e.g. a store read that
+        # crashed on "database is locked").  The exchange outcome is then
+        # "never accepted", not "rejected" — TERMINAL_UNFILLED is the honest
+        # terminal; a late exchange fill still wins via the back-fill edge.
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
     },
     ExitOrderAttemptState.SUBMISSION_UNKNOWN: {
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
@@ -296,6 +302,9 @@ for _late_fill_state in (
     ExitOrderAttemptState.EXPIRED_EXCHANGE,
     ExitOrderAttemptState.CANCELED,
     ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED,
+    # A submit that crashed pre-wire is TERMINAL_UNFILLED locally, but if the
+    # request did reach Kalshi the order can still fill — exchange truth wins.
+    ExitOrderAttemptState.TERMINAL_UNFILLED,
 ):
     EXIT_VALID_TRANSITIONS.setdefault(_late_fill_state, set()).add(
         ExitOrderAttemptState.FILLED
@@ -329,8 +338,13 @@ class OrderAttemptStore:
         if self._persistent_conn is not None:
             return self._persistent_conn
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn = sqlite3.connect(self._db_path, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # busy_timeout must precede journal_mode: the WAL pragma itself
+        # acquires a lock and raises "database is locked" instantly under
+        # concurrent writers (observed 2026-10-18: finalize_order_identity
+        # crashed mid-route on a SOL exit whose order had already filled).
+        conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn

@@ -442,8 +442,12 @@ class DecisionAuditLedger:
         """Return False when a queued write should be dropped for load."""
         if priority == "high":
             return True
-        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "1500"))
-        crit = int(os.environ.get("MERID_AUDIT_SHED_CRIT_DEPTH", "5000"))
+        # 2026-10-18: engage earlier — at depth 749 nothing shed while the
+        # writer ran 334s behind and the backlog still consumed disk/CPU on
+        # the starved loop.  LOW (noise telemetry) samples out first;
+        # NORMAL only samples at crit; HIGH (fills/settlements) never sheds.
+        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "700"))
+        crit = int(os.environ.get("MERID_AUDIT_SHED_CRIT_DEPTH", "2500"))
         if depth < soft:
             return True
         self._shed_seq += 1
