@@ -9232,11 +9232,12 @@ class LeanAgent15m:
             # When a directional read exists, only that side may emit — a
             # countertrend fallback is the exact loss pattern this fixes.
             # With no read, the argmax side may fall back to its alternate.
+            _wq_argmax = decision.best_side
             if _wq_dir_pref is not None:
                 _wq_order = [_wq_dir_pref]
             else:
-                _wq_order = [decision.best_side]
-                _wq_alt = "no" if decision.best_side == "yes" else "yes"
+                _wq_order = [_wq_argmax]
+                _wq_alt = "no" if _wq_argmax == "yes" else "yes"
                 _wq_order.append(_wq_alt)
 
             _wq_side = None
@@ -9291,9 +9292,26 @@ class LeanAgent15m:
                     decision.p_no_calibrated if _wq_side == "no"
                     else decision.p_yes_calibrated
                 )
+                # When the dir-align pick differs from the ungated argmax,
+                # edge_breakdown must describe the emitted side or the
+                # DUAL-SIDE-CONTRADICTION invariant destroys the candidate.
+                _wq_bd = decision.edge_breakdown
+                _wq_new_best = decision.best_side
+                if _wq_side != _wq_argmax:
+                    _wq_bd = (
+                        decision.no_edge_breakdown
+                        if _wq_side == "no"
+                        else decision.yes_edge_breakdown
+                    ) or _wq_bd
+                    # The lane re-ranks the side by directional policy —
+                    # best_side follows the emitted side so downstream
+                    # coherence checks see a consistent triple (the true
+                    # argmax stays in window_quota.argmax_side).
+                    _wq_new_best = _wq_side
                 decision = replace(
                     decision,
                     selected_outcome=_wq_side,
+                    best_side=_wq_new_best,
                     selected_action="buy",
                     selected_outcome_price=_DQ(str(_wq_ask)) / _DQ(100),
                     p_selected=_DQ(str(float(_wq_p or 0))),
@@ -9301,6 +9319,7 @@ class LeanAgent15m:
                     min_required_edge=_DQ(
                         str(_wq_quota.quota_min_ev_cents() / 100.0)
                     ),
+                    edge_breakdown=_wq_bd,
                     no_trade_reason=None,
                 )
                 _ind_q = decision.indicators
@@ -9320,9 +9339,9 @@ class LeanAgent15m:
                     "dir_pref": _wq_dir_pref,
                     "flipped_from_argmax": (
                         _wq_dir_pref is not None
-                        and _wq_dir_pref != decision.best_side
+                        and _wq_dir_pref != _wq_argmax
                     ),
-                    "argmax_side": decision.best_side,
+                    "argmax_side": _wq_argmax,
                     "asset_r60": (
                         (
                             getattr(_wq_dir_reg, "asset_r60", None) or {}
@@ -9349,7 +9368,7 @@ class LeanAgent15m:
                     "forcing bounded taker emit",
                     asset, _wq_side, _wq_ask, _wq_ev_c,
                     float(seconds_to_expiry), _wq_depth,
-                    _wq_dir_pref, decision.best_side,
+                    _wq_dir_pref, _wq_argmax,
                     (
                         f"{(getattr(_wq_dir_reg, 'asset_r60', None) or {}).get(str(asset).upper()):+.5f}"
                         if _wq_dir_reg is not None
