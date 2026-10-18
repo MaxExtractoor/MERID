@@ -8877,6 +8877,8 @@ class LeanAgent15m:
             decision_maker = replace(
                 decision_maker,
                 selected_outcome=None,
+                selected_action=None,
+                selected_outcome_price=None,
                 no_trade_reason="pinned_fav_taker_only",
             )
             _maker_sel = False
@@ -9483,6 +9485,8 @@ class LeanAgent15m:
                         decision = replace(
                             decision,
                             selected_outcome=None,
+                            selected_action=None,
+                            selected_outcome_price=None,
                             no_trade_reason="evidence_escape_cap_exceeded_at_emission",
                         )
                     else:
@@ -9542,6 +9546,8 @@ class LeanAgent15m:
                         decision = replace(
                             decision,
                             selected_outcome=None,
+                            selected_action=None,
+                            selected_outcome_price=None,
                             no_trade_reason="pinned_fav_cap_exceeded_at_emission",
                         )
                     else:
@@ -9610,6 +9616,8 @@ class LeanAgent15m:
                         decision = replace(
                             decision,
                             selected_outcome=None,
+                            selected_action=None,
+                            selected_outcome_price=None,
                             no_trade_reason="window_quota_cap_exceeded_at_emission",
                         )
                     else:
@@ -9860,6 +9868,8 @@ class LeanAgent15m:
                     decision = replace(
                         decision,
                         selected_outcome=None,
+                        selected_action=None,
+                        selected_outcome_price=None,
                         no_trade_reason="canary_taker_daily_cap_or_window",
                     )
                 else:
@@ -9936,6 +9946,8 @@ class LeanAgent15m:
                     decision = replace(
                         decision,
                         selected_outcome=None,
+                        selected_action=None,
+                        selected_outcome_price=None,
                         no_trade_reason=f"marginal_band_{_mb_block}"[:120],
                     )
                 else:
