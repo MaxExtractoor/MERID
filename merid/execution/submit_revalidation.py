@@ -217,7 +217,7 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
     d.ev_order_cents = ev_order
     d.ev_per_contract_cents = ev_order / q_contracts if q_contracts else None
 
-    if ev_order <= 0 or (
+    if (ev_order <= 0 and inp.required_edge_per_contract_cents >= 0) or (
         d.ev_per_contract_cents is not None
         and d.ev_per_contract_cents < inp.required_edge_per_contract_cents
     ):
@@ -237,7 +237,15 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
 
 def _held_side_of(intent) -> Optional[str]:
     side = str(getattr(intent, "side", "") or "").lower()
-    return side if side in ("yes", "no") else None
+    if side in ("yes", "no"):
+        return side
+    # Canonical intents carry Kalshi-formatted side (BUY_YES / SELL_NO etc.) —
+    # the held outcome is the suffix.  Without this every entry intent fails
+    # closed with submit_inputs_missing.
+    for token in ("_yes", "_no"):
+        if side.endswith(token):
+            return token[1:]
+    return None
 
 
 def acquisition_book_from_state(state, held_side: str,
@@ -356,7 +364,10 @@ def input_from_intent(
             req_edge_dec *= 100
     except Exception:
         req_edge_dec = Decimal("0")
-    if req_edge_dec <= 0:
+    if req_edge is None:
+        # No stamped admission bound — apply the env default.  Bounded lanes
+        # deliberately stamp negative floors (e.g. window_quota -25c); those
+        # must survive rather than being clobbered to a positive default.
         try:
             req_edge_dec = Decimal(os.environ.get(
                 "MERID_SUBMIT_REQUIRED_EDGE_CENTS", "1.5"))
