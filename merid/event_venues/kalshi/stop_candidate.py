@@ -2326,7 +2326,43 @@ async def maybe_submit_stop_candidate(
         )
 
     from merid.event_venues.kalshi.order_router import route_order_async
-    result = await route_order_async(intent)
+    # 2026-10-18: bound the route call.  Starved stop-candidate submits sat
+    # SUBMITTING ~50-60s until the reconcile sweep terminal'd them
+    # position_closed with no exchange_order_id — the whole collapse window
+    # went by unprotected.  On timeout mark the durable attempt
+    # SUBMISSION_UNKNOWN so reconcile-by-client_order_id resolves the true
+    # outcome before any re-arm (Kalshi dedups on coid).
+    _route_timeout_s = float(
+        os.environ.get("MERID_EXIT_ROUTE_TIMEOUT_S", "20"))
+    try:
+        result = await asyncio.wait_for(
+            route_order_async(intent), timeout=_route_timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[STOP-CANDIDATE] route_order_async exceeded %.0fs; marking "
+            "submission unknown for reconcile: candidate=%s ticker=%s coid=%s",
+            _route_timeout_s, candidate.candidate_id,
+            candidate.market_ticker, intent.client_order_id,
+        )
+        if _exit_attempt is not None:
+            try:
+                from merid.event_venues.kalshi.order_attempt_store import (
+                    OrderAttemptStore as _OAStore,
+                    ExitOrderAttemptState as _EAS,
+                )
+                _OAStore().transition_exit_attempt(
+                    _exit_attempt.attempt_id,
+                    _EAS.SUBMISSION_UNKNOWN.value,
+                    actor="stop_candidate",
+                    reason=f"route_timeout_{_route_timeout_s:.0f}s",
+                )
+            except Exception:
+                pass
+        return OrderResult(
+            status="submission_unknown",
+            mode=TradingMode.PAPER,
+            reason=f"route_timeout_{_route_timeout_s:.0f}s",
+        )
     if _arb_pk is not None:
         try:
             _fill_cc = int(

@@ -2592,7 +2592,26 @@ def _run_exit_price_guard(
 
     # Determine slippage and whether this is a profit exit.
     is_profit_exit = canonical in ("take_profit",)
-    slippage = 0 if is_profit_exit else MERID_EXIT_MAX_SLIPPAGE_CENTS
+    # 2026-10-18: profit exits previously priced the IOC at exactly the best bid
+    # (slippage=0) — a "don't concede cents" doctrine that produced near-zero
+    # fills on moving books.  KXBTC15M-26OCT181915-15 submitted ~30 take_profit
+    # IOCs at 63-79c; every one arrived after the bid had stepped and canceled
+    # unfilled, riding a +36c winner to settlement.  Buffer the limit the same
+    # way stops do — Kalshi fills at the resting bid when it still exists, so
+    # the buffer only concedes when the book actually moved.  The
+    # profit_exit_not_profitable gate below (net_worst >= 0) still prevents a
+    # buffered limit from ever realizing a net loss.  The profit buffer
+    # defaults deeper than stop slippage: observed dispatch lag under load is
+    # ~5-15s against ~0.8c/s of peak bid decay, and a fat profit has room to
+    # absorb the walk while a thin one rejects at the net_worst floor either
+    # way.
+    slippage = (
+        int(os.environ.get(
+            "MERID_EXIT_PROFIT_SLIPPAGE_CENTS", "5"
+        ))
+        if is_profit_exit
+        else MERID_EXIT_MAX_SLIPPAGE_CENTS
+    )
 
     # Determine the limit price.  For hard-stop exits the limit is anchored to
     # the stop level minus slippage so the order cannot be swept past the stop.
@@ -2670,7 +2689,7 @@ def _run_exit_price_guard(
         limit_cents = max(1, min(99, _lock_floor))
         record["lock_threshold_cents"] = _lock_floor
     else:
-        limit_cents = best_bid if is_profit_exit else max(1, best_bid - slippage)
+        limit_cents = max(1, best_bid - slippage)
 
     # Clamp to valid Kalshi 1-99 cent range.
     limit_cents = max(1, min(99, int(round(limit_cents))))
@@ -4136,8 +4155,37 @@ async def _execute_exit_order(
 
         _max_resubmits = 2
         _current_resubmit = resubmit_count
+        # 2026-10-18: bound the route call.  Under event-loop starvation this
+        # await parked for 50-60s while the book collapsed through the exit
+        # price (KXBTC15M-26OCT181915-15: every post-19:09:48 submit sat
+        # SUBMITTING ~60s and was terminal'd position_closed with no
+        # exchange_order_id).  On timeout the in-flight order may or may not
+        # exist — identical semantics to a lost ack: mark SUBMISSION_UNKNOWN
+        # and let reconcile-by-client_order_id resolve it before any re-arm.
+        _exit_route_timeout_s = float(
+            os.environ.get("MERID_EXIT_ROUTE_TIMEOUT_S", "20"))
         while True:
-            result = await route_order_async(intent)
+            try:
+                result = await asyncio.wait_for(
+                    route_order_async(intent),
+                    timeout=_exit_route_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[EXIT-ORDER] route_order_async exceeded %.0fs; marking "
+                    "submission unknown for reconcile: position=%s market=%s "
+                    "client_order_id=%s",
+                    _exit_route_timeout_s,
+                    position.position_id[:8],
+                    position.market_id,
+                    intent.client_order_id,
+                )
+                if self._position_monitor:
+                    self._position_monitor._mark_exit_intent_submission_unknown(
+                        position.position_id,
+                        f"route_timeout_{_exit_route_timeout_s:.0f}s",
+                    )
+                return
             if _arb_position_key is not None:
                 try:
                     post_route_update(
