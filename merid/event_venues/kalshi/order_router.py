@@ -10923,7 +10923,22 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
         return None
 
     edge_pct = getattr(intent, "edge_pct", None) or 0.0
-    if edge_pct <= 0.0:
+    # Bounded lanes admit intentionally weak/negative-EV probes bounded by
+    # their lane caps; their round-trip bound is the stamped lane floor
+    # (min_required_edge, a fraction -> cents) rather than zero.  Only
+    # relaxes: unstamped or positively-stamped intents keep the zero bound.
+    _lane_floor_c = 0.0
+    try:
+        from merid.prediction.trade_decision import (
+            BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+        )
+        if getattr(intent, "decision_lane", None) in _BOUNDED_LANES:
+            _mre = getattr(intent, "min_required_edge", None)
+            if _mre is not None:
+                _lane_floor_c = min(0.0, float(_mre) * 100.0)
+    except Exception:
+        _lane_floor_c = 0.0
+    if _lane_floor_c == 0.0 and edge_pct <= 0.0:
         # No modeled edge; there is nothing to pay for fees or spread.
         return "net_of_cost:zero_or_negative_edge"
 
@@ -11024,19 +11039,21 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
     maker_net = gross_edge_cents - maker_round_trip_cents
     taker_net = gross_edge_cents - taker_round_trip_cents
 
-    # Determine the cheapest viable role.
-    if taker_net > 0 and (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
+    # Determine the cheapest viable role.  For bounded lanes the viability
+    # bound is the stamped lane floor (negative), not breakeven — the lane
+    # has already authorized the probe's worst-case cost upstream.
+    if taker_net > _lane_floor_c and (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
         # Upstream already requested taker and it pays.
         intent.policy_mode = "AGGRESSIVE_CONVICTION"
         return None
 
-    if maker_net > 0:
+    if maker_net > _lane_floor_c:
         # Passive/maker is the default; the policy engine will be forced to
         # maker-only NEUTRAL_MM below.
         intent.policy_mode = "NEUTRAL_MM"
         return None
 
-    if taker_net > 0:
+    if taker_net > _lane_floor_c:
         # Taker is viable even if it was not requested, but we still prefer
         # maker when maker is also viable. Since maker is not viable, allow
         # taker only if the strategy explicitly wants aggressiveness; otherwise
@@ -16465,6 +16482,21 @@ async def _route_live(
             # unit for tick-quantized Kalshi binaries; edge must clear the all-in
             # cost (fee + spread + risk buffer) for this specific price and role.
             canonical_edge_side_frac = getattr(intent, 'edge_yes_frac', None) if is_yes_side else getattr(intent, 'edge_no_frac', None)
+            # Bounded lanes (window_quota etc.) carry a stamped lane floor in
+            # min_required_edge; it governs their executable bound instead of
+            # the profitability floor below.  Only relaxes: non-bounded or
+            # unstamped intents keep the computed required edge.
+            _lane_min_edge_cents: Optional[float] = None
+            try:
+                from merid.prediction.trade_decision import (
+                    BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+                )
+                if getattr(intent, "decision_lane", None) in _BOUNDED_LANES:
+                    _mre = getattr(intent, "min_required_edge", None)
+                    if _mre is not None:
+                        _lane_min_edge_cents = float(_mre) * 100.0
+            except Exception:
+                _lane_min_edge_cents = None
             if CENTS_EDGE_GATE_ENABLED:
                 yes_bid = getattr(state, 'best_bid_cents', None)
                 yes_ask = getattr(state, 'best_ask_cents', None)
@@ -16488,6 +16520,10 @@ async def _route_live(
                     asset=extract_asset_from_ticker(intent.ticker),
                     spread_cents=spread_cents,
                 )
+                if _lane_min_edge_cents is not None:
+                    min_executable_edge_cents = min(
+                        min_executable_edge_cents, _lane_min_edge_cents
+                    )
                 min_executable_edge_frac = min_executable_edge_cents / 100.0
                 edge_cents = (canonical_edge_side_frac or 0.0) * 100.0
                 if canonical_edge_side_frac is not None and edge_cents < min_executable_edge_cents:
@@ -16505,6 +16541,10 @@ async def _route_live(
             else:
                 # Legacy flat-fraction gate (emergency revert)
                 min_executable_edge_frac = 0.03  # 3% minimum (from profile)
+                if _lane_min_edge_cents is not None:
+                    min_executable_edge_frac = min(
+                        min_executable_edge_frac, _lane_min_edge_cents / 100.0
+                    )
                 if canonical_edge_side_frac is not None and canonical_edge_side_frac < min_executable_edge_frac:
                     logger.error(
                         "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s canonical_edge_side_frac=%.4f < min_executable_edge_frac=%.4f - REJECTING ORDER",
