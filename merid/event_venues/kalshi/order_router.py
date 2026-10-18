@@ -16405,6 +16405,25 @@ async def _route_live(
             # the configured minimum (default 0.50, overridable via
             # MERID_TRADE_DECISION_MIN_P_SELECTED for cost-basis entries).
             min_p_hat_cents = TRADE_DECISION_MIN_P_SELECTED * 100.0
+            # Bounded lanes (window_quota etc.) deliberately probe sides the
+            # model prices below market; their stamped lane floor bounds how
+            # far below the entry price p_selected may sit instead of the
+            # 0.50 release gate.  Only relaxes: non-bounded or unstamped
+            # intents keep the default bound.
+            try:
+                from merid.prediction.trade_decision import (
+                    BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+                )
+                if getattr(intent, "decision_lane", None) in _BOUNDED_LANES:
+                    _mre = getattr(intent, "min_required_edge", None)
+                    if _mre is not None:
+                        _bound_px = int(getattr(intent, "price_cents", 0) or 0)
+                        min_p_hat_cents = min(
+                            min_p_hat_cents,
+                            max(1.0, _bound_px + float(_mre) * 100.0),
+                        )
+            except Exception:
+                pass
             if p_hat_side_cents <= min_p_hat_cents:
                 logger.error(
                     "[ROUTER-INVARIANT-FAIL] ticker=%s side=%s p_hat_side_cents=%.2f <= %.2f - "
