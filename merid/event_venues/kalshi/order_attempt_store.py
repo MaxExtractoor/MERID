@@ -286,10 +286,16 @@ EXIT_VALID_TRANSITIONS[ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL
 # (late ack, cancel-after-fill, post-reject liquidity sweep).  The fill is
 # ground truth; refusing to record it leaves the durable attempt contradicting
 # the fills ledger (observed 2026-09-23: REJECTED_EXCHANGE -> FILLED).
+# NOT_ACCEPTED_CONFIRMED belongs in this set too: the not-accepted verdict is
+# derived from a REST order lookup that can lag an already-resting order —
+# when the exchange fill then lands it is authoritative (observed
+# 2026-10-18: NOT_ACCEPTED_CONFIRMED -> FILLED left the exit attempt
+# nonterminal and re-armed exit intents on an already-flat position).
 for _late_fill_state in (
     ExitOrderAttemptState.REJECTED_EXCHANGE,
     ExitOrderAttemptState.EXPIRED_EXCHANGE,
     ExitOrderAttemptState.CANCELED,
+    ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED,
 ):
     EXIT_VALID_TRANSITIONS.setdefault(_late_fill_state, set()).add(
         ExitOrderAttemptState.FILLED

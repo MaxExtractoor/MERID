@@ -8732,6 +8732,9 @@ class LeanAgent15m:
                         compute_directional_regime,
                     )
                     _dir_regime = compute_directional_regime(self._feature_snapshot)
+                    # Stash for the window-quota lane's directional-alignment
+                    # side preference (it runs after this nested call returns).
+                    self._dir_regime_last = _dir_regime
             except Exception as _dr_err:
                 logger.debug("[REGIME] compute failed: %s", _dr_err)
             decision = compute_trade_decision(
@@ -9162,31 +9165,127 @@ class LeanAgent15m:
                 str(getattr(decision, "ticker", "") or ticker or "")
             )
         ):
-            _wq_side = decision.best_side
-            _wq_ask = (
-                float(no_ask) if _wq_side == "no" else float(yes_ask)
-            )
-            _wq_bid = (
-                float(no_bid) if _wq_side == "no" else float(yes_bid)
-            )
-            _wq_depth = (
-                float(decision.no_depth_cc) if _wq_side == "no"
-                else float(decision.yes_depth_cc)
-            )
-            _wq_ev_frac = (
-                decision.no_net_edge if _wq_side == "no"
-                else decision.yes_net_edge
-            )
-            _wq_ev_c = float(_wq_ev_frac or 0) * 100.0
-            if (
-                _wq_ask > 0.0
-                and _wq_bid > 0.0
-                and _wq_quota.quota_band_match(_wq_ask)
-                and (_wq_ask - _wq_bid)
-                <= _wq_quota.quota_max_spread_cents()
-                and _wq_depth >= 100.0
-                and _wq_ev_c >= _wq_quota.quota_min_ev_cents()
-            ):
+            # 2026-10-18: directional alignment for the quota pick.  The
+            # argmax side is the model's lean, which is routinely inside
+            # noise; the settlement underlier's own 60s return is the
+            # better directional read at this horizon (spot momentum leads
+            # contract repricing — Windmill's 781-bet Kalshi-15m study lost
+            # 3.35c/contract following *contract* price momentum, while
+            # Turbine's external-venue velocity strategies won).  Applies
+            # per asset via DirectionalRegime.asset_r60, not just BTC.
+            # Preference order: this asset's r60 beyond MERID_WINDOW_QUOTA_
+            # DIR_MIN_R60_BP, else the confirmed cross-asset label family,
+            # else the unaligned argmax.  A countertrend side inside a
+            # *_CONFIRMED regime is never emitted (regime_entry_block,
+            # same veto the normal lanes use, deep-ITM exception intact).
+            _wq_dir_pref = None
+            _wq_dir_reg = getattr(self, "_dir_regime_last", None)
+            try:
+                if (
+                    _wq_dir_reg is not None
+                    and time.time() - float(getattr(_wq_dir_reg, "ts", 0.0) or 0.0)
+                    > 300.0
+                ):
+                    _wq_dir_reg = None
+            except Exception:
+                _wq_dir_reg = None
+            _wq_dir_on = os.environ.get(
+                "MERID_WINDOW_QUOTA_DIR_ALIGN", "1"
+            ).strip().lower() in ("1", "true", "yes")
+            if _wq_dir_on and _wq_dir_reg is not None:
+                try:
+                    _wq_r60 = (
+                        getattr(_wq_dir_reg, "asset_r60", None) or {}
+                    ).get(str(asset).upper())
+                except Exception:
+                    _wq_r60 = None
+                _wq_min_r60 = float(
+                    os.environ.get("MERID_WINDOW_QUOTA_DIR_R60_BP", "2.0")
+                ) / 10000.0
+                if (
+                    _wq_r60 is not None
+                    and math.isfinite(_wq_r60)
+                    and abs(_wq_r60) >= _wq_min_r60
+                ):
+                    _wq_dir_pref = "yes" if _wq_r60 > 0 else "no"
+                else:
+                    _wq_lbl = (getattr(_wq_dir_reg, "label", "") or "").upper()
+                    if _wq_lbl.startswith("RALLY"):
+                        _wq_dir_pref = "yes"
+                    elif _wq_lbl.startswith("SELL_OFF"):
+                        _wq_dir_pref = "no"
+
+            _wq_z = None
+            try:
+                _wq_z = float(getattr(settlement_distribution, "z_score", None))
+                if not math.isfinite(_wq_z):
+                    _wq_z = None
+            except Exception:
+                _wq_z = None
+            try:
+                from merid.prediction.directional_regime import (
+                    regime_entry_block as _wq_regime_block,
+                )
+            except Exception:
+                _wq_regime_block = None
+
+            # When a directional read exists, only that side may emit — a
+            # countertrend fallback is the exact loss pattern this fixes.
+            # With no read, the argmax side may fall back to its alternate.
+            if _wq_dir_pref is not None:
+                _wq_order = [_wq_dir_pref]
+            else:
+                _wq_order = [decision.best_side]
+                _wq_alt = "no" if decision.best_side == "yes" else "yes"
+                _wq_order.append(_wq_alt)
+
+            _wq_side = None
+            _wq_ask = _wq_bid = _wq_depth = _wq_ev_c = None
+            _wq_notes = []
+            for _wq_cand in _wq_order:
+                if _wq_regime_block is not None and _wq_dir_reg is not None:
+                    _wq_rb = _wq_regime_block(_wq_dir_reg, _wq_cand, _wq_z)
+                    if _wq_rb is not None:
+                        _wq_notes.append(f"{_wq_cand}:regime:{_wq_rb}")
+                        continue
+                _cand_ask = (
+                    float(no_ask) if _wq_cand == "no" else float(yes_ask)
+                )
+                _cand_bid = (
+                    float(no_bid) if _wq_cand == "no" else float(yes_bid)
+                )
+                _cand_depth = (
+                    float(decision.no_depth_cc) if _wq_cand == "no"
+                    else float(decision.yes_depth_cc)
+                )
+                _cand_ev = float(
+                    (
+                        decision.no_net_edge
+                        if _wq_cand == "no"
+                        else decision.yes_net_edge
+                    )
+                    or 0
+                ) * 100.0
+                if (
+                    _cand_ask > 0.0
+                    and _cand_bid > 0.0
+                    and _wq_quota.quota_band_match(_cand_ask)
+                    and (_cand_ask - _cand_bid)
+                    <= _wq_quota.quota_max_spread_cents()
+                    and _cand_depth >= 100.0
+                    and _cand_ev >= _wq_quota.quota_min_ev_cents()
+                ):
+                    _wq_side = _wq_cand
+                    _wq_ask = _cand_ask
+                    _wq_bid = _cand_bid
+                    _wq_depth = _cand_depth
+                    _wq_ev_c = _cand_ev
+                    break
+                _wq_notes.append(
+                    f"{_wq_cand}:book ask={_cand_ask:.0f} bid={_cand_bid:.0f} "
+                    f"ev={_cand_ev:.1f}c depth={_cand_depth:.0f}"
+                )
+            if _wq_side is not None:
                 from decimal import Decimal as _DQ
                 _wq_p = (
                     decision.p_no_calibrated if _wq_side == "no"
@@ -9218,6 +9317,24 @@ class LeanAgent15m:
                     "claim_ev_cents": _wq_ev_c,
                     "tte_s": float(seconds_to_expiry),
                     "depth_cc": _wq_depth,
+                    "dir_pref": _wq_dir_pref,
+                    "flipped_from_argmax": (
+                        _wq_dir_pref is not None
+                        and _wq_dir_pref != decision.best_side
+                    ),
+                    "argmax_side": decision.best_side,
+                    "asset_r60": (
+                        (
+                            getattr(_wq_dir_reg, "asset_r60", None) or {}
+                        ).get(str(asset).upper())
+                        if _wq_dir_reg is not None
+                        else None
+                    ),
+                    "regime_label": (
+                        getattr(_wq_dir_reg, "label", None)
+                        if _wq_dir_reg is not None
+                        else None
+                    ),
                 }
                 liquidity_role = "taker"
                 aggressiveness = 1.0
@@ -9227,16 +9344,27 @@ class LeanAgent15m:
                 fee_cents = taker_fee_cents
                 logger.info(
                     "[WINDOW-QUOTA] asset=%s side=%s ask=%.1fc "
-                    "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f — "
+                    "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f "
+                    "dir_pref=%s argmax=%s r60=%s regime=%s — "
                     "forcing bounded taker emit",
                     asset, _wq_side, _wq_ask, _wq_ev_c,
                     float(seconds_to_expiry), _wq_depth,
+                    _wq_dir_pref, decision.best_side,
+                    (
+                        f"{(getattr(_wq_dir_reg, 'asset_r60', None) or {}).get(str(asset).upper()):+.5f}"
+                        if _wq_dir_reg is not None
+                        and (getattr(_wq_dir_reg, 'asset_r60', None) or {}).get(str(asset).upper()) is not None
+                        else "na"
+                    ),
+                    getattr(_wq_dir_reg, "label", "na"),
                 )
             else:
-                decision.indicators["window_quota_block"] = (
-                    f"ask={_wq_ask:.0f} bid={_wq_bid:.0f} "
-                    f"ev={_wq_ev_c:.1f}c depth={_wq_depth:.0f}"
-                )
+                _wq_block_detail = "; ".join(_wq_notes) or "no_candidate"
+                if _wq_dir_pref is not None:
+                    _wq_block_detail = (
+                        f"dir_pref={_wq_dir_pref} {_wq_block_detail}"
+                    )
+                decision.indicators["window_quota_block"] = _wq_block_detail
 
         # Cheap-NO research shadow lane (read-only): score every evaluation
         # whose executable NO ask sits in the research band so the
