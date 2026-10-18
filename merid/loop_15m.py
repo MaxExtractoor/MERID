@@ -9368,7 +9368,30 @@ def _validate_candidate_edge(self, candidate: Dict) -> bool:
         )
         return True
     
-    # Price-based signals: require positive edge
+    # Price-based signals: require positive edge — except bounded lanes.
+    # BOUNDED_POST_ONLY_LANES (window_quota, pinned_fav, cells, canaries)
+    # intentionally emit negative-EV probes bounded by per-lane floors; the
+    # claimed edge is checked against the stamped admission floor here and
+    # re-checked against the live submit price by the executable-cost EV
+    # re-gate.  A missing lane stamp keeps the legacy edge<=0 veto.
+    _lane = str(candidate.get("decision_lane") or "")
+    if _lane in BOUNDED_POST_ONLY_LANES:
+        _floor_c = candidate.get("effective_required_edge_cents")
+        if _floor_c is not None:
+            try:
+                _floor_c = float(_floor_c)
+            except Exception:
+                _floor_c = None
+        if _floor_c is not None:
+            if edge < _floor_c:
+                logger.warning(
+                    "[EDGE-VALIDATION] Bounded-lane edge degraded past lane floor: "
+                    "edge=%.2f floor=%.2f lane=%s ticker=%s",
+                    edge, _floor_c, _lane, candidate.get("ticker", "unknown")
+                )
+                return False
+            return True
+    
     if edge <= 0:
         logger.warning(
             "[EDGE-VALIDATION] Candidate edge is not positive: edge=%.2f ticker=%s",
