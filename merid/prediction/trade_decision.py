@@ -1850,7 +1850,18 @@ def apply_model_edge_floor_gate(decision: TradeDecision) -> TradeDecision:
         return decision
     sel = str(decision.selected_outcome)
     ind = decision.indicators or {}
-    if ind.get("entry_lane") == "settlement_convergence":
+    _floor_lane = ind.get("entry_lane")
+    if _floor_lane == "settlement_convergence":
+        return decision
+    if _floor_lane == "pinned_fav":
+        # 2026-10-18: pinned-fav exemption.  The lane's own band is 92-98c,
+        # where the raw model gap is mathematically capped at ~2-8c (price
+        # cannot exceed 100c), so the universal 4c raw-edge floor was an
+        # effective ban across most of the lane's domain - every observed
+        # veto (@92-97c, raw 0.9-1.8c) was structural, not informational.
+        # The lane's bound is its own net-EV floor (PINNED_FAV_MIN_EV_CENTS)
+        # plus daily cap and 1-contract post-only probe sizing; the cohort's
+        # settled counterfactual (+1.9..+7.3c) is the measured evidence.
         return decision
     breakdown = decision.edge_breakdown or (
         decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
@@ -7222,8 +7233,18 @@ def compute_trade_decision(
         # A negative dollar floor makes the EV/tail ratio check vacuous —
         # the ratio is negative for every candidate the lane exists to
         # admit, and the dollar floor already bounds the spend.
+        # 2026-10-18: bound the ratio at the lane floor expressed per unit
+        # of tail risk instead of a flat -1.  At deep-ITM prices the tail
+        # (1-p) is ~1-8c, so a -1 ratio floor vetoed admissions the lane's
+        # own -10..-15c floor explicitly allows (XRP: ratio -1.03 on a -15c
+        # floor at p=0.98).  floor/(1-p) admits exactly the dollar-floor
+        # envelope and still blocks EV worse than the lane bound.
         _ev_gate_min_ratio = (
-            Decimal("-1") if _ev_gate_min_dollar is not None else None
+            (
+                Decimal(str(_side_min_edge))
+                / max(Decimal("1") - p_selected, Decimal("0.005"))
+            )
+            if _ev_gate_min_dollar is not None else None
         )
         ev_input = EVInput(
             p_model=p_selected,
