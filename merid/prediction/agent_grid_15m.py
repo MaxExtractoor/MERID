@@ -9234,6 +9234,7 @@ class LeanAgent15m:
             # With no read, the argmax side may fall back to its alternate.
             _wq_argmax = decision.best_side
             _wq_flip_demoted = False
+            _wq_flip_stale_note = None
             if (
                 _wq_dir_pref is not None
                 and _wq_argmax is not None
@@ -9278,9 +9279,59 @@ class LeanAgent15m:
                         or (_wq_dir_pref == "no" and _wq_lbl_cf.startswith("RALLY"))
                     )
                 )
+                # 2026-10-18 (signal-recency guard): r60 and the regime label
+                # are lagging inputs — r60 is a 60s lookback on a spot feed
+                # whose poll staleness sawtooths past 10s, and the label is
+                # breadth over the same window.  Both can keep "confirming" a
+                # direction for tens of seconds after the tape has already
+                # turned.  The freshest directional read is the RTI velocity
+                # snapshot (~0.5-1s).  A flip is additionally confirmed only
+                # when (a) the spot input feeding r60 is fresh enough
+                # (MERID_WINDOW_QUOTA_DIR_SPOT_MAX_STALE_MS, default 6000) and
+                # (b) the fresh velocity — when present — does not already
+                # point the other way (reversal-in-progress veto; missing
+                # velocity does not veto).  Observed live: SELL_OFF_CONFIRMED
+                # authorized five NO flips at 17:05:2x-6x while the market
+                # had already V-reversed; ETH NO@43 settled 0.
+                try:
+                    _wq_spot_stale_ms = getattr(
+                        (getattr(self, "_last_spot_data", {}) or {}).get(asset),
+                        "staleness_ms",
+                        None,
+                    )
+                except Exception:
+                    _wq_spot_stale_ms = None
+                try:
+                    _wq_spot_max_ms = float(
+                        os.environ.get(
+                            "MERID_WINDOW_QUOTA_DIR_SPOT_MAX_STALE_MS", "6000"
+                        )
+                    )
+                except Exception:
+                    _wq_spot_max_ms = 6000.0
+                _wq_spot_fresh = (
+                    _wq_spot_stale_ms is None
+                    or float(_wq_spot_stale_ms) <= _wq_spot_max_ms
+                )
+                _wq_vel = getattr(self, "_last_velocity_value", None)
+                _wq_vel_ok = (
+                    _wq_vel is None
+                    or not isinstance(_wq_vel, (int, float))
+                    or not math.isfinite(_wq_vel)
+                    or (
+                        (_wq_dir_pref == "yes" and _wq_vel > 0)
+                        or (_wq_dir_pref == "no" and _wq_vel < 0)
+                    )
+                )
                 if not (_wq_flip_label_ok or _wq_flip_r60_ok):
                     _wq_dir_pref = None
                     _wq_flip_demoted = True
+                elif not (_wq_spot_fresh and _wq_vel_ok):
+                    _wq_dir_pref = None
+                    _wq_flip_demoted = True
+                    _wq_flip_stale_note = (
+                        f"stale:spot_ms={_wq_spot_stale_ms} vel={_wq_vel}"
+                    )
             if _wq_dir_pref is not None:
                 _wq_order = [_wq_dir_pref]
             else:
@@ -9390,6 +9441,7 @@ class LeanAgent15m:
                         and _wq_dir_pref != _wq_argmax
                     ),
                     "flip_demoted": _wq_flip_demoted,
+                    "flip_demote_detail": _wq_flip_stale_note,
                     "argmax_side": _wq_argmax,
                     "asset_r60": (
                         (
@@ -9431,7 +9483,7 @@ class LeanAgent15m:
                 _wq_block_detail = "; ".join(_wq_notes) or "no_candidate"
                 if _wq_flip_demoted:
                     _wq_block_detail = (
-                        f"flip_demoted {_wq_block_detail}"
+                        f"flip_demoted{('(' + _wq_flip_stale_note + ')') if _wq_flip_stale_note else ''} {_wq_block_detail}"
                     )
                 if _wq_dir_pref is not None:
                     _wq_block_detail = (

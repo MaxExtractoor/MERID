@@ -2432,9 +2432,24 @@ class PositionMonitor:
         """
         with self._lock:
             existing = self._exit_intent_in_flight.get(position_id, {})
+            # Re-marks for the SAME in-flight client_order_id must not refresh
+            # the dispatch timestamp — the timeout measures the age of the
+            # obligation, not the last monitor poll.  Observed live
+            # (2026-10-18, ETH-1715): a trail exit attempt wedged in
+            # SUBMITTING with order_id=null; every ~5s re-arm refreshed
+            # EXECUTION_PENDING's timestamp so the 15s timeout never fired,
+            # the in-flight lock stayed held, and every later exit decision
+            # deduped against the dead attempt while the position rode to 0.
+            # A genuinely new obligation (new/None coid) still starts a fresh
+            # clock.
+            _same_obligation = (
+                client_order_id is not None
+                and existing.get("client_order_id") == client_order_id
+                and existing.get("state") == "EXECUTION_PENDING"
+            )
             updated = {
                 "state": "EXECUTION_PENDING",
-                "timestamp": time.time(),
+                "timestamp": existing.get("timestamp", time.time()) if _same_obligation else time.time(),
                 "client_order_id": client_order_id if client_order_id is not None else existing.get("client_order_id"),
                 "reason": reason if reason is not None else existing.get("reason"),
                 "task": task if task is not None else existing.get("task"),
@@ -2447,7 +2462,12 @@ class PositionMonitor:
             self._exit_intent_in_flight[position_id] = updated
             if client_order_id:
                 self._position_to_client_order[position_id] = client_order_id
-                self._recent_exit_submissions[client_order_id] = time.time()
+                # Only a NEW obligation warms the submission cache.  Re-marks
+                # for the same wedged attempt must not extend the TTL — the
+                # timeout branch checks this cache and would otherwise keep
+                # the dead attempt "recently submitted" indefinitely.
+                if not _same_obligation:
+                    self._recent_exit_submissions[client_order_id] = time.time()
             logger.info(
                 "[EXIT-INTENT-IN-FLIGHT] Marked exit intent EXECUTION_PENDING: position_id=%s client_order_id=%s reason=%s attempt_id=%s",
                 position_id[:8],
@@ -2826,9 +2846,12 @@ class PositionMonitor:
         the durable backstop for when the callback/task died, the flight map
         was lost across a restart, or the transition write never ran
         (observed live: DOGE take_profit wedged SUBMITTING >15min,
-        2026-10-16)."""
+        2026-10-16).  180s proved far too slow for 15m markets — the ETH-1715
+        trail exit sat SUBMITTING ~205s while the position decayed to zero;
+        45s still dwarfs ACK latency but bounds the wedge to a fraction of
+        a position's life."""
         try:
-            return float(os.environ.get("MERID_EXIT_UNRESOLVED_RECONCILE_S", "180"))
+            return float(os.environ.get("MERID_EXIT_UNRESOLVED_RECONCILE_S", "45"))
         except (TypeError, ValueError):
             return 180.0
 
