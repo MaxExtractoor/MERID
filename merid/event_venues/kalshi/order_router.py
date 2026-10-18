@@ -19369,10 +19369,26 @@ def _run_shared_risk_guard_and_dedup(
         ):
             price = int(intent.price_cents)
 
-            # Prefer the signal generator's pre-computed net EV.
+            # Prefer the signal generator's pre-computed net EV.  Bounded
+            # lanes admit intentionally weak/negative-EV probes sized by
+            # their lane caps, so their floor is the stamped lane bound
+            # (min_required_edge, a fraction -> cents) rather than zero.
+            # Only relaxes: unstamped or positively-stamped lanes keep the
+            # non-positive-EV rejection.
             ev_net_cents = getattr(intent, "ev_net_cents", None)
             if ev_net_cents is not None:
-                if ev_net_cents <= 0:
+                _ev_floor_c = 0.0
+                try:
+                    from merid.prediction.trade_decision import (
+                        BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+                    )
+                    if getattr(intent, "decision_lane", None) in _BOUNDED_LANES:
+                        _mre = getattr(intent, "min_required_edge", None)
+                        if _mre is not None:
+                            _ev_floor_c = min(0.0, float(_mre) * 100.0)
+                except Exception:
+                    _ev_floor_c = 0.0
+                if ev_net_cents <= _ev_floor_c:
                     latency = (_time.monotonic() - t0) * 1000
                     logger.info(
                         "[NET-EDGE-FILTER] Rejecting %s: ev_net_cents=%.4f <= 0",
