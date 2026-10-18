@@ -11654,14 +11654,25 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     # lane's alternate side may be policy-vetoed upstream
                     # (countertrend, band, depth) so it is not actually
                     # tradable, and a chosen side whose repriced executable
-                    # edge is non-negative is a valid pick even when it is
-                    # not the argmax.  A genuine inversion (chosen repriced
-                    # edge < 0 while the alternate clears it) still blocks.
+                    # edge is inside its stamped lane bound is a valid pick
+                    # even when it is not the argmax.  The bound is the
+                    # lane's own effective_required_edge_cents floor (e.g.
+                    # -25c for window_quota), not zero — bounded probes are
+                    # intentionally weak/negative EV.  A genuine inversion
+                    # (chosen repriced edge below the lane floor) still
+                    # blocks; lanes without a stamp keep the 0 bound.
                     if is_winner_mismatch and _is_bounded_lane:
                         _chosen_repriced = (
                             _parity_edge_no if chosen_side == "no" else _parity_edge_yes
                         )
-                        if _chosen_repriced is not None and _chosen_repriced >= 0:
+                        _mismatch_bound = 0.0
+                        _eff_c = candidate.get("effective_required_edge_cents")
+                        if _eff_c is not None:
+                            try:
+                                _mismatch_bound = float(_eff_c) / 100.0
+                            except (TypeError, ValueError):
+                                _mismatch_bound = 0.0
+                        if _chosen_repriced is not None and _chosen_repriced >= _mismatch_bound:
                             logger.info(
                                 "[15M-LOOP] BOUNDED-LANE winner-mismatch downgrade: "
                                 "ticker=%s lane=%s chosen=%s chosen_repriced_edge=%.4f "

@@ -1379,13 +1379,35 @@ def validate_canonical_intent(
             raise OrderIntentValidationError(
                 f"hard_tte_cutoff:tte={i.time_to_expiry_seconds:.1f}s<={exit_only_cutoff:.0f}s"
             )
-        if i.ev_net_cents is not None and i.ev_net_cents <= 0:
+        # Positive-EV bound.  Bounded lanes (BOUNDED_POST_ONLY_LANES)
+        # deliberately admit weak/negative-EV probes sized by their lane
+        # caps, so their floor is the stamped lane bound
+        # (min_required_edge, a fraction -> cents) rather than zero.  Only
+        # ever relaxes: an unstamped or positively-stamped lane keeps the
+        # original non-positive-EV rejection.
+        _ev_floor_c = 0.0
+        try:
+            from merid.prediction.trade_decision import (
+                BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+            )
+            if i.decision_lane in _BOUNDED_LANES:
+                _mre = getattr(i, "min_required_edge", None)
+                if _mre is not None:
+                    _ev_floor_c = min(0.0, float(_mre) * 100.0)
+        except Exception:
+            _ev_floor_c = 0.0
+        if i.ev_net_cents is not None and i.ev_net_cents <= _ev_floor_c:
             raise OrderIntentValidationError(
                 f"negative_ev:ev_net_cents={i.ev_net_cents:.4f}"
             )
         if i.limit_cents <= 5 or i.limit_cents >= 95:
             _fee = i.fee_cents or 2
             _min_ev_extreme = 2.5 * _fee
+            # Bounded lanes use their stamped lane floor here too: the
+            # extreme-price surcharge would otherwise block every deep-price
+            # probe the lane's own bound admits (e.g. 95-97c quota band).
+            if _ev_floor_c < 0:
+                _min_ev_extreme = _ev_floor_c
             if i.ev_net_cents is not None and i.ev_net_cents < _min_ev_extreme:
                 raise OrderIntentValidationError(
                     f"insufficient_ev_extreme:ev={i.ev_net_cents:.4f}<min={_min_ev_extreme:.4f}"
