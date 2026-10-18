@@ -20858,7 +20858,13 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                               else None)
             except Exception:
                 _mkt_state = None
-            _rin = input_from_intent(intent, state=_mkt_state)
+            _tradable = True
+            if _mkt_state is not None:
+                _ms = str(getattr(_mkt_state, "status", "") or "").lower()
+                if _ms and _ms != "open":
+                    _tradable = False
+            _rin = input_from_intent(intent, state=_mkt_state,
+                                     market_trading=_tradable)
             _dec = (revalidate_entry(_rin) if _rin is not None else None)
             _rev_ms = round((_time.monotonic() - _rev_start) * 1000, 2)
             if _dec is None or (

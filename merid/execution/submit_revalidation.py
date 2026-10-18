@@ -143,7 +143,11 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
     # --- freshness -----------------------------------------------------
     now = time.time()
     if inp.prob_est_ts is not None:
-        d.prob_age_ms = int((now - inp.prob_est_ts) * 1000)
+        # prob_est_ts may be wall or monotonic depending on producer;
+        # pick the clock that yields a sane (non-huge-negative) age.
+        est = float(inp.prob_est_ts)
+        d.prob_age_ms = max(0, int((
+            (time.monotonic() if est < 1e9 else now) - est) * 1000))
         if d.prob_age_ms > inp.max_prob_age_ms:
             d.outcome = SUBMIT_PROBABILITY_STALE
             d.reason = f"prob_age_ms={d.prob_age_ms}>{inp.max_prob_age_ms}"
@@ -281,7 +285,16 @@ def acquisition_book_from_state(state, held_side: str,
     age_ms = None
     ts = getattr(state, "last_book_update_ts", None)
     if ts:
-        age_ms = max(0, int((time.time() - float(ts)) * 1000))
+        # last_book_update_ts is stamped with time.monotonic() by the
+        # store (market_state._sync_book_fields).  Compare against the same
+        # clock — mixing clocks would yield a negative/huge age and either
+        # hide staleness or reject every book.  If a wall-clock timestamp
+        # ever appears (ts >> monotonic range), fall back to wall math.
+        ts_f = float(ts)
+        if ts_f < 1e9:
+            age_ms = max(0, int((time.monotonic() - ts_f) * 1000))
+        else:
+            age_ms = max(0, int((time.time() - ts_f) * 1000))
     seq = getattr(state, "ws_last_seq", None) or getattr(
         state, "book_sequence", None)
     return AcquisitionBook(levels=sorted(levels, key=lambda l: l[0]),
