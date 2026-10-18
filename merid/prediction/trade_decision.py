@@ -7208,8 +7208,16 @@ def compute_trade_decision(
         if _sel_pf_lane:
             from merid.prediction import directional_regime as _dr_evg
             _side_min_edge = _dr_evg._pinned_fav_min_ev_cents() / 100.0
+        # 2026-10-18: scale the per-contract lane floor to this order's size.
+        # min_dollar_ev is an ORDER-level dollar bound; passing the bare
+        # per-contract floor silently tightened a -10c/contract lane to
+        # -10c/order at qty>1 contract, rejecting candidates the lane had
+        # admitted at its own bound.  Matches the submit-time re-gate in
+        # loop_15m which already multiplies by count.
         _ev_gate_min_dollar = (
-            Decimal(str(_side_min_edge)) if float(_side_min_edge) < 0.0 else None
+            Decimal(str(_side_min_edge))
+            * (Decimal(str(int(approved_size_cc))) / Decimal("100"))
+            if float(_side_min_edge) < 0.0 else None
         )
         # A negative dollar floor makes the EV/tail ratio check vacuous —
         # the ratio is negative for every candidate the lane exists to
