@@ -119,6 +119,7 @@ def main():
 
     # --- row-level export + reconciled deltas --------------------------------
     recon, unknown = [], []
+    qty_mismatch, qty_indeterminate = 0, 0
     with open(ROWS_OUT, "w", encoding="utf-8") as f:
         for r in rows:
             delta = r.get("exit_value_added_c")
@@ -127,8 +128,32 @@ def main():
             rec = dict(r)
             rec["delta_c"] = delta
             rec["settlement_known"] = known
-            rec["quantity_reconciled"] = (
-                "entry_qty_basis_only_allocated_exit_qty_not_exported")
+            # Quantity reconciliation: realized = (xw - entry_px)*tot_qty
+            # - entry_fee - tot_fee inverts to the allocated exit quantity
+            # whenever xw != entry_px.  Comparing to qty_contracts detects
+            # partial exits even though the ledger omits allocated qty.
+            iq = None
+            if r.get("closed_by") == "exit":
+                xw, ep = r.get("exit_exec_c"), r.get("entry_price_c")
+                fees = (r.get("entry_fee_c") or 0) + (r.get("exit_fee_c") or 0)
+                if xw is not None and ep is not None and abs(xw - ep) > 0.01:
+                    iq = ((r.get("realized_pnl_c") or 0) + fees) / (xw - ep)
+                    rec["implied_exit_qty_cc"] = round(iq * 100, 2)
+                    rec["entry_qty_cc"] = round(
+                        (r.get("qty_contracts") or 0) * 100, 2)
+                    if abs(iq - (r.get("qty_contracts") or 0)) > 0.01:
+                        qty_mismatch += 1
+                        rec["quantity_reconciled"] = (
+                            f"MISMATCH implied_exit={iq * 100:.1f}cc "
+                            f"vs entry={rec['entry_qty_cc']:.0f}cc")
+                    else:
+                        rec["quantity_reconciled"] = "matched"
+                else:
+                    qty_indeterminate += 1
+                    rec["quantity_reconciled"] = (
+                        "indeterminate:exec==entry_price qty unsolvable")
+            else:
+                rec["quantity_reconciled"] = "n/a:no_exit_fill"
             (recon if known else unknown).append(rec)
             f.write(json.dumps(rec, sort_keys=True) + "\n")
 
@@ -191,12 +216,15 @@ def main():
                               L * q - (r.get("entry_price_c") or 0) * q
                               - (r.get("entry_fee_c") or 0)))
         policies[f"hard_lock_{L}c"] = {
-            "confirmed_executable_positions": confirmed,
+            "observed_exit_fills_at_or_above_L": confirmed,
             "unconstrained_scenario_extrema_c": [round(sum(lo), 2),
                                                  round(sum(hi), 2)],
-            "note": "extrema are mathematically possible, NOT backtest PnL; "
-                    "do not rank thresholds on them. Marks/quotes/settlement "
-                    "are not executable evidence."}
+            "note": "confirmed = real exit fill at >=L in that record; does "
+                    "NOT establish the full position could have sold at L, "
+                    "nor that L was executable at an earlier trigger time. "
+                    "Extrema are mathematically possible, NOT backtest PnL; "
+                    "marks/quotes/settlement payouts are not executable "
+                    "evidence. Do not rank thresholds on them."}
 
     policies["corrected_trail"] = {"computable": False,
                                    "missing": "intra-window executable book "
@@ -221,13 +249,14 @@ def main():
         "benefit_from_exits_c": round(benefit, 2),
         "cost_of_exits_c": round(cost, 2),
         "sum_deltas_c": round(sum(deltas), 2),
-        "settle_payout_exceeded_gross_exit_proceeds_n": len(forfeited),
+        "exits_below_eventual_settlement_value_n": len(forfeited),
         "exec_exceeded_settle_value_n": len(helped),
         "settlement_unknown_n": len(unknown),
         "recoveries_forfeited_c": round(cost, 2),
         "losses_avoided_c": round(benefit, 2),
-        "note": "forfeited = settle_value > exit exec (binary outcome beat "
-                "the sale); includes below-floor executions by old policy",
+        "note": "exits_below_settlement means execution price < eventual "
+                "settlement value; it does NOT establish that holding would "
+                "have produced positive net PnL after entry cost and fees.",
     }
 
     # --- fill accounting ------------------------------------------------------
@@ -299,6 +328,28 @@ def main():
     report = {
         "label": "same-entry liquidation comparison (NOT a full "
                  "alternative-strategy simulation)",
+        "comparison_populations": {
+            "all_reported_rows_delta_c": round(actual_total - sum(
+                r["cf_hold_pnl_c"] or 0 for r in rows), 2),
+            "all_rows_note": "difference between reported aggregates; "
+                             "unknown-outcome rows have no valid hold "
+                             "counterfactual (treated as 0 here)",
+            "known_outcome_delta_c": round(delta_total, 2),
+            "known_outcome_note": "comparison over rows with both legs "
+                                  "known; subject to quantity alignment",
+            "quantity_mismatched_rows": qty_mismatch,
+            "quantity_indeterminate_rows": qty_indeterminate,
+        },
+        "acceptance_wording": (
+            "Reported actual net PnL was +191.88c. The known-settlement "
+            "ledger comparison was +140.83c versus same-entry hold, with "
+            "partial-exit quantity comparability still unresolved unless "
+            "verified separately. 35 of 88 known-outcome early exits "
+            "executed below eventual settlement value. Take-profit "
+            "attribution was dominated by below-entry executions. These "
+            "findings correct the prior accounting and recovery claims "
+            "but do not establish a causal policy advantage or justify a "
+            "policy change."),
         "deployment_scope": "all rows predate the exit arbiter; they cannot "
                             "evidence its floor enforcement either way",
         "n_positions": len(rows), "n_early_exits": len(early),
@@ -310,13 +361,25 @@ def main():
         "fill_accounting": fills_meta,
         "take_profit_audit": {
             "n": len(tp), "classifications": dict(cls_counts),
+            "classification_precedence": [
+                "1. below_entry_execution (exec < entry; loss-taking, "
+                "no floor guarantee under old policy)",
+                "2. else forfeited_settlement_win (settle 100 > exec)",
+                "3. else fees_turned_gross_gain_negative",
+                "4. else exit_added_value",
+                "5. else settlement_outcome_unknown / unclassified"],
+            "precedence_note": "categories overlap; each row takes the "
+                               "FIRST matching class, so forfeited_win rows "
+                               "exclude rows already counted below_entry",
             "export": str(TP_AUDIT)},
         "cohorts": cohorts,
         "invariants": {n: ok for n, ok in inv},
         "missing_data": {
             "allocated_exit_qty_per_row":
-                "not exported by exit_decision_ledger.py — partial-exit "
-                "quantity reconciliation limited to flagging",
+                "not exported by exit_decision_ledger.py — reconciled "
+                "post-hoc via implied-exit-qty inversion; "
+                f"{qty_mismatch} mismatched, {qty_indeterminate} "
+                "indeterminate (exec==entry)",
             "policy_version_per_row": "not recorded — all pre-arbiter",
             "tte_at_entry_s": sum(1 for r in rows
                                   if r.get("tte_at_entry_s") is None),
@@ -337,12 +400,16 @@ def main():
     print(f"delta(actual-hold,known)={delta_total:.2f}c  "
           f"benefit={benefit:.2f} cost={cost:.2f} "
           f"benefit-cost={benefit - cost:.2f}")
-    print(f"forfeited(settle>exec)={len(forfeited)} "
-          f"helped(exec>settle)={len(helped)}")
+    print(f"all-rows aggregate delta={actual_total - sum(r['cf_hold_pnl_c'] or 0 for r in rows):.2f}c "
+          f"(includes {len(unknown)} unknown-outcome rows)")
+    print(f"qty reconciliation: mismatched={qty_mismatch} "
+          f"indeterminate={qty_indeterminate} of {len(early)}")
+    print(f"exits below eventual settle value={len(forfeited)} "
+          f"exec above settle={len(helped)}")
     print(f"records-with-fills={fills_meta['completed_early_exit_records_with_fills']}")
     for L in HARD_LOCK_LEVELS:
         p = policies[f"hard_lock_{L}c"]
-        print(f"hard_lock_{L}c: confirmed_exec={p['confirmed_executable_positions']} "
+        print(f"hard_lock_{L}c: observed_fills_at_or_above={p['observed_exit_fills_at_or_above_L']} "
               f"extrema={p['unconstrained_scenario_extrema_c']}")
     print("\ntake_profit classifications:")
     for k, v in sorted(cls_counts.items()):
