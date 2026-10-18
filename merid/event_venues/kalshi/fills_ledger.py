@@ -2484,6 +2484,25 @@ class KalshiFillsLedger:
         Returns:
             True if new fill, False if duplicate
         """
+        # Event-driven reconcile wake (before dedupe): a fill observation
+        # carrying order/client ids may resolve an unresolved exit attempt.
+        # Inputs to durable accounting only — never a truth source.
+        try:
+            from merid.position_management.exit_reconcile_worker import (
+                get_exit_reconcile_worker,
+            )
+            _w = get_exit_reconcile_worker()
+            if _w is not None:
+                _w.note_fill_event(
+                    order_id=raw.get("order_id"),
+                    client_order_id=raw.get("client_order_id"),
+                    market_id=raw.get("ticker") or raw.get("market_ticker"),
+                    fill_id=(raw.get("fill_id") or raw.get("trade_id")
+                             or raw.get("id")),
+                )
+        except Exception:
+            pass
+
         # Ensure we have already-loaded fills in memory before deciding what is new.
         if self._loaded_count == 0:
             try:

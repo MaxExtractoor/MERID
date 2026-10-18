@@ -3026,6 +3026,31 @@ def _emit_execution_stage_latency(
             "caller_resolution_ms": _exec_delta_ms(
                 intent, "caller_resolution_start", "caller_resolution_end"
             ),
+            # Required stage metrics (2026-10-17): evaluation->submit,
+            # router queue wait, final-gate cost, freshness at submit,
+            # transport delay, exit responsiveness.  All derived from
+            # monotonic marks; UTC stamps are correlation-only.
+            "eval_to_submit_ms": _exec_delta_ms(
+                intent, "eval_end", "api_send"
+            ),
+            "queue_wait_ms": _exec_delta_ms(
+                intent, "router_entry", "router_dequeue"
+            ),
+            "submit_revalidation_ms": _exec_delta_ms(
+                intent, "submit_revalidation_start",
+                "submit_revalidation_end"
+            ),
+            "prob_age_at_submit_ms": getattr(
+                intent, "_submit_prob_age_ms", None
+            ),
+            "book_age_at_submit_ms": getattr(
+                intent, "_submit_book_age_ms", None
+            ),
+            "exit_trigger_to_send_ms": _exec_delta_ms(
+                intent, "exit_trigger", "api_send"
+            ),
+            "send_utc": getattr(intent, "_api_send_utc", None),
+            "ack_utc": getattr(intent, "_api_ack_utc", None),
             # 2026-10-02: book-quality audit fields — which quote source the
             # submit decision relied on, the derived per-ticker book state,
             # and the WS/REST divergence observed at the alignment gate.
@@ -3054,6 +3079,22 @@ def _emit_execution_stage_latency(
                 getattr(intent, "_execution_contract", None) or {}
             ).get("chase_cap"),
         }
+        try:
+            from merid.observability.latency_distribution import (
+                record_metric,
+            )
+            for _k in (
+                "intent_to_canonical_ms", "risk_ms", "edge_gate_ms",
+                "revalidation_ms", "prepare_gate_ms",
+                "construct_to_send_ms", "send_to_ack_ms",
+                "total_to_send_ms", "total_to_terminal_ms",
+                "eval_to_submit_ms", "queue_wait_ms",
+                "submit_revalidation_ms", "prob_age_at_submit_ms",
+                "book_age_at_submit_ms", "exit_trigger_to_send_ms",
+            ):
+                record_metric(f"exec.{_k}", fields.get(_k))
+        except Exception:
+            pass
         logger.info("EXECUTION-STAGE-LATENCY %s", json.dumps(fields, default=str))
     except Exception:
         pass
@@ -16922,6 +16963,7 @@ async def _route_live(
         placed_res = None
         _submit_timed_out = False
         _exec_stamp(intent, "api_send")
+        intent._api_send_utc = _time.time()
         _send_mono = _time.monotonic()
         try:
             placed_res = await port.create_order(create_request)
@@ -16932,6 +16974,7 @@ async def _route_live(
                 intent.intent_id, intent.ticker, intent.client_tag, _submit_to_exc,
             )
         _ack_mono = _time.monotonic()
+        intent._api_ack_utc = _time.time()
         _exec_stamp(intent, "api_ack")
         latency = (_time.monotonic() - t0) * 1000
 
@@ -20786,6 +20829,120 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                 "live arbiter attempt: ticker=%s attempt_id=%s",
                 intent.ticker, getattr(intent, "exit_attempt_id", None),
             )
+
+    # Submit-time entry EV revalidation (fail-closed): the final gate
+    # recomputes the actual proposed trade at the final permitted
+    # price/qty against a valid current book and a sufficiently current
+    # probability estimate.  Exits are governed by the arbiter+firewall
+    # chain above; this gate covers entries only.  It never mutates
+    # economics — a resize or a limit above the derived bound is a fresh
+    # decision (submit_reapproval_required), not a silent rewrite.
+    _is_entry_intent = not _is_exit_intent
+    if _is_entry_intent and os.environ.get(
+            "MERID_SUBMIT_REVALIDATION_ENABLED", "1").strip() not in (
+                "0", "false", "no"):
+        _rev_start = _time.monotonic()
+        _exec_stamp(intent, "submit_revalidation_start")
+        try:
+            from merid.execution.submit_revalidation import (
+                SUBMIT_EDGE_VALID, input_from_intent, revalidate_entry,
+            )
+            _mkt_state = None
+            try:
+                from merid.event_venues.kalshi.market_state import (
+                    get_kalshi_market_state_store,
+                )
+                _store = get_kalshi_market_state_store()
+                _mkt_state = (_store.get(intent.ticker)
+                              if _store is not None and hasattr(_store, "get")
+                              else None)
+            except Exception:
+                _mkt_state = None
+            _rin = input_from_intent(intent, state=_mkt_state)
+            _dec = (revalidate_entry(_rin) if _rin is not None else None)
+            _rev_ms = round((_time.monotonic() - _rev_start) * 1000, 2)
+            if _dec is None or (
+                _dec.outcome != SUBMIT_EDGE_VALID
+                or _dec.permitted_qty_cc != _rin.qty_cc
+                or _dec.permitted_limit_cents != _rin.proposed_limit_cents
+            ):
+                _out = (_dec.outcome if _dec is not None
+                        else "submit_inputs_missing")
+                if _dec is not None and _dec.outcome == SUBMIT_EDGE_VALID:
+                    # EV holds but permitted economics differ from proposed
+                    # (depth resize or bound clamp) — fresh decision needed.
+                    _out = "submit_reapproval_required"
+                logger.warning(
+                    "[SUBMIT-REVALIDATION] REJECTED ticker=%s outcome=%s "
+                    "reason=%s ev=%s ev_per_contract=%s prob_age_ms=%s "
+                    "book_age_ms=%s limit=%s max_price=%s reval_ms=%s",
+                    intent.ticker, _out,
+                    getattr(_dec, "reason", "no_inputs"),
+                    getattr(_dec, "ev_order_cents", None),
+                    getattr(_dec, "ev_per_contract_cents", None),
+                    getattr(_dec, "prob_age_ms", None),
+                    getattr(_dec, "book_age_ms", None),
+                    getattr(_rin, "proposed_limit_cents", None)
+                    if _rin else getattr(intent, "price_cents", None),
+                    getattr(_dec, "max_price_cents", None), _rev_ms,
+                )
+                if coid:
+                    async with _IN_FLIGHT_LOCK:
+                        _IN_FLIGHT_COIDS.discard(coid)
+                try:
+                    from merid.prediction.paired_side_eval import update_stage
+                    update_stage(
+                        getattr(intent, "decision_id", None),
+                        getattr(intent, "side", None),
+                        submit_result=str(_out))
+                except Exception:
+                    pass
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"submit_revalidation:{_out}",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            logger.info(
+                "[SUBMIT-REVALIDATION] ok ticker=%s ev=%s ev_pc=%s "
+                "prob_age_ms=%s book_age_ms=%s reval_ms=%s",
+                intent.ticker, _dec.ev_order_cents,
+                _dec.ev_per_contract_cents, _dec.prob_age_ms,
+                _dec.book_age_ms, _rev_ms,
+            )
+            try:
+                intent._submit_prob_age_ms = _dec.prob_age_ms
+                intent._submit_book_age_ms = _dec.book_age_ms
+                marks = getattr(intent, "exec_stage_marks_ns", None)
+                if isinstance(marks, dict):
+                    marks["submit_revalidation_end"] = _time.monotonic_ns()
+                    marks["submit_revalidation_ms"] = _rev_ms
+            except Exception:
+                pass
+            try:
+                from merid.prediction.paired_side_eval import update_stage
+                update_stage(
+                    getattr(intent, "decision_id", None),
+                    getattr(intent, "side", None),
+                    submit_result="submit_edge_valid")
+            except Exception:
+                pass
+        except Exception as _rev_exc:
+            logger.error(
+                "[SUBMIT-REVALIDATION] error (fail-closed) ticker=%s: %s",
+                intent.ticker, _rev_exc,
+            )
+            if coid:
+                async with _IN_FLIGHT_LOCK:
+                    _IN_FLIGHT_COIDS.discard(coid)
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="submit_revalidation:error",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
+    _exec_stamp(intent, "router_dequeue")
     try:
         result = await asyncio.wait_for(
             _route_order_async_impl(intent),

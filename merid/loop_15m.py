@@ -1862,6 +1862,20 @@ class Kalshi15mLoop:
         self._loop_task = loop.create_task(self._run_loop(), name="kalshi_15m_loop")
         logger.info("[15m-LOOP] Background task created: %s", self._loop_task)
 
+        # Independent exit-attempt reconcile liveness: startup recovery of
+        # unresolved attempts + bounded periodic worker + fill-event wake.
+        # Exits must never wait on the next exit request to reconcile.
+        try:
+            from merid.position_management.exit_reconcile_worker import (
+                get_exit_reconcile_worker,
+            )
+            self._exit_reconcile_worker = get_exit_reconcile_worker()
+            asyncio.create_task(self._exit_reconcile_worker.start())
+            logger.info("[15m-LOOP] Exit reconcile worker started")
+        except Exception as _rc_err:
+            logger.error("[15m-LOOP] Exit reconcile worker failed to start: %s",
+                         _rc_err)
+
         # CRITICAL: Start Coinbase WebSocket for external spot velocity signals (Turbine research #1 winner)
         if self._coinbase_client:
             try:
@@ -3792,6 +3806,15 @@ async def _execute_exit_order(
             parent_entry_signal_id=_entry_signal_id,
             parentage_status=_parentage_status,
         )
+
+        # Exit responsiveness mark: the earliest controlled point on the
+        # exit path (intent construction, immediately after the monitor's
+        # trigger evaluation invoked this function).
+        try:
+            intent.exec_stage_marks_ns["exit_trigger"] = \
+                __import__("time").monotonic_ns()
+        except Exception:
+            pass
 
         # Bind quote-feed provenance onto the exit intent for the audit record
         # when the live market state was resolved during the spread check above.
@@ -10945,6 +10968,37 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 candidate.get("admission_owner") or _lane or "formula"
             )
             intent.exec_stage_marks_ns["intent_created"] = time.monotonic_ns()
+            # Eval→submit span: upstream producer marks take precedence
+            # (first-write-wins semantics in the emitter); these capture
+            # the construction boundary when upstream didn't stamp.
+            intent.exec_stage_marks_ns.setdefault(
+                "eval_end", time.monotonic_ns())
+            if candidate.get("decision_ts"):
+                try:
+                    intent.exec_stage_marks_ns.setdefault(
+                        "candidate_created",
+                        int(float(candidate["decision_ts"]) * 1e9))
+                except Exception:
+                    pass
+            intent.exec_stage_marks_ns.setdefault(
+                "candidate_created", time.monotonic_ns())
+            # Paired-side funnel: allocator selection + final wire economics
+            # for the selected side (the sibling stays "not_selected").
+            try:
+                from merid.prediction.paired_side_eval import update_stage
+                _outcome_side = (
+                    "yes" if "YES" in str(kalshi_side).upper()
+                    else "no" if "NO" in str(kalshi_side).upper() else None)
+                update_stage(
+                    candidate.get("decision_id"), _outcome_side,
+                    allocator_result=(
+                        f"approved:{count}cc" if count else "rejected"),
+                    final_direction=f"{action_raw}_{_outcome_side}",
+                    wire={"side": str(kalshi_side), "action": action_raw,
+                          "price_cents": int(price_cents),
+                          "count_cc": float(count)})
+            except Exception:
+                pass
             if _lane == "threshold_cell" and intent.threshold_cell_id:
                 from merid.prediction import threshold_cells as _tc
                 _tc.emit_cell_lifecycle(

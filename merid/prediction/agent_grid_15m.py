@@ -337,6 +337,16 @@ def _write_shadow_telemetry(
     candidate can be replayed and reconciled against the live feed before
     canary trading is enabled.
     """
+    # Paired-side funnel record: both YES and NO economics from this same
+    # snapshot. Emitted for every evaluated market, independent of the
+    # shadow-file toggle below.
+    try:
+        from merid.prediction.paired_side_eval import (
+            emit_paired_eval, from_decision,
+        )
+        emit_paired_eval(from_decision(decision))
+    except Exception:
+        pass
     if os.environ.get("MERID_CFB_RTI_SHADOW_TELEMETRY", "1").strip().lower() in ("0", "false", "off"):
         return
     try:
