@@ -11608,6 +11608,26 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
                     # Check if failure is WINNER_MISMATCH - this is a critical bug
                     is_winner_mismatch = any("WINNER_MISMATCH" in reason for reason in parity_result.reasons)
+                    # 2026-10-18: for bounded lanes the WINNER_MISMATCH argmax
+                    # veto only makes sense as an inversion detector — the
+                    # lane's alternate side may be policy-vetoed upstream
+                    # (countertrend, band, depth) so it is not actually
+                    # tradable, and a chosen side whose repriced executable
+                    # edge is non-negative is a valid pick even when it is
+                    # not the argmax.  A genuine inversion (chosen repriced
+                    # edge < 0 while the alternate clears it) still blocks.
+                    if is_winner_mismatch and _is_bounded_lane:
+                        _chosen_repriced = (
+                            _parity_edge_no if chosen_side == "no" else _parity_edge_yes
+                        )
+                        if _chosen_repriced is not None and _chosen_repriced >= 0:
+                            logger.info(
+                                "[15M-LOOP] BOUNDED-LANE winner-mismatch downgrade: "
+                                "ticker=%s lane=%s chosen=%s chosen_repriced_edge=%.4f "
+                                "(alt argmax is policy-vetoed upstream) — not a real inversion",
+                                ticker, _td_lane, chosen_side, _chosen_repriced,
+                            )
+                            is_winner_mismatch = False
                     if is_winner_mismatch:
                         parity_blocked = True
                         # CRITICAL FIX: 2026-08-02 - Remove counter increment here to avoid double-counting
