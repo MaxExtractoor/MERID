@@ -11525,10 +11525,49 @@ def _apply_risk_based_order_sizing(
             # Log the actual reason from metadata (Kelly filter or exposure cap)
             reason = metadata.get("reason", "unknown")
             if reason == "kelly_no_edge":
-                logger.warning(
-                    "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (Kelly filter: no edge)",
-                    ticker, asset, float(bankroll_usd), price_cents,
-                )
+                # 2026-10-18: Bounded lanes carry an explicit non-positive
+                # min_required_edge floor and are EV-authorized upstream; the
+                # Kelly positive-edge filter is a normal-lane economic gate that
+                # would structurally reject every bounded probe.  Re-size with
+                # model_prob=None (skips Kelly) so only the fixed exposure cap —
+                # a legitimate risk bound — constrains the order.
+                _bounded_kelly_bypass = False
+                try:
+                    from merid.prediction.trade_decision import (
+                        BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+                    )
+                    _mre = getattr(intent, "min_required_edge", None)
+                    _bounded_kelly_bypass = (
+                        getattr(intent, "decision_lane", None) in _BOUNDED_LANES
+                        and _mre is not None
+                        and float(_mre) <= 0.0
+                    )
+                except Exception:
+                    _bounded_kelly_bypass = False
+                if _bounded_kelly_bypass:
+                    logger.info(
+                        "[RISK-BASED-SIZING] ticker=%s asset=%s lane=%s min_required_edge=%s "
+                        "-> Kelly no-edge bypassed for bounded lane; sizing by exposure cap only",
+                        ticker, asset, getattr(intent, "decision_lane", None), _mre,
+                    )
+                    count, notional_usd, metadata = compute_order_size(
+                        bankroll_usd=bankroll_usd,
+                        price_cents=price_cents,
+                        asset=asset,
+                        model_prob=None,
+                        side=side,
+                        metadata=intent_metadata,
+                        flb_position_multiplier=flb_position_multiplier,
+                    )
+                    if count > 0:
+                        max_count_fp = Decimal(str(count))
+                        sized = min(requested, max_count_fp)
+                        return sized
+                else:
+                    logger.warning(
+                        "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (Kelly filter: no edge)",
+                        ticker, asset, float(bankroll_usd), price_cents,
+                    )
             else:
                 logger.warning(
                     "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds fixed exposure cap, requested_count_fp=%s)",
