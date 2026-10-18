@@ -9672,6 +9672,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # the canonical side-aware range predates it and would silently
         # substitute a market-mid price for the evaluated ask.
         _wq_lane_cand = candidate.get("decision_lane") == "window_quota"
+        if _wq_lane_cand:
+            # 2026-10-18: the lane's 5–97c band (validated at emit) is wider
+            # than the canonical side-aware range (YES 10–75 / NO 25–95).
+            # Both the mid-price clamp fallbacks below and the pre-send
+            # assert further down must use the lane band — otherwise bounded
+            # probes (e.g. NO@11c, YES@88c) are silently clamped to a price
+            # that was never evaluated or rejected outright.
+            try:
+                from merid.prediction import window_quota as _wq_loop_bounds
+                min_price_cents = max(1, int(_wq_loop_bounds.quota_price_lo()))
+                max_price_cents = min(99, int(_wq_loop_bounds.quota_price_hi()))
+            except Exception:
+                pass
         def _cand_in_range(_px: int) -> bool:
             if is_price_in_canonical_range(_px, _candidate_side):
                 return True
