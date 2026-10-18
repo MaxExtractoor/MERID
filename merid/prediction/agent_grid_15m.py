@@ -9233,6 +9233,54 @@ class LeanAgent15m:
             # countertrend fallback is the exact loss pattern this fixes.
             # With no read, the argmax side may fall back to its alternate.
             _wq_argmax = decision.best_side
+            _wq_flip_demoted = False
+            if (
+                _wq_dir_pref is not None
+                and _wq_argmax is not None
+                and _wq_dir_pref != _wq_argmax
+            ):
+                # 2026-10-18 (flip confirmation): fighting the model argmax
+                # needs corroboration — a confirmed cross-asset label in the
+                # same direction (RALLY_CONFIRMED / SELL_OFF_CONFIRMED) or
+                # asset r60 beyond the stronger
+                # MERID_WINDOW_QUOTA_DIR_FLIP_R60_BP threshold.  Weak-signal
+                # flips on WEAKENING/NEUTRAL labels whipsawed twice live
+                # (ETH YES@58, DOGE NO@47); confirmed-regime alignment won
+                # (BTC YES@42 +37c, BTC NO@77 +10c).  An unconfirmed flip is
+                # demoted to the unaligned argmax path — it still passes
+                # regime_entry_block and book sanity below.
+                _wq_lbl_cf = (
+                    getattr(_wq_dir_reg, "label", "") or ""
+                ).upper()
+                _wq_flip_label_ok = (
+                    _wq_dir_pref == "yes" and _wq_lbl_cf == "RALLY_CONFIRMED"
+                ) or (
+                    _wq_dir_pref == "no" and _wq_lbl_cf == "SELL_OFF_CONFIRMED"
+                )
+                try:
+                    _wq_flip_r60 = float(
+                        os.environ.get(
+                            "MERID_WINDOW_QUOTA_DIR_FLIP_R60_BP", "4.0"
+                        )
+                    ) / 10000.0
+                except Exception:
+                    _wq_flip_r60 = 4.0 / 10000.0
+                # Strong r60 may carry the flip only when the label family
+                # does not actively oppose it — a lone asset spike inside a
+                # confirmed opposite regime is fade, not leadership.
+                _wq_flip_r60_ok = (
+                    _wq_r60 is not None
+                    and math.isfinite(_wq_r60)
+                    and abs(_wq_r60) >= _wq_flip_r60
+                    and (_wq_r60 > 0) == (_wq_dir_pref == "yes")
+                    and not (
+                        (_wq_dir_pref == "yes" and _wq_lbl_cf.startswith("SELL_OFF"))
+                        or (_wq_dir_pref == "no" and _wq_lbl_cf.startswith("RALLY"))
+                    )
+                )
+                if not (_wq_flip_label_ok or _wq_flip_r60_ok):
+                    _wq_dir_pref = None
+                    _wq_flip_demoted = True
             if _wq_dir_pref is not None:
                 _wq_order = [_wq_dir_pref]
             else:
@@ -9341,6 +9389,7 @@ class LeanAgent15m:
                         _wq_dir_pref is not None
                         and _wq_dir_pref != _wq_argmax
                     ),
+                    "flip_demoted": _wq_flip_demoted,
                     "argmax_side": _wq_argmax,
                     "asset_r60": (
                         (
@@ -9364,7 +9413,7 @@ class LeanAgent15m:
                 logger.info(
                     "[WINDOW-QUOTA] asset=%s side=%s ask=%.1fc "
                     "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f "
-                    "dir_pref=%s argmax=%s r60=%s regime=%s — "
+                    "dir_pref=%s argmax=%s r60=%s regime=%s%s — "
                     "forcing bounded taker emit",
                     asset, _wq_side, _wq_ask, _wq_ev_c,
                     float(seconds_to_expiry), _wq_depth,
@@ -9376,9 +9425,14 @@ class LeanAgent15m:
                         else "na"
                     ),
                     getattr(_wq_dir_reg, "label", "na"),
+                    " flip_demoted" if _wq_flip_demoted else "",
                 )
             else:
                 _wq_block_detail = "; ".join(_wq_notes) or "no_candidate"
+                if _wq_flip_demoted:
+                    _wq_block_detail = (
+                        f"flip_demoted {_wq_block_detail}"
+                    )
                 if _wq_dir_pref is not None:
                     _wq_block_detail = (
                         f"dir_pref={_wq_dir_pref} {_wq_block_detail}"
