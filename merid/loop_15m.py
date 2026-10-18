@@ -3807,11 +3807,10 @@ async def _execute_exit_order(
             parentage_status=_parentage_status,
         )
 
-        # Exit responsiveness mark: the earliest controlled point on the
-        # exit path (intent construction, immediately after the monitor's
-        # trigger evaluation invoked this function).
+        # Exit-path mark: intent construction. This measures intent->send;
+        # producer trigger->intent delay is upstream and NOT captured here.
         try:
-            intent.exec_stage_marks_ns["exit_trigger"] = \
+            intent.exec_stage_marks_ns["exit_intent_created"] = \
                 __import__("time").monotonic_ns()
         except Exception:
             pass
@@ -10994,9 +10993,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     allocator_result=(
                         f"approved:{count}cc" if count else "rejected"),
                     final_direction=f"{action_raw}_{_outcome_side}",
-                    wire={"side": str(kalshi_side), "action": action_raw,
-                          "price_cents": int(price_cents),
-                          "count_cc": float(count)})
+                    router_handoff={
+                        "side": str(kalshi_side), "action": action_raw,
+                        "price_cents": int(price_cents),
+                        "count_cc": float(count)})
             except Exception:
                 pass
             if _lane == "threshold_cell" and intent.threshold_cell_id:

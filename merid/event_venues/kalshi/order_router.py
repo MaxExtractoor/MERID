@@ -3046,8 +3046,8 @@ def _emit_execution_stage_latency(
             "book_age_at_submit_ms": getattr(
                 intent, "_submit_book_age_ms", None
             ),
-            "exit_trigger_to_send_ms": _exec_delta_ms(
-                intent, "exit_trigger", "api_send"
+            "exit_intent_to_send_ms": _exec_delta_ms(
+                intent, "exit_intent_created", "api_send"
             ),
             "send_utc": getattr(intent, "_api_send_utc", None),
             "ack_utc": getattr(intent, "_api_ack_utc", None),
@@ -3090,7 +3090,7 @@ def _emit_execution_stage_latency(
                 "total_to_send_ms", "total_to_terminal_ms",
                 "eval_to_submit_ms", "queue_wait_ms",
                 "submit_revalidation_ms", "prob_age_at_submit_ms",
-                "book_age_at_submit_ms", "exit_trigger_to_send_ms",
+                "book_age_at_submit_ms", "exit_intent_to_send_ms",
             ):
                 record_metric(f"exec.{_k}", fields.get(_k))
         except Exception:

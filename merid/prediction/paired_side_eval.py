@@ -83,7 +83,7 @@ class SideEval:
     allocator_result: Optional[str] = None
     submit_result: Optional[str] = None
     final_direction: Optional[str] = None
-    wire: Optional[Dict[str, Any]] = None       # side/action/price/count sent
+    router_handoff: Optional[Dict[str, Any]] = None  # intent-created economics
 
 
 @dataclass
@@ -239,7 +239,7 @@ def update_stage(decision_id: Optional[str], side: Optional[str], *,
                  allocator_result: Optional[str] = None,
                  submit_result: Optional[str] = None,
                  final_direction: Optional[str] = None,
-                 wire: Optional[Dict[str, Any]] = None) -> None:
+                 router_handoff: Optional[Dict[str, Any]] = None) -> None:
     """Attach a downstream funnel result to the selected side's record."""
     if not _ENABLED or not decision_id or side not in ("yes", "no"):
         return
@@ -253,15 +253,15 @@ def update_stage(decision_id: Optional[str], side: Optional[str], *,
         se.submit_result = submit_result
     if final_direction is not None:
         se.final_direction = final_direction
-    if wire is not None:
-        se.wire = wire
+    if router_handoff is not None:
+        se.router_handoff = router_handoff
     try:
         logger.info("[PAIRED-SIDE-STAGE] %s", json.dumps({
             "decision_id": decision_id, "side": side,
             "allocator_result": se.allocator_result,
             "submit_result": se.submit_result,
             "final_direction": se.final_direction,
-            "wire": se.wire,
+            "router_handoff": se.router_handoff,
         }, sort_keys=True, default=str))
     except Exception:
         pass
