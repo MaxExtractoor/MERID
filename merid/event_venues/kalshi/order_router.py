@@ -10085,7 +10085,25 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
         theoretical_max = int((p_selected * 100 - 1).to_integral_value(rounding=ROUND_FLOOR))
         if theoretical_max < 1:
             return None
-        start_cap = min(start_cap, theoretical_max)
+        # Bounded lanes with a stamped negative floor (window_quota etc.)
+        # explicitly authorize buying at-or-above model fair value — the
+        # linear start_cap above already enforces net edge >= the lane floor
+        # at every fill price.  Re-imposing the fair-minus-tick clamp here
+        # silently restored a positive-edge bound the lane waived upstream
+        # (live: XRP YES@93, ask improved to 92, cap 91 -> reprice reject).
+        _lane_negative_floor = False
+        try:
+            from merid.prediction.trade_decision import (
+                BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+            )
+            _lane_negative_floor = (
+                getattr(intent, "decision_lane", None) in _BOUNDED_LANES
+                and threshold_cents < 0
+            )
+        except Exception:
+            _lane_negative_floor = False
+        if not _lane_negative_floor:
+            start_cap = min(start_cap, theoretical_max)
     start_cap = max(1, min(99, start_cap))
 
     # CRITICAL FIX (2026-08-21): Search the full 1c-99c range from the computed cap
