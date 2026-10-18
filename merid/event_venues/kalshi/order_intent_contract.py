@@ -630,6 +630,12 @@ class CanonicalOrderIntent:
     # authorized without loosening the bound for ordinary intents.
     decision_lane: str | None = None
 
+    # 2026-10-18: stamped per-lane admission floor (fraction, e.g. -0.25 =
+    # -25c for window_quota).  Bounded lanes admit intentionally weak or
+    # negative-EV probes; the entry-EV invariant compares ``ev_net_cents``
+    # against this bound instead of the generic positivity floor.
+    min_required_edge: float | None = None
+
     # 2026-10-17: structured emergency authorization.  The firewall validates
     # these fields — never the free-text ``reason`` — before allowing a
     # below-floor / loss-taking exit.  ``position_generation_id`` binds the
@@ -1231,6 +1237,7 @@ def normalize_order(
         economic_side=economic_side_val,
         config_hash=config_hash,
         decision_lane=getattr(intent, "decision_lane", None),
+        min_required_edge=getattr(intent, "min_required_edge", None),
         exit_class=exit_class_val,
         emergency_type=emergency_type_val,
         authorization_source=auth_source_val,
