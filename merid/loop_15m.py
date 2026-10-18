@@ -6488,7 +6488,21 @@ async def _run_loop(self) -> None:
                                     consider_fee_impact=True,
                                     estimated_fee_cents=int(_fee_cents) if _fee_cents is not None else None,
                                     tte_seconds=_tte_seconds,
-                                    model_prob=model_prob,  # 2026-07-12: Kelly Criterion
+                                    # 2026-10-18: bounded lanes (window_quota,
+                                    # pinned_fav, cells, canaries) are admitted
+                                    # under their own stamped floors at
+                                    # deliberately weak/negative claimed EV —
+                                    # Kelly's positive-edge requirement can
+                                    # never pass them by construction.  Their
+                                    # size is bounded by the lane contract cap,
+                                    # so withhold model_prob to skip the Kelly
+                                    # gate; exposure-cap sizing still applies.
+                                    model_prob=(
+                                        model_prob
+                                        if candidate.get("decision_lane")
+                                        not in BOUNDED_POST_ONLY_LANES
+                                        else None
+                                    ),  # 2026-07-12: Kelly Criterion
                                     side=candidate_side  # 2026-07-13: Pass side for Kelly
                                 )
                                 

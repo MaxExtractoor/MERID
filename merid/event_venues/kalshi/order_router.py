@@ -20861,7 +20861,10 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             _tradable = True
             if _mkt_state is not None:
                 _ms = str(getattr(_mkt_state, "status", "") or "").lower()
-                if _ms and _ms != "open":
+                # Kalshi reports live markets as "open" (v1) or "active"
+                # (v2 catalog).  Anything else — closed/paused/settled/
+                # determined — still fails closed.
+                if _ms and _ms not in ("open", "active"):
                     _tradable = False
             _rin = input_from_intent(intent, state=_mkt_state,
                                      market_trading=_tradable)
