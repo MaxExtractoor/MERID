@@ -265,10 +265,20 @@ class ParityMetrics:
         }
         self.yes_won_but_no_traded = 0
         self.no_won_but_yes_traded = 0
+        self.bounded_lane_downgrades = 0
     
     def record_evaluated(self) -> None:
         """Record a market was evaluated."""
         self.total_markets_evaluated += 1
+    
+    def record_bounded_downgrade(self) -> None:
+        """Record a bounded-lane WINNER_MISMATCH classified as non-inversion.
+
+        Kept separate from parity_checks_failed: the alternate argmax side
+        was policy-vetoed upstream, so the mismatch is structural, not a
+        genuine inversion — but it should still be visible in summaries.
+        """
+        self.bounded_lane_downgrades += 1
     
     def record_traded(self) -> None:
         """Record a market was traded."""
@@ -300,6 +310,7 @@ class ParityMetrics:
             "failures_by_reason": self.failures_by_reason,
             "yes_won_but_no_traded": self.yes_won_but_no_traded,
             "no_won_but_yes_traded": self.no_won_but_yes_traded,
+            "bounded_lane_downgrades": self.bounded_lane_downgrades,
         }
     
     def is_healthy(self) -> bool:

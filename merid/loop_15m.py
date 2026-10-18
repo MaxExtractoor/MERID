@@ -11705,9 +11705,6 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 # CRITICAL FIX: 2026-08-02 - Initialize is_winner_mismatch flag
                 is_winner_mismatch = False
                 if not parity_result.ok:
-                    metrics.record_failure(parity_result)
-                    checker.log_failure(parity_result, cycle_id=f"15m_{ticker}", logger=logger)
-
                     # Check if failure is WINNER_MISMATCH - this is a critical bug
                     is_winner_mismatch = any("WINNER_MISMATCH" in reason for reason in parity_result.reasons)
                     # 2026-10-18: for bounded lanes the WINNER_MISMATCH argmax
@@ -11722,6 +11719,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     # intentionally weak/negative EV.  A genuine inversion
                     # (chosen repriced edge below the lane floor) still
                     # blocks; lanes without a stamp keep the 0 bound.
+                    # 2026-10-18b: run the downgrade BEFORE failure logging —
+                    # the ERROR blob + non-blocking warning fired on every
+                    # quota-lane window even though the downgrade already
+                    # classifies it "not a real inversion".
+                    _bounded_downgrade = False
                     if is_winner_mismatch and _is_bounded_lane:
                         _chosen_repriced = (
                             _parity_edge_no if chosen_side == "no" else _parity_edge_yes
@@ -11741,6 +11743,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                                 ticker, _td_lane, chosen_side, _chosen_repriced,
                             )
                             is_winner_mismatch = False
+                            _bounded_downgrade = True
+                    if _bounded_downgrade:
+                        metrics.record_bounded_downgrade()
+                    else:
+                        metrics.record_failure(parity_result)
+                        checker.log_failure(parity_result, cycle_id=f"15m_{ticker}", logger=logger)
                     if is_winner_mismatch:
                         parity_blocked = True
                         # CRITICAL FIX: 2026-08-02 - Remove counter increment here to avoid double-counting
@@ -11749,7 +11757,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             "[15M-LOOP] PARITY BLOCKED (WINNER_MISMATCH): ticker=%s chosen_side=%s edge_yes=%.4f edge_no=%.4f reasons=%s - ORDER REJECTED",
                             ticker, chosen_side, edge_yes, edge_no, parity_result.reasons
                         )
-                    else:
+                    elif not _bounded_downgrade:
                         logger.warning(
                             "[15M-LOOP] PARITY CHECK FAILED (non-blocking): ticker=%s side=%s reasons=%s",
                             ticker, kalshi_side, parity_result.reasons
