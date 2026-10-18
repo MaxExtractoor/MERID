@@ -9862,6 +9862,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 _lane_cap = float(_bounded_lane_max_contracts())
             except Exception:
                 _lane_cap = 1.0
+            if candidate.get("decision_lane") == "window_quota":
+                # Quota probes are budgeted at MERID_WINDOW_QUOTA_MAX_CONTRACTS
+                # (default 1) — they must not inherit a raised generic cap.
+                try:
+                    from merid.prediction import window_quota as _wq_lc
+                    _lane_cap = min(_lane_cap, _wq_lc.quota_max_contracts())
+                except Exception:
+                    pass
             if count > _lane_cap:
                 logger.warning(
                     "[15M-LOOP] CELL-LANE count=%s exceeds lane cap=%s, capping. ticker=%s lane=%s",
@@ -9941,10 +9949,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             _lane_min_dollar_ev = (
                                 Decimal(str(float(_eff_edge_c))) / Decimal("100")
                             ) * Decimal(str(count))
-                            # Tail-ratio check is meaningless for a lane that
-                            # deliberately admits negative EV; keep a wide
-                            # sanity bound so absurd EV-vs-tail stays blocked.
-                            _lane_min_ev_tail = Decimal("-1")
+                            # Tail-ratio bound scaled to the lane floor: the
+                            # fixed -1 sanity bound was tighter than the lane's
+                            # own dollar floor at deep-ITM prices (e.g. -25c
+                            # claim on a 3c tail at 97c -> ratio -8.3), so it
+                            # silently vetoed claims the floor admits.  Bound
+                            # = floor/tail makes the ratio check exactly as
+                            # permissive as the dollar check — never tighter.
+                            _tail_risk = (Decimal("1") - _p_model) * Decimal(str(count))
+                            if _tail_risk > Decimal("0"):
+                                _lane_min_ev_tail = _lane_min_dollar_ev / _tail_risk
+                            else:
+                                _lane_min_ev_tail = Decimal("-1")
                         except Exception:
                             _lane_min_dollar_ev = None
                             _lane_min_ev_tail = None

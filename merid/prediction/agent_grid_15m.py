@@ -9792,6 +9792,16 @@ class LeanAgent15m:
                     # Canary probes are priced and accounted at one contract;
                     # they must not inherit a raised generic bounded cap.
                     _lane_cap = min(_lane_cap, _canary_lane_max_contracts())
+                elif _decision_lane == "window_quota":
+                    # The quota lane is documented and budgeted as a
+                    # 1-contract probe (MERID_WINDOW_QUOTA_MAX_CONTRACTS) —
+                    # it must not inherit a raised generic bounded cap; on a
+                    # ~$7 account a 3-contract 97c emit is ~40% of bankroll.
+                    try:
+                        from merid.prediction import window_quota as _wq_cap
+                        _lane_cap = min(_lane_cap, _wq_cap.quota_max_contracts())
+                    except Exception:
+                        pass
                 if _probe_restricted:
                     # Evidence-refused / non-positive-LCB probes are capped at
                     # the probe size, not the (possibly operator-raised)
