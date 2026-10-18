@@ -5308,7 +5308,7 @@ class KalshiVenueClient(EventVenueClient):
                 close_time=self._parse_datetime(data.get("close_time")),
                 expiration_time=self._parse_datetime(data.get("expiration_time")),
                 settlement_time=self._parse_datetime(data.get("settlement_time")),
-                active=data.get("status") == "open",  # Kalshi API uses "open" for active markets, not "active"
+                active=data.get("status") in ("open", "active"),  # Kalshi reports live markets as "open" (v1) or "active" (v2)
                 status=data.get("status", "open"),
                 volume=Decimal(str(data.get("volume", 0))),
                 volume_24h=Decimal(str(data.get("volume_24h", 0))) if data.get("volume_24h") is not None else None,

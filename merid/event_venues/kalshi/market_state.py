@@ -2487,7 +2487,7 @@ class KalshiMarketStateStore:
                     # Kalshi alignment: Check market status for tradability
                     # Markets with status=closed/paused are not tradable even if books are fresh
                     market_status = getattr(state, 'status', 'unknown').lower()
-                    is_tradable_status = market_status == 'open'  # Kalshi API uses "open" for active markets
+                    is_tradable_status = market_status in ('open', 'active')  # Kalshi reports live markets as "open" (v1) or "active" (v2)
 
                     # P1 FIX: Log separated health metrics
                     # Handle None values for spread_cents to avoid logging TypeError
