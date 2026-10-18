@@ -1232,6 +1232,7 @@ class PositionMonitor:
             "staged_exit_stage_0_timestamp", "staged_exit_stage_1_timestamp",
             "staged_exit_stage_2_timestamp",
             "hard_lock_pending",
+            "tail_loss_floor_fired",
         }
 
         # Provenance/construction fields that an older, more trusted record should keep.
@@ -1269,6 +1270,17 @@ class PositionMonitor:
                 self._open_positions[position.position_id] = position
                 self._market_to_position[position.market_id] = position.position_id
                 self._sweep_orphan_exit_registry(position.position_id)
+                # Restore durable exit state (armed trail, ratchet floor,
+                # high-water mark, one-shot emergency flags).  A restart or
+                # record rebuild must not silently disarm protection.
+                try:
+                    from merid.position_management.position_exit_state import get_exit_state_store
+                    get_exit_state_store().restore_into(position)
+                except Exception as _xs_exc:
+                    logger.debug(
+                        "[EXIT-STATE-STORE] restore skipped for %s: %s",
+                        position.market_id, _xs_exc,
+                    )
                 logger.info(
                     "[POSITION-MONITOR] Added position: %s market=%s side=%s size=%s entry=%dc TP=%s SL=%s caller=%s",
                     position.position_id[:8], position.market_id, position.side,
@@ -1454,6 +1466,14 @@ class PositionMonitor:
             self._position_exit_locks.pop(resolved_id, None)
             self._exit_intent_in_flight.pop(resolved_id, None)
             self._position_to_client_order.pop(resolved_id, None)
+
+        # Terminal removal: archive the durable exit-state record (kept for
+        # audit / settlement reconciliation — never hard-deleted on close).
+        try:
+            from merid.position_management.position_exit_state import get_exit_state_store
+            get_exit_state_store().archive(position)
+        except Exception as _xs_exc:
+            logger.debug("[EXIT-STATE-STORE] archive failed for %s: %s", position.market_id, _xs_exc)
 
         # 2026-10-05: drop the hard-lock fast-path subscription for the ticker
         # unless another open position still needs it.
@@ -7674,6 +7694,11 @@ class PositionMonitor:
                                     del self._open_positions[position_id]
                                 if position.market_id in self._market_to_position:
                                     del self._market_to_position[position.market_id]
+                            try:
+                                from merid.position_management.position_exit_state import get_exit_state_store
+                                get_exit_state_store().archive(position)
+                            except Exception:
+                                pass
                             continue
 
                         state = store.get(position.market_id)
@@ -7693,6 +7718,11 @@ class PositionMonitor:
                                     del self._open_positions[position_id]
                                 if position.market_id in self._market_to_position:
                                     del self._market_to_position[position.market_id]
+                            try:
+                                from merid.position_management.position_exit_state import get_exit_state_store
+                                get_exit_state_store().archive(position)
+                            except Exception:
+                                pass
                             continue
 
                         # CRITICAL FIX (2026-08-09): Use an executable same-side bid/ask snapshot.
@@ -7716,6 +7746,11 @@ class PositionMonitor:
                                 price_snapshot.has_bid_size,
                             )
                             await self._check_position(position, price_snapshot, poll_count)
+                            try:
+                                from merid.position_management.position_exit_state import get_exit_state_store
+                                get_exit_state_store().save(position)
+                            except Exception:
+                                pass
                         else:
                             # 2026-10-05: a latched hard-lock obligation must not
                             # degrade into a silent BOOK_UNUSABLE.  Emit the
@@ -7794,6 +7829,11 @@ class PositionMonitor:
                                 recovered = await self._hard_lock_quote_recovery(position)
                                 if recovered is not None:
                                     await self._check_position(position, recovered, poll_count)
+                                    try:
+                                        from merid.position_management.position_exit_state import get_exit_state_store
+                                        get_exit_state_store().save(position)
+                                    except Exception:
+                                        pass
                                     continue
                                 # 2026-10-05: bounded recovery exhausted with no
                                 # executable quote — the witnessed lock-level bid is

@@ -367,11 +367,64 @@ class KalshiSettlement:
     expiry_time: Optional[str] = None
     settlement_time: Optional[str] = None
     
-    # Position info (if we had a position)
+    # Position info (if we had a position).  ``yes_count``/``no_count`` are the
+    # truncated ints for legacy consumers; ``yes_count_fp``/``no_count_fp``
+    # preserve the exchange's exact fixed-point gross counts for quantity-level
+    # reconciliation (a same-side quantity mismatch is still a failed
+    # reconciliation even when the sides agree).
     position_count: int = 0
     yes_count: int = 0
     no_count: int = 0
+    yes_count_fp: Optional[Decimal] = None
+    no_count_fp: Optional[Decimal] = None
     realized_pnl_cents: Optional[float] = None
+    # 2026-10-17: residual signed-YES exposure (centi-contracts) reconstructed
+    # from the local fills ledger as of settlement_time, populated by
+    # ``_hydrate_pnl_from_ledger``.  This is a LOCAL observation compared
+    # against the exchange's ``yes_count``/``no_count`` — Kalshi documents
+    # those as contracts owned at settlement, so a disagreement is a
+    # reconciliation failure (see ``reconciliation_status``), never a silent
+    # overwrite of either source (KXXRP15M-26OCT171530-30: exchange reported
+    # yes_count>0 while the local ledger shows the NO position fully exited
+    # before settlement — recorded as ``flat_vs_exchange_held``).
+    ledger_residual_yes_cc: Optional[int] = None
+    # Reconciliation status between the local pre-settlement residual and the
+    # exchange count fields — see ``_settlement_result_fields`` for the
+    # vocabulary (``matched_flat`` | ``matched_exposure`` |
+    # ``quantity_mismatch`` | ``side_mismatch`` | ``flat_vs_exchange_held`` |
+    # ``held_vs_exchange_flat`` | ``paired_counts_observed`` |
+    # ``boundary_unavailable`` | ``local_history_incomplete``).
+    reconciliation_status: str = "unreconciled"
+    # Raw API item retained verbatim for forensic audit of count fields.
+    raw_payload: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    # ── Settlement semantics (2026-10-17) ────────────────────────────────────
+    # Exchange count fields are PRESERVED OBSERVATIONS, not a residual
+    # calculator.  The XRP incident (KXXRP15M-26OCT171530-30) showed both
+    # counts nonzero on a fully closed lifecycle — consistent with gross
+    # per-side-form quantities — but one payload does not establish universal
+    # semantics across partial closes, reopenings, or residual holds.  Those
+    # are exercised by the bounded lifecycle fixture before any stronger
+    # claim is made.
+    local_history_complete: bool = False  # ledger has fills for this market
+    exchange_counts_interpretation: str = (
+        "counts_unavailable"  # zero_counts | single_side_yes |
+        # single_side_no | paired_counts_observed | counts_unavailable
+    )
+    exchange_count_semantics: str = (
+        "not_universally_established"  # promoted only by lifecycle evidence
+    )
+    # Cash cross-check vs the exchange payload: fee_cost vs ledger fee total
+    # AND revenue vs local-residual-consistent payout.
+    #   matched | mismatch | unverified | not_applicable
+    cash_reconciliation: str = "not_applicable"
+    exchange_revenue_cents: Optional[Decimal] = None
+    exchange_fee_cost_cents: Optional[Decimal] = None
+
+    @property
+    def local_residual_at_settlement(self) -> Optional[int]:
+        """Explicitly-named local signed-YES residual (cc) at settlement."""
+        return self.ledger_residual_yes_cc
     
     @classmethod
     def from_api(cls, item: Dict[str, Any]) -> "KalshiSettlement":
@@ -418,11 +471,20 @@ class KalshiSettlement:
         # settlement_value is gross payout/revenue in cents.
         settlement_value: Optional[float] = None
         revenue = item.get("revenue")
+        exchange_revenue_cents: Optional[Decimal] = None
         if revenue is not None:
             try:
                 settlement_value = float(revenue)
+                exchange_revenue_cents = Decimal(str(revenue))
             except (TypeError, ValueError):
                 settlement_value = None
+        exchange_fee_cost_cents: Optional[Decimal] = None
+        if item.get("fee_cost") is not None:
+            try:
+                # fee_cost is dollars -> cents
+                exchange_fee_cost_cents = Decimal(str(item["fee_cost"])) * Decimal("100")
+            except Exception:
+                exchange_fee_cost_cents = None
 
         # Fallback realized PnL from the API response.  ``fee_cost`` in the
         # /portfolio/settlements payload is the exchange's settlement-time fee,
@@ -465,6 +527,14 @@ class KalshiSettlement:
             except Exception:
                 return 0
 
+        def _parse_fp(raw: Any) -> Optional[Decimal]:
+            if raw is None:
+                return None
+            try:
+                return Decimal(str(raw))
+            except Exception:
+                return None
+
         return cls(
             market_id=market_id,
             ticker=ticker,
@@ -473,12 +543,21 @@ class KalshiSettlement:
             status=status,
             settlement_price_cents=settlement_price_cents,
             settlement_value=settlement_value,
-            expiry_time=item.get("settled_time") or item.get("settlement_time"),
+            # ``settled_time`` is when settlement/payouts were processed (the
+            # correct as-of boundary for pre-settlement exposure); it must NOT
+            # be conflated with market close.  ``expiry_time`` prefers the
+            # explicit expiration field and falls back only when absent.
+            expiry_time=item.get("expiration_time") or item.get("settled_time") or item.get("settlement_time"),
             settlement_time=item.get("settled_time") or item.get("settlement_time"),
             position_count=_parse_count(item.get("yes_count_fp")) + _parse_count(item.get("no_count_fp")),
             yes_count=_parse_count(item.get("yes_count_fp")),
             no_count=_parse_count(item.get("no_count_fp")),
+            yes_count_fp=_parse_fp(item.get("yes_count_fp")),
+            no_count_fp=_parse_fp(item.get("no_count_fp")),
             realized_pnl_cents=realized_pnl_cents,
+            raw_payload=item,
+            exchange_revenue_cents=exchange_revenue_cents,
+            exchange_fee_cost_cents=exchange_fee_cost_cents,
         )
 
     def to_outcome(self) -> Optional[Outcome]:
@@ -547,32 +626,138 @@ class PollerConfig:
     max_pages: int = 50                 # Safety limit for pagination (was 10, increased for high volume)
 
 
-def _settlement_result_fields(settlement: "KalshiSettlement") -> Tuple[str, str, str, str]:
-    """Return (market_outcome, held_side, position_result, realized) for logging.
+def _exchange_residual_side(settlement: "KalshiSettlement") -> str:
+    """Residual side implied by the exchange's settlement count fields.
 
-    ``market_outcome`` is the contract's resolution — ``"yes"`` when the YES
-    outcome paid 100c, ``"no"`` when it paid 0c — and is deliberately NOT a
-    WIN/LOSS label: a YES settlement while holding NO is a loss.  The
-    position's result is derived from the held side (``yes_count`` /
-    ``no_count``); when no residual position exists (exited before
-    settlement), the authoritative signed PnL decides.  ``realized`` reports
-    the signed-PnL bucket for dashboards.
+    Kalshi documents yes_count_fp/no_count_fp as contracts owned at
+    settlement.  Both zero = flat at settlement; both nonzero = ambiguous
+    (possible netting artifact — flagged, not guessed).
+    """
+    y = settlement.yes_count_fp if settlement.yes_count_fp is not None else Decimal(settlement.yes_count)
+    n = settlement.no_count_fp if settlement.no_count_fp is not None else Decimal(settlement.no_count)
+    if y > 0 and n > 0:
+        return "ambiguous"
+    if y > 0:
+        return "yes"
+    if n > 0:
+        return "no"
+    return "none"
+
+
+def _exchange_side_qty(settlement: "KalshiSettlement", side: str) -> Optional[Decimal]:
+    """Gross contracts the exchange reports owned at settlement on ``side``."""
+    if side == "yes":
+        return settlement.yes_count_fp if settlement.yes_count_fp is not None else Decimal(settlement.yes_count)
+    if side == "no":
+        return settlement.no_count_fp if settlement.no_count_fp is not None else Decimal(settlement.no_count)
+    return None
+
+
+def _settlement_result_fields(
+    settlement: "KalshiSettlement",
+) -> Tuple[str, str, str, str, str, str, Dict[str, Any]]:
+    """Return (market_outcome, held_side, position_result, realized,
+    reconciliation_status, exchange_residual_side, observation_fields) for
+    logging and record update.
+
+    ``held_side`` is the residual at settlement — ``none`` for a fully closed
+    trade (zero has no direction; a closed trade is never a settlement "win"
+    even when holding would have won).  ``market_outcome`` is the contract's
+    resolution — NOT a WIN/LOSS label.  When a residual side exists it grades
+    WIN/LOSS against the outcome; otherwise the authoritative signed cash PnL
+    decides.  Both observations are preserved and compared at side AND
+    quantity level — disagreement sets ``reconciliation_status`` rather than
+    overwriting either source.
     """
     market_outcome = (
         "yes" if settlement.settlement_price_cents == 100
         else "no" if settlement.settlement_price_cents == 0
         else "unknown"
     )
-    if settlement.yes_count > 0:
-        held_side = "yes"
-    elif settlement.no_count > 0:
-        held_side = "no"
+    exchange_side = _exchange_residual_side(settlement)
+
+    y = settlement.yes_count_fp if settlement.yes_count_fp is not None else Decimal(settlement.yes_count)
+    n = settlement.no_count_fp if settlement.no_count_fp is not None else Decimal(settlement.no_count)
+    paired = y > 0 and n > 0
+    zero_counts = y <= 0 and n <= 0
+    counts_interp = (
+        "paired_counts_observed" if paired
+        else "zero_counts" if zero_counts
+        else "single_side_yes" if y > 0
+        else "single_side_no"
+    )
+
+    if settlement.ledger_residual_yes_cc is None:
+        local_side = "unknown"
+    elif settlement.ledger_residual_yes_cc > 0:
+        local_side = "yes"
+    elif settlement.ledger_residual_yes_cc < 0:
+        local_side = "no"
     else:
-        held_side = "none"
+        local_side = "none"
+
+    # Reconcile the two observations — side AND quantity at the same
+    # account/market scope.  ``held_side`` reports the local pre-settlement
+    # residual when the ledger covers this market, falling back to the
+    # exchange counts when no local fills exist.  Status vocabulary:
+    #   matched_flat             both sources agree: nothing held
+    #   matched_exposure         same side, same quantity
+    #   quantity_mismatch        same side, different gross quantity (warning:
+    #                            gross-vs-net semantics not yet established)
+    #   side_mismatch            opposite residual sides — impossible under
+    #                            every count interpretation
+    #   flat_vs_exchange_held    local flat but a single exchange side is
+    #                            nonzero (warning: consistent with
+    #                            gross-lifetime counts on a closed lifecycle)
+    #   held_vs_exchange_flat    local residual held but all exchange counts
+    #                            zero — impossible under every interpretation
+    #   paired_counts_observed   both exchange counts nonzero; count
+    #                            semantics unestablished (KXXRP15M-26OCT171530-30
+    #                            showed this on a fully closed lifecycle).
+    #                            Observation, not a residual calculator.
+    #   boundary_unavailable     settlement_time missing — a TIMING
+    #                            ambiguity, kept distinct from count semantics
+    #   local_history_incomplete ledger has no fills for this market
+    #   (scope_mismatch is reserved for subaccount-scoped exchange counts vs
+    #   whole-account ledger — our settlements fetch is account-wide, so this
+    #   status is not produced here; it is documented for consumers.)
+    if local_side == "unknown":
+        recon = "local_history_incomplete"
+        held_side = exchange_side if exchange_side != "ambiguous" else "unknown"
+    else:
+        held_side = local_side
+        if settlement.settlement_time is None:
+            recon = "boundary_unavailable"
+        elif paired:
+            recon = "paired_counts_observed"
+        elif zero_counts:
+            recon = "matched_flat" if local_side == "none" else "held_vs_exchange_flat"
+        elif local_side == "none":
+            recon = "flat_vs_exchange_held"
+        elif local_side != exchange_side:
+            recon = "side_mismatch"
+        else:
+            local_qty = (
+                abs(Decimal(settlement.ledger_residual_yes_cc)) / Decimal("100")
+            )
+            exch_qty = _exchange_side_qty(settlement, exchange_side)
+            recon = (
+                "matched_exposure"
+                if exch_qty is not None and local_qty == exch_qty
+                else "quantity_mismatch"
+            )
+
+    obs_fields: Dict[str, Any] = {
+        "reconciliation_status": recon,
+        "exchange_counts_interpretation": counts_interp,
+    }
+
     pnl = settlement.realized_pnl_cents
-    if held_side != "none" and market_outcome != "unknown":
+    if held_side in ("yes", "no") and market_outcome != "unknown":
         position_result = "WIN" if held_side == market_outcome else "LOSS"
     elif pnl is not None:
+        # Flat (or contested) residual: realized cash is the arbiter.  On a
+        # reconciliation mismatch this remains a cash-verdict, not a side one.
         position_result = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
     else:
         position_result = "UNKNOWN"
@@ -581,7 +766,8 @@ def _settlement_result_fields(settlement: "KalshiSettlement") -> Tuple[str, str,
         else "loss" if pnl is not None and pnl < 0
         else "flat" if pnl is not None else "unknown"
     )
-    return market_outcome, held_side, position_result, realized
+    return (market_outcome, held_side, position_result, realized, recon,
+            exchange_side, obs_fields)
 
 
 class KalshiSettlementPoller:
@@ -874,6 +1060,42 @@ class KalshiSettlementPoller:
             # tail PnL reflects the full cost stack.
             settlement = self._hydrate_pnl_from_ledger(settlement)
 
+            # Reconcile local pre-settlement residual vs exchange count fields
+            # BEFORE caching/publishing so downstream consumers see the status.
+            (market_outcome, held_side, position_result, realized,
+             recon_status, exchange_side, obs_fields) = _settlement_result_fields(
+                 settlement)
+            settlement = replace(settlement, **obs_fields)
+            if recon_status not in ("matched_flat", "matched_exposure"):
+                # Reconciliation event: both observations preserved on the
+                # record and in this log line — neither is overwritten.
+                # Hard errors are contradictions under EVERY count
+                # interpretation (opposite residual side; local residual with
+                # all-zero exchange counts).  Paired counts, flat-vs-held
+                # counts, quantity diffs, missing settlement_time, and
+                # incomplete local history are warnings — count semantics are
+                # not universally established (see exchange_count_semantics).
+                _log_fn = (
+                    logger.error
+                    if recon_status in ("side_mismatch", "held_vs_exchange_flat")
+                    else logger.warning
+                )
+                _log_fn(
+                    "[SETTLEMENT-RECONCILE-DISCREPANCY] ticker=%s status=%s "
+                    "counts_interp=%s cash=%s "
+                    "exchange_counts=yes:%s/no:%s exchange_side=%s "
+                    "local_residual_yes_cc=%s held_side=%s outcome=%s "
+                    "pnl_cents=%s raw=%s",
+                    settlement.ticker, recon_status,
+                    settlement.exchange_counts_interpretation,
+                    settlement.cash_reconciliation,
+                    settlement.yes_count_fp, settlement.no_count_fp, exchange_side,
+                    settlement.ledger_residual_yes_cc, held_side, market_outcome,
+                    settlement.realized_pnl_cents,
+                    json.dumps(settlement.raw_payload, default=str)[:400]
+                    if settlement.raw_payload else "n/a",
+                )
+
             # Mark as seen to prevent replay
             self._graded_settlements.add(dedupe_key)
             self._settlement_cache[settlement.market_id] = settlement
@@ -883,18 +1105,21 @@ class KalshiSettlementPoller:
 
             # Log settlement with key information.  ``market_outcome`` is the
             # contract's resolution (yes won / no won) — NOT the position's
-            # result.  A YES settlement while holding NO is a loss, so the
-            # position result is derived from the held side, and ``realized``
-            # reports the signed PnL (authoritative for positions exited
-            # before settlement where residual counts are zero).
-            market_outcome, held_side, position_result, realized = _settlement_result_fields(settlement)
+            # result.  ``held_side`` is the residual at settlement: ``none``
+            # for a fully closed trade — zero has no direction, and a closed
+            # trade is never labeled a settlement win.  ``realized`` reports
+            # the signed cash PnL.
             _pnl_c = settlement.realized_pnl_cents
             logger.info(
                 "[SETTLEMENT] contract=%s ticker=%s market_outcome=%s held_side=%s "
-                "position_result=%s realized=%s pnl_cents=%d bankroll_update=N/A",
+                "position_result=%s realized=%s pnl_cents=%d recon=%s "
+                "exchange_counts=y:%s/n:%s local_residual_cc=%s bankroll_update=N/A",
                 settlement.market_id, settlement.ticker, market_outcome, held_side,
                 position_result, realized,
-                int(_pnl_c) if _pnl_c else 0
+                int(_pnl_c) if _pnl_c else 0,
+                recon_status,
+                settlement.yes_count_fp, settlement.no_count_fp,
+                settlement.ledger_residual_yes_cc,
             )
 
             # Check for settled-but-ungraded backlog
@@ -1328,6 +1553,20 @@ class KalshiSettlementPoller:
             # early-exited winner (e.g. XRP NO 73c→91c = +16c) from being
             # reported as a full-stake loss (-74c) — which wrongly fed the
             # post-loss re-entry cooldown on 2026-09-24.
+            # 2026-10-17: also reconstruct the LOCAL residual signed-YES
+            # exposure as of the market's settlement_time (not now — a
+            # post-settlement row must not corrupt it).  This is compared
+            # against the exchange's yes_count/no_count downstream; any
+            # disagreement is a reconciliation failure, not an override.
+            _asof = _kalshi_settlement_close_ts(settlement)
+            residual_yes_cc = ledger.get_market_residual_yes_cc(
+                settlement.market_id, asof_ts=_asof
+            )
+            if residual_yes_cc is None and settlement.ticker != settlement.market_id:
+                residual_yes_cc = ledger.get_market_residual_yes_cc(
+                    settlement.ticker, asof_ts=_asof
+                )
+
             pnl_dollars = ledger.get_market_round_trip_pnl_dollars(
                 settlement.market_id, outcome
             )
@@ -1339,20 +1578,71 @@ class KalshiSettlementPoller:
                 pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.market_id, outcome)
                 if pnl_dollars is None and settlement.ticker != settlement.market_id:
                     pnl_dollars = ledger.get_settlement_pnl_dollars(settlement.ticker, outcome)
-            if pnl_dollars is None:
-                # No local fills at all; keep the API-derived value.
-                return settlement
+            if pnl_dollars is None and residual_yes_cc is None:
+                # No local fills at all; keep the API-derived value.  History
+                # is genuinely incomplete for this market (not a flat record).
+                return replace(settlement, local_history_complete=False)
 
-            pnl_cents = (pnl_dollars * Decimal("100")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
+            # Cash cross-check: the exchange's own settlement economics vs
+            # our ledger record.  ``fee_cost`` (exchange) is compared to the
+            # ledger fee total, and ``revenue`` is compared to the payout the
+            # LOCAL residual should have produced — so flatness is supported
+            # by signed-fill reconstruction, not by ``revenue=0`` alone (an
+            # unhedged losing residual also pays zero).
+            local_history_complete = residual_yes_cc is not None
+            cash_recon = "not_applicable"
+            if local_history_complete:
+                rev_c = settlement.exchange_revenue_cents
+                fee_c = settlement.exchange_fee_cost_cents
+                if rev_c is None or fee_c is None:
+                    cash_recon = "unverified"
+                else:
+                    fee_local = ledger.get_market_fee_total_dollars(
+                        settlement.market_id, asof_ts=_asof
+                    )
+                    if fee_local is None and settlement.ticker != settlement.market_id:
+                        fee_local = ledger.get_market_fee_total_dollars(
+                            settlement.ticker, asof_ts=_asof
+                        )
+                    # Expected settlement payout in cents: N contracts pay
+                    # $N = N*100 cents == residual_yes_cc numerically.
+                    if residual_yes_cc > 0 and outcome == "yes":
+                        expected_rev = Decimal(residual_yes_cc)
+                    elif residual_yes_cc < 0 and outcome == "no":
+                        expected_rev = Decimal(-residual_yes_cc)
+                    else:
+                        expected_rev = Decimal("0")
+                    fee_ok = (
+                        fee_local is not None
+                        and abs((fee_local * Decimal("100")) - fee_c)
+                        <= Decimal("1.0")
+                    )
+                    rev_ok = abs(rev_c - expected_rev) <= Decimal("1.0")
+                    cash_recon = "matched" if (fee_ok and rev_ok) else "mismatch"
+
+            pnl_cents = (
+                (pnl_dollars * Decimal("100")).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+                if pnl_dollars is not None
+                else None
             )
 
             logger.debug(
-                "[SETTLEMENT-HYDRATION-RESULT] market_id=%s pnl_dollars=%s pnl_cents=%s",
-                settlement.market_id, pnl_dollars, pnl_cents
+                "[SETTLEMENT-HYDRATION-RESULT] market_id=%s pnl_dollars=%s pnl_cents=%s residual_yes_cc=%s cash=%s",
+                settlement.market_id, pnl_dollars, pnl_cents, residual_yes_cc, cash_recon
             )
-            
-            return replace(settlement, realized_pnl_cents=float(pnl_cents))
+
+            return replace(
+                settlement,
+                realized_pnl_cents=(
+                    float(pnl_cents) if pnl_cents is not None
+                    else settlement.realized_pnl_cents
+                ),
+                ledger_residual_yes_cc=residual_yes_cc,
+                local_history_complete=local_history_complete,
+                cash_reconciliation=cash_recon,
+            )
         except Exception as exc:
             logger.warning(
                 "[SETTLEMENT-PNL-HYDRATION] Failed to enrich PnL from fills ledger "

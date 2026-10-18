@@ -380,11 +380,30 @@ class EntryProvenanceStore:
         )
         if fills:
             for fill in fills:
-                fill_side = (
-                    getattr(fill, "canonical_position_side", None)
-                    or getattr(fill, "side", None)
-                    or ""
-                ).lower()
+                # Exit fills legitimately move exposure opposite the held side;
+                # only opens can corroborate or contradict it.
+                if getattr(fill, "is_exit", None) is True:
+                    continue
+                # canonical_position_side is the traded leg; the economic side
+                # (direction of exposure change) is the complement for
+                # sell-form fills.  Prefer the ledger's derived economic_side.
+                fill_side = (getattr(fill, "economic_side", None) or "").lower()
+                if fill_side not in ("yes", "no"):
+                    _leg = (
+                        getattr(fill, "canonical_position_side", None)
+                        or getattr(fill, "side", None)
+                        or ""
+                    ).lower()
+                    _act = (
+                        getattr(fill, "canonical_position_action", None)
+                        or getattr(fill, "action", None)
+                        or ""
+                    ).lower()
+                    if _leg in ("yes", "no"):
+                        fill_side = (
+                            _leg if _act != "sell"
+                            else ("no" if _leg == "yes" else "yes")
+                        )
                 if fill_side and fill_side != position_side.lower():
                     side_mismatch = True
                 if getattr(fill, "canonical_leg_price_cents", None):
@@ -564,11 +583,27 @@ class EntryProvenanceStore:
         cost_basis_resolved = False
         entry_price = None
         for fill in fills:
-            fill_side = (
-                getattr(fill, "canonical_position_side", None)
-                or getattr(fill, "side", None)
-                or ""
-            ).lower()
+            # Exit fills legitimately move exposure opposite the held side;
+            # only opens can corroborate or contradict it.
+            if getattr(fill, "is_exit", None) is True:
+                continue
+            fill_side = (getattr(fill, "economic_side", None) or "").lower()
+            if fill_side not in ("yes", "no"):
+                _leg = (
+                    getattr(fill, "canonical_position_side", None)
+                    or getattr(fill, "side", None)
+                    or ""
+                ).lower()
+                _act = (
+                    getattr(fill, "canonical_position_action", None)
+                    or getattr(fill, "action", None)
+                    or ""
+                ).lower()
+                if _leg in ("yes", "no"):
+                    fill_side = (
+                        _leg if _act != "sell"
+                        else ("no" if _leg == "yes" else "yes")
+                    )
             fill_qty += abs(getattr(fill, "quantity_cc", 0) or 0)
             if fill_side and fill_side != position_side.lower():
                 side_mismatch = True

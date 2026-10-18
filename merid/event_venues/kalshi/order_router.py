@@ -3639,6 +3639,27 @@ class OrderIntent:
     directional_regime: Optional[str] = None
     policy_epoch: Optional[str] = None
 
+    # STRUCTURED EMERGENCY AUTHORIZATION (2026-10-17): replaces free-text
+    # reason matching as the basis for below-floor / loss-taking exits.  The
+    # firewall validates these fields independently of ``reason``:
+    #   exit_class            "discretionary" | "operational" | "emergency"
+    #   emergency_type        e.g. POSITION_LOSS_BUDGET | ACCOUNT_LOSS_BUDGET |
+    #                         MARKET_OBLIGATION | STATE_REPAIR |
+    #                         OPERATIONAL_RISK | EXTERNAL_AUTHORITY |
+    #                         GENERIC_EMERGENCY
+    #   authorization_source  issuing controller identity (required when the
+    #                         class/type claim an exemption)
+    #   position_generation_id  acquisition-lifecycle id (entry fill) the
+    #                         authorization binds to
+    exit_class: Optional[str] = None
+    emergency_type: Optional[str] = None
+    authorization_source: Optional[str] = None
+    position_generation_id: Optional[str] = None
+    # Arbiter-approved attempt identity.  Exit intents (entry_or_exit=="exit"
+    # or reduce_only) must carry a live approved attempt minted by the
+    # position-owned ExitArbiter; route_order_async enforces it fail-closed.
+    exit_attempt_id: Optional[str] = None
+
     def __post_init__(self):
         # Derive canonical side/action from Kalshi-format side if needed
         if self.kalshi_side and (not self.side or not self.action):
@@ -3752,42 +3773,37 @@ def _is_exit_order(intent: OrderIntent) -> bool:
     return is_exit_order_from_intent(intent, pre_position_yes_cc=pre_yes_cc)
 
 
-_SAFETY_EXIT_REASONS: set[str] = {
-    "manual",
-    "risk",
-    "stale_data",
-    "stale_position_snapshot",
-    "stop_loss",
-    "settlement_guard",
-    "auto_exit_99c",
-    "hard_profit_lock",
-    "market_expired",
-    "expiry_liquidation",
-    "time_exit",
-    "time_stop",
-    "hard_stop",
-    "soft_stop",
-    "trailing_stop",
-    "kill_switch",
-}
-
-
 def _is_safety_exit_reason(intent: OrderIntent) -> bool:
     """Return True if the intent is a safety, time-to-expiry, or operator exit.
 
     These exits are allowed for positions with non-canonical parentage (e.g.
     rest_sync/replay/unknown) as long as they are reduce-only.
+
+    2026-10-17: free-text reason matching removed.  Identity tolerance is
+    granted by declared structure only: the manual-operator flag or a
+    classified non-discretionary exit class (operational/emergency) plus a
+    named issuing source.  A reason that merely *describes* safety — e.g.
+    ``reason="close_for_risk_review"`` — no longer qualifies.
     """
     if getattr(intent, "is_manual_emergency_close", False):
         return True
-    exit_reason = (getattr(intent, "exit_reason", None) or "").lower().replace("exit_", "")
-    if exit_reason and exit_reason in _SAFETY_EXIT_REASONS:
-        return True
-    reason = (getattr(intent, "reason", None) or "").lower()
-    for safety in _SAFETY_EXIT_REASONS:
-        if safety in reason:
-            return True
-    return False
+    try:
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            ExitClass,
+            classify_exit_reason,
+        )
+        _cls = classify_exit_reason(
+            getattr(intent, "exit_reason", None) or getattr(intent, "reason", None)
+        )[2]
+    except Exception:
+        _cls = ExitClass.UNKNOWN
+    if _cls not in (ExitClass.OPERATIONAL, ExitClass.EMERGENCY):
+        return False
+    # A classified operational/emergency exit still needs a named issuer —
+    # authorization without attribution is denied.
+    return bool(
+        (getattr(intent, "source", None) or getattr(intent, "agent_id", None) or "").strip()
+    )
 
 
 def _validate_order_identity(intent: OrderIntent, t0: float) -> Optional[OrderResult]:
@@ -20716,6 +20732,60 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             _IN_FLIGHT_COIDS.add(coid)
 
     route_timeout_s = float(os.environ.get("MERID_ROUTE_TIMEOUT_SECONDS", "5.0"))
+
+    # Position-owned exit authority (fail-closed): an exit intent — declared
+    # ``entry_or_exit=="exit"`` or ``reduce_only`` — must ride a live approved
+    # ExitArbiter attempt for ``{ticker}|{position_generation_id}``.  Producers
+    # propose; only the arbiter approves.  ``MERID_EXIT_ARBITER_REQUIRED=0``
+    # demotes to observe-only for staged rollout; entries are unaffected.
+    _is_exit_intent = (
+        getattr(intent, "entry_or_exit", None) == "exit"
+        or getattr(intent, "reduce_only", None) is True
+    )
+    if _is_exit_intent:
+        _arb_required = os.environ.get(
+            "MERID_EXIT_ARBITER_REQUIRED", "1"
+        ).strip() not in ("0", "false", "no")
+        _arb_attempt = None
+        try:
+            from merid.position_management.exit_arbiter import get_exit_arbiter
+            _arb_key = (
+                f"{intent.ticker}|{intent.position_generation_id}"
+                if getattr(intent, "position_generation_id", None)
+                else f"{intent.ticker}|"
+            )
+            _arb_attempt = get_exit_arbiter().validate_attempt_token(
+                _arb_key, getattr(intent, "exit_attempt_id", None),
+            )
+        except Exception as _arb_exc:
+            logger.error(
+                "[EXIT-ARBITER-GATE] validation error ticker=%s: %s",
+                intent.ticker, _arb_exc,
+            )
+        if _arb_attempt is None:
+            if _arb_required:
+                logger.critical(
+                    "[EXIT-ARBITER-GATE] REJECTED exit intent without live "
+                    "arbiter attempt: ticker=%s attempt_id=%s gen=%s source=%s",
+                    intent.ticker,
+                    getattr(intent, "exit_attempt_id", None),
+                    getattr(intent, "position_generation_id", None),
+                    getattr(intent, "source", None),
+                )
+                if coid:
+                    async with _IN_FLIGHT_LOCK:
+                        _IN_FLIGHT_COIDS.discard(coid)
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason="exit_arbiter:no_approved_attempt",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+            logger.warning(
+                "[EXIT-ARBITER-GATE] OBSERVE-ONLY bypass: exit intent without "
+                "live arbiter attempt: ticker=%s attempt_id=%s",
+                intent.ticker, getattr(intent, "exit_attempt_id", None),
+            )
     try:
         result = await asyncio.wait_for(
             _route_order_async_impl(intent),

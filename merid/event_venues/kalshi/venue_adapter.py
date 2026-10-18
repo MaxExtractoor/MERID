@@ -582,6 +582,16 @@ class KalshiVenueAdapter:
                             "client_order_id": order.client_order_id,
                         },
                     )
+                _mm = ExecutionRiskFirewall.approval_mismatches(order, decision)
+                if _mm:
+                    raise KalshiVenueError(
+                        "submit_order",
+                        {
+                            "reason": f"firewall:approval_binding_mismatch:{';'.join(_mm)}",
+                            "ticker": order.market_id,
+                            "client_order_id": order.client_order_id,
+                        },
+                    )
 
         try:
             await asyncio.wait_for(self.client.connect(), timeout=10.0)

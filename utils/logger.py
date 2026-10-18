@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
@@ -297,15 +298,19 @@ _log_queue: "_queue_mod.Queue" = _queue_mod.Queue(maxsize=_LOG_QUEUE_MAX)
 _queue_handler: Optional[QueueHandler] = None
 _queue_listener: Optional[QueueListener] = None
 _log_dropped = 0
+_log_queue_max_seen = 0
 
 
 class _NonBlockingQueueHandler(QueueHandler):
     """QueueHandler that drops instead of blocking the calling thread."""
 
     def enqueue(self, record: logging.LogRecord) -> None:
-        global _log_dropped
+        global _log_dropped, _log_queue_max_seen
         try:
             self.queue.put_nowait(record)
+            _d = self.queue.qsize()
+            if _d > _log_queue_max_seen:
+                _log_queue_max_seen = _d
         except _queue_mod.Full:
             _log_dropped += 1
 
@@ -313,6 +318,67 @@ class _NonBlockingQueueHandler(QueueHandler):
 def get_log_dropped_count() -> int:
     """Observability: log records dropped because the async queue was full."""
     return _log_dropped
+
+
+def get_log_queue_stats() -> Dict[str, int]:
+    """Observability: async log queue depth, watermark, and drop count.
+
+    Under bursts the drain thread lags producers by minutes (JsonFormatter
+    now stamps emit time in ``ts`` and drain lag in ``drain_lag_ms``); these
+    counters make the backlog itself measurable.
+    """
+    try:
+        depth = _log_queue.qsize()
+    except Exception:
+        depth = -1
+    return {
+        "queue_depth": depth,
+        "queue_max": _LOG_QUEUE_MAX,
+        "queue_max_seen": _log_queue_max_seen,
+        "dropped_total": _log_dropped,
+    }
+
+
+def _log_queue_monitor() -> None:
+    """Periodic queue-health line written straight to the real handlers.
+
+    It bypasses the queue on purpose — a backlog must not be able to hide its
+    own telemetry.  Interval: MERID_LOG_QUEUE_STATS_SECONDS (default 30s).
+    """
+    interval = float(os.getenv("MERID_LOG_QUEUE_STATS_SECONDS", "30"))
+    last_dropped = 0
+    while True:
+        try:
+            time.sleep(interval)
+        except Exception:
+            return
+        try:
+            stats = get_log_queue_stats()
+            delta = stats["dropped_total"] - last_dropped
+            last_dropped = stats["dropped_total"]
+            backlog = stats["queue_depth"] > 0
+            level = logging.WARNING if (delta > 0 or backlog) else logging.INFO
+            rec = logging.LogRecord(
+                name="merid.logqueue",
+                level=level,
+                pathname=__file__,
+                lineno=0,
+                msg="[LOG-QUEUE] depth=%d/%d max_seen=%d dropped_total=%d dropped_delta=%d",
+                args=(
+                    stats["queue_depth"], stats["queue_max"],
+                    stats["queue_max_seen"], stats["dropped_total"], delta,
+                ),
+                exc_info=None,
+            )
+            for h in (_file_handler, _production_handler, _stream_handler):
+                if h is None:
+                    continue
+                try:
+                    h.handle(rec)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def _stop_log_listener() -> None:
@@ -380,6 +446,13 @@ def _ensure_handlers() -> None:
     _queue_listener.daemon = True
     _queue_listener.start()
     atexit.register(_stop_log_listener)
+
+    # Queue-health monitor: writes depth/drop stats straight to the real
+    # handlers so a backlog cannot hide its own telemetry (2026-10-17).
+    _mon = threading.Thread(
+        target=_log_queue_monitor, name="log-queue-monitor", daemon=True
+    )
+    _mon.start()
 
     _handlers_initialized = True
 
@@ -501,9 +574,22 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         entry: Dict[str, Any] = {}
 
-        # Add timestamp if configured
+        # Add timestamp if configured.  ``ts`` is the EVENT time — the
+        # LogRecord's creation timestamp, stamped at emit in the producer
+        # thread.  Under QueueListener this format() runs in the drain thread,
+        # so stamping ``datetime.now()`` here records drain time; under log
+        # bursts the queue backed up 30-60 minutes and made forensic ordering
+        # impossible (2026-10-17 phantom-driver investigation).  The drain
+        # timestamp and queue lag are preserved as separate fields so backlog
+        # remains measurable instead of silently distorting event time.
         if self.include_timestamp:
-            entry["ts"] = datetime.now(timezone.utc).isoformat()
+            emit_dt = datetime.fromtimestamp(record.created, timezone.utc)
+            drain_dt = datetime.now(timezone.utc)
+            entry["ts"] = emit_dt.isoformat()
+            entry["drain_ts"] = drain_dt.isoformat()
+            entry["drain_lag_ms"] = int(
+                (drain_dt - emit_dt).total_seconds() * 1000
+            )
 
         # Add level if configured
         if self.include_level:

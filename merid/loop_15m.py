@@ -4058,10 +4058,80 @@ async def _execute_exit_order(
         # return not_submitted (authoritative empty) -> resubmit with the same
         # client_order_id. For submission_unknown / duplicate_unknown, keep the
         # in-flight lock and return; do NOT re-arm or clear it.
+
+        # POSITION-OWNED ARBITER (fail-closed): every exit intent must ride a
+        # single approved attempt for this position generation.  The arbiter
+        # mints the attempt; the router gate in route_order_async rejects any
+        # exit intent without it, so producers cannot bypass arbitration.
+        from merid.position_management.exit_pipeline import (
+            approve_intent, context_from_position, post_route_update,
+            sweep_reconcile_attempts,
+        )
+        # Before any fresh decision: exchange evidence must clear (or
+        # confirm) unresolved attempts — a lost ack is not a dead order.
+        try:
+            from merid.event_venues.kalshi.client import (
+                get_kalshi_client,
+            )
+            await sweep_reconcile_attempts(get_kalshi_client())
+        except Exception as _sweep_err:
+            logger.debug("[EXIT-ARBITER] reconcile sweep: %s", _sweep_err)
+        _arb_ctx = context_from_position(
+            position,
+            remaining_cc=int(requested_exit_cc or 0),
+            generation_id=(
+                _parent_entry_fill_id
+                or getattr(intent, "position_generation_id", None)
+            ),
+        )
+        _arb_position_key = None
+        if _arb_ctx is not None:
+            intent.position_generation_id = _arb_ctx.generation_id
+            _prepared = approve_intent(
+                intent, _arb_ctx, issuer="position_monitor",
+            )
+            if not _prepared.approved:
+                logger.warning(
+                    "[EXIT-ARBITER] exit suppressed: position=%s market=%s "
+                    "reason=%s status=%s detail=%s",
+                    position.position_id[:8], position.market_id,
+                    exit_reason_str,
+                    _prepared.result.status, _prepared.denial,
+                )
+                _clear_in_flight()
+                self._rearm_position_after_failed_exit(
+                    position, exit_reason, contracts_to_close)
+                return
+            _arb_position_key = (
+                f"{_arb_ctx.market_id}|{_arb_ctx.generation_id}")
+            exit_price_cents = intent.price_cents
+        else:
+            logger.critical(
+                "[EXIT-ARBITER] cannot build exit context (no generation) "
+                "for position=%s market=%s - router gate will reject",
+                position.position_id[:8], position.market_id,
+            )
+
         _max_resubmits = 2
         _current_resubmit = resubmit_count
         while True:
             result = await route_order_async(intent)
+            if _arb_position_key is not None:
+                try:
+                    post_route_update(
+                        _arb_position_key, result,
+                        fill_cc=int(
+                            getattr(result, "executed_quantity_cc", 0) or 0),
+                        fill_id=(
+                            (result.fill or {}).get("fill_id")
+                            or (result.fill or {}).get("id")
+                        ) if result else None,
+                    )
+                except Exception as _arb_post_err:
+                    logger.debug(
+                        "[EXIT-ARBITER] post_route_update failed: %s",
+                        _arb_post_err,
+                    )
             route_ok = _confirmed_submission(result)
             if _ev_resolver is not None:
                 try:
@@ -6749,9 +6819,81 @@ async def _run_loop(self) -> None:
                             # Retry up to 3 times with 1s delay to handle transient rejections
                             max_retries = 3
                             result = None
+
+                            # POSITION-OWNED ARBITER: hedge exits are
+                            # reduce-only and must ride an approved attempt.
+                            _hedge_exit_ok = True
+                            _hedge_pk = None
+                            if getattr(hedge_intent, "entry_or_exit", None) == "exit" \
+                                    or getattr(hedge_intent, "reduce_only", None) is True:
+                                try:
+                                    from merid.position_management.exit_pipeline import (
+                                        approve_intent, post_route_update,
+                                    )
+                                    from merid.position_management.exit_arbiter import (
+                                        ExitContext as _ExitContext,
+                                    )
+                                    _hmd = getattr(hedge_intent, "metadata", None) or {}
+                                    _hgen = (
+                                        _hmd.get("paired_alpha_fill_id")
+                                        or hedge_intent.client_tag
+                                        or f"hedge:{hedge_intent.ticker}"
+                                    )
+                                    _hcc = int(
+                                        Decimal(str(hedge_intent.count or 0))
+                                        * Decimal("100"))
+                                    _hctx = _ExitContext(
+                                        market_id=hedge_intent.ticker,
+                                        generation_id=str(_hgen),
+                                        held_side=str(
+                                            hedge_intent.side or "").lower(),
+                                        remaining_cc=_hcc,
+                                        breakeven_floor_cents=0,
+                                    )
+                                    hedge_intent.position_generation_id = str(_hgen)
+                                    _hprep = approve_intent(
+                                        hedge_intent, _hctx,
+                                        kind="emergency",
+                                        issuer="hedge_engine",
+                                    )
+                                    if not _hprep.approved:
+                                        logger.warning(
+                                            "[HEDGE-ARBITER] hedge exit "
+                                            "suppressed: ticker=%s status=%s "
+                                            "detail=%s",
+                                            hedge_intent.ticker,
+                                            _hprep.result.status,
+                                            _hprep.denial,
+                                        )
+                                        _hedge_exit_ok = False
+                                    else:
+                                        _hedge_pk = (
+                                            f"{_hctx.market_id}|{_hctx.generation_id}")
+                                except Exception as _harb_err:
+                                    logger.error(
+                                        "[HEDGE-ARBITER] approval failed "
+                                        "(fail-closed): ticker=%s err=%s",
+                                        hedge_intent.ticker, _harb_err,
+                                    )
+                                    _hedge_exit_ok = False
+                            if not _hedge_exit_ok:
+                                continue
                             for attempt in range(max_retries):
                                 try:
                                     result = await route_order_async(hedge_intent)
+                                    if _hedge_pk is not None:
+                                        try:
+                                            post_route_update(
+                                                _hedge_pk, result,
+                                                fill_cc=int(
+                                                    getattr(result, "executed_quantity_cc", 0) or 0),
+                                                fill_id=(
+                                                    (result.fill or {}).get("fill_id")
+                                                    or (result.fill or {}).get("id")
+                                                ) if result else None,
+                                            )
+                                        except Exception:
+                                            pass
                                     if result and (result.has_execution or (result.request_completed and not result.is_terminal)):
                                         logger.info(
                                             "[15m-LOOP] Hedge order routed successfully: ticker=%s side=%s count=%s status=%s attempt=%d",

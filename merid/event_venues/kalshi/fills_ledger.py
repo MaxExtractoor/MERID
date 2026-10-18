@@ -938,7 +938,16 @@ class KalshiFill:
                 except Exception:
                     self.economic_side = "NO"
             elif self.canonical_position_side in ("yes", "no"):
-                self.economic_side = self.canonical_position_side.upper()
+                # canonical_position_side is the traded leg, not the exposure
+                # direction: a SELL of NO contributes +YES exposure.  Without
+                # a signed delta the economic side is the leg for buys and the
+                # complement for sells.
+                if (self.canonical_position_action or "").lower() == "sell":
+                    self.economic_side = (
+                        "YES" if self.canonical_position_side == "no" else "NO"
+                    )
+                else:
+                    self.economic_side = self.canonical_position_side.upper()
             else:
                 self.economic_side = "NO"
         if self.is_exit is False:
@@ -7075,12 +7084,43 @@ class KalshiFillsLedger:
         bought 73c, sold ~91c → +16c) was reported as a -74c settlement loss,
         wrongly triggering the post-loss re-entry cooldown.
         """
+        residual = self._market_fill_totals(market_ticker)
+        if residual is None:
+            return None
+        total, residual_yes_cc = residual
+        if residual_yes_cc > 0 and outcome == "yes":
+            total += Decimal(residual_yes_cc) / Decimal("100")
+        elif residual_yes_cc < 0 and outcome == "no":
+            total += Decimal(-residual_yes_cc) / Decimal("100")
+        return total
+
+    def _market_fill_totals(
+        self,
+        market_ticker: str,
+        asof_ts: Optional[float] = None,
+    ) -> Optional[Tuple[Decimal, int]]:
+        """Return ``(sum_signed_proceeds_dollars, residual_signed_yes_cc)`` for
+        a market, or ``None`` when the ledger holds no fills for it.
+
+        ``asof_ts`` (epoch seconds) bounds the reconstruction: only fills
+        whose ``created_time`` is at or before the boundary count.  Settlement
+        reconciliation uses the market's settlement_time so a late-arriving
+        or post-settlement ledger row cannot corrupt the pre-settlement
+        exposure.  PnL reporting calls it with ``None`` (all fills)."""
         total = Decimal("0")
         residual_yes_cc = 0
         found = False
         for fill in list(self._fills.values()):
             if fill.market_ticker != market_ticker:
                 continue
+            if asof_ts is not None:
+                ct = getattr(fill, "created_time", None)
+                try:
+                    fts = ct.timestamp() if ct is not None else None
+                except Exception:
+                    fts = None
+                if fts is not None and fts > asof_ts:
+                    continue
             found = True
             if fill.proceeds_dollars is not None:
                 total += fill.proceeds_dollars
@@ -7088,11 +7128,51 @@ class KalshiFillsLedger:
                 residual_yes_cc += fill.canonical_yes_delta_cc
         if not found:
             return None
-        if residual_yes_cc > 0 and outcome == "yes":
-            total += Decimal(residual_yes_cc) / Decimal("100")
-        elif residual_yes_cc < 0 and outcome == "no":
-            total += Decimal(-residual_yes_cc) / Decimal("100")
-        return total
+        return total, residual_yes_cc
+
+    def get_market_fee_total_dollars(
+        self,
+        market_ticker: str,
+        asof_ts: Optional[float] = None,
+    ) -> Optional[Decimal]:
+        """Total exchange fees (dollars) across trusted fills for a market as
+        of ``asof_ts`` — the local side of the settlement cash cross-check
+        against the exchange's ``fee_cost`` field.  ``None`` when the ledger
+        holds no fills for the market."""
+        total = Decimal("0")
+        found = False
+        for fill in list(self._fills.values()):
+            if fill.market_ticker != market_ticker:
+                continue
+            if asof_ts is not None:
+                ct = getattr(fill, "created_time", None)
+                try:
+                    fts = ct.timestamp() if ct is not None else None
+                except Exception:
+                    fts = None
+                if fts is not None and fts > asof_ts:
+                    continue
+            found = True
+            if fill.fee_cost is not None:
+                total += fill.fee_cost
+        return total if found else None
+
+    def get_market_residual_yes_cc(
+        self,
+        market_ticker: str,
+        asof_ts: Optional[float] = None,
+    ) -> Optional[int]:
+        """Residual signed-YES exposure (centi-contracts) reconstructed from
+        trusted fills as of ``asof_ts`` (epoch seconds, ``None`` = all fills).
+
+        ``None`` when the ledger holds no fills for the market.  This is a
+        LOCAL reconstruction — it is compared against the exchange's
+        settlement count fields by the settlement reconciler; a disagreement
+        is a reconciliation failure, not a silent override of either side.
+        Pass the market's settlement_time to reconstruct pre-settlement
+        exposure."""
+        totals = self._market_fill_totals(market_ticker, asof_ts)
+        return totals[1] if totals is not None else None
 
     def on_market_price_update(self, market_ticker: str, last_price_cents: int) -> None:
         """Handle market price update for unrealized PnL recompute.

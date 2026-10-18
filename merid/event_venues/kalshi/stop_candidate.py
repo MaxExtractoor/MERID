@@ -235,6 +235,61 @@ def profit_only_exits_enabled() -> bool:
     return _env_bool("MERID_PROFIT_ONLY_EXITS", True)
 
 
+def _trigger_emergency_type(trigger_reason: Any) -> Optional[str]:
+    """Map a candidate trigger to its structured emergency-authorization
+    type (the producer's declared classification; the firewall validates it
+    alongside exit_class, authorization_source, and generation)."""
+    try:
+        from merid.event_venues.kalshi.order_intent_contract import (
+            _REASON_TO_EMERGENCY_TYPE,
+        )
+        return _REASON_TO_EMERGENCY_TYPE.get(
+            str(trigger_reason or "").lower().replace("exit_", "")
+        )
+    except Exception:
+        return None
+
+
+# ── Ordinary price-stop shadow (2026-10-17) ─────────────────────────────────
+# The entry-relative hard-stop executor is under repair: it conflates
+# entry-relative loss cutting with exit arbitration, races ahead of the armed
+# profit trail and the settlement-aligned model exit, bypasses the intent
+# in-flight lock, and is exempt from the breakeven floor (LOSS_SELL_EXEMPT).
+# In the 2026-10-17 XRP incident it sold 3 NO at 13c (bid <= floor 18c) on a
+# market that settled NO — a −64c realized loss vs a +199c settlement — while
+# the armed trail never saw an executable held-side bid above its 37c arm.
+#
+# While the exit policy is rebuilt into a single position-owned controller,
+# these trigger reasons are recorded with full shadow telemetry but never
+# submitted.  Emergency / loss-budget / operational triggers (LOSS_CAP,
+# OPERATIONAL_RISK, STALE_DATA, POSITION_MISMATCH, EXPIRY_LIQUIDATION,
+# MARKET_EXPIRED, EMERGENCY, HARD_RISK, HARD_PROFIT_LOCK) are unaffected —
+# they are portfolio or state-integrity controls, not ordinary price stops.
+# Discretionary stops (SOFT_STOP, STOP_LOSS, POSITION_MONITOR_STOP) are
+# already observe-only unless the EV-exit gate is enabled; listing them here
+# makes the repair freeze explicit and independent of that gate.  The shadow
+# has NO caller-side escape hatch: ``force`` bypasses only the
+# submission-enable check, never this gate.  An authorized emergency uses a
+# distinct trigger class (LOSS_CAP / OPERATIONAL_RISK / EMERGENCY / ...), not
+# a boolean on a shadowed reason.
+SHADOWED_PRICE_STOP_TRIGGERS = frozenset({
+    "HARD_STOP",
+    "SOFT_STOP",
+    "STOP_LOSS",
+    "POSITION_MONITOR_STOP",
+})
+
+
+def price_stop_shadow_enabled() -> bool:
+    """True while the ordinary entry-relative price-stop executor is shadowed.
+
+    Default ON: the defective price-stop is shadow-only until the
+    position-owned exit controller is validated.  Set
+    ``MERID_PRICE_STOP_SHADOW=0`` to re-enable live submission.
+    """
+    return _env_bool("MERID_PRICE_STOP_SHADOW", True)
+
+
 # 2026-10-16: bid-vs-hold-EV salvage.  The entry-price anchor alone made every
 # below-entry bid unthinkable, so positions watched 70c->44c->27c salvage bids
 # pass and settled at zero (DOGE-1315).  When a trustworthy hold value exists,
@@ -344,6 +399,11 @@ class StopCandidate:
     current_edge_cents: Optional[int] = None
     edge_decay_exit_cents: Optional[int] = None
     stop_level_cents: Optional[int] = None
+    # 2026-10-17: issuing controller identity for structured emergency
+    # authorization (validated by the execution firewall; never the reason
+    # text).  Defaults to the position monitor, which builds all current
+    # candidates.
+    authorization_source: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Derive the held contract deterministically from the signed position.
@@ -380,6 +440,7 @@ class StopCandidate:
             "current_edge_cents": self.current_edge_cents,
             "edge_decay_exit_cents": self.edge_decay_exit_cents,
             "stop_level_cents": self.stop_level_cents,
+            "authorization_source": self.authorization_source,
         }
         return d
 
@@ -1187,6 +1248,7 @@ async def _maybe_degraded_stop_exit(
     *,
     held_side: str,
     held_qty_cc: int,
+    parent_entry_fill_id: Optional[str] = None,
 ) -> None:
     """Residual-exposure branch for a non-executable protective exit.
 
@@ -1414,6 +1476,9 @@ async def _maybe_degraded_stop_exit(
         return
 
     from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+    from merid.event_venues.kalshi.settlement_aligned_exit import (
+        classify_trigger_reason,
+    )
 
     kalshi_side = to_kalshi_side(held_side, "sell")
     attempt_no = residual.degraded_attempt_number
@@ -1451,6 +1516,15 @@ async def _maybe_degraded_stop_exit(
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
         pre_position_fp=held_qty_cc,
         expected_post_position_fp=0,
+        # Same structured authorization as the primary path — a residual
+        # degraded exit is the same candidate's retry and must carry the
+        # tuple the firewall validates (class/type/source/generation).
+        exit_class=classify_trigger_reason(candidate.trigger_reason).value,
+        emergency_type=_trigger_emergency_type(candidate.trigger_reason),
+        authorization_source=(
+            candidate.authorization_source or "position_monitor"
+        ),
+        position_generation_id=parent_entry_fill_id,
     )
     logger.info(
         "[STOP-DEGRADED-SUBMIT] candidate=%s ticker=%s attempt=%d "
@@ -1464,7 +1538,71 @@ async def _maybe_degraded_stop_exit(
         degraded_limit,
         held_qty_cc,
     )
+    # POSITION-OWNED ARBITER (fail-closed): degraded residual exits are
+    # proposals for the same generation — never a parallel submit path.
+    from merid.position_management.exit_pipeline import (
+        approve_intent, post_route_update,
+    )
+    from merid.position_management.exit_arbiter import (
+        ExitBook as _ExitBook, ExitContext as _ExitContext,
+    )
+    _arb_pk = None
+    if parent_entry_fill_id:
+        _arb_ctx = _ExitContext(
+            market_id=candidate.market_ticker,
+            generation_id=str(parent_entry_fill_id),
+            held_side=str(held_side).lower(),
+            remaining_cc=int(held_qty_cc),
+            breakeven_floor_cents=int(
+                candidate.entry_price_cents or 0) + 8,
+            book=_ExitBook(
+                held_side=str(held_side).lower(),
+                liquidation_cents=int(
+                    vwap_cents or fresh_bid or degraded_limit),
+                qty_cc=int(held_qty_cc),
+                age_ms=int(candidate.quote_age_ms or 0),
+            ),
+        )
+        _prepared = approve_intent(
+            intent, _arb_ctx, issuer="stop_candidate",
+        )
+        if not _prepared.approved:
+            logger.warning(
+                "[STOP-ARBITER-DG] candidate=%s ticker=%s degraded exit "
+                "suppressed: status=%s detail=%s",
+                candidate.candidate_id, candidate.market_ticker,
+                _prepared.result.status, _prepared.denial,
+            )
+            _finish(
+                "ARBITER_REJECTED",
+                f"{_prepared.result.status}:{_prepared.denial}",
+                # Not terminal — the residual stays live for the next
+                # re-evaluation cycle (e.g. after the in-flight attempt
+                # reconciles or the book changes).
+                ResidualStatus.REEVALUATING,
+            )
+            return
+        _arb_pk = f"{_arb_ctx.market_id}|{_arb_ctx.generation_id}"
+    else:
+        logger.critical(
+            "[STOP-ARBITER-DG] candidate=%s ticker=%s: no generation - "
+            "router gate will reject degraded exit",
+            candidate.candidate_id, candidate.market_ticker,
+        )
+
     result = await route_order_async(intent)
+    if _arb_pk is not None:
+        try:
+            _dg_fill_cc = int(
+                getattr(result, "executed_quantity_cc", 0) or 0)
+            _dg_fill = getattr(result, "fill", None) or {}
+            post_route_update(
+                _arb_pk, result, fill_cc=_dg_fill_cc,
+                fill_id=_dg_fill.get("fill_id") or _dg_fill.get("id"),
+            )
+        except Exception as _arb_post_err:
+            logger.debug(
+                "[STOP-ARBITER-DG] post_route_update: %s", _arb_post_err)
     record["decision"] = "DEGRADED_EXIT_APPROVED"
     record["basis"] = "degraded_ioc_submitted"
     record["result"] = _serialize_result(result)
@@ -1628,6 +1766,39 @@ async def maybe_submit_stop_candidate(
             status="rejected",
             mode=TradingMode.PAPER,
             reason=reason,
+        )
+
+    # ── Ordinary price-stop shadow (2026-10-17) ────────────────────────────
+    # HARD_STOP-class price stops are shadow-only while the entry-relative
+    # executor is being rebuilt (see SHADOWED_PRICE_STOP_TRIGGERS).  The
+    # candidate is durably recorded with everything needed to reconstruct the
+    # would-be order — trigger, signed position, entry, executable exit bid,
+    # model fair value, TTE — so cohort replay can score what it would have
+    # done.  Deliberately NOT conditional on ``force``: a generic boolean must
+    # not turn a disabled strategy policy into a live submission.  Emergency
+    # liquidation is a separate, explicitly-classified trigger, not a flag.
+    if (
+        candidate.trigger_reason in SHADOWED_PRICE_STOP_TRIGGERS
+        and price_stop_shadow_enabled()
+    ):
+        logger.warning(
+            "[PRICE-STOP-SHADOW] candidate=%s ticker=%s trigger=%s "
+            "position_cc=%d entry=%sc exec_exit=%sc fair=%sc tte=%ss - "
+            "shadowed; no order submitted",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+            candidate.position_from_exchange_cc,
+            candidate.entry_price_cents,
+            candidate.executable_exit_cents,
+            candidate.fair_value_cents,
+            candidate.seconds_to_expiry,
+        )
+        record_stop_candidate(candidate)
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.PAPER,
+            reason=f"price_stop_shadowed:{candidate.trigger_reason}",
         )
 
     # profit_only_v1 breakeven floor (early stage): the trigger-time executable
@@ -1953,6 +2124,17 @@ async def maybe_submit_stop_candidate(
         parent_entry_order_id=parent_entry_order_id,
         parent_entry_signal_id=parent_entry_signal_id,
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
+        # Structured emergency authorization: the classification computed at
+        # the top of this function plus the issuing controller identity.
+        # The firewall validates these fields — not ``reason`` — before
+        # allowing a below-floor exit.  ``position_generation_id`` binds the
+        # authorization to this acquisition lifecycle.
+        exit_class=trigger_class.value,
+        emergency_type=_trigger_emergency_type(candidate.trigger_reason),
+        authorization_source=(
+            candidate.authorization_source or "position_monitor"
+        ),
+        position_generation_id=parent_entry_fill_id,
     )
 
     # 5. Canonical contract validation (fetches fresh position again, but the
@@ -2104,8 +2286,58 @@ async def maybe_submit_stop_candidate(
             _res_exc,
         )
 
+    # POSITION-OWNED ARBITER (fail-closed): the candidate becomes a proposal;
+    # only an arbiter-approved attempt may reach the router.
+    from merid.position_management.exit_pipeline import (
+        approve_intent, context_from_position, post_route_update,
+    )
+    _arb_ctx = context_from_position(
+        cached_position,
+        remaining_cc=int(qty_cc),
+        generation_id=parent_entry_fill_id,
+    )
+    _arb_pk = None
+    if _arb_ctx is not None:
+        _prepared = approve_intent(
+            intent, _arb_ctx, issuer="stop_candidate",
+        )
+        if not _prepared.approved:
+            logger.warning(
+                "[STOP-ARBITER] candidate=%s ticker=%s suppressed: "
+                "status=%s detail=%s",
+                candidate.candidate_id, candidate.market_ticker,
+                _prepared.result.status, _prepared.denial,
+            )
+            record_stop_candidate(candidate)
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.PAPER,
+                reason=(
+                    f"exit_arbiter:{_prepared.result.status}:"
+                    f"{_prepared.denial}"
+                ),
+            )
+        _arb_pk = f"{_arb_ctx.market_id}|{_arb_ctx.generation_id}"
+    else:
+        logger.critical(
+            "[STOP-ARBITER] candidate=%s ticker=%s: no exit context "
+            "(missing generation) - router gate will reject",
+            candidate.candidate_id, candidate.market_ticker,
+        )
+
     from merid.event_venues.kalshi.order_router import route_order_async
     result = await route_order_async(intent)
+    if _arb_pk is not None:
+        try:
+            _fill_cc = int(
+                getattr(result, "executed_quantity_cc", 0) or 0)
+            _fill = getattr(result, "fill", None) or {}
+            post_route_update(
+                _arb_pk, result, fill_cc=_fill_cc,
+                fill_id=_fill.get("fill_id") or _fill.get("id"),
+            )
+        except Exception as _arb_post_err:
+            logger.debug("[STOP-ARBITER] post_route_update: %s", _arb_post_err)
     get_stop_candidate_ledger().record_submission(
         candidate,
         result,
@@ -2156,6 +2388,7 @@ async def maybe_submit_stop_candidate(
             result,
             held_side=held_side,
             held_qty_cc=qty_cc,
+            parent_entry_fill_id=parent_entry_fill_id,
         )
     except Exception as exc:
         logger.critical(

@@ -1845,12 +1845,23 @@ class KalshiPositionCache:
                 action = (getattr(fill, 'canonical_position_action', None) or getattr(fill, 'action', '') or '').lower()
                 side = (getattr(fill, 'canonical_position_side', None) or getattr(fill, 'side', '') or '').lower()
 
-                if action == 'buy' and side in ('yes', 'no'):
-                    logger.info(
-                        "[POSITION-CACHE-INFERRED-SIDE] market=%s inferred thesis_side=%s from fill history (fill_id=%s)",
-                        market_id, side, getattr(fill, 'fill_id', 'unknown')
-                    )
-                    return side
+                # Match on the signed YES delta — not action == 'buy' — so
+                # complement-form entries (SELL_YES opening long NO) infer too.
+                _delta = getattr(fill, 'canonical_yes_delta_cc', None)
+                if _delta is None and action in ('buy', 'sell') and side in ('yes', 'no'):
+                    try:
+                        _q = getattr(fill, 'quantity_cc', None) or int((getattr(fill, 'count_fp', 0) or 0) * 100)
+                        _delta = yes_delta(action, side, _q) if BINARY_PRICE_SPACE_AVAILABLE else None
+                    except Exception:
+                        _delta = None
+                if _delta:
+                    _held, _ = from_signed_yes_exposure(_delta)
+                    if _held in ('yes', 'no'):
+                        logger.info(
+                            "[POSITION-CACHE-INFERRED-SIDE] market=%s inferred thesis_side=%s from fill history (fill_id=%s)",
+                            market_id, _held, getattr(fill, 'fill_id', 'unknown')
+                        )
+                        return _held
 
             logger.debug(
                 "[POSITION-CACHE-SIDE-AWARE] Could not infer thesis_side from fill history for market %s",
@@ -5674,8 +5685,21 @@ class KalshiPositionCache:
                                                 # Prefer canonical side over raw exchange side
                                                 fill_side = getattr(fill, "canonical_position_side", None) or getattr(fill, "side", None) or ""
                                                 fill_action = getattr(fill, "canonical_position_action", None) or getattr(fill, "action", None) or ""
-                                                if fill_action == "buy" and fill_side in ("yes", "no"):
-                                                    preserved_thesis_side = fill_side.lower()
+                                                # Derive held side from the signed delta so
+                                                # complement-form entries (SELL_YES = long NO) match.
+                                                _fcd = getattr(fill, "canonical_yes_delta_cc", None)
+                                                if _fcd is None and fill_action in ("buy", "sell") and fill_side in ("yes", "no") and BINARY_PRICE_SPACE_AVAILABLE:
+                                                    try:
+                                                        _fcd = yes_delta(fill_action, fill_side,
+                                                                         getattr(fill, "quantity_cc", None) or int((getattr(fill, "count_fp", 0) or 0) * 100))
+                                                    except Exception:
+                                                        _fcd = None
+                                                if _fcd:
+                                                    _fch, _ = from_signed_yes_exposure(_fcd)
+                                                else:
+                                                    _fch = None
+                                                if _fch in ("yes", "no"):
+                                                    preserved_thesis_side = _fch
                                                     logger.info(
                                                         "[POSITION-CACHE-NEW-POSITION-FILLS-LEDGER] market=%s reconstructed thesis_side=%s from fills_ledger (fill_id=%s)",
                                                         market_id, preserved_thesis_side, getattr(fill, "fill_id", "unknown")

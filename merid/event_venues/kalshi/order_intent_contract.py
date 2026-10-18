@@ -630,6 +630,20 @@ class CanonicalOrderIntent:
     # authorized without loosening the bound for ordinary intents.
     decision_lane: str | None = None
 
+    # 2026-10-17: structured emergency authorization.  The firewall validates
+    # these fields — never the free-text ``reason`` — before allowing a
+    # below-floor / loss-taking exit.  ``position_generation_id`` binds the
+    # authorization to the acquisition lifecycle (defaults to
+    # ``parent_entry_fill_id``).
+    exit_class: str | None = None
+    emergency_type: str | None = None
+    authorization_source: str | None = None
+    position_generation_id: str | None = None
+
+    # Exchange shard index (Kalshi ``exchange_index``; crypto 15m = 2) — bound
+    # into the firewall approval so a post-approval shard change is rejected.
+    exchange_index: int | None = None
+
     def yes_delta(self) -> int:
         """Signed-YES centi-contract delta for this order."""
         return yes_delta(self.action, self.contract, self.qty_cc)
@@ -691,6 +705,11 @@ class CanonicalOrderIntent:
             "position_effect": self.position_effect,
             "economic_side": self.economic_side,
             "config_hash": self.config_hash,
+            "exit_class": self.exit_class,
+            "emergency_type": self.emergency_type,
+            "authorization_source": self.authorization_source,
+            "position_generation_id": self.position_generation_id,
+            "exchange_index": self.exchange_index,
         }
 
 
@@ -919,6 +938,29 @@ def compute_expected_realized_pnl_cents(
     return pnl_cents - fee_cents
 
 
+# Canonical exit-reason -> emergency authorization type.  Only reasons in
+# this map may claim below-floor / loss-taking authority; mapping to a type
+# is necessary but NOT sufficient — the firewall additionally requires an
+# ``authorization_source`` and a consistent ``position_generation_id``.
+_REASON_TO_EMERGENCY_TYPE: Dict[str, str] = {
+    "loss_cap": "POSITION_LOSS_BUDGET",
+    "expiry_liquidation": "MARKET_OBLIGATION",
+    "market_expired": "MARKET_OBLIGATION",
+    "market_closed": "MARKET_OBLIGATION",
+    "position_mismatch": "STATE_REPAIR",
+    "reconciliation": "STATE_REPAIR",
+    "reconcile": "STATE_REPAIR",
+    "stale_data": "STATE_REPAIR",
+    "operational_risk": "OPERATIONAL_RISK",
+    "manual": "EXTERNAL_AUTHORITY",
+    "position_monitor_manual": "EXTERNAL_AUTHORITY",
+    "external_exit": "EXTERNAL_AUTHORITY",
+    "emergency": "GENERIC_EMERGENCY",
+    "hard_risk": "GENERIC_EMERGENCY",
+    "hard_stop": "GENERIC_EMERGENCY",
+}
+
+
 def normalize_order(
     intent: Any,
     *,
@@ -1105,6 +1147,36 @@ def normalize_order(
         except Exception:
             config_hash = None
 
+    # Structured emergency authorization (2026-10-17).  Producers may declare
+    # ``exit_class`` / ``emergency_type`` / ``authorization_source`` directly;
+    # when unset they are derived here from the canonical exit-reason
+    # taxonomy so the firewall validates a *declared classification* rather
+    # than pattern-matching the free-text reason.  ``authorization_source``
+    # falls back to the intent's issuing component (source/agent_id) — an
+    # exemption with no issuer is denied downstream.
+    exit_class_val = getattr(intent, "exit_class", None)
+    emergency_type_val = getattr(intent, "emergency_type", None)
+    auth_source_val = getattr(intent, "authorization_source", None)
+    if purpose == "close" and (exit_class_val is None or emergency_type_val is None):
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import (
+                classify_exit_reason,
+            )
+            _eraw = getattr(intent, "exit_reason", None) or reason
+            _eo, _ec, _ecls = classify_exit_reason(_eraw)
+            if exit_class_val is None:
+                exit_class_val = _ecls.value if _ecls.value != "unknown" else "ordinary"
+            if emergency_type_val is None:
+                emergency_type_val = _REASON_TO_EMERGENCY_TYPE.get(_ec)
+        except Exception:
+            if exit_class_val is None:
+                exit_class_val = "ordinary"
+    if auth_source_val is None and purpose == "close":
+        auth_source_val = (
+            getattr(intent, "source", None)
+            or getattr(intent, "agent_id", None)
+        )
+
     return CanonicalOrderIntent(
         market_ticker=market_ticker,
         contract=contract,  # type: ignore[arg-type]
@@ -1159,6 +1231,14 @@ def normalize_order(
         economic_side=economic_side_val,
         config_hash=config_hash,
         decision_lane=getattr(intent, "decision_lane", None),
+        exit_class=exit_class_val,
+        emergency_type=emergency_type_val,
+        authorization_source=auth_source_val,
+        position_generation_id=(
+            getattr(intent, "position_generation_id", None)
+            or getattr(intent, "parent_entry_fill_id", None)
+        ),
+        exchange_index=getattr(intent, "exchange_index", None),
     )
 
 

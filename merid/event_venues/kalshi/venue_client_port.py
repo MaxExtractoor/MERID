@@ -64,22 +64,6 @@ class KalshiVenueClientExecutionPort:
             or request.metadata.get("entry_or_exit") in ("exit", "close")
             or bool(firewall_approval_id)
         )
-        if is_exit:
-            from merid.event_venues.kalshi.execution_risk_firewall import ExecutionRiskFirewall
-
-            firewall = ExecutionRiskFirewall.get_instance()
-            if firewall.is_enforced():
-                decision = firewall.get_decision(request.client_order_id) if request.client_order_id else None
-                if not decision or decision.decision_id != firewall_approval_id:
-                    logger.critical(
-                        "[PORT-FIREWALL-REJECT] client_order_id=%s missing/invalid approval token",
-                        request.client_order_id,
-                    )
-                    return CreateOrderResponse(
-                        success=False,
-                        error="firewall:missing_or_invalid_approval_token",
-                    )
-
         order = VenueOrder(
             market_id=request.ticker,
             side=request.side,
@@ -102,6 +86,34 @@ class KalshiVenueClientExecutionPort:
             max_execution_cost_cents=request.max_execution_cost_cents,
             cancel_order_on_pause=request.cancel_order_on_pause,
         )
+
+        if is_exit:
+            from merid.event_venues.kalshi.execution_risk_firewall import ExecutionRiskFirewall
+
+            firewall = ExecutionRiskFirewall.get_instance()
+            if firewall.is_enforced():
+                decision = firewall.get_decision(request.client_order_id) if request.client_order_id else None
+                if not decision or decision.decision_id != firewall_approval_id:
+                    logger.critical(
+                        "[PORT-FIREWALL-REJECT] client_order_id=%s missing/invalid approval token",
+                        request.client_order_id,
+                    )
+                    return CreateOrderResponse(
+                        success=False,
+                        error="firewall:missing_or_invalid_approval_token",
+                    )
+                # The approval covers THIS order — a mutated protected field
+                # is rejected here as well as at the client boundary.
+                _mm = firewall.approval_mismatches(order, decision)
+                if _mm:
+                    logger.critical(
+                        "[PORT-FIREWALL-REJECT] client_order_id=%s approval-binding mismatch: %s",
+                        request.client_order_id, ";".join(_mm),
+                    )
+                    return CreateOrderResponse(
+                        success=False,
+                        error=f"firewall:approval_binding_mismatch:{';'.join(_mm)}",
+                    )
 
         result = await self._client.place_order_result(
             order,

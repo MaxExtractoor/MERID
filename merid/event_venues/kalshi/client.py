@@ -2275,6 +2275,26 @@ class KalshiVenueClient(EventVenueClient):
                             latency_ms=0.0,
                             retries=0,
                         )
+                    # APPROVAL BINDING (2026-10-17): the token approves a
+                    # specific order, not a reusable capability.  Any
+                    # post-approval mutation of a protected field is a
+                    # rejection — the economics transmitted must equal the
+                    # economics approved.  (Account scope is bound by the
+                    # authenticated client credential; orders carry no
+                    # per-order account field.)
+                    _mismatches = fw.approval_mismatches(order, decision)
+                    if _mismatches:
+                        logger.critical(
+                            "[CLIENT-FIREWALL-REJECT] ticker=%s client_order_id=%s "
+                            "approval-binding mismatch: %s",
+                            order.market_id, getattr(order, "client_order_id", None),
+                            ";".join(_mismatches),
+                        )
+                        return OperationResult.fail(
+                            f"firewall:approval_binding_mismatch:{';'.join(_mismatches)}",
+                            latency_ms=0.0,
+                            retries=0,
+                        )
             except Exception as exc:
                 logger.critical("[CLIENT-FIREWALL-ERROR] %s", exc, exc_info=True)
                 return OperationResult.fail(

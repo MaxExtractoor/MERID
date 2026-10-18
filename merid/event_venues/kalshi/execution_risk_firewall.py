@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -29,6 +30,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from utils.logger import get_logger
+from merid.event_venues.kalshi import exit_authorization as _xa
 
 if TYPE_CHECKING:
     from merid.event_venues.kalshi.order_intent_contract import CanonicalOrderIntent
@@ -122,6 +124,13 @@ class FirewallDecision:
     available_depth_cc: int
     parent_entry_fill_id: Optional[str] = None
     emergency: bool = False
+    # Approval binding (2026-10-17): the economics the approval covers.  The
+    # venue client rejects an order carrying this token when any bound field
+    # differs — approval is of THIS order, not a reusable capability.
+    time_in_force: str = ""
+    reduce_only: bool = True
+    exchange_index: Optional[int] = None
+    intent_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -285,7 +294,7 @@ class ExecutionRiskFirewall:
         # resize to the visible depth and let the residual position re-fire
         # its trigger next tick.  Discretionary exits keep the hard reject.
         if book.available_qty_cc < qty_cc:
-            if self._is_forced_exit(original_intent, canonical) and book.available_qty_cc > 0:
+            if self._is_forced_exit(original_intent, canonical, pos) and book.available_qty_cc > 0:
                 new_qty_cc = int(book.available_qty_cc)
                 logger.warning(
                     "[FIREWALL-RESIZE-FORCED-EXIT] ticker=%s intent_id=%s "
@@ -317,7 +326,7 @@ class ExecutionRiskFirewall:
             # position further while the book falls.
             if (
                 _env_bool("MERID_FIREWALL_FORCED_EXIT_REPRICE", True)
-                and self._is_forced_exit(original_intent, canonical)
+                and self._is_forced_exit(original_intent, canonical, pos)
                 and book.marginal_price_cents is not None
             ):
                 _old_limit = int(canonical.limit_cents)
@@ -369,17 +378,80 @@ class ExecutionRiskFirewall:
         allowed, policy_reason = self._apply_loss_policy(
             canonical, pos, book, expected_pnl, original_intent
         )
+        # (step 9 delegates structured emergency checks with the live
+        # position snapshot so the generation binding is enforced)
         if not allowed:
             return self._rejected(policy_reason, canonical)
 
         # 10. Parent entry linkage.
         parent = self._resolve_parent_entry_fill_id(canonical, original_intent, pos)
         if _env_bool("MERID_REQUIRE_EXIT_PARENTAGE", False) and not parent:
-            if not self._is_safety_or_manual_exit(original_intent, canonical):
+            if not self._is_safety_or_manual_exit(original_intent, canonical, pos):
                 return self._rejected("missing_parent_entry_fill_id", canonical)
 
         # 11. Approve with a clamped worst-case limit and deterministic client order id.
         approved_limit = self._clamp_exit_limit(canonical, book)
+
+        # 11a. Minimum-proceeds floor for ordinary profit exits (2026-10-17).
+        # A voluntary profit-taking exit may not submit below the position's
+        # fee-adjusted breakeven floor (held-side entry + entry fee + exit
+        # fee).  IOC semantics make the clamp safe: quantity that cannot fill
+        # at >= floor is canceled, and the residual rides to settlement — the
+        # floor is a submission invariant, never a guaranteed fill.
+        # Emergency / operational exits are exempt and may deliberately
+        # realize a loss.  When the floor itself is unattainable (> 99c) the
+        # honest answer is to hold, so the exit is rejected rather than
+        # submitted below it.
+        _min_proceeds_exempt = self._is_min_proceeds_exempt(
+            original_intent, canonical, pos
+        )
+        if not _min_proceeds_exempt:
+            _entry_c = pos.avg_price_cents
+            if _entry_c is not None and 1 <= int(_entry_c) <= 99:
+                _floor = self._fee_adjusted_floor_cents(
+                    int(_entry_c), approved_limit
+                )
+                # The required floor is max(breakeven, persisted trail lock):
+                # a trail that already locked a gain must not be allowed to
+                # submit near breakeven (entry+fees is only the *minimum*
+                # profit bound, not the locked-profit level).
+                _trail_lock = self._persisted_trail_lock_cents(
+                    ticker,
+                    generation_id=parent,
+                    held_outcome=pos.side if pos else None,
+                )
+                if _trail_lock is not None:
+                    _floor = _trail_lock if _floor is None else max(_floor, _trail_lock)
+                if _floor is not None and not (1 <= _floor <= 99):
+                    return self._rejected(
+                        f"min_proceeds_unattainable:floor={_floor}:entry={int(_entry_c)}",
+                        canonical,
+                    )
+                if _floor is not None:
+                    # Held-side-equivalent proceeds: a sell realizes its limit
+                    # directly; a YES-form buy closing a NO position realizes
+                    # 100 - limit.  Enforce the floor in held-side space.
+                    if canonical.action == "sell" and approved_limit < _floor:
+                        logger.warning(
+                            "[MIN-PROCEEDS-FLOOR] ticker=%s intent_id=%s "
+                            "approved_limit=%dc -> %dc (entry=%dc fee-adjusted "
+                            "floor; unfilled quantity cancels, residual rides "
+                            "to settlement)",
+                            ticker, canonical.intent_id,
+                            approved_limit, _floor, int(_entry_c),
+                        )
+                        approved_limit = _floor
+                    elif canonical.action == "buy" and approved_limit > 100 - _floor:
+                        logger.warning(
+                            "[MIN-PROCEEDS-FLOOR] ticker=%s intent_id=%s "
+                            "approved_limit=%dc -> %dc (YES-form close; "
+                            "held-equivalent floor=%dc entry=%dc; unfilled "
+                            "quantity cancels, residual rides to settlement)",
+                            ticker, canonical.intent_id,
+                            approved_limit, 100 - _floor, _floor, int(_entry_c),
+                        )
+                        approved_limit = 100 - _floor
+
         coid = self._deterministic_coid(canonical, pos, approved_limit, parent)
         decision_id = f"firewall_{uuid.uuid4().hex}"
 
@@ -403,7 +475,11 @@ class ExecutionRiskFirewall:
             vwap_cents=book.vwap_cents,
             available_depth_cc=book.available_qty_cc,
             parent_entry_fill_id=parent,
-            emergency=False,
+            emergency=_min_proceeds_exempt,
+            time_in_force=str(getattr(canonical, "time_in_force", "") or ""),
+            reduce_only=bool(getattr(canonical, "reduce_only", False)),
+            exchange_index=getattr(canonical, "exchange_index", None),
+            intent_id=getattr(canonical, "intent_id", None),
             raw={
                 "latency_ms": round((time.monotonic() - t0) * 1000, 2),
                 "fee_cents": fee_cents,
@@ -433,6 +509,63 @@ class ExecutionRiskFirewall:
         left every decision resident forever — the map grew unbounded over
         a run and a stale coid could be re-read after routing."""
         return self._decisions.pop(client_order_id, None)
+
+    @staticmethod
+    def approval_mismatches(order: Any, decision: "FirewallDecision") -> List[str]:
+        """Protected-field binding between an approved decision and the order
+        carrying its token.  The approval covers THIS order — any
+        post-approval mutation of market, outcome/action, quantity, limit
+        price, reduce_only, time-in-force, or exchange shard is a rejection.
+        Position generation is bound transitively through client_order_id
+        (it is derived from the resolved generation); account scope is bound
+        by the authenticated client credential (orders carry no per-order
+        account field).  Returns the list of ``field:got!=approved``
+        mismatches (empty == bound)."""
+        mismatches: List[str] = []
+        if getattr(order, "market_id", None) != decision.market_ticker:
+            mismatches.append(
+                f"market:{getattr(order, 'market_id', None)}!={decision.market_ticker}")
+        if (getattr(order, "outcome_id", None) or "").lower() != (decision.contract or "").lower():
+            mismatches.append(
+                f"contract:{getattr(order, 'outcome_id', None)}!={decision.contract}")
+        if (getattr(order, "side", None) or "").lower() != (decision.action or "").lower():
+            mismatches.append(
+                f"action:{getattr(order, 'side', None)}!={decision.action}")
+        try:
+            qty_cc = int((Decimal(str(getattr(order, "size", ""))) * Decimal("100")).to_integral_value())
+        except Exception:
+            qty_cc = -1
+        if qty_cc != decision.qty_cc:
+            mismatches.append(f"qty_cc:{qty_cc}!={decision.qty_cc}")
+        try:
+            price_c = int((Decimal(str(getattr(order, "price", ""))) * Decimal("100")).to_integral_value())
+        except Exception:
+            price_c = -1
+        if price_c != decision.approved_limit_cents:
+            mismatches.append(
+                f"price_c:{price_c}!={decision.approved_limit_cents}")
+        if bool(getattr(order, "reduce_only", False)) != bool(decision.reduce_only):
+            mismatches.append(
+                f"reduce_only:{getattr(order, 'reduce_only', None)}!={decision.reduce_only}")
+        try:
+            from merid.event_venues.kalshi.client import (
+                merid_time_in_force_to_kalshi_api,
+            )
+            tif_w = merid_time_in_force_to_kalshi_api(
+                getattr(order, "time_in_force", None) or "GTC")
+            tif_d = merid_time_in_force_to_kalshi_api(
+                decision.time_in_force or "GTC")
+        except Exception:
+            tif_w = tif_d = "__norm_error__"
+        if tif_w != tif_d:
+            mismatches.append(f"tif:{tif_w}!={tif_d}")
+        if decision.exchange_index is not None and (
+            getattr(order, "exchange_index", None) != decision.exchange_index
+        ):
+            mismatches.append(
+                f"exchange_index:{getattr(order, 'exchange_index', None)}"
+                f"!={decision.exchange_index}")
+        return mismatches
 
     # ── Internals ───────────────────────────────────────────────────────────
 
@@ -728,7 +861,7 @@ class ExecutionRiskFirewall:
         # Forced exits (safety, stop, expiry, manual) are allowed to close at an
         # inherent loss; only discretionary profit exits are bound by the adverse
         # PnL budget.
-        if not self._is_forced_exit(original_intent, canonical):
+        if not self._is_forced_exit(original_intent, canonical, pos):
             if expected_pnl is not None and expected_pnl < -max_adverse:
                 return False, f"adverse_pnl:predicted={expected_pnl}:max=-{max_adverse}"
         elif expected_pnl is not None and expected_pnl < -max_adverse:
@@ -780,33 +913,11 @@ class ExecutionRiskFirewall:
         fee = int(fee_exact.to_integral_value(rounding=ROUND_CEILING))
         return max(0, fee)
 
-    _SAFETY_EXIT_REASONS: frozenset[str] = frozenset(
-        {
-            "manual",
-            "risk",
-            "stale_data",
-            "stale_position_snapshot",
-            "stop_loss",
-            "settlement_guard",
-            "auto_exit_99c",
-            "hard_profit_lock",
-            "market_expired",
-            "expiry_liquidation",
-            "time_exit",
-            "time_stop",
-            "hard_stop",
-            "soft_stop",
-            "trailing_stop",
-            "kill_switch",
-            "loss_cap",
-            "model_invalidation_loss_exit",
-        }
-    )
-
     def _is_forced_exit(
         self,
         original_intent: Optional[Any],
         canonical: "CanonicalOrderIntent",
+        pos: Optional[PositionSnapshot] = None,
     ) -> bool:
         """Return True for exits that must bypass the adverse-PnL bound.
 
@@ -815,40 +926,30 @@ class ExecutionRiskFirewall:
         loss (the position is already underwater or the market is closing), but
         they are still subject to slippage and quantity invariants.
         """
-        if original_intent is not None and getattr(
-            original_intent, "is_manual_emergency_close", False
-        ):
+        if self._manual_close_authorized(original_intent, canonical):
             return True
-
-        # Prefer explicit exit_reason, fall back to canonical reason.
-        reason = ""
-        if original_intent is not None:
-            reason = (
-                getattr(original_intent, "exit_reason", None)
-                or getattr(original_intent, "reason", None)
-                or ""
-            ).lower().replace("exit_", "")
-        if not reason and canonical is not None:
-            reason = (canonical.reason or "").lower().replace("exit_", "")
-
-        if reason and reason in self._SAFETY_EXIT_REASONS:
-            return True
-        for safety in self._SAFETY_EXIT_REASONS:
-            if safety in reason:
-                return True
-        return False
+        # Structured authorization only (2026-10-17): a free-text reason may
+        # describe a forced exit but can no longer *authorize* a deliberate
+        # loss.  The adverse-PnL bound is bypassed only by the validated
+        # exit_class/emergency_type/authorization_source/generation tuple.
+        return self._structured_emergency_authorized(
+            original_intent, canonical, pos
+        )
 
     def _is_safety_or_manual_exit(
         self,
         original_intent: Optional[Any],
         canonical: "CanonicalOrderIntent",
+        pos: Optional[PositionSnapshot] = None,
     ) -> bool:
         """Return True for safety/time-to-expiry/operator exits that may lack a fill id."""
-        if original_intent is not None and getattr(
-            original_intent, "is_manual_emergency_close", False
-        ):
+        if self._manual_close_authorized(original_intent, canonical):
             return True
-        if canonical.reduce_only and getattr(original_intent, "parentage_status", None) in (
+        _pstatus = (
+            getattr(canonical, "parentage_status", None)
+            or getattr(original_intent, "parentage_status", None)
+        )
+        if canonical.reduce_only and _pstatus in (
             "CANONICAL_FILL",
             "ORDER_LINKED",
             "SIGNAL_ONLY",
@@ -856,16 +957,16 @@ class ExecutionRiskFirewall:
         ):
             # Reduce-only safety exits for unknown/weak provenance are allowed.
             # Discretionary profit exits are blocked upstream by ExitPolicy/
-            # PositionMonitor quarantine.
-            reason = (canonical.reason or "").lower()
-            exit_reason = (
-                getattr(original_intent, "exit_reason", None) or ""
-            ).lower().replace("exit_", "")
-            if exit_reason and exit_reason in self._SAFETY_EXIT_REASONS:
+            # PositionMonitor quarantine.  2026-10-17: free-text reasons no
+            # longer authorize — the same structured model applies (class +
+            # issuing source + generation consistency).  ``emergency_type``
+            # is not required here: this check grants identity tolerance, not
+            # loss-taking authority, which stays behind the full tuple.
+            if self._structured_emergency_authorized(original_intent, canonical, pos):
                 return True
-            for safety in self._SAFETY_EXIT_REASONS:
-                if safety in reason:
-                    return True
+            return self._structured_operational_authorized(
+                original_intent, canonical, pos
+            )
         return False
 
     def _resolve_parent_entry_fill_id(
@@ -891,6 +992,234 @@ class ExecutionRiskFirewall:
         if canonical.action == "sell":
             return min(canonical.limit_cents, book.vwap_cents)
         return max(canonical.limit_cents, book.vwap_cents)
+
+    # Emergency authorization tables live in the shared, versioned policy
+    # module so the arbiter (proposal-time) and this firewall (submit-time)
+    # evaluate identical rules — see merid/event_venues/kalshi/
+    # exit_authorization.py (policy version exit-auth-v1).
+    _LOSS_AUTHORIZED_EMERGENCY_TYPES = _xa.LOSS_AUTHORIZED_EMERGENCY_TYPES
+    _EMERGENCY_TYPE_ISSUERS = _xa.EMERGENCY_TYPE_ISSUERS
+    _OPERATIONAL_EXIT_ISSUERS = _xa.OPERATIONAL_EXIT_ISSUERS
+    _MANUAL_CLOSE_ISSUERS = _xa.MANUAL_CLOSE_ISSUERS
+
+    def _manual_close_authorized(
+        self,
+        original_intent: Optional[Any],
+        canonical: "CanonicalOrderIntent",
+    ) -> bool:
+        """The operator manual-close flag is honored only from an operator
+        issuer — an arbitrary producer cannot set the bit on its own intent
+        to mint emergency authority."""
+        if original_intent is None or not getattr(
+            original_intent, "is_manual_emergency_close", False
+        ):
+            return False
+        src = (
+            getattr(original_intent, "authorization_source", None)
+            or getattr(original_intent, "source", None)
+            or getattr(original_intent, "agent_id", None)
+            or getattr(canonical, "authorization_source", None)
+            or ""
+        ).strip()
+        return src in _MANUAL_CLOSE_ISSUERS
+
+    def _is_min_proceeds_exempt(
+        self,
+        original_intent: Optional[Any],
+        canonical: "CanonicalOrderIntent",
+        pos: Optional[PositionSnapshot] = None,
+    ) -> bool:
+        """True only when the exit carries *structured* emergency
+        authorization — never because the free-text reason names one.
+
+        Required authorization tuple (validated here, independent of
+        ``reason``):
+          - ``exit_class`` in {emergency, operational}
+          - ``emergency_type`` in ``_LOSS_AUTHORIZED_EMERGENCY_TYPES``
+          - non-empty ``authorization_source`` (the controller that issued
+            the exception — an exemption with no issuer is denied)
+          - ``position_generation_id`` consistent with the position's
+            resolved entry-fill generation when both are known
+
+        ``is_manual_emergency_close`` on the original intent remains a
+        separately-authorized operator path, honored only from an operator
+        issuer.  Everything else — including a bare ``reason="hard_stop"`` —
+        is an ordinary exit and carries the min-proceeds submission
+        invariant.
+        """
+        if self._manual_close_authorized(original_intent, canonical):
+            return True
+        return self._structured_emergency_authorized(
+            original_intent, canonical, pos, denied_log_tag="MIN-PROCEEDS"
+        )
+
+    def _structured_emergency_authorized(
+        self,
+        original_intent: Optional[Any],
+        canonical: "CanonicalOrderIntent",
+        pos: Optional[PositionSnapshot] = None,
+        denied_log_tag: str = "EMERGENCY-AUTH",
+    ) -> bool:
+        """Validate the structured emergency-authorization tuple.
+
+        This is authorization, not classification.  Required, all evaluated
+        independently of ``reason``:
+          - ``exit_class`` in {emergency, operational}
+          - ``emergency_type`` in ``_LOSS_AUTHORIZED_EMERGENCY_TYPES``
+          - ``authorization_source`` in the type's issuer allowlist
+            (``_EMERGENCY_TYPE_ISSUERS``) — a producer cannot manufacture an
+            emergency type outside its scope
+          - ``position_generation_id`` non-empty AND equal to the position's
+            resolved generation — two empty fields do not count as
+            "consistent", and a position with no resolvable generation
+            cannot receive loss-taking authority at all
+          - requested quantity does not exceed the position's remaining
+            quantity (the exception binds to this generation's exposure,
+            not an arbitrary size)
+        """
+        def _field(name: str) -> Optional[str]:
+            for src in (canonical, original_intent):
+                v = getattr(src, name, None) if src is not None else None
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+            return None
+
+        exit_class = (_field("exit_class") or "").lower()
+        etype = (_field("emergency_type") or "").upper()
+        source = _field("authorization_source")
+        gen = _field("position_generation_id") or getattr(
+            canonical, "parent_entry_fill_id", None
+        )
+        pos_gen = (
+            getattr(pos, "parent_entry_fill_id", None) if pos is not None else None
+        )
+
+        issuer_scope = self._EMERGENCY_TYPE_ISSUERS.get(etype, frozenset())
+        gen_bound = bool(gen) and bool(pos_gen) and gen == pos_gen
+        qty_bound = pos is not None and canonical.qty_cc <= abs(
+            getattr(pos, "position_cc", 0) or 0
+        )
+
+        authorized = (
+            exit_class in ("emergency", "operational")
+            and etype in self._LOSS_AUTHORIZED_EMERGENCY_TYPES
+            and bool(source)
+            and source in issuer_scope
+            and gen_bound
+            and qty_bound
+        )
+        if not authorized and (exit_class or etype or source):
+            logger.warning(
+                "[%s-EXEMPT-DENIED] intent=%s exit_class=%s "
+                "emergency_type=%s source=%s gen=%s - structured emergency "
+                "authorization incomplete; ordinary bounds apply",
+                denied_log_tag,
+                getattr(canonical, "intent_id", None),
+                exit_class or None, etype or None, source, gen,
+            )
+        return authorized
+
+    def _structured_operational_authorized(
+        self,
+        original_intent: Optional[Any],
+        canonical: "CanonicalOrderIntent",
+        pos: Optional[PositionSnapshot] = None,
+    ) -> bool:
+        """Structured authorization for identity-tolerance exemptions (e.g.
+        the missing-parent-entry-fill bypass for safety exits).
+
+        Same model as ``_structured_emergency_authorized`` minus
+        ``emergency_type``: the caller is asking to proceed despite weak
+        provenance, not to take a loss.  Requires a declared operational /
+        emergency class and a non-empty issuing source; generation is
+        enforced only when both sides are known (this path exists precisely
+        for exits whose parent linkage is UNKNOWN).
+        """
+        def _field(name: str) -> Optional[str]:
+            for src in (canonical, original_intent):
+                v = getattr(src, name, None) if src is not None else None
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+            return None
+
+        exit_class = (_field("exit_class") or "").lower()
+        source = _field("authorization_source")
+        gen = _field("position_generation_id") or getattr(
+            canonical, "parent_entry_fill_id", None
+        )
+        pos_gen = (
+            getattr(pos, "parent_entry_fill_id", None) if pos is not None else None
+        )
+        return (
+            exit_class in ("emergency", "operational")
+            and bool(source)
+            and source in self._OPERATIONAL_EXIT_ISSUERS
+            # Generation consistency only when both are known — this path
+            # exists precisely for UNKNOWN-parentage exits, and it grants no
+            # loss-taking authority regardless.
+            and (not gen or not pos_gen or gen == pos_gen)
+        )
+
+    def _fee_adjusted_floor_cents(
+        self, entry_cents: int, proposed_limit_cents: int
+    ) -> Optional[int]:
+        """Fee-adjusted breakeven exit floor in held-side cents.
+
+        floor = held-side entry + per-contract entry fee + per-contract exit
+        fee at the proposed limit.  ``MERID_MIN_PROCEEDS_FEE_ADJUST=0`` reverts
+        to the plain entry-price floor.
+        """
+        if not _env_bool("MERID_MIN_PROCEEDS_FEE_ADJUST", True):
+            return entry_cents
+        try:
+            from merid.event_venues.kalshi.parabolic_fees import (
+                kalshi_fee_cents_exact,
+            )
+            entry_fee = float(
+                kalshi_fee_cents_exact(entry_cents / 100.0, 1, "taker")
+            )
+            exit_fee = float(
+                kalshi_fee_cents_exact(proposed_limit_cents / 100.0, 1, "taker")
+            )
+            return int(math.ceil(entry_cents + entry_fee + exit_fee))
+        except Exception:
+            return entry_cents
+
+    def _persisted_trail_lock_cents(
+        self,
+        ticker: str,
+        generation_id: Optional[str] = None,
+        held_outcome: Optional[str] = None,
+    ) -> Optional[int]:
+        """Held-side locked-profit price floor from the durable exit-state
+        store (``ratchet_floor_price_cents``), or None.
+
+        The lookup is lifecycle-exact: it requires the position's generation
+        id (resolved ``parent_entry_fill_id``) and, when the record carries
+        one, a matching ``held_outcome``.  A generationless lookup returns
+        None rather than borrowing the newest live record for the ticker —
+        an archived prior generation's locked floor must never leak into a
+        new trade.
+        """
+        try:
+            from merid.position_management.position_exit_state import (
+                get_exit_state_store,
+            )
+            rec = get_exit_state_store().find_record(
+                ticker,
+                generation_id=generation_id,
+                held_outcome=held_outcome,
+                require_generation=True,
+            )
+            if not rec:
+                return None
+            lock = rec.get("ratchet_floor_price_cents")
+            if lock is None:
+                return None
+            lock = int(lock)
+            return lock if 1 <= lock <= 99 else None
+        except Exception:
+            return None
 
     def _deterministic_coid(
         self,
