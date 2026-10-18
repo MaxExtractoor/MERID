@@ -29,7 +29,18 @@ Bounds (all env-tunable):
                                              a fill blocks the ticker
                                              upstream via the position
                                              gate)
-  MERID_WINDOW_QUOTA_DAILY_MAX          480  total quota submissions/day
+  MERID_WINDOW_QUOTA_DAILY_MAX          1440 total quota submissions/day;
+                                             sized to exactly cover the full
+                                             universe: 5 assets x 96
+                                             15-minute windows x
+                                             MAX_PER_TICKER(3).  The real
+                                             spend limiters are the
+                                             per-ticker budget, the position
+                                             gate, and allocator caps — this
+                                             counter is only a
+                                             catastrophic-bleed bound, so it
+                                             must not starve normal
+                                             operation before day-end.
   MERID_WINDOW_QUOTA_MIN_GAP_S          15   minimum seconds between quota
                                              emissions on the same ticker
   MERID_WINDOW_QUOTA_P_CAP              0.99 router-side model-prob ceiling
@@ -107,7 +118,7 @@ def quota_max_per_ticker() -> int:
 
 
 def quota_daily_max() -> int:
-    return int(_env_float("MERID_WINDOW_QUOTA_DAILY_MAX", 480.0))
+    return int(_env_float("MERID_WINDOW_QUOTA_DAILY_MAX", 1440.0))
 
 
 def quota_min_gap_s() -> float:
