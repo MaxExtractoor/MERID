@@ -4259,7 +4259,28 @@ class KalshiMarketStateStore:
         with self._lock:
             stale_tickers = [t for t in self._states if t not in active_set]
 
+            # 2026-10-18 (selector-miss retention): a ticker absent from the
+            # active set but still inside its live window is a catalog
+            # selector miss, not an expired market - deleting its state here
+            # wipes the warm book and forces a multi-minute resync when the
+            # selector recovers.  Recompute TTE from the state's own expiry
+            # metadata (single source of truth, not the caller's list) and
+            # retain the state; genuinely expired tickers still prune.
+            deletable = []
             for ticker in stale_tickers:
+                state = self._states.get(ticker)
+                if state is not None:
+                    _recompute_seconds_to_expiry(state)
+                tte = getattr(state, "seconds_to_expiry", None) if state is not None else None
+                if tte is not None and tte > 0:
+                    logger.info(
+                        "[MARKET-STATE-CLEANUP] Retained live ticker=%s absent from active set (seconds_to_expiry=%.1f)",
+                        ticker, tte,
+                    )
+                    continue
+                deletable.append(ticker)
+
+            for ticker in deletable:
                 del self._states[ticker]
                 self._unified.pop(ticker, None)
                 self._subscribers.pop(ticker, None)
@@ -4273,8 +4294,25 @@ class KalshiMarketStateStore:
                 self._needs_resync.pop(ticker, None)
                 logger.info(f"[MARKET-STATE-CLEANUP] Removed stale state for ticker={ticker}")
 
-            if stale_tickers:
-                logger.info(f"[MARKET-STATE-CLEANUP] Cleaned up {len(stale_tickers)} stale tickers: {stale_tickers}")
+            if deletable:
+                logger.info(f"[MARKET-STATE-CLEANUP] Cleaned up {len(deletable)} stale tickers: {deletable}")
+
+    def live_state_tickers(self) -> List[str]:
+        """Tickers whose tracked state is still inside its live window.
+
+        Recomputes ``seconds_to_expiry`` from each state's own expiry
+        metadata first, so a stale cached value cannot extend the liveness
+        claim.  Used to protect still-live markets from catalog-selector
+        misses in the WS desired set.
+        """
+        live: List[str] = []
+        with self._lock:
+            for ticker, state in self._states.items():
+                _recompute_seconds_to_expiry(state)
+                tte = getattr(state, "seconds_to_expiry", None)
+                if tte is not None and tte > 0:
+                    live.append(ticker)
+        return live
 
     def invalidate_all_live_sequence(self) -> None:
         """Clear live_sequence_confirmed for all tracked markets.

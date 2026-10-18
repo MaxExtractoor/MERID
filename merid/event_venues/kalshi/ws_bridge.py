@@ -2995,6 +2995,26 @@ class KalshiWebSocketBridge:
         # Use desired_tickers set by loop (not catalog query)
         desired = set(self._desired_tickers) if self._desired_tickers else set()
 
+        # 2026-10-18 (selector-miss retention): union the desired set with
+        # still-live store states so a transient catalog-selector miss
+        # cannot unsubscribe (and below, cannot cleanup) a market that is
+        # inside its trading window.  Expired states contribute nothing
+        # since their recomputed TTE is <= 0, so rollover pruning still
+        # works exactly as before.
+        if self._market_state_store is not None:
+            try:
+                live_states = self._market_state_store.live_state_tickers()
+                if live_states:
+                    missing = sorted(set(live_states) - desired)
+                    if missing:
+                        logger.info(
+                            "[WS-SYNC] Retaining %d live-state tickers absent from desired set: %s",
+                            len(missing), missing,
+                        )
+                        desired |= set(live_states)
+            except Exception as e:
+                logger.warning("[WS-SYNC] live_state_tickers failed: %s", e)
+
         # P0 FIX: Use the WebSocket's actual orderbook ticker set as the current
         # state. _subscribed_tickers can drift from the WS layer after reconnects
         # or partial syncs, which caused the bridge to resubscribe to expired
