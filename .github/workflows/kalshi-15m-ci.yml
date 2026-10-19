@@ -64,12 +64,16 @@ jobs:
       run: |
         pytest tests/kalshi_15m/ -m kalshi_15m -v --tb=short
     
-    - name: Run Kalshi core tests
+    - name: Run Kalshi venue tests
       env:
         MERID_PROFILE: kalshi_crypto_15m_v2
         MERID_TEST_MODE: 1
       run: |
-        pytest tests/kalshi/ tests/merid/event_venues/kalshi/ -m kalshi_core -v --tb=short
+        # 2026-10-18: was `pytest tests/kalshi/ tests/merid/event_venues/kalshi/
+        # -m kalshi_core` — both directories are pytest-ignored (legacy mirrors)
+        # and no test carries the kalshi_core mark, so the step collected 0
+        # tests and failed with pytest exit code 5.
+        pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120
     
     - name: Run reconciliation and risk tests
       env:

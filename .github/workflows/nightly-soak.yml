@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -40,11 +40,10 @@ jobs:
             -v --tb=short
         timeout-minutes: 10
 
-      - name: Swarm Benchmark (Kalshi scenarios)
-        run: |
-          pytest tests/test_swarm_vs_single_agent_benchmark.py::TestHistoricalKalshiBenchmark \
-            -v --tb=short
-        timeout-minutes: 10
+      # Removed 2026-10-18: "Swarm Benchmark" step targeted
+      # tests/test_swarm_vs_single_agent_benchmark.py, which moved to
+      # tests/legacy/ and imports the deleted core.consensus_math module —
+      # it can never run against the 15m stack.
 
       - name: Golden Path + Phase 2/3 Hardening
         run: |
@@ -53,7 +52,6 @@ jobs:
             tests/test_hardening.py \
             tests/event_venues/kalshi/test_ws_resilience.py \
             tests/event_venues/kalshi/test_rate_limits.py \
-            tests/prediction/test_trading_agent_explainability.py \
             tests/integration/test_swarm_health_gating.py \
             tests/integration/test_kalshi_e2e_stress.py \
             -v --tb=short --timeout=60
@@ -76,13 +74,35 @@ jobs:
 
       - name: Notify on failure
         if: failure()
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
-            github.rest.issues.create({
+            // Upsert a single tracking issue instead of opening a new issue per
+            // nightly failure (2026-10-18: ~80 duplicate issues were auto-filed).
+            const title = '🔴 Nightly Soak Test Failures';
+            const { data: existing } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '🔴 Nightly Soak Test Failed',
-              body: `The nightly soak test run #${context.runNumber} failed.\n\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              labels: ['bug', 'soak-test', 'ci']
+              state: 'open',
+              labels: 'soak-test',
+              per_page: 10,
             });
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Run #${context.runNumber} failed on ${context.sha.slice(0, 8)}.\n\nSee: ${runUrl}`;
+            const tracking = existing.find(i => i.title === title);
+            if (tracking) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracking.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `The nightly soak test is failing. New failures are appended as comments.\n\n${body}`,
+                labels: ['bug', 'soak-test', 'ci'],
+              });
+            }

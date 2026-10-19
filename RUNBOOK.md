@@ -1,19 +1,30 @@
-# MERID Kalshi Swarm — Operations Runbook
+# MERID Kalshi 15m — Operations Runbook
 
-> **Audience**: On-call operator / trader  
-> **Scope**: Kill-switch policy, halt conditions, daily pre-open and post-close checklist
+> **Audience**: On-call operator / trader
+> **Scope**: Kill-switch policy, halt conditions, daily checklist for the canonical 15m stack (`web.main_15m_lean:app`, port 8011, profile `kalshi_crypto_15m_v2`)
+> **Authoritative contract**: [`AGENTS.md`](AGENTS.md) — startup state machine, entry authorization, halt/recovery rules.
 
 ---
 
-## 1. Trading Modes
+## 1. Runtime Modes & Live State Machine
 
 | Mode | Description | Key guard |
 |------|-------------|-----------|
-| `mock` | Fully simulated, no real API calls | Always safe |
-| `paper` | Simulated fills against real market data | `KALSHI_ENV=demo` required |
-| `live` | Real-money orders on Kalshi | Double-lock: `KALSHI_ENV=live` + `VenueGate.live_enabled=True` |
+| non-live (paper/sim) | Bare `uvicorn web.main_15m_lean:app` — no live latches set | Missing `TRADING_ENABLED`/`MERID_PM_TRADING_MODE=live` etc. demotes to non-live |
+| observe-only | Full live-data stack, zero order submission | `MERID_OBSERVE_ONLY=1` (always wins) |
+| live | Real-money orders on Kalshi prod | `.\start_15m.ps1` latches + `auto_execution_mode:1` + passing preflight |
 
-**Never set `KALSHI_ENV=live` on a machine used for development or backtesting.**
+Live entry state machine (per `AGENTS.md`):
+
+```text
+STARTING → PREFLIGHT_RUNNING → LIVE_ENTRIES_ENABLED     (all checks pass)
+         → LIVE_ENTRIES_HALTED                          (any check fails — fail closed)
+LIVE_ENTRIES_ENABLED → LIVE_ENTRIES_HALTED → RECOVERY_RUNNING → LIVE_ENTRIES_ENABLED
+```
+
+In `LIVE_ENTRIES_HALTED`: no new entries; cancels, reduce-only exits, and flatten stay active.
+
+**Never set live-trading latches on a machine used for development or backtesting.**
 
 ---
 
@@ -40,7 +51,7 @@ All in-flight agents will drain their current cycle and then stop accepting new 
 ### 2.3 Kill-switch reset procedure
 1. Confirm the root cause (see `/api/v1/risk/kill-switch` for reason + timestamp).
 2. Fix or acknowledge the underlying condition.
-3. Reset via the KalshiGridView UI **Reset Kill Switch** button (requires confirmation dialog), or:
+3. Reset via the **Grid** view's kill-switch control (requires confirmation), or:
 ```bash
 from merid.risk.kill_switches import risk_controller
 risk_controller.reset()
@@ -91,18 +102,16 @@ print(get_category_exposure_tracker().get_snapshot().to_dict())
 
 ## 5. Daily Pre-Open Checklist
 
-Run **before** switching to `paper` or `live` mode each session:
+Run **before** each production restart / session:
 
-- [ ] Verify `KALSHI_ENV` matches the intended mode (`demo`/`live`).
-- [ ] Confirm correct key pair is loaded: `KALSHI_LIVE_API_KEY_ID` vs `KALSHI_DEMO_API_KEY_ID`.
-- [ ] Check kill switch is clear: `risk_controller.can_trade()` returns `True`.
-- [ ] Check yesterday's P&L did not hit the daily loss limit (auto-reset at UTC midnight).
-- [ ] Review swarm Brier degradation: `/api/v1/kalshi/brier-scores` — `swarm_brier` < 0.35.
-- [ ] Confirm venue WebSocket is connected: KalshiGridView health panel shows green.
-- [ ] Confirm at least 2 agents passed the gauntlet (`/api/v1/kalshi/grid/status`).
-- [ ] Review `CategoryExposureTracker` caps — ensure they are appropriate for session.
-- [ ] Verify `MERID_PM_MAX_TOTAL_NOTIONAL` is set correctly for the session budget.
-- [ ] Check TIF default is `gtc` (not `fill_or_kill`) — confirm `OrderIntent.time_in_force` default.
+- [ ] Verify `MERID_KALSHI_ENV=prod` and `KALSHI_USE_DEMO=false` are resolved by the launcher (it sets them).
+- [ ] Confirm `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` match the intended live account.
+- [ ] Check kill switch is clear and committed `data/kill_switch.json` has `active != true`.
+- [ ] Watch startup: `STARTING → PREFLIGHT_RUNNING → LIVE_ENTRIES_ENABLED`; if `LIVE_ENTRIES_HALTED`, read the structured denial reason — do not unset protections to force it green.
+- [ ] Confirm Kalshi WebSocket healthy and trusted fill watermark advancing (Monitor view / self-check).
+- [ ] Confirm trading-shard (shard 2) collateral: `MERID_AUTO_FUND_TRADING_SHARD=1` relocates idle cash; otherwise ensure shard 2 holds ≥ one centi-contract + fee.
+- [ ] Review category/exposure caps and `MERID_FIXED_EXPOSURE_CAP_USD` for the session budget.
+- [ ] Confirm reconciliation is clean before expecting entries (per-ticker, signed YES centi-contracts).
 
 ---
 
@@ -110,15 +119,12 @@ Run **before** switching to `paper` or `live` mode each session:
 
 Run **after** the trading session ends or before switching to `mock` mode:
 
-- [ ] Switch all agents to `mock` or `paper` mode via KalshiGridView.
-- [ ] Export fills: Portfolio View → Export Fills → save to `/data/fills/YYYY-MM-DD.csv`.
-- [ ] Confirm open orders are zero (cancel stragglers via Batch Cancel).
+- [ ] Confirm open orders are zero or intentionally resting (Portfolio view → orders).
 - [ ] Record session P&L in the incident log.
-- [ ] Review any kill-switch events emitted today (`risk_controller._events`).
+- [ ] Review any kill-switch / circuit-breaker events emitted today.
 - [ ] Check `CategoryExposureTracker` daily totals against caps — document if any were hit.
-- [ ] Run Brier score update: resolved markets should flow into `pred_resolved` table.
+- [ ] Confirm all fills were promoted from provisional to authoritative (no stuck provisional fills; see `apply_fill_once` contract in `AGENTS.md`).
 - [ ] Rotate API keys if any were exposed (check git log for accidental `.env` commits).
-- [ ] Verify backup of the SQLite consensus DB (`data/pred_consensus.db`).
 
 ---
 
@@ -139,7 +145,7 @@ Run **after** the trading session ends or before switching to `mock` mode:
 |-----------|--------|
 | Cannot reset kill switch | Restart MERID process; all state reloads from DB |
 | Venue API fully unreachable | Wait; do not restart repeatedly (circuit breaker handles backoff) |
-| Unexpected live position | Manually close via Terminal View → open orders → cancel all |
+| Unexpected live position | Manually close via Trade view → open orders → cancel all; verify signed YES exposure |
 | P&L discrepancy > $50 | Halt; reconcile manually via `/api/v1/reconciliation/unified-status` |
 | Suspected key compromise | Rotate immediately (Section 7); engage emergency stop first |
 

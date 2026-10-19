@@ -1,198 +1,131 @@
-# MERID — Getting Started (v3.4.0)
+# MERID — Getting Started
 
-Go from zero to a running Kalshi swarm trading session in under 30 minutes.
+Go from zero to a running MERID server in under 15 minutes. MERID is a production trading system for **Kalshi 15-minute crypto markets** (BTC, ETH, SOL, XRP, DOGE).
 
-> **Safety first:** MERID defaults to paper mode with demo API. No agent can place real orders unless you explicitly set 3 separate environment flags. See [Safety](#safety) below.
+> **Safety first:** a bare `uvicorn` launch without production flags stays non-live, and `MERID_OBSERVE_ONLY=1` runs the full live-data stack without ever submitting an order. The production launcher `start_15m.ps1` enables real-money trading — see [Going Live](#5-going-live).
 
 ---
 
 ## Prerequisites
 
 - **Python 3.11+** with `pip`
-- **Node.js 18+** (for the React dashboard)
+- **Node.js 18+** (for the React dashboard, optional)
 - **Git**
-- A terminal (PowerShell, bash, or zsh)
+- Windows PowerShell for the production launcher; the app itself runs anywhere via uvicorn
 
-No Docker, Redis, Neo4j, or external infrastructure required.
+## 1. Clone & Install
 
----
-
-## 1. Clone & Install (5 min)
-
-```bash
+```powershell
 git clone https://github.com/MaxExtractoor/MERID.git
 cd MERID
 python -m venv .venv
-.venv\Scripts\activate              # Windows
-# source .venv/bin/activate         # macOS/Linux
-
+.\.venv\Scripts\Activate.ps1      # Windows
+# source .venv/bin/activate       # macOS/Linux
 pip install -r requirements.txt
 ```
 
-Optionally copy the environment template:
+No Docker, Redis, or external infrastructure is required.
 
-```bash
-cp .env.example .env
+## 2. Start the Server
+
+**Safe first run (observe-only, real data, no orders):**
+
+```powershell
+$env:MERID_OBSERVE_ONLY = "1"
+.\start_15m.ps1 -Port 8011 -Profile kalshi_crypto_15m_v2
 ```
 
-MERID runs in paper mode with zero configuration. Add Kalshi credentials later for live market data.
+**Or bare uvicorn (non-live by default):**
 
----
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn web.main_15m_lean:app --host 127.0.0.1 --port 8011
+```
 
-## 2. Start the System (5 min)
+Verify:
 
-```bash
-# Terminal 1 — Backend
-make serve                          # http://127.0.0.1:8000
+```powershell
+curl http://localhost:8011/api/v1/health | ConvertFrom-Json | Select-Object app, profile
+# expected: app=merid_15m_kalshi_crypto, profile=kalshi_crypto_15m_v2
+curl http://localhost:8011/api/v1/self-check
+```
 
-# Terminal 2 — Dashboard
+API docs: **http://localhost:8011/docs**
+
+## 3. Dashboard
+
+```powershell
 cd web/react
 npm install
-npm run dev                         # http://localhost:5173
+npm run dev     # http://localhost:5173
 ```
 
-Open **http://localhost:5173** to see the operator dashboard.
+Wired views: Dashboard, Kalshi Dashboard (markets), Kalshi Portfolio, Trade, Grid, Risk, Calibration, Monitor, Logs, Settings.
 
----
+## 4. Understand the Architecture
 
-## 3. Run Tests (5 min)
-
-```bash
-make preflight
-```
-
-This runs the full test suite plus readiness auditor, drift audit, and RiskContext snapshot.
-
----
-
-## 4. Start Paper Trading (5 min)
-
-```bash
-make loop-start-execute
-```
-
-The MeridLoop orchestrator runs the full cycle: market scan → AI agent analysis → swarm consensus → Kelly sizing → paper execution → PnL tracking.
-
-No real money, no API keys needed.
-
----
-
-## 5. Understand the Architecture (10 min)
-
-### Data Flow
+### Execution flow (per asset, per 15-minute window)
 
 ```text
-Kalshi Markets → Agent Grid (35 agents) → Consensus Engine → Kelly Sizer → Execution Guard → Paper Engine
-       ↑                                        ↑                ↑              ↑
-  REST + WS API                         Trust-weighted       RiskContext    Kill Switch
-                                        2/3 quorum           scale factor
+SPOT SIGNAL → EDGE vs BOOK → EV GATE → SIZE → EXECUTE → MONITOR → EXIT → SETTLE
 ```
 
-### 8-Step Operator Workflow
+- **Signal** — CF Benchmarks RTI/spot reference + Kalshi orderbook snapshots feed a Bachelier/TWAP probability baseline.
+- **Edge gate** — model probability vs executable book price must clear a per-asset dynamic edge threshold plus a slippage-adjusted cost gate.
+- **Size** — bounded by `MERID_MAX_CONTRACTS_PER_ORDER`, `MERID_FIXED_EXPOSURE_CAP_USD`, held-price floor `MERID_MIN_HELD_PRICE_CENTS`.
+- **Execute** — canonical Kalshi order router with deterministic `client_order_id` idempotency and submission-unknown reconciliation.
+- **Monitor/Exit** — position monitor + exit policy (hard profit lock, stop paths), reduce-only exits.
+- **Settle** — positions resolve at window close with a post-close grace period.
 
-| Step | Action | Primary View |
-|------|--------|-------------|
-| 1 | DISCOVER — Browse markets, filter by category | Markets |
-| 2 | ANALYZE — Review agent signals and edge | Agent Grid |
-| 3 | CONSENSUS — Check swarm agreement | Swarm Matrix |
-| 4 | SIZE — Kelly-optimal position sizing | Vol & Sizing |
-| 5 | EXECUTE — Place order via trade ticket | Terminal |
-| 6 | MONITOR — Track positions, PnL, fills | Portfolio |
-| 7 | PROMOTE — Promote paper → live | Operator |
-| 8 | PROTECT — Kill switch, drawdown governor | Kill Switch |
-
-See [docs/ui/kalshi_workflow.md](ui/kalshi_workflow.md) for the full reference.
-
-### Key Files
+### Key files
 
 | File | Purpose |
 |------|---------|
-| `web/main.py` | FastAPI server entry point |
-| `merid/settings.py` | Pydantic Settings — all env config, safety defaults |
-| `merid/loop.py` | MeridLoop orchestrator — per-step isolation, 15s watchdog |
-| `merid/pipeline/router.py` | Trade routing pipeline |
-| `merid/pipeline/risk_manager.py` | 7-point risk check |
-| `merid/pipeline/risk_context.py` | System stress bridge |
-| `merid/execution_guard.py` | Kill switch + CQI throttle |
-| `merid/prediction/venue_gate.py` | VenueGate — mode gating with LIVE→PAPER safety guard |
-| `merid/prediction/kalshi_tools.py` | Kalshi tools — demo safety net blocks real orders |
-| `trading/trade_mode.py` | Canonical TradeMode enum (MOCK/PAPER/LIVE) |
-| `config/kalshi_agent_grid.yaml` | 35 agent configs with paper-safe risk limits |
-| `web/react/src/views/` | 17 active UI views |
-| `web/react/src/components/` | 46 shared UI components |
+| `web/main_15m_lean.py` | Canonical FastAPI entrypoint (startup preflight state machine) |
+| `start_15m.ps1` | Production launcher — sets live latches, strips legacy creds, port-guarded |
+| `merid/loop_15m.py` | 15m trading loop |
+| `merid/prediction/agent_grid_15m.py` | 5-asset agent grid |
+| `merid/event_venues/kalshi/` | Kalshi client, WebSocket, order router/gate, reconciliation |
+| `merid/risk/` | Kill switches, drawdown, platform kill switch |
+| `merid/position_management/` | Position monitor, exit policy, hard profit lock |
+| `config/profiles/kalshi_crypto_15m_v2.yaml` | Single source of truth for 15m risk config |
+| `AGENTS.md` | **Live-trading operational contract** |
 
----
+`web/main.py`, `merid/loop.py`, and the legacy swarm/consensus modules are **quarantined reference code** — boundaries are enforced by `tests/test_15m_architectural_separation.py`; see [`ARCHITECTURE_15M.md`](../ARCHITECTURE_15M.md).
 
-## 6. Connect to Kalshi (Optional)
+## 5. Going Live
 
-Add to `.env`:
+Live trading requires ALL of:
 
-```bash
-KALSHI_API_KEY_ID=your_key_id
-KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
-KALSHI_USE_DEMO=true
-MERID_PM_TRADING_MODE=paper
-MERID_ALLOW_LIVE_TRADES=false
+1. `.\start_15m.ps1` (sets `TRADING_ENABLED`, `MERID_PM_TRADING_MODE=live`, `MERID_PM_LIVE_ENABLED`, `MERID_ALLOW_LIVE_TRADES`, `MERID_KALSHI_ENV=prod`, `KALSHI_USE_DEMO=false`)
+2. Valid `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` in `.env` for the intended live account
+3. `auto_execution_mode: 1` in `AGENTS.md` (durable authorization — already the repo default)
+4. `MERID_OBSERVE_ONLY` unset/`0` (explicit `=1` always wins)
+5. A passing startup preflight → `LIVE_ENTRIES_ENABLED`
+
+If preflight fails, entries halt while exits/cancels remain active (`LIVE_ENTRIES_HALTED`). Read [`AGENTS.md`](../AGENTS.md) before operating live.
+
+## 6. Tests
+
+```powershell
+# Architectural separation (legacy-import firewall)
+python -m pytest tests/test_15m_architectural_separation.py -v
+
+# Canonical smoke slice
+python -m pytest tests/test_15m_lean_smoke.py -v --tb=short
 ```
-
-Get credentials at [kalshi.com](https://kalshi.com/) → Account → API Keys.
-
----
-
-## Safety
-
-MERID enforces 3 independent layers that prevent accidental real-money trades:
-
-| Layer | Default | What It Does |
-|-------|---------|-------------|
-| **Environment** | `KALSHI_USE_DEMO=true` | Routes all API calls to Kalshi demo sandbox |
-| **VenueGate** | Forces PAPER | If mode resolves to LIVE but `MERID_ALLOW_LIVE_TRADES` is not set → auto-downgrades to PAPER |
-| **kalshi_tools** | Blocks real orders | If `KALSHI_USE_DEMO=true` → returns simulated fill instead of real order |
-
-To enable live trading, you must **explicitly** set all three:
-
-```bash
-KALSHI_USE_DEMO=false
-MERID_ALLOW_LIVE_TRADES=true
-MERID_PM_TRADING_MODE=live
-MERID_PM_LIVE_ENABLED=true
-```
-
-All 35 agents are capped to paper-safe limits: $250 max notional, 500 max contracts, 10 max orders per window.
-
----
-
-## 7. Verify Deployment Readiness
-
-```bash
-python scripts/_deploy_readiness.py
-```
-
-Expected output: `CRITICAL: 0, HIGH: 0, MEDIUM: 0`. This runs 10 checks across trade mode, VenueGate, kill switch, agent limits, settings, syntax, credentials, and loop config.
-
----
-
-## 8. Next Steps
-
-- **Explore views** — Click through all 17 views in the sidebar
-- **Check risk state** — `make risk-context`
-- **Run drift audit** — `make codebase-drift-audit`
-- **Read the workflow** — [docs/ui/kalshi_workflow.md](ui/kalshi_workflow.md)
-- **API reference** — [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Wiring audit** — [docs/KALSHI_WIRING_AUDIT_2026_02_23.md](KALSHI_WIRING_AUDIT_2026_02_23.md)
-- **System audit** — [docs/SYSTEM_AUDIT_2026_02_23.md](SYSTEM_AUDIT_2026_02_23.md)
-
----
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError` | Activate venv: `.venv\Scripts\activate` |
-| Tests fail | Check Python 3.11+ and `pip install -r requirements.txt` |
-| API returns errors | Ensure `make serve` is running |
-| React build fails | `npm install` in `web/react/` |
+| `ModuleNotFoundError` | Activate `.venv`, reinstall `requirements.txt` |
+| `REFUSED: port 8011 already bound` | Another instance is running — duplicate launches are refused by design |
+| `LIVE_ENTRIES_HALTED` | Preflight failed closed — read the structured denial reason in the logs |
+| Dashboard blank | Start the backend first; check `web/react` console |
 
----
+## Next
 
-Last updated: 2026-02-23.
+- [QUICKSTART.md](../QUICKSTART.md) — terse operator quickstart
+- [RUNBOOK.md](../RUNBOOK.md) — kill-switch policy, halt conditions
+- [docs/API_REFERENCE.md](API_REFERENCE.md) — API reference
+- [docs/UI/kalshi_workflow.md](UI/kalshi_workflow.md) — operator workflow

@@ -571,5 +571,9 @@ wiring-audit-test:
 	python -m pytest tests/test_wiring_audit.py -v --tb=short
 
 # ── Web Server ─────────────────────────────────────────────────────
+# 2026-10-18: repointed from web.main:create_app (the quarantined legacy
+# entrypoint) to the canonical 15m app on the production port. Bare uvicorn
+# without the start_15m.ps1 latches stays non-live (paper/sim); for the real
+# production launch use .\start_15m.ps1 (Windows only).
 serve:
-	uvicorn web.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
+	uvicorn web.main_15m_lean:app --host 127.0.0.1 --port 8011

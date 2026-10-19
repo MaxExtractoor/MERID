@@ -31,13 +31,15 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
       
       - name: Run kill switch unit tests
         run: |
@@ -45,7 +47,7 @@ jobs:
       
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kill-switch-unit-test-results
           path: test-results/
@@ -61,13 +63,15 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
       
       - name: Run kill switch integration tests
         run: |
@@ -75,7 +79,7 @@ jobs:
       
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kill-switch-integration-test-results
           path: test-results/
@@ -91,13 +95,15 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
       
       - name: Run programmatic interface tests
         run: |
@@ -105,7 +111,7 @@ jobs:
       
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kill-switch-interface-test-results
           path: test-results/
@@ -122,13 +128,15 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
       
       - name: Run all kill switch tests
         run: |
@@ -136,7 +144,7 @@ jobs:
       
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kill-switch-full-test-results
           path: test-results/

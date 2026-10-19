@@ -145,11 +145,12 @@ jobs:
         pytest tests/ -v -m kalshi_risk --cov=merid.event_venues.kalshi --cov-report=xml
     
     - name: Upload coverage
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
         flags: kalshi-risk
         name: kalshi-risk-coverage
+        fail_ci_if_error: false
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Full Test Suite
@@ -174,14 +175,17 @@ jobs:
     
     - name: Run Kalshi pipeline tests
       run: |
-        pytest tests/test_formulas_source_of_truth.py tests/test_kalshi_market_consensus.py tests/test_sprint_bc.py -v --cov=merid.formulas --cov-report=xml
+        # 2026-10-18: dropped tests/test_kalshi_market_consensus.py - the
+        # consensus module was deleted in Phase 1 (d30e2178).
+        pytest tests/test_formulas_source_of_truth.py tests/test_sprint_bc.py -v --cov=merid.formulas --cov-report=xml
     
     - name: Upload coverage
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
         flags: kalshi-pipeline
         name: kalshi-pipeline-coverage
+        fail_ci_if_error: false
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Integration Smoke Test
@@ -241,15 +245,20 @@ jobs:
     
     - name: Verify audit spec references
       run: |
-        # Check that all AGENT_AUDIT references in code match sections in the doc
+        # Check that AGENT_AUDIT references exist in code
         echo "Checking AGENT_AUDIT references in codebase..."
-        grep -r "\[AGENT_AUDIT:" --include="*.py" . | wc -l
-        echo "AGENT_AUDIT references found (should be > 0)"
-        
-        # Verify formulas module is referenced in audit spec
-        if grep -q "merid/formulas.py" docs/AGENT_AUDIT_KALSHI_SENTIMENT.md; then
-          echo "✅ merid/formulas.py referenced in audit spec"
+        COUNT=$(grep -r "\[AGENT_AUDIT:" --include="*.py" . | wc -l)
+        echo "AGENT_AUDIT references found: $COUNT (should be > 0)"
+        if [ "$COUNT" -eq 0 ]; then
+          echo "::error::No [AGENT_AUDIT:...] markers found in code"
+          exit 1
+        fi
+
+        # 2026-10-18: docs/AGENT_AUDIT_KALSHI_SENTIMENT.md was retired in the
+        # doc cleanup; verify formulas.py is referenced somewhere under docs/.
+        if grep -rq "merid/formulas.py" docs/; then
+          echo "✅ merid/formulas.py referenced under docs/"
         else
-          echo "❌ merid/formulas.py not referenced in audit spec"
+          echo "❌ merid/formulas.py not referenced in docs/"
           exit 1
         fi

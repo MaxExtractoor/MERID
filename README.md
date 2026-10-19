@@ -35,14 +35,16 @@ Each 15-minute cycle, per asset:
 
 ### Launch (canonical)
 
+See [`QUICKSTART.md`](QUICKSTART.md) for a safe first run — `start_15m.ps1` is the **live-production launcher** and sets every live-trading latch itself. To run read-only against live data, set `MERID_OBSERVE_ONLY=1` first; to validate configuration without starting, use `-DryRun`.
+
 ```powershell
 # .env must set:
 #   MERID_PROFILE=kalshi_crypto_15m_v2
-#   KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH (or use demo env)
+#   KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH
 .\start_15m.ps1 -Port 8011 -Profile kalshi_crypto_15m_v2
 ```
 
-The startup script refuses to double-launch on an already-bound port and derives observe-only defaults from `AGENTS.md` unless explicit live flags are set.
+The startup script refuses to double-launch on an already-bound port and derives `MERID_OBSERVE_ONLY` from `auto_execution_mode` in `AGENTS.md` (an explicit `MERID_OBSERVE_ONLY=1` always wins).
 
 ### Verify
 
@@ -63,14 +65,11 @@ npm run dev   # http://localhost:5173
 
 ## Trading Modes & Safety
 
-Paper mode is the default. Live trading requires **multiple explicit unlocks** — no single env var reaches production:
+A bare `uvicorn` launch without the production flags stays non-live (paper/simulation), and `MERID_OBSERVE_ONLY=1` runs the full live-data stack without ever submitting an order. Production live trading is governed by the durable operator contract in [`AGENTS.md`](AGENTS.md):
 
-| Layer | Control |
-|-------|---------|
-| Mode flags | `MERID_TRADE_MODE=live` + `MERID_ALLOW_LIVE_TRADES=true` + `MERID_LIVE_TRADING_UNLOCKED=true` |
-| Confirmation | `MERID_LIVE_CONFIRMATION=I_KNOW_WHAT_I_AM_DOING` (validated at startup) |
-| Venue env | `MERID_KALSHI_ENV=prod`, `KALSHI_USE_DEMO=false` |
-| Startup validation | `validate_production_startup()` fails closed on missing/mismatched flags |
+- `auto_execution_mode: 1` is standing authorization: on each production restart the system runs the full startup preflight and transitions `STARTING → PREFLIGHT_RUNNING → LIVE_ENTRIES_ENABLED` — no per-run approval token. Any failed check → `LIVE_ENTRIES_HALTED`.
+- `start_15m.ps1` is the live launcher: it sets the four entry latches (`TRADING_ENABLED`, `MERID_PM_TRADING_MODE=live`, `MERID_PM_LIVE_ENABLED`, `MERID_ALLOW_LIVE_TRADES`), pins `MERID_KALSHI_ENV=prod` / `KALSHI_USE_DEMO=false`, strips legacy exchange credentials from the process, and fails closed if required safety controls are missing or mismatched.
+- Preflight fails closed on test/demo/sandbox/mock/paper/shadow/simulation/replay routing, missing or mismatched credentials, wrong Kalshi endpoint/account, noncanonical order router, disabled reconciliation/trusted-fill/exit protections, unapproved models, or missing calibration artifacts.
 
 Execution-path controls:
 
@@ -84,12 +83,12 @@ Environment templates live in `config/profiles/env.*.example`. See [`ENV_SETUP.m
 
 ## UI
 
-React dashboard (`web/react`) — wired views:
+React dashboard (`web/react`) — 10 wired views:
 
 | Section | Views |
 |---------|-------|
-| Trading | Dashboard, Markets, Portfolio, Trade |
-| Swarm | Grid (5-asset agent grid status/control) |
+| Trading | Dashboard, Kalshi Dashboard (markets), Kalshi Portfolio, Trade |
+| Agents | Grid (5-asset agent grid status/control) |
 | Analytics | Risk, Calibration |
 | Operator | Monitor |
 | System | Logs, Settings |
@@ -135,6 +134,8 @@ CI gates on `main` include: `kalshi-15m-ci`, `merid-safety-ci`, `kill-switch-ci`
 
 | Doc | Purpose |
 |-----|---------|
+| [`QUICKSTART.md`](QUICKSTART.md) | Zero-to-running in safe modes + live-launch requirements |
+| [`AGENTS.md`](AGENTS.md) | Live-trading operational contract (startup state machine, halt/recovery, invariants) |
 | [`ARCHITECTURE_15M.md`](ARCHITECTURE_15M.md) | 15m/legacy boundaries, forbidden imports, safeguards |
 | [`RUNBOOK.md`](RUNBOOK.md) | Kill-switch policy, halt conditions, checklists |
 | [`ENV_SETUP.md`](ENV_SETUP.md) | Environment configuration |

@@ -1,102 +1,125 @@
 # MERID — Quick Start
 
-Get MERID running in 5 minutes. No API keys required for paper mode.
+MERID is a production trading system for **Kalshi 15-minute crypto markets** (BTC, ETH, SOL, XRP, DOGE). This guide gets you from a fresh clone to a running server — **safely**.
+
+> **Read this first:** the production launcher (`start_15m.ps1`) enables **real-money live trading** the moment valid Kalshi credentials are present — it sets every live latch itself (`TRADING_ENABLED`, `MERID_PM_TRADING_MODE=live`, `MERID_ALLOW_LIVE_TRADES`, `KALSHI_USE_DEMO=false`) and points at `external-api.kalshi.com`. Use one of the **safe modes below** unless you are deploying to production.
 
 ---
 
-## 1. Install (2 min)
+## 1. Prerequisites
 
-```bash
+- **Python 3.11+** and `pip`
+- **Node.js 18+** (optional — only for the React dashboard)
+- **Windows** for the production launcher (`start_15m.ps1`); the app itself is plain FastAPI/uvicorn and runs anywhere
+- **Kalshi API credentials** (key ID + RSA private key file) — *not required* for the safe modes below
+
+## 2. Install
+
+```powershell
 cd MERID
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-> **Note**: Uses latest stable dependencies (FastAPI 0.135.1, pandas 3.0.1, pytest 9.0.2)
-
-## 2. Start (1 min)
-
 ```bash
-# Terminal 1 — Backend
-make serve                      # http://127.0.0.1:8000
-
-# Terminal 2 — Dashboard
-cd web/react && npm install && npm run dev   # http://localhost:5173
+# Linux/macOS equivalent
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## 3. Verify (2 min)
+## 3. Start — choose a mode
 
-```bash
-make preflight                  # Tests + readiness + drift audit + risk context
+### A. Observe-only against live data (recommended first run)
+
+Consumes real Kalshi market data, runs the full decision pipeline, and **never submits an order**:
+
+```powershell
+$env:MERID_OBSERVE_ONLY = "1"
+.\start_15m.ps1 -Port 8011 -Profile kalshi_crypto_15m_v2
 ```
 
----
+Without Kalshi credentials the startup preflight fails closed into `LIVE_ENTRIES_HALTED`, but the API, dashboard, and self-check endpoints still serve normally — enough to explore the system safely.
 
-## What You'll See
+### B. Bare server, no live flags (paper/simulation)
 
-Open **http://localhost:5173** to see the operator dashboard with 17 views:
+Skip the launcher entirely — without its live latches the app stays non-live:
 
-- **Overview** — System health, balance, PnL
-- **Markets** — Browse Kalshi markets, edge signals, trade ticket
-- **Terminal** — Execution cockpit with orderbook and Kelly sizing
-- **Portfolio** — Positions, orders, fills, risk, PnL chart
-- **Agent Grid** — Start/stop the 5×4 agent matrix
-- **Swarm Matrix** — Multi-agent consensus visualization
-- **Operator** — Kill switch, mode control, system alerts
-
-API docs at **http://127.0.0.1:8000/docs** (Swagger UI).
-
----
-
-## Start Paper Trading
-
-```bash
-make loop-start-execute         # MeridLoop with paper execution
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn web.main_15m_lean:app --host 127.0.0.1 --port 8011
 ```
 
-This runs the full agent cycle: market scan → AI analysis → swarm consensus → Kelly sizing → paper execution → PnL tracking. No real money, no API keys needed.
+### C. Config validation only
 
----
+`start_15m.ps1` supports a `-DryRun` switch that resolves the environment, prints the startup fingerprint, and exits **without launching**:
 
-## Connect to Kalshi
-
-Add to `.env` for live market data and trading:
-
-```bash
-KALSHI_API_KEY_ID=your_key_id
-KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
-KALSHI_USE_DEMO=true
-MERID_PM_TRADING_MODE=paper
+```powershell
+.\start_15m.ps1 -DryRun
 ```
 
+## 4. Verify
+
+```powershell
+curl http://localhost:8011/api/v1/health | ConvertFrom-Json | Select-Object app, profile
+# expected: app=merid_15m_kalshi_crypto, profile=kalshi_crypto_15m_v2
+
+curl http://localhost:8011/api/v1/self-check   # runtime invariant check
+```
+
+Interactive API docs: **http://localhost:8011/docs**
+
+## 5. Dashboard (optional)
+
+```powershell
+cd web/react
+npm install
+npm run dev        # http://localhost:5173
+```
+
+Wired views: **Dashboard, Markets (Kalshi dashboard), Portfolio, Trade, Grid (5-asset agent grid), Risk, Calibration, Monitor, Logs, Settings**.
+
+## 6. Going live — production only
+
+Live trading is deliberately hard to reach by accident. All of the following must hold:
+
+| Layer | Requirement |
+|-------|-------------|
+| Launcher | `.\start_15m.ps1` (sets `TRADING_ENABLED`, `MERID_PM_TRADING_MODE=live`, `MERID_PM_LIVE_ENABLED`, `MERID_ALLOW_LIVE_TRADES`, `MERID_KALSHI_ENV=prod`, `KALSHI_USE_DEMO=false`) |
+| Credentials | `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` in `.env`, matching the intended live account |
+| Operator contract | `auto_execution_mode: 1` in `AGENTS.md` front-matter — durable authorization for live entries after preflight |
+| Read-only override | `MERID_OBSERVE_ONLY=0` (derived automatically from `auto_execution_mode`; `=1` always wins) |
+| Preflight | `STARTING → PREFLIGHT_RUNNING → LIVE_ENTRIES_ENABLED`; any failure → `LIVE_ENTRIES_HALTED` |
+
+If preflight fails, the server still runs — entries halt, exits/cancels stay active. The full state machine, halt conditions, and safety invariants are defined in **[AGENTS.md](AGENTS.md)**; read it before operating live.
+
+**Never** put real credentials in `.env.example`, committed configs, or docs. `.env` is gitignored.
+
 ---
 
-## Key Commands
+## Key Endpoints
 
-| Command | What it does |
-|---------|-------------|
-| `make serve` | Start API server (port 8000) |
-| `make loop-start` | MeridLoop in observe mode |
-| `make loop-start-execute` | MeridLoop with paper execution |
-| `make golden-path` | Run test suite |
-| `make preflight` | Full system check |
-| `make risk-context` | Print risk state JSON |
-
----
+| Endpoint | Purpose |
+|----------|---------|
+| `/api/v1/health` | Liveness + profile identity |
+| `/api/v1/self-check` | Runtime invariant self-check |
+| `/docs` | OpenAPI/Swagger UI |
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError` | `pip install -r requirements.txt` |
-| `make` not found (Windows) | `choco install make` |
-| API returns errors | Ensure `make serve` is running |
-| React build fails | `npm install` in `web/react/` |
-
----
+| `ModuleNotFoundError` | Activate `.venv`, `pip install -r requirements.txt` |
+| `REFUSED: port 8011 is already bound` | An instance is already running — the launcher refuses duplicates by design |
+| `LIVE MODE REFUSED: ...` | A required safety control is missing/mismatched; read the message, do not unset protections |
+| `LIVE_ENTRIES_HALTED` at startup | A preflight step failed closed — check the structured denial reason in logs; entries stay blocked while exits/cancels remain active |
+| React build fails | `npm install` inside `web/react/` first |
 
 ## Next
 
-- [README.md](README.md) — Full project overview
-- [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) — Operator workflow (8 steps, 17 views)
-- [ENV_SETUP.md](ENV_SETUP.md) — Environment configuration
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — Detailed onboarding
+- [README.md](README.md) — architecture, execution flow, repository layout
+- [AGENTS.md](AGENTS.md) — **the live-trading operational contract (read before production)**
+- [ARCHITECTURE_15M.md](ARCHITECTURE_15M.md) — 15m/legacy boundaries and forbidden imports
+- [ENV_SETUP.md](ENV_SETUP.md) — full environment variable reference
+- [RUNBOOK.md](RUNBOOK.md) — kill-switch policy, halt conditions, operator checklists
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — detailed onboarding
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md) — API reference

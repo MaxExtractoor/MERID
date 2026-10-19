@@ -229,6 +229,17 @@ test/
 # Binary tools
 .tools/
 
+# Vendored third-party checkout kept locally for IDE skills; it was committed
+# as a gitlink with no .gitmodules URL, which breaks actions/checkout.
+# Local working copies are unaffected.
+tools/openclaw/
+
+# Runtime state that must never be committed (PII / live fill DB snapshots).
+# Files remain on disk for the running server; they are untracked from 2026-10-18.
+data/auth_users.json
+data/*.backup_*
+data/*.db.backup*
+
 # Root-level stale scripts and AI artifacts
 create_shortcut.ps1
 COMPLETE_*.md
@@ -272,6 +283,15 @@ patch_*.py
 fix_*.py
 debug_*.py
 check_*.py
+# 2026-10-18: the check_*.py scratch rule above silently ignored committed
+# CI infrastructure — scripts/check_kill_switch_default.py (ci.yml gate),
+# scripts/check_version_drift.py (version-drift job), and everything under
+# scripts/ci/ — so those jobs could never pass on a runner. Un-ignore the
+# CI-referenced ones; ad-hoc check_*.py scripts elsewhere stay ignored.
+!scripts/ci/check_*.py
+!scripts/check_kill_switch_default.py
+!scripts/check_version_drift.py
+!scripts/check_live_readiness.py
 diagnose_*.py
 audit_*.py
 complete_*.py

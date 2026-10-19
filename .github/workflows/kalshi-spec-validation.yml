@@ -1,21 +1,22 @@
 name: Kalshi Spec Validation
 
+# 2026-10-18: dispatch-only. The validate job diffs the live venue spec against
+# config/kalshi_expected_spec.yaml, which is not committed to the repo, and
+# expects the MERID_KALSHI_API_KEY secret. It failed every nightly run. Run it
+# manually after generating a spec snapshot:
+#   python -m merid.tools.kalshi_spec_snapshot --mode snapshot \
+#       --output config/kalshi_expected_spec.yaml
 on:
-  schedule:
-    # Run daily at 3 AM UTC
-    - cron: '0 3 * * *'
   workflow_dispatch:
   push:
     branches:
       - main
-      - develop
     paths:
       - 'config/kalshi_expected_spec.yaml'
       - 'merid/tools/kalshi_spec_snapshot.py'
   pull_request:
     branches:
       - main
-      - develop
     paths:
       - 'config/kalshi_expected_spec.yaml'
       - 'merid/tools/kalshi_spec_snapshot.py'
@@ -31,13 +32,13 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install -r requirements.txt
           pip install pyyaml
       
       - name: Validate Kalshi spec
@@ -50,7 +51,7 @@ jobs:
       
       - name: Upload validation results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kalshi-spec-validation-results
           path: kalshi_spec_validation_results.json
@@ -67,13 +68,13 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install -r requirements.txt
           pip install pyyaml
       
       - name: Snapshot Kalshi spec

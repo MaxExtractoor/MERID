@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Check for mock imports in production code
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Search for FakeKalshi imports
         run: |
@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Validate production wiring
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Check for build_kalshi_catalog usage
         run: |

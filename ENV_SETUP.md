@@ -1,13 +1,17 @@
 # MERID — Environment Configuration
 
+Canonical production stack: `web.main_15m_lean:app` via `.\start_15m.ps1` (port **8011**, profile `kalshi_crypto_15m_v2`). The live-trading operational contract — startup preflight, `LIVE_ENTRIES_ENABLED/HALTED`, durable `auto_execution_mode` — is defined in [`AGENTS.md`](AGENTS.md).
+
 ## Quick Setup
 
-```bash
-cp .env.example .env        # copy template
-make serve                  # start API server
+```powershell
+cp .env.example .env                      # copy template (optional; gitignored)
+# Safe first run — read-only against live data, no orders:
+$env:MERID_OBSERVE_ONLY = "1"
+.\start_15m.ps1 -Port 8011 -Profile kalshi_crypto_15m_v2
 ```
 
-MERID runs in paper mode with zero configuration. Add Kalshi credentials below for live market data.
+> **Warning:** `.\start_15m.ps1` is the **live** launcher. With valid Kalshi credentials present it sets all live latches and trades real money after preflight. Use `MERID_OBSERVE_ONLY=1` or bare `uvicorn web.main_15m_lean:app` for a non-live run — see [`QUICKSTART.md`](QUICKSTART.md).
 
 ---
 
@@ -16,25 +20,26 @@ MERID runs in paper mode with zero configuration. Add Kalshi credentials below f
 ```bash
 KALSHI_API_KEY_ID=your_key_id
 KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
-KALSHI_USE_DEMO=true                  # true = demo environment, false = production
 ```
 
-Get credentials at [https://kalshi.com/](https://kalshi.com/) → Account → API Keys.
+Get credentials at [https://kalshi.com/](https://kalshi.com/) → Account → API Keys. `KALSHI_USE_DEMO` and the venue endpoints are set by the launcher (`false` + `external-api.kalshi.com` in production); do not set them manually to conflicting values.
 
 ---
 
 ## Trading Mode (prediction markets / Kalshi)
 
-**Production (real orders on Kalshi)** — set on the server (`.env` is gitignored):
+**Production (real orders on Kalshi)** — the production launcher sets these; shown here for reference (`.env` is gitignored):
 
 ```bash
-KALSHI_ENV=live
+TRADING_ENABLED=true
 MERID_PM_TRADING_MODE=live
 MERID_PM_LIVE_ENABLED=true
 MERID_ALLOW_LIVE_TRADES=true
+MERID_KALSHI_ENV=prod
+KALSHI_USE_DEMO=false
 ```
 
-`MERID_ALLOW_LIVE_TRADES` is required: `VenueGate` downgrades to paper if prediction mode is `live` but this flag is not set.
+`MERID_ALLOW_LIVE_TRADES` is required: `VenueGate` downgrades to paper if prediction mode is `live` but this flag is not set. `MERID_OBSERVE_ONLY=1` overrides everything to read-only regardless of the latches.
 
 At startup, each AgentGrid agent is still registered with `DeploymentController` in **PAPER**; execution routing for PM trades follows `VenueGate` + `MERID_PM_*` and the Kalshi adapter mode (live when `MERID_PM_LIVE_ENABLED=true`). Promotions logged in `[deploy]` come from the deployment controller when you promote agents explicitly.
 
@@ -59,6 +64,7 @@ KALSHI_ENV=demo
 MERID_PM_TRADING_MODE=paper
 MERID_PM_LIVE_ENABLED=false
 MERID_ALLOW_LIVE_TRADES=false
+MERID_OBSERVE_ONLY=1        # belt-and-suspenders read-only
 ```
 
 | Mode | Behavior |
@@ -66,6 +72,7 @@ MERID_ALLOW_LIVE_TRADES=false
 | `mock` / legacy `sim` | Simulated fills, no API calls |
 | `paper` | Real market data from Kalshi, simulated execution (unless other gates say live) |
 | `live` | Real orders on Kalshi (`MERID_PM_LIVE_ENABLED=true` and `MERID_ALLOW_LIVE_TRADES=true`) |
+| observe-only | `MERID_OBSERVE_ONLY=1` — live data + decisions, never submits orders |
 
 ---
 

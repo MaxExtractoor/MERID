@@ -56,7 +56,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       
       - name: Cache dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -67,20 +67,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-      
+          pip install pytest pytest-asyncio
+
       - name: Run unit tests
         run: |
-          pytest tests/unit -v --tb=short
+          # 2026-10-18: was `pytest tests/unit` — that directory does not exist
+          # (and requirements-dev.txt was never committed). The lean-stack smoke
+          # slice is the closest committed fast unit check.
+          pytest tests/test_15m_lean_smoke.py -v --tb=short
       
-      - name: Syntax check all modified files
+      - name: Syntax check core production files
         run: |
           python -c "
           import ast
-          import sys
           from pathlib import Path
-          
+
           files = [
+              'web/main_15m_lean.py',
+              'merid/loop_15m.py',
               'merid/infra/loop_lag_monitor.py',
               'merid/infra/redis_resilient.py',
               'merid/infra/self_test.py',
@@ -89,17 +93,17 @@ jobs:
               'core/execution_gate.py',
               'merid/risk/kill_switches.py',
           ]
-          
+
           for f in files:
               path = Path(f)
               if path.exists():
-                  with open(path) as fp:
+                  with open(path, encoding='utf-8') as fp:
                       ast.parse(fp.read())
-                  print(f'✓ {f}')
+                  print(f'ok {f}')
               else:
-                  print(f'⚠ {f} not found')
-          
-          print('\nAll files syntax OK')
+                  print(f'skip {f} (not present)')
+
+          print('All files syntax OK')
           "
 
   # ── Stage 2: Production Self-Test ──────────────────────────────────────────
@@ -262,7 +266,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install pytest pytest-asyncio
       
       - name: Run integration tests
         env:

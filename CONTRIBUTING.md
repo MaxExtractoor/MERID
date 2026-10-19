@@ -7,10 +7,11 @@ Guidelines for contributing to the MERID Kalshi swarm intelligence platform.
 ## Setup
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/MaxExtractoor/MERID.git
 cd MERID
-python -m venv venv
-venv\Scripts\activate           # Windows
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1    # Windows
+# source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 

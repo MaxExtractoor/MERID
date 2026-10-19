@@ -71,7 +71,7 @@ jobs:
       run: |
         python -m venv venv_test
         source venv_test/bin/activate
-        pip install -e .
+        pip install -r requirements.txt
         pip install pytest pytest-asyncio httpx fastapi pyyaml
     
     - name: Run Risk Enforcement Tests
