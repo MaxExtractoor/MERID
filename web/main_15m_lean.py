@@ -10,7 +10,7 @@ import uuid
 import logging
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # CRITICAL (2026-08-07): Kalshi deprecated the legacy V1 /portfolio/orders endpoint
 # on ~2026-06-18 and now returns 410 "Please switch to the V2 endpoints". V2's

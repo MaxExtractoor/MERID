@@ -1,10 +1,16 @@
-"""Validate canonical 15m crypto config against live Kalshi metadata.
+"""Validate canonical 15m crypto trading scope against live Kalshi metadata.
 
-This script:
-1. Fetches actual 15m crypto markets from Kalshi
-2. Compares against canonical config series tickers
-3. Logs configuration parameters for each asset/tier
-4. Ensures no markets are missing or mis-typed
+This script validates the *current* production scope sources:
+
+- ``config/trading_scope.py`` — canonical ``ALLOWED_ASSETS`` /
+  ``ALLOWED_SERIES_TICKERS`` (derived from the active profile's
+  ``asset_whitelist`` gate, same path the running server uses).
+- ``config/profiles/kalshi_crypto_15m_v2.yaml`` — production risk profile.
+- ``KalshiMarketCatalog`` — live market metadata.
+
+It no longer references the removed tiered entry/exit policy tables
+(``get_entry_policy`` / ``EXIT_POLICY_TABLE`` / ``VolatilityTier`` era);
+those were superseded by the profile YAML.
 
 Usage:
     python scripts/validate_kalshi_15m_config.py
@@ -17,12 +23,8 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.kalshi_universe import (
-    KALSHI_15M_CRYPTO_ASSETS,
-    KALSHI_15M_SERIES_TICKERS,
-)
-from merid.event_venues.kalshi.client import KalshiVenueClient
-from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
+from config.trading_scope import get_trading_scope
+from merid.event_venues.kalshi.market_catalog import get_market_catalog
 from utils.logger import get_logger
 
 logger = get_logger("scripts.validate_kalshi_15m_config")
@@ -31,227 +33,169 @@ logger = get_logger("scripts.validate_kalshi_15m_config")
 async def fetch_live_15m_crypto_markets() -> dict:
     """Fetch live 15m crypto markets from Kalshi."""
     logger.info("Fetching live Kalshi markets...")
-    
+
     catalog = get_market_catalog()
     await catalog.refresh()
-    
-    # Filter for 15m crypto markets
-    crypto_15m_markets = catalog.get_markets_by_category("crypto", timeframe="15m")
-    
+
+    # Filter for 15m markets
+    crypto_15m_markets = catalog.get_markets_by_timeframe("15m")
+
     # Group by asset
     markets_by_asset = {}
     for market in crypto_15m_markets:
-        asset = market.asset if hasattr(market, 'asset') else None
+        asset = getattr(market, "asset", None)
         if asset:
-            if asset not in markets_by_asset:
-                markets_by_asset[asset] = []
-            markets_by_asset[asset].append(market)
-    
-    logger.info(f"Found {len(crypto_15m_markets)} total 15m crypto markets")
-    for asset, markets in markets_by_asset.items():
+            markets_by_asset.setdefault(asset, []).append(market)
+
+    logger.info(f"Found {len(crypto_15m_markets)} total 15m markets")
+    for asset, markets in sorted(markets_by_asset.items()):
         logger.info(f"  {asset}: {len(markets)} markets")
-    
+
     return markets_by_asset
 
 
-def log_config_parameters():
-    """Log configuration parameters for each asset/tier."""
-    logger.info("=" * 80)
-    logger.info("CANONICAL 15M CRYPTO CONFIGURATION PARAMETERS")
-    logger.info("=" * 80)
-    
-    for asset in KALSHI_15M_CRYPTO_ASSETS:
-        asset_class = get_asset_class(asset)
-        entry_policy = get_entry_policy(asset)
-        
-        logger.info(f"\n--- {asset} ({asset_class}) ---")
-        logger.info(f"Series Ticker: {KALSHI_15M_SERIES_TICKERS[asset]}")
-        logger.info(f"Entry Window: {entry_policy.base_window_start_minutes}m - {entry_policy.base_window_end_minutes}m before expiry")
-        logger.info(f"Terminal Phase: enabled={entry_policy.terminal_config.enabled}, max={entry_policy.terminal_config.max_terminal_minutes}m")
-        
-        # Log exit policy parameters for each tier
-        logger.info(f"\nExit Policies:")
-        for tier in ["A", "B", "C"]:
-            params = get_exit_policy_params(tier, asset)
-            logger.info(f"  Tier {tier}:")
-            logger.info(f"    TP R-multiple: {params['tp_r_multiple']}")
-            logger.info(f"    SL edge multiplier: {params['sl_edge_multiplier']}")
-            logger.info(f"    Trailing enabled: {params['trailing_enabled']}")
-            if params['trailing_enabled']:
-                logger.info(f"    Trailing activation: {params.get('trailing_activation_r_multiple')}")
-                logger.info(f"    Trailing giveback: {params.get('trailing_giveback_pct')}%")
-            logger.info(f"    Max hold: {params['max_hold_seconds']}s")
-        
-        # Log edge thresholds for each volatility tier
-        logger.info(f"\nEdge Thresholds:")
-        for vol_tier in [VolatilityTier.LOW, VolatilityTier.MEDIUM, VolatilityTier.HIGH]:
-            threshold = get_base_edge_threshold(asset, vol_tier)
-            logger.info(f"  {vol_tier.value}: {threshold:.2%}")
-
-
-def extract_series_ticker_from_event(event_ticker: str) -> str:
+def extract_series_ticker(event_ticker: str) -> str:
     """Extract series ticker from event ticker (e.g., KXBTC15M-26MAR50K -> KXBTC15M)."""
     if not event_ticker:
         return None
-    # Split on '-' and take the first part
-    parts = event_ticker.split('-')
+    parts = event_ticker.split("-")
     return parts[0] if parts else None
 
 
-def compare_series_tickers(live_markets_by_asset: dict):
-    """Compare canonical config series tickers against live markets."""
+def _market_series_ticker(market) -> str:
+    """Best-effort series ticker for a catalog market record."""
+    ticker = getattr(market, "series_ticker", None)
+    if ticker:
+        return ticker
+    event_ticker = getattr(market, "event_ticker", None)
+    if event_ticker:
+        return extract_series_ticker(event_ticker)
+    inner = getattr(market, "market", None)
+    inner_ticker = getattr(inner, "ticker", None) if inner is not None else None
+    if inner_ticker:
+        return extract_series_ticker(inner_ticker)
+    market_ticker = getattr(market, "ticker", None)
+    if market_ticker:
+        return extract_series_ticker(market_ticker)
+    return None
+
+
+def compare_series_tickers(live_markets_by_asset: dict, allowed_assets, allowed_series) -> bool:
+    """Compare canonical scope series tickers against live markets."""
     logger.info("=" * 80)
     logger.info("SERIES TICKER VALIDATION")
     logger.info("=" * 80)
-    
-    canonical_series = set(KALSHI_15M_SERIES_TICKERS.values())
+
+    canonical_series = set(allowed_series)
     live_series = set()
-    
-    # Debug: Log first market structure to understand available fields
-    for asset, markets in live_markets_by_asset.items():
-        if markets:
-            logger.info(f"\nDebug: First {asset} market structure:")
-            market = markets[0]
-            logger.info(f"  Type: {type(market)}")
-            logger.info(f"  Dir: {[a for a in dir(market) if not a.startswith('_')]}")
-            if hasattr(market, 'market'):
-                logger.info(f"  market type: {type(market.market)}")
-                logger.info(f"  market dir: {[a for a in dir(market.market) if not a.startswith('_')][:20]}")
-            break
-    
-    for asset, markets in live_markets_by_asset.items():
+
+    for markets in live_markets_by_asset.values():
         for market in markets:
-            # Try series_ticker first, fall back to extracting from event_ticker
-            ticker = None
-            if hasattr(market, 'series_ticker') and market.series_ticker:
-                ticker = market.series_ticker
-            elif hasattr(market, 'event_ticker') and market.event_ticker:
-                ticker = extract_series_ticker_from_event(market.event_ticker)
-            elif hasattr(market, 'market') and hasattr(market.market, 'ticker'):
-                ticker = extract_series_ticker_from_event(market.market.ticker)
-            
+            ticker = _market_series_ticker(market)
             if ticker:
                 live_series.add(ticker)
-    
-    # Check for missing series
+
+    ok = True
+
     missing_in_live = canonical_series - live_series
     if missing_in_live:
-        logger.warning(f"Series in canonical config but NOT found in live data: {missing_in_live}")
+        logger.warning(f"Series in canonical scope but NOT found in live data: {missing_in_live}")
+        ok = False
     else:
-        logger.info("✓ All canonical series tickers found in live data")
-    
-    # Check for extra series
+        logger.info("OK: All canonical series tickers found in live data")
+
     extra_in_live = live_series - canonical_series
     if extra_in_live:
-        logger.warning(f"Series in live data but NOT in canonical config: {extra_in_live}")
-        logger.warning("  These may be new series that should be added to the config")
+        logger.warning(f"Series in live data but NOT in canonical scope: {extra_in_live}")
+        logger.warning("  These may be new series outside the asset whitelist")
     else:
-        logger.info("✓ No unexpected series in live data")
-    
-    # Check per-asset
+        logger.info("OK: No unexpected series in live data")
+
     logger.info("\nPer-asset validation:")
-    for asset in KALSHI_15M_CRYPTO_ASSETS:
-        canonical_ticker = KALSHI_15M_SERIES_TICKERS[asset]
+    for asset in sorted(allowed_assets):
+        canonical_ticker = f"KX{asset}15M"
         live_markets = live_markets_by_asset.get(asset, [])
-        live_series_for_asset = set()
-        for market in live_markets:
-            ticker = None
-            if hasattr(market, 'series_ticker') and market.series_ticker:
-                ticker = market.series_ticker
-            elif hasattr(market, 'event_ticker') and market.event_ticker:
-                ticker = extract_series_ticker_from_event(market.event_ticker)
-            elif hasattr(market, 'market') and hasattr(market.market, 'ticker'):
-                ticker = extract_series_ticker_from_event(market.market.ticker)
-            
-            if ticker:
-                live_series_for_asset.add(ticker)
-        
+        live_series_for_asset = {
+            t for t in (_market_series_ticker(m) for m in live_markets) if t
+        }
         if canonical_ticker in live_series_for_asset:
-            logger.info(f"  ✓ {asset}: {canonical_ticker} found in live data ({len(live_markets)} markets)")
+            logger.info(
+                f"  OK {asset}: {canonical_ticker} found in live data "
+                f"({len(live_markets)} markets)"
+            )
         else:
-            logger.error(f"  ✗ {asset}: {canonical_ticker} NOT found in live data (found: {live_series_for_asset})")
+            logger.error(
+                f"  FAIL {asset}: {canonical_ticker} NOT found in live data "
+                f"(found: {live_series_for_asset})"
+            )
+            ok = False
+
+    return ok
 
 
-def validate_config_structure():
-    """Validate the canonical config structure."""
+def validate_config_structure() -> bool:
+    """Validate the canonical trading-scope structure."""
     logger.info("=" * 80)
     logger.info("CONFIG STRUCTURE VALIDATION")
     logger.info("=" * 80)
-    
-    # Validate assets
-    expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
-    if set(KALSHI_15M_CRYPTO_ASSETS) == expected_assets:
-        logger.info("✓ All 5 expected assets present")
+
+    scope = get_trading_scope()
+    allowed_assets = scope.ALLOWED_ASSETS
+    allowed_series = scope.ALLOWED_SERIES_TICKERS
+
+    ok = True
+
+    logger.info(f"Allowed assets: {sorted(allowed_assets)}")
+    logger.info(f"Allowed series tickers: {sorted(allowed_series)}")
+
+    if not allowed_assets:
+        logger.error("FAIL: ALLOWED_ASSETS is empty")
+        ok = False
+
+    if all(t.startswith("KX") and t.endswith("15M") for t in allowed_series):
+        logger.info("OK: All series tickers follow KX{ASSET}15M pattern")
     else:
-        logger.error(f"✗ Asset mismatch. Expected: {expected_assets}, Got: {set(KALSHI_15M_CRYPTO_ASSETS)}")
-    
-    # Validate timeframe
-    if KALSHI_15M_TIMEFRAME == "15m":
-        logger.info("✓ Timeframe is 15m")
+        logger.error("FAIL: Some series tickers do not follow KX{ASSET}15M pattern")
+        ok = False
+
+    expected_series = {f"KX{a}15M" for a in allowed_assets}
+    if set(allowed_series) == expected_series:
+        logger.info("OK: Series tickers consistent with asset whitelist")
     else:
-        logger.error(f"✗ Timeframe is {KALSHI_15M_TIMEFRAME}, expected 15m")
-    
-    # Validate series tickers
-    if all(ticker.startswith("KX") and "15M" in ticker for ticker in KALSHI_15M_SERIES_TICKERS.values()):
-        logger.info("✓ All series tickers follow KX{COIN}15M pattern")
-    else:
-        logger.error("✗ Some series tickers do not follow KX{COIN}15M pattern")
-    
-    # Validate entry policies
-    for asset in KALSHI_15M_CRYPTO_ASSETS:
-        policy = get_entry_policy(asset)
-        if policy.asset == asset and policy.base_window_start_minutes > policy.base_window_end_minutes:
-            logger.info(f"✓ {asset} entry policy valid")
-        else:
-            logger.error(f"✗ {asset} entry policy invalid")
-    
-    # Validate exit policy table
-    expected_combinations = {(tier, asset_class) for tier in ["A", "B", "C"] for asset_class in ["major", "alt"]}
-    actual_combinations = set(EXIT_POLICY_TABLE.keys())
-    if expected_combinations == actual_combinations:
-        logger.info("✓ All (tier, asset_class) combinations present in exit policy table")
-    else:
-        missing = expected_combinations - actual_combinations
-        extra = actual_combinations - expected_combinations
-        if missing:
-            logger.error(f"✗ Missing exit policy combinations: {missing}")
-        if extra:
-            logger.warning(f"  Extra exit policy combinations: {extra}")
+        logger.error(
+            f"FAIL: Series tickers {sorted(allowed_series)} do not match "
+            f"whitelist-derived {sorted(expected_series)}"
+        )
+        ok = False
+
+    return ok
 
 
-async def main():
-    """Main validation routine."""
-    logger.info("Starting Kalshi 15m crypto config validation")
+async def main() -> int:
+    """Main validation routine. Returns 0 on success, 1 on any failure."""
+    logger.info("Starting Kalshi 15m crypto scope validation")
     logger.info("=" * 80)
-    
-    # 1. Validate config structure
-    validate_config_structure()
-    
-    # 2. Log configuration parameters
-    log_config_parameters()
-    
-    # 3. Fetch live markets and compare
+
+    scope = get_trading_scope()
+
+    ok = validate_config_structure()
+
     try:
         live_markets_by_asset = await fetch_live_15m_crypto_markets()
-        compare_series_tickers(live_markets_by_asset)
+        ok = compare_series_tickers(
+            live_markets_by_asset,
+            scope.ALLOWED_ASSETS,
+            scope.ALLOWED_SERIES_TICKERS,
+        ) and ok
     except Exception as e:
         logger.error(f"Failed to fetch live markets: {e}")
         logger.warning("Skipping live data comparison")
-    
-    # 4. Dump config summary
+
     logger.info("=" * 80)
-    logger.info("CONFIG SUMMARY")
+    logger.info("Validation complete: %s", "PASS" if ok else "FAIL")
     logger.info("=" * 80)
-    summary = dump_config_summary()
-    logger.info(f"Universe: {summary['universe']}")
-    logger.info(f"Entry Policies: {len(summary['entry_policies'])}")
-    logger.info(f"Exit Policies: {len(summary['exit_policies'])}")
-    logger.info(f"Validation: {summary['validation']}")
-    
-    logger.info("=" * 80)
-    logger.info("Validation complete")
-    logger.info("=" * 80)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

@@ -13,6 +13,9 @@ from pydantic import BaseModel
 from web.api.auth import get_current_session
 
 from utils.logger import get_logger
+from governance.constitutional import get_constitutional
+from governance.authority_boundary import get_authority_enforcer, MeridSystem
+from governance.time_decay import get_time_decay_manager
 
 # ZT5-01: All governance mutation routes require authentication.
 router = APIRouter(

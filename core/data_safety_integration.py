@@ -346,15 +346,15 @@ class DataSafetyCoordinator:
         
         return await self._retention_manager.enforce_policies()
     
-    def get_backup_manager(self) -> Optional[DatabaseBackupManager]:
+    def get_backup_manager(self) -> Optional[DatabaseSafetyBackupManager]:
         """Get the backup manager instance."""
         return self._backup_manager
     
-    def get_integrity_checker(self) -> Optional[DataIntegrityChecker]:
+    def get_integrity_checker(self) -> Optional[DataSafetyIntegrityChecker]:
         """Get the integrity checker instance."""
         return self._integrity_checker
     
-    def get_retention_manager(self) -> Optional[DataRetentionManager]:
+    def get_retention_manager(self) -> Optional[DataSafetyRetentionManager]:
         """Get the retention manager instance."""
         return self._retention_manager
 

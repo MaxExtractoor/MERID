@@ -16,7 +16,10 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid.prediction.trade_decision import TradeDecision
 
 from utils.logger import get_logger
 

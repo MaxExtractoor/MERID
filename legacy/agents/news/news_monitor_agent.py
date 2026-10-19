@@ -16,6 +16,11 @@ import threading
 import asyncio
 import time
 from typing import List, Dict, Optional, Any
+
+# MarketOpinion was removed with the legacy consensus pipeline; retained as an
+# opaque alias so the historical annotations in this quarantined module still
+# resolve.
+MarketOpinion = Any
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum

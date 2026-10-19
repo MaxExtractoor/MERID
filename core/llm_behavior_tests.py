@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from core.drift_monitor import get_drift_monitor
 from core.explainability import ExplanationContext, ExplanationType, get_explainability_service

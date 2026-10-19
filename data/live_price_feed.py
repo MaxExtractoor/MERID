@@ -78,6 +78,8 @@ from datetime import datetime, timezone
 
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from data.spot_models import ExchangeName
+
 
 
 import httpx

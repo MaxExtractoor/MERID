@@ -21,6 +21,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from utils.logger import get_logger
+
+logger = get_logger("agents.prompts.react_templates")
+
 
 class AgentRole(str, Enum):
     """TradingAgents-style roles for MERID agents."""

@@ -17,7 +17,10 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple
+from typing import Dict, Optional, List, Any, Union, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid.event_venues.kalshi.settlement_aligned_exit import ExitClass
 from merid.position_management.position import (
     Position,
     PositionSide,

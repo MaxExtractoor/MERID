@@ -30,6 +30,8 @@ try:
 except ImportError:
     HAS_JSON_LOGGER = False
 
+logger = get_logger("agents.prediction_arbitrage_analyst")
+
 # Structured logging setup
 SERVICE_NAME = os.getenv("SERVICE_NAME", "merid-agent")
 

@@ -11,6 +11,7 @@ Replaces hardcoded/fake data with real engine data from:
 All endpoints that were previously returning 404 or hardcoded data.
 """
 
+import os
 import time
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
@@ -1769,6 +1770,7 @@ async def get_codebase_drift() -> Dict[str, Any]:
     """Codebase drift — matches DriftData in CodebaseHealth.tsx."""
     items = []
     try:
+        from core.codebase_drift_auditor import CodebaseDriftAuditor
         auditor = CodebaseDriftAuditor()
         results = auditor.run_audit()
         for i, r in enumerate(results):

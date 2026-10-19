@@ -511,6 +511,7 @@ if __name__ == "__main__":
     print("\n🧪 Testing Concurrent Handler Configuration...")
     if CONCURRENT_HANDLER_AVAILABLE:
         print("   ✅ Using concurrent-log-handler")
+        from utf8_concise_patterns import configure_concurrent_logging
         concurrent_logger = configure_concurrent_logging()
         concurrent_logger.info("Concurrent handler test: 🚀 αβγ")
     else:

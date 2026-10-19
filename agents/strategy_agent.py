@@ -111,8 +111,7 @@ class StrategyAgent(BaseAgent):
             strategy_id=strategy_id,
             asset=asset,
             portfolio_value=portfolio_value,
-            risk_appetite=risk_appetite,
-            social_sentiment=social_sentiment,
+            sentiment_score=sentiment_score,
             version=version,
             market_metrics=market_metrics,
         )

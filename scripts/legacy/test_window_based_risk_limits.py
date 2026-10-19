@@ -653,7 +653,7 @@ def main():
         test_position_closure_reduces_exposure,
         test_order_gate_window_enforcement,
         test_function_name_correctness,
-        test_dynamic_sizing_disabled,
+        test_dynamic_sizing_state,
         test_upstream_reservation_window_check,
         test_force_reset_window_exposure,
         test_reset_stale_window_exposure,

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from utils.logger import get_logger
+from trading.paper_trading import get_paper_engine
 
 logger = get_logger("web.api.ws_dedicated_streams")
 

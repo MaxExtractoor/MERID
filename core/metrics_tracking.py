@@ -4,7 +4,7 @@ Metrics collection and monitoring for swarm health, trading performance,
 and system performance. Integrates with Prometheus for scraping.
 """
 
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple
 from datetime import datetime
 import time
 import structlog

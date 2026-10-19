@@ -24,6 +24,7 @@ from merid.metrics.canonical_buckets import (
     CANONICAL_PRICE_BANDS,
     ALL_PRICE_BANDS,
     CANONICAL_DISTANCE_BANDS,
+    OUT_OF_RANGE_PRICE_BANDS,
     get_price_bucket,
     get_distance_bucket,
     BucketStats

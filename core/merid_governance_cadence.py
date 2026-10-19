@@ -15,7 +15,7 @@ import json
 from collections import defaultdict
 
 from core.merid_metrics import get_merid_metrics, CalibrationArchetype
-from core.merid_governance import get_merid_governance, GovernanceAction, RiskTier
+from core.merid_governance import get_merid_governance, GovernanceAction, RiskTier, RiskLimits
 from core.merid_dashboard import get_merid_dashboard
 from core.merid_feedback import get_merid_feedback_loop, AlertConfiguration
 from core.brier_metrics_db import get_brier_db

@@ -281,51 +281,42 @@ class PredictionMarketConnector:
             # Mock implementation for Phase 0 - simulate prediction markets
             mock_markets = [
                 PredictionMarket(
-                    id="market_001",
-                    title="Will Bitcoin reach $100k by end of 2024?",
-                    description="Binary prediction on Bitcoin price",
-                    category=MarketCategory.CRYPTOCURRENCY,
-                    outcomes=[
-                        MarketOutcome(id="yes", title="Yes", probability=0.45, current_odds=1.22),
-                        MarketOutcome(id="no", title="No", probability=0.55, current_odds=0.82)
-                    ],
-                    volume=1000000.0,
+                    market_id="market_001",
+                    platform=self.platform,
+                    question="Will Bitcoin reach $100k by end of 2024?",
+                    category=MarketCategory.CRYPTO,
+                    yes_price=0.45,
+                    no_price=0.55,
+                    volume_24h=1000000.0,
+                    total_volume=1000000.0,
                     liquidity=500000.0,
-                    end_time=time.time() + 86400 * 30,  # 30 days
-                    resolution_time=None,
-                    status="active",
+                    resolution_date=time.time() + 86400 * 30,  # 30 days
                     created_at=time.time()
                 ),
                 PredictionMarket(
-                    id="market_002",
-                    title="Will Ethereum 2.0 launch in Q1 2024?",
-                    description="Binary prediction on Ethereum 2.0 launch",
-                    category=MarketCategory.TECHNOLOGY,
-                    outcomes=[
-                        MarketOutcome(id="yes", title="Yes", probability=0.35, current_odds=1.86),
-                        MarketOutcome(id="no", title="No", probability=0.65, current_odds=0.54)
-                    ],
-                    volume=750000.0,
+                    market_id="market_002",
+                    platform=self.platform,
+                    question="Will Ethereum 2.0 launch in Q1 2024?",
+                    category=MarketCategory.CRYPTO,
+                    yes_price=0.35,
+                    no_price=0.65,
+                    volume_24h=750000.0,
+                    total_volume=750000.0,
                     liquidity=375000.0,
-                    end_time=time.time() + 86400 * 45,  # 45 days
-                    resolution_time=None,
-                    status="active",
+                    resolution_date=time.time() + 86400 * 45,  # 45 days
                     created_at=time.time()
                 ),
                 PredictionMarket(
-                    id="market_003",
-                    title="Will US avoid recession in 2024?",
-                    description="Binary prediction on US economic outlook",
-                    category=Category.ECONOMICS,
-                    outcomes=[
-                        MarketOutcome(id="yes", title="Yes", probability=0.40, current_odds=1.50),
-                        MarketOutcome(id="no", title="No", probability=0.60, current_odds=0.67)
-                    ],
-                    volume=1200000.0,
+                    market_id="market_003",
+                    platform=self.platform,
+                    question="Will US avoid recession in 2024?",
+                    category=MarketCategory.ECONOMICS,
+                    yes_price=0.40,
+                    no_price=0.60,
+                    volume_24h=1200000.0,
+                    total_volume=1200000.0,
                     liquidity=600000.0,
-                    end_time=time.time() + 86400 * 60,  # 60 days
-                    resolution_time=None,
-                    status="active",
+                    resolution_date=time.time() + 86400 * 60,  # 60 days
                     created_at=time.time()
                 )
             ]
@@ -336,7 +327,7 @@ class PredictionMarketConnector:
             
             # Update cache
             for market in mock_markets:
-                self._markets[market.id] = market
+                self._markets[market.market_id] = market
             
             self._last_fetch = time.time()
             logger.info(f"Mock prediction markets fetched: {len(mock_markets)} markets")
@@ -355,7 +346,7 @@ class PredictionMarketConnector:
             
             # If not in cache, fetch all markets and return the requested one
             markets = await self.fetch_markets()
-            return next((m for m in markets if m.id == market_id), None)
+            return next((m for m in markets if m.market_id == market_id), None)
             
         except Exception as e:
             logger.error(f"Mock market fetch error for {market_id}: {e}")

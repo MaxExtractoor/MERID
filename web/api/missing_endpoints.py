@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Body, Request, HTTPException
 from web.api.auth import get_current_session
 from utils.logger import get_logger
+from merid.pipeline.risk_manager import get_global_risk_manager, GlobalRiskManager
 
 logger = get_logger(__name__)
 

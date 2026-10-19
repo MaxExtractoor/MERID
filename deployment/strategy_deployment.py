@@ -13,6 +13,7 @@ Features:
 """
 
 import asyncio
+import uuid
 import time
 import json
 import numpy as np

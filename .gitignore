@@ -448,6 +448,45 @@ data/trading_circuit_breaker_http_watermark.json
 data/exit_intents*.json
 data/backup_*/
 data/final_state_output.txt
+data/evidence/
+data/.regime_*.tmp
+data/calibration/
+data/canary_taker_lane.json
+data/cell_discovery.json
+data/current_build_provisional_lane.json
+data/directional_regime_state.json
+data/directional_throttle.json
+data/directional_throttle.json.bak_*
+data/epc_train_until_*.json
+data/epc_wf_*.json
+data/evidence_escape_fills.json
+data/evidence_rehab_probes.json
+data/exit_attempts.json
+data/exit_decision_ledger.json
+data/live_entry_evidence.refresh.json
+data/maker_bid_lane.json
+data/pinned_fav_fills.json
+data/position_exit_state.json
+data/probability_tail_calibration.pre_refit_*.json
+data/reconcile_fill_outcomes_state.json
+data/settlement_positions_observation_*.json
+data/stop_residuals.json
+data/streaming_calibration.json
+data/threshold_cell_*.json
+data/window_funnel_*.json
+data/window_quota_fills.json
+
+# Local operator investigation scratch (never commit)
+scripts/_*
+data/_*
+
+# Stray root-level scratch dumps
+/audit/
+/1791849500
+/=
+
+# Runtime backup artifacts
+data/*.backup_20*
 
 # Devin/live monitoring artifacts
 .devin_monitor.py

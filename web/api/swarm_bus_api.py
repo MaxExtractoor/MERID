@@ -42,8 +42,7 @@ async def get_critic_history() -> Dict[str, Any]:
 
     # LEGACY REMOVAL: Debate store fallback removed - debate module deleted
     # LEGACY REMOVAL: Consensus opinion fallback removed - consensus module deleted
-    critiques.sort(key=lambda c: str(c.get("timestamp", "")), reverse=True)
-    return {"critiques": critiques[:50], "count": len(critiques)}
+    return {"critiques": [], "count": 0}
 
 
 @router.get("/recalibration")

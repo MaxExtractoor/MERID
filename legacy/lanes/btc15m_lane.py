@@ -12,6 +12,7 @@ Migration path: Kalshi API and startup code now use Crypto15MLane via registry.g
 """
 
 from __future__ import annotations
+import math
 
 import threading
 import asyncio

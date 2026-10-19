@@ -35,18 +35,15 @@ def get_key_status() -> Dict[str, bool]:
         "rotation_active": is_rotation_active()
     }
 
-# Example usage in FastAPI endpoint:
-@app.post("/auth/login")
-async def login(credentials: AuthCredentials):
-    payload = {
-        "sub": credentials.email,
-        "role": "trader",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=15)  # Short-lived
-    }
-    access_token = sign_access(payload)
-    refresh_token = create_refresh_token(payload)
-    
-    return {
-        "access": access_token,
-        "refresh": refresh_token
-    }
+# Example usage in FastAPI endpoint (illustrative — wire to your own app/auth):
+#
+# @app.post("/auth/login")
+# async def login(credentials: AuthCredentials):
+#     payload = {
+#         "sub": credentials.email,
+#         "role": "trader",
+#         "exp": datetime.now(timezone.utc) + timedelta(minutes=15)  # Short-lived
+#     }
+#     access_token = sign_access(payload)
+#     refresh_token = create_refresh_token(payload)
+#     return {"access": access_token, "refresh": refresh_token}

@@ -542,7 +542,7 @@ def test_listener_only_configuration(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Get listener-only configuration
-    config = create_listener_only_configuration(log_path)
+    config = create_listener_only_config(log_path)
     
     # Set up queue listener process with enhanced configuration
     try:

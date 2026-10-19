@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Dict, Literal
 
 from merid.event_venues.kalshi.binary_price_space import (
     canonical_outcome_side,

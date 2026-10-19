@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import queue as _queue_mod
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from merid_bootstrap import PROJECT_ROOT
 from config.monitoring_config import get_monitoring_config, LoggingConfig

@@ -6,7 +6,7 @@ and privacy testing/auditing capabilities.
 """
 
 from utils.logger import get_logger
-from typing import Dict, List, Optional, Any, Set, Callable
+from typing import Dict, List, Optional, Any, Set, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum

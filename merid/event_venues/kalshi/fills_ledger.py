@@ -8033,6 +8033,7 @@ class KalshiFillsLedger:
 
         _market_outcome_side = (raw.get("outcome_side") or raw.get("intent_side") or "").lower()
         _book_side = (raw.get("book_side") or "").lower()
+        _ticker_for_identity = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
 
         # 2. The market's reported traded outcome side is the canonical traded side.
         #    In V2, ``outcome_side`` / ``book_side`` (bid=yes, ask=no) describe the
@@ -8179,7 +8180,6 @@ class KalshiFillsLedger:
         #    outcome_side but the same signed-YES exposure.
         _side_conflict = False
         _side_conflict_reason: Optional[str] = None
-        _ticker_for_identity = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
 
         # 5. The user-side _execution_action was already derived above.  The
         #    intent is only used to fill a missing value, never to override an

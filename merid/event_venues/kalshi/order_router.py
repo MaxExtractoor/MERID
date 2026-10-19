@@ -54,6 +54,7 @@ from utils.logger import get_logger
 from merid.observability.live_runtime_state import can_submit_live_entry
 from merid.config.observe_only import is_observe_only
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
+from merid.event_venues.kalshi.models import KalshiMarketState
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 from merid.prediction.trade_decision import (
     TRADE_DECISION_MIN_P_SELECTED,
@@ -6959,17 +6960,6 @@ def _build_create_order_request(
         stop_loss_price_cents=intent.stop_loss_price_cents,
         metadata=metadata,
     )
-
-    # Record intent in the unified trade attribution fact table (non-blocking).
-    try:
-        from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
-        table = get_trade_attribution_table()
-        if table is not None:
-            table.record_intent(intent, req)
-    except Exception as e:
-        logger.warning("[ORDER-ROUTER] trade attribution record_intent failed: %s", e)
-
-    return req
 
 
 def _price_for_side(

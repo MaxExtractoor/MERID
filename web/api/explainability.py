@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from agents.explainability import get_explainability_tracker
+from core.explainability import get_explainability_service
+from trading.execution.defense import get_mev_defense
 from core.consensus_logging import get_consensus_logger
 from core.trust_transparency import get_trust_manager
 from core.error_handling import get_error_handler, get_health_monitor

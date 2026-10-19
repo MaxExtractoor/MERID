@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from core.execution_guard import ActionType, ExecutionContext, get_execution_guard
 from core.environment import get_environment_flags

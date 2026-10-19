@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid.execution.order_decision_schema import OrderDecisionRecord
 
 from utils.logger import get_logger
 

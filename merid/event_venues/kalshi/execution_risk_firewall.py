@@ -1021,7 +1021,7 @@ class ExecutionRiskFirewall:
             or getattr(canonical, "authorization_source", None)
             or ""
         ).strip()
-        return src in _MANUAL_CLOSE_ISSUERS
+        return src in self._MANUAL_CLOSE_ISSUERS
 
     def _is_min_proceeds_exempt(
         self,

@@ -7,6 +7,7 @@ Add to your FastAPI startup to enable:
     enable_rate_limit_metrics()
 """
 
+import asyncio
 from typing import Dict, Any
 from prometheus_client import Counter, Histogram, Gauge, Info
 import time

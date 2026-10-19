@@ -13,6 +13,9 @@ from pydantic import BaseModel
 
 from web.api.auth import get_current_session
 from utils.logger import get_logger
+from ops.data_provenance import get_provenance_tracker
+from ops.signal_entropy import get_entropy_tracker
+from ops.conflict_detector import get_conflict_detector
 
 router = APIRouter(prefix="/api/v1/ops", tags=["ops"], dependencies=[Depends(get_current_session)]  # ZT6-01
 )

@@ -28,7 +28,10 @@ import os
 
 import statistics
 
-from typing import Any, Optional, Dict, List, Set, Tuple
+from typing import Any, Optional, Dict, List, Set, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid.prediction.trade_decision import TradeDecision
 
 from dataclasses import dataclass, field, asdict, replace
 

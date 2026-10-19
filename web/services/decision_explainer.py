@@ -38,7 +38,7 @@ class DecisionExplainerService:
         self._stopping = asyncio.Event()
 
     async def run_forever(self) -> None:
-        LOGGER.info(
+        logger.info(
             "Prime Screen explainer worker started (pid=%s, store=%s)",
             os.getpid(),
             self.store.path,
@@ -47,7 +47,7 @@ class DecisionExplainerService:
             try:
                 processed = await self._process_batch()
             except Exception as exc:  # pylint: disable=broad-except
-                LOGGER.exception("Explainer batch failed: %s", exc)
+                logger.exception("Explainer batch failed: %s", exc)
                 processed = 0
             if processed == 0:
                 await asyncio.sleep(self.sleep_seconds)
@@ -62,7 +62,7 @@ class DecisionExplainerService:
         )
         if not pending:
             return 0
-        LOGGER.debug("Processing %s pending narratives", len(pending))
+        logger.debug("Processing %s pending narratives", len(pending))
         count = 0
         for decision_id in pending:
             await self._process_decision(decision_id)
@@ -77,7 +77,7 @@ class DecisionExplainerService:
         try:
             narrative = await call_local_llm(prompt)
         except Exception as exc:  # pylint: disable=broad-except
-            LOGGER.warning("LLM generation failed for %s: %s", decision_id, exc)
+            logger.warning("LLM generation failed for %s: %s", decision_id, exc)
             self.store.set_narrative(decision_id, None, status="failed")
             return
         self.store.set_narrative(decision_id, narrative.strip(), status="ready")

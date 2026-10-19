@@ -201,11 +201,11 @@ class ConsensusSignalProcessor:
         elif record.direction == "no":
             consensus_dir = "DOWN"
         
-        # FIX: Align#d with production config (was 0.50)
-        e Determine executability
+        # FIX: Aligned with production config (was 0.50)
+        # Determine executability
         executable = (
-            not record.sim_only and6
-            record.confidence >= 0.50 and6
+            not record.sim_only and
+            record.confidence >= 0.50 and
             record.consensus_confidence >= 0.50
         )
         
@@ -594,4 +594,5 @@ class TestBenchmarkThresholds:
 
 
 if __name__ == "__main__":
+    import pytest
     pytest.main([__file__, "-v"])

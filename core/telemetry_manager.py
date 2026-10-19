@@ -8,6 +8,7 @@ sampling, and multi-tier storage for cost control and compliance.
 from utils.logger import get_logger
 import hashlib
 import json
+import logging
 import threading
 
 from typing import Dict, List, Optional, Any, Set

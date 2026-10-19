@@ -434,6 +434,7 @@ from dataclasses import dataclass
 from utils.logger import get_logger
 from merid.observability.live_runtime_state import can_submit_live_entry
 from merid.config.observe_only import is_observe_only
+from merid.config.live_config import get_resolved_live_config
 
 
 @dataclass(frozen=True)
@@ -7821,6 +7822,7 @@ async def _run_one_cycle(self, tick: int) -> None:
             ws_forwarder_healthy = False
         
         # Check WS forwarder health before declaring execution ready
+        num_allowed_assets = len(self._allowed_assets)
         ws_forwarder_healthy = False
         try:
             # CRITICAL FIX: Use shared WS bridge instance from main_15m_lean P1.5
@@ -7900,7 +7902,6 @@ async def _run_one_cycle(self, tick: int) -> None:
         # LOOP-STATE: ready-asset count required for NORMAL vs DEGRADED within ACTIVE.
         # With a BTC-only whitelist, a single ready asset is the full scope, so NORMAL
         # must be attainable with 1/1.
-        num_allowed_assets = len(self._allowed_assets)
         MIN_READY_ASSETS_FOR_NORMAL = min(2, num_allowed_assets)
         MIN_READY_ASSETS_FOR_NORMAL = max(1, MIN_READY_ASSETS_FOR_NORMAL)
         

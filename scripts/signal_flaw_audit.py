@@ -575,7 +575,7 @@ class SignalFlawAuditor:
     
     def _test_fee_modeling(self):
         """Test Kalshi fee modeling"""
-        # Kalshi fee: 7% × p × (1-p) on winning trades, capped at $0.0175
+        # Kalshi fee: 7% Ã— p Ã— (1-p) on winning trades, capped at $0.0175
         test_cases = [
             (0.50, 50),  # 50 cents at 50% probability
             (0.75, 75),  # 75 cents at 75% probability
@@ -609,7 +609,7 @@ class SignalFlawAuditor:
     
     def _calculate_kalshi_fee_test(self, p_mkt: float, price_cents: int) -> float:
         """Simulate Kalshi fee calculation for testing"""
-        # Kalshi fee: 7% × p × (1-p) on winning trades, capped at $0.0175
+        # Kalshi fee: 7% Ã— p Ã— (1-p) on winning trades, capped at $0.0175
         fee_dollars = 0.07 * p_mkt * (1.0 - p_mkt) * (price_cents / 100.0)
         fee_cents = fee_dollars * 100.0
         fee_cents = min(fee_cents, 1.75)  # Cap at $0.0175
@@ -999,7 +999,7 @@ class SignalFlawAuditor:
             if not math.isfinite(velocity):
                 self.flaws.append(FlawReport(
                     category="Edge Cases",
-                    severity=FlavorSeverity.HIGH,
+                    severity=FlawSeverity.HIGH,
                     description="Negative price produces non-finite velocity",
                     location="velocity calculation",
                     evidence={"negative_price": negative_price, "velocity": velocity},
@@ -1026,7 +1026,7 @@ class SignalFlawAuditor:
         if velocity == 0.0:
             self.flaws.append(FlawReport(
                 category="Edge Cases",
-                severity=FlavorSeverity.MEDIUM,
+                severity=FlawSeverity.MEDIUM,
                 description="Very small price movement produces zero velocity",
                 location="velocity calculation",
                 evidence={"base_price": base_price, "small_price": small_price, "velocity": velocity},

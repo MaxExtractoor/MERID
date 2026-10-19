@@ -30,7 +30,10 @@ from utils.logger import get_logger
 import os
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid_core.event_bus.nats_adapter import EventEnvelope
 from dataclasses import dataclass
 from enum import Enum
 

@@ -19,6 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from web.api.auth import get_current_session
 
+from data.live_price_feed import get_live_price_feed
+from trading.paper_trading import get_paper_engine
 from trading.agents.arbitrage_agent import ArbitrageAgent, ArbitrageOpportunity
 from trading.agents.execution_agent import ExecutionAgent, OrderSide, OrderType
 from trading.agents.slippage_agent import SlippageAgent
@@ -542,7 +544,8 @@ async def close_perp_position(
 @router.get("/markets/list")
 async def list_prediction_markets(
     platform: str = "kalshi",
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    limit: int = 100
 ):
     """List available prediction markets from Kalshi."""
     # LEGACY: Polymarket support moved to _legacy/

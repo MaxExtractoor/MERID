@@ -502,6 +502,7 @@ if __name__ == "__main__":
     
     # Test shared queue module
     print("\n🧪 Testing Shared Queue Module...")
+    from utf8_concise_patterns import create_shared_queue_module
     shared_queue_module = create_shared_queue_module()
     print(f"   ✅ Shared queue module created: {shared_queue_module}")
     

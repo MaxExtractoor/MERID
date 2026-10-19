@@ -10,7 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from merid.pipeline.risk_context import RiskContext
 
 from merid.agents.base import AgentCategory, AgentOutput, CanonicalAgent
 from merid.pipeline.proposal import TradeProposal

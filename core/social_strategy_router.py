@@ -5,7 +5,7 @@ Bridges strategy metadata, social-aware quant engine, and multi-agent risk contr
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from governance.multi_agent_risk_controls import get_multi_agent_risk_controls
 from social.social_aware_quant import get_social_aware_quant_engine

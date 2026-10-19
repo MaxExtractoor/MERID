@@ -6,7 +6,7 @@ documentation standards, performance reviews, and retirement procedures.
 """
 
 from utils.logger import get_logger
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
