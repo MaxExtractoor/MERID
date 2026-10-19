@@ -628,20 +628,13 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     $-sized hard loss cap: fires when the executable own-side bid has fallen
     ``drop_cents`` below entry OR under the absolute ``floor_cents``.  At that
     depth the contract is a lottery ticket — salvage value beats riding a
-    dead position to zero.  Emits a LOSS_CAP-class StopCandidate on the
-    reduce-only IOC channel (mandatory hard-risk: floor-exempt, EV-veto
-    exempt, and not in SHADOWED_PRICE_STOP_TRIGGERS — the 2026-10-17
-    price-stop freeze must not swallow catastrophic salvage), so it
-    executes even while the exit-intent in-flight lock is jammed in
-    SUBMISSION_UNKNOWN.
+    dead position to zero.  Emits a HARD_STOP-class StopCandidate on the
+    reduce-only IOC channel, so it executes even while the exit-intent
+    in-flight lock is jammed in SUBMISSION_UNKNOWN.
 
     MERID_TAIL_LOSS_ENABLED     master switch (default 1)
-    MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 25)
+    MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
     MERID_TAIL_LOSS_FLOOR_CENTS absolute bid floor that triggers (default 18)
-    MERID_TAIL_LOSS_REARM_DROP_CENTS  further drop below the last fired bid
-                                    that re-arms the floor after a missed
-                                    salvage IOC (default 8; bounded — each
-                                    re-fire needs another rearm-size drop)
     """
 
     def _int(name: str, default: int) -> int:
@@ -653,9 +646,8 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     return {
         "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
         in ("1", "true", "yes", "on"),
-        "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 25),
+        "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
-        "rearm_drop_cents": _int("MERID_TAIL_LOSS_REARM_DROP_CENTS", 8),
     }
 
 
@@ -1244,7 +1236,6 @@ class PositionMonitor:
             "staged_exit_stage_2_timestamp",
             "hard_lock_pending",
             "tail_loss_floor_fired",
-            "tail_loss_floor_last_bid_cents",
         }
 
         # Provenance/construction fields that an older, more trusted record should keep.
@@ -3915,38 +3906,15 @@ class PositionMonitor:
         # 2026-10-07: Tail-loss floor — catastrophic salvage for deep-tail losses.
         # Independent of the armed SL (disabled under profit_only_v1): fires when
         # the executable bid has dropped >= drop_cents vs entry, or sits at/below
-        # the absolute floor.  Emits a LOSS_CAP StopCandidate (2026-10-19: was
-        # HARD_STOP, which the 2026-10-17 SHADOWED_PRICE_STOP_TRIGGERS freeze
-        # silently converted into shadow-only — every tail-floor trigger since
-        # has been recorded but never submitted, e.g. KXXRP15M-26OCT190230-30
-        # YES@88 rode 45c->0).  LOSS_CAP is the taxonomy's mechanical hard-risk
-        # class: reduce-only IOC, exempt from the breakeven floor and the
-        # EV-hold veto, outside the price-stop shadow, and on a submission
-        # channel that does not flow through the intent in-flight lock — so a
-        # stale SUBMISSION_UNKNOWN exit cannot hold a dying position hostage
-        # (the XRP-1800 failure mode).
+        # the absolute floor.  Emits a HARD_STOP-class StopCandidate: mechanical
+        # hard-risk, reduce-only IOC, and a submission channel that does not flow
+        # through the intent in-flight lock — so a stale SUBMISSION_UNKNOWN exit
+        # cannot hold a dying position hostage (the XRP-1800 failure mode).
         _tail_cfg = _get_tail_loss_floor_config()
-        # One-shot latch with a bounded re-arm: after the floor has fired, it
-        # may fire again only when the bid has fallen another
-        # ``rearm_drop_cents`` below the level of the last emission.  A missed
-        # or partially-filled salvage IOC on a still-collapsing book is a
-        # live position riding to zero — re-arming on further material drop
-        # preserves spam protection without a permanent dead-man switch.
-        _tail_rearm_ok = False
-        if position.tail_loss_floor_fired:
-            _last_tail_bid = getattr(
-                position, "tail_loss_floor_last_bid_cents", None
-            )
-            _tail_rearm_ok = (
-                _last_tail_bid is not None
-                and current_price_cents is not None
-                and current_price_cents
-                <= _last_tail_bid - _tail_cfg["rearm_drop_cents"]
-            )
         if (
             _tail_cfg["enabled"]
             and current_price_cents is not None
-            and (not position.tail_loss_floor_fired or _tail_rearm_ok)
+            and not position.tail_loss_floor_fired
         ):
             _entry_px = getattr(position, "avg_entry_price_cents", 0) or 0
             _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _tail_cfg["drop_cents"]
@@ -3984,9 +3952,6 @@ class PositionMonitor:
                         _tail_level,
                     )
                     position.tail_loss_floor_fired = True
-                    position.tail_loss_floor_last_bid_cents = int(
-                        current_price_cents
-                    )
                     try:
                         _position_cc = to_signed_yes_exposure(
                             position.side.value,
@@ -4025,7 +3990,7 @@ class PositionMonitor:
                         candidate = build_stop_candidate(
                             market_ticker=position.market_id,
                             exchange_position_cc=_position_cc,
-                            trigger_reason="LOSS_CAP",
+                            trigger_reason="HARD_STOP",
                             entry_price_cents=_entry_px or None,
                             kalshi_state=_kalshi_state,
                             unified_state=_unified_state,

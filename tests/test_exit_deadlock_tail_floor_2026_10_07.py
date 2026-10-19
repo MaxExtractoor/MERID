@@ -17,12 +17,10 @@ Fixes under test:
 2. A stale SUBMISSION_UNKNOWN in-flight lock becomes force-reconcilable by ANY
    exit class after ``MERID_EXIT_INFLIGHT_STALE_FORCE_S`` (default 30s).
 
-3. The tail-loss floor emits a LOSS_CAP StopCandidate on the
+3. The tail-loss floor emits a HARD_STOP-class StopCandidate on the
    reduce-only IOC submission channel — independent of the intent lock — when
    the executable own-side bid drops >= ``MERID_TAIL_LOSS_DROP_CENTS`` below
-   entry or sits <= ``MERID_TAIL_LOSS_FLOOR_CENTS``.  (2026-10-19: emitted
-   HARD_STOP until the 10-17 price-stop shadow freeze silently converted
-   every tail-floor trigger into shadow-only telemetry.)
+   entry or sits <= ``MERID_TAIL_LOSS_FLOOR_CENTS``.
 
 4. ``loss_cap`` is a first-class canonical emergency exit reason end-to-end
    (canonical map, emergency class, allowed-reason set, hard-risk set, and the
@@ -130,27 +128,17 @@ class TestStaleInflightKnobs:
 
 class TestTailLossFloor:
     def test_config_defaults(self, monkeypatch):
-        for var in (
-            "MERID_TAIL_LOSS_ENABLED", "MERID_TAIL_LOSS_DROP_CENTS",
-            "MERID_TAIL_LOSS_FLOOR_CENTS", "MERID_TAIL_LOSS_REARM_DROP_CENTS",
-        ):
+        for var in ("MERID_TAIL_LOSS_ENABLED", "MERID_TAIL_LOSS_DROP_CENTS", "MERID_TAIL_LOSS_FLOOR_CENTS"):
             monkeypatch.delenv(var, raising=False)
         cfg = _get_tail_loss_floor_config()
-        assert cfg == {
-            "enabled": True, "drop_cents": 25, "floor_cents": 18,
-            "rearm_drop_cents": 8,
-        }
+        assert cfg == {"enabled": True, "drop_cents": 30, "floor_cents": 18}
 
     def test_config_overrides(self, monkeypatch):
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "0")
         monkeypatch.setenv("MERID_TAIL_LOSS_DROP_CENTS", "25")
         monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_CENTS", "22")
-        monkeypatch.setenv("MERID_TAIL_LOSS_REARM_DROP_CENTS", "12")
         cfg = _get_tail_loss_floor_config()
-        assert cfg == {
-            "enabled": False, "drop_cents": 25, "floor_cents": 22,
-            "rearm_drop_cents": 12,
-        }
+        assert cfg == {"enabled": False, "drop_cents": 25, "floor_cents": 22}
 
     def _position(self, **kwargs) -> Position:
         defaults = dict(
@@ -185,10 +173,8 @@ class TestTailLossFloor:
         )
 
     def test_floor_fires_hard_stop_candidate(self, monkeypatch):
-        """Entry 68c, bid 38c -> drop 30c hits the floor; a LOSS_CAP-class
-        StopCandidate is submitted on the reduce-only channel (2026-10-19:
-        was HARD_STOP, which the SHADOWED_PRICE_STOP_TRIGGERS freeze
-        silently converted to shadow-only)."""
+        """Entry 68c, bid 38c -> drop 30c hits the floor; a HARD_STOP-class
+        StopCandidate is submitted on the reduce-only channel."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
@@ -215,7 +201,7 @@ class TestTailLossFloor:
         assert position.tail_loss_floor_fired is True
         assert len(recorded) == 1
         assert len(submitted) == 1
-        assert submitted[0].trigger_reason == "LOSS_CAP"
+        assert submitted[0].trigger_reason == "HARD_STOP"
 
     def test_floor_does_not_fire_above_drop(self, monkeypatch):
         """Entry 68c, bid 50c -> only -18c, above the 30c drop and 18c floor."""
@@ -265,41 +251,6 @@ class TestTailLossFloor:
         asyncio.run(monitor._check_position(position, self._snapshot(38)))
         asyncio.run(monitor._check_position(position, self._snapshot(35)))
         assert len(submitted) == 1
-
-    def test_floor_rearms_after_further_drop(self, monkeypatch):
-        """2026-10-19: a one-shot latch lets a missed salvage IOC ride to
-        zero on a collapsing book.  The floor re-fires only after the bid
-        drops another MERID_TAIL_LOSS_REARM_DROP_CENTS (default 8c) below
-        the last fired level — bounded, never a poll-rate spam."""
-        monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
-        monitor = PositionMonitor()
-        monitor._loop = None
-        monkeypatch.setattr(monitor, "_is_expired_market", lambda *a, **k: False)
-        submitted = []
-        monkeypatch.setattr(
-            monitor, "_submit_stop_candidate", lambda c: submitted.append(c)
-        )
-        monkeypatch.setattr(pm_mod, "record_stop_candidate", lambda c: None)
-
-        async def _capture(*a, **k):
-            pass
-
-        monkeypatch.setattr(monitor, "_emit_exit_intent", _capture)
-
-        position = self._position()
-        monitor.add_position(position)
-        # Fires at 38c; last_bid stamped 38.  35c and 31c are inside the 8c
-        # re-arm window (rearm at bid <= 30) -> still latched.  30c hits the
-        # boundary -> second salvage attempt; each re-fire needs another
-        # rearm-size drop, so the latch stays bounded.
-        asyncio.run(monitor._check_position(position, self._snapshot(38)))
-        asyncio.run(monitor._check_position(position, self._snapshot(35)))
-        asyncio.run(monitor._check_position(position, self._snapshot(31)))
-        assert len(submitted) == 1
-        asyncio.run(monitor._check_position(position, self._snapshot(30)))
-        assert len(submitted) == 2
-        assert submitted[0].trigger_reason == "LOSS_CAP"
-        assert submitted[1].trigger_reason == "LOSS_CAP"
 
     def test_floor_absolute_trigger(self, monkeypatch):
         """Bid <= floor_cents fires even when the entry drop is smaller

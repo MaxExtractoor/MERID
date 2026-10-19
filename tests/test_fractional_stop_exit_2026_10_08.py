@@ -27,7 +27,7 @@ from merid.event_venues.kalshi.residual_exit import (
 def _candidate(position_cc, **kw):
     args = dict(
         market_ticker="KXSOL15M-TEST",
-        trigger_reason="LOSS_CAP",           # mandatory-risk, non-shadowed price stop
+        trigger_reason="HARD_STOP",          # operational: no EV-gate consult
         position_from_exchange_cc=position_cc,
         candidate_id="sc-frac-test",
         seconds_to_expiry=400.0,

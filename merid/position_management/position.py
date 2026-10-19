@@ -206,14 +206,8 @@ class Position:
     hard_stop_confirmed: bool = False  # True once a hard stop has triggered
     hard_stop_price_cents: Optional[int] = None  # soft stop - extra buffer for taker fee/slippage
     # 2026-10-07: tail-loss floor (profit_only_v1 has no armed SL — this is the
-    # catastrophic salvage trigger, emitted as a LOSS_CAP StopCandidate since
-    # 2026-10-19 — HARD_STOP is shadowed by the 10-17 price-stop freeze).
+    # catastrophic salvage trigger, emitted as a HARD_STOP-class StopCandidate).
     tail_loss_floor_fired: bool = False
-    # 2026-10-19: bid level at which the tail floor last fired.  A one-shot
-    # latch lets a missed IOC on a collapsing book ride to zero (the residual
-    # degraded branch is env-gated off) — the floor may re-fire only after the
-    # bid falls another MERID_TAIL_LOSS_REARM_DROP_CENTS below this level.
-    tail_loss_floor_last_bid_cents: Optional[int] = None
 
     # Trailing-stop timing (2026-08-10)
     trail_armed_at: Optional[float] = None  # when profit first reached arm threshold
@@ -1337,7 +1331,6 @@ class Position:
             "hard_stop_confirmed": self.hard_stop_confirmed,
             "hard_stop_price_cents": self.hard_stop_price_cents,
             "tail_loss_floor_fired": self.tail_loss_floor_fired,
-            "tail_loss_floor_last_bid_cents": self.tail_loss_floor_last_bid_cents,
             "trail_armed_at": self.trail_armed_at,
             "trail_started_at": self.trail_started_at,
             "high_watermark_updated_at": self.high_watermark_updated_at,
@@ -1449,7 +1442,6 @@ class Position:
             hard_stop_confirmed=data.get("hard_stop_confirmed", False),
             hard_stop_price_cents=data.get("hard_stop_price_cents"),
             tail_loss_floor_fired=data.get("tail_loss_floor_fired", False),
-            tail_loss_floor_last_bid_cents=data.get("tail_loss_floor_last_bid_cents"),
             trail_armed_at=data.get("trail_armed_at"),
             trail_started_at=data.get("trail_started_at"),
             high_watermark_updated_at=data.get("high_watermark_updated_at"),

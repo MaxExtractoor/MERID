@@ -16,15 +16,14 @@ Bounds (all env-tunable):
                                              settlement stretch)
   MERID_WINDOW_QUOTA_TTE_MAX_S          600  (stays inside
                                              MERID_LIVE_ENTRY_MAX_TTE_S)
-  MERID_WINDOW_QUOTA_PRICE_LO           20c  sanity floor (Bürgi DP20631:
-                                             sub-20c longshots bleed)
-  MERID_WINDOW_QUOTA_PRICE_HI           75c  sanity ceiling (picks up
-                                             pennies in front of steamroller
-                                             at higher prices)
-  MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS   -10  claimed-EV sanity floor
-                                             (tightened from -15 after
-                                             high-price losses)
-  MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS   6    liquidity sanity — wider
+  MERID_WINDOW_QUOTA_PRICE_LO           5c   sanity floor
+  MERID_WINDOW_QUOTA_PRICE_HI           97c  sanity ceiling
+  MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS   -15  claimed-EV sanity floor
+                                             (blocks crossed-book noise,
+                                             not economics vetoes; was
+                                             -25 until the -5c XRP entry
+                                             rode to zero 2026-10-19)
+  MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS   8    liquidity sanity — wider
                                              spreads are pure bleed
   MERID_WINDOW_QUOTA_MAX_PER_TICKER     3    emission attempts per window
                                              per asset (a pre-venue reject
@@ -88,11 +87,11 @@ def quota_tte_hi() -> float:
 
 
 def quota_price_lo() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_PRICE_LO", 20.0)
+    return _env_float("MERID_WINDOW_QUOTA_PRICE_LO", 5.0)
 
 
 def quota_price_hi() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_PRICE_HI", 75.0)
+    return _env_float("MERID_WINDOW_QUOTA_PRICE_HI", 97.0)
 
 
 def quota_band_match(price_cents: Optional[float]) -> bool:
@@ -109,11 +108,11 @@ def quota_min_ev_cents() -> float:
     """Claimed net-EV sanity floor in cents (negative).  This is not an
     edge threshold — it only rejects degenerate claims (crossed books,
     missing probability)."""
-    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -10.0)
+    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -15.0)
 
 
 def quota_max_spread_cents() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS", 6.0)
+    return _env_float("MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS", 8.0)
 
 
 def quota_max_per_ticker() -> int:
