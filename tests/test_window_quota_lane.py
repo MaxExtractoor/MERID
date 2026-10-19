@@ -97,6 +97,34 @@ class TestQuotaModule:
         assert not wq.quota_ticker_exhausted("T1", path=p)
 
 
+class TestQuotaMinPFloorParity:
+    """2026-10-19: the flip veto demotes a dir_pref into a sub-0.25
+    longshot, but the argmax fallback gate admitted p>=0.22 — so a side
+    too weakly supported to authorize a flip could still be bought when
+    dir_pref was absent or already equal to argmax.  Live loss observed:
+    KXBTC15M-26OCT191500-00 bought NO@25c with p_no=0.2406 and settled 0.
+    Both gates must read the same env knob with the same default."""
+
+    def test_argmax_and_flip_paths_share_min_p_default(self):
+        import re
+        src_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "merid", "prediction", "agent_grid_15m.py",
+        )
+        src = open(src_path, "r", encoding="utf-8").read()
+        defaults = re.findall(
+            r'MERID_WINDOW_QUOTA_MIN_P",\s*"([0-9.]+)"', src
+        )
+        assert len(defaults) >= 2, (
+            "expected MIN_P to be read in both the flip-veto and the "
+            "argmax candidate gate"
+        )
+        assert len(set(defaults)) == 1, (
+            f"MIN_P defaults diverged across quota paths: {defaults}"
+        )
+        assert defaults[0] == "0.25"
+
+
 class TestAllocatorQuotaLane:
     """The allocator must honor the lane's stamped (gate_ev, required_edge)
     pair and its own price band — never the generic +edge floor or the

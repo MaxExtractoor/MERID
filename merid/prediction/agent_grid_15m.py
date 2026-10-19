@@ -9381,8 +9381,15 @@ class LeanAgent15m:
                 )
             except Exception:
                 _wq_in_canon_range = None
+            # 2026-10-19: same MERID_WINDOW_QUOTA_MIN_P floor as the flip
+            # veto above (0.25), not a weaker one — when dir_pref is demoted
+            # or absent, the argmax candidate must still clear the longshot
+            # bar the veto was written to enforce.  Observed live: BTC quota
+            # bought NO@25c with p_no=0.2406 — inside the veto's p<0.25
+            # demote region — because dir_pref==argmax skipped the veto
+            # entirely and this gate admitted p>=0.22.  The fill settled 0.
             _wq_min_cand_p = float(
-                os.environ.get("MERID_WINDOW_QUOTA_MIN_P", "0.22")
+                os.environ.get("MERID_WINDOW_QUOTA_MIN_P", "0.25")
             )
             for _wq_cand in _wq_order:
                 if _wq_regime_block is not None and _wq_dir_reg is not None:
