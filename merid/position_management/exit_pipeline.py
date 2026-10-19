@@ -19,8 +19,8 @@ from decimal import Decimal
 from typing import Any, List, Optional
 
 from merid.position_management.exit_arbiter import (
-    ArbiterResult, ExitArbiter, ExitBook, ExitProposal, ProposalKind,
-    get_exit_arbiter,
+    ArbiterResult, AttemptState, ExitArbiter, ExitBook, ExitProposal,
+    ProposalKind, get_exit_arbiter,
 )
 
 logger = logging.getLogger(__name__)
@@ -539,6 +539,15 @@ def post_route_update(
     arb = arbiter or get_exit_arbiter()
     status = str(getattr(order_result, "status", "") or "").lower()
     certainty = str(getattr(order_result, "submission_certainty", "") or "")
+    # Land the exchange order_id on the attempt so reconcile's first
+    # discovery path (GET /portfolio/orders/{order_id}) works for working
+    # orders — before this, only the client_order_id path was available.
+    _oid = getattr(order_result, "order_id", None)
+    if _oid:
+        try:
+            arb.bind_attempt_identity(position_key, "", order_id=str(_oid))
+        except Exception:
+            pass
     if fill_cc > 0 or getattr(order_result, "has_execution", False):
         arb.mark_acked(position_key)
         if fill_cc > 0:
@@ -586,3 +595,35 @@ def post_route_update(
         arb.resolve_reconcile(position_key, ReconcileEvidence(
             order_found=_transmitted, terminal=True, filled_cc=0,
             source=f"route_{status}" if _transmitted else "local_no_transmit"))
+    elif status in ("not_submitted",):
+        # ``not_submitted`` is the router's authoritative-empty verdict: the
+        # in-router reconcile proved the order never landed on the exchange
+        # (submission_attempted=True + empty coid lookup, or a pre-transmit
+        # gate refusal with submission_attempted=False).  Either way the
+        # attempt is confirmed dead — resolve RETRY_ELIGIBLE so the next
+        # decision may mint a fresh attempt instead of wedging SUBMITTING.
+        from merid.position_management.exit_arbiter import ReconcileEvidence
+        arb.begin_reconcile(position_key)
+        arb.resolve_reconcile(position_key, ReconcileEvidence(
+            order_found=True, terminal=True, filled_cc=0,
+            source="route_not_submitted_authoritative_empty"))
+    elif status in ("duplicate", "duplicate_unknown"):
+        # Router-level concurrent dedup: another in-flight route owns this
+        # client_order_id and will drive its outcome.  The attempt's fate is
+        # therefore UNKNOWN from this route — ACK_UNKNOWN keeps it in the
+        # must-reconcile set so the worker observes the owning order.
+        arb.mark_ack_unknown(position_key, note=f"route_{status}")
+    else:
+        # Safe default — any status this function does not recognise leaves
+        # the submission outcome genuinely uncertain.  SUBMITTING is
+        # unresolved but was historically left out of the reconcile set, so
+        # an unhandled status wedged every later exit for the generation.
+        # Mark ACK_UNKNOWN: unknown is not dead, but it MUST be reconciled.
+        att = arb.attempt_store.get_active(position_key)
+        if att is not None and att.state == AttemptState.SUBMITTING:
+            logger.warning(
+                "[EXIT-ARBITER] post_route_update: unhandled status=%s "
+                "key=%s — marking ACK_UNKNOWN for reconcile",
+                status or "<none>", position_key)
+            arb.mark_ack_unknown(
+                position_key, note=f"route_unhandled:{status or 'none'}")

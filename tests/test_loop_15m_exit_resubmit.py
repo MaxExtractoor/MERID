@@ -45,10 +45,19 @@ def position():
 
 @pytest.mark.asyncio
 async def test_exit_not_submitted_resubmits_with_same_client_order_id(
-    self_mock, position, monkeypatch
+    self_mock, position, monkeypatch, tmp_path
 ):
     """_execute_exit_order resubmits with the same ClOrdID on not_submitted,
     keeps the in-flight guard, and does not rearm or retry."""
+
+    # Durable arbiter state must not leak into repo data/ — redirect the
+    # store paths and drop the singleton so it rebuilds under tmp_path.
+    monkeypatch.setenv(
+        "MERID_EXIT_ATTEMPTS_PATH", str(tmp_path / "exit_attempts.json"))
+    monkeypatch.setenv(
+        "MERID_EXIT_STATE_PATH", str(tmp_path / "exit_state.json"))
+    monkeypatch.setattr(
+        "merid.position_management.exit_arbiter._ARBITER", None)
 
     route_calls = []
 

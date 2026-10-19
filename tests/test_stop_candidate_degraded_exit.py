@@ -52,6 +52,14 @@ class _FakeLedger:
 def _patch_env(monkeypatch, tmp_path):
     ledger = _FakeLedger()
     tracker = ResidualExitTracker(tmp_path / "residuals.json")
+    # Durable arbiter state must not leak into repo data/ — redirect the
+    # store paths and drop the singleton so it rebuilds under tmp_path.
+    monkeypatch.setenv(
+        "MERID_EXIT_ATTEMPTS_PATH", str(tmp_path / "exit_attempts.json"))
+    monkeypatch.setenv(
+        "MERID_EXIT_STATE_PATH", str(tmp_path / "exit_state.json"))
+    monkeypatch.setattr(
+        "merid.position_management.exit_arbiter._ARBITER", None)
     monkeypatch.setattr(sc, "get_stop_candidate_ledger", lambda: ledger)
     monkeypatch.setattr(
         "merid.event_venues.kalshi.residual_exit.get_residual_exit_tracker",

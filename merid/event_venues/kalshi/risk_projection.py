@@ -105,7 +105,10 @@ class BackendPosition:
     """
     ticker: str
     side: str  # "yes" or "no"
-    count: int
+    # Kalshi positions are fractional (position_fp, 0.01 granularity) — an int
+    # field silently truncated 0.75-contract positions to 0 and hid real
+    # exposure from the projection (2026-10-19).
+    count: Decimal
     avg_price_dollars: Decimal  # Average entry price (0-1 range)
     total_cost_dollars: Decimal
     unrealized_pnl_dollars: Decimal
@@ -140,9 +143,12 @@ class BackendPosition:
             # Compute from count * avg_price
             total_cost = avg_price * raw["count"]
         
-        # Type validation
-        if not isinstance(raw["count"], int):
-            raise SchemaError(f"count must be int, got {type(raw['count'])}")
+        # Type validation — count may arrive as int, float, str, or Decimal;
+        # all normalize to Decimal (fractional contracts are canonical).
+        try:
+            count_dec = Decimal(str(raw["count"]))
+        except Exception:
+            raise SchemaError(f"count must be numeric, got {raw['count']!r}")
         
         if raw["side"] not in ("yes", "no"):
             raise SchemaError(f"side must be 'yes' or 'no', got {raw['side']}")
@@ -163,7 +169,7 @@ class BackendPosition:
         return cls(
             ticker=raw["ticker"],
             side=raw["side"],
-            count=raw["count"],
+            count=count_dec,
             avg_price_dollars=avg_price_dec,
             total_cost_dollars=total_cost_dec,
             unrealized_pnl_dollars=unrealized_pnl,
@@ -176,7 +182,7 @@ class BackendPosition:
         return {
             "ticker": self.ticker,
             "side": self.side,
-            "count": self.count,
+            "count": str(self.count),
             "avg_price_dollars": str(self.avg_price_dollars),
             "total_cost_dollars": str(self.total_cost_dollars),
             "unrealized_pnl_dollars": str(self.unrealized_pnl_dollars),

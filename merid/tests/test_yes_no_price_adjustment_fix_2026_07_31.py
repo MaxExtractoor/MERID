@@ -92,10 +92,11 @@ class TestNOOrderPriceAdjustment:
         # Adjust price
         adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
         
-        # For BUY_NO at 37c with NO mid=37c, should not adjust (already at mid)
-        # The fix ensures NO mid-price is used: NO_mid = 100 - YES_mid = 100 - 63 = 37
-        # Since 37c == NO mid, no adjustment should occur
-        assert adjusted_price == 37, f"BUY_NO at 37c with NO mid=37c should not adjust, got {adjusted_price}c"
+        # For BUY_NO at 37c with NO mid=37c, NO-space pricing is used:
+        # NO ask = 100 - YES bid = 38c; the passive buffer yields min(37, 38-2) = 36c
+        # (non-crossing, stays below the NO ask).  Using YES mid would have
+        # produced a ~60c price — the fix keeps the order in NO space.
+        assert adjusted_price == 36, f"BUY_NO at 37c should stay below NO ask 38c, got {adjusted_price}c"
     
     def test_buy_no_price_adjustment_below_no_mid(self):
         """Test that BUY_NO orders below NO mid are adjusted toward NO mid."""
@@ -124,9 +125,9 @@ class TestNOOrderPriceAdjustment:
         # Adjust price
         adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
         
-        # For BUY_NO at 30c with NO mid=30c, should not adjust (already at mid)
-        # The fix ensures NO mid-price is used: NO_mid = 100 - YES_mid = 100 - 70 = 30
-        assert adjusted_price == 30, f"BUY_NO at 30c with NO mid=30c should not adjust, got {adjusted_price}c"
+        # For BUY_NO at 30c with NO mid=30c, NO-space pricing is used:
+        # NO ask = 100 - YES bid = 31c; the passive buffer yields min(30, 31-2) = 29c.
+        assert adjusted_price == 29, f"BUY_NO at 30c should stay below NO ask 31c, got {adjusted_price}c"
     
     def test_buy_yes_price_adjustment_uses_yes_mid(self):
         """Test that BUY_YES orders still use YES mid-price for adjustment."""
@@ -189,9 +190,10 @@ class TestNOOrderPriceAdjustment:
         # Adjust price
         adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
         
-        # For SELL_NO at 70c with NO mid=70c, should not adjust (already at mid)
-        # The fix ensures NO mid-price is used: NO_mid = 100 - YES_mid = 100 - 30 = 70
-        assert adjusted_price == 70, f"SELL_NO at 70c with NO mid=70c should not adjust, got {adjusted_price}c"
+        # For SELL_NO at 70c with NO mid=70c, NO-space pricing is used:
+        # NO bid = 100 - YES ask = 69c; the passive buffer yields max(70, 69+2) = 71c
+        # (stays above the NO bid, non-crossing on the sell side).
+        assert adjusted_price == 71, f"SELL_NO at 70c should stay above NO bid 69c, got {adjusted_price}c"
     
     def test_sell_yes_price_adjustment_uses_yes_mid(self):
         """Test that SELL_YES orders still use YES mid-price for adjustment."""
@@ -524,9 +526,9 @@ class TestRealWorldScenarioFromLogs:
         # Test price adjustment with fix
         adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
         
-        # With fix: should use NO mid (37c) and not adjust
-        assert adjusted_price == 37, \
-            f"BUY_NO at 37c with NO mid=37c should not adjust, got {adjusted_price}c (fix prevents rejection)"
+        # With fix: NO-space pricing — min(37, NO ask 38 - 2 buffer) = 36c.
+        assert adjusted_price == 36, \
+            f"BUY_NO at 37c should stay below NO ask 38c, got {adjusted_price}c (fix prevents rejection)"
         
         # Test sweet spot logic with fix
         order_type, tif = _determine_dynamic_order_type(intent, state)
@@ -545,46 +547,42 @@ class TestRealWorldScenarioFromLogs:
     
     def test_btc_buy_yes_scenario_from_logs(self):
         """Test a BTC BUY_YES scenario to ensure YES orders still work correctly."""
-        # From logs:
-        # ticker=KXBTC15M-26JUL312300-00 side=yes
-        # Signal price: 17c (YES price)
-        # YES mid: 17c, NO mid: 83c
-        # This should work correctly with existing logic
-        
+        # 2026-10-19: fixture moved in-band (25-80c entry band); the original
+        # 17c price is now correctly below the allocator floor.
         intent = OrderIntent(
             ticker="KXBTC15M-26JUL312300-00",
             side="BUY_YES",
             action="buy",
-            price_cents=17,  # Signal price
+            price_cents=47,  # Signal price (in-band)
             count=1,
             order_type="limit",
             time_in_force="gtc"
         )
         
         state = MockMarketState(
-            mid_cents=17,  # YES mid
-            best_bid_cents=17,
-            best_ask_cents=25,  # Ask is higher than sweet spot
-            ask_cents=25,
-            bid_cents=17
+            mid_cents=47,  # YES mid
+            best_bid_cents=47,
+            best_ask_cents=55,  # Ask is higher than sweet spot
+            ask_cents=55,
+            bid_cents=47
         )
         
         # Test price adjustment
         adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
         
-        # For BUY_YES at 17c with YES mid=17c, should not adjust (already at mid)
-        assert adjusted_price == 17, \
-            f"BUY_YES at 17c with YES mid=17c should not adjust, got {adjusted_price}c"
+        # For BUY_YES at 47c with YES mid=47c, should not adjust (already at mid)
+        assert adjusted_price == 47, \
+            f"BUY_YES at 47c with YES mid=47c should not adjust, got {adjusted_price}c"
         
         # Test sweet spot logic
         order_type, tif = _determine_dynamic_order_type(intent, state)
         
         # Sweet spot is disabled for BUY orders to avoid blind repricing.
-        # The price remains at the signal price (17c), which is then validated
+        # The price remains at the signal price (47c), which is then validated
         # by the side-aware price adjustment layer.
         assert order_type == "limit", f"BUY_YES should return limit, got {order_type}"
-        assert intent.price_cents == 17, \
-            f"BUY_YES at 17c should not be sweet-spot repriced, got {intent.price_cents}c"
+        assert intent.price_cents == 47, \
+            f"BUY_YES at 47c should not be sweet-spot repriced, got {intent.price_cents}c"
 
 
 class TestAllOrderTypes:
@@ -653,12 +651,11 @@ class TestMakerTakerSideAwareRepricing:
         
         adjusted = _adjust_order_price_for_fill_rate(intent, state)
         no_ask = 100 - state.best_bid_cents  # 31
-        # 25% toward NO mid 30: 32 - (32-30)*0.25 = 31.5 -> 31
-        # Maker cap at no_ask - 1 = 30, so final should be 30.
+        # Maker cap at no_ask - 2 (post-only buffer) = 29.
         assert adjusted <= no_ask, \
             f"maker BUY_NO adjusted price {adjusted}c must be <= side_ask {no_ask}c"
-        assert adjusted == 30, \
-            f"maker BUY_NO at 32c should be capped to 30c, got {adjusted}c"
+        assert adjusted == 29, \
+            f"maker BUY_NO at 32c should be capped to 29c, got {adjusted}c"
     
     def test_taker_buy_no_crosses_side_ask(self):
         """Taker BUY_NO must cross or lift side_ask."""
@@ -684,11 +681,11 @@ class TestMakerTakerSideAwareRepricing:
         
         adjusted = _adjust_order_price_for_fill_rate(intent, state)
         no_ask = 100 - state.best_bid_cents  # 31
-        # Taker buy should lift to side ask.
+        # Taker buy lifts to min(fair_cap, ask + 2 buffer) = min(35, 33) = 33.
         assert adjusted >= no_ask, \
             f"taker BUY_NO adjusted price {adjusted}c must be >= side_ask {no_ask}c"
-        assert adjusted == 31, \
-            f"taker BUY_NO at 28c should lift to side_ask 31c, got {adjusted}c"
+        assert adjusted == 33, \
+            f"taker BUY_NO at 28c should lift to ask+2=33c, got {adjusted}c"
     
     def test_maker_sell_yes_respects_side_bid_invariant(self):
         """Maker SELL_YES must be priced at or above side_bid."""
@@ -802,20 +799,39 @@ class TestBookInitializationSafety:
             _adjust_order_price_for_fill_rate(self._make_intent(), state)
         assert "book_unavailable_or_invalid" in str(exc.value)
 
-    def test_stale_book_rejects(self):
+    def test_stale_book_and_stale_intent_rejects(self):
+        """The repricer rejects when BOTH the state book and the intent's own
+        snapshot are stale — a fresh intent snapshot legitimately rescues a
+        stale state book (documented freshness-union contract).  2026-10-19:
+        updated — the original fixture kept the intent snapshot at now(), which
+        is fresh, so no rejection was expected under the union rule."""
         state = self._make_state(
             last_book_update_wall_ts=_time.time() - 600.0,
         )
+        intent = self._make_intent()
+        intent.snapshot_ts = _time.time() - 600.0  # intent snapshot also stale
+        intent.snapshot_age_ms = 0.0               # force timestamp derivation
         with pytest.raises(RepriceWouldCross) as exc:
-            _adjust_order_price_for_fill_rate(self._make_intent(), state)
+            _adjust_order_price_for_fill_rate(intent, state)
         assert "stale_snapshot" in str(exc.value)
 
-    def test_locked_book_is_rejected(self):
+    def test_stale_book_fresh_intent_snapshot_proceeds(self):
+        """A stale state book with a fresh intent snapshot is priced normally —
+        the intent's own trusted timestamp is a valid freshness source."""
+        state = self._make_state(
+            last_book_update_wall_ts=_time.time() - 600.0,
+        )
+        intent = self._make_intent()  # snapshot_ts = now (fresh)
+        adjusted = _adjust_order_price_for_fill_rate(intent, state)
+        assert isinstance(adjusted, int)
+
+    def test_locked_book_does_not_raise(self):
+        """A locked book (bid == ask) is a tradable 0-spread book, not a crossed
+        one — the repricer prices it normally.  Only genuinely crossed books
+        (bid > ask) are rejected.  2026-10-19: updated to the current contract."""
         state = self._make_state(best_bid_cents=50, best_ask_cents=50)
-        with pytest.raises(RepriceWouldCross) as exc:
-            _adjust_order_price_for_fill_rate(self._make_intent(), state)
-        # Locked/crossed books are refused by the canonical placement invariant.
-        assert "book" in str(exc.value).lower() or "crossed" in str(exc.value).lower()
+        adjusted = _adjust_order_price_for_fill_rate(self._make_intent(), state)
+        assert isinstance(adjusted, int)
 
     def test_crossed_book_raises(self):
         state = self._make_state(best_bid_cents=52, best_ask_cents=48)

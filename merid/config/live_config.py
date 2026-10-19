@@ -86,8 +86,8 @@ class ResolvedLiveConfig:
     max_positions_per_asset: int = 1
 
     # Price collar (execution; router must be a subset of this)
-    min_entry_cents: int = 10
-    max_entry_cents: int = 75
+    min_entry_cents: int = 25
+    max_entry_cents: int = 80
     valid_price_cents_min: int = 10
     valid_price_cents_max: int = 99
 

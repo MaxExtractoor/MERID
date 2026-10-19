@@ -6,7 +6,8 @@ Each contract consumes its entry price from the $3 cap, and slots free up on exi
 
 Key Rules:
 - Max 3 contracts per trade (hard cap, still bounded by the $3 exposure cap)
-- Entry price must be 10-75c (hard enforcement)
+- Entry price must be 25-80c (hard enforcement; env-overridable via
+  MERID_MIN_ENTRY_CENTS / MERID_MAX_ENTRY_CENTS)
 - Total exposure across all 5 assets ≤ $3 (hard enforcement)
 - Sequential trading: new entries blocked until $3 frees up
 - Re-entry allowed when positions close (slot recycling)
@@ -98,8 +99,8 @@ class AllocationRequest:
         """Validate request parameters."""
         resolved = _get_resolved_or_default()
         max_contracts = resolved.max_contracts_per_order if resolved else MAX_CONTRACTS_PER_ORDER
-        min_entry_cents = resolved.min_entry_cents if resolved else 10
-        max_entry_cents = resolved.max_entry_cents if resolved else 75
+        min_entry_cents = resolved.min_entry_cents if resolved else GlobalSlotAllocator.MIN_ENTRY_CENTS
+        max_entry_cents = resolved.max_entry_cents if resolved else GlobalSlotAllocator.MAX_ENTRY_CENTS
 
         # Kalshi V2 supports fractional contracts down to 0.01 (one centi-contract).
         # Reject sub-minimal or non-positive sizes, but allow sub-one-contract entries

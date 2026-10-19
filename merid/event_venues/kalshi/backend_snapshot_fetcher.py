@@ -97,10 +97,23 @@ async def _fetch_positions(kalshi_client: Any) -> List[BackendPosition]:
         for venue_pos in result.data:
             # VenuePosition has: market_id, outcome_id, size, average_entry_price, unrealized_pnl, realized_pnl
             try:
+                if not venue_pos.outcome_id:
+                    # Missing side must not silently become YES — a wrong
+                    # guess flips the exposure sign in the projection.
+                    # Surface it loudly; the record keeps the "yes" default
+                    # because the schema requires a yes/no value and dropping
+                    # the position would hide the exposure entirely.
+                    logger.warning(
+                        "[BACKEND-SNAPSHOT] position %s missing outcome_id — "
+                        "defaulting side=yes; verify against exchange",
+                        venue_pos.market_id,
+                    )
                 position = BackendPosition(
                     ticker=venue_pos.market_id,
                     side=venue_pos.outcome_id if venue_pos.outcome_id else "yes",  # "yes" or "no"
-                    count=int(venue_pos.size),
+                    # Fractional contracts are canonical — int() truncated
+                    # 0.75-contract positions to 0 and hid real exposure.
+                    count=venue_pos.size,
                     avg_price_dollars=venue_pos.average_entry_price,  # Already in dollars
                     total_cost_dollars=venue_pos.average_entry_price * venue_pos.size,
                     unrealized_pnl_dollars=venue_pos.unrealized_pnl if venue_pos.unrealized_pnl else Decimal("0"),

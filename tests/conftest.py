@@ -208,6 +208,10 @@ for _env_key, _fname in {
     # Regime EMA/hysteresis state: production persistence must not leak into
     # tests (stale confirmed labels would change gate verdicts).
     "MERID_DIRECTIONAL_REGIME_STATE_PATH": "directional_regime_state.json",
+    # Exit lifecycle: arbiter attempts + trailing-stop state persist under
+    # data/ in production; any test touching position fills can write them.
+    "MERID_EXIT_STATE_PATH": "position_exit_state.json",
+    "MERID_EXIT_ATTEMPTS_PATH": "exit_attempts.json",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.

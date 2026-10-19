@@ -4345,13 +4345,70 @@ async def _execute_exit_order(
                     position.market_id,
                     intent.client_order_id,
                 )
+                if _arb_position_key is not None:
+                    try:
+                        from merid.position_management.exit_arbiter import (
+                            get_exit_arbiter,
+                        )
+                        _arbiter = get_exit_arbiter()
+                        _arbiter.mark_ack_unknown(
+                            _arb_position_key,
+                            note=f"route_timeout_{_exit_route_timeout_s:.0f}s",
+                        )
+                    except Exception:
+                        pass
                 if self._position_monitor:
                     self._position_monitor._mark_exit_intent_submission_unknown(
                         position.position_id,
                         f"route_timeout_{_exit_route_timeout_s:.0f}s",
                     )
                 return
-            if _arb_position_key is not None:
+            except Exception as route_exc:
+                # A raised route call leaves the submission outcome genuinely
+                # unknown — the request may or may not have reached the wire.
+                # Mirror the timeout contract: ACK_UNKNOWN on the arbiter
+                # attempt + submission-unknown on the monitor intent so
+                # reconcile-by-coid decides before any re-arm.  Without this
+                # the attempt stayed SUBMITTING and suppressed every later
+                # exit for the generation.
+                logger.warning(
+                    "[EXIT-ORDER] route_order_async raised; marking "
+                    "submission unknown for reconcile: position=%s market=%s "
+                    "client_order_id=%s error=%s",
+                    position.position_id[:8],
+                    position.market_id,
+                    intent.client_order_id,
+                    route_exc,
+                )
+                if _arb_position_key is not None:
+                    try:
+                        from merid.position_management.exit_arbiter import (
+                            get_exit_arbiter,
+                        )
+                        _arbiter = get_exit_arbiter()
+                        _arbiter.mark_ack_unknown(
+                            _arb_position_key,
+                            note=f"route_exception:{route_exc}",
+                        )
+                    except Exception:
+                        pass
+                if self._position_monitor:
+                    self._position_monitor._mark_exit_intent_submission_unknown(
+                        position.position_id,
+                        f"route_exception:{route_exc}",
+                    )
+                return
+            _result_status = getattr(result, "status", "")
+            # An intermediate ``not_submitted`` that will be resubmitted keeps
+            # the SAME arbiter attempt in-flight — the resubmission rides the
+            # same client_order_id, so resolving the attempt here would strand
+            # the resubmitted order outside arbiter tracking.  Only update the
+            # lifecycle on terminal outcomes (incl. the final not_submitted).
+            _will_resubmit = (
+                _result_status == "not_submitted"
+                and _current_resubmit < _max_resubmits
+            )
+            if _arb_position_key is not None and not _will_resubmit:
                 try:
                     post_route_update(
                         _arb_position_key, result,

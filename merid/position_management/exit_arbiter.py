@@ -107,6 +107,19 @@ _MUST_RECONCILE_STATES = frozenset({
     AttemptState.WORKING_OR_PARTIALLY_FILLED,
 })
 
+# A SUBMITTING attempt is legitimately transient — the route call is
+# in-flight.  If it outlives the route timeout without post_route_update
+# landing (timeout/exception paths that returned early, or a wedged route
+# coroutine), the submission outcome is unknown and must be reconciled
+# exactly like a lost ack.  Default 30s > MERID_EXIT_ROUTE_TIMEOUT_S (20s)
+# so an in-flight call is never disturbed; override via env only with a
+# value above the route timeout.
+def _submitting_stale_s() -> float:
+    try:
+        return float(os.environ.get("MERID_EXIT_SUBMITTING_STALE_S", "30"))
+    except Exception:
+        return 30.0
+
 
 class ProposalKind(str, Enum):
     PROFIT_LOCK = "profit_lock"
@@ -590,8 +603,15 @@ class ExitArbiter:
 
         # 3) Unresolved attempt gate — reconcile before replacement.
         if attempt is not None and attempt.state in _UNRESOLVED_STATES:
+            _stale_submit = (
+                attempt.state == AttemptState.SUBMITTING
+                and time.time() - (
+                    attempt.updated_ts or attempt.created_ts or 0.0)
+                > _submitting_stale_s()
+            )
             status = ("reconcile_required"
                       if attempt.state in _MUST_RECONCILE_STATES
+                         or _stale_submit
                       else "in_flight")
             return ArbiterResult(
                 status=status, floor_cents=floor, floor_source=floor_source,
@@ -882,11 +902,23 @@ class ExitArbiter:
             self._attempts.clear_active(a)
 
     def positions_requiring_reconcile(self) -> List[str]:
-        return [
-            key for key in self._attempts._positions
-            if (a := self._attempts.get_active(key)) is not None
-            and a.state in _MUST_RECONCILE_STATES
-        ]
+        now = time.time()
+        stale_s = _submitting_stale_s()
+        keys: List[str] = []
+        for key in self._attempts._positions:
+            a = self._attempts.get_active(key)
+            if a is None:
+                continue
+            if a.state in _MUST_RECONCILE_STATES:
+                keys.append(key)
+            elif (
+                a.state == AttemptState.SUBMITTING
+                and now - (a.updated_ts or a.created_ts or now) > stale_s
+            ):
+                # Wedged submission: post_route_update never landed.  Same
+                # contract as a lost ack — reconcile by coid/order_id.
+                keys.append(key)
+        return keys
 
     def validate_attempt_token(
         self, position_key: str, attempt_id: Optional[str],

@@ -27,7 +27,11 @@ from merid.event_venues.kalshi.residual_exit import (
 def _candidate(position_cc, **kw):
     args = dict(
         market_ticker="KXSOL15M-TEST",
-        trigger_reason="HARD_STOP",          # operational: no EV-gate consult
+        # operational: no EV-gate consult, and outside
+        # SHADOWED_PRICE_STOP_TRIGGERS (HARD_STOP is shadowed since
+        # 2026-10-17 — the shadow doc names LOSS_CAP as the authorized
+        # emergency trigger class for this path).
+        trigger_reason="LOSS_CAP",
         position_from_exchange_cc=position_cc,
         candidate_id="sc-frac-test",
         seconds_to_expiry=400.0,
@@ -69,6 +73,14 @@ def _patch_submit_env(monkeypatch, tmp_path, position_cc):
         "merid.event_venues.kalshi.residual_exit.get_residual_exit_tracker",
         lambda path=None: tracker,
     )
+    # Durable arbiter state must not leak into repo data/ — redirect the
+    # store paths and drop the singleton so it rebuilds under tmp_path.
+    monkeypatch.setenv(
+        "MERID_EXIT_ATTEMPTS_PATH", str(tmp_path / "exit_attempts.json"))
+    monkeypatch.setenv(
+        "MERID_EXIT_STATE_PATH", str(tmp_path / "exit_state.json"))
+    monkeypatch.setattr(
+        "merid.position_management.exit_arbiter._ARBITER", None)
     monkeypatch.setattr(sc, "_resolve_position_epoch", lambda t: "fill-ep-1")
     monkeypatch.setattr(sc, "_get_market_state", lambda t: (None, None))
     monkeypatch.setattr(sc, "_get_executable_exit_cents", lambda s, side: 18)

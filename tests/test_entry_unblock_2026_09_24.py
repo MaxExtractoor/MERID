@@ -50,8 +50,13 @@ def test_canonical_yes_ceiling_is_95():
     assert get_canonical_price_range("no") == (25, 95)
 
 
-def test_profile_entry_ceiling_resolves_95_and_loss_limits_off():
-    """The committed profile resolves max_entry=95c with loss halts disabled."""
+def test_profile_entry_ceiling_resolves_80_and_loss_limits_off():
+    """The committed profile resolves the 25-80c entry band with loss halts disabled.
+
+    2026-10-19: the execution band was tightened to [25c, 80c] (favorite–longshot
+    bias below 25c, asymmetric bounce traps above 80c).  The canonical venue
+    bound remains 95c — it is a validity range, not the entry band.
+    """
     profile_path = (
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         + "/config/profiles/kalshi_crypto_15m_v2.yaml"
@@ -59,8 +64,10 @@ def test_profile_entry_ceiling_resolves_95_and_loss_limits_off():
     with open(profile_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
-    assert raw["price_range"]["max_price_cents"] == 95
-    assert raw["guardrails"]["max_contract_price_cents"] == 95
+    assert raw["price_range"]["max_price_cents"] == 80
+    assert raw["price_range"]["min_price_cents"] == 25
+    assert raw["guardrails"]["max_contract_price_cents"] == 80
+    assert raw["guardrails"]["min_contract_price_cents"] == 25
     assert raw["canonical"]["price_range"]["max_cents"] == 95
     assert raw["guardrails"]["daily_loss_enabled"] is False
     assert raw["guardrails"]["drawdown_halt_enabled"] is False
@@ -258,9 +265,32 @@ def _wide_book_state(yes_bid: int, yes_ask: int):
 
 
 def test_taker_repricer_uses_edge_budget_in_wide_book(monkeypatch):
-    """ask > mid+slippage but <= edge budget -> price at the budget, no reject."""
+    """ask > mid+slippage but <= edge budget -> marketable at ask+buf, no reject.
+
+    2026-10-19: the book is in-band (25-80c allocator band) — YES 55/78,
+    mid~66 -> fair_cap 71 < ask 78 (mid-anchored cap alone rejects).  With an
+    edge budget the order must route marketably at min(ask+buf, edge cap).
+    """
     monkeypatch.setenv("MERID_MAX_SLIPPAGE_CENTS", "5")
-    # YES 69/88: mid~78/79 -> fair_cap ~84 < ask 88 (old code rejected here).
+    state = _wide_book_state(55, 78)
+    intent = _taker_buy_intent(
+        price_cents=78, basis=74, ev_net=10.0, min_edge=0.03, p_selected=0.92
+    )
+    intent.snapshot_age_ms = 10
+    cap = _max_edge_preserving_buy_price(intent)
+    assert cap is not None and cap >= 78
+
+    adjusted = _adjust_order_price_for_fill_rate(intent, state)
+    # The edge-budget path caps at the tighter of (ask + taker buffer) and the
+    # signal's edge cap — marketable but never paying above the budget.
+    assert adjusted == min(78 + 2, cap)
+    assert adjusted >= 78
+    assert adjusted <= cap
+
+
+def test_taker_repricer_edge_budget_respects_allocator_band(monkeypatch):
+    """An edge-backed buy that would route above the 80c band is rejected."""
+    monkeypatch.setenv("MERID_MAX_SLIPPAGE_CENTS", "5")
     state = _wide_book_state(69, 88)
     intent = _taker_buy_intent(
         price_cents=88, basis=85, ev_net=10.0, min_edge=0.03, p_selected=0.92
@@ -268,10 +298,10 @@ def test_taker_repricer_uses_edge_budget_in_wide_book(monkeypatch):
     intent.snapshot_age_ms = 10
     cap = _max_edge_preserving_buy_price(intent)
     assert cap is not None and cap >= 88
-
-    adjusted = _adjust_order_price_for_fill_rate(intent, state)
-    assert adjusted == min(99, cap)
-    assert adjusted >= 88
+    # Repriced cap would be min(88+2, 91)=90 -> clamped to the 80c allocator
+    # ceiling -> below the 88c ask -> unmarketable -> RepriceWouldCross.
+    with pytest.raises(RepriceWouldCross):
+        _adjust_order_price_for_fill_rate(intent, state)
 
 
 def test_taker_repricer_still_rejects_beyond_edge_budget(monkeypatch):

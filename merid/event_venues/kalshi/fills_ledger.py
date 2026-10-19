@@ -8056,6 +8056,10 @@ class KalshiFillsLedger:
 
         _execution_outcome_side: Optional[str] = None
         _execution_action: Optional[str] = None
+        # 2026-10-19: tracks whether the action came from the explicit action
+        # field (trusted) or from a side-agreement/default heuristic (must be
+        # re-validated against a live position before it can mutate exposure).
+        _action_was_inferred = False
 
         if _raw_traded_side and _raw_action:
             # The explicit user-side payload (side / purchased_side) tells us
@@ -8074,6 +8078,7 @@ class KalshiFillsLedger:
             # the market side agrees (buy) or opposes (sell) the user's side.
             _execution_outcome_side = _raw_traded_side
             _execution_action = "buy" if _market_outcome_side == _raw_traded_side else "sell"
+            _action_was_inferred = True
         elif _market_outcome_side and _raw_action:
             # V2 payload with market side and action.  The executed contract is
             # ``outcome_side`` and the action is the taker's action on that
@@ -8084,6 +8089,7 @@ class KalshiFillsLedger:
             # Only the market side is known; default to a buy and warn.
             _execution_outcome_side = _market_outcome_side
             _execution_action = "buy"
+            _action_was_inferred = True
             logger.warning(
                 "[FILL-SIDE-CANONICALIZATION] fill_id=%s market=%s - "
                 "Only outcome_side/book_side present; defaulting to BUY %s. "
@@ -8250,15 +8256,60 @@ class KalshiFillsLedger:
         # the ticker, a positive-count fill on a valid side can only be an
         # opening buy (it cannot be a reduce-only close with no prior position).
         # Infer ``buy`` so the fill is not quarantined; record the metric.
-        if _execution_action is None and _execution_outcome_side in ("yes", "no") and _quantity_cc > 0:
+        #
+        # 2026-10-19 hardening: "no prior position" must be proven against the
+        # position cache, not just the ledger — after a restart with a live
+        # exchange position and a cold ledger, a close could otherwise be
+        # mis-recorded as an opening buy (phantom-direction).  The same risk
+        # applies to actions set by the side-agreement/default heuristics above
+        # (``_action_was_inferred``) — an inferred direction against a live or
+        # previously-filled position is unresolvable and must quarantine rather
+        # than guess.  When the cache shows a position, clear the inferred
+        # action (or leave the missing one unset) -> quarantine path.
+        if (
+            _execution_outcome_side in ("yes", "no")
+            and _quantity_cc > 0
+            and not resolved_intent_id
+            and (_execution_action is None or _action_was_inferred)
+        ):
             existing_fills = self._fills_by_market.get(_ticker_for_identity, [])
-            if not existing_fills and not resolved_intent_id:
-                _execution_action = "buy"
-                try:
-                    from merid.event_venues.kalshi.kalshi_ledger_metrics import inc_fills_missing_action
-                    inc_fills_missing_action()
-                except Exception:
-                    pass
+            _has_position = False
+            try:
+                # Consult the live singleton only — instantiating a cache
+                # inside fill parsing would create durable state (and in
+                # tests pollute data/) purely to answer a lookup.  In
+                # production the cache is created at startup preflight, so
+                # a missing instance means no position info is available.
+                from merid.event_venues.kalshi import position_cache as _pc_mod
+                _cache = _pc_mod._position_cache_instance
+                if _cache is not None:
+                    _pos = _cache.get_position(_ticker_for_identity)
+                    _has_position = bool(
+                        _pos is not None
+                        and int(getattr(_pos, "quantity_cc", 0) or
+                                getattr(_pos, "size_cc", 0) or 0) != 0
+                    )
+            except Exception:
+                _has_position = False
+            if not existing_fills and not _has_position:
+                if _execution_action is None:
+                    _execution_action = "buy"
+                    try:
+                        from merid.event_venues.kalshi.kalshi_ledger_metrics import inc_fills_missing_action
+                        inc_fills_missing_action()
+                    except Exception:
+                        pass
+                # else: keep the heuristic inference — a flat book makes the
+                # fill an opening by exhaustion, and the heuristic direction
+                # is the best available reading of the wire form.
+            elif _action_was_inferred:
+                logger.warning(
+                    "[FILL-ACTION-UNRESOLVED] fill_id=%s ticker=%s - "
+                    "inferred action cannot be trusted against existing "
+                    "fills/position; leaving action unresolved for quarantine",
+                    fill_id, _ticker_for_identity or "",
+                )
+                _execution_action = None
 
         # 7. Compute signed-YES deltas for intent and execution.
         # Both the intent and the execution are now canonicalized to the user's

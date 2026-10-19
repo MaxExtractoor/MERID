@@ -238,3 +238,96 @@ class TestNoSidePriceAdjustment:
         )
         with pytest.raises(RepriceWouldCross):
             _adjust_order_price_for_fill_rate(intent, state)
+
+
+class TestDivergenceReprice:
+    """_maybe_reprice_on_divergence must apply the repriced limit.
+
+    Regression: the divergence path called _adjust_order_price_for_fill_rate
+    but discarded its return value, so the fresh snapshot alone was updated
+    and the stale intent.price_cents was validated/routed.  Also verifies the
+    repriced limit stays inside the slot allocator's entry band — without the
+    allocator-bounds clamp a book jump past the ceiling could route a live
+    order above the band because the allocator gate runs earlier in the pipe.
+    """
+
+    def _armed_taker_intent(self):
+        """Return a taker BUY_YES intent carrying a 45/55 snapshot."""
+        old_state = _state(best_bid_cents=45, best_ask_cents=55, mid_cents=50)
+        intent = _intent(
+            side="BUY_YES", action="buy", price_cents=55, count=1,
+            execution_mode="taker", aggressiveness=1.0,
+        )
+        intent.price_cents = _adjust_order_price_for_fill_rate(intent, old_state)
+        assert intent._book_snapshot is not None
+        return intent
+
+    def test_divergence_reprice_updates_intent_price(self):
+        from merid.event_venues.kalshi.order_router import (
+            _maybe_reprice_on_divergence,
+        )
+        intent = self._armed_taker_intent()
+        assert intent.price_cents == 55
+        # Book jumps 20c — far above the 0.5c divergence threshold.
+        new_state = _state(best_bid_cents=65, best_ask_cents=75, mid_cents=70)
+        err = _maybe_reprice_on_divergence(intent, new_state, time.monotonic())
+        assert err is None
+        # taker cap = min(mid+slippage=75, buffered ask cap=75) -> 75
+        assert intent.price_cents == 75
+
+    def test_divergence_reprice_respects_allocator_band(self):
+        from merid.event_venues.kalshi.order_router import (
+            _maybe_reprice_on_divergence,
+        )
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        allocator = get_global_slot_allocator()
+        saved = (allocator.min_entry_cents, allocator.max_entry_cents)
+        allocator.min_entry_cents, allocator.max_entry_cents = 25, 80
+        try:
+            intent = self._armed_taker_intent()
+            # Ask jumps to 85c — above the 80c allocator ceiling.
+            new_state = _state(best_bid_cents=75, best_ask_cents=85, mid_cents=80)
+            err = _maybe_reprice_on_divergence(intent, new_state, time.monotonic())
+            # Repriced taker cap of 85 clamps to the 80c ceiling, which is
+            # below the 85c ask -> unmarketable -> RepriceWouldCross.
+            assert err is not None
+            assert "reprice_would_cross" in err
+            assert intent.price_cents == 55  # unchanged on rejection
+        finally:
+            allocator.min_entry_cents, allocator.max_entry_cents = saved
+
+    def test_divergence_reprice_no_snapshot_is_noop(self):
+        from merid.event_venues.kalshi.order_router import (
+            _maybe_reprice_on_divergence,
+        )
+        intent = _intent(
+            side="BUY_YES", action="buy", price_cents=50, count=1,
+            execution_mode="taker", aggressiveness=1.0,
+        )
+        err = _maybe_reprice_on_divergence(intent, _state(), time.monotonic())
+        assert err is None
+        assert intent.price_cents == 50  # untouched — only snapshot captured
+        assert intent._book_snapshot is not None
+
+    def test_divergence_reprice_skips_exit_orders(self):
+        from merid.event_venues.kalshi.order_router import (
+            _maybe_reprice_on_divergence,
+        )
+        cache = get_position_cache()
+        cache._positions["KXBTC15M-TEST"] = CachedPosition(
+            market_id="KXBTC15M-TEST",
+            agent_id="BTC_15M",
+            contracts=10,
+            side="yes",
+            thesis_side="yes",
+            avg_price_cents=50,
+            quantity_cc=1000,
+        )
+        intent = _intent(
+            side="SELL_YES", action="sell", price_cents=55, count=10,
+            execution_mode="taker", aggressiveness=1.0,
+        )
+        new_state = _state(best_bid_cents=65, best_ask_cents=75, mid_cents=70)
+        err = _maybe_reprice_on_divergence(intent, new_state, time.monotonic())
+        assert err is None
+        assert intent.price_cents == 55  # exits never repriced

@@ -1573,8 +1573,9 @@ async def _maybe_degraded_stop_exit(
     from merid.position_management.exit_pipeline import (
         approve_intent, post_route_update,
     )
-    from merid.position_management.exit_arbiter import (
-        ExitBook as _ExitBook, ExitContext as _ExitContext,
+    from merid.position_management.exit_arbiter import ExitBook as _ExitBook
+    from merid.position_management.exit_pipeline import (
+        ExitContext as _ExitContext,
     )
     _arb_pk = None
     if parent_entry_fill_id:
@@ -1620,7 +1621,61 @@ async def _maybe_degraded_stop_exit(
             candidate.candidate_id, candidate.market_ticker,
         )
 
-    result = await route_order_async(intent)
+    # Bound the route call — an unbounded hang or a raised exception leaves
+    # the arbiter attempt SUBMITTING (suppressing every later exit for the
+    # generation) and the residual lease ambiguous.  On timeout/exception
+    # mark the attempt ACK_UNKNOWN and record the ambiguous outcome so
+    # reconcile-by-coid decides before the residual re-arms.
+    _dg_route_timeout_s = float(
+        os.environ.get("MERID_EXIT_ROUTE_TIMEOUT_S", "20"))
+    try:
+        result = await asyncio.wait_for(
+            route_order_async(intent), timeout=_dg_route_timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[STOP-DEGRADED] route_order_async exceeded %.0fs; marking "
+            "submission unknown for reconcile: candidate=%s ticker=%s coid=%s",
+            _dg_route_timeout_s, candidate.candidate_id,
+            candidate.market_ticker, intent.client_order_id,
+        )
+        if _arb_pk is not None:
+            try:
+                from merid.position_management.exit_arbiter import (
+                    get_exit_arbiter as _get_arb,
+                )
+                _get_arb().mark_ack_unknown(
+                    _arb_pk,
+                    note=f"route_timeout_{_dg_route_timeout_s:.0f}s",
+                )
+            except Exception:
+                pass
+        record["decision"] = "DEGRADED_EXIT_APPROVED"
+        record["basis"] = (
+            "degraded_ioc_ambiguous_awaiting_reconciliation:route_timeout")
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
+    except Exception as _dg_route_exc:
+        logger.warning(
+            "[STOP-DEGRADED] route_order_async raised; marking submission "
+            "unknown for reconcile: candidate=%s ticker=%s coid=%s error=%s",
+            candidate.candidate_id, candidate.market_ticker,
+            intent.client_order_id, _dg_route_exc,
+        )
+        if _arb_pk is not None:
+            try:
+                from merid.position_management.exit_arbiter import (
+                    get_exit_arbiter as _get_arb,
+                )
+                _get_arb().mark_ack_unknown(
+                    _arb_pk, note=f"route_exception:{_dg_route_exc}")
+            except Exception:
+                pass
+        record["decision"] = "DEGRADED_EXIT_APPROVED"
+        record["basis"] = (
+            "degraded_ioc_ambiguous_awaiting_reconciliation:"
+            f"route_exception:{_dg_route_exc}")
+        get_stop_candidate_ledger().record_residual_decision(candidate, record)
+        return
     if _arb_pk is not None:
         try:
             _dg_fill_cc = int(
@@ -2388,10 +2443,61 @@ async def maybe_submit_stop_candidate(
                 )
             except Exception:
                 pass
+        if _arb_pk is not None:
+            try:
+                from merid.position_management.exit_arbiter import (
+                    get_exit_arbiter as _get_arb,
+                )
+                _get_arb().mark_ack_unknown(
+                    _arb_pk,
+                    note=f"route_timeout_{_route_timeout_s:.0f}s",
+                )
+            except Exception:
+                pass
         return OrderResult(
             status="submission_unknown",
             mode=TradingMode.PAPER,
             reason=f"route_timeout_{_route_timeout_s:.0f}s",
+        )
+    except Exception as _route_exc:
+        # A raised route call leaves the submission outcome unknown — the
+        # request may or may not have reached the wire.  Mirror the timeout
+        # contract (durable SUBMISSION_UNKNOWN + arbiter ACK_UNKNOWN) so
+        # reconcile-by-coid decides; returning here without a mark left the
+        # arbiter attempt SUBMITTING and suppressed every later exit.
+        logger.warning(
+            "[STOP-CANDIDATE] route_order_async raised; marking submission "
+            "unknown for reconcile: candidate=%s ticker=%s coid=%s error=%s",
+            candidate.candidate_id, candidate.market_ticker,
+            intent.client_order_id, _route_exc,
+        )
+        if _exit_attempt is not None:
+            try:
+                from merid.event_venues.kalshi.order_attempt_store import (
+                    OrderAttemptStore as _OAStore,
+                    ExitOrderAttemptState as _EAS,
+                )
+                _OAStore().transition_exit_attempt(
+                    _exit_attempt.attempt_id,
+                    _EAS.SUBMISSION_UNKNOWN.value,
+                    actor="stop_candidate",
+                    reason=f"route_exception:{_route_exc}",
+                )
+            except Exception:
+                pass
+        if _arb_pk is not None:
+            try:
+                from merid.position_management.exit_arbiter import (
+                    get_exit_arbiter as _get_arb,
+                )
+                _get_arb().mark_ack_unknown(
+                    _arb_pk, note=f"route_exception:{_route_exc}")
+            except Exception:
+                pass
+        return OrderResult(
+            status="submission_unknown",
+            mode=TradingMode.PAPER,
+            reason=f"route_exception:{_route_exc}",
         )
     if _arb_pk is not None:
         try:

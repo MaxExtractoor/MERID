@@ -5582,6 +5582,19 @@ class KalshiVenueClient(EventVenueClient):
                 if outcome_side == "no" and action in ("buy", "sell"):
                     return action
 
+            # 2026-10-19: last-resort default.  Only reachable when the payload
+            # has no action, no book_side, and no usable outcome label — the
+            # parsed order is already untrusted for direction.  Keep the "buy"
+            # placeholder (consumers key on buy/sell; a third value would
+            # silently flip sign math in e.g. bracket_risk) but surface it so
+            # the degraded payload is visible in audit rather than invisible.
+            logger.warning(
+                "[ORDER-PARSE-DEGRADED] order_id=%s ticker=%s has no action/"
+                "book_side/outcome fields - defaulting side='buy'; verify "
+                "against exchange before trusting direction",
+                data.get("order_id", data.get("id", "")),
+                data.get("ticker", ""),
+            )
             return "buy"
 
         def _market_leg_prices() -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:

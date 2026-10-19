@@ -670,8 +670,9 @@ class TestDynamicOrderTypeSelection:
 class TestDepthBasedOrderSizing:
     """Test depth-based order sizing.
 
-    The slot-based model enforces a maximum of 2 contracts per order, so
-    depth-based sizing only reduces multi-contract intents to the slot limit.
+    The slot-based model enforces a maximum of 3 contracts per order
+    (MERID_MAX_CONTRACTS_PER_ORDER default), so depth-based sizing only
+    reduces multi-contract intents to the slot limit.
     """
 
     def _intent(self, count):
@@ -688,10 +689,10 @@ class TestDepthBasedOrderSizing:
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
         from merid.event_venues.kalshi.models import KalshiMarketState
 
-        # Even with deep liquidity, count cannot exceed the 2-contract slot limit.
+        # Even with deep liquidity, count cannot exceed the 3-contract slot limit.
         state = KalshiMarketState(ticker="KXBTC-TEST", top_of_book_size=100)
         adjusted_count = _apply_depth_based_order_sizing(self._intent(100), state)
-        assert adjusted_count == 2
+        assert adjusted_count == 3
 
     def test_preserves_single_contract_order(self):
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
@@ -705,7 +706,7 @@ class TestDepthBasedOrderSizing:
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
 
         adjusted_count = _apply_depth_based_order_sizing(self._intent(50), None)
-        assert adjusted_count == 2
+        assert adjusted_count == 3
 
     def test_returns_slot_limit_when_no_liquidity_data(self):
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
@@ -713,7 +714,7 @@ class TestDepthBasedOrderSizing:
 
         state = KalshiMarketState(ticker="KXBTC-TEST", top_of_book_size=0)
         adjusted_count = _apply_depth_based_order_sizing(self._intent(50), state)
-        assert adjusted_count == 2
+        assert adjusted_count == 3
 
 
 class TestPriceValidationAgainstOrderbook:

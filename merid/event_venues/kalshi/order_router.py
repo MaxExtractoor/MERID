@@ -6630,7 +6630,10 @@ def _maybe_reprice_on_divergence(
                 intent.ticker, attempt, intent.price_cents
             )
         try:
-            _adjust_order_price_for_fill_rate(intent, state)
+            # The repricer returns the adjusted price — it does not mutate
+            # intent.price_cents.  Assign it or the reprice is a silent no-op
+            # and the stale limit is validated against the fresh snapshot.
+            intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         except RepriceWouldCross as e:
             logger.error(
                 "[BOOK-DIVERGENCE] ticker=%s repricing failed: %s | price=%dc",
@@ -10525,12 +10528,14 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
 
                 _ask_buf = int(os.environ.get("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2"))
                 _ceil = 98 if getattr(intent, "decision_lane", None) == "pinned_fav" else 95
-                _buffered_ask_cap = min(
-                    fair_cap,
-                    max(int(side_ask), min(_ceil, int(side_ask) + _ask_buf)),
-                )
-                taker_cap = _buffered_ask_cap
                 if edge_preserve_cap is not None:
+                    # 2026-10-19: with an edge-preserving budget the mid-anchored
+                    # fair cap must not bind — the 2026-09-24 contract says it only
+                    # protects orders without edge provenance.  Including fair_cap
+                    # here capped edge-backed buys below the ask on every wide
+                    # converging book, silently re-breaking the unblock.  The cap
+                    # is the tighter of the marketable bound (ask + buffer) and
+                    # the signal's own edge budget.
                     if side_ask > edge_preserve_cap:
                         raise RepriceWouldCross(
                             ticker=intent.ticker,
@@ -10542,8 +10547,13 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                             side_ask=side_ask,
                             reason=f"taker buy: side_ask {side_ask}c exceeds edge budget {edge_preserve_cap}c",
                         )
-                    taker_cap = min(_buffered_ask_cap, edge_preserve_cap)
+                    taker_cap = min(min(_ceil, int(side_ask) + _ask_buf), edge_preserve_cap)
                 else:
+                    _buffered_ask_cap = min(
+                        fair_cap,
+                        max(int(side_ask), min(_ceil, int(side_ask) + _ask_buf)),
+                    )
+                    taker_cap = _buffered_ask_cap
                     p_selected = getattr(intent, "p_selected", None)
                     if p_selected is not None and getattr(intent, "decision_lane", None) not in ("window_quota", "pinned_fav"):
                         fee = getattr(intent, "estimated_fee_cents", None)
@@ -10797,13 +10807,36 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                 ALLOCATOR_MAX_PRICE = min(95, int(_wq_alloc.quota_price_hi()))
             except Exception:
                 ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 10, 95
+        else:
+            # 2026-10-19: ordinary entries are bounded by the slot allocator's
+            # resolved entry band — the same band can_allocate enforces on the
+            # routed price downstream.  The canonical side-aware range is wider
+            # (YES 10-95 / NO 25-95), so without this a divergence reprice
+            # could land above the allocator ceiling and pass every remaining
+            # check after the allocator gate.
+            try:
+                from merid.risk.global_slot_allocator import get_global_slot_allocator
+                _gsa = get_global_slot_allocator()
+                ALLOCATOR_MIN_PRICE = int(getattr(_gsa, "min_entry_cents", ALLOCATOR_MIN_PRICE))
+                ALLOCATOR_MAX_PRICE = int(getattr(_gsa, "max_entry_cents", ALLOCATOR_MAX_PRICE))
+            except Exception:
+                pass
 
         if adjusted_price < ALLOCATOR_MIN_PRICE:
-            logger.warning(
-                "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc below allocator minimum %dc (side=%s) - clamping to minimum",
-                intent.ticker, adjusted_price, ALLOCATOR_MIN_PRICE, outcome_side
+            # 2026-10-19: below-band entries reject, never clamp upward —
+            # raising the limit can cross the book or pay more than the
+            # signal intended.  can_allocate rejects this price downstream
+            # anyway; failing here covers the divergence-reprice path too.
+            raise RepriceWouldCross(
+                ticker=intent.ticker,
+                side=outcome_side,
+                action=intent.action,
+                role=role,
+                attempted_price=adjusted_price,
+                side_bid=side_bid,
+                side_ask=side_ask,
+                reason=f"adjusted price {adjusted_price}c below entry band floor {ALLOCATOR_MIN_PRICE}c",
             )
-            adjusted_price = ALLOCATOR_MIN_PRICE
         elif adjusted_price > ALLOCATOR_MAX_PRICE:
             logger.warning(
                 "[PRICE-ADJUSTMENT] ticker=%s adjusted price %dc above allocator maximum %dc (side=%s) - clamping to maximum",
