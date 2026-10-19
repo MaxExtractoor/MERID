@@ -6885,14 +6885,23 @@ class PositionMonitor:
                     gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
                 )
                 if min_exit is not None and exit_price_cents < min_exit:
+                    # Raise the position's take-profit threshold to min_exit so
+                    # the monitor does not repeatedly trigger below the round-trip
+                    # fee floor on every poll.
+                    if (
+                        exit_reason == ExitReason.TAKE_PROFIT
+                        and getattr(position, "take_profit_price_cents", None) is not None
+                        and int(position.take_profit_price_cents) < int(min_exit)
+                    ):
+                        position.take_profit_price_cents = int(min_exit)
                     _bump_stop_counter(
                         "exit_stop_rejected_spread_only",
                         f"position={position.position_id[:8]} reason={exit_reason.value} exit={exit_price_cents}c entry={entry_ref}c min_exit={min_exit}c",
                     )
-                    logger.error(
-                        "[PROFIT-EXIT-INVARIANT] position=%s reason=%s exit=%dc < entry=%dc + fee_buffer=%dc - profit exit below round-trip buffer, blocking",
+                    logger.info(
+                        "[PROFIT-EXIT-INVARIANT] position=%s reason=%s exit=%dc < entry=%dc + fee_buffer=%dc - profit exit below round-trip buffer, deferring until >=%dc",
                         position.position_id[:8], exit_reason.value, exit_price_cents,
-                        entry_ref, min_exit - entry_ref,
+                        entry_ref, min_exit - entry_ref, min_exit,
                     )
                     return
 

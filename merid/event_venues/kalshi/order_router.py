@@ -10523,7 +10523,13 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         reason=f"taker buy: displayed ask {side_ask}c beyond fair cap {fair_cap}c (slippage > {max_slippage_cents}c)",
                     )
 
-                taker_cap = fair_cap
+                _ask_buf = int(os.environ.get("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2"))
+                _ceil = 98 if getattr(intent, "decision_lane", None) == "pinned_fav" else 95
+                _buffered_ask_cap = min(
+                    fair_cap,
+                    max(int(side_ask), min(_ceil, int(side_ask) + _ask_buf)),
+                )
+                taker_cap = _buffered_ask_cap
                 if edge_preserve_cap is not None:
                     if side_ask > edge_preserve_cap:
                         raise RepriceWouldCross(
@@ -10536,21 +10542,8 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                             side_ask=side_ask,
                             reason=f"taker buy: side_ask {side_ask}c exceeds edge budget {edge_preserve_cap}c",
                         )
-                    taker_cap = min(99, edge_preserve_cap)
+                    taker_cap = min(_buffered_ask_cap, edge_preserve_cap)
                 else:
-                    # 2026-10-19: Without an edge_preserve_cap (e.g. window_quota
-                    # or bounded taker probes), setting adjusted_price = fair_cap
-                    # (mid + 15c) inflated 76-93c entries to 97c, which then
-                    # failed GlobalSlotAllocator.can_allocate (max_entry_cents=95c)
-                    # and over-reserved notional in unified_sizing.  Bound the
-                    # taker buy limit to a small marketable buffer above side_ask
-                    # (default 2c) inside the 95c slot-allocator ceiling.
-                    _ask_buf = int(os.environ.get("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2"))
-                    _ceil = 98 if getattr(intent, "decision_lane", None) == "pinned_fav" else 95
-                    taker_cap = min(
-                        fair_cap,
-                        max(int(side_ask), min(_ceil, int(side_ask) + _ask_buf)),
-                    )
                     p_selected = getattr(intent, "p_selected", None)
                     if p_selected is not None and getattr(intent, "decision_lane", None) not in ("window_quota", "pinned_fav"):
                         fee = getattr(intent, "estimated_fee_cents", None)

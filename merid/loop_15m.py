@@ -2691,15 +2691,33 @@ def _run_exit_price_guard(
         record["lock_threshold_cents"] = _lock_floor
     else:
         limit_cents = max(1, best_bid - slippage)
+        if canonical in MERID_PROFIT_EXIT_REASONS and entry_price > 0:
+            try:
+                from merid.event_venues.kalshi.fees import (
+                    min_profitable_exit_price_cents,
+                    TAKE_PROFIT_MIN_PROFIT_CENTS,
+                )
+                _pos_sz_for_min = getattr(position, "size", None) or count or 1
+                _min_prof = min_profitable_exit_price_cents(
+                    int(entry_price),
+                    _pos_sz_for_min,
+                    gross_min_cents=TAKE_PROFIT_MIN_PROFIT_CENTS,
+                )
+                if _min_prof is not None and best_bid >= _min_prof:
+                    limit_cents = max(limit_cents, int(_min_prof))
+            except Exception:
+                pass
 
     # Clamp to valid Kalshi 1-99 cent range.
     limit_cents = max(1, min(99, int(round(limit_cents))))
 
     # Projected PnL: own-side price, own-side entry, round-trip taker fees.
-    closed_count = min(int(count), int(getattr(position, "size", 0) or 0))
-    gross_expected = (best_bid - entry_price) * closed_count
-    gross_worst = (limit_cents - entry_price) * closed_count
-    fees = _estimate_exit_fees(entry_price, limit_cents, closed_count)
+    _pos_sz_f = float(getattr(position, "size", 0) or 0)
+    _req_sz_f = float(count) if count and float(count) > 0 else _pos_sz_f
+    closed_count = min(_req_sz_f, _pos_sz_f) if _pos_sz_f > 0 else 1.0
+    gross_expected = int(round((best_bid - entry_price) * closed_count))
+    gross_worst = int(round((limit_cents - entry_price) * closed_count))
+    fees = _estimate_exit_fees(entry_price, limit_cents, max(1, int(math.ceil(closed_count))))
     net_expected = gross_expected - fees
     net_worst = gross_worst - fees
 
@@ -3259,7 +3277,7 @@ async def _execute_exit_order(
         position=position,
         exit_reason=exit_reason,
         exit_price_cents=exit_price_cents,
-        count=int(requested_exit_contracts),
+        count=float(requested_exit_contracts),
     )
     if not guard_approved:
         logger.critical(
@@ -4147,6 +4165,19 @@ async def _execute_exit_order(
         _arb_position_key = None
         if _arb_ctx is not None:
             intent.position_generation_id = _arb_ctx.generation_id
+            if (
+                _arb_ctx.book is not None
+                and int(intent.price_cents) > int(_arb_ctx.book.liquidation_cents)
+            ):
+                _live_liq = int(_arb_ctx.book.liquidation_cents)
+                _be_fl = int(_arb_ctx.breakeven_floor_cents or 0)
+                _slip_buf = int(os.environ.get("MERID_EXIT_PROFIT_SLIPPAGE_CENTS", "5"))
+                if canonical_exit_reason in MERID_PROFIT_EXIT_REASONS:
+                    _min_fl = max(_be_fl, int(locals().get("min_profitable") or _be_fl))
+                    if _live_liq >= _min_fl:
+                        intent.price_cents = max(_min_fl, _live_liq - _slip_buf)
+                elif _live_liq >= _be_fl:
+                    intent.price_cents = max(_be_fl, _live_liq - _slip_buf)
             _prepared = approve_intent(
                 intent, _arb_ctx, issuer="position_monitor",
             )

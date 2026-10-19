@@ -18658,18 +18658,26 @@ class LeanAgent15m:
 
 
 
-                    if position_count >= self.config.max_concurrent_positions:
+                    # Per-asset / per-window invariant: only 1 open position is
+                    # permitted per asset/ticker (GlobalSlotAllocator
+                    # MAX_POSITIONS_PER_ASSET=1).  Comparing per-window
+                    # position_count against max_concurrent_positions (4)
+                    # allowed an already-filled asset to keep emitting duplicate
+                    # window_quota candidates that crowded out flat assets in
+                    # GlobalAllocator.
+                    _per_asset_max = 1
+                    if position_count >= _per_asset_max or len(all_positions) >= self.config.max_concurrent_positions:
 
                         logger.info(
 
-                            "[POSITION-LIMIT] agent=%s current_positions=%d >= max_concurrent_positions=%d -> SKIP (position limit reached)",
+                            "[POSITION-LIMIT] agent=%s current_positions=%d (asset=%d) >= max=%d -> SKIP (position limit reached)",
 
-                            self.config.name, position_count, self.config.max_concurrent_positions
+                            self.config.name, position_count, asset_position_count, _per_asset_max
 
                         )
 
-                        self._record_waterfall("position_limit", False, f"positions={position_count} >= max={self.config.max_concurrent_positions}")
-                        self._set_final_reason(f"risk_guard:position_limit positions={position_count} max={self.config.max_concurrent_positions}")
+                        self._record_waterfall("position_limit", False, f"positions={position_count} >= max={_per_asset_max}")
+                        self._set_final_reason(f"risk_guard:position_limit positions={position_count} max={_per_asset_max}")
 
                         return None
 

@@ -212,6 +212,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         # "never accepted", not "rejected" — TERMINAL_UNFILLED is the honest
         # terminal; a late exchange fill still wins via the back-fill edge.
         ExitOrderAttemptState.TERMINAL_UNFILLED,
+        ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED,
     },
     ExitOrderAttemptState.SUBMISSION_UNKNOWN: {
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
