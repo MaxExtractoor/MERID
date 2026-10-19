@@ -8730,7 +8730,30 @@ class KalshiFillsLedger:
             entry_model_version=getattr(intent, 'entry_model_version', None) if intent else None,
             entry_model_probability=getattr(intent, 'entry_model_probability', None) if intent else None,
             entry_market_probability=getattr(intent, 'entry_market_probability', None) if intent else None,
-            entry_edge=getattr(intent, 'entry_edge', None) if intent else None,
+            # 2026-10-19: entry_edge drives the exit envelope's probe arm
+            # (entry_edge <= 0 => telemetry/no-edge entry => bank wins at
+            # 4c lock instead of 10c).  The normal emit path stamps it as
+            # model_prob - price, but the window_quota lane sets p_selected
+            # while leaving model_prob unset, so quota fills arrived with
+            # entry_edge=None and the probe arm was dead code — observed:
+            # KXDOGE15M-26OCT191545-45 quota YES@52c (claimed -8.4c) had its
+            # take_profit at bid=59c deferred by the full 10c arm because
+            # position.entry_edge was None.  Fallback computes the same
+            # gross-edge fraction from p_selected/model_prob - price, then
+            # net_edge_pretrade (also fraction units).
+            entry_edge=(
+                _ie
+                if (_ie := (getattr(intent, 'entry_edge', None) if intent else None)) is not None
+                else (
+                    (float(getattr(intent, 'p_selected', None) or getattr(intent, 'model_prob', None)) - float(intent.price_cents) / 100.0)
+                    if (
+                        intent is not None
+                        and (getattr(intent, 'p_selected', None) or getattr(intent, 'model_prob', None)) is not None
+                        and getattr(intent, 'price_cents', None)
+                    )
+                    else (getattr(intent, 'net_edge_pretrade', None) if intent else None)
+                )
+            ),
             entry_book_snapshot_id=getattr(intent, 'entry_book_snapshot_id', None) if intent else None,
             entry_execution_mode=getattr(intent, 'entry_execution_mode', None) if intent else None,
             # 2026-08-11: Persist signal economics and settlement telemetry on the fill record.

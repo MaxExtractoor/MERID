@@ -203,6 +203,104 @@ class TestBackendPositionFractional:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# entry_edge fallback stamping (exit-envelope probe arm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEntryEdgeFallbackStamping:
+    """2026-10-19: the window-quota lane emits intents with ``p_selected``
+    set but ``model_prob``/``entry_edge`` unset, and bare taker IOCs skip
+    ``register_tp_targets`` (TP/SL guard).  ``fill.entry_edge`` therefore
+    arrived None, so ``position.entry_edge`` was None and the exit
+    envelope's no-edge probe arm (lock at 4c instead of 10c) never fired:
+    KXDOGE15M-26OCT191545-45 quota YES@52c (claimed -8.4c) had its
+    take_profit at bid=59c deferred under the full 10c arm."""
+
+    def _fill_with_intent(self, ledger, intent):
+        coid = "merid_quota_probe_test"
+        ledger._intents[intent.intent_id] = intent
+        ledger._intents_by_client_order_id[coid] = intent.intent_id
+        raw = {
+            "fill_id": "fill-quota-probe",
+            "market_ticker": "KXDOGE15M-PROBE-TEST",
+            "side": "yes",
+            "action": "buy",
+            "yes_price_dollars": "0.5200",
+            "no_price_dollars": "0.4800",
+            "count_fp": "1",
+            "fee_cost": "0.0175",
+            "client_order_id": coid,
+            "created_time": datetime.now(timezone.utc).isoformat(),
+        }
+        return ledger._parse_fill(raw, "http_poller")
+
+    def test_p_selected_fallback_stamps_negative_edge(self, ledger):
+        from types import SimpleNamespace
+
+        intent = SimpleNamespace(
+            intent_id="intent_quota_probe",
+            ticker="KXDOGE15M-PROBE-TEST",
+            side="yes",
+            action="buy",
+            original_side="BUY_YES",
+            original_action="buy",
+            client_order_id="merid_quota_probe_test",
+            entry_edge=None,          # quota path never populates it
+            model_prob=None,
+            p_selected=0.481,         # quota sets p_selected only
+            price_cents=52,
+            net_edge_pretrade=-0.084,
+        )
+        fill = self._fill_with_intent(ledger, intent)
+        assert fill is not None
+        # p_selected - price = 0.481 - 0.52 = -0.039 (gross-edge fraction)
+        assert fill.entry_edge == pytest.approx(-0.039, abs=1e-6)
+        assert fill.entry_edge <= 0.0
+
+    def test_explicit_entry_edge_takes_precedence(self, ledger):
+        from types import SimpleNamespace
+
+        intent = SimpleNamespace(
+            intent_id="intent_explicit_edge",
+            ticker="KXDOGE15M-PROBE-TEST",
+            side="yes",
+            action="buy",
+            original_side="BUY_YES",
+            original_action="buy",
+            client_order_id="merid_quota_probe_test",
+            entry_edge=0.05,          # explicit stamp wins
+            model_prob=None,
+            p_selected=0.481,
+            price_cents=52,
+            net_edge_pretrade=-0.084,
+        )
+        fill = self._fill_with_intent(ledger, intent)
+        assert fill is not None
+        assert fill.entry_edge == pytest.approx(0.05)
+
+    def test_net_edge_pretrade_last_resort(self, ledger):
+        from types import SimpleNamespace
+
+        intent = SimpleNamespace(
+            intent_id="intent_netedge_only",
+            ticker="KXDOGE15M-PROBE-TEST",
+            side="yes",
+            action="buy",
+            original_side="BUY_YES",
+            original_action="buy",
+            client_order_id="merid_quota_probe_test",
+            entry_edge=None,
+            model_prob=None,
+            p_selected=None,          # no probability fields at all
+            price_cents=52,
+            net_edge_pretrade=-0.084, # fraction units — same as entry_edge
+        )
+        fill = self._fill_with_intent(ledger, intent)
+        assert fill is not None
+        assert fill.entry_edge == pytest.approx(-0.084)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # client._parse_order degraded-payload surface
 # ─────────────────────────────────────────────────────────────────────────────
 
