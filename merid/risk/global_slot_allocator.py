@@ -142,8 +142,8 @@ class GlobalSlotAllocator:
 
     # Hard limits (env-overridable; default to the $3 / 3-contract policy values)
     MAX_EXPOSURE_USD = float(os.getenv("MERID_MAX_EXPOSURE_USD", "3.00"))
-    MIN_ENTRY_CENTS = int(os.getenv("MERID_MIN_ENTRY_CENTS", "10"))
-    MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "75"))
+    MIN_ENTRY_CENTS = int(os.getenv("MERID_MIN_ENTRY_CENTS", "25"))
+    MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "80"))
     MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
     MAX_POSITIONS_PER_ASSET = int(os.getenv("MERID_MAX_POSITIONS_PER_ASSET", "1"))
 

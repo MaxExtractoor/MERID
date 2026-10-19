@@ -9469,13 +9469,13 @@ class LeanAgent15m:
                 _wq_target_cc = int(round(_wq_quota.quota_max_contracts() * 100.0))
                 _wq_depth_whole_cc = max(100, (int(_wq_depth or 100) // 100) * 100)
                 _wq_size_cc = min(_wq_target_cc, _wq_depth_whole_cc)
-                # 2026-10-19: negative claimed EV is the lane's telemetry
-                # signal — it buys order-flow data, not a model thesis.
-                # Scaling a losing claim to max contracts turned a -5c XRP
-                # claim into a 2.52-contract position that rode to zero
-                # (KXXRP15M-26OCT190130-30).  Cap negative claims at one
-                # contract; positive claims keep the full size.
-                if _wq_ev_c < 0:
+                # 2026-10-19: negative or negligible claimed EV is the lane's telemetry
+                # signal — it buys order-flow data, not a strong model thesis.
+                # Scaling a zero/sub-2c claim to max contracts turned a 0.0c BTC
+                # claim into a 3-contract position that took a full loss.
+                # Cap claims with < 2.0c net edge at one contract; only verified
+                # positive-edge trades (>= 2.0c) may scale to multi-contract size.
+                if _wq_ev_c < 2.0:
                     _wq_size_cc = min(_wq_size_cc, 100)
                 decision = replace(
                     decision,

@@ -16,8 +16,10 @@ Bounds (all env-tunable):
                                              settlement stretch)
   MERID_WINDOW_QUOTA_TTE_MAX_S          600  (stays inside
                                              MERID_LIVE_ENTRY_MAX_TTE_S)
-  MERID_WINDOW_QUOTA_PRICE_LO           5c   sanity floor
-  MERID_WINDOW_QUOTA_PRICE_HI           97c  sanity ceiling
+  MERID_WINDOW_QUOTA_PRICE_LO           25c  sanity floor (Bürgi DP20631:
+                                             sub-25c longshots bleed)
+  MERID_WINDOW_QUOTA_PRICE_HI           80c  sanity ceiling (avoids 85c+
+                                             bounce/negative-skew traps)
   MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS   -15  claimed-EV sanity floor
                                              (blocks crossed-book noise,
                                              not economics vetoes; was
@@ -87,11 +89,11 @@ def quota_tte_hi() -> float:
 
 
 def quota_price_lo() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_PRICE_LO", 5.0)
+    return _env_float("MERID_WINDOW_QUOTA_PRICE_LO", 25.0)
 
 
 def quota_price_hi() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_PRICE_HI", 97.0)
+    return _env_float("MERID_WINDOW_QUOTA_PRICE_HI", 80.0)
 
 
 def quota_band_match(price_cents: Optional[float]) -> bool:

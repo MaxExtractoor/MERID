@@ -299,8 +299,8 @@ class GlobalAllocator:
                                       # Display multiplies by 100 for logging, but internal comparison uses fraction
         min_confidence: float = 0.50,  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
                                       # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
-        min_price_cents: int = 10,  # CRITICAL 2026-08-14: Restore 10c hard floor (was 1c)
-        max_price_cents: int = 75,  # CRITICAL 2026-08-14: Restore 75c hard cap (was 99c)
+        min_price_cents: int = 25,  # 2026-10-19: 25c floor (prevents longshot bleed)
+        max_price_cents: int = 80,  # 2026-10-19: 80c ceiling (prevents 85c+ asymmetric traps)
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
         # 2026-07-14: Per-asset edge thresholds aligned with profile edge_bands (2.5% unified - industry standard)
@@ -1167,8 +1167,8 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     min_confidence = 0.50  # 2026-07-28: CRITICAL FIX - Lowered from 0.65 to 0.50 to match signal generation range
                           # Signal generation produces confidence = 0.5 + edge (edge is 0.02-0.08), resulting in 52-58%
                           # Previous 65% threshold was blocking all candidates despite valid edge
-    min_price_cents = 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
-    max_price_cents = 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
+    min_price_cents = 25  # 2026-10-19: 25c floor (prevents longshot bleed)
+    max_price_cents = 80  # 2026-10-19: 80c ceiling (prevents 85c+ asymmetric traps)
     max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
     # 2026-07-14: Per-asset edge thresholds aligned with profile edge_bands (2.5% unified)
@@ -1189,8 +1189,8 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
         config = envelope.allocator_config
         min_edge_pct = config.get('min_edge_pct', 0.05)
         min_confidence = config.get('min_confidence', 0.65)
-        min_price_cents = config.get('min_price_cents', 10)
-        max_price_cents = config.get('max_price_cents', 75)  # 2026-07-12: Default 75c to match current market conditions
+        min_price_cents = config.get('min_price_cents', 25)
+        max_price_cents = config.get('max_price_cents', 80)
         max_single_asset_fraction = config.get('max_single_asset_fraction', 1.00)
         # Allow envelope to override per-asset thresholds if provided
         if 'per_asset_min_edge_pct' in config:

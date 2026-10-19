@@ -1026,8 +1026,8 @@ class Crypto15mProfileAdapter:
                 # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c expanded range)
                 # 2026-07-12: Fixed max from 50c to 75c to match profile price_range.max_price_cents (expanded for market conditions)
                 price_range=PriceRange(
-                    min_price_cents=raw.get('price_range', {}).get('min_price_cents', 10),
-                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 75),  # CRITICAL FIX: Default 75c to match guardrails (was 50)
+                    min_price_cents=raw.get('price_range', {}).get('min_price_cents', 25),
+                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 80),
                     description=raw.get('price_range', {}).get('description', 'Valid price range in cents for order execution')
                 ),
                 

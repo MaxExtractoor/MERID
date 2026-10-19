@@ -36,11 +36,11 @@ class TestQuotaModule:
         assert not wq.quota_enabled()
 
     def test_band_match(self):
-        assert wq.quota_band_match(5)
+        assert wq.quota_band_match(25)
         assert wq.quota_band_match(50)
-        assert wq.quota_band_match(97)
-        assert not wq.quota_band_match(4)
-        assert not wq.quota_band_match(98)
+        assert wq.quota_band_match(80)
+        assert not wq.quota_band_match(24)
+        assert not wq.quota_band_match(81)
         assert not wq.quota_band_match(None)
 
     def test_per_ticker_attempts_and_exhaustion(self, quota_env):
