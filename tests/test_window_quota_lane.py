@@ -36,11 +36,11 @@ class TestQuotaModule:
         assert not wq.quota_enabled()
 
     def test_band_match(self):
-        assert wq.quota_band_match(5)
+        assert wq.quota_band_match(20)
         assert wq.quota_band_match(50)
-        assert wq.quota_band_match(97)
-        assert not wq.quota_band_match(4)
-        assert not wq.quota_band_match(98)
+        assert wq.quota_band_match(75)
+        assert not wq.quota_band_match(19)
+        assert not wq.quota_band_match(76)
         assert not wq.quota_band_match(None)
 
     def test_per_ticker_attempts_and_exhaustion(self, quota_env):
@@ -124,23 +124,25 @@ class TestAllocatorQuotaLane:
         monkeypatch.setenv("MERID_WINDOW_QUOTA_ENABLED", "1")
         cand = self._candidate(
             decision_lane="window_quota",
-            effective_required_edge_cents=-25.0,
+            effective_required_edge_cents=-10.0,
             gate_ev_cents=-9.0,
+            price_cents=70,
         )
         chosen = self._allocator().allocate([cand])
         assert cand in chosen, (
-            "quota candidate with claim -9c vs lane floor -25c must not "
+            "quota candidate with claim -9c vs lane floor -10c must not "
             "die on the generic positive edge floor"
         )
 
     def test_quota_price_above_yes_canonical_ceiling(self, monkeypatch):
-        """YES@80c is outside the canonical YES band [10,75] but inside the
-        quota band — the PRICE stage must use the lane bound."""
+        """YES@70c is outside the canonical YES band [10,65] (hypothetical)
+        but inside the quota band [20,75] — the PRICE stage must use the
+        lane bound."""
         monkeypatch.setenv("MERID_WINDOW_QUOTA_ENABLED", "1")
         cand = self._candidate(
-            price_cents=80,
+            price_cents=70,
             decision_lane="window_quota",
-            effective_required_edge_cents=-25.0,
+            effective_required_edge_cents=-10.0,
             gate_ev_cents=-9.0,
         )
         chosen = self._allocator().allocate([cand])

@@ -1575,7 +1575,10 @@ exit_policy:
     # ── Per-Position Hard Loss Cap (2026-08-25) ──────────────────────────────
     # Backstop only: $5/position unrealized loss cap.  At 1-2 contract sizing this
     # does not fire; it protects the book if sizing scales.
-    hard_unrealized_loss_cap_usd: 5.00
+    # Hard per-position unrealized loss cap.  Configurable backstop (default $5/position).
+    # 2026-10-19: raised to $15.00 to avoid premature stops on 3-contract positions
+    # (though at $3 total exposure cap this is effectively inert).
+    hard_unrealized_loss_cap_usd: 15.00
 
     # ── Continuation Stop (2026-08-25) ───────────────────────────────────────
     # DISABLED until backtest-calibrated.  Per-asset, vol-normalized parameters

@@ -636,7 +636,7 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     SUBMISSION_UNKNOWN.
 
     MERID_TAIL_LOSS_ENABLED     master switch (default 1)
-    MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
+    MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 25)
     MERID_TAIL_LOSS_FLOOR_CENTS absolute bid floor that triggers (default 18)
     MERID_TAIL_LOSS_REARM_DROP_CENTS  further drop below the last fired bid
                                     that re-arms the floor after a missed
@@ -653,7 +653,7 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     return {
         "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
         in ("1", "true", "yes", "on"),
-        "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
+        "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 25),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
         "rearm_drop_cents": _int("MERID_TAIL_LOSS_REARM_DROP_CENTS", 8),
     }

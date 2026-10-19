@@ -137,7 +137,7 @@ class TestTailLossFloor:
             monkeypatch.delenv(var, raising=False)
         cfg = _get_tail_loss_floor_config()
         assert cfg == {
-            "enabled": True, "drop_cents": 30, "floor_cents": 18,
+            "enabled": True, "drop_cents": 25, "floor_cents": 18,
             "rearm_drop_cents": 8,
         }
 
