@@ -349,11 +349,30 @@ def exit_envelope_trail_lock_cents() -> float:
     return _env_float("MERID_EXIT_ENVELOPE_TRAIL_LOCK_C", 1.0)
 
 
+def exit_envelope_probe_lock_cents() -> float:
+    """Profit-lock threshold for entries that admitted no edge (default 4c).
+
+    2026-10-19 (KXXRP15M-26OCT190130-30 loss audit): a window-quota YES
+    entry at 51c with a claimed -5c edge watched the bid peak at 68c, then
+    had its take-profit at 59c envelope-deferred because the +8c lock gain
+    fell short of the 10c arm.  The position settled at zero.  The
+    envelope's hold-for-more thesis assumes the model believed in the
+    entry; a bounded-lane/telemetry entry admitted negative claimed EV at
+    admission, so there is no model thesis to hold for — the lane's own
+    contract is bank-the-win.  When the position's stamped ``entry_edge``
+    is <= 0, the profit-lock arm engages at this lower threshold (covers
+    the ~3.5c mid-band round-trip taker fee plus a small margin).  A
+    positive claimed edge keeps the full 10c arm the audit supports.
+    """
+    return _env_float("MERID_EXIT_ENVELOPE_PROBE_LOCK_C", 4.0)
+
+
 def exit_envelope_allows(
     canonical_reason: Any,
     executable_bid_cents: Optional[int],
     seconds_to_expiry: Optional[float],
     entry_price_cents: Optional[float] = None,
+    entry_edge: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """Evidence-envelope verdict for a gated exit reason.
 
@@ -364,6 +383,12 @@ def exit_envelope_allows(
       * profit-lock arm — bid >= entry + ``MERID_EXIT_ENVELOPE_PROFIT_LOCK_C``
         (a locked gain may be banked; the envelope exists to stop *bleeding*
         exits, not to veto winners back into losers).
+    ``entry_edge`` is the position's stamped claimed edge (fraction or
+    percent — only its sign is used).  Non-positive claimed edge marks a
+    bounded-lane/telemetry entry: the profit-lock arm then uses
+    ``MERID_EXIT_ENVELOPE_PROBE_LOCK_C`` (default 4c) instead of the full
+    10c, because an entry that admitted no edge has no model thesis worth
+    holding a locked win for.
     Missing bid/TTE defers (fail toward hold) — settlement itself is the
     fallback exit, so a missing quote never forces a sell.  A missing entry
     price simply leaves the profit-lock arm unarmed; the envelope's
@@ -387,6 +412,11 @@ def exit_envelope_allows(
     _lock_c = exit_envelope_profit_lock_cents()
     if c == "trailing_stop":
         _lock_c = min(_lock_c, exit_envelope_trail_lock_cents())
+    try:
+        if entry_edge is not None and float(entry_edge) <= 0.0:
+            _lock_c = min(_lock_c, exit_envelope_probe_lock_cents())
+    except (TypeError, ValueError):
+        pass
     if (
         _lock_c > 0.0
         and executable_bid_cents is not None

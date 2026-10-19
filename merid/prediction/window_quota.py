@@ -18,9 +18,11 @@ Bounds (all env-tunable):
                                              MERID_LIVE_ENTRY_MAX_TTE_S)
   MERID_WINDOW_QUOTA_PRICE_LO           5c   sanity floor
   MERID_WINDOW_QUOTA_PRICE_HI           97c  sanity ceiling
-  MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS   -25  claimed-EV sanity floor
+  MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS   -15  claimed-EV sanity floor
                                              (blocks crossed-book noise,
-                                             not economics vetoes)
+                                             not economics vetoes; was
+                                             -25 until the -5c XRP entry
+                                             rode to zero 2026-10-19)
   MERID_WINDOW_QUOTA_MAX_SPREAD_CENTS   8    liquidity sanity — wider
                                              spreads are pure bleed
   MERID_WINDOW_QUOTA_MAX_PER_TICKER     3    emission attempts per window
@@ -106,7 +108,7 @@ def quota_min_ev_cents() -> float:
     """Claimed net-EV sanity floor in cents (negative).  This is not an
     edge threshold — it only rejects degenerate claims (crossed books,
     missing probability)."""
-    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -25.0)
+    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -15.0)
 
 
 def quota_max_spread_cents() -> float:

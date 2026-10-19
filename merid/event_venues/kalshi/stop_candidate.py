@@ -307,6 +307,7 @@ def loss_sell_blocked(
     *,
     hold_value_cents: Optional[int] = None,
     peak_price_cents: Optional[int] = None,
+    entry_edge: Optional[float] = None,
 ) -> bool:
     """True when profit-only exits are armed and this candidate would realize
     a loss at ``exit_price_cents`` vs the held-side ``entry_price_cents``.
@@ -319,6 +320,18 @@ def loss_sell_blocked(
     a below-floor bid that still pays ``hold + margin`` is worth more than
     holding, so the sell is allowed.  ``peak_price_cents`` arms the
     breakeven ratchet (floor = max(entry, peak - trail)).
+
+    ``entry_edge`` is the position's stamped claimed edge (sign only).  A
+    non-positive claimed edge marks a bounded-lane/telemetry entry: the
+    entry anchor and peak ratchet encode a "trust the model, ride to
+    settlement" thesis the lane never had, so the floor drops to
+    ``hold_value - MERID_LOSS_SELL_PROBE_MARGIN_CENTS`` (default 2c) —
+    a protective trigger may sell at ≈fair value instead of being forced
+    into a binary all-or-nothing ride.  2026-10-19 KXXRP15M-26OCT190130-30:
+    a -5c quota entry peaked at 68c then had ~60 trail sells suppressed by
+    the ratcheted 56c floor down to settlement at zero.  When no
+    ``hold_value_cents`` is available the entry anchor still applies
+    (fail closed).
     """
     if not profit_only_exits_enabled():
         return False
@@ -329,8 +342,25 @@ def loss_sell_blocked(
         return False
     exit_price = int(exit_price_cents)
     entry_price = int(entry_price_cents)
+    _no_edge_entry = False
+    try:
+        _no_edge_entry = entry_edge is not None and float(entry_edge) <= 0.0
+    except (TypeError, ValueError):
+        _no_edge_entry = False
     floor = entry_price
-    if peak_price_cents is not None:
+    if (
+        _no_edge_entry
+        and hold_value_cents is not None
+    ):
+        floor = max(
+            1,
+            min(
+                entry_price,
+                int(hold_value_cents)
+                - _env_int("MERID_LOSS_SELL_PROBE_MARGIN_CENTS", 2),
+            ),
+        )
+    elif peak_price_cents is not None:
         peak = int(peak_price_cents)
         arm = _env_int("MERID_BREAKEVEN_RATCET_ARM_CENTS", 8)
         if peak >= entry_price + arm:

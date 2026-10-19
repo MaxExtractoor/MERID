@@ -50,6 +50,15 @@ MERID_EXIT_MAX_QUOTE_AGE_MS = int(os.getenv("MERID_EXIT_MAX_QUOTE_AGE_MS", "1000
 MERID_EXIT_MAX_QUOTE_AGE_NEAR_EXPIRY_MS = int(os.getenv("MERID_EXIT_MAX_QUOTE_AGE_NEAR_EXPIRY_MS", "15000"))
 MERID_EXIT_NEAR_EXPIRY_CUTOFF_SECONDS = int(os.getenv("MERID_EXIT_NEAR_EXPIRY_CUTOFF_SECONDS", "120"))
 MERID_EXIT_EMERGENCY_CUTOFF_SECONDS = int(os.getenv("MERID_EXIT_EMERGENCY_CUTOFF_SECONDS", "60"))
+# 2026-10-19: stale resting-exit reprice.  A WORKING resting order whose
+# limit sits above the live bid wedges every later proposal as
+# reconcile_required (the exchange honestly reports the order alive, so
+# reconcile can never clear it).  When a marketable proposal arrives we
+# amend the resting order's price down instead of queueing behind it.
+# Throttle amendments per attempt so a fast book doesn't spam the venue.
+_MERID_EXIT_AMEND_MIN_INTERVAL_S = float(
+    os.getenv("MERID_EXIT_AMEND_MIN_INTERVAL_S", "3"))
+_EXIT_AMEND_LAST_TS: Dict[str, float] = {}
 
 # Canonical, human-auditable exit reasons.  Any non-emergency exit whose projected
 # net P&L is worse than MERID_EXIT_MAX_LOSS_CENTS is rejected unless it is an
@@ -2561,6 +2570,7 @@ def _run_exit_price_guard(
             entry_price_cents=(
                 _entry_for_envelope if _entry_for_envelope > 0 else None
             ),
+            entry_edge=getattr(position, "entry_edge", None),
         )
         record["exit_envelope"] = {"allowed": _env_ok, "detail": _env_detail}
         if not _env_ok:
@@ -4182,23 +4192,121 @@ async def _execute_exit_order(
                 intent, _arb_ctx, issuer="position_monitor",
             )
             if not _prepared.approved:
-                logger.warning(
-                    "[EXIT-ARBITER] exit suppressed: position=%s market=%s "
-                    "reason=%s status=%s detail=%s",
-                    position.position_id[:8], position.market_id,
-                    exit_reason_str,
-                    _prepared.result.status, _prepared.denial,
-                )
-                _clear_in_flight()
-                self._rearm_position_after_failed_exit(
-                    position,
-                    exit_reason,
-                    contracts_to_close,
-                    is_code_failure=(
+                # 2026-10-19: a live but unmarketable resting exit wedges
+                # every later proposal — the arbiter returns
+                # reconcile_required while the exchange reports the order
+                # alive, so reconcile can never clear it and the position
+                # rides to settlement behind a stale limit
+                # (KXXRP15M-26OCT190130-30: resting 63c while bid fell
+                # 59c->1c).  When the active attempt's sell limit sits
+                # above the live bid and the new intent is marketable,
+                # amend the resting order's price down to it — same order,
+                # same generation binding, reduce-only preserved — rather
+                # than queueing behind the wedge.
+                _amended = False
+                try:
+                    _act_attempt = getattr(_prepared.result, "attempt", None)
+                    _act_state = getattr(_act_attempt, "state", None)
+                    _act_state_v = getattr(_act_state, "value", _act_state)
+                    _act_oid = getattr(_act_attempt, "order_id", None)
+                    _act_lim = getattr(_act_attempt, "limit_cents", None)
+                    _liq = None
+                    _ctx_book = getattr(_arb_ctx, "book", None)
+                    if _ctx_book is not None:
+                        _liq = getattr(_ctx_book, "liquidation_cents", None)
+                    if _liq is None:
+                        _liq = getattr(
+                            _prepared.result, "executable_value_cents", None
+                        )
+                    if (
                         _prepared.result.status
-                        in ("in_flight", "reconcile_required", "held_unmarketable")
-                    ),
-                )
+                        in ("reconcile_required", "in_flight")
+                        and _act_state_v == "WORKING_OR_PARTIALLY_FILLED"
+                        and _act_oid
+                        and _act_lim is not None
+                        and _liq is not None
+                        and int(_act_lim) > int(_liq)
+                        and intent.price_cents is not None
+                        and int(intent.price_cents) <= int(_liq)
+                        and int(intent.price_cents) < int(_act_lim)
+                    ):
+                        _amend_key = (
+                            getattr(_act_attempt, "attempt_id", None)
+                            or str(_act_oid)
+                        )
+                        _last_amend = _EXIT_AMEND_LAST_TS.get(_amend_key, 0.0)
+                        if (time.monotonic() - _last_amend
+                                >= _MERID_EXIT_AMEND_MIN_INTERVAL_S):
+                            from merid.event_venues.kalshi.client import (
+                                get_kalshi_client,
+                            )
+                            _new_lim = int(intent.price_cents)
+                            if str(
+                                getattr(_arb_ctx, "held_side", "") or ""
+                            ).lower() == "no":
+                                _amend_res = await get_kalshi_client().amend_order(
+                                    _act_oid, no_price=_new_lim)
+                            else:
+                                _amend_res = await get_kalshi_client().amend_order(
+                                    _act_oid, yes_price=_new_lim)
+                            _EXIT_AMEND_LAST_TS[_amend_key] = time.monotonic()
+                            if getattr(_amend_res, "success", False):
+                                _amended = True
+                                try:
+                                    _act_attempt.history.append({
+                                        "ts": time.time(),
+                                        "from": _act_state_v,
+                                        "to": _act_state_v,
+                                        "note": (
+                                            f"amended:{_act_lim}c->{_new_lim}c"
+                                        ),
+                                    })
+                                    _act_attempt.limit_cents = _new_lim
+                                    _act_attempt.updated_ts = time.time()
+                                except Exception:
+                                    pass
+                                logger.info(
+                                    "[EXIT-ARBITER] amended stale resting "
+                                    "exit: position=%s market=%s attempt=%s "
+                                    "order=%s %dc->%dc bid=%sc",
+                                    position.position_id[:8],
+                                    position.market_id,
+                                    _amend_key, _act_oid,
+                                    _act_lim, _new_lim, _liq,
+                                )
+                            else:
+                                logger.warning(
+                                    "[EXIT-ARBITER] stale-resting amend "
+                                    "failed: position=%s order=%s "
+                                    "%dc->%dc err=%s",
+                                    position.position_id[:8], _act_oid,
+                                    _act_lim, _new_lim,
+                                    getattr(_amend_res, "error", None),
+                                )
+                except Exception as _amend_err:
+                    logger.warning(
+                        "[EXIT-ARBITER] stale-resting amend error: %s",
+                        _amend_err,
+                    )
+                if not _amended:
+                    logger.warning(
+                        "[EXIT-ARBITER] exit suppressed: position=%s market=%s "
+                        "reason=%s status=%s detail=%s",
+                        position.position_id[:8], position.market_id,
+                        exit_reason_str,
+                        _prepared.result.status, _prepared.denial,
+                    )
+                    _clear_in_flight()
+                    self._rearm_position_after_failed_exit(
+                        position,
+                        exit_reason,
+                        contracts_to_close,
+                        is_code_failure=(
+                            _prepared.result.status
+                            in ("in_flight", "reconcile_required",
+                                "held_unmarketable")
+                        ),
+                    )
                 return
             _arb_position_key = (
                 f"{_arb_ctx.market_id}|{_arb_ctx.generation_id}")

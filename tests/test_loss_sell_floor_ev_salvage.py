@@ -132,3 +132,84 @@ class TestBreakevenRatchet:
 
     def test_no_peak_unchanged(self):
         assert loss_sell_blocked("TRAILING_STOP", 67, 68) is True
+
+
+class TestNoEdgeProbeFloor:
+    """2026-10-19: a non-positive *stamped admission edge* marks a
+    bounded-lane/telemetry entry — there is no model thesis to hold for,
+    so the floor drops to ``hold - MERID_LOSS_SELL_PROBE_MARGIN_CENTS``
+    instead of forcing a binary ride.  XRP-0130: a -5c quota entry
+    peaked at 68c then watched ~60 trail sells suppressed by the
+    ratcheted 56c floor down to settlement at zero."""
+
+    def test_no_edge_entry_salvages_at_hold(self):
+        # entry 51, peak 68 (ratchet floor would be 56), hold 42, bid 42:
+        # probe floor = min(51, 40) = 40 -> sell at fair is allowed.
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 42, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+
+    def test_no_edge_entry_blocked_below_probe_floor(self):
+        # bid 38 < hold 42 - margin 2 -> below fair; still suppressed.
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 38, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is True
+
+    def test_no_edge_entry_capped_at_entry_when_model_bullish(self):
+        # hold 80 >> bid 40: floor = min(51, 78) = 51 -> the model still
+        # claims hold > entry, so the ride stays protected.
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 40, 51, hold_value_cents=80,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is True
+
+    def test_positive_edge_entry_ratchet_unchanged(self):
+        # +5c stamped edge -> ratchet floor 56 stands, bid 42 blocked.
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 42, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=0.05,
+        ) is True
+
+    def test_missing_edge_entry_ratchet_unchanged(self):
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 42, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=None,
+        ) is True
+
+    def test_no_edge_missing_hold_fails_closed(self):
+        # No hold value -> keep the entry/ratchet anchor (fail closed).
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 42, 51, hold_value_cents=None,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is True
+
+    def test_no_edge_exempt_trigger_still_exempt(self):
+        assert loss_sell_blocked(
+            "HARD_STOP", 30, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+
+    def test_no_edge_floor_never_below_one(self):
+        # hold collapsed to 1c -> floor = max(1, min(51, -1)) = 1.
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 2, 51, hold_value_cents=1,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 1, 51, hold_value_cents=1,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+
+    def test_probe_margin_env_override(self, monkeypatch):
+        monkeypatch.setenv("MERID_LOSS_SELL_PROBE_MARGIN_CENTS", "10")
+        # floor = hold 42 - 10 = 32 -> bid 38 still sells (>= 32).
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 38, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+        assert loss_sell_blocked(
+            "TRAILING_STOP", 30, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is True

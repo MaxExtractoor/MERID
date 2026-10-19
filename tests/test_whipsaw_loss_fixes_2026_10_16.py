@@ -107,6 +107,64 @@ def test_envelope_untouched_for_non_gated_reasons() -> None:
     assert ok and detail == "not_gated"
 
 
+# --------------------------------------------------- probe-lock arm ------
+# 2026-10-19: a non-positive stamped admission edge marks a bounded-lane
+# telemetry entry — no model thesis to hold for, so the profit-lock arm
+# engages at MERID_EXIT_ENVELOPE_PROBE_LOCK_C (default 4c).  XRP-0130:
+# TP at +8c deferred on a -5c quota entry, rode to settlement at zero.
+
+def test_envelope_probe_lock_allows_small_gain_on_no_edge_entry() -> None:
+    """XRP case: bid=59 vs entry=51 (+8c) on a -5c claimed-EV quota entry
+    at TTE=300 — probe lock 4c engages -> ALLOW."""
+    ok, detail = exit_envelope_allows(
+        "take_profit", 59, 300.0, entry_price_cents=51, entry_edge=-0.05
+    )
+    assert ok, detail
+    assert "lock_ok=True" in detail
+
+
+def test_envelope_probe_lock_full_arm_for_positive_edge_entry() -> None:
+    """A +4c claimed edge keeps the full 10c arm — +8c defers."""
+    ok, detail = exit_envelope_allows(
+        "take_profit", 59, 300.0, entry_price_cents=51, entry_edge=0.04
+    )
+    assert not ok
+    assert "lock_gain" in detail
+
+
+def test_envelope_probe_lock_missing_edge_unchanged() -> None:
+    ok, detail = exit_envelope_allows(
+        "take_profit", 59, 300.0, entry_price_cents=51, entry_edge=None
+    )
+    assert not ok
+    assert "lock_gain" in detail
+
+
+def test_envelope_probe_lock_below_threshold_still_defers() -> None:
+    """+3c gain is below the 4c probe lock — deferral stands."""
+    ok, detail = exit_envelope_allows(
+        "take_profit", 54, 300.0, entry_price_cents=51, entry_edge=-0.05
+    )
+    assert not ok
+    assert "lock_gain" in detail
+
+
+def test_envelope_probe_lock_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("MERID_EXIT_ENVELOPE_PROBE_LOCK_C", "12")
+    ok, _ = exit_envelope_allows(
+        "take_profit", 59, 300.0, entry_price_cents=51, entry_edge=-0.05
+    )
+    assert not ok  # +8c < raised 12c probe lock
+
+
+def test_envelope_probe_lock_accepts_pct_scale_edge() -> None:
+    """The stamped edge may arrive in percent units (-5.3c) — sign only."""
+    ok, _ = exit_envelope_allows(
+        "take_profit", 59, 300.0, entry_price_cents=51, entry_edge=-5.3
+    )
+    assert ok
+
+
 # ---------------------------------------------------------------- B --------
 # Evidence-refused / non-positive-LCB probe sizing.
 
@@ -158,10 +216,12 @@ def test_probe_not_restricted_on_clean_evidence() -> None:
     assert not restricted
 
 
-def test_probe_max_contracts_default_one(monkeypatch) -> None:
+def test_probe_max_contracts_default_three(monkeypatch) -> None:
+    # 2026-10-19: probe cap aligned to the 3-contract order/exposure caps
+    # (MERID_MAX_CONTRACTS_PER_ORDER=3, MERID_BOUNDED_LANE_MAX_CONTRACTS=3).
     monkeypatch.delenv("MERID_PROBE_LANE_MAX_CONTRACTS", raising=False)
     from merid.prediction.agent_grid_15m import _probe_lane_max_contracts
-    assert _probe_lane_max_contracts() == 1.0
+    assert _probe_lane_max_contracts() == 3.0
 
 
 # ---------------------------------------------------------------- C --------
@@ -224,6 +284,23 @@ def _canonical(**over: Any) -> CanonicalOrderIntent:
     return CanonicalOrderIntent(**defaults)
 
 
+def _forced_exit_overrides() -> dict:
+    """Structured emergency-authorization tuple required since 2026-10-17.
+
+    A bare ``reason="hard_stop"`` no longer authorizes a deliberate loss —
+    the firewall validates exit_class + emergency_type + allowlisted issuer
+    + position-generation binding + qty bound.  ``stop_candidate`` is in
+    the POSITION_LOSS_BUDGET issuer scope; ``fill_entry_1`` is the mock
+    position's ``entry_fill_id`` (its resolved generation).
+    """
+    return {
+        "exit_class": "emergency",
+        "emergency_type": "POSITION_LOSS_BUDGET",
+        "authorization_source": "stop_candidate",
+        "position_generation_id": "fill_entry_1",
+    }
+
+
 def _mock_position_and_book(
     no_bids: List[Tuple[int, int]],
     yes_exposure_cc: int = -191,
@@ -283,7 +360,7 @@ async def test_forced_stop_repriced_to_marginal_not_rejected():
     # Book sizes are contracts: 1.0ct@43 then 0.91ct@40 -> vwap=ceil(41.57)=42,
     # marginal=40.  limit=44 is non-executable at full qty.
     _mock_position_and_book(no_bids=[(43, 1), (40, 100)])
-    canonical = _canonical()
+    canonical = _canonical(**_forced_exit_overrides())
     decision = await ExecutionRiskFirewall.get_instance().validate_exit(
         canonical
     )
@@ -309,7 +386,7 @@ async def test_discretionary_exit_still_rejected_when_non_executable():
 async def test_forced_exit_reprice_kill_switch(monkeypatch):
     monkeypatch.setenv("MERID_FIREWALL_FORCED_EXIT_REPRICE", "0")
     _mock_position_and_book(no_bids=[(43, 1), (40, 100)])
-    canonical = _canonical()
+    canonical = _canonical(**_forced_exit_overrides())
     decision = await ExecutionRiskFirewall.get_instance().validate_exit(
         canonical
     )
@@ -321,7 +398,7 @@ async def test_forced_exit_reprice_kill_switch(monkeypatch):
 async def test_forced_exit_still_approves_when_limit_executable():
     """No reprice needed — marginal is above the limit (deep book)."""
     _mock_position_and_book(no_bids=[(45, 1000), (44, 1000)])
-    canonical = _canonical(limit_cents=43)
+    canonical = _canonical(limit_cents=43, **_forced_exit_overrides())
     decision = await ExecutionRiskFirewall.get_instance().validate_exit(
         canonical
     )

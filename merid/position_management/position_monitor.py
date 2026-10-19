@@ -6591,6 +6591,7 @@ class PositionMonitor:
             _floor_entry,
             hold_value_cents=_hold_value_cents,
             peak_price_cents=position.high_watermark_cents,
+            entry_edge=getattr(position, "entry_edge", None),
         ):
             logger.warning(
                 "[BREAKEVEN-FLOOR] position=%s market=%s side=%s reason=%s "
