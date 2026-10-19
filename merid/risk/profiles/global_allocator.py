@@ -870,6 +870,15 @@ class GlobalAllocator:
                 c.position_value_usd <= _wq_residual
                 and (_wq_cur + c.position_value_usd) <= _wq_asset_max
             )
+            if not _wq_fits and c.count > 1.0 and c.price_cents > 0:
+                _max_fit_usd = min(_wq_residual, _wq_asset_max - _wq_cur)
+                _fit_whole = int((_max_fit_usd * 100.0) // float(c.price_cents))
+                if _fit_whole >= 1:
+                    c.count = float(min(int(c.count), _fit_whole))
+                    _wq_fits = (
+                        c.position_value_usd <= _wq_residual
+                        and (_wq_cur + c.position_value_usd) <= _wq_asset_max
+                    )
             if _wq_fits:
                 chosen.append(c)
                 _wq_residual -= float(c.position_value_usd)

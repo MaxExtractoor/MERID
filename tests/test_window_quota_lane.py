@@ -83,6 +83,19 @@ class TestQuotaModule:
         n_t, n_d = wq.record_quota_submission("T1", path=p)
         assert (n_t, n_d) == (1, 1)
 
+    def test_release_quota_submission_restores_budget_and_gap(
+        self, quota_env, monkeypatch
+    ):
+        monkeypatch.setenv("MERID_WINDOW_QUOTA_MIN_GAP_S", "9999")
+        p = str(quota_env)
+        n_t, n_d = wq.record_quota_submission("T1", path=p)
+        assert (n_t, n_d) == (1, 1)
+        assert wq.quota_ticker_exhausted("T1", path=p)
+        wq.release_quota_submission("T1", path=p)
+        assert wq.quota_ticker_attempts("T1", path=p) == 0
+        assert wq.quota_submissions_today(path=p) == 0
+        assert not wq.quota_ticker_exhausted("T1", path=p)
+
 
 class TestAllocatorQuotaLane:
     """The allocator must honor the lane's stamped (gate_ev, required_edge)

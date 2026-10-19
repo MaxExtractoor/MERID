@@ -76,8 +76,8 @@ class RiskLimits:
     min_confidence_for_trade: float = 0.50
     
     # Timing limits
-    min_time_between_trades_seconds: float = 60.0
-    max_trades_per_hour: int = 20
+    min_time_between_trades_seconds: float = 3.0
+    max_trades_per_hour: int = 120
     
     # Version for tracking changes
     version: str = "1.0.0"

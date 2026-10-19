@@ -3877,15 +3877,18 @@ async def _execute_exit_order(
                     resubmit_count,
                 )
             else:
+                _effective_resubmit = max(
+                    int(resubmit_count or 0),
+                    int(getattr(position, "exit_retry_count", 0) or 0),
+                )
                 client_order_id = derive_exit_client_order_id(
-                    exit_parent_id, exit_reason_str, resubmit_count=resubmit_count
+                    exit_parent_id, exit_reason_str, resubmit_count=_effective_resubmit
                 )
                 intent.client_order_id = client_order_id
                 intent.client_tag = client_order_id
 
             intent.run_id = os.environ.get("MERID_RUN_ID") or f"live_exit_{int(time.time())}"
             intent.process_id = str(os.getpid())
-            finalize_order_identity(intent)
         except Exception as identity_err:
             logger.error(
                 "[EXIT-ORDER-IDENTITY-REJECT] position=%s market=%s error=%s",
@@ -3911,7 +3914,8 @@ async def _execute_exit_order(
             store = OrderAttemptStore()
             durable_exit_attempt = store.get_exit_attempt_by_client_order_id(client_order_id)
             if durable_exit_attempt is not None and OrderAttemptStore.is_terminal_state(durable_exit_attempt.state):
-                # A prior attempt reached a terminal state (e.g. NOT_ACCEPTED_CONFIRMED).
+                # A prior attempt reached a terminal state (e.g. NOT_ACCEPTED_CONFIRMED,
+                # TERMINAL_UNFILLED, CANCELED).
                 # Supersede it — AND mint a fresh client_order_id: the old wire id is
                 # consumed on the exchange (resubmitting a dead id gets HTTP 409 /
                 # silent idempotent-hit — the XRP-1800 second jam).  The deterministic
@@ -3930,6 +3934,7 @@ async def _execute_exit_order(
                     client_order_id = f"exit_{_salt}"
                     intent.client_order_id = client_order_id
                     intent.client_tag = client_order_id
+                    intent.order_attempt_id = None
                     durable_exit_attempt = None
             if durable_exit_attempt is None:
                 # exit_policy may be None or malformed; a missing policy must
@@ -3969,6 +3974,19 @@ async def _execute_exit_order(
             logger.warning(
                 "[EXIT-ORDER-ATTEMPT] Failed to create durable exit attempt: %s", attempt_err
             )
+
+        try:
+            finalize_order_identity(intent)
+        except Exception as identity_err:
+            logger.error(
+                "[EXIT-ORDER-IDENTITY-REJECT] position=%s market=%s error=%s",
+                position.position_id[:8],
+                position.market_id,
+                identity_err,
+            )
+            _clear_in_flight()
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+            return
 
         # Register the attempt with the exit-attempt resolver so a fill that
         # arrives before the route ack resolves the attempt to FILLED instead
@@ -4142,7 +4160,14 @@ async def _execute_exit_order(
                 )
                 _clear_in_flight()
                 self._rearm_position_after_failed_exit(
-                    position, exit_reason, contracts_to_close)
+                    position,
+                    exit_reason,
+                    contracts_to_close,
+                    is_code_failure=(
+                        _prepared.result.status
+                        in ("in_flight", "reconcile_required", "held_unmarketable")
+                    ),
+                )
                 return
             _arb_position_key = (
                 f"{_arb_ctx.market_id}|{_arb_ctx.generation_id}")
@@ -4718,7 +4743,7 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
         # CRITICAL FIX (2026-07-16): Add retry limit to prevent infinite retry loops
         # Without this, a position could keep retrying exits indefinitely if orders
         # keep failing (e.g., during market outage or API issues). Limit to 3 retries.
-        MAX_EXIT_RETRIES = 3
+        MAX_EXIT_RETRIES = int(os.environ.get("MERID_MAX_EXIT_RETRIES", "20"))
         if retry_count > MAX_EXIT_RETRIES:
             # 2026-09-23: emergency liquidation exits (settlement_guard ->
             # expiry_liquidation, emergency, hard_risk) must never be capped
@@ -6694,6 +6719,9 @@ async def _run_loop(self) -> None:
                                     _pre_wire_cell = candidate.get("threshold_cell_id")
                                     _pre_wire_prov = candidate.get("provisional_cell_id")
                                     try:
+                                        if candidate.get("decision_lane") == "window_quota":
+                                            from merid.prediction import window_quota as _wq_rel
+                                            _wq_rel.release_quota_submission(ticker)
                                         if _pre_wire_cell:
                                             from merid.prediction import threshold_cells as _tc
                                             _tc.release_cell_submission_reservation(

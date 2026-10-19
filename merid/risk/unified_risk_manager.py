@@ -96,8 +96,8 @@ class RiskLimits:
     drawdown_unwind_pct: float = 0.25  # 25% (was 0.15 - aligned with profile)
     
     # Rate limiting
-    rate_limit_max_trades_per_hour: int = 30  # Aligned with profile (30/hour)
-    rate_limit_min_time_between_trades: float = 60.0
+    rate_limit_max_trades_per_hour: int = 120  # Aligned with 5 assets x 4 windows/hr
+    rate_limit_min_time_between_trades: float = 3.0  # Aligned with profile per_asset_cooldown_sec=3s
     
     # Emergency controls
     emergency_halt: bool = False
@@ -238,8 +238,8 @@ class UnifiedRiskManager:
             
             # Rate limiting
             if 'rate_limit' in config:
-                limits.rate_limit_max_trades_per_hour = config['rate_limit'].get('max_trades_per_hour', 20)
-                limits.rate_limit_min_time_between_trades = config['rate_limit'].get('min_time_between_trades', 60.0)
+                limits.rate_limit_max_trades_per_hour = config['rate_limit'].get('max_trades_per_hour', 120)
+                limits.rate_limit_min_time_between_trades = config['rate_limit'].get('min_time_between_trades', 3.0)
             
             # Emergency controls
             if 'emergency' in config:

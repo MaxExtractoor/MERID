@@ -117,20 +117,16 @@ def _canary_lane_max_contracts() -> float:
 
 
 def _probe_lane_max_contracts() -> float:
-    """Hard cap for *evidence-refused* probes (default 1.0 contract).
+    """Hard cap for *evidence-refused* probes (default 3.0 contracts).
 
-    2026-10-16 (loss audit): two post-restart losses were evidence-blocked
-    cells admitted through ``current_build_provisional`` — BTC NO ~78c at
-    1.91 contracts and ETH NO 47c at 3 contracts, together ~$3 of a $3.14
-    account.  A probe whose cell the evidence verdict refused
-    (``{side}_evidence_action == "block"``) or whose lower confidence bound
-    on net EV is non-positive is paid-telemetry, not a sized position; it
-    must never consume more than ``MERID_PROBE_LANE_MAX_CONTRACTS``.
+    2026-10-19: aligned with MERID_MAX_CONTRACTS_PER_ORDER=3 and
+    MERID_BOUNDED_LANE_MAX_CONTRACTS=3 so bounded/probe entries can size up
+    to 3 contracts when the $3.00 global exposure cap and book depth allow.
     """
     try:
-        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "1"))
+        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "3"))
     except Exception:
-        return 1.0
+        return 3.0
     return max(0.01, min(v, 100.0))
 
 
@@ -350,7 +346,11 @@ def _write_shadow_telemetry(
         emit_paired_eval(from_decision(decision))
     except Exception:
         pass
-    if os.environ.get("MERID_CFB_RTI_SHADOW_TELEMETRY", "1").strip().lower() in ("0", "false", "off"):
+    # 2026-10-19: default off in production — data/shadow/cfb_rti accumulated
+    # 1.39M files, causing synchronous NTFS mkdir/write_text calls on the
+    # main asyncio loop to stall ticks for 5-80s (faulthandler dump at
+    # agent_grid_15m.py:458).  emit_paired_eval above still runs on every eval.
+    if os.environ.get("MERID_CFB_RTI_SHADOW_TELEMETRY", "0").strip().lower() in ("0", "false", "off"):
         return
     try:
         now_ms = int(time.time() * 1000)
@@ -9338,8 +9338,35 @@ class LeanAgent15m:
                     _wq_flip_stale_note = (
                         f"stale:spot_ms={_wq_spot_stale_ms} vel={_wq_vel}"
                     )
+                else:
+                    # 2026-10-19: never flip against model argmax into a
+                    # deep-OTM longshot (observed: KXBTC15M-26OCT182230-30
+                    # flipped against p_no=93.4% into YES@9c with p_yes=6.6%
+                    # and settled 0c; Window 2300 flipped into NO@6-18c).
+                    _flip_p = float(
+                        (
+                            decision.p_no_calibrated
+                            if _wq_dir_pref == "no"
+                            else decision.p_yes_calibrated
+                        )
+                        or 0.0
+                    )
+                    _flip_ask = float(
+                        no_ask if _wq_dir_pref == "no" else yes_ask
+                    )
+                    _min_flip_p = float(
+                        os.environ.get("MERID_WINDOW_QUOTA_MIN_P", "0.25")
+                    )
+                    if _flip_p < _min_flip_p or _flip_ask < 25.0:
+                        _wq_dir_pref = None
+                        _wq_flip_demoted = True
+                        _wq_flip_stale_note = (
+                            f"longshot_veto:p={_flip_p:.3f}<{_min_flip_p:.2f}_or_ask={_flip_ask:.0f}c<25c"
+                        )
             if _wq_dir_pref is not None:
                 _wq_order = [_wq_dir_pref]
+                if _wq_argmax is not None and _wq_argmax != _wq_dir_pref:
+                    _wq_order.append(_wq_argmax)
             else:
                 _wq_order = [_wq_argmax]
                 _wq_alt = "no" if _wq_argmax == "yes" else "yes"
@@ -9348,6 +9375,15 @@ class LeanAgent15m:
             _wq_side = None
             _wq_ask = _wq_bid = _wq_depth = _wq_ev_c = None
             _wq_notes = []
+            try:
+                from merid.event_venues.kalshi.binary_price_space import (
+                    is_price_in_canonical_range as _wq_in_canon_range,
+                )
+            except Exception:
+                _wq_in_canon_range = None
+            _wq_min_cand_p = float(
+                os.environ.get("MERID_WINDOW_QUOTA_MIN_P", "0.22")
+            )
             for _wq_cand in _wq_order:
                 if _wq_regime_block is not None and _wq_dir_reg is not None:
                     _wq_rb = _wq_regime_block(_wq_dir_reg, _wq_cand, _wq_z)
@@ -9364,6 +9400,14 @@ class LeanAgent15m:
                     float(decision.no_depth_cc) if _wq_cand == "no"
                     else float(decision.yes_depth_cc)
                 )
+                _cand_p = float(
+                    (
+                        decision.p_no_calibrated
+                        if _wq_cand == "no"
+                        else decision.p_yes_calibrated
+                    )
+                    or 0.0
+                )
                 _cand_ev = float(
                     (
                         decision.no_net_edge
@@ -9372,13 +9416,19 @@ class LeanAgent15m:
                     )
                     or 0
                 ) * 100.0
+                _canon_ok = (
+                    _wq_in_canon_range is None
+                    or _wq_in_canon_range(int(round(_cand_ask)), _wq_cand)
+                )
                 if (
-                    _cand_ask > 0.0
+                    _cand_ask >= 25.0
                     and _cand_bid > 0.0
+                    and _canon_ok
                     and _wq_quota.quota_band_match(_cand_ask)
                     and (_cand_ask - _cand_bid)
                     <= _wq_quota.quota_max_spread_cents()
                     and _cand_depth >= 100.0
+                    and _cand_p >= _wq_min_cand_p
                     and _cand_ev >= _wq_quota.quota_min_ev_cents()
                 ):
                     _wq_side = _wq_cand
@@ -9389,7 +9439,7 @@ class LeanAgent15m:
                     break
                 _wq_notes.append(
                     f"{_wq_cand}:book ask={_cand_ask:.0f} bid={_cand_bid:.0f} "
-                    f"ev={_cand_ev:.1f}c depth={_cand_depth:.0f}"
+                    f"p={_cand_p:.2f} ev={_cand_ev:.1f}c depth={_cand_depth:.0f}"
                 )
             if _wq_side is not None:
                 from decimal import Decimal as _DQ
@@ -9413,6 +9463,12 @@ class LeanAgent15m:
                     # coherence checks see a consistent triple (the true
                     # argmax stays in window_quota.argmax_side).
                     _wq_new_best = _wq_side
+                # Size up to MERID_WINDOW_QUOTA_MAX_CONTRACTS (default 3),
+                # bounded by visible whole-contract ask depth so
+                # submit_revalidation never rejects for partial_depth.
+                _wq_target_cc = int(round(_wq_quota.quota_max_contracts() * 100.0))
+                _wq_depth_whole_cc = max(100, (int(_wq_depth or 100) // 100) * 100)
+                _wq_size_cc = min(_wq_target_cc, _wq_depth_whole_cc)
                 decision = replace(
                     decision,
                     selected_outcome=_wq_side,
@@ -9425,6 +9481,7 @@ class LeanAgent15m:
                         str(_wq_quota.quota_min_ev_cents() / 100.0)
                     ),
                     edge_breakdown=_wq_bd,
+                    approved_size_cc=_DQ(str(_wq_size_cc)),
                     no_trade_reason=None,
                 )
                 _ind_q = decision.indicators
@@ -21516,15 +21573,35 @@ class LeanAgentGrid15m:
                         in BOUNDED_POST_ONLY_LANES
                     )
                     if _bounded_lane:
-                        _pre_count = _bounded_lane_max_contracts()
+                        _b_max = _bounded_lane_max_contracts()
+                        if candidate.get('decision_lane') == "window_quota":
+                            try:
+                                from merid.prediction import window_quota as _wq_pc
+                                _b_max = min(_b_max, _wq_pc.quota_max_contracts())
+                            except Exception:
+                                pass
+                        _pre_count = (
+                            min(float(_pre_count), _b_max)
+                            if _pre_count > 0.0
+                            else _b_max
+                        )
                     try:
                         from decimal import Decimal as _D, ROUND_DOWN as _RD
                         _cap_usd = _D(str(getattr(allocator, "venue_cap_usd", 0.0) or 0.0))
                         _price_usd = _D(price_cents) / _D(100)
                         if _price_usd > 0 and _cap_usd > 0:
-                            _fit = (_cap_usd / _price_usd).quantize(_D("0.01"), rounding=_RD)
-                            if _pre_count <= 0.0 or (_D(str(_pre_count)) > _fit and not _bounded_lane):
-                                _pre_count = float(_fit)
+                            if _bounded_lane:
+                                # Fit to whole contracts under the venue cap (min 1)
+                                # so a 3-contract candidate at e.g. 85c ($2.55) or
+                                # >$1.00 scales to whole contracts that fit instead
+                                # of failing BUDGET/KNAPSACK_CAP.
+                                _whole_fit = max(1, int(_cap_usd // _price_usd))
+                                if _pre_count > float(_whole_fit):
+                                    _pre_count = float(_whole_fit)
+                            else:
+                                _fit = (_cap_usd / _price_usd).quantize(_D("0.01"), rounding=_RD)
+                                if _pre_count <= 0.0 or _D(str(_pre_count)) > _fit:
+                                    _pre_count = float(_fit)
                         if _pre_count <= 0.0:
                             _pre_count = _default_entry_contracts()
                     except Exception as _fit_err:
@@ -21765,6 +21842,12 @@ class LeanAgentGrid15m:
                         concrete = _ad.constraint_reasons[0] if (_ad and _ad.constraint_reasons) else "allocator_loss"
                         if _ad and _ad.terminal_reason and not concrete:
                             concrete = _ad.terminal_reason
+                        if oc.get("decision_lane") == "window_quota":
+                            try:
+                                from merid.prediction import window_quota as _wq_rel
+                                _wq_rel.release_quota_submission(str(oc.get("ticker") or ""))
+                            except Exception:
+                                pass
                         logger.info(
                             "[CANDIDATE-REJECTED] candidate_id=%s ticker=%s side=%s edge_pct=%.6f reason=%s",
                             cid, oc.get("ticker"), oc.get("side"), float(oc.get("edge_pct", 0.0) or 0.0), concrete

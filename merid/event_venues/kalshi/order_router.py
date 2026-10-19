@@ -10538,8 +10538,21 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                         )
                     taker_cap = min(99, edge_preserve_cap)
                 else:
+                    # 2026-10-19: Without an edge_preserve_cap (e.g. window_quota
+                    # or bounded taker probes), setting adjusted_price = fair_cap
+                    # (mid + 15c) inflated 76-93c entries to 97c, which then
+                    # failed GlobalSlotAllocator.can_allocate (max_entry_cents=95c)
+                    # and over-reserved notional in unified_sizing.  Bound the
+                    # taker buy limit to a small marketable buffer above side_ask
+                    # (default 2c) inside the 95c slot-allocator ceiling.
+                    _ask_buf = int(os.environ.get("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2"))
+                    _ceil = 98 if getattr(intent, "decision_lane", None) == "pinned_fav" else 95
+                    taker_cap = min(
+                        fair_cap,
+                        max(int(side_ask), min(_ceil, int(side_ask) + _ask_buf)),
+                    )
                     p_selected = getattr(intent, "p_selected", None)
-                    if p_selected is not None:
+                    if p_selected is not None and getattr(intent, "decision_lane", None) not in ("window_quota", "pinned_fav"):
                         fee = getattr(intent, "estimated_fee_cents", None)
                         if fee is None:
                             try:
@@ -10564,7 +10577,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                                 side_ask=side_ask,
                                 reason=f"taker buy: model edge cap {edge_cap}c below displayed ask {side_ask}c",
                             )
-                        taker_cap = min(fair_cap, edge_cap)
+                        taker_cap = min(taker_cap, edge_cap)
 
                 # 2026-09-14: Use the full taker cap as the IOC limit. A limit order
                 # fills at the best available ask; the cap is the maximum we are willing
@@ -10782,12 +10795,15 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
         elif getattr(intent, "decision_lane", None) == "window_quota":
             # 2026-10-17: quota emissions span the lane's own band; clamping
             # to the canonical ceiling would silently reprice under the ask.
+            # 2026-10-19: cap at 95c (GlobalSlotAllocator.max_entry_cents) so
+            # the repricer never clamps to 97c and triggers a guaranteed
+            # slot_allocator_executable rejection downstream.
             try:
                 from merid.prediction import window_quota as _wq_alloc
-                ALLOCATOR_MIN_PRICE = int(_wq_alloc.quota_price_lo())
-                ALLOCATOR_MAX_PRICE = int(_wq_alloc.quota_price_hi())
+                ALLOCATOR_MIN_PRICE = max(10, int(_wq_alloc.quota_price_lo()))
+                ALLOCATOR_MAX_PRICE = min(95, int(_wq_alloc.quota_price_hi()))
             except Exception:
-                ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 5, 97
+                ALLOCATOR_MIN_PRICE, ALLOCATOR_MAX_PRICE = 10, 95
 
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             logger.warning(
@@ -21143,6 +21159,18 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # Only lane-owned intents count: cell ids ride along as provenance on
     # every cell-matched admission, so keying on them would charge the cell's
     # router-reject suspension budget for another lane's pre-wire drop.
+    if (
+        getattr(intent, "decision_lane", None) == "window_quota"
+        and result is not None
+        and result.status == "rejected"
+        and not getattr(result, "submission_attempted", False)
+    ):
+        try:
+            from merid.prediction import window_quota as _wq_rel
+            _wq_rel.release_quota_submission(intent.ticker)
+        except Exception:
+            pass
+
     if (
         getattr(intent, "decision_lane", None)
         in ("threshold_cell", "current_build_provisional")

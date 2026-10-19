@@ -181,6 +181,22 @@ def context_from_position(
                     )
         except Exception:
             book = None
+    if trail_giveback_cents is None:
+        _tp_param = getattr(position, "trailing_param", None)
+        if _tp_param is not None:
+            try:
+                trail_giveback_cents = max(1, int(round(float(_tp_param))))
+            except Exception:
+                trail_giveback_cents = None
+        if trail_giveback_cents is None:
+            try:
+                import os as _os_ep
+                trail_giveback_cents = max(
+                    1,
+                    int(_os_ep.environ.get("MERID_EXIT_PROFIT_SLIPPAGE_CENTS", "5")),
+                )
+            except Exception:
+                trail_giveback_cents = 5
     return ExitContext(
         market_id=str(market_id),
         generation_id=str(gen),
@@ -527,12 +543,46 @@ def post_route_update(
         arb.mark_acked(position_key)
         if fill_cc > 0:
             arb.record_fill(position_key, fill_cc, fill_id=fill_id)
-    elif status == "submission_unknown" or certainty == "unknown":
+        # An IOC or terminal partial fill leaves no resting order on the book —
+        # transition any remaining coverage to RETRY_ELIGIBLE so the next
+        # poll can close the residual instead of waiting on WORKING forever.
+        att = arb.attempt_store.get_active(position_key)
+        if (
+            att is not None
+            and att.filled_cc < att.qty_cc
+            and (
+                status in ("unfilled_ioc", "canceled", "cancelled", "expired")
+                or (
+                    getattr(order_result, "is_terminal", False)
+                    and not getattr(order_result, "is_resting", False)
+                )
+            )
+        ):
+            from merid.position_management.exit_arbiter import ReconcileEvidence
+            arb.begin_reconcile(position_key)
+            arb.resolve_reconcile(position_key, ReconcileEvidence(
+                order_found=True, terminal=True, filled_cc=att.filled_cc,
+                source=f"route_{status or 'terminal_partial'}"))
+    elif status == "submission_unknown" or certainty == "unknown" or getattr(
+            order_result, "requires_recovery", False):
         arb.mark_ack_unknown(position_key, note=f"route_{status or 'unknown'}")
-    elif status in ("rejected", "failed", "error") and not getattr(
-            order_result, "submission_attempted", False):
+    elif status in ("unfilled_ioc", "canceled", "cancelled", "expired"):
+        # 2026-10-19: an IOC exit that returned unfilled_ioc / canceled /
+        # expired is confirmed terminal on the exchange with zero fill.
+        # Previously post_route_update had no branch for unfilled_ioc,
+        # leaving the arbiter attempt stuck in SUBMITTING forever and
+        # suppressing all subsequent profit/stop exits for the position
+        # (observed: KXBTC15M-26OCT182200-00 14 retries suppressed while bid
+        # ran 57c->72c, then settled 0c).
         from merid.position_management.exit_arbiter import ReconcileEvidence
         arb.begin_reconcile(position_key)
         arb.resolve_reconcile(position_key, ReconcileEvidence(
-            order_found=False, terminal=True,
-            source="local_no_transmit"))
+            order_found=True, terminal=True, filled_cc=0,
+            source=f"route_{status}"))
+    elif status in ("rejected", "failed", "error"):
+        from merid.position_management.exit_arbiter import ReconcileEvidence
+        _transmitted = bool(getattr(order_result, "submission_attempted", False))
+        arb.begin_reconcile(position_key)
+        arb.resolve_reconcile(position_key, ReconcileEvidence(
+            order_found=_transmitted, terminal=True, filled_cc=0,
+            source=f"route_{status}" if _transmitted else "local_no_transmit"))

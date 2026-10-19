@@ -1010,7 +1010,14 @@ def normalize_order(
         if not (1 <= price_cents <= 99):
             raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents}")
     else:
-        if not is_price_in_canonical_range(price_cents, contract):
+        _in_canon = is_price_in_canonical_range(price_cents, contract)
+        if not _in_canon and getattr(intent, "decision_lane", None) == "pinned_fav":
+            try:
+                from merid.prediction import directional_regime as _dr_oic
+                _in_canon = _dr_oic.pinned_fav_band_match(float(price_cents))
+            except Exception:
+                _in_canon = False
+        if not _in_canon:
             raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents},contract={contract}")
 
     # Canonical quantity resolution.  ``count_fp`` (Decimal contracts) is the

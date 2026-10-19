@@ -226,6 +226,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.FILLED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
     },
     ExitOrderAttemptState.RESOLVING_ON_EXCHANGE: {
         ExitOrderAttemptState.ACKNOWLEDGED,
@@ -239,6 +240,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.FILLED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
         # The route path can still be in flight when reconciliation starts —
         # a late route timeout re-marks the attempt SUBMISSION_UNKNOWN; that
         # signal must not be dropped just because the resolver moved first.
@@ -251,6 +253,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.ACKNOWLEDGED_LATE: {
@@ -260,6 +263,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.RESTING: {
@@ -268,6 +272,7 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
         ExitOrderAttemptState.CANCELED,
         ExitOrderAttemptState.REJECTED_EXCHANGE,
         ExitOrderAttemptState.EXPIRED_EXCHANGE,
+        ExitOrderAttemptState.TERMINAL_UNFILLED,
         ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
     },
     ExitOrderAttemptState.PARTIALLY_FILLED: {

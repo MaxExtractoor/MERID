@@ -126,7 +126,7 @@ def quota_min_gap_s() -> float:
 
 
 def quota_max_contracts() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_MAX_CONTRACTS", 1.0)
+    return _env_float("MERID_WINDOW_QUOTA_MAX_CONTRACTS", 3.0)
 
 
 def quota_state_path() -> str:
@@ -200,6 +200,7 @@ def record_quota_submission(
     st["count"] = int(st.get("count") or 0) + 1
     tickers = st.setdefault("tickers", {})
     rec = tickers.setdefault(ticker, {"n": 0, "first_ts": now})
+    rec["prev_ts"] = float(rec.get("last_ts") or 0.0)
     rec["n"] = int(rec.get("n") or 0) + 1
     rec["last_ts"] = now
     try:
@@ -211,3 +212,34 @@ def record_quota_submission(
     except Exception:
         pass
     return int(rec["n"]), int(st["count"])
+
+
+def release_quota_submission(
+    ticker: str, path: Optional[str] = None, now: Optional[float] = None
+) -> None:
+    """Release a quota slot when a candidate is dropped pre-wire
+    (e.g. GlobalAllocator KNAPSACK_CAP or pre-wire router rejection) so
+    internal multi-asset contention does not exhaust the ticker's
+    3-attempt window budget without transmitting an order."""
+    if not ticker:
+        return
+    now = time.time() if now is None else float(now)
+    p = path or quota_state_path()
+    st = _load_state(p, now)
+    tickers = st.get("tickers") or {}
+    rec = tickers.get(ticker)
+    if not isinstance(rec, dict) or int(rec.get("n") or 0) <= 0:
+        return
+    rec["n"] = max(0, int(rec.get("n") or 0) - 1)
+    rec["last_ts"] = float(rec.get("prev_ts") or 0.0)
+    st["count"] = max(0, int(st.get("count") or 0) - 1)
+    if rec["n"] == 0:
+        tickers.pop(ticker, None)
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(st, separators=(",", ":")))
+        os.replace(tmp, p)
+    except Exception:
+        pass

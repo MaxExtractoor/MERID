@@ -85,10 +85,10 @@ drawdown:
 
 # Rate limiting
 rate_limit:
-  # Maximum trades per hour
-  max_trades_per_hour: 20
-  # Minimum time between trades (seconds)
-  min_time_between_trades: 60.0
+  # Maximum trades per hour (aligned with 5 assets x 4 windows/hr x 3 attempts)
+  max_trades_per_hour: 120
+  # Minimum time between trades (seconds) — aligned with kalshi_crypto_15m_v2.yaml per_asset_cooldown_sec: 3
+  min_time_between_trades: 3.0
 
 # Emergency controls
 emergency:
