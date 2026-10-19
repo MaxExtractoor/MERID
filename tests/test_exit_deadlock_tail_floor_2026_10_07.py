@@ -17,10 +17,13 @@ Fixes under test:
 2. A stale SUBMISSION_UNKNOWN in-flight lock becomes force-reconcilable by ANY
    exit class after ``MERID_EXIT_INFLIGHT_STALE_FORCE_S`` (default 30s).
 
-3. The tail-loss floor emits a HARD_STOP-class StopCandidate on the
-   reduce-only IOC submission channel — independent of the intent lock — when
-   the executable own-side bid drops >= ``MERID_TAIL_LOSS_DROP_CENTS`` below
-   entry or sits <= ``MERID_TAIL_LOSS_FLOOR_CENTS``.
+3. The tail-loss floor emits a StopCandidate on the reduce-only IOC
+   submission channel — independent of the intent lock — when the
+   executable own-side bid drops >= ``MERID_TAIL_LOSS_DROP_CENTS`` below
+   entry or sits <= ``MERID_TAIL_LOSS_FLOOR_CENTS``.  (2026-10-19: the
+   trigger class was corrected from HARD_STOP to LOSS_CAP — HARD_STOP is
+   shadowed by the 2026-10-17 price-stop freeze, which had silently
+   reduced every tail-floor emission to record-only telemetry.)
 
 4. ``loss_cap`` is a first-class canonical emergency exit reason end-to-end
    (canonical map, emergency class, allowed-reason set, hard-risk set, and the
@@ -173,8 +176,9 @@ class TestTailLossFloor:
         )
 
     def test_floor_fires_hard_stop_candidate(self, monkeypatch):
-        """Entry 68c, bid 38c -> drop 30c hits the floor; a HARD_STOP-class
-        StopCandidate is submitted on the reduce-only channel."""
+        """Entry 68c, bid 38c -> drop 30c hits the floor; a LOSS_CAP-class
+        (mandatory-risk, non-shadowed) StopCandidate is submitted on the
+        reduce-only channel."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
@@ -201,7 +205,7 @@ class TestTailLossFloor:
         assert position.tail_loss_floor_fired is True
         assert len(recorded) == 1
         assert len(submitted) == 1
-        assert submitted[0].trigger_reason == "HARD_STOP"
+        assert submitted[0].trigger_reason == "LOSS_CAP"
 
     def test_floor_does_not_fire_above_drop(self, monkeypatch):
         """Entry 68c, bid 50c -> only -18c, above the 30c drop and 18c floor."""

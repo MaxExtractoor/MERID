@@ -117,6 +117,13 @@ PRICE_STOP_TRIGGER_REASONS = frozenset({
     "OPERATIONAL_RISK",
     "STALE_DATA",
     "POSITION_MISMATCH",
+    # 2026-10-19: LOSS_CAP is the tail-loss floor's explicit price trigger —
+    # it must take the unconditional price-stop branch in
+    # ``settlement_phase_allows_stop`` (emissions carry no edge persistence)
+    # and count as ``is_price_stop`` so no fair value is required.  It is
+    # deliberately NOT in SHADOWED_PRICE_STOP_TRIGGERS: catastrophic salvage
+    # is a mandatory-risk control, not an ordinary price stop.
+    "LOSS_CAP",
 })
 
 # Map a stop-candidate trigger reason to a canonical safety exit-reason so the
@@ -135,6 +142,10 @@ _STOP_TRIGGER_TO_EXIT_REASON = {
     "UNIFIED_POLICY_STOP": "STOP_LOSS",
     "EDGE_STOP": "STOP_LOSS",
     "EDGE_DECAY": "EDGE_DECAY",
+    # 2026-10-19: without this mapping a LOSS_CAP candidate fell back to
+    # "STOP_LOSS" -> canonical stop_loss -> DISCRETIONARY/EV-gated, defeating
+    # the mandatory-risk classification the trigger carries.
+    "LOSS_CAP": "LOSS_CAP",
 }
 
 # Cutoff and freshness constants (seconds / ms).

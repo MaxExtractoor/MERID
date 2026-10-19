@@ -3990,7 +3990,18 @@ class PositionMonitor:
                         candidate = build_stop_candidate(
                             market_ticker=position.market_id,
                             exchange_position_cc=_position_cc,
-                            trigger_reason="HARD_STOP",
+                            # 2026-10-19: emit the catastrophic tail floor under
+                            # its designed LOSS_CAP class, not HARD_STOP — the
+                            # 2026-10-17 price-stop shadow freezes HARD_STOP
+                            # candidates (record-only, never submitted), which
+                            # silently killed every tail-floor salvage while
+                            # ``tail_loss_floor_fired`` latched true.  XRP/DOGE
+                            # 1630-30 fired at tte=307s with executable 39c/35c
+                            # salvage bids and rode to settlement at ~0.
+                            # LOSS_CAP is the non-shadowed mandatory-risk class
+                            # (LOSS_SELL_EXEMPT, EV-veto-exempt, emergency
+                            # POSITION_LOSS_BUDGET at the firewall).
+                            trigger_reason="LOSS_CAP",
                             entry_price_cents=_entry_px or None,
                             kalshi_state=_kalshi_state,
                             unified_state=_unified_state,
