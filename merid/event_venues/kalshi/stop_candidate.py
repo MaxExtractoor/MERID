@@ -107,6 +107,11 @@ STOP_MAX_SLIPPAGE_CENTS = _env_int("MERID_STOP_MAX_SLIPPAGE_CENTS", 3)
 
 # Trigger reasons that are explicit price/operational stops.  They do not
 # require a model fair value or edge persistence to be submitted.
+# LOSS_CAP (2026-10-19): the tail-loss floor emits this class — it is an
+# explicit catastrophic price trigger (bid <= entry - drop OR bid <= floor),
+# so the model-edge breach test must not gate it; when the model tracks the
+# bid down 1:1 an edge stop can never fire while the position collapses
+# (KXXRP15M-26OCT190230-30 YES@88 rode 45c -> 0 on shadowed HARD_STOPs).
 PRICE_STOP_TRIGGER_REASONS = frozenset({
     "POSITION_MONITOR_STOP",
     "STOP_LOSS",
@@ -117,6 +122,7 @@ PRICE_STOP_TRIGGER_REASONS = frozenset({
     "OPERATIONAL_RISK",
     "STALE_DATA",
     "POSITION_MISMATCH",
+    "LOSS_CAP",
 })
 
 # Map a stop-candidate trigger reason to a canonical safety exit-reason so the
@@ -135,6 +141,10 @@ _STOP_TRIGGER_TO_EXIT_REASON = {
     "UNIFIED_POLICY_STOP": "STOP_LOSS",
     "EDGE_STOP": "STOP_LOSS",
     "EDGE_DECAY": "EDGE_DECAY",
+    # Tail-loss floor emission: canonicalizes to `loss_cap` (EMERGENCY /
+    # POSITION_LOSS_BUDGET) so the exit carries structured loss authority
+    # instead of falling back to STOP_LOSS (discretionary/unknown class).
+    "LOSS_CAP": "LOSS_CAP",
 }
 
 # Cutoff and freshness constants (seconds / ms).
@@ -1573,9 +1583,8 @@ async def _maybe_degraded_stop_exit(
     from merid.position_management.exit_pipeline import (
         approve_intent, post_route_update,
     )
-    from merid.position_management.exit_arbiter import (
-        ExitBook as _ExitBook, ExitContext as _ExitContext,
-    )
+    from merid.position_management.exit_arbiter import ExitBook as _ExitBook
+    from merid.position_management.exit_pipeline import ExitContext as _ExitContext
     _arb_pk = None
     if parent_entry_fill_id:
         _arb_ctx = _ExitContext(
