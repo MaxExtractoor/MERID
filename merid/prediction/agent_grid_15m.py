@@ -9505,6 +9505,35 @@ class LeanAgent15m:
                 _wq_min_cand_p = max(
                     _wq_min_cand_p, _wq_quota.quota_dir_absent_min_p()
                 )
+            # 2026-10-20: order-book-imbalance veto.  depth_10c_yes/no
+            # count RESTING BID depth within +-10c of mid — the side
+            # informed flow is buying.  Emitting the opposite side buys
+            # into that pressure (SSRN 143k-snapshot Kalshi OFI study:
+            # beta=0.45 predicting mid moves; KalshiBackTest: top-book
+            # imbalance leads price by seconds).  Same shape as the
+            # book_falling veto: the vetoed side abstains, the other
+            # candidate may still emit.  Fails open on thin/stale depth.
+            _wq_obi = None
+            try:
+                _wq_obi_min = float(
+                    os.environ.get("MERID_WINDOW_QUOTA_OBI_MIN", "0.5")
+                )
+                _wq_obi_min_dep = float(
+                    os.environ.get(
+                        "MERID_WINDOW_QUOTA_OBI_MIN_DEPTH", "100"
+                    )
+                )
+                _wq_dyes = float(
+                    getattr(market_state, "depth_10c_yes", 0) or 0
+                )
+                _wq_dno = float(
+                    getattr(market_state, "depth_10c_no", 0) or 0
+                )
+                _wq_obi_tot = _wq_dyes + _wq_dno
+                if _wq_obi_tot >= _wq_obi_min_dep:
+                    _wq_obi = (_wq_dyes - _wq_dno) / _wq_obi_tot
+            except Exception:
+                _wq_obi = None
             for _wq_cand in _wq_order:
                 if (
                     _wq_leader is not None
@@ -9535,6 +9564,17 @@ class LeanAgent15m:
                     ):
                         _wq_notes.append(
                             f"{_wq_cand}:book_falling:{float(no_ask) if _wq_cand == 'no' else float(yes_ask):.0f}c"
+                        )
+                        continue
+                except Exception:
+                    pass
+                try:
+                    if _wq_obi is not None and (
+                        (_wq_cand == "yes" and _wq_obi <= -_wq_obi_min)
+                        or (_wq_cand == "no" and _wq_obi >= _wq_obi_min)
+                    ):
+                        _wq_notes.append(
+                            f"{_wq_cand}:obi_against:{_wq_obi:+.2f}"
                         )
                         continue
                 except Exception:
