@@ -9658,7 +9658,7 @@ class LeanAgent15m:
                 logger.info(
                     "[WINDOW-QUOTA] asset=%s side=%s ask=%.1fc "
                     "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f "
-                    "dir_pref=%s argmax=%s r60=%s regime=%s%s%s%s — "
+                    "dir_pref=%s argmax=%s r60=%s regime=%s%s%s%s%s — "
                     "forcing bounded taker emit",
                     asset, _wq_side, _wq_ask, _wq_ev_c,
                     float(seconds_to_expiry), _wq_depth,
