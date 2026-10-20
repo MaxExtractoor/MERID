@@ -1649,28 +1649,106 @@ def pinned_fav_enabled() -> bool:
     return _env_flag("MERID_PINNED_FAV_ENABLED", False)
 
 
+def pinned_fav_maker_mode() -> bool:
+    """Maker-mode switch: the lane rests post-only bids instead of taking asks.
+
+    Taker mode (default off-switch state) measured the 92-98c ask cohort.
+    External real-money evidence (Pondletter favorite-maker: +2.07c/contract
+    over 1,459 fills vs its unfiltered twin at -0.26c; ask-vs-bid twin test:
+    taker -6c/fill on identical signals) shows the same contracts only clear
+    costs when bought at the bid in the 80s with a reachability filter.  In
+    maker mode every lane bound re-centers on the realizable bid band: the
+    band accessors below, the TTE window, the EV floor, and the min-p pin
+    filter all apply to the resting-bid cohort, and ``decision_lane`` stays
+    ``"pinned_fav"`` so the allocator/slot/loop/router lane-aware bounds
+    follow automatically.
+    """
+    return _env_flag("MERID_PINNED_FAV_MAKER_MODE", False)
+
+
 def _pinned_fav_lo() -> float:
     # 92c, not 91c: measured edge at 91c/TTE 300-600s is ~0 (-0.05c avg).
+    # Maker mode: 82c — the realizable resting-bid floor on a converged
+    # favorite book (the measured winning cohort rested "in the 80s").
+    if pinned_fav_maker_mode():
+        return _env_float("MERID_PINNED_FAV_MAKER_LO", 82.0)
     return _env_float("MERID_PINNED_FAV_PRICE_LO", 92.0)
 
 
 def _pinned_fav_hi() -> float:
     # 98c, not 99c: 99-100c has <=1c of payoff headroom before fees.
+    # Maker mode: 91c — a resting bid at 92+ on a converged book is a de
+    # facto taker order (no payoff headroom after costs).
+    if pinned_fav_maker_mode():
+        return _env_float("MERID_PINNED_FAV_MAKER_HI", 91.0)
     return _env_float("MERID_PINNED_FAV_PRICE_HI", 98.0)
 
 
 def _pinned_fav_min_tte() -> float:
     # 300s, not 120s: the measured edge lives at TTE >= 300s; the 120-300s
     # bucket realized ~0 (-0.05c) and the settlement lane owns <120s.
+    # Maker mode: 121s — the whole passive path is skipped when is_late
+    # (TTE <= MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS=120), so 120 itself is
+    # unreachable; the maker cohort's edge is the late converged window.
+    if pinned_fav_maker_mode():
+        return _env_float("MERID_PINNED_FAV_MAKER_MIN_TTE_S", 121.0)
     return _env_float("MERID_PINNED_FAV_MIN_TTE_S", 300.0)
 
 
 def _pinned_fav_max_tte() -> float:
+    # Maker mode: 420s — the measured winner entered "late in the market",
+    # not early-window where pin claims are weakest.
+    if pinned_fav_maker_mode():
+        return _env_float("MERID_PINNED_FAV_MAKER_MAX_TTE_S", 420.0)
     return _env_float("MERID_PINNED_FAV_MAX_TTE_S", 840.0)
 
 
 def _pinned_fav_min_ev_cents() -> float:
+    # Maker mode: bounded probe floor.  Measured bid-priced claims on the
+    # filtered cohort run roughly -9..-3c under the reserve stack (gross
+    # p-bid minus ASR/model-uncertainty/giveback) while the external
+    # realized basis for the same configuration was +2.07c/contract — the
+    # min-p gate is the discriminator, the floor bounds the probe.
+    # -12c admits the observed claim distribution; a deeper claim means
+    # the pin thesis itself is mispriced, not the reserve stack.
+    if pinned_fav_maker_mode():
+        return _env_float("MERID_PINNED_FAV_MAKER_MIN_EV_CENTS", -12.0)
     return _env_float("MERID_PINNED_FAV_MIN_EV_CENTS", 2.0)
+
+
+def _pinned_fav_maker_min_p() -> float:
+    """Min calibrated p_selected for a maker-mode admission (the filter).
+
+    The external winner's edge was not the resting mechanics — it was the
+    reachability filter: identical maker quoting without it ran -0.26c over
+    3,230 fills.  p_selected is the Bachelier z-distance Phi(d/sigma*sqrt(T))
+    — the same "index far enough from strike" gate in our units.
+    """
+    return _env_float("MERID_PINNED_FAV_MAKER_MIN_P", 0.85)
+
+
+def pinned_fav_maker_min_spread_cents() -> float:
+    """Spread floor for the maker-mode cohort inside the maker_bid pass.
+
+    The generic maker_bid lane requires a >=4c own-side spread; converged
+    favorite books run 1-2c, so the floor would exclude exactly the books
+    the lane exists to rest in.  A 1c floor still refuses locked books
+    where no resting price exists.
+    """
+    return _env_float("MERID_PINNED_FAV_MAKER_MIN_SPREAD_CENTS", 1.0)
+
+
+def pinned_fav_taker_probe() -> bool:
+    """Whether the lane may emit taker/IOC orders.
+
+    ``MERID_PINNED_FAV_TAKER_PROBE=0`` restores the generic post-only probe
+    restriction; maker mode additionally forbids taker emissions entirely —
+    a 92-98c ask taker is the measured-losing configuration the mode exists
+    to leave behind.
+    """
+    if pinned_fav_maker_mode():
+        return False
+    return _env_flag("MERID_PINNED_FAV_TAKER_PROBE", True)
 
 
 def pinned_fav_band_match(price_cents: Optional[float]) -> bool:
@@ -1717,6 +1795,7 @@ def pinned_fav_block(
     side_price_cents: Optional[float],
     net_ev_cents: Optional[float],
     tte_seconds: Optional[float],
+    p_selected: Optional[float] = None,
 ) -> Optional[str]:
     """Strict pinned-favorite admission gate.
 
@@ -1727,6 +1806,11 @@ def pinned_fav_block(
     evidence, throttle, book-flow, conviction, edge-bias) wrap it — the
     lane's job is to stop the pre-economics vetoes, not to weaken the
     economics that remain.
+
+    Maker mode additionally requires ``p_selected`` (the reachability
+    filter): a resting favorite bid without a strong z-distance claim is
+    the configuration that measured -0.26c/contract unfiltered.  Fail
+    closed when p is unavailable.
     """
     if not pinned_fav_enabled():
         return None
@@ -1738,6 +1822,15 @@ def pinned_fav_block(
         _pinned_fav_min_tte() <= float(tte_seconds) <= _pinned_fav_max_tte()
     ):
         return "pinned_fav_tte"
+    if pinned_fav_maker_mode():
+        try:
+            _p = float(p_selected) if p_selected is not None else None
+        except (TypeError, ValueError):
+            _p = None
+        if _p is None or not math.isfinite(_p):
+            return "pinned_fav_maker_no_p"
+        if _p < _pinned_fav_maker_min_p():
+            return "pinned_fav_maker_low_p"
     if net_ev_cents is None or float(net_ev_cents) < _pinned_fav_min_ev_cents():
         return "pinned_fav_low_ev"
     if pinned_fav_cap_remaining() <= 0:

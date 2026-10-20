@@ -186,22 +186,25 @@ class TestPinnedFavTakerRouting(unittest.TestCase):
 
     def test_pf_lane_forces_taker_route(self):
         src = self._src()
-        assert 'or _pf_lane' in src
-        # The force-taker condition must sit in the use_taker chain.
+        # Taker mode keeps the force-taker condition; maker mode is
+        # excluded from it (its only vehicle is the bid-priced pass).
         seg = src[src.find('_taker_sel = decision_taker.selected_outcome'):]
         sel_block = seg[:seg.find('if use_taker:')]
-        assert 'or _pf_lane' in sel_block
+        assert 'or (_pf_lane and not _pf_maker_mode)' in sel_block
 
     def test_maker_only_pinned_admission_suppressed(self):
         src = self._src()
         assert 'pinned_fav_taker_only' in src
-        # Suppression must null the maker selection before route choice.
-        seg = src[src.find('_pf_lane and not _taker_sel and _maker_sel'):]
+        # Taker-mode suppression must null the maker selection before
+        # route choice (only when maker mode is off).
+        seg = src[src.find('not _pf_maker_mode and not _taker_sel and _maker_sel'):]
         assert '_maker_sel = False' in seg[:800]
+        # Maker mode suppresses BOTH ask-priced selections — the lane's
+        # only vehicle is the bid-priced maker_bid pass.
+        assert 'pinned_fav_maker_only' in src
 
     def test_pinned_probe_keeps_taker_cross(self):
         src = self._src()
-        assert 'MERID_PINNED_FAV_TAKER_PROBE' in src
         assert '_pf_taker_probe' in src
         assert 'not _probe_restricted or _pf_taker_probe' in src
 

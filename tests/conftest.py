@@ -91,6 +91,11 @@ _os.environ["MERID_MONEYNESS_GATE_ENABLED"] = "0"
 # expected terminal reasons.  Exercised explicitly in
 # tests/test_pinned_fav_lane.py.
 _os.environ["MERID_PINNED_FAV_ENABLED"] = "0"
+# 2026-10-20 (pinned-fav maker mode): production .env re-centers the lane
+# band on the resting-bid window (82-91c).  Pin the mode off globally —
+# the taker-mode 92-98c reserved band is the default the suite was
+# written against; maker-mode tests opt in via fixture.
+_os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
 # 2026-10-17: production .env arms negative per-cohort provisional floors
 # (MERID_PROVISIONAL_MIN_EV_C_*) — they change no-edge terminal labels to
 # edge_below_lane_floor.  Restore the code defaults (positive bounds) via

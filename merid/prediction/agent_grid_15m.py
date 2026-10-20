@@ -8882,7 +8882,37 @@ class LeanAgent15m:
             and (decision_maker.indicators or {}).get("decision_lane")
             == "pinned_fav"
         )
-        if _pf_lane and not _taker_sel and _maker_sel:
+        # 2026-10-20 (maker mode): the lane's only realizable vehicle is the
+        # bid-priced maker_bid pass below.  In maker mode suppress BOTH
+        # ask-priced selections — an ask-priced maker selection cannot rest
+        # (it would cross) and an ask-priced taker selection is the
+        # measured-losing configuration the mode exists to leave behind.
+        _pf_maker_mode = False
+        if _pf_lane:
+            try:
+                from merid.prediction import directional_regime as _dr_pf_route
+                _pf_maker_mode = bool(_dr_pf_route.pinned_fav_maker_mode())
+            except Exception:
+                _pf_maker_mode = False
+        if _pf_lane and _pf_maker_mode and _maker_sel:
+            decision_maker = replace(
+                decision_maker,
+                selected_outcome=None,
+                selected_action=None,
+                selected_outcome_price=None,
+                no_trade_reason="pinned_fav_maker_only",
+            )
+            _maker_sel = False
+        if _pf_lane and _pf_maker_mode and _taker_sel:
+            decision_taker = replace(
+                decision_taker,
+                selected_outcome=None,
+                selected_action=None,
+                selected_outcome_price=None,
+                no_trade_reason="pinned_fav_maker_only",
+            )
+            _taker_sel = False
+        if _pf_lane and not _pf_maker_mode and not _taker_sel and _maker_sel:
             decision_maker = replace(
                 decision_maker,
                 selected_outcome=None,
@@ -8901,13 +8931,14 @@ class LeanAgent15m:
             use_taker = False
         elif (
             is_late or is_high_edge or _taker_rescued or not _maker_sel
-            or _pf_lane
+            or (_pf_lane and not _pf_maker_mode)
         ):
             # Positive taker surplus + no qualified passive alternative:
             # forcing this candidate to rest forfeits a certain fill for the
             # maker-fee delta.  Route IOC (bounded by the economic cap).
             # Pinned-fav selections route taker unconditionally — see the
-            # _pf_lane note above.
+            # _pf_lane note above (taker mode only; maker mode suppressed
+            # both ask-priced selections already).
             use_taker = True
         else:
             # Both routes qualify: prefer maker only when its
@@ -9020,7 +9051,31 @@ class LeanAgent15m:
                                 )
                             except Exception:
                                 _mb_toxic_bf = None
-                        if _mb_spread >= MERID_MAKER_BID_MIN_SPREAD_CENTS and not _mb_toxic_bf:
+                        # 2026-10-20 (pinned-fav maker mode): the lane
+                        # rests in converged favorite books whose own-side
+                        # spread is 1-2c — the generic >=4c floor would
+                        # exclude exactly the cohort the lane exists for.
+                        # Admission there came from the lane's own gates
+                        # (band/TTE/min-p/EV/cap); the spread floor drops
+                        # to the realizable minimum (still refuse locked
+                        # books).  Applies only when the bid-priced pass
+                        # itself stamped the lane.
+                        _mb_lane = (decision_maker_bid.indicators or {}).get(
+                            "decision_lane"
+                        )
+                        _mb_spread_floor = MERID_MAKER_BID_MIN_SPREAD_CENTS
+                        if _mb_lane == "pinned_fav":
+                            try:
+                                from merid.prediction import (
+                                    directional_regime as _dr_mb,
+                                )
+                                if _dr_mb.pinned_fav_maker_mode():
+                                    _mb_spread_floor = (
+                                        _dr_mb.pinned_fav_maker_min_spread_cents()
+                                    )
+                            except Exception:
+                                pass
+                        if _mb_spread >= _mb_spread_floor and not _mb_toxic_bf:
                             decision = decision_maker_bid
                             liquidity_role = "maker"
                             aggressiveness = 0.0
@@ -10025,12 +10080,13 @@ class LeanAgent15m:
             # (1 contract) and the daily cap still bound them.  Kill
             # switch: MERID_PINNED_FAV_TAKER_PROBE=0 restores the generic
             # post-only probe restriction for this lane.
-            _pf_taker_probe = (
-                _decision_lane == "pinned_fav"
-                and os.environ.get(
-                    "MERID_PINNED_FAV_TAKER_PROBE", "1"
-                ).strip().lower() in ("1", "true", "yes")
-            )
+            _pf_taker_probe = False
+            if _decision_lane == "pinned_fav":
+                try:
+                    from merid.prediction import directional_regime as _dr_pf_tp
+                    _pf_taker_probe = bool(_dr_pf_tp.pinned_fav_taker_probe())
+                except Exception:
+                    _pf_taker_probe = False
             # 2026-10-17 (window-quota): quota emissions are paid telemetry
             # evaluated at the ask — the claim never priced a passive fill,
             # so probe/evidence state must not flip the order post-only
@@ -15020,14 +15076,32 @@ class LeanAgent15m:
             from merid.prediction import directional_regime as _dr_pf
             from merid.event_venues.kalshi.market_regime import SkewRegime
 
+            # 2026-10-20 (maker mode): the lane band is a resting-BID
+            # window (82-91c default), but this classifier only sees the
+            # own-side ASK.  In maker mode reachability is decided on the
+            # bid — a 91c YES bid on a 93c ask, or an 88c bid under a 95c
+            # ask, is exactly the resting-favorite book the lane exists
+            # for; ask-side prices 82-90 already classify into enabled
+            # regimes anyway, so the injection only matters at 91c+.
+            _pf_maker = _dr_pf.pinned_fav_maker_mode()
+            _pf_yes_px = (
+                float(best_bid) if _pf_maker else yes_price_cents
+            )
+            _pf_no_px = (
+                (100.0 - float(best_ask)) if _pf_maker else no_price_cents
+            )
             _pf_tte = float(seconds_to_expiry) if seconds_to_expiry is not None else None
+            _pf_lo = int(_dr_pf._pinned_fav_lo())
+            _pf_hi = int(_dr_pf._pinned_fav_hi())
+            _pf_tte_lo = int(_dr_pf._pinned_fav_min_tte())
+            _pf_tte_hi = int(_dr_pf._pinned_fav_max_tte())
             if yes_regime is None and _dr_pf.pinned_fav_reachable(
-                yes_price_cents, _pf_tte
+                _pf_yes_px, _pf_tte
             ):
                 yes_regime = SkewRegime(
                     name="pinned_fav",
-                    min_price_cents=92,
-                    max_price_cents=98,
+                    min_price_cents=_pf_lo,
+                    max_price_cents=_pf_hi,
                     min_net_edge_cents=Decimal("2.0"),
                     min_confidence=Decimal("0.80"),
                     max_spread_cents=2,
@@ -15035,16 +15109,16 @@ class LeanAgent15m:
                     size_multiplier=Decimal("0.50"),
                     enabled=True,
                     min_book_freshness_ms=1000,
-                    min_time_to_expiry_seconds=120,
-                    max_time_to_expiry_seconds=840,
+                    min_time_to_expiry_seconds=_pf_tte_lo,
+                    max_time_to_expiry_seconds=_pf_tte_hi,
                 )
             if no_regime is None and _dr_pf.pinned_fav_reachable(
-                no_price_cents, _pf_tte
+                _pf_no_px, _pf_tte
             ):
                 no_regime = SkewRegime(
                     name="pinned_fav",
-                    min_price_cents=92,
-                    max_price_cents=98,
+                    min_price_cents=_pf_lo,
+                    max_price_cents=_pf_hi,
                     min_net_edge_cents=Decimal("2.0"),
                     min_confidence=Decimal("0.80"),
                     max_spread_cents=2,
@@ -15052,8 +15126,8 @@ class LeanAgent15m:
                     size_multiplier=Decimal("0.50"),
                     enabled=True,
                     min_book_freshness_ms=1000,
-                    min_time_to_expiry_seconds=120,
-                    max_time_to_expiry_seconds=840,
+                    min_time_to_expiry_seconds=_pf_tte_lo,
+                    max_time_to_expiry_seconds=_pf_tte_hi,
                 )
         except Exception:
             pass

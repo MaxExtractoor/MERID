@@ -5393,12 +5393,22 @@ def compute_trade_decision(
         tte_seconds=(
             float(seconds_to_expiry) if seconds_to_expiry is not None else None
         ),
+        p_selected=(
+            float(yes_breakdown.p_selected)
+            if yes_breakdown.p_selected is not None
+            else None
+        ),
     ) if _yes_pf_price else None
     _no_pf_block = _dr.pinned_fav_block(
         side_price_cents=float(no_price_cents) if no_price_cents else None,
         net_ev_cents=float(no_breakdown.net_edge) * 100.0,
         tte_seconds=(
             float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        p_selected=(
+            float(no_breakdown.p_selected)
+            if no_breakdown.p_selected is not None
+            else None
         ),
     ) if _no_pf_price else None
     _yes_pf_qualifies = (
@@ -7435,11 +7445,24 @@ def compute_trade_decision(
         # (bounded δ-slack admissions) stays separable from full-bound
         # maker_bid fills in the outcome joins.
         if entry_price_basis == "bid":
-            indicators["decision_lane"] = (
-                "empirical_marginal_maker"
-                if route == "empirical_marginal_maker"
-                else "maker_bid"
-            )
+            # 2026-10-20 (pinned-fav maker mode): an in-band bid-priced
+            # pinned_fav admission keeps its lane id — downstream bounds,
+            # the daily cap, the measured-loss cell guard, and the
+            # maker_bid spread-floor exemption all key on it, and the
+            # post-only contract still applies via BOUNDED_POST_ONLY_LANES.
+            _pf_bid_lane = indicators.get("decision_lane") == "pinned_fav"
+            try:
+                _pf_bid_lane = _pf_bid_lane and bool(
+                    _dr.pinned_fav_maker_mode()
+                )
+            except Exception:
+                _pf_bid_lane = False
+            if not _pf_bid_lane:
+                indicators["decision_lane"] = (
+                    "empirical_marginal_maker"
+                    if route == "empirical_marginal_maker"
+                    else "maker_bid"
+                )
 
         if _sel_thr.cell_id is not None:
             indicators["threshold_cell_id"] = _sel_thr.cell_id

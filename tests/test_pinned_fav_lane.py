@@ -37,6 +37,9 @@ def _iso(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "MERID_PINNED_FAV_STATE_PATH", str(tmp_path / "pinned_fav.json")
     )
+    # The repo .env arms maker mode for live; this file pins the taker-mode
+    # semantics explicitly so the suite is .env-independent.
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "0")
     yield
 
 
@@ -530,3 +533,148 @@ def test_non_pinned_selection_keeps_positive_min_required_edge(
     d = _decision(seconds_to_expiry=200.0)  # outside the lane TTE window
     assert d.selected_outcome is None
     assert float(d.min_required_edge) >= 0.0
+
+# ------------------------------------------------- maker mode (2026-10-20) ----
+# External real-money evidence converted the lane from ask-taker to resting
+# bid: the same favorite contracts clear costs only at the bid in the 80s
+# with a reachability filter (Pondletter filtered favorite maker +2.07c/
+# contract over 1,459 fills vs -0.26c unfiltered; taker-vs-bid twin -6c/fill
+# on identical signals).  These tests pin the mode-aware bounds, the min-p
+# pin filter, the taker-probe lockout, and the bid-basis lane stamp.
+
+
+@pytest.fixture
+def _maker_mode(monkeypatch):
+    """Arm maker mode with the live band/window/filter settings."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "82")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_HI", "91")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_TTE_S", "121")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MAX_TTE_S", "420")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_EV_CENTS", "-12")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_P", "0.85")
+    yield
+
+
+def test_maker_mode_band_recentered_on_bid_window(_maker_mode):
+    assert dr.pinned_fav_band_match(82.0) is True
+    assert dr.pinned_fav_band_match(85.0) is True
+    assert dr.pinned_fav_band_match(91.0) is True
+    # The taker band is gone: an in-band resting bid cannot exist at the ask.
+    assert dr.pinned_fav_band_match(92.0) is False
+    assert dr.pinned_fav_band_match(98.0) is False
+    assert dr.pinned_fav_band_match(81.0) is False
+
+
+def test_maker_mode_tte_window(_maker_mode):
+    # 121-420s: is_late swallows <=120s, early-window pins are not the cohort.
+    assert dr.pinned_fav_reachable(85.0, 200.0) is True
+    assert dr.pinned_fav_reachable(85.0, 121.0) is True
+    assert dr.pinned_fav_reachable(85.0, 420.0) is True
+    assert dr.pinned_fav_reachable(85.0, 120.0) is False
+    assert dr.pinned_fav_reachable(85.0, 500.0) is False
+
+
+def test_maker_mode_min_p_is_the_filter(_maker_mode):
+    """The reachability filter is the whole edge: identical favorite
+    quoting without it measured -0.26c over 3,230 fills.  p is the
+    Bachelier z-distance Phi(d/sigma*sqrt(T)) in our units."""
+    assert dr.pinned_fav_block(85.0, -1.0, 200.0, p_selected=0.90) is None
+    assert dr.pinned_fav_block(
+        85.0, -1.0, 200.0, p_selected=0.80
+    ) == "pinned_fav_maker_low_p"
+    # Fail closed when the claim is unavailable — an unpriced pin is not
+    # a filtered pin.
+    assert dr.pinned_fav_block(
+        85.0, -1.0, 200.0, p_selected=None
+    ) == "pinned_fav_maker_no_p"
+
+
+def test_maker_mode_min_ev_floor_bounded(_maker_mode):
+    # -12c bounded probe floor: admits the measured claim distribution
+    # (-9..-3c under the reserve stack), rejects mispriced pins.  The
+    # min-p gate is the discriminator; the floor bounds the probe.
+    assert dr._pinned_fav_min_ev_cents() == pytest.approx(-12.0)
+    assert dr.pinned_fav_block(
+        85.0, -13.0, 200.0, p_selected=0.90
+    ) == "pinned_fav_low_ev"
+    assert dr.pinned_fav_block(85.0, -10.0, 200.0, p_selected=0.90) is None
+
+
+def test_maker_mode_taker_probe_off(monkeypatch, _maker_mode):
+    """No taker emissions in maker mode even if the probe flag is set —
+    the 92-98c ask-taker is the measured-losing configuration."""
+    monkeypatch.setenv("MERID_PINNED_FAV_TAKER_PROBE", "1")
+    assert dr.pinned_fav_taker_probe() is False
+
+
+def test_taker_mode_taker_probe_flag_still_honored(monkeypatch):
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "0")
+    monkeypatch.setenv("MERID_PINNED_FAV_TAKER_PROBE", "0")
+    assert dr.pinned_fav_taker_probe() is False
+    monkeypatch.setenv("MERID_PINNED_FAV_TAKER_PROBE", "1")
+    assert dr.pinned_fav_taker_probe() is True
+
+
+def test_maker_mode_min_spread_floor(_maker_mode):
+    # Converged favorite books run 1-2c spreads; the floor only refuses
+    # locked books where no resting price exists.
+    assert dr.pinned_fav_maker_min_spread_cents() == pytest.approx(1.0)
+
+
+def test_maker_mode_bid_priced_selection_stamps_lane(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """The bid-priced maker_bid pass is the lane's vehicle: an in-band
+    own-side bid at 85c stamps decision_lane=pinned_fav so the
+    allocator/slot/loop/router lane-aware bounds follow the mode."""
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision(
+        seconds_to_expiry=200.0,
+        spot_price=101.0,
+        yes_bid_cents=85.0,
+        yes_ask_cents=87.0,
+        no_bid_cents=13.0,
+        no_ask_cents=15.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.04,
+        route="maker_bid",
+    )
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"),
+        d.no_trade_reason,
+        d.indicators.get("yes_pinned_fav_block"),
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("yes_pinned_fav_qualifies") is True
+
+
+def test_maker_mode_low_p_bid_does_not_select(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """A resting favorite bid without a strong pin claim is the
+    unfiltered configuration that measured -0.26c — it must not admit."""
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision(
+        seconds_to_expiry=200.0,
+        spot_price=100.02,  # nearly on strike -> weak z-distance claim
+        yes_bid_cents=85.0,
+        yes_ask_cents=87.0,
+        no_bid_cents=13.0,
+        no_ask_cents=15.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.04,
+        route="maker_bid",
+    )
+    assert d.selected_outcome != "yes" or (
+        d.indicators.get("decision_lane") != "pinned_fav"
+    ), (
+        d.indicators.get("yes_pinned_fav_block"),
+        d.selected_outcome,
+        d.selected_outcome_price,
+    )

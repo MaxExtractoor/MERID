@@ -567,6 +567,12 @@ class TestLaneAwareEntryBand:
     def setup_method(self):
         from merid.risk.global_slot_allocator import reset_global_slot_allocator
         reset_global_slot_allocator()
+        # The repo .env arms maker mode for live (lane band 82-91c); this
+        # class pins the taker-mode 92-98c band it was written against.
+        os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
+
+    def teardown_method(self):
+        os.environ.pop("MERID_PINNED_FAV_MAKER_MODE", None)
 
     def _req(self, price_cents, lane, ticker="KXXRP15M-TEST", asset="XRP"):
         from merid.risk.global_slot_allocator import AllocationRequest
