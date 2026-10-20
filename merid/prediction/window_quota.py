@@ -133,6 +133,37 @@ def quota_max_contracts() -> float:
     return _env_float("MERID_WINDOW_QUOTA_MAX_CONTRACTS", 3.0)
 
 
+def quota_dir_absent_min_p() -> float:
+    """2026-10-19: when the lane has no directional read (no asset r60 beyond
+    the dir threshold, no regime label, or a demoted flip), the ungated argmax
+    side is a coin-flip the lane still paid taker for — observed live as
+    dir_pref=None emissions at 75-80c with -3..-10c claimed EV.  External
+    evidence on 15m binaries (Turbine KXBTC15M drift study; the 237-live-trade
+    calibration audit) is unambiguous that undirected taker flow cannot clear
+    the ~2.5c round-trip cost.  With no directional read the emitted side must
+    therefore clear a conviction floor (default 0.60) instead of the 0.25
+    longshot floor — buying the measured favorite is the only argmax entry the
+    evidence supports.  Set to <= the MIN_P floor to disable."""
+    return _env_float("MERID_WINDOW_QUOTA_DIR_ABSENT_MIN_P", 0.60)
+
+
+def quota_candidate_order(
+    dir_pref: Optional[str], argmax: Optional[str]
+) -> list:
+    """Side try-order for the lane.  With a directional read, that side leads
+    and the argmax is the fallback.  Without one, only the argmax may emit:
+    the alternate side has neither model nor tape support, and buying it is
+    the exact undirected-taker loss pattern this gate removes."""
+    order: list = []
+    if dir_pref is not None:
+        order.append(dir_pref)
+        if argmax is not None and argmax != dir_pref:
+            order.append(argmax)
+    elif argmax is not None:
+        order.append(argmax)
+    return order
+
+
 def quota_state_path() -> str:
     return os.environ.get(
         "MERID_WINDOW_QUOTA_STATE_PATH", "data/window_quota_fills.json"

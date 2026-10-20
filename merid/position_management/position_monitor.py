@@ -628,9 +628,11 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     $-sized hard loss cap: fires when the executable own-side bid has fallen
     ``drop_cents`` below entry OR under the absolute ``floor_cents``.  At that
     depth the contract is a lottery ticket — salvage value beats riding a
-    dead position to zero.  Emits a HARD_STOP-class StopCandidate on the
-    reduce-only IOC channel, so it executes even while the exit-intent
-    in-flight lock is jammed in SUBMISSION_UNKNOWN.
+    dead position to zero.  Emits a LOSS_CAP-class StopCandidate on the
+    reduce-only IOC channel (2026-10-19: HARD_STOP is shadow-frozen and was
+    silently swallowed; LOSS_CAP is the designed mandatory-risk class), so it
+    executes even while the exit-intent in-flight lock is jammed in
+    SUBMISSION_UNKNOWN.
 
     MERID_TAIL_LOSS_ENABLED     master switch (default 1)
     MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
@@ -649,6 +651,68 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
         "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
     }
+
+
+def _scalp_arm_override_cents(position: Any, min_profit_cents: float) -> float:
+    """Bounded relaxations of the trailing-profit arm for scalp cohorts.
+
+    The static +10c arm misses the +4-9c peak cluster where losing scalps
+    live — observed live 2026-10-19: XRP YES@70 peaked 77c -> settled 1c,
+    DOGE YES@69 peaked 73c -> settled 1c, both with ``trailing_activated``
+    False their whole life.  Both relaxations still require the executable
+    own-side bid to cover the (lowered) threshold, so a mid-price wick cannot
+    arm the trail.
+
+    * ``entry_edge <= 0`` (quota / bounded-negative-EV admissions — the
+      lane's contract is bank-the-win and the exit-envelope probe arm
+      already anticipates a 4c lock): arm at MERID_TRAIL_PROBE_ARM_CENTS
+      (default 5c).
+    * Late window (tte <= MERID_TRAIL_LATE_ARM_TTE_S, default 240s): arm at
+      MERID_TRAIL_LATE_ARM_CENTS (default 6c) — a +4-8c pop in the final
+      minutes almost never gets a second chance before settlement.
+    """
+    try:
+        arm = float(min_profit_cents)
+    except Exception:
+        arm = 12.0
+    try:
+        probe_arm_c = float(os.environ.get("MERID_TRAIL_PROBE_ARM_CENTS", "5"))
+    except Exception:
+        probe_arm_c = 5.0
+    pos_edge = getattr(position, "entry_edge", None)
+    if (
+        probe_arm_c > 0
+        and pos_edge is not None
+        and isinstance(pos_edge, (int, float))
+        and float(pos_edge) <= 0.0
+    ):
+        arm = min(arm, probe_arm_c)
+    try:
+        late_arm_tte = float(
+            os.environ.get("MERID_TRAIL_LATE_ARM_TTE_S", "240")
+        )
+        late_arm_c = float(
+            os.environ.get("MERID_TRAIL_LATE_ARM_CENTS", "6")
+        )
+    except Exception:
+        late_arm_tte, late_arm_c = 240.0, 6.0
+    if late_arm_c > 0:
+        tte = None
+        try:
+            from merid.event_venues.kalshi.market_state import (
+                get_kalshi_market_state_store,
+            )
+            st = get_kalshi_market_state_store().get(
+                getattr(position, "market_id", None)
+            )
+            raw = getattr(st, "seconds_to_expiry", None) if st is not None else None
+            if raw is not None:
+                tte = float(raw)
+        except Exception:
+            tte = None
+        if tte is not None and tte <= late_arm_tte:
+            arm = min(arm, late_arm_c)
+    return arm
 
 
 def _get_continuation_stop_config(asset: str) -> Dict[str, Any]:
@@ -5112,6 +5176,16 @@ class PositionMonitor:
                 profit_zone_activation_cents = 80
             if not isinstance(activation_delay_sec, (int, float)):
                 activation_delay_sec = STARTUP_GRACE_WINDOW_SECONDS  # Default fallback
+
+            # 2026-10-19 (scalp arm): the static +10c arm misses the +4-9c
+            # peak cluster where losing scalps live — observed live:
+            # XRP YES@70 peaked 77c -> settled 1c, DOGE YES@69 peaked 73c
+            # -> settled 1c, both with trailing_activated=False the whole
+            # life.  Bounded relaxations live in _scalp_arm_override_cents;
+            # the executable-bid validation below still applies.
+            min_profit_cents = _scalp_arm_override_cents(
+                position, min_profit_cents
+            )
 
             # 2026-10-09: activation on a *validated executable* profit
             # threshold, not an unconditional elapsed delay.  The previous

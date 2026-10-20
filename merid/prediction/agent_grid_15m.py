@@ -9363,14 +9363,9 @@ class LeanAgent15m:
                         _wq_flip_stale_note = (
                             f"longshot_veto:p={_flip_p:.3f}<{_min_flip_p:.2f}_or_ask={_flip_ask:.0f}c<25c"
                         )
-            if _wq_dir_pref is not None:
-                _wq_order = [_wq_dir_pref]
-                if _wq_argmax is not None and _wq_argmax != _wq_dir_pref:
-                    _wq_order.append(_wq_argmax)
-            else:
-                _wq_order = [_wq_argmax]
-                _wq_alt = "no" if _wq_argmax == "yes" else "yes"
-                _wq_order.append(_wq_alt)
+            _wq_order = _wq_quota.quota_candidate_order(
+                _wq_dir_pref, _wq_argmax
+            )
 
             _wq_side = None
             _wq_ask = _wq_bid = _wq_depth = _wq_ev_c = None
@@ -9391,6 +9386,17 @@ class LeanAgent15m:
             _wq_min_cand_p = float(
                 os.environ.get("MERID_WINDOW_QUOTA_MIN_P", "0.25")
             )
+            # 2026-10-19 (evidence gate): when no directional read exists —
+            # dir_pref None (flat tape/stale regime) or a demoted flip — the
+            # candidate is an undirected argmax coin flip.  Require conviction
+            # (dir_absent_min_p, default 0.60) instead of the longshot floor;
+            # the alternate-side fallback is already removed by
+            # quota_candidate_order.  Observed live: dir_pref=None emissions
+            # at 75-80c asks with -3..-10c claimed EV.
+            if _wq_dir_pref is None:
+                _wq_min_cand_p = max(
+                    _wq_min_cand_p, _wq_quota.quota_dir_absent_min_p()
+                )
             for _wq_cand in _wq_order:
                 if _wq_regime_block is not None and _wq_dir_reg is not None:
                     _wq_rb = _wq_regime_block(_wq_dir_reg, _wq_cand, _wq_z)

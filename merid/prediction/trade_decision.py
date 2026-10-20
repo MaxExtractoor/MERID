@@ -4398,15 +4398,47 @@ def compute_trade_decision(
     indicators["yes_edge_bias_correction_cents"] = _bias_yes * 100.0
     indicators["no_edge_bias_correction_cents"] = _bias_no * 100.0
 
+    # 2026-10-19 (settlement-lane reserve): the generic model_uncertainty +
+    # calibration-gap + drift stack prices *model-form* uncertainty — but the
+    # lane's claim is banked-sample arithmetic whose residual risk is the
+    # favored side's expected tail loss, (1 - p_side) * entry_price.  The
+    # generic stack is what silently disabled the lane live: KXXRP15M-1745
+    # at tte=34s admitted NO@99c with p=0.999 (+0.9c gross) then ate a 4.17c
+    # model_risk_reserve -> -4.34c net vs the lane's 0.75c bound, and every
+    # settlement admission dies the same way.  For the favored side only,
+    # replace the stack with the distribution's own tail loss.
+    _mrr_yes = min(1.0, model_risk_reserve + _calib_gap_yes + _drift_res_yes)
+    _mrr_no = min(1.0, model_risk_reserve + _calib_gap_no + _drift_res_no)
+    if settlement_lane and settlement_distribution is not None:
+        try:
+            _lp_raw = getattr(settlement_distribution, "p_yes_raw", None)
+            # ``or 0.5`` would corrupt a legitimate p_yes_raw=0.0 (NO-favored
+            # banked average) into 0.5 — flipping the favored side and the
+            # tail-loss reserve onto the wrong breakdown.
+            _lp = (
+                float(_lp_raw)
+                if _lp_raw is not None and math.isfinite(float(_lp_raw))
+                else 0.5
+            )
+            _fav_yes = _lp >= 0.5
+            _fav_p = _lp if _fav_yes else 1.0 - _lp
+            _fav_entry = float(yes_entry if _fav_yes else no_entry)
+            _lane_mrr = max(0.0, (1.0 - _fav_p) * _fav_entry)
+            if _fav_yes:
+                _mrr_yes = _lane_mrr
+            else:
+                _mrr_no = _lane_mrr
+            indicators["settlement_lane_tail_reserve_cents"] = _lane_mrr * 100.0
+        except Exception:
+            pass
+
     yes_breakdown = compute_edge(
         p_yes=p_yes_for_yes,
         selected_side="yes",
         entry_price=yes_entry,
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_yes,
-        model_risk_reserve=min(
-            1.0, model_risk_reserve + _calib_gap_yes + _drift_res_yes
-        ),
+        model_risk_reserve=_mrr_yes,
         adverse_selection_reserve=_asr_yes,
         policy_giveback_reserve=_policy_gb_yes,
         implementation_shortfall_reserve=_impl_sf_yes,
@@ -4419,9 +4451,7 @@ def compute_trade_decision(
         entry_fee=fee,
         exit_cost_reserve=expected_exit_cost_no,
         adverse_selection_reserve=_asr_no,
-        model_risk_reserve=min(
-            1.0, model_risk_reserve + _calib_gap_no + _drift_res_no
-        ),
+        model_risk_reserve=_mrr_no,
         policy_giveback_reserve=_policy_gb_no,
         implementation_shortfall_reserve=_impl_sf_no,
         edge_bias_correction=_bias_no,
