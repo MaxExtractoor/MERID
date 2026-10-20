@@ -13,6 +13,7 @@ the only path to the wire for a position-reducing order.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -415,6 +416,101 @@ _ACTIVE_ORDER_STATUSES = frozenset({
     "untriggered",
 })
 
+# client_order_id prefixes whose orders are submit-time-validated as
+# immediate-only (stop candidates hard-code time_in_force="ioc" and the
+# StopOrderInvariantError check rejects non-IOC/FOK before the wire).
+_IOC_COID_PREFIXES = ("stopcand_",)
+
+
+def _ioc_dead_after_s() -> float:
+    try:
+        return float(os.environ.get("MERID_EXIT_IOC_DEAD_AFTER_S", "90"))
+    except Exception:
+        return 90.0
+
+
+def _reconcile_stuck_alert_s() -> float:
+    try:
+        return float(os.environ.get("MERID_EXIT_RECONCILE_STUCK_S", "180"))
+    except Exception:
+        return 180.0
+
+
+def _attempt_is_ioc(attempt: Any) -> bool:
+    """True when the attempt's order is provably immediate-only (IOC/FOK).
+
+    Immediate-only orders cannot rest on the book, so "not found anywhere"
+    after a bounded age is terminal evidence — unlike a resting order,
+    where absence is ambiguous.  ``stopcand_`` coids are IOC by
+    construction; a ``time_in_force`` marker on the record also counts.
+    """
+    tif = str(getattr(attempt, "time_in_force", "") or "").lower()
+    if tif in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill"):
+        return True
+    coid = str(getattr(attempt, "client_order_id", "") or "")
+    if coid.startswith(_IOC_COID_PREFIXES):
+        return True
+    # Arbiter attempts carry proposal/decision ids rather than a payload:
+    # ``stop_candidate:`` proposals submit IOC by construction.
+    for marker in (
+        getattr(attempt, "proposal_id", None),
+        getattr(attempt, "decision_id", None),
+    ):
+        if str(marker or "").startswith("stop_candidate:"):
+            return True
+    return False
+
+
+def _ioc_attempt_is_dead(attempt: Any) -> bool:
+    """An immediate-only attempt old enough that it must be terminal."""
+    if not _attempt_is_ioc(attempt):
+        return False
+    created = float(getattr(attempt, "created_ts", 0.0) or 0.0)
+    return created > 0 and (time.time() - created) >= _ioc_dead_after_s()
+
+
+def _alert_stuck_reconcile(arb: Any, position_key: str) -> None:
+    """Escalate a reconcile that has stayed inconclusive too long.
+
+    Does NOT resolve the attempt — a resting order's absence remains
+    ambiguous — but operators must see a wedge forming instead of a silent
+    ``RECONCILING`` row (the 2026-10-20 BTC wedge suppressed a LOSS_CAP for
+    ~7min and rode −53c to settlement).  Alerts once per attempt.
+
+    Re-fetches the active attempt: ``get_active`` returns a copy, and the
+    caller's pre-``begin_reconcile`` copy is stale — persisting it would
+    revert the RECONCILING transition.
+    """
+    attempt = arb.attempt_store.get_active(position_key)
+    if attempt is None:
+        return
+    age = time.time() - float(getattr(attempt, "created_ts", 0.0) or 0.0)
+    if age < _reconcile_stuck_alert_s():
+        return
+    for h in getattr(attempt, "history", []) or []:
+        if str(h.get("note", "")).startswith("reconcile_stuck_alerted"):
+            return
+    logger.critical(
+        "[EXIT-RECONCILE-STUCK] key=%s coid=%s order_id=%s state=%s "
+        "age_s=%.0f — order lookup inconclusive for >%ss; exchange order "
+        "may be resting-but-unlisted or the lookup may be degraded. "
+        "Attempt stays RECONCILING; investigate manually.",
+        position_key, getattr(attempt, "client_order_id", None),
+        getattr(attempt, "order_id", None),
+        getattr(getattr(attempt, "state", None), "value", "?"),
+        age, _reconcile_stuck_alert_s(),
+    )
+    try:
+        attempt.history.append({
+            "ts": time.time(),
+            "from": getattr(getattr(attempt, "state", None), "value", "?"),
+            "to": getattr(getattr(attempt, "state", None), "value", "?"),
+            "note": f"reconcile_stuck_alerted:age={int(age)}s",
+        })
+        arb.attempt_store.save_active(attempt)
+    except Exception:
+        pass
+
 
 async def reconcile_attempt(
     position_key: str,
@@ -451,8 +547,16 @@ async def reconcile_attempt(
                 position_key, exc)
     if order is None and attempt.client_order_id:
         try:
+            # min_ts bounds the search window — Kalshi's orders list is
+            # recency-ordered and a generous margin keeps the local coid
+            # filter cheap even without server-side coid filtering.
+            _coid_min_ts = (
+                int(attempt.created_ts) - 120
+                if getattr(attempt, "created_ts", 0) else None
+            )
             res = await client.get_order_by_client_id_result(
-                attempt.client_order_id, market_id=market_id)
+                attempt.client_order_id, market_id=market_id,
+                min_ts=_coid_min_ts)
             if getattr(res, "success", False):
                 order = res.unwrap_or(None)
                 source = "client_order_id_lookup"
@@ -466,9 +570,21 @@ async def reconcile_attempt(
             arb.resolve_reconcile(position_key, ReconcileEvidence(
                 order_found=False, terminal=True, filled_cc=0,
                 source="local_no_transmit"))
+        elif _ioc_attempt_is_dead(attempt):
+            # IOC/FOK orders cannot rest: if every exchange view (resting,
+            # executed, canceled) still can't see the order well past its
+            # terminal-by-construction deadline, the order is dead — either
+            # it never transmitted or it terminally processed off the live
+            # orders feed (Kalshi ages terminal orders into /historical).
+            # Unlike a resting order, a missing IOC is never "still working",
+            # so releasing a fresh reduce-only attempt cannot stack exposure.
+            arb.resolve_reconcile(position_key, ReconcileEvidence(
+                order_found=True, terminal=True, filled_cc=0,
+                source="ioc_terminal_inferred"))
         else:
             # Lookup inconclusive or order absent — absence is NOT proof
             # of death (a found-but-empty list may lag the wire).
+            _alert_stuck_reconcile(arb, position_key)
             arb.resolve_reconcile(position_key, ReconcileEvidence(
                 order_found=False, terminal=False, filled_cc=0,
                 source="lookup_inconclusive"))
@@ -572,6 +688,14 @@ def post_route_update(
             arb.resolve_reconcile(position_key, ReconcileEvidence(
                 order_found=True, terminal=True, filled_cc=att.filled_cc,
                 source=f"route_{status or 'terminal_partial'}"))
+    elif status in ("accepted_live", "submitted_live", "resting"):
+        # The venue ACKed the order — it exists on the exchange (the
+        # route-unhandled fallthrough used to land these in ACK_UNKNOWN
+        # with a misleading "unhandled" note).  mark_acked → WORKING keeps
+        # the attempt in the must-reconcile set so the next sweep observes
+        # the terminal state (an accepted IOC terminals within ~1s) instead
+        # of claiming the outcome is unknown.
+        arb.mark_acked(position_key)
     elif status == "submission_unknown" or certainty == "unknown" or getattr(
             order_result, "requires_recovery", False):
         arb.mark_ack_unknown(position_key, note=f"route_{status or 'unknown'}")

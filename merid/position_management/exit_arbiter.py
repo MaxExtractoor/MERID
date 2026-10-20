@@ -340,6 +340,15 @@ class ExitAttemptStore:
                 active["updated_ts"] = time.time()
                 self._flush()
 
+    # Closed attempts retained per position in the JSON ledger.  The file is
+    # rewritten on every attempt transition, so unbounded closed history
+    # makes each flush slower forever (observed: 737KB synchronous write on
+    # the event loop per transition during the 2026-10-20 wedge — a
+    # direct drain-lag contributor).  The SQL ``order_attempts`` store keeps
+    # the full durable lifecycle; this ledger only needs recent depth for
+    # restart reconcile and forensic review.
+    _MAX_CLOSED_PER_POSITION = 50
+
     def _flush(self) -> None:
         try:
             with self._lock:
@@ -348,7 +357,7 @@ class ExitAttemptStore:
                 tmp.write_text(json.dumps(
                     {"schema_version": 1, "updated_at": time.time(),
                      "positions": self._positions},
-                    indent=2, default=str), encoding="utf-8")
+                    separators=(",", ":"), default=str), encoding="utf-8")
                 os.replace(tmp, self._path)
         except Exception as exc:
             logger.warning("[EXIT-ATTEMPTS] save failed: %s", exc)
@@ -387,6 +396,8 @@ class ExitAttemptStore:
                 )
             if prev_active and prev_active.get("attempt_id") != attempt.attempt_id:
                 rec["closed"].append(prev_active)
+                if len(rec["closed"]) > self._MAX_CLOSED_PER_POSITION:
+                    del rec["closed"][:-self._MAX_CLOSED_PER_POSITION]
             try:
                 seq = int(attempt.attempt_id.rsplit("#", 1)[-1])
                 rec["attempt_seq"] = max(int(rec.get("attempt_seq", 0)), seq)
@@ -403,6 +414,8 @@ class ExitAttemptStore:
                 return
             if rec.get("active", {}).get("attempt_id") == attempt.attempt_id:
                 rec["closed"].append(rec["active"])
+                if len(rec["closed"]) > self._MAX_CLOSED_PER_POSITION:
+                    del rec["closed"][:-self._MAX_CLOSED_PER_POSITION]
                 rec["active"] = None
         self._flush()
 
@@ -850,9 +863,10 @@ class ExitArbiter:
             a.transition(AttemptState.FLAT, "reconciled:filled")
             self._attempts.clear_active(a)
         else:
-            note = ("reconciled:order_dead_unfilled"
-                    if a.filled_cc == 0 else
-                    f"reconciled:terminal_partial:{a.filled_cc}/{a.qty_cc}")
+            note = (
+                f"reconciled:order_dead_unfilled:{evidence.source}"
+                if a.filled_cc == 0 else
+                f"reconciled:terminal_partial:{a.filled_cc}/{a.qty_cc}:{evidence.source}")
             a.transition(AttemptState.RETRY_ELIGIBLE, note)
             self._attempts.save_active(a)
         return a

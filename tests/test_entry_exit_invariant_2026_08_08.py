@@ -298,8 +298,9 @@ class TestAgentGridEntryExitInvariant:
         
         agent_grid_path = Path("C:/Dev/MERID/merid/prediction/agent_grid_15m.py")
         
-        # Read the file
-        with open(agent_grid_path, 'r') as f:
+        # Read the file (utf-8: the source contains box-drawing comments
+        # that cp1252 — the Windows default codec — cannot decode)
+        with open(agent_grid_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Find all signal_action assignments

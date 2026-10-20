@@ -2215,20 +2215,21 @@ async def maybe_submit_stop_candidate(
         and exit_bid >= _resolved_floor
     ):
         exit_price = _resolved_floor
+    _cdisp = lambda v: "n/a" if v is None else f"{v}c"
     logger.info(
         "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger=%s "
-        "entry=%dc bid=%dc marginal=%s fair=%dc entry_edge=%dc current_edge=%dc "
-        "stop_level=%dc submitted_limit=%dc slippage_cap=%dc tte=%.1fs",
+        "entry=%s bid=%dc marginal=%s fair=%s entry_edge=%s current_edge=%s "
+        "stop_level=%s submitted_limit=%dc slippage_cap=%dc tte=%.1fs",
         candidate.candidate_id,
         candidate.market_ticker,
         candidate.trigger_reason,
-        candidate.entry_price_cents or -1,
+        _cdisp(candidate.entry_price_cents),
         exit_bid,
         str(_marginal_c) if _marginal_c is not None else "n/a",
-        candidate.fair_value_cents or -1,
-        candidate.entry_edge_cents or -99,
-        candidate.current_edge_cents or -99,
-        candidate.stop_level_cents or -1,
+        _cdisp(candidate.fair_value_cents),
+        _cdisp(candidate.entry_edge_cents),
+        _cdisp(candidate.current_edge_cents),
+        _cdisp(candidate.stop_level_cents),
         exit_price,
         STOP_MAX_SLIPPAGE_CENTS,
         candidate.seconds_to_expiry or -1.0,
@@ -2452,6 +2453,12 @@ async def maybe_submit_stop_candidate(
                         "parent_entry_fill_id": parent_entry_fill_id,
                         "parent_entry_order_id": parent_entry_order_id,
                         "entry_or_exit": "exit",
+                        # Immediate-only marker: the reconcile path treats a
+                        # bounded-age unfindable IOC as terminal (it cannot
+                        # rest).  Stop-candidate orders are IOC by the
+                        # submit-time invariant — stamp it for audit too.
+                        "time_in_force": str(
+                            getattr(intent, "time_in_force", "") or "ioc"),
                     },
                 )
             except ExitOrderAttemptConflict:

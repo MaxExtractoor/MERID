@@ -4142,7 +4142,8 @@ class KalshiVenueClient(EventVenueClient):
         )
     
     async def get_order_by_client_id_result(
-        self, client_order_id: str, market_id: Optional[str] = None
+        self, client_order_id: str, market_id: Optional[str] = None,
+        min_ts: Optional[int] = None,
     ) -> OperationResult[Optional[PlacedOrder]]:
         """Get order by client_order_id with explicit result.
 
@@ -4153,44 +4154,69 @@ class KalshiVenueClient(EventVenueClient):
         ``client_order_id`` is the Kalshi idempotency key.  If the server ignores
         the parameter or returns a broader list, we filter locally by matching
         ``client_order_id`` in the response.
+
+        2026-10-20: the default (no ``status``) query only returns *resting*
+        orders.  A terminal IOC — filled or canceled within ~1s of submit —
+        is therefore invisible to reconcile, which wedged attempts in
+        RECONCILING forever and suppressed every later protective exit
+        (KXBTC15M-26OCT200015 rode −53c to settlement while a dead IOC's
+        attempt stayed ``inconclusive_lookup_still_unresolved`` ×7).
+        On a resting-list miss we retry with ``status=executed`` and
+        ``status=canceled`` so terminal orders become observable.
         """
         params: Dict[str, Any] = {"client_order_id": client_order_id, "limit": 10}
         if market_id:
             params["ticker"] = market_id
+        if min_ts is not None:
+            params["min_ts"] = int(min_ts)
 
-        result = await self._request_with_resilience(
-            "GET", "/portfolio/orders",
-            params=params,
-            operation_name=f"get_order_by_client_id({client_order_id[:16]}...)"
-        )
+        queries = [dict(params)]
+        for _st in ("executed", "canceled"):
+            queries.append({**params, "status": _st})
 
-        if not result.success:
-            return OperationResult.fail(
-                result.error,
-                latency_ms=result.latency_ms,
-                retries=result.retries,
+        total_latency = 0.0
+        total_retries = 0
+        for idx, q in enumerate(queries):
+            result = await self._request_with_resilience(
+                "GET", "/portfolio/orders",
+                params=q,
+                operation_name=f"get_order_by_client_id({client_order_id[:16]}...)"
             )
+            total_latency += result.latency_ms or 0
+            total_retries += result.retries or 0
 
-        orders = result.data.get("orders", [])
-        match = next(
-            (
-                o for o in orders
-                if o.get("client_order_id") == client_order_id
-            ),
-            None,
-        )
-        if match is not None:
-            return OperationResult.ok(
-                self._to_placed_order(match),
-                latency_ms=result.latency_ms,
-                retries=result.retries,
+            if not result.success:
+                if idx == 0:
+                    # Base lookup failed outright — report the failure;
+                    # terminal-status retries can't rescue a dead transport.
+                    return OperationResult.fail(
+                        result.error,
+                        latency_ms=total_latency,
+                        retries=total_retries,
+                    )
+                continue
+
+            orders = result.data.get("orders", [])
+            match = next(
+                (
+                    o for o in orders
+                    if o.get("client_order_id") == client_order_id
+                ),
+                None,
             )
+            if match is not None:
+                return OperationResult.ok(
+                    self._to_placed_order(match),
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                )
 
-        # Order not found - might be old/canceled, return None but success
+        # Order not found in resting/executed/canceled views — return None
+        # but success (caller decides whether absence is meaningful).
         return OperationResult.ok(
             None,
-            latency_ms=result.latency_ms,
-            retries=result.retries,
+            latency_ms=total_latency,
+            retries=total_retries,
         )
     
     async def get_open_orders(self, market_id: Optional[str] = None) -> List[PlacedOrder]:
