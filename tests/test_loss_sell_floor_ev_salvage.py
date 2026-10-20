@@ -27,12 +27,18 @@ def _defaults(monkeypatch):
 
 
 class TestHardRiskExemptions:
-    """HARD_STOP/LOSS_CAP are capital protection — the floor must not convert
-    them into ride-to-zero holds."""
+    """2026-10-20: HARD_STOP/LOSS_CAP are capital protection ONLY while
+    MERID_LOSS_EXITS_ENABLED=1; the operator directive disables
+    price-depth loss exits by default (stopped dips recover ~70%)."""
 
     @pytest.mark.parametrize("trigger", ["HARD_STOP", "LOSS_CAP", "hard_stop", "loss_cap"])
-    def test_hard_risk_triggers_not_floored(self, trigger):
+    def test_hard_risk_triggers_not_floored(self, trigger, monkeypatch):
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         assert loss_sell_blocked(trigger, 30, 68) is False
+
+    @pytest.mark.parametrize("trigger", ["HARD_STOP", "LOSS_CAP", "hard_stop", "loss_cap"])
+    def test_hard_risk_triggers_floored_when_disabled(self, trigger):
+        assert loss_sell_blocked(trigger, 30, 68) is True
 
     def test_discretionary_trigger_still_floored(self):
         assert loss_sell_blocked("EDGE_DECAY", 30, 68) is True
@@ -185,9 +191,23 @@ class TestNoEdgeProbeFloor:
             peak_price_cents=68, entry_edge=-0.05,
         ) is True
 
-    def test_no_edge_exempt_trigger_still_exempt(self):
+    def test_no_edge_exempt_trigger_still_exempt(self, monkeypatch):
+        # Exemption survives only under the re-enable flag (2026-10-20).
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         assert loss_sell_blocked(
             "HARD_STOP", 30, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is False
+
+    def test_no_edge_hard_stop_uses_probe_floor_when_disabled(self):
+        # flag off + no-edge entry: floor = hold 42 - probe 2 = 40;
+        # bid 30 < 40 -> suppressed; bid 42 would pass (+EV vs hold).
+        assert loss_sell_blocked(
+            "HARD_STOP", 30, 51, hold_value_cents=42,
+            peak_price_cents=68, entry_edge=-0.05,
+        ) is True
+        assert loss_sell_blocked(
+            "LOSS_CAP", 42, 51, hold_value_cents=42,
             peak_price_cents=68, entry_edge=-0.05,
         ) is False
 

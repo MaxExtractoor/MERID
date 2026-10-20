@@ -112,13 +112,32 @@ class TestBreakevenFloorWiring(unittest.TestCase):
         )
         self.assertTrue(blocked)
 
-    def test_loss_cap_exempt_regardless(self):
-        c = self._cand(trigger="LOSS_CAP", bid=40)
+    def test_loss_cap_exempt_when_loss_exits_enabled(self):
+        """MERID_LOSS_EXITS_ENABLED=1 restores the prior exemption."""
+        with mock.patch.dict(os.environ, {"MERID_LOSS_EXITS_ENABLED": "1"}):
+            blocked = loss_sell_blocked(
+                "LOSS_CAP", 40, 78, hold_value_cents=60,
+                peak_price_cents=None, entry_edge=None,
+            )
+        self.assertFalse(blocked)
+
+    def test_loss_cap_floor_blocked_when_loss_exits_disabled(self):
+        """2026-10-20 operator directive (default off): a below-entry
+        LOSS_CAP faces the breakeven floor like any economic exit.
+        KXXRP15M-26OCT200200-00 NO@40 was stopped at 16c (-27c) and
+        settled NO (~+58c forgone)."""
         blocked = loss_sell_blocked(
             "LOSS_CAP", 40, 78, hold_value_cents=60,
             peak_price_cents=None, entry_edge=None,
         )
-        self.assertFalse(blocked)
+        self.assertTrue(blocked)
+
+    def test_hard_stop_floor_blocked_when_loss_exits_disabled(self):
+        blocked = loss_sell_blocked(
+            "HARD_STOP", 40, 78, hold_value_cents=60,
+            peak_price_cents=None, entry_edge=None,
+        )
+        self.assertTrue(blocked)
 
 
 class TestLossCapSweep(unittest.TestCase):
@@ -182,8 +201,18 @@ class TestFloorClamp(unittest.TestCase):
         self.assertEqual(floor, 78)
 
     def test_exempt_trigger_returns_none(self):
-        self.assertIsNone(resolve_loss_sell_floor("LOSS_CAP", 78))
-        self.assertIsNone(resolve_loss_sell_floor("HARD_STOP", 78))
+        """Exemption only while MERID_LOSS_EXITS_ENABLED=1 (2026-10-20)."""
+        with mock.patch.dict(os.environ, {"MERID_LOSS_EXITS_ENABLED": "1"}):
+            self.assertIsNone(resolve_loss_sell_floor("LOSS_CAP", 78))
+            self.assertIsNone(resolve_loss_sell_floor("HARD_STOP", 78))
+
+    def test_price_depth_triggers_floored_when_disabled(self):
+        """Default off: HARD_STOP/LOSS_CAP resolve the entry floor."""
+        self.assertEqual(resolve_loss_sell_floor("LOSS_CAP", 78), 78)
+        self.assertEqual(resolve_loss_sell_floor("HARD_STOP", 78), 78)
+        # Operational triggers stay exempt regardless.
+        self.assertIsNone(resolve_loss_sell_floor("MARKET_EXPIRED", 78))
+        self.assertIsNone(resolve_loss_sell_floor("MANUAL", 78))
 
     def test_missing_entry_returns_none(self):
         self.assertIsNone(

@@ -47,6 +47,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     build_stop_candidate,
     evaluate_edge_stop,
     loss_sell_blocked,
+    loss_exits_enabled,
     maybe_submit_stop_candidate_sync,
     record_stop_candidate,
 )
@@ -3983,7 +3984,11 @@ class PositionMonitor:
         # Configurable backstop (default $5/position).  At current 1-2 contract
         # sizing this is inert; it protects the book if position size scales up.
         _hard_loss_cap_cents = _get_hard_loss_cap_cents()
-        if _hard_loss_cap_cents > 0 and position.unrealized_pnl_cents <= -_hard_loss_cap_cents:
+        if (
+            _hard_loss_cap_cents > 0
+            and loss_exits_enabled()
+            and position.unrealized_pnl_cents <= -_hard_loss_cap_cents
+        ):
             logger.warning(
                 "[POSITION-MONITOR] HARD-LOSS-CAP triggered: position=%s pnl=%dc cap=%dc - exiting",
                 position.position_id[:8],
@@ -4034,107 +4039,135 @@ class PositionMonitor:
             _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _drop_cents
             _floor_hit = current_price_cents <= _tail_cfg["floor_cents"]
             if _drop_hit or _floor_hit:
-                _has_fill_provenance = (
-                    position.fill_source is not None or position.entry_fill_id is not None
-                )
-                if _has_fill_provenance and not (
-                    snapshot is not None and getattr(snapshot, "executable", False)
-                ):
-                    logger.warning(
-                        "[POSITION-MONITOR] TAIL-LOSS-FLOOR rejected: position=%s "
-                        "bid=%dc - snapshot not executable",
-                        position.position_id[:8], current_price_cents,
+                # 2026-10-20 operator directive: price-depth loss exits are
+                # off (MERID_LOSS_EXITS_ENABLED=0).  15m binaries mean-
+                # revert to fair until expiry — KXXRP15M-26OCT200200-00
+                # NO@40 was stopped at 16c (-27c) and settled NO (~+58c
+                # forgone).  Keep the would-have-fired observation
+                # throttled for calibration; the position rides to
+                # settlement or a profit/trail/thesis exit.  Even with the
+                # flag on, LOSS_CAP candidates now face the breakeven
+                # floor (exemption removed) — see loss_exits_enabled().
+                if not loss_exits_enabled():
+                    _supp_at = float(
+                        getattr(position, "tail_loss_suppress_logged_at", 0.0) or 0.0
                     )
-                else:
-                    # Telemetry stop level: the deeper of the two triggers.
-                    _tail_level = max(
-                        1,
-                        min(
-                            (_entry_px - _drop_cents) if _entry_px > 0 else 99,
-                            _tail_cfg["floor_cents"],
-                        ),
-                    )
-                    logger.warning(
-                        "[POSITION-MONITOR] TAIL-LOSS-FLOOR triggered: position=%s side=%s "
-                        "bid=%dc entry=%dc drop_cents=%d floor=%dc level=%dc - exiting",
-                        position.position_id[:8],
-                        position.side.value,
-                        current_price_cents,
-                        _entry_px,
-                        _drop_cents,
-                        _tail_cfg["floor_cents"],
-                        _tail_level,
-                    )
-                    position.tail_loss_floor_fired = True
-                    position.tail_loss_floor_fired_at = time.time()
-                    position.tail_loss_floor_attempts = _tail_attempts + 1
-                    try:
-                        _position_cc = to_signed_yes_exposure(
+                    if time.time() - _supp_at >= 60.0:
+                        position.tail_loss_suppress_logged_at = time.time()
+                        logger.warning(
+                            "[LOSS-EXIT-DISABLED] position=%s side=%s "
+                            "bid=%dc entry=%dc drop_cents=%d floor=%dc - "
+                            "price-depth loss exit suppressed; rides to "
+                            "settlement or profit exit",
+                            position.position_id[:8],
                             position.side.value,
-                            int(position.size * Decimal("100")),
+                            current_price_cents,
+                            _entry_px,
+                            _drop_cents,
+                            _tail_cfg["floor_cents"],
                         )
-                        _kalshi_state = None
-                        _unified_state = None
-                        _book_age_ms_val = None
-                        _seconds_to_expiry = None
+                else:
+                    _has_fill_provenance = (
+                        position.fill_source is not None or position.entry_fill_id is not None
+                    )
+                    if _has_fill_provenance and not (
+                        snapshot is not None and getattr(snapshot, "executable", False)
+                    ):
+                        logger.warning(
+                            "[POSITION-MONITOR] TAIL-LOSS-FLOOR rejected: position=%s "
+                            "bid=%dc - snapshot not executable",
+                            position.position_id[:8], current_price_cents,
+                        )
+                    else:
+                        # Telemetry stop level: the deeper of the two triggers.
+                        _tail_level = max(
+                            1,
+                            min(
+                                (_entry_px - _drop_cents) if _entry_px > 0 else 99,
+                                _tail_cfg["floor_cents"],
+                            ),
+                        )
+                        logger.warning(
+                            "[POSITION-MONITOR] TAIL-LOSS-FLOOR triggered: position=%s side=%s "
+                            "bid=%dc entry=%dc drop_cents=%d floor=%dc level=%dc - exiting",
+                            position.position_id[:8],
+                            position.side.value,
+                            current_price_cents,
+                            _entry_px,
+                            _drop_cents,
+                            _tail_cfg["floor_cents"],
+                            _tail_level,
+                        )
+                        position.tail_loss_floor_fired = True
+                        position.tail_loss_floor_fired_at = time.time()
+                        position.tail_loss_floor_attempts = _tail_attempts + 1
                         try:
-                            from merid.event_venues.kalshi.market_state import (
-                                get_kalshi_market_state_store,
+                            _position_cc = to_signed_yes_exposure(
+                                position.side.value,
+                                int(position.size * Decimal("100")),
                             )
+                            _kalshi_state = None
+                            _unified_state = None
+                            _book_age_ms_val = None
+                            _seconds_to_expiry = None
+                            try:
+                                from merid.event_venues.kalshi.market_state import (
+                                    get_kalshi_market_state_store,
+                                )
 
-                            _store = get_kalshi_market_state_store()
-                            _kalshi_state = _store.get(position.market_id)
-                            _unified_state = (
-                                _store.get_unified(position.market_id)
-                                if hasattr(_store, "get_unified")
-                                else None
-                            )
-                            if _kalshi_state is not None:
-                                _book_age_ms_val = _book_age_ms(_kalshi_state)
-                                _seconds_to_expiry = getattr(
-                                    _kalshi_state, "seconds_to_expiry", None
+                                _store = get_kalshi_market_state_store()
+                                _kalshi_state = _store.get(position.market_id)
+                                _unified_state = (
+                                    _store.get_unified(position.market_id)
+                                    if hasattr(_store, "get_unified")
+                                    else None
                                 )
-                            if _seconds_to_expiry is None and _unified_state is not None:
-                                _seconds_to_expiry = getattr(
-                                    _unified_state, "seconds_to_expiry", None
+                                if _kalshi_state is not None:
+                                    _book_age_ms_val = _book_age_ms(_kalshi_state)
+                                    _seconds_to_expiry = getattr(
+                                        _kalshi_state, "seconds_to_expiry", None
+                                    )
+                                if _seconds_to_expiry is None and _unified_state is not None:
+                                    _seconds_to_expiry = getattr(
+                                        _unified_state, "seconds_to_expiry", None
+                                    )
+                            except Exception as _st_exc:
+                                logger.debug(
+                                    "[TAIL-LOSS] market state lookup failed for %s: %s",
+                                    position.market_id, _st_exc,
                                 )
-                        except Exception as _st_exc:
-                            logger.debug(
-                                "[TAIL-LOSS] market state lookup failed for %s: %s",
-                                position.market_id, _st_exc,
+                            candidate = build_stop_candidate(
+                                market_ticker=position.market_id,
+                                exchange_position_cc=_position_cc,
+                                # 2026-10-19: emit the catastrophic tail floor under
+                                # its designed LOSS_CAP class, not HARD_STOP — the
+                                # 2026-10-17 price-stop shadow freezes HARD_STOP
+                                # candidates (record-only, never submitted), which
+                                # silently killed every tail-floor salvage while
+                                # ``tail_loss_floor_fired`` latched true.  XRP/DOGE
+                                # 1630-30 fired at tte=307s with executable 39c/35c
+                                # salvage bids and rode to settlement at ~0.
+                                # LOSS_CAP is the non-shadowed mandatory-risk class
+                                # (LOSS_SELL_EXEMPT, EV-veto-exempt, emergency
+                                # POSITION_LOSS_BUDGET at the firewall).
+                                trigger_reason="LOSS_CAP",
+                                entry_price_cents=_entry_px or None,
+                                kalshi_state=_kalshi_state,
+                                unified_state=_unified_state,
+                                quote_age_ms=_book_age_ms_val,
+                                consecutive_edge_below=0,
+                                hard_stop_cents=_tail_level,
+                                peak_price_cents=position.high_watermark_cents,
+                                claimed_entry_edge=getattr(position, "entry_edge", None),
                             )
-                        candidate = build_stop_candidate(
-                            market_ticker=position.market_id,
-                            exchange_position_cc=_position_cc,
-                            # 2026-10-19: emit the catastrophic tail floor under
-                            # its designed LOSS_CAP class, not HARD_STOP — the
-                            # 2026-10-17 price-stop shadow freezes HARD_STOP
-                            # candidates (record-only, never submitted), which
-                            # silently killed every tail-floor salvage while
-                            # ``tail_loss_floor_fired`` latched true.  XRP/DOGE
-                            # 1630-30 fired at tte=307s with executable 39c/35c
-                            # salvage bids and rode to settlement at ~0.
-                            # LOSS_CAP is the non-shadowed mandatory-risk class
-                            # (LOSS_SELL_EXEMPT, EV-veto-exempt, emergency
-                            # POSITION_LOSS_BUDGET at the firewall).
-                            trigger_reason="LOSS_CAP",
-                            entry_price_cents=_entry_px or None,
-                            kalshi_state=_kalshi_state,
-                            unified_state=_unified_state,
-                            quote_age_ms=_book_age_ms_val,
-                            consecutive_edge_below=0,
-                            hard_stop_cents=_tail_level,
-                            peak_price_cents=position.high_watermark_cents,
-                            claimed_entry_edge=getattr(position, "entry_edge", None),
-                        )
-                        record_stop_candidate(candidate)
-                        self._submit_stop_candidate(candidate)
-                    except Exception as _tail_exc:
-                        position.tail_loss_floor_fired = False
-                        logger.exception(
-                            "[POSITION-MONITOR] TAIL-LOSS-FLOOR emission failed for %s: %s",
-                            position.position_id[:8], _tail_exc,
-                        )
+                            record_stop_candidate(candidate)
+                            self._submit_stop_candidate(candidate)
+                        except Exception as _tail_exc:
+                            position.tail_loss_floor_fired = False
+                            logger.exception(
+                                "[POSITION-MONITOR] TAIL-LOSS-FLOOR emission failed for %s: %s",
+                                position.position_id[:8], _tail_exc,
+                            )
                 # Continue evaluating candidates; the central resolver will choose the final exit.
 
         # Wired as a config-driven parameter but DISABLED by default.  The 24h fill

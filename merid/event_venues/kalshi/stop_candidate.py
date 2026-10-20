@@ -246,6 +246,36 @@ def profit_only_exits_enabled() -> bool:
     return _env_bool("MERID_PROFIT_ONLY_EXITS", True)
 
 
+def loss_exits_enabled() -> bool:
+    """2026-10-20 operator directive: price-depth loss exits are disabled.
+    15m binaries mean-revert around fair value until expiry — a stop
+    converts book noise into a realized loss and forfeits settlement.
+    Live evidence: KXXRP15M-26OCT200200-00 NO@40 was stopped at 16c
+    (-27c) and settled NO (would have paid ~+58c); same failure as the
+    2026-10-17 XRP NO stop (-64c vs +199c settlement).  External evidence
+    concurs: ~18,000 settled 15m markets show stopping a dipped favorite
+    costs ~20c EV vs holding (dips recover ~70%); "the only exit is
+    settlement" is the documented winning posture for event binaries.
+
+    Default OFF: HARD_STOP/LOSS_CAP lose their LOSS_SELL_EXEMPT status
+    and every below-entry sell routes through ``resolve_loss_sell_floor``
+    like discretionary triggers (breakeven floor for model entries,
+    hold-value probe floor for no-edge/quota entries).  Operational /
+    state-repair triggers (RISK, STALE_DATA, POSITION_MISMATCH, MANUAL,
+    MARKET_EXPIRED, EXPIRY_LIQUIDATION, EMERGENCY, RECONCILE) stay
+    exempt — they fix broken state, they are not economic stops.
+    ``MERID_LOSS_EXITS_ENABLED=1`` restores the prior behavior.
+    """
+    return _env_bool("MERID_LOSS_EXITS_ENABLED", False)
+
+
+# Price-depth loss triggers: capital-protection exits keyed on how far the
+# held-side price fell.  Exempt from the breakeven floor only while
+# ``MERID_LOSS_EXITS_ENABLED=1``; with the flag off they face the same
+# below-entry suppression as every other economic exit.
+_PRICE_DEPTH_LOSS_TRIGGERS = frozenset({"HARD_STOP", "LOSS_CAP"})
+
+
 def _trigger_emergency_type(trigger_reason: Any) -> Optional[str]:
     """Map a candidate trigger to its structured emergency-authorization
     type (the producer's declared classification; the firewall validates it
@@ -387,7 +417,10 @@ def resolve_loss_sell_floor(
     if not profit_only_exits_enabled():
         return None
     _tr = getattr(trigger_reason, "value", trigger_reason)
-    if str(_tr).upper() in LOSS_SELL_EXEMPT_TRIGGERS:
+    _exempt = LOSS_SELL_EXEMPT_TRIGGERS
+    if not loss_exits_enabled():
+        _exempt = _exempt - _PRICE_DEPTH_LOSS_TRIGGERS
+    if str(_tr).upper() in _exempt:
         return None
     if entry_price_cents is None:
         return None

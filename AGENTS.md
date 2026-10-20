@@ -634,3 +634,20 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
 - Structural gates (countertrend/bookflow/conviction/throttle) are now
   counterfactual-logged to `logs/rejected_candidates.jsonl` and map to
   terminal codes `LOW_CONVICTION` / `STRUCTURAL_RISK_VETO`.
+
+## Fill price semantics (kalshi_fills ledger)
+
+- `execution_price_cents` and `canonical_leg_price_cents` are always the
+  **YES-leg price**, for both `yes` and `no` actions.  A NO position's
+  held-side cost = `100 - leg_price` (+ fees); a NO exit's proceeds =
+  `100 - leg_price` (- fees).
+- `action`/`side` columns are the *submitted* order legs.  The
+  canonical position is in `canonical_position_side` /
+  `canonical_position_action`: `sell yes` = short YES = a **NO
+  position** (betting down); `buy no` canonicalizes to the same thing.
+- P&L example (0200 window): `buy no` YES-leg 42 -> NO@58 cost; `sell
+  no` YES-leg 28 -> NO realized 72c = +14c gross.  Reading the leg price
+  as the NO price inverts winners and losers - this mistake was made once;
+  always convert via `100 - leg`.
+- `client_order_id` prefixes: `merid_*` = entry, `stopcand_sc-*` =
+  stop-candidate/arbiter exit, `exit_*` = guard-path exit.

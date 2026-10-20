@@ -213,6 +213,10 @@ class Position:
     # at bid 47c, missed in a falling book, latched, and settled ~0 (-78c).
     tail_loss_floor_fired_at: Optional[float] = None
     tail_loss_floor_attempts: int = 0
+    # 2026-10-20: when MERID_LOSS_EXITS_ENABLED=0 the price-depth triggers
+    # are suppressed; this transient stamp throttles the would-have-fired
+    # observation log to once per 60s per position (not persisted).
+    tail_loss_suppress_logged_at: Optional[float] = None
 
     # Trailing-stop timing (2026-08-10)
     trail_armed_at: Optional[float] = None  # when profit first reached arm threshold
