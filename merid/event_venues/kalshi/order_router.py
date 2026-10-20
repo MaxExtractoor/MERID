@@ -16408,7 +16408,12 @@ async def _route_live(
                     spread_cents=0,
                     confidence=getattr(intent, 'confidence', 0.5),
                     is_exit_order=False,
-                    count=intent.count  # CRITICAL FIX (2026-07-31): Pass contract count for validation
+                    count=intent.count,  # CRITICAL FIX (2026-07-31): Pass contract count for validation
+                    # 2026-10-20: bounded lanes (pinned_fav 92-98c, quota
+                    # 5-97c, settlement <=97c) carry their own verified
+                    # price band; the profile 25-80c range would reject
+                    # every canonical-valid lane order here.
+                    decision_lane=getattr(intent, "decision_lane", None),
                 )
                 
                 # Request slot allocation BEFORE submission

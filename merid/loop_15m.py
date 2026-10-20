@@ -9958,6 +9958,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 max_price_cents = min(99, int(_wq_loop_bounds.quota_price_hi()))
             except Exception:
                 pass
+        _pf_lane_cand = candidate.get("decision_lane") == "pinned_fav"
+        if _pf_lane_cand:
+            # 2026-10-20: the lane's 92-98c band (validated at emit) exceeds
+            # the canonical side-aware ceiling (YES/NO 95c).  Same clamp /
+            # assert argument as the window_quota branch above — a YES@97
+            # pin must not be repriced to 95c mid-fallback or assert-killed.
+            try:
+                from merid.prediction import directional_regime as _dr_loop_bounds
+                min_price_cents = max(1, int(_dr_loop_bounds._pinned_fav_lo()))
+                max_price_cents = min(99, int(_dr_loop_bounds._pinned_fav_hi()))
+            except Exception:
+                pass
         def _cand_in_range(_px: int) -> bool:
             if is_price_in_canonical_range(_px, _candidate_side):
                 return True
@@ -9965,6 +9977,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 try:
                     from merid.prediction import window_quota as _wq_loop
                     return _wq_loop.quota_band_match(_px)
+                except Exception:
+                    return False
+            if _pf_lane_cand:
+                try:
+                    from merid.prediction import directional_regime as _dr_loop
+                    return _dr_loop.pinned_fav_band_match(_px)
                 except Exception:
                     return False
             return False

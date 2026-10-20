@@ -81,6 +81,36 @@ class PositionSlot:
 Slot = PositionSlot
 
 
+def _lane_entry_band_cents(decision_lane: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Bounded admission lanes carry their own verified price band, wider
+    than the profile entry range (25-80c).  A lane-stamped request was
+    admitted inside that band by its own gate; re-checking it against the
+    generic profile range would reject canonical-valid lane orders (e.g.
+    a pinned_fav 92-98c intent died as ``slot_allocation_error`` once the
+    submit-time EV revalidation was fixed, 2026-10-20).  Returns None for
+    ordinary candidates, which keep the profile band."""
+    if not decision_lane:
+        return None
+    try:
+        if decision_lane == "pinned_fav":
+            from merid.prediction import directional_regime as _dr
+            return int(_dr._pinned_fav_lo()), int(_dr._pinned_fav_hi())
+        if decision_lane == "window_quota":
+            from merid.prediction import window_quota as _wq
+            return int(_wq.quota_price_lo()), int(_wq.quota_price_hi())
+        if decision_lane == "settlement_convergence":
+            from merid.prediction.trade_decision import (
+                MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+            )
+            return (
+                GlobalSlotAllocator.MIN_ENTRY_CENTS,
+                int(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS),
+            )
+    except Exception:
+        return None
+    return None
+
+
 @dataclass
 class AllocationRequest:
     """Request for slot allocation."""
@@ -94,13 +124,17 @@ class AllocationRequest:
     is_exit_order: bool = False  # CRITICAL: Exit orders bypass slot allocation
     count: float = 1.0  # Contract count (default 1.0, used for validation)
     request_time: float = field(default_factory=time.time)
-    
+    decision_lane: Optional[str] = None  # bounded lanes carry their own price band
+
     def __post_init__(self):
         """Validate request parameters."""
         resolved = _get_resolved_or_default()
         max_contracts = resolved.max_contracts_per_order if resolved else MAX_CONTRACTS_PER_ORDER
         min_entry_cents = resolved.min_entry_cents if resolved else GlobalSlotAllocator.MIN_ENTRY_CENTS
         max_entry_cents = resolved.max_entry_cents if resolved else GlobalSlotAllocator.MAX_ENTRY_CENTS
+        _lane_band = _lane_entry_band_cents(self.decision_lane)
+        if _lane_band is not None:
+            min_entry_cents, max_entry_cents = _lane_band
 
         # Kalshi V2 supports fractional contracts down to 0.01 (one centi-contract).
         # Reject sub-minimal or non-positive sizes, but allow sub-one-contract entries
@@ -438,7 +472,8 @@ class GlobalSlotAllocator:
         self,
         entry_price_cents: int,
         asset: Optional[str] = None,
-        count: float = 1.0
+        count: float = 1.0,
+        decision_lane: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Check if a slot can be allocated for the given entry price.
@@ -447,16 +482,22 @@ class GlobalSlotAllocator:
             entry_price_cents: Entry price in cents
             asset: Optional asset symbol for per-asset checks
             count: Number of contracts (default 1.0)
+            decision_lane: bounded lanes validate against their own band
 
         Returns:
             Tuple of (allowed, reason)
         """
         # Check entry price range
-        if entry_price_cents < self.min_entry_cents:
-            return False, f"Entry price {entry_price_cents}c below minimum {self.min_entry_cents}c"
+        _min_entry = self.min_entry_cents
+        _max_entry = self.max_entry_cents
+        _lane_band = _lane_entry_band_cents(decision_lane)
+        if _lane_band is not None:
+            _min_entry, _max_entry = _lane_band
+        if entry_price_cents < _min_entry:
+            return False, f"Entry price {entry_price_cents}c below minimum {_min_entry}c"
 
-        if entry_price_cents > self.max_entry_cents:
-            return False, f"Entry price {entry_price_cents}c above maximum {self.max_entry_cents}c"
+        if entry_price_cents > _max_entry:
+            return False, f"Entry price {entry_price_cents}c above maximum {_max_entry}c"
 
         if count > self.max_contracts_per_order:
             return False, (
@@ -531,21 +572,27 @@ class GlobalSlotAllocator:
             return True, "EXIT_ORDER_BYPASS", None
         
         # Validate request for entry orders
+        _min_entry = self.min_entry_cents
+        _max_entry = self.max_entry_cents
+        _lane_band = _lane_entry_band_cents(getattr(request, "decision_lane", None))
+        if _lane_band is not None:
+            _min_entry, _max_entry = _lane_band
         try:
-            if request.entry_price_cents < self.min_entry_cents:
+            if request.entry_price_cents < _min_entry:
                 self._total_rejections += 1
                 return False, f"Entry price {request.entry_price_cents}c below minimum", None
-            
-            if request.entry_price_cents > self.max_entry_cents:
+
+            if request.entry_price_cents > _max_entry:
                 self._total_rejections += 1
                 return False, f"Entry price {request.entry_price_cents}c above maximum", None
         except ValueError as e:
             self._total_rejections += 1
             return False, str(e), None
-        
+
         # Check if allocation is possible
         can_allocate, reason = self.can_allocate(
-            request.entry_price_cents, request.asset, count=request.count
+            request.entry_price_cents, request.asset, count=request.count,
+            decision_lane=getattr(request, "decision_lane", None),
         )
 
         if not can_allocate:

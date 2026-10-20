@@ -7498,6 +7498,35 @@ def compute_trade_decision(
                 float(selected_threshold) * 100.0
             )
 
+    # 2026-10-20: bounded-lane admission bound must flow into
+    # decision.min_required_edge -> intent.min_required_edge -> the
+    # router's submit-time revalidation bound.  Without this the positive
+    # formula threshold is stamped instead, and revalidation caps
+    # max_price at p_held - fee - reserves - (+edge) — every emitted
+    # 92-98c pinned_fav order died as submit_reapproval_required
+    # (XRP YES@92 limit>max_price=85, 2026-10-20).  Mirrors the
+    # marginal_band slack stamp above and the quota lane's explicit
+    # min_required_edge override in agent_grid_15m.  min() never stamps
+    # a bound stricter than the one the selected lane actually cleared.
+    _mre_lane = indicators.get("decision_lane") if selected_outcome else None
+    if _mre_lane == "pinned_fav":
+        try:
+            from merid.prediction import directional_regime as _dr_mre
+            selected_threshold = min(
+                float(selected_threshold),
+                float(_dr_mre._pinned_fav_min_ev_cents()) / 100.0,
+            )
+        except Exception:
+            pass
+    elif _mre_lane == "settlement_convergence":
+        try:
+            selected_threshold = min(
+                float(selected_threshold),
+                float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE),
+            )
+        except Exception:
+            pass
+
     decision = TradeDecision(
         run_id=run_id,
         decision_id=decision_id,

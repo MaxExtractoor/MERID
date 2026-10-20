@@ -103,6 +103,11 @@ class TestBoundedLaneMembership:
             # 2026-10-12: cohort-restricted marginal-band release lane —
             # NO-side SOL/DOGE/XRP near-miss at <=1c shortfall.
             "marginal_band",
+            # 2026-10-17: pinned-favorite probe lane (92-98c, TTE 300-840s)
+            # and the window-quota paid-telemetry fallback — both bounded
+            # by their own admission floors and durable caps.
+            "pinned_fav",
+            "window_quota",
         }
 
 

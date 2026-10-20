@@ -554,5 +554,79 @@ class TestGlobalSlotAllocator:
         print("✓ Sync with position cache (expired market) test passed")
 
 
+class TestLaneAwareEntryBand:
+    """Bounded admission lanes carry their own verified price band.
+
+    2026-10-20: the pinned_fav lane's 92-98c band exceeded the profile
+    25-80c range — once submit-time EV revalidation was fixed, every
+    canonical-valid pinned intent died here as ``slot_allocation_error``.
+    The lane stamp swaps in the band the lane's own gate verified; the
+    exposure math (count * price vs the $3 cap) is unchanged.
+    """
+
+    def setup_method(self):
+        from merid.risk.global_slot_allocator import reset_global_slot_allocator
+        reset_global_slot_allocator()
+
+    def _req(self, price_cents, lane, ticker="KXXRP15M-TEST", asset="XRP"):
+        from merid.risk.global_slot_allocator import AllocationRequest
+        return AllocationRequest(
+            agent_id="pf_test",
+            asset=asset,
+            ticker=ticker,
+            entry_price_cents=price_cents,
+            edge_pct=-10.0,
+            spread_cents=1,
+            decision_lane=lane,
+        )
+
+    def test_pinned_fav_band_admits_92_98(self):
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        allocator = get_global_slot_allocator()
+        allocated, reason, slot_id = allocator.request_allocation(
+            self._req(95, "pinned_fav")
+        )
+        assert allocated, f"95c pinned_fav must fit the lane band: {reason}"
+        assert slot_id is not None
+        # Exposure still counts at cash notional against the cap.
+        assert allocator.get_total_exposure() == pytest.approx(0.95)
+
+    def test_pinned_fav_band_is_bounded(self):
+        # The lane band replaces the profile range — it does not widen
+        # to 1-99.  Out-of-band lane requests still fail closed.
+        with pytest.raises(ValueError, match="outside allowed range"):
+            self._req(99, "pinned_fav")   # above lane hi (98)
+        with pytest.raises(ValueError, match="outside allowed range"):
+            self._req(85, "pinned_fav")   # below lane lo (92)
+
+    def test_generic_request_keeps_profile_ceiling(self):
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        allocator = get_global_slot_allocator()
+        # No lane stamp: a 92c ordinary request still dies at the profile
+        # ceiling (80c) — the lane exception is stamp-scoped.
+        with pytest.raises(ValueError, match="outside allowed range"):
+            self._req(92, None)
+        allocated, reason, _ = allocator.request_allocation(self._req(50, None))
+        assert allocated, f"50c ordinary request should pass: {reason}"
+
+    def test_can_allocate_lane_band(self):
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        allocator = get_global_slot_allocator()
+        ok, reason = allocator.can_allocate(
+            95, asset="XRP", decision_lane="pinned_fav"
+        )
+        assert ok, reason
+        ok, reason = allocator.can_allocate(95, asset="BTC")
+        assert not ok and "above maximum" in reason
+
+    def test_settlement_lane_extends_ceiling(self):
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        allocator = get_global_slot_allocator()
+        allocated, reason, _ = allocator.request_allocation(
+            self._req(96, "settlement_convergence")
+        )
+        assert allocated, f"96c settlement intent must pass: {reason}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-x", "-s"])

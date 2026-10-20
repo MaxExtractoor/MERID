@@ -648,13 +648,32 @@ class GlobalAllocator:
         for c, d in conf_passed:
             _pmin = _pmax = None
             try:
-                if getattr(c, "decision_lane", None) == "window_quota":
+                _cand_lane = getattr(c, "decision_lane", None)
+                if _cand_lane == "window_quota":
                     # 2026-10-17: window-quota spans the lane's own band —
                     # the canonical side-aware range predates it and would
                     # re-veto e.g. a YES@80 quota the lane admitted.
                     from merid.prediction import window_quota as _wq_alloc
                     _pmin = int(_wq_alloc.quota_price_lo())
                     _pmax = int(_wq_alloc.quota_price_hi())
+                elif _cand_lane == "pinned_fav":
+                    # 2026-10-20: the lane's 92-98c band exceeds the
+                    # canonical 95c ceiling — a YES@97 pin must not die at
+                    # PRICE after clearing its own admission gate.
+                    from merid.prediction import directional_regime as _dr_alloc
+                    _pmin = int(_dr_alloc._pinned_fav_lo())
+                    _pmax = int(_dr_alloc._pinned_fav_hi())
+                elif _cand_lane == "settlement_convergence":
+                    # Same class of gap: the lane admits up to its own cap
+                    # (default 97c) while the canonical ceiling is 95c.
+                    from merid.prediction.trade_decision import (
+                        MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+                    )
+                    from merid.event_venues.kalshi.binary_price_space import (
+                        get_canonical_price_range,
+                    )
+                    _pmin, _pmax = get_canonical_price_range(c.side)
+                    _pmax = max(_pmax, int(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS))
                 else:
                     from merid.event_venues.kalshi.binary_price_space import (
                         get_canonical_price_range,

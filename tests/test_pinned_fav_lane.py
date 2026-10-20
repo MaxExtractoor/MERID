@@ -489,3 +489,44 @@ def test_non_pf_side_keeps_generic_stamps(tmp_path, monkeypatch):
         bound = d.indicators.get(f"{pfx}_effective_required_edge_cents")
         if bound is not None:
             assert bound >= 0.0
+
+
+def test_selected_decision_stamps_lane_floor_into_min_required_edge(
+    tmp_path, monkeypatch
+):
+    """Router submit-time revalidation derives the permitted limit from
+    intent.min_required_edge (max_price = p_held - fee - reserves -
+    required_edge).  Stamping the positive formula threshold capped
+    max_price at ~85c and rejected every live pinned emit
+    (``limit=92 > max_price=85`` on the 2026-10-20 live XRP YES@92
+    reprice).  The lane floor is the honest admission bound and must
+    reach the intent."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), d.no_trade_reason,
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    # min_required_edge is a probability fraction: -6c floor -> -0.06.
+    # The formula threshold is always positive, so a negative stamp
+    # proves the lane floor flowed through to the intent.
+    assert float(d.min_required_edge) == pytest.approx(-0.06, abs=1e-9)
+
+
+def test_non_pinned_selection_keeps_positive_min_required_edge(
+    tmp_path, monkeypatch
+):
+    """A vetoed/no-trade decision must not carry the negative lane floor:
+    the stamp is selection-scoped, not lane-armed-global."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision(seconds_to_expiry=200.0)  # outside the lane TTE window
+    assert d.selected_outcome is None
+    assert float(d.min_required_edge) >= 0.0
