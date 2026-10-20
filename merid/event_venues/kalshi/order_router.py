@@ -6312,9 +6312,15 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 # Comparable REST disagreement on fillability: lifting the
                 # ceiling to the capped edge budget costs nothing when WS is
                 # right (limit orders fill at best ask) and rescues the fill
-                # when the REST observation was the real book.
+                # when the REST observation was the real book.  2026-10-20:
+                # coverage only needs a FRESH REST leg (rest_usable), not the
+                # aligned-timing proof `rest_comparable` demands — a moving
+                # book is exactly when the decision snapshot is staler than
+                # the REST pull, and a bounded limit cannot overpay (it fills
+                # at best ask or dies).  Live: XRP quota NO@80c IOC-missed a
+                # real 86c ask because the non-comparable leg never repriced.
                 if (
-                    _buy_taker and rest_comparable and not rest_marketable
+                    _buy_taker and rest_usable and not rest_marketable
                     and _epc is not None
                     and _epc >= rest_book_side["ask_cents"]
                     and _epc > int(getattr(intent, "price_cents", 0) or 0)
@@ -6348,7 +6354,7 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
             if _buy_taker:
                 _cover_ask = (
                     min(ws_book["ask_cents"], rest_book_side["ask_cents"])
-                    if rest_comparable else ws_book["ask_cents"]
+                    if (rest_comparable or rest_usable) else ws_book["ask_cents"]
                 )
                 if _epc is not None and _cover_ask <= _epc:
                     if _epc > int(getattr(intent, "price_cents", 0) or 0):
