@@ -29,6 +29,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     _candidate_floor_entry_edge,
     _stop_sweep_cents,
     loss_sell_blocked,
+    resolve_loss_sell_floor,
 )
 from merid.position_management.position_monitor import (
     _get_tail_loss_floor_config,
@@ -126,14 +127,104 @@ class TestLossCapSweep(unittest.TestCase):
             _stop_sweep_cents("LOSS_CAP"), 6,
         )
 
+    def test_edge_decay_sweeps_deeper(self):
+        """2026-10-20 KXXRP15M-2315: three EDGE_DECAY profit-takers missed
+        on a falling book at the 3c cap; the position rode to -40c."""
+        self.assertGreaterEqual(
+            _stop_sweep_cents("EDGE_DECAY"), 6,
+        )
+
     def test_other_triggers_keep_default(self):
         from merid.event_venues.kalshi.stop_candidate import STOP_MAX_SLIPPAGE_CENTS
-        self.assertEqual(_stop_sweep_cents("EDGE_DECAY"), STOP_MAX_SLIPPAGE_CENTS)
         self.assertEqual(_stop_sweep_cents("HARD_STOP"), STOP_MAX_SLIPPAGE_CENTS)
+        self.assertEqual(_stop_sweep_cents("TRAILING_STOP"), STOP_MAX_SLIPPAGE_CENTS)
 
     def test_sweep_env_override(self):
         with mock.patch.dict(os.environ, {"MERID_LOSS_CAP_SWEEP_CENTS": "10"}):
             self.assertEqual(_stop_sweep_cents("LOSS_CAP"), 10)
+        with mock.patch.dict(os.environ, {"MERID_EDGE_DECAY_SWEEP_CENTS": "9"}):
+            self.assertEqual(_stop_sweep_cents("EDGE_DECAY"), 9)
+
+
+class TestFloorClamp(unittest.TestCase):
+    """resolve_loss_sell_floor lets the pricing path clamp the swept limit
+    at the floor (fills >= floor, same protection) instead of suppressing
+    an exit whose worst-case bound dipped under a still-executable bid."""
+
+    def setUp(self):
+        os.environ.pop("MERID_PROFIT_ONLY_EXITS", None)
+
+    def test_no_edge_entry_floor_is_fair_minus_margin(self):
+        # entry 61, edge -5, fair 68 -> floor = min(61, 68-2) = 61.
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 61, hold_value_cents=68, entry_edge=-5.0,
+        )
+        self.assertEqual(floor, 61)
+
+    def test_no_edge_floor_drops_below_entry_when_fair_lower(self):
+        # entry 78, edge -4, fair 74 -> floor = 72 (the live BTC case).
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 78, hold_value_cents=74, entry_edge=-4.0,
+        )
+        self.assertEqual(floor, 72)
+
+    def test_positive_edge_floor_is_entry(self):
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 61, hold_value_cents=68, entry_edge=+5.0,
+        )
+        self.assertEqual(floor, 61)
+
+    def test_ratchet_floor_for_winner(self):
+        # entry 78, peak 86 (arm 8), trail 12 -> floor = max(78, 86-12)=78.
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 78, peak_price_cents=86, entry_edge=+9.0,
+        )
+        self.assertEqual(floor, 78)
+
+    def test_exempt_trigger_returns_none(self):
+        self.assertIsNone(resolve_loss_sell_floor("LOSS_CAP", 78))
+        self.assertIsNone(resolve_loss_sell_floor("HARD_STOP", 78))
+
+    def test_missing_entry_returns_none(self):
+        self.assertIsNone(
+            resolve_loss_sell_floor("EDGE_DECAY", None, hold_value_cents=70),
+        )
+
+    def test_clamp_semantics_xrp_replay(self):
+        """Replay of the live XRP 2315 case: entry 61, edge -5, fair 68,
+        bid 64, sweep 6 -> raw limit 58 < floor 61.  Clamping to 61 submits
+        an IOC that fills at the live bid (>=61) — under the old behaviour
+        the candidate was suppressed and the position rode to -40c."""
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 61, hold_value_cents=68, entry_edge=-5.0,
+        )
+        raw_limit = 64 - _stop_sweep_cents("EDGE_DECAY")
+        self.assertLess(raw_limit, floor)
+        clamped = max(raw_limit, floor)  # what the pricing path now emits
+        blocked = loss_sell_blocked(
+            "EDGE_DECAY", clamped, 61,
+            hold_value_cents=68, entry_edge=-5.0,
+        )
+        self.assertFalse(blocked)
+
+    def test_bid_below_floor_still_suppressed(self):
+        """When the executable bid itself is under the floor the candidate
+        must still be suppressed — the clamp only rescues limit-vs-floor
+        dips while the market still trades at/above the floor."""
+        floor = resolve_loss_sell_floor(
+            "EDGE_DECAY", 61, hold_value_cents=68, entry_edge=+5.0,
+        )
+        bid = 55
+        raw_limit = max(1, bid - _stop_sweep_cents("EDGE_DECAY"))
+        exit_price = raw_limit
+        if raw_limit < floor <= bid:
+            exit_price = floor
+        self.assertTrue(
+            loss_sell_blocked(
+                "EDGE_DECAY", exit_price, 61,
+                hold_value_cents=68, entry_edge=+5.0,
+            ),
+        )
 
 
 class TestTailFloorRetry(unittest.TestCase):

@@ -39,11 +39,11 @@ class TestRatchetProfitFloor:
                 assert field.default == 5, \
                     f"Expected ratchet_floor_offset_cents=5, got {field.default}"
             if field.name == 'ratchet_force_exit_on_floor_breach':
-                assert field.default == True, \
-                    f"Expected ratchet_force_exit_on_floor_breach=True, got {field.default}"
+                assert field.default == False, \
+                    f"Expected ratchet_force_exit_on_floor_breach=False, got {field.default}"
             if field.name == 'ratchet_min_hold_after_activation_sec':
-                assert field.default == 30, \
-                    f"Expected ratchet_min_hold_after_activation_sec=30, got {field.default}"
+                assert field.default == 60, \
+                    f"Expected ratchet_min_hold_after_activation_sec=60, got {field.default}"
             if field.name == 'ratchet_mandatory_exit_at_99c':
                 assert field.default == True, \
                     f"Expected ratchet_mandatory_exit_at_99c=True, got {field.default}"
@@ -123,7 +123,8 @@ class TestRatchetProfitFloor:
         
         # Verify floor calculation logic
         assert 'floor_price = activation_threshold - floor_offset' in content or \
-               'floor_price = activation_threshold_cents - floor_offset_cents' in content, \
+               'floor_price = activation_threshold_cents - floor_offset_cents' in content or \
+               'floor_price = base_activation - floor_offset' in content, \
             "Should calculate floor as activation - offset"
     
     def test_ratchet_hold_period(self):

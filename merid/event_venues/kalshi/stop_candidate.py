@@ -344,14 +344,53 @@ def loss_sell_blocked(
     ``hold_value_cents`` is available the entry anchor still applies
     (fail closed).
     """
-    if not profit_only_exits_enabled():
-        return False
-    _tr = getattr(trigger_reason, "value", trigger_reason)
-    if str(_tr).upper() in LOSS_SELL_EXEMPT_TRIGGERS:
-        return False
-    if exit_price_cents is None or entry_price_cents is None:
+    floor = resolve_loss_sell_floor(
+        trigger_reason,
+        entry_price_cents,
+        hold_value_cents=hold_value_cents,
+        peak_price_cents=peak_price_cents,
+        entry_edge=entry_edge,
+    )
+    if floor is None or exit_price_cents is None:
         return False
     exit_price = int(exit_price_cents)
+    if exit_price >= floor:
+        return False
+    if (
+        hold_value_cents is not None
+        and _env_bool("MERID_LOSS_SELL_EV_SALVAGE", True)
+        and exit_price
+        >= int(hold_value_cents)
+        + _env_int("MERID_LOSS_SELL_SALVAGE_MARGIN_CENTS", 5)
+    ):
+        return False
+    return True
+
+
+def resolve_loss_sell_floor(
+    trigger_reason: Any,
+    entry_price_cents: Optional[int],
+    *,
+    hold_value_cents: Optional[int] = None,
+    peak_price_cents: Optional[int] = None,
+    entry_edge: Optional[float] = None,
+) -> Optional[int]:
+    """The breakeven floor a loss-sale may not cross, or None when no floor
+    applies (exits disabled, exempt trigger, or no entry price to anchor).
+
+    Returned separately from the blocked check so the pricing path can
+    *clamp* a swept limit at the floor instead of suppressing the whole
+    candidate — an IOC at limit=floor can only fill at >= floor, which
+    preserves the floor's intent while converting exits whose worst-case
+    bound dipped below it (2026-10-20 KXXRP15M-2315: three EDGE_DECAY
+    profit-takers missed on a falling book and the position rode -40c)."""
+    if not profit_only_exits_enabled():
+        return None
+    _tr = getattr(trigger_reason, "value", trigger_reason)
+    if str(_tr).upper() in LOSS_SELL_EXEMPT_TRIGGERS:
+        return None
+    if entry_price_cents is None:
+        return None
     entry_price = int(entry_price_cents)
     _no_edge_entry = False
     try:
@@ -379,17 +418,7 @@ def loss_sell_blocked(
                 entry_price,
                 peak - _env_int("MERID_BREAKEVEN_RATCET_TRAIL_CENTS", 12),
             )
-    if exit_price >= floor:
-        return False
-    if (
-        hold_value_cents is not None
-        and _env_bool("MERID_LOSS_SELL_EV_SALVAGE", True)
-        and exit_price
-        >= int(hold_value_cents)
-        + _env_int("MERID_LOSS_SELL_SALVAGE_MARGIN_CENTS", 5)
-    ):
-        return False
-    return True
+    return floor
 
 
 def _stop_sweep_cents(trigger_reason: Any) -> int:
@@ -409,6 +438,16 @@ def _stop_sweep_cents(trigger_reason: Any) -> int:
         return max(
             STOP_MAX_SLIPPAGE_CENTS,
             _env_int("MERID_LOSS_CAP_SWEEP_CENTS", 6),
+        )
+    if _name == "EDGE_DECAY":
+        # Thesis-death exits get the same deeper sweep as salvage:
+        # 2026-10-20 KXXRP15M-2315 fired three profit-takers at limits
+        # 63-67 into a falling book — all missed at the 3c cap, and the
+        # position rode to a 21c dump (-40c).  The limit is a bound, not
+        # the price; deeper converts more on a moving book.
+        return max(
+            STOP_MAX_SLIPPAGE_CENTS,
+            _env_int("MERID_EDGE_DECAY_SWEEP_CENTS", 6),
         )
     return STOP_MAX_SLIPPAGE_CENTS
 
@@ -2153,6 +2192,29 @@ async def maybe_submit_stop_candidate(
         exit_price = max(1, min(exit_bid - _sweep_c, _marginal_c))
     else:
         exit_price = max(1, exit_bid - _sweep_c)
+    _floor_entry = candidate.entry_price_cents
+    if _floor_entry is None:
+        _floor_entry = position_avg_price_cents
+    # 2026-10-20: clamp the swept limit at the resolved floor instead of
+    # letting the sweep push it below.  A deeper sweep (LOSS_CAP/
+    # EDGE_DECAY) can price the worst-case bound under the floor while the
+    # executable bid is still at/above it — an IOC at limit=floor can only
+    # fill at >= floor, so clamping converts the exit at the live bid
+    # without weakening the floor.  Suppression remains for the real case:
+    # the observed bid itself already below the floor.
+    _resolved_floor = resolve_loss_sell_floor(
+        candidate.trigger_reason,
+        _floor_entry,
+        hold_value_cents=candidate.fair_value_cents,
+        peak_price_cents=candidate.peak_price_cents,
+        entry_edge=_candidate_floor_entry_edge(candidate),
+    )
+    if (
+        _resolved_floor is not None
+        and exit_price < _resolved_floor
+        and exit_bid >= _resolved_floor
+    ):
+        exit_price = _resolved_floor
     logger.info(
         "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger=%s "
         "entry=%dc bid=%dc marginal=%s fair=%dc entry_edge=%dc current_edge=%dc "
@@ -2176,9 +2238,6 @@ async def maybe_submit_stop_candidate(
     # If it is below the held-side entry, this candidate would lock a loss —
     # suppress it and let the position ride to settlement.  The candidate is
     # still recorded so the suppression is auditable.
-    _floor_entry = candidate.entry_price_cents
-    if _floor_entry is None:
-        _floor_entry = position_avg_price_cents
     if loss_sell_blocked(
         candidate.trigger_reason, exit_price, _floor_entry,
         hold_value_cents=candidate.fair_value_cents,
