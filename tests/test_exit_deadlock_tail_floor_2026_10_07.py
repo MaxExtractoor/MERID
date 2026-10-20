@@ -131,17 +131,19 @@ class TestStaleInflightKnobs:
 
 class TestTailLossFloor:
     def test_config_defaults(self, monkeypatch):
-        for var in ("MERID_TAIL_LOSS_ENABLED", "MERID_TAIL_LOSS_DROP_CENTS", "MERID_TAIL_LOSS_FLOOR_CENTS"):
+        for var in ("MERID_TAIL_LOSS_ENABLED", "MERID_TAIL_LOSS_DROP_CENTS", "MERID_TAIL_LOSS_FLOOR_CENTS", "MERID_TAIL_LOSS_RETRY_S", "MERID_TAIL_LOSS_MAX_ATTEMPTS"):
             monkeypatch.delenv(var, raising=False)
         cfg = _get_tail_loss_floor_config()
-        assert cfg == {"enabled": True, "drop_cents": 30, "floor_cents": 18}
+        assert cfg == {"enabled": True, "drop_cents": 30, "floor_cents": 18, "retry_s": 20, "max_attempts": 4}
 
     def test_config_overrides(self, monkeypatch):
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "0")
         monkeypatch.setenv("MERID_TAIL_LOSS_DROP_CENTS", "25")
         monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_CENTS", "22")
+        monkeypatch.setenv("MERID_TAIL_LOSS_RETRY_S", "15")
+        monkeypatch.setenv("MERID_TAIL_LOSS_MAX_ATTEMPTS", "6")
         cfg = _get_tail_loss_floor_config()
-        assert cfg == {"enabled": False, "drop_cents": 25, "floor_cents": 22}
+        assert cfg == {"enabled": False, "drop_cents": 25, "floor_cents": 22, "retry_s": 15, "max_attempts": 6}
 
     def _position(self, **kwargs) -> Position:
         defaults = dict(

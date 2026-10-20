@@ -392,6 +392,43 @@ def loss_sell_blocked(
     return True
 
 
+def _stop_sweep_cents(trigger_reason: Any) -> int:
+    """Permitted below-bid sweep for the exit limit, in cents.
+
+    A sell limit below the observed bid still fills at the best bid — the
+    sweep depth only bounds how far the book may slide during submit latency
+    before the order stops converting.  Catastrophic salvage (LOSS_CAP) is
+    allowed a deeper sweep (``MERID_LOSS_CAP_SWEEP_CENTS``, default 6c):
+    2026-10-20 KXBTC15M-2230 priced limit=44 vs bid=47, the book fell below
+    44 in ~1.5s, the IOC missed, and the position settled ~0 (-78c).  A 6c
+    sweep converts books that fall ~2x as far in transit while still filling
+    at best bid when the book holds.
+    """
+    _name = str(getattr(trigger_reason, "value", trigger_reason) or "").upper()
+    if _name == "LOSS_CAP":
+        return max(
+            STOP_MAX_SLIPPAGE_CENTS,
+            _env_int("MERID_LOSS_CAP_SWEEP_CENTS", 6),
+        )
+    return STOP_MAX_SLIPPAGE_CENTS
+
+
+def _candidate_floor_entry_edge(candidate: "StopCandidate") -> Optional[float]:
+    """Entry-edge signal for the breakeven floor, preferring the stamped
+    entry-time lane claim (``claimed_entry_edge`` — the same ``entry_edge``
+    semantic the exit resolver passes from the position record) and falling
+    back to the candidate's model-fair-vs-entry delta.  Either flag marks a
+    no-edge / underwater entry where the "trust the model, ride to
+    settlement" thesis does not apply, so the floor drops to ~fair value
+    instead of pinning to entry.  2026-10-20 KXBTC15M-2230: entry_edge was
+    stamped but never wired here — EDGE_DECAY at bid 74c vs entry 78c was
+    suppressed and the position rode to ~0 (-78c)."""
+    claimed = getattr(candidate, "claimed_entry_edge", None)
+    if claimed is not None:
+        return claimed
+    return getattr(candidate, "entry_edge_cents", None)
+
+
 # Settlement-aware phase constants (seconds).
 SETTLEMENT_CLOSE_BUFFER_SECONDS = _env_int(
     "MERID_SETTLEMENT_CLOSE_BUFFER_SECONDS", 60
@@ -440,6 +477,14 @@ class StopCandidate:
     current_edge_cents: Optional[int] = None
     edge_decay_exit_cents: Optional[int] = None
     stop_level_cents: Optional[int] = None
+    # 2026-10-20: breakeven-floor inputs the submission path was missing.
+    # ``peak_price_cents`` is the held-side high watermark (own-side price
+    # space) so the ratchet arm can raise the floor on round-tripping
+    # winners.  ``claimed_entry_edge`` is the position's stamped entry-time
+    # claim (the lane's advertised edge, sign only) — distinct from
+    # ``entry_edge_cents`` which is model-fair minus entry at candidate time.
+    peak_price_cents: Optional[int] = None
+    claimed_entry_edge: Optional[float] = None
     # 2026-10-17: issuing controller identity for structured emergency
     # authorization (validated by the execution firewall; never the reason
     # text).  Defaults to the position monitor, which builds all current
@@ -481,6 +526,8 @@ class StopCandidate:
             "current_edge_cents": self.current_edge_cents,
             "edge_decay_exit_cents": self.edge_decay_exit_cents,
             "stop_level_cents": self.stop_level_cents,
+            "peak_price_cents": self.peak_price_cents,
+            "claimed_entry_edge": self.claimed_entry_edge,
             "authorization_source": self.authorization_source,
         }
         return d
@@ -1134,6 +1181,8 @@ def build_stop_candidate(
     seconds_to_expiry: Optional[float] = None,
     source_book_sequence: Optional[int] = None,
     hard_stop_cents: Optional[int] = None,
+    peak_price_cents: Optional[int] = None,
+    claimed_entry_edge: Optional[float] = None,
 ) -> StopCandidate:
     """Build a `StopCandidate` from live market and position state."""
     # Canonical exposure is always an integer number of centi-contracts.
@@ -1213,6 +1262,8 @@ def build_stop_candidate(
         current_edge_cents=current_edge,
         edge_decay_exit_cents=edge_decay_exit,
         stop_level_cents=stop_level,
+        peak_price_cents=peak_price_cents,
+        claimed_entry_edge=claimed_entry_edge,
     )
 
 
@@ -1477,6 +1528,8 @@ async def _maybe_degraded_stop_exit(
     if loss_sell_blocked(
         candidate.trigger_reason, degraded_limit, candidate.entry_price_cents,
         hold_value_cents=candidate.fair_value_cents,
+        peak_price_cents=candidate.peak_price_cents,
+        entry_edge=_candidate_floor_entry_edge(candidate),
     ):
         _finish(
             "HOLD_TO_SETTLEMENT_APPROVED",
@@ -1907,6 +1960,8 @@ async def maybe_submit_stop_candidate(
         candidate.executable_exit_cents,
         candidate.entry_price_cents,
         hold_value_cents=candidate.fair_value_cents,
+        peak_price_cents=candidate.peak_price_cents,
+        entry_edge=_candidate_floor_entry_edge(candidate),
     ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
@@ -2086,10 +2141,18 @@ async def maybe_submit_stop_candidate(
         )
     except Exception:
         _marginal_c = None
+    # 2026-10-20: catastrophic salvage sweeps deeper than discretionary stops.
+    # A sell limit below the observed bid still fills at the best bid — the
+    # extra depth only permits conversion when the book slides through the
+    # marginal level during submit latency.  KXBTC15M-2230: LOSS_CAP priced
+    # limit=44 vs bid=47, the book fell <44 in ~1.5s, the IOC missed, the
+    # floor latched, and the position settled ~0 (-78c).  Deepening the
+    # permitted sweep buys fill probability, not worse price.
+    _sweep_c = _stop_sweep_cents(candidate.trigger_reason)
     if _marginal_c is not None:
-        exit_price = max(1, min(exit_bid - STOP_MAX_SLIPPAGE_CENTS, _marginal_c))
+        exit_price = max(1, min(exit_bid - _sweep_c, _marginal_c))
     else:
-        exit_price = max(1, exit_bid - STOP_MAX_SLIPPAGE_CENTS)
+        exit_price = max(1, exit_bid - _sweep_c)
     logger.info(
         "[STOP-CANDIDATE-PRICING] candidate=%s ticker=%s trigger=%s "
         "entry=%dc bid=%dc marginal=%s fair=%dc entry_edge=%dc current_edge=%dc "
@@ -2119,6 +2182,8 @@ async def maybe_submit_stop_candidate(
     if loss_sell_blocked(
         candidate.trigger_reason, exit_price, _floor_entry,
         hold_value_cents=candidate.fair_value_cents,
+        peak_price_cents=candidate.peak_price_cents,
+        entry_edge=_candidate_floor_entry_edge(candidate),
     ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "

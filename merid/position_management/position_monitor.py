@@ -637,6 +637,8 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
     MERID_TAIL_LOSS_ENABLED     master switch (default 1)
     MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
     MERID_TAIL_LOSS_FLOOR_CENTS absolute bid floor that triggers (default 18)
+    MERID_TAIL_LOSS_RETRY_S     cooldown before a persistent floor breach re-emits (default 20)
+    MERID_TAIL_LOSS_MAX_ATTEMPTS total emissions allowed per position (default 4)
     """
 
     def _int(name: str, default: int) -> int:
@@ -650,7 +652,26 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
         in ("1", "true", "yes", "on"),
         "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
+        "retry_s": _int("MERID_TAIL_LOSS_RETRY_S", 20),
+        "max_attempts": _int("MERID_TAIL_LOSS_MAX_ATTEMPTS", 4),
     }
+
+
+def _tail_floor_fire_allowed(position: Any, cfg: Dict[str, Any], now: float) -> bool:
+    """Whether the tail-loss floor may emit a candidate right now.
+
+    First fire is always allowed while the floor condition holds.  After an
+    emission the position records a timestamped latch; a persistent breach
+    re-arms after ``retry_s`` up to ``max_attempts`` total emissions so a
+    single IOC miss cannot strand a dying position (2026-10-20 KXBTC15M-2230:
+    fired once at bid 47c, missed, latched, settled ~0 = -78c)."""
+    if not getattr(position, "tail_loss_floor_fired", False):
+        return True
+    attempts = int(getattr(position, "tail_loss_floor_attempts", 0) or 0)
+    if attempts >= cfg["max_attempts"]:
+        return False
+    fired_at = float(getattr(position, "tail_loss_floor_fired_at", 0.0) or 0.0)
+    return (now - fired_at) >= cfg["retry_s"]
 
 
 def _scalp_arm_override_cents(position: Any, min_profit_cents: float) -> float:
@@ -3975,10 +3996,20 @@ class PositionMonitor:
         # through the intent in-flight lock — so a stale SUBMISSION_UNKNOWN exit
         # cannot hold a dying position hostage (the XRP-1800 failure mode).
         _tail_cfg = _get_tail_loss_floor_config()
+        # 2026-10-20: the latch is no longer permanent.  A single IOC miss used
+        # to latch ``tail_loss_floor_fired`` forever and the position rode to
+        # zero — KXBTC15M-2230 fired once at bid 47c, missed, and settled ~0
+        # (-78c).  While the floor condition persists the floor re-arms after
+        # MERID_TAIL_LOSS_RETRY_S and re-emits a fresh candidate (new id, fresh
+        # book/marginal pricing) up to MERID_TAIL_LOSS_MAX_ATTEMPTS total.
+        # Each candidate is a reduce-only IOC so a retry cannot expand
+        # exposure; a completed exit removes the position from evaluation
+        # entirely, making the latch irrelevant post-fill.
+        _tail_attempts = int(getattr(position, "tail_loss_floor_attempts", 0) or 0)
         if (
             _tail_cfg["enabled"]
             and current_price_cents is not None
-            and not position.tail_loss_floor_fired
+            and _tail_floor_fire_allowed(position, _tail_cfg, time.time())
         ):
             _entry_px = getattr(position, "avg_entry_price_cents", 0) or 0
             _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _tail_cfg["drop_cents"]
@@ -4016,6 +4047,8 @@ class PositionMonitor:
                         _tail_level,
                     )
                     position.tail_loss_floor_fired = True
+                    position.tail_loss_floor_fired_at = time.time()
+                    position.tail_loss_floor_attempts = _tail_attempts + 1
                     try:
                         _position_cc = to_signed_yes_exposure(
                             position.side.value,
@@ -4072,6 +4105,8 @@ class PositionMonitor:
                             quote_age_ms=_book_age_ms_val,
                             consecutive_edge_below=0,
                             hard_stop_cents=_tail_level,
+                            peak_price_cents=position.high_watermark_cents,
+                            claimed_entry_edge=getattr(position, "entry_edge", None),
                         )
                         record_stop_candidate(candidate)
                         self._submit_stop_candidate(candidate)
@@ -6073,6 +6108,8 @@ class PositionMonitor:
                 quote_age_ms=book_age_ms,
                 consecutive_edge_below=position.soft_stop_observations,
                 hard_stop_cents=position.hard_stop_price_cents,
+                peak_price_cents=position.high_watermark_cents,
+                claimed_entry_edge=getattr(position, "entry_edge", None),
             )
             record_stop_candidate(candidate)
             self._submit_stop_candidate(candidate)
@@ -6161,6 +6198,8 @@ class PositionMonitor:
                     consecutive_edge_below=position.soft_stop_observations,
                     total_exit_cost_cents=STOP_EDGE_TOTAL_EXIT_COST_CENTS,
                     hysteresis_cents=STOP_EDGE_HYSTERESIS_CENTS,
+                    peak_price_cents=position.high_watermark_cents,
+                    claimed_entry_edge=getattr(position, "entry_edge", None),
                 )
                 record_stop_candidate(candidate)
                 self._submit_stop_candidate(candidate)
@@ -6222,6 +6261,8 @@ class PositionMonitor:
                 quote_age_ms=book_age_ms,
                 seconds_to_expiry=seconds_to_expiry,
                 hard_stop_cents=position.stop_loss_price_cents,
+                peak_price_cents=position.high_watermark_cents,
+                claimed_entry_edge=getattr(position, "entry_edge", None),
             )
             record_stop_candidate(edge_candidate)
             _ev_submit_ok = True
@@ -6276,6 +6317,8 @@ class PositionMonitor:
                     quote_age_ms=book_age_ms,
                     consecutive_edge_below=position.soft_stop_observations,
                     hard_stop_cents=position.stop_loss_price_cents,
+                    peak_price_cents=position.high_watermark_cents,
+                    claimed_entry_edge=getattr(position, "entry_edge", None),
                 )
                 record_stop_candidate(candidate)
                 self._submit_stop_candidate(candidate)

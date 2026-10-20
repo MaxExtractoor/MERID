@@ -2710,7 +2710,18 @@ class KalshiVenueClient(EventVenueClient):
                 retries=result.retries,
             )
 
-        placed = self._to_placed_order(result.data.get("order", result.data))
+        # Kalshi's create-order response omits action/book_side, which sends
+        # _to_placed_order down the degraded path (side='buy' on every order,
+        # including sells — [ORDER-PARSE-DEGRADED] x18 in the 2026-10-20
+        # session).  The request body we just sent is authoritative for our
+        # own order's direction; fill only the fields the response lacks so
+        # any venue-provided direction still takes precedence.
+        _resp_order = result.data.get("order", result.data)
+        if isinstance(_resp_order, dict):
+            _resp_order = dict(_resp_order)
+            _resp_order.setdefault("book_side", kalshi_side)
+            _resp_order.setdefault("action", action)
+        placed = self._to_placed_order(_resp_order)
 
         # ── Decisive audit trace (fill/response-time fields) ────────────────────
         response_data = result.data.get("order", result.data) or {}
@@ -2958,8 +2969,13 @@ class KalshiVenueClient(EventVenueClient):
                 retries=result.retries,
             )
 
+        _resp_order = result.data.get("order", result.data)
+        if isinstance(_resp_order, dict):
+            _resp_order = dict(_resp_order)
+            _resp_order.setdefault("action", action)
+            _resp_order.setdefault("side", outcome)
         return OperationResult.ok(
-            self._to_placed_order(result.data.get("order", result.data)),
+            self._to_placed_order(_resp_order),
             latency_ms=result.latency_ms,
             retries=result.retries,
         )

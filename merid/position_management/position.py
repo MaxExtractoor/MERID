@@ -208,6 +208,11 @@ class Position:
     # 2026-10-07: tail-loss floor (profit_only_v1 has no armed SL — this is the
     # catastrophic salvage trigger, emitted as a HARD_STOP-class StopCandidate).
     tail_loss_floor_fired: bool = False
+    # 2026-10-20: the floor latch is timestamped + attempt-bounded so a single
+    # IOC miss cannot permanently suppress salvage — KXBTC15M-2230 fired once
+    # at bid 47c, missed in a falling book, latched, and settled ~0 (-78c).
+    tail_loss_floor_fired_at: Optional[float] = None
+    tail_loss_floor_attempts: int = 0
 
     # Trailing-stop timing (2026-08-10)
     trail_armed_at: Optional[float] = None  # when profit first reached arm threshold
@@ -1331,6 +1336,8 @@ class Position:
             "hard_stop_confirmed": self.hard_stop_confirmed,
             "hard_stop_price_cents": self.hard_stop_price_cents,
             "tail_loss_floor_fired": self.tail_loss_floor_fired,
+            "tail_loss_floor_fired_at": self.tail_loss_floor_fired_at,
+            "tail_loss_floor_attempts": self.tail_loss_floor_attempts,
             "trail_armed_at": self.trail_armed_at,
             "trail_started_at": self.trail_started_at,
             "high_watermark_updated_at": self.high_watermark_updated_at,
@@ -1442,6 +1449,8 @@ class Position:
             hard_stop_confirmed=data.get("hard_stop_confirmed", False),
             hard_stop_price_cents=data.get("hard_stop_price_cents"),
             tail_loss_floor_fired=data.get("tail_loss_floor_fired", False),
+            tail_loss_floor_fired_at=data.get("tail_loss_floor_fired_at"),
+            tail_loss_floor_attempts=data.get("tail_loss_floor_attempts", 0),
             trail_armed_at=data.get("trail_armed_at"),
             trail_started_at=data.get("trail_started_at"),
             high_watermark_updated_at=data.get("high_watermark_updated_at"),

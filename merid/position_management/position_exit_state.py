@@ -73,6 +73,8 @@ _SCALAR_FIELDS = (
     "dynamic_tp_triggered",
     "hard_lock_pending",
     "tail_loss_floor_fired",
+    "tail_loss_floor_fired_at",
+    "tail_loss_floor_attempts",
     "hard_stop_confirmed",
     "break_even_triggered",
     "break_even_price_cents",
