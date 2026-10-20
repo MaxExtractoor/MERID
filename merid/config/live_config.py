@@ -488,6 +488,10 @@ _ENV_OVERRIDES.update({
     for name in (
         # Comma-separated lane names exempt from the sticky-calibration veto.
         "MERID_ENTRY_TRAP_EXEMPT_LANES",
+        # Comma-separated lane names exempt only from the flat-book veto
+        # (settlement convergence and pinned favorite enter flat books by
+        # design; they keep the drop and sticky-p vetoes).
+        "MERID_ENTRY_TRAP_FLAT_EXEMPT_LANES",
     )
 })
 

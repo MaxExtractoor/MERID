@@ -95,6 +95,19 @@ def exempt_lanes() -> Tuple[str, ...]:
     return tuple(s.strip() for s in raw.split(",") if s.strip())
 
 
+def flat_exempt_lanes() -> Tuple[str, ...]:
+    """Lanes exempt only from the flat-book veto — lanes whose normal entry
+    state IS a flat book (settlement convergence at 95-99c, pinned favorite
+    at 92-98c).  They still face the own-side drop veto, and pinned_fav
+    additionally keeps the sticky-p veto: a favorite whose ask reprices
+    while the model sits static is a broken pin, not an edge."""
+    raw = os.environ.get(
+        "MERID_ENTRY_TRAP_FLAT_EXEMPT_LANES",
+        "settlement_convergence,pinned_fav",
+    )
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
 def basket_same_side_max() -> int:
     """Max same-direction emissions per 15m window across the 5 correlated
     crypto series.  2 lets a leader + one follower through; the 2026-10-20
@@ -227,9 +240,10 @@ def entry_book_veto(
                     f"stale_model_divergence:ask_drop={drop:.0f}c "
                     f"dp={abs(ps[-1] - ps[0]):.3f}"
                 )
-    if flat_trap_enabled() and str(lane or "") not in exempt_lanes():
-        # Exempt lanes profit from settlement arithmetic, not book movement —
-        # a flat 95-99c book in the final minute is their normal state.
+    if flat_trap_enabled() and str(lane or "") not in flat_exempt_lanes():
+        # Flat-exempt lanes profit from settlement arithmetic or the pin
+        # itself, not book movement — a flat 95-99c book is their normal
+        # entry state.
         mids = [
             m for m in (side_mid_cents(s, side) for s in samples)
             if m is not None

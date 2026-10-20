@@ -26,6 +26,10 @@ def _clean_env(monkeypatch):
     monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_DROP_C", "3.0")
     monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_MAX_DP", "0.02")
     monkeypatch.setenv("MERID_ENTRY_TRAP_EXEMPT_LANES", "settlement_convergence")
+    monkeypatch.setenv(
+        "MERID_ENTRY_TRAP_FLAT_EXEMPT_LANES",
+        "settlement_convergence,pinned_fav",
+    )
     monkeypatch.setenv("MERID_ENTRY_FLAT_TRAP_ENABLED", "1")
     monkeypatch.setenv("MERID_BASKET_SAME_SIDE_MAX", "2")
     etg._reset_registry_for_tests()
@@ -218,6 +222,55 @@ class TestFlatTrapVeto:
             )
             is None
         )
+
+    def test_pinned_fav_flat_exempt_keeps_book_vetoes(self):
+        """pinned_fav is a taker lane whose normal state IS a flat 92-98c
+        book — exempt from the flat veto, but the drop and sticky-p vetoes
+        still fire: a repricing 'pin' is a broken thesis, not an edge."""
+        now = 1000.0
+        flat = [
+            _s(now - d, 94, 95, 4, 5, 0.95, 0.05)
+            for d in (35, 30, 25, 20, 15, 10, 5)
+        ]
+        assert (
+            etg.entry_book_veto(
+                _hist(flat)["T"], "yes", lane="pinned_fav",
+                crosses_spread=True, now=now,
+            )
+            is None
+        )
+        # Same flat book on a non-exempt taker lane still vetoes.
+        assert (
+            etg.entry_book_veto(
+                _hist(flat)["T"], "yes", lane="core",
+                crosses_spread=True, now=now,
+            )
+            == "flat_book_taker_cross"
+        )
+        # A gently repricing pin (>=3c drop, static p) hits sticky-p.
+        drifting = [
+            _s(now - 35, 96, 98, 1, 3, 0.96, 0.04),
+            _s(now - 20, 95, 96, 3, 5, 0.96, 0.04),
+            _s(now - 5, 93, 95, 4, 6, 0.96, 0.04),
+        ]
+        reason = etg.entry_book_veto(
+            _hist(drifting)["T"], "yes", lane="pinned_fav",
+            crosses_spread=True, now=now,
+        )
+        assert reason is not None
+        assert reason.startswith("stale_model_divergence")
+        # A collapsing pin (>=5c drop) hits the drop veto regardless.
+        collapsing = [
+            _s(now - 35, 96, 98, 1, 3, 0.96, 0.04),
+            _s(now - 20, 94, 95, 4, 6, 0.96, 0.04),
+            _s(now - 5, 90, 92, 7, 9, 0.96, 0.04),
+        ]
+        reason = etg.entry_book_veto(
+            _hist(collapsing)["T"], "yes", lane="pinned_fav",
+            crosses_spread=True, now=now,
+        )
+        assert reason is not None
+        assert reason.startswith("own_side_ask_falling")
 
 
 class TestBasketSameSideCap:
