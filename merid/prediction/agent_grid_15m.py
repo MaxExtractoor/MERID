@@ -9412,7 +9412,7 @@ class LeanAgent15m:
             #   the top of a basket crash (DOGE YES settled ~1c; the
             #   argmax side would have won).  The lone-dissenter loss
             #   pattern this fixes only exists across attempts.
-            _wq_consensus = _wq_locked = _wq_leader = None
+            _wq_consensus = _wq_locked = _wq_leader = _wq_leader_src = None
             try:
                 _wq_ticker = str(
                     getattr(decision, "ticker", "") or ticker or ""
@@ -9429,8 +9429,31 @@ class LeanAgent15m:
                 # BTC=no SELL_OFF_CONFIRMED won +11c while SOL/XRP/DOGE/
                 # ETH emitted YES on +0.02-0.08bp r60 noise and lost
                 # ~88c).  The veto abstains — it never flips a side.
+                # Fallback: when BTC has not emitted this window (own
+                # gates blocked, or the sibling evaluates first), use
+                # BTC's LIVE directional read — 0430 window ETH emitted
+                # NO 185s after BTC's record expired under the old 180s
+                # bound; a BTC-silent window is the same exposure.  The
+                # emitted record takes precedence — it is a committed
+                # trade; the live read is only the fallback signal.
+                try:
+                    from merid.prediction import basket_direction as _wq_bd
+
+                    _wq_bd.record_direction(
+                        asset, _wq_dir_pref or _wq_argmax
+                    )
+                except Exception:
+                    _wq_bd = None
+                _wq_leader_src = None
                 _wq_leader = _wq_quota.quota_basket_leader_side(_wq_ticker)
+                if _wq_leader is not None:
+                    _wq_leader_src = "rec"
+                elif _wq_bd is not None:
+                    _wq_leader = _wq_bd.leader_direction(asset)
+                    if _wq_leader is not None:
+                        _wq_leader_src = "live"
             except Exception:
+                _wq_leader_src = None
                 pass
             if _wq_consensus is not None:
                 # A recorded majority overrules every other read —
@@ -9681,7 +9704,7 @@ class LeanAgent15m:
                         else ""
                     ),
                     (
-                        f" leader={_wq_leader}"
+                        f" leader={_wq_leader}@{_wq_leader_src}"
                         if _wq_leader is not None
                         else ""
                     ),

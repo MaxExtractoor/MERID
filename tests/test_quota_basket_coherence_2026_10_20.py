@@ -283,3 +283,59 @@ class TestBookMomentumVeto:
     def test_drop_under_threshold_no_veto(self):
         h = self._hist([46, 44, 43, 41])  # only 5c drop
         assert not wq.quota_side_book_fell(h, "yes", 41.0, now=1000.0)
+
+
+class TestLeaderLiveReadFallback:
+    """merid.prediction.basket_direction — 2026-10-20 0430 window.
+
+    BTC's emitted record only exists when BTC emits; a BTC-silent
+    window (own gates blocked, or sibling evaluated first) must not
+    leave siblings independent of the leader's live read.
+    """
+
+    def setup_method(self):
+        from merid.prediction import basket_direction as bd
+
+        bd.clear()
+        self._bd = bd
+
+    def teardown_method(self):
+        self._bd.clear()
+
+    def test_leader_read_visible_to_sibling(self):
+        self._bd.record_direction("BTC", "yes", now=1000.0)
+        assert self._bd.leader_direction("ETH", now=1005.0) == "yes"
+
+    def test_leader_asset_never_vetoes_itself(self):
+        self._bd.record_direction("BTC", "yes", now=1000.0)
+        assert self._bd.leader_direction("BTC", now=1005.0) is None
+
+    def test_undirected_read_does_not_veto(self):
+        self._bd.record_direction("BTC", None, now=1000.0)
+        assert self._bd.leader_direction("ETH", now=1005.0) is None
+
+    def test_stale_read_does_not_veto(self, monkeypatch):
+        monkeypatch.setenv("MERID_BASKET_LEADER_LIVE_MAX_AGE_S", "90")
+        self._bd.record_direction("BTC", "no", now=1000.0)
+        assert self._bd.leader_direction("ETH", now=1091.0) is None
+
+    def test_fresh_read_within_bound(self, monkeypatch):
+        monkeypatch.setenv("MERID_BASKET_LEADER_LIVE_MAX_AGE_S", "90")
+        self._bd.record_direction("BTC", "no", now=1000.0)
+        assert self._bd.leader_direction("ETH", now=1089.0) == "no"
+
+    def test_missing_read_returns_none(self):
+        assert self._bd.leader_direction("SOL", now=1000.0) is None
+
+    def test_latest_read_wins(self):
+        self._bd.record_direction("BTC", "yes", now=1000.0)
+        self._bd.record_direction("BTC", "no", now=1010.0)
+        assert self._bd.leader_direction("ETH", now=1015.0) == "no"
+
+    def test_env_leader_asset_override(self, monkeypatch):
+        monkeypatch.setenv("MERID_BASKET_LEADER_ASSET", "ETH")
+        self._bd.record_direction("ETH", "yes", now=1000.0)
+        self._bd.record_direction("BTC", "no", now=1000.0)
+        assert self._bd.leader_direction("SOL", now=1005.0) == "yes"
+        # BTC is now a sibling like any other — ETH's read vetoes it too
+        assert self._bd.leader_direction("BTC", now=1005.0) == "yes"
