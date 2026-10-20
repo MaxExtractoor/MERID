@@ -181,6 +181,61 @@ class TestOrderingRules:
                            consensus=None) == ["yes", "no"]
 
 
+class TestBasketLeaderVeto:
+    """quota_basket_leader_side — BTC's emitted side vetoes dissenting
+    siblings (2026-10-20 0300 window: BTC=no SELL_OFF_CONFIRMED won +11c
+    while SOL/XRP/DOGE/ETH emitted YES on +0.02-0.08bp r60 noise and lost
+    ~88c).  Veto abstains — never flips a side with no own-evidence."""
+
+    def test_btc_record_vetoes_sibling_dissent(self, state_path):
+        _seed(state_path, {"BTC": "no"})
+        assert wq.quota_basket_leader_side(
+            f"KXSOL15M-{W}-15", path=state_path
+        ) == "no"
+
+    def test_leader_does_not_veto_itself(self, state_path):
+        _seed(state_path, {"BTC": "no"})
+        assert wq.quota_basket_leader_side(
+            f"KXBTC15M-{W}-15", path=state_path
+        ) is None
+
+    def test_no_btc_record_no_veto(self, state_path):
+        _seed(state_path, {"ETH": "yes", "SOL": "yes"})
+        assert wq.quota_basket_leader_side(
+            f"KXXRP15M-{W}-15", path=state_path
+        ) is None
+
+    def test_other_window_btc_ignored(self, state_path):
+        _seed(state_path, {"BTC": "no"}, window="26OCT192300")
+        assert wq.quota_basket_leader_side(
+            f"KXSOL15M-{W}-15", path=state_path
+        ) is None
+
+    def test_stale_btc_record_expires(self, state_path):
+        """A leader read from minutes ago must not bind — the basket may
+        have genuinely turned."""
+        _seed(state_path, {"BTC": "no"}, ts=time.time() - 300)
+        assert wq.quota_basket_leader_side(
+            f"KXSOL15M-{W}-15", path=state_path
+        ) is None
+
+    def test_leader_max_age_env(self, state_path, monkeypatch):
+        monkeypatch.setenv("MERID_BASKET_LEADER_MAX_AGE_S", "30")
+        _seed(state_path, {"BTC": "no"}, ts=time.time() - 60)
+        assert wq.quota_basket_leader_side(
+            f"KXSOL15M-{W}-15", path=state_path
+        ) is None
+
+    def test_leader_series_env(self, state_path, monkeypatch):
+        monkeypatch.setenv("MERID_BASKET_LEADER_SERIES", "KXETH15M")
+        # BTC is no longer the leader — its dissenting record is ignored;
+        # ETH's record leads.
+        _seed(state_path, {"ETH": "no", "BTC": "yes"})
+        assert wq.quota_basket_leader_side(
+            f"KXSOL15M-{W}-15", path=state_path
+        ) == "no"
+
+
 class TestBookMomentumVeto:
     """quota_side_book_fell — the 2026-10-20 KXXRP15M-0015 pattern:
     emissions kept buying YES while the ask collapsed 43->39->34."""

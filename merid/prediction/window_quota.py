@@ -274,6 +274,45 @@ def quota_window_consensus(
     return top if votes[top] >= min_votes else None
 
 
+def quota_basket_leader_side(
+    ticker: str, path: Optional[str] = None, now: Optional[float] = None
+) -> Optional[str]:
+    """BTC's emitted side this window — the basket leader.
+
+    2026-10-20: the crypto majors are one correlated 15-minute move and
+    BTC carries the deepest book / cleanest signal — external research
+    ("cross-asset BTC bleed") documents alt markets repricing 2-10s
+    behind BTC.  Observed live (0300 window): BTC emitted NO under
+    SELL_OFF_CONFIRMED (dir_pref=no argmax=no, -11c winner) while
+    SOL/XRP/DOGE/ETH each emitted YES on +0.02-0.08bp r60 microstructure
+    noise and lost their full premiums.  A sibling whose candidate
+    disagrees with the leader's recorded side is vetoed — abstained, not
+    flipped.  Returns None when the leader has no fresh record (first
+    emissions stay independent) or when this ticker IS the leader."""
+    leader_series = (
+        os.environ.get("MERID_BASKET_LEADER_SERIES", "KXBTC15M").strip().upper()
+    )
+    if not leader_series or str(ticker or "").upper().startswith(leader_series):
+        return None
+    key = _ticker_window_key(ticker)
+    if key is None:
+        return None
+    now = time.time() if now is None else float(now)
+    max_age = _env_float("MERID_BASKET_LEADER_MAX_AGE_S", 180.0)
+    for t, rec in (_load_state(path, now).get("tickers") or {}).items():
+        if not str(t).upper().startswith(leader_series + "-"):
+            continue
+        if _ticker_window_key(t) != key:
+            continue
+        last_ts = float((rec or {}).get("last_ts") or 0.0)
+        if max_age > 0 and last_ts > 0.0 and (now - last_ts) > max_age:
+            continue
+        s = (rec or {}).get("side") or (rec or {}).get("first_side")
+        if s in ("yes", "no"):
+            return s
+    return None
+
+
 def quota_state_path() -> str:
     return os.environ.get(
         "MERID_WINDOW_QUOTA_STATE_PATH", "data/window_quota_fills.json"

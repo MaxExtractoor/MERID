@@ -9412,7 +9412,7 @@ class LeanAgent15m:
             #   the top of a basket crash (DOGE YES settled ~1c; the
             #   argmax side would have won).  The lone-dissenter loss
             #   pattern this fixes only exists across attempts.
-            _wq_consensus = _wq_locked = None
+            _wq_consensus = _wq_locked = _wq_leader = None
             try:
                 _wq_ticker = str(
                     getattr(decision, "ticker", "") or ticker or ""
@@ -9422,6 +9422,14 @@ class LeanAgent15m:
                     _wq_consensus = _wq_quota.quota_window_consensus(
                         _wq_ticker
                     )
+                # 2026-10-20: BTC basket-leader veto.  The five series are
+                # one correlated move and BTC carries the deepest book —
+                # a sibling emitting AGAINST BTC's recorded side this
+                # window is the observed repeat-loss pattern (0300:
+                # BTC=no SELL_OFF_CONFIRMED won +11c while SOL/XRP/DOGE/
+                # ETH emitted YES on +0.02-0.08bp r60 noise and lost
+                # ~88c).  The veto abstains — it never flips a side.
+                _wq_leader = _wq_quota.quota_basket_leader_side(_wq_ticker)
             except Exception:
                 pass
             if _wq_consensus is not None:
@@ -9469,6 +9477,14 @@ class LeanAgent15m:
                     _wq_min_cand_p, _wq_quota.quota_dir_absent_min_p()
                 )
             for _wq_cand in _wq_order:
+                if (
+                    _wq_leader is not None
+                    and _wq_cand != _wq_leader
+                ):
+                    _wq_notes.append(
+                        f"{_wq_cand}:leader_conflict:BTC={_wq_leader}"
+                    )
+                    continue
                 if _wq_regime_block is not None and _wq_dir_reg is not None:
                     _wq_rb = _wq_regime_block(_wq_dir_reg, _wq_cand, _wq_z)
                     if _wq_rb is not None:
@@ -9662,6 +9678,11 @@ class LeanAgent15m:
                     (
                         f" lock={_wq_locked}"
                         if _wq_locked is not None
+                        else ""
+                    ),
+                    (
+                        f" leader={_wq_leader}"
+                        if _wq_leader is not None
                         else ""
                     ),
                     " flip_demoted" if _wq_flip_demoted else "",
