@@ -202,11 +202,21 @@ def quota_side_book_fell(
     now = time.time() if now is None else float(now)
     lb = quota_book_lookback_s() if lookback_s is None else float(lookback_s)
     thr = quota_book_drop_veto_c() if drop_cents is None else float(drop_cents)
-    idx = 1 if side == "yes" else 2
-    asks = [
-        float(s[idx]) for s in history
-        if s and now - float(s[0]) <= lb
-    ]
+    # Sample layouts: legacy 3-tuple (ts, yes_ask, no_ask) and the current
+    # 7-tuple (ts, yes_bid, yes_ask, no_bid, no_ask, p_yes_cal, p_no_cal)
+    # recorded for the shared entry-trap gate.
+    asks = []
+    for s in history:
+        if not s or now - float(s[0]) > lb:
+            continue
+        try:
+            asks.append(
+                float(s[2] if side == "yes" else s[4])
+                if len(s) >= 7
+                else float(s[1] if side == "yes" else s[2])
+            )
+        except Exception:
+            continue
     if len(asks) < 3:
         return False
     return (max(asks) - float(current_ask)) >= thr

@@ -9145,6 +9145,43 @@ class LeanAgent15m:
             execution_mode = "taker"
             fee_cents = taker_fee_cents
 
+        # 2026-10-20 (anti-trap history): record every evaluation's BBO and
+        # calibrated probability — unconditionally, not just when the quota
+        # lane is eligible — so the shared entry-trap gate below can detect
+        # a collapsing own-side book and a static (stale) model claim.  The
+        # 7-tuple layout feeds both the quota book-drop veto and
+        # entry_trap_guard.entry_book_veto.
+        try:
+            from merid.prediction import entry_trap_guard as _etg_rec
+            _wq_hist = getattr(self, "_wq_ask_hist", None)
+            if _wq_hist is None:
+                _wq_hist = {}
+                self._wq_ask_hist = _wq_hist
+            _wq_hist_key = str(
+                getattr(decision, "ticker", "") or ticker or ""
+            )
+            _etg_rec.record_sample(
+                _wq_hist,
+                _wq_hist_key,
+                time.time(),
+                float(yes_bid),
+                float(yes_ask),
+                float(no_bid),
+                float(no_ask),
+                (
+                    float(decision.p_yes_calibrated)
+                    if getattr(decision, "p_yes_calibrated", None) is not None
+                    else None
+                ),
+                (
+                    float(decision.p_no_calibrated)
+                    if getattr(decision, "p_no_calibrated", None) is not None
+                    else None
+                ),
+            )
+        except Exception as _etg_rec_exc:
+            logger.debug("[ENTRY-TRAP-HIST] record failed: %s", _etg_rec_exc)
+
         # Window-quota lane (bounded paid telemetry, opt-in): when every
         # upstream lane declined this evaluation, force-select the ungated
         # best side as a bounded taker IOC inside the lane's own
@@ -9184,31 +9221,17 @@ class LeanAgent15m:
             # else the unaligned argmax.  A countertrend side inside a
             # *_CONFIRMED regime is never emitted (regime_entry_block,
             # same veto the normal lanes use, deep-ITM exception intact).
-            # 2026-10-20 (book-momentum veto): record this evaluation's
-            # BBO asks so the candidate gate can reject a side whose ask
-            # is actively collapsing — buying a falling ask is adverse
-            # selection (Graveyard: dip-buys on crashing favorites lost
-            # 8.3c/fill; "the panic price already knows").  KXXRP15M-0015
-            # emitted YES three times while its ask fell 43->39->34c.
-            _wq_hist = getattr(self, "_wq_ask_hist", None)
-            if _wq_hist is None:
-                from collections import deque as _dq
-
-                _wq_hist = {}
-                self._wq_ask_hist = _wq_hist
+            # 2026-10-20 (book-momentum veto): the per-tick BBO+model
+            # history is recorded unconditionally just above (shared
+            # anti-trap gate); here we only need the lookup key the
+            # candidate loop passes to quota_side_book_fell.
+            _wq_hist = getattr(self, "_wq_ask_hist", None) or {}
             try:
                 _wq_hist_key = str(
                     getattr(decision, "ticker", "") or ticker or ""
                 )
-                _wq_hist_dq = _wq_hist.get(_wq_hist_key)
-                if _wq_hist_dq is None:
-                    _wq_hist_dq = _dq(maxlen=240)
-                    _wq_hist[_wq_hist_key] = _wq_hist_dq
-                _wq_hist_dq.append(
-                    (time.time(), float(yes_ask), float(no_ask))
-                )
             except Exception:
-                pass
+                _wq_hist_key = ""
             _wq_dir_pref = None
             _wq_dir_reg = getattr(self, "_dir_regime_last", None)
             try:
@@ -9864,6 +9887,108 @@ class LeanAgent15m:
         # admitted by a data-qualified cell (threshold_cells.py), enters only
         # as a one-contract post-only order.
         _decision_lane = decision.indicators.get("decision_lane")
+
+        # 2026-10-20 (shared anti-trap gate): every emitted entry — core,
+        # bounded-lane, or quota — rechecks the book trajectory before it
+        # can consume lane budget or reach the router.  Buying into a
+        # collapsing own-side ask is the dominant measured loss pattern
+        # (BTC YES@59 into a 66->59c 9s collapse; ETH YES@36 -11.5c/30s;
+        # Graveyard dip-buy study -8.3c/fill).  The model-vs-market
+        # divergence check kills the phantom edge created when the book
+        # reprices while the calibrated claim stays static.  The basket
+        # cap stops the correlated five-series same-side stack observed
+        # in the 0515 window (BTC/ETH/DOGE all rode YES to 0).
+        if decision.selected_outcome is not None:
+            _trap_reason = None
+            try:
+                from merid.prediction import entry_trap_guard as _etg
+
+                _etg_hist_map = getattr(self, "_wq_ask_hist", None) or {}
+                _etg_hist = _etg_hist_map.get(
+                    str(getattr(decision, "ticker", "") or ticker or "")
+                ) or ()
+                _etg_reason = _etg.entry_book_veto(
+                    _etg_hist,
+                    str(decision.selected_outcome),
+                    lane=str(_decision_lane or ""),
+                    crosses_spread=(
+                        liquidity_role == "taker" or not post_only
+                    ),
+                )
+                if _etg_reason is None:
+                    _etg_reason = _etg.basket_same_side_veto(
+                        str(
+                            getattr(decision, "ticker", "") or ticker or ""
+                        ),
+                        str(decision.selected_outcome),
+                    )
+                if _etg_reason is not None:
+                    _trap_reason = _etg_reason
+                else:
+                    # Record surviving emissions for basket accounting —
+                    # emission (not fill) is the binding event, matching the
+                    # consume-then-suppress convention used by the bounded
+                    # lanes' durable counters.
+                    _etg.record_window_emission(
+                        str(
+                            getattr(decision, "ticker", "") or ticker or ""
+                        ),
+                        str(decision.selected_outcome),
+                    )
+            except Exception as _etg_exc:
+                # Guard internals must not silently admit unchecked flow, but
+                # a pure-function failure should not brick entries either —
+                # log loudly and keep the pre-guard checks.
+                logger.warning(
+                    "[ENTRY-TRAP-GUARD] check failed (non-blocking): %s",
+                    _etg_exc,
+                )
+            if _trap_reason is not None:
+                logger.warning(
+                    "[ENTRY-TRAP-VETO] asset=%s side=%s lane=%s reason=%s",
+                    asset, decision.selected_outcome, _decision_lane,
+                    _trap_reason,
+                )
+                try:
+                    from merid.execution.decision_audit_ledger import (
+                        get_decision_audit_ledger,
+                    )
+                    get_decision_audit_ledger().append_decision_event(
+                        decision_id=str(
+                            getattr(decision, "decision_id", "") or ""
+                        ),
+                        event_type="LANE_SUPPRESSED",
+                        stage="ENTRY_TRAP_GUARD",
+                        reason_code="entry_trap_veto",
+                        reason_detail={
+                            "side": decision.selected_outcome,
+                            "lane": _decision_lane,
+                            "ticker": str(
+                                getattr(decision, "ticker", "") or ticker or ""
+                            ),
+                            "veto": _trap_reason,
+                        },
+                        trace_id=str(
+                            getattr(decision, "decision_id", "") or ""
+                        ),
+                        run_id=decision.indicators.get("run_id"),
+                        ticker=str(
+                            getattr(decision, "ticker", "") or ticker or ""
+                        ),
+                        asset=asset,
+                    )
+                except Exception:
+                    pass
+                # The shared no-trade path below records the rejection —
+                # no_trade_reason carries the veto detail into the waterfall.
+                decision = replace(
+                    decision,
+                    selected_outcome=None,
+                    selected_action=None,
+                    selected_outcome_price=None,
+                    no_trade_reason=f"entry_trap_veto:{_trap_reason}",
+                )
+
         # 2026-10-16 (loss audit): an evidence-refused / non-positive-LCB
         # admission is a paid-telemetry probe — it may never size above
         # MERID_PROBE_LANE_MAX_CONTRACTS and may not cross the spread as a

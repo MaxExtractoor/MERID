@@ -434,6 +434,9 @@ _ENV_OVERRIDES.update({
         "MERID_SETTLEMENT_DISTRIBUTION_V2", "MERID_SETTLEMENT_LANE_ENABLED",
         "MERID_SETTLEMENT_ANCHOR_RELEASE",
         "MERID_PROVISIONAL_COINFLIP_EXEMPT",
+        # 2026-10-20: shared entry-trap gate toggles (all-lane admission veto).
+        "MERID_ENTRY_TRAP_VETO_ENABLED", "MERID_ENTRY_FLAT_TRAP_ENABLED",
+        "MERID_TOXICITY_CHECK_FAIL_OPEN",
     )
 })
 _ENV_OVERRIDES.update({
@@ -472,6 +475,19 @@ _ENV_OVERRIDES.update({
         # agent_grid_15m._bounded_lane_max_contracts; declared here so it is
         # not reported as an unknown MERID_* variable).
         ("MERID_BOUNDED_LANE_MAX_CONTRACTS", "float", 0.01, 100),
+        # 2026-10-20: shared entry-trap gate knobs (all-lane admission veto).
+        ("MERID_ENTRY_TRAP_LOOKBACK_S", "float", 1, None),
+        ("MERID_ENTRY_TRAP_DROP_C", "float", 0, 99),
+        ("MERID_ENTRY_TRAP_STICKY_P_DROP_C", "float", 0, 99),
+        ("MERID_ENTRY_TRAP_STICKY_P_MAX_DP", "float", 0, 1),
+        ("MERID_BASKET_SAME_SIDE_MAX", "int", 0, 5),
+    )
+})
+_ENV_OVERRIDES.update({
+    name: _EnvOverride(name=name, type="str")
+    for name in (
+        # Comma-separated lane names exempt from the sticky-calibration veto.
+        "MERID_ENTRY_TRAP_EXEMPT_LANES",
     )
 })
 

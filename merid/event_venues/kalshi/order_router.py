@@ -1575,8 +1575,17 @@ def _check_toxicity_kill_switch(intent: OrderIntent) -> Optional[str]:
             )
             return f"kill_switch_active:{reason}"
     except Exception as e:
-        logger.warning("[TOXICITY-KILL-SWITCH] Check failed (fail-open): %s", e)
-        # Fail-open: allow trading if kill switch check fails
+        # 2026-10-20: fail-closed for entries.  A broken toxicity check that
+        # silently admits entries is how the toxic-mid cancel never ran inside
+        # fill windows (post-fill risk-control latency audit).  Exits already
+        # bypass this guard above, so failing closed here can only block new
+        # risk, never risk reduction.  MERID_TOXICITY_CHECK_FAIL_OPEN=1 is the
+        # operator escape hatch.
+        if os.environ.get("MERID_TOXICITY_CHECK_FAIL_OPEN", "0").strip().lower() in ("1", "true", "yes"):
+            logger.warning("[TOXICITY-KILL-SWITCH] Check failed (fail-open override): %s", e)
+            return None
+        logger.error("[TOXICITY-KILL-SWITCH] Check failed (fail-closed): %s — rejecting entry", e)
+        return "kill_switch_check_failed"
     
     return None
 
