@@ -315,6 +315,75 @@ class _NonBlockingQueueHandler(QueueHandler):
             _log_dropped += 1
 
 
+class _HotDiagnosticThrottleFilter(logging.Filter):
+    """Rate-limit known-hot per-tick diagnostic messages before they reach
+    the drain queue.
+
+    2026-10-20: the QueueListener drains to three handlers serially
+    (~file stat+write+flush ×2 + console) while per-tick evaluation emits
+    ~40-60 records/s — drain lag grew to ~7 minutes within 15min of
+    restart and risks the 200k drop floor.  Each throttled prefix emits at
+    most once per ``interval`` per (logger, template-prefix, first-arg)
+    key, so sampled observability is preserved and audit-critical lines
+    ([WINDOW-QUOTA], [STOP-CANDIDATE*], [ORDER-ACK], reconcile, fills) are
+    never throttled.
+    """
+
+    # (message-prefix, min-interval-seconds).  Prefixes are matched against
+    # the *template* (record.msg) so arg values never defeat the match.
+    _THROTTLED_PREFIXES = (
+        ("[GET-CURRENT-15M]", 15.0),
+        ("[DYNAMIC-THRESHOLD]", 15.0),
+        ("[UPDATE-PRICE-HISTORY-ENTRY]", 15.0),
+        ("[CANDLE-UPDATE]", 15.0),
+        ("[MARKET-VALIDATION]", 15.0),
+        ("[PRICE-BUCKET-DIAGNOSTIC]", 15.0),
+        ("[REGIME-CLASSIFICATION]", 15.0),
+        ("[DUAL-SIDE-EVALUATION]", 15.0),
+        ("[DUAL-SIDE-PRICE]", 15.0),
+        ("[TRADE-DECISION-STRIKE-DIAG]", 15.0),
+        ("[HYBRID-P-YES-WARMUP]", 15.0),
+        ("[FEED-ALIGNMENT]", 15.0),
+        ("[VELOCITY-SOURCE]", 15.0),
+        ("[TIME-WINDOW-FILTER]", 15.0),
+        ("[STRIP-DIAG]", 30.0),
+        ("[COLLECT-SAMPLE-TICKERS]", 30.0),
+        ("[CF-RTI-ADAPTER] stream_observation_accepted", 30.0),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_emit: Dict[tuple, float] = {}
+        self._lock = threading.Lock()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        template = str(record.msg or "")
+        interval = None
+        for prefix, iv in self._THROTTLED_PREFIXES:
+            if template.startswith(prefix):
+                interval = iv
+                break
+        if interval is None:
+            return True
+        args0 = ""
+        try:
+            if record.args:
+                if isinstance(record.args, dict):
+                    args0 = str(next(iter(record.args.values()), ""))
+                else:
+                    args0 = str(record.args[0])
+        except Exception:
+            pass
+        key = (record.name, template[:80], args0)
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_emit.get(key, 0.0)
+            if now - last < interval:
+                return False
+            self._last_emit[key] = now
+        return True
+
+
 def get_log_dropped_count() -> int:
     """Observability: log records dropped because the async queue was full."""
     return _log_dropped
@@ -436,6 +505,7 @@ def _ensure_handlers() -> None:
     _stream_handler.addFilter(sensitive_filter)
 
     _queue_handler = _NonBlockingQueueHandler(_log_queue)
+    _queue_handler.addFilter(_HotDiagnosticThrottleFilter())
     _queue_listener = QueueListener(
         _log_queue,
         _file_handler,
