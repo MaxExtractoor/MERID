@@ -35,7 +35,11 @@ class TestQuotaModule:
         monkeypatch.delenv("MERID_WINDOW_QUOTA_ENABLED", raising=False)
         assert not wq.quota_enabled()
 
-    def test_band_match(self):
+    def test_band_match(self, monkeypatch):
+        # Pin the band — the production .env raised PRICE_HI to 88
+        # (a005e7a2) and this test must not read live config.
+        monkeypatch.setenv("MERID_WINDOW_QUOTA_PRICE_LO", "25")
+        monkeypatch.setenv("MERID_WINDOW_QUOTA_PRICE_HI", "80")
         assert wq.quota_band_match(25)
         assert wq.quota_band_match(50)
         assert wq.quota_band_match(80)

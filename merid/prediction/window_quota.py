@@ -164,6 +164,68 @@ def quota_candidate_order(
     return order
 
 
+def quota_consensus_min_votes() -> int:
+    return int(_env_float("MERID_WINDOW_QUOTA_CONSENSUS_MIN", 2.0))
+
+
+def _ticker_window_key(ticker: str) -> Optional[str]:
+    """The 15-minute window id shared by sibling series tickers —
+    ``KXBTC15M-26OCT192315-15`` -> ``26OCT192315``."""
+    parts = str(ticker or "").split("-")
+    return parts[1] if len(parts) >= 3 else None
+
+
+def quota_ticker_locked_side(
+    ticker: str, path: Optional[str] = None, now: Optional[float] = None
+) -> Optional[str]:
+    """The side this ticker already emitted this window (a ticker lives
+    exactly one window).  Recorded even when the slot was later released
+    pre-wire — the whipsaw being prevented is a direction flip across
+    emission decisions, not just across transmitted orders."""
+    st = _load_state(path, now)
+    rec = (st.get("tickers") or {}).get(ticker) or {}
+    s = rec.get("side") or rec.get("first_side")
+    return s if s in ("yes", "no") else None
+
+
+def quota_window_consensus(
+    ticker: str, path: Optional[str] = None, now: Optional[float] = None
+) -> Optional[str]:
+    """Majority emitted side among SIBLING tickers in the same window.
+
+    All five series are one correlated 15-minute crypto move — a lone
+    dissenter trading the opposite direction is the observed repeat-loss
+    pattern (KXSOL15M-2315: YES attempt dropped pre-wire, retry flipped to
+    NO@52 on a -4.8bp r60 flick while the basket bought YES and rallied
+    -> -35c stopout; KXDOGE15M-2315 flipped NO->YES and was saved only by
+    a lucky miss).  Only sibling records fresher than
+    MERID_WINDOW_QUOTA_CONSENSUS_MAX_AGE_S (default 120s) vote — a
+    majority built early in the window must not bind a dissenter minutes
+    later after the basket may have genuinely turned.  Returns the
+    majority side when at least MERID_WINDOW_QUOTA_CONSENSUS_MIN siblings
+    recorded the same side and it strictly leads, else None."""
+    key = _ticker_window_key(ticker)
+    if key is None:
+        return None
+    now = time.time() if now is None else float(now)
+    min_votes = quota_consensus_min_votes()
+    max_age = _env_float("MERID_WINDOW_QUOTA_CONSENSUS_MAX_AGE_S", 120.0)
+    votes = {"yes": 0, "no": 0}
+    for t, rec in (_load_state(path, now).get("tickers") or {}).items():
+        if t == ticker or _ticker_window_key(t) != key:
+            continue
+        last_ts = float((rec or {}).get("last_ts") or 0.0)
+        if max_age > 0 and last_ts > 0.0 and (now - last_ts) > max_age:
+            continue
+        s = (rec or {}).get("side") or (rec or {}).get("first_side")
+        if s in votes:
+            votes[s] += 1
+    if votes["yes"] == votes["no"]:
+        return None
+    top = "yes" if votes["yes"] > votes["no"] else "no"
+    return top if votes[top] >= min_votes else None
+
+
 def quota_state_path() -> str:
     return os.environ.get(
         "MERID_WINDOW_QUOTA_STATE_PATH", "data/window_quota_fills.json"
@@ -225,10 +287,16 @@ def quota_ticker_exhausted(
 
 
 def record_quota_submission(
-    ticker: str, path: Optional[str] = None, now: Optional[float] = None
+    ticker: str,
+    path: Optional[str] = None,
+    now: Optional[float] = None,
+    side: Optional[str] = None,
 ) -> Tuple[int, int]:
     """Durable consume-then-suppress counter.  Returns
-    (per_ticker_attempts, day_total) after incrementing."""
+    (per_ticker_attempts, day_total) after incrementing.  ``side`` is the
+    emitted outcome — retained on the ticker record (as ``first_side``
+    plus the latest ``side``) so the window side-lock and basket
+    consensus see the direction even when the slot is later released."""
     now = time.time() if now is None else float(now)
     p = path or quota_state_path()
     st = _load_state(p, now)
@@ -238,6 +306,9 @@ def record_quota_submission(
     rec["prev_ts"] = float(rec.get("last_ts") or 0.0)
     rec["n"] = int(rec.get("n") or 0) + 1
     rec["last_ts"] = now
+    if side in ("yes", "no"):
+        rec.setdefault("first_side", side)
+        rec["side"] = side
     try:
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         tmp = p + ".tmp"
@@ -268,7 +339,10 @@ def release_quota_submission(
     rec["n"] = max(0, int(rec.get("n") or 0) - 1)
     rec["last_ts"] = float(rec.get("prev_ts") or 0.0)
     st["count"] = max(0, int(st.get("count") or 0) - 1)
-    if rec["n"] == 0:
+    # Keep the record when a side was emitted — the released slot frees the
+    # attempt budget, but the directional memory must survive so a retry
+    # cannot whipsaw onto the opposite side (2026-10-20 KXSOL15M-2315).
+    if rec["n"] == 0 and not (rec.get("side") or rec.get("first_side")):
         tickers.pop(ticker, None)
     try:
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)

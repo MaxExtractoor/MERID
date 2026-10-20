@@ -9366,6 +9366,43 @@ class LeanAgent15m:
             _wq_order = _wq_quota.quota_candidate_order(
                 _wq_dir_pref, _wq_argmax
             )
+            # 2026-10-20 (basket coherence): all five series are one
+            # correlated 15-minute move — a lone dissenter trading the
+            # opposite direction is the observed repeat-loss pattern
+            # (KXSOL15M-2315: YES attempt dropped pre-wire, retry flipped
+            # to NO@52 on a -4.8bp r60 flick while the basket bought YES
+            # and rallied -> -35c stopout).  Two soft rules applied to the
+            # try-order; every side still must pass the same book gates:
+            #   1. basket consensus: >=MERID_WINDOW_QUOTA_CONSENSUS_MIN
+            #      sibling tickers emitted the same side this window ->
+            #      the order collapses to the majority side (contra-
+            #      majority sides are never retried; a genuinely
+            #      contrarian asset simply skips the tick).
+            #   2. side lock: absent a majority, retries lead with this
+            #      ticker's established side so a missed attempt reprices
+            #      instead of whipsawing onto the opposite side.
+            _wq_consensus = _wq_locked = None
+            try:
+                _wq_ticker = str(
+                    getattr(decision, "ticker", "") or ticker or ""
+                )
+                _wq_consensus = _wq_quota.quota_window_consensus(_wq_ticker)
+                _wq_locked = _wq_quota.quota_ticker_locked_side(_wq_ticker)
+            except Exception:
+                pass
+            if _wq_consensus is not None:
+                # A recorded majority overrules every other read —
+                # including a stale lock from this ticker's earlier
+                # attempt (a real basket reversal may flip it back).
+                _wq_order = [_wq_consensus]
+            elif (
+                _wq_locked is not None
+                and _wq_order
+                and _wq_order[0] != _wq_locked
+            ):
+                _wq_order = [_wq_locked] + [
+                    _s for _s in _wq_order if _s != _wq_locked
+                ]
 
             _wq_side = None
             _wq_ask = _wq_bid = _wq_depth = _wq_ev_c = None
@@ -9539,6 +9576,8 @@ class LeanAgent15m:
                         if _wq_dir_reg is not None
                         else None
                     ),
+                    "consensus_side": _wq_consensus,
+                    "locked_side": _wq_locked,
                 }
                 liquidity_role = "taker"
                 aggressiveness = 1.0
@@ -9549,7 +9588,7 @@ class LeanAgent15m:
                 logger.info(
                     "[WINDOW-QUOTA] asset=%s side=%s ask=%.1fc "
                     "claim_ev=%.2fc tte=%.0fs depth_cc=%.0f "
-                    "dir_pref=%s argmax=%s r60=%s regime=%s%s — "
+                    "dir_pref=%s argmax=%s r60=%s regime=%s%s%s%s — "
                     "forcing bounded taker emit",
                     asset, _wq_side, _wq_ask, _wq_ev_c,
                     float(seconds_to_expiry), _wq_depth,
@@ -9561,6 +9600,16 @@ class LeanAgent15m:
                         else "na"
                     ),
                     getattr(_wq_dir_reg, "label", "na"),
+                    (
+                        f" cons={_wq_consensus}"
+                        if _wq_consensus is not None
+                        else ""
+                    ),
+                    (
+                        f" lock={_wq_locked}"
+                        if _wq_locked is not None
+                        else ""
+                    ),
                     " flip_demoted" if _wq_flip_demoted else "",
                 )
             else:
@@ -9911,7 +9960,9 @@ class LeanAgent15m:
                     _ticker_q = str(
                         getattr(decision, "ticker", "") or ticker or ""
                     )
-                    _n_t, _n_d = _wq_lane.record_quota_submission(_ticker_q)
+                    _n_t, _n_d = _wq_lane.record_quota_submission(
+                        _ticker_q, side=decision.selected_outcome
+                    )
                     _cap_t = _wq_lane.quota_max_per_ticker()
                     _cap_d = _wq_lane.quota_daily_max()
                     if _n_t > _cap_t or _n_d > _cap_d:
