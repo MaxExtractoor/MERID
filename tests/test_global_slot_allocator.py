@@ -63,61 +63,63 @@ class TestGlobalSlotAllocator:
         print("✓ Max exposure limit test passed")
     
     def test_entry_price_range_validation(self):
-        """Test that entry price must be between 10c and 75c."""
+        """Test that entry price must stay inside the resolved profile band."""
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        min_cents = allocator.min_entry_cents
+        max_cents = allocator.max_entry_cents
 
         # Test that AllocationRequest validates entry price for entry orders
-        # Should reject below 10c
+        # Should reject below the band floor
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
                 ticker="KXBTC15M-TEST",
-                entry_price_cents=0,
+                entry_price_cents=min_cents - 1,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
             )
 
-        # Should reject above 75c
+        # Should reject above the band ceiling
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
                 ticker="KXBTC15M-TEST",
-                entry_price_cents=100,
+                entry_price_cents=max_cents + 1,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
             )
 
-        # Should accept 10c (minimum)
+        # Should accept the band floor
         request_min = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
             ticker="KXBTC15M-TEST",
-            entry_price_cents=10,
+            entry_price_cents=min_cents,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        assert request_min.entry_price_cents == 10
+        assert request_min.entry_price_cents == min_cents
 
-        # Should accept 75c (maximum)
+        # Should accept the band ceiling
         request_max = AllocationRequest(
             agent_id="ETH_15M",
             asset="ETH",
             ticker="KXETH15M-TEST",
-            entry_price_cents=75,
+            entry_price_cents=max_cents,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        assert request_max.entry_price_cents == 75
+        assert request_max.entry_price_cents == max_cents
         
         print("✓ Entry price range validation test passed")
     
@@ -312,12 +314,13 @@ class TestGlobalSlotAllocator:
         assert abs(allocator.get_total_exposure() - 3.00) < 0.01  # Floating point tolerance
         assert abs(allocator.get_available_exposure() - 0.00) < 0.01
 
-        # Should reject DOGE 20c (would exceed $2)
+        # Should reject a DOGE entry (capacity is exhausted)
+        doge_price = allocator.min_entry_cents
         request_doge = AllocationRequest(
             agent_id="DOGE_15M",
             asset="DOGE",
             ticker="KXDOGE15M-TEST",
-            entry_price_cents=20,
+            entry_price_cents=doge_price,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
@@ -345,10 +348,10 @@ class TestGlobalSlotAllocator:
         assert allocator.get_total_exposure() == 2.25
         assert allocator.get_available_exposure() == 0.75
 
-        # Now DOGE 20c should be allowed
+        # Now the DOGE entry should be allowed
         allocated_doge2, _, slot_doge = allocator.request_allocation(request_doge)
         assert allocated_doge2
-        assert allocator.get_total_exposure() == 2.45
+        assert allocator.get_total_exposure() == pytest.approx(2.25 + doge_price / 100.0)
 
         print("✓ Sequential trading with exits test passed")
     
@@ -366,7 +369,7 @@ class TestGlobalSlotAllocator:
             agent_id="BTC_15M",
             asset="BTC",
             ticker="KXBTC15M-TEST1",
-            entry_price_cents=20,
+            entry_price_cents=allocator.min_entry_cents,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False

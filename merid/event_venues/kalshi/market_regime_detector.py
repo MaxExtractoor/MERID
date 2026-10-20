@@ -184,9 +184,11 @@ class MarketRegimeDetector:
         Select execution mode based on regime.
         
         Key insight from SimpleFunctions:
-        - Maker-dominated: Use taker (cross spread, makers are defensive)
+        - Maker-dominated: Use maker (join the liquidity providers); only
+          cross as taker when the spread is extremely tight (< 5% of mid)
         - Taker-dominated: Use maker (provide liquidity, makers withdrew)
-        - Neutral: Use thesis-based (default to taker for now)
+        - Neutral: Spread-percentage adaptive (wide -> maker, moderate ->
+          staged IOC, tight -> taker)
         
         ENHANCEMENT (2026-08-01): Add spread percentage guard for extreme spreads
         - Even in maker-dominated regimes, if spread is > 100% of price, use maker mode

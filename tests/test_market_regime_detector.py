@@ -40,7 +40,9 @@ class TestMarketRegimeDetector:
         )
         
         assert classification.regime == MarketRegime.MAKER_DOMINATED
-        assert classification.execution_mode == ExecutionMode.TAKER
+        # Makers provide liquidity -> rest passively.  5c spread on a 50c
+        # mid is 10% — above the <5% exception that would cross as taker.
+        assert classification.execution_mode == ExecutionMode.MAKER
         assert classification.confidence >= 0.75  # Should have high confidence
     
     def test_taker_dominated_classification(self):
@@ -94,9 +96,29 @@ class TestMarketRegimeDetector:
             quote_refresh_timestamps=None,
         )
         
-        # Maker-dominated should use taker execution
+        # Maker-dominated uses maker execution unless the spread is
+        # extremely tight (< 5% of mid); 10% here -> MAKER.
+        assert classification.execution_mode == ExecutionMode.MAKER
+
+    def test_execution_mode_maker_dominated_tight_spread_exception(self):
+        """Maker-dominated crosses as taker only when spread < 5% of mid."""
+        detector = MarketRegimeDetector()
+
+        # spread must stay > 4c for the maker-dominated signal, so the <5%
+        # exception is only reachable on a high-priced contract.
+        classification = detector.classify_regime(
+            ticker="KXBTC15M-TEST",
+            spread_cents=4.5,
+            bid_depth=300.0,
+            ask_depth=300.0,
+            mid_price=95.0,  # 4.5/95 = 4.74% < 5%
+            trade_timestamps=None,
+            quote_refresh_timestamps=None,
+        )
+
+        assert classification.regime == MarketRegime.MAKER_DOMINATED
         assert classification.execution_mode == ExecutionMode.TAKER
-    
+
     def test_execution_mode_taker_dominated(self):
         """Test execution mode for taker-dominated regime."""
         detector = MarketRegimeDetector()
