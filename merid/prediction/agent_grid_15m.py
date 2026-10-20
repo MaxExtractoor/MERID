@@ -9240,10 +9240,16 @@ class LeanAgent15m:
                 ):
                     _wq_dir_pref = "yes" if _wq_r60 > 0 else "no"
                 else:
+                    # 2026-10-20: the label fallback must hold the same
+                    # *_CONFIRMED bar the flip-confirmation gate below
+                    # already enforces — startswith("RALLY"/"SELL_OFF")
+                    # also accepted *_WEAKENING labels, and weakening is
+                    # the documented whipsaw label (ETH YES@58, DOGE
+                    # NO@47), not a directional read.
                     _wq_lbl = (getattr(_wq_dir_reg, "label", "") or "").upper()
-                    if _wq_lbl.startswith("RALLY"):
+                    if _wq_lbl == "RALLY_CONFIRMED":
                         _wq_dir_pref = "yes"
-                    elif _wq_lbl.startswith("SELL_OFF"):
+                    elif _wq_lbl == "SELL_OFF_CONFIRMED":
                         _wq_dir_pref = "no"
 
             _wq_z = None
