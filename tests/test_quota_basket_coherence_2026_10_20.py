@@ -141,10 +141,14 @@ class TestOrderingRules:
     @staticmethod
     def _apply(dir_pref, argmax, locked, consensus):
         order = wq.quota_candidate_order(dir_pref, argmax)
-        if consensus is not None:
-            order = [consensus]
-        elif locked is not None and order and order[0] != locked:
-            order = [locked] + [s for s in order if s != locked]
+        # 2026-10-20: consensus is consulted only on retries — a ticker
+        # with no recorded side keeps its own argmax/dir read (KXDOGE15M-
+        # 0015 flipped a correct argmax=no to YES at the basket top).
+        if locked is not None:
+            if consensus is not None:
+                order = [consensus]
+            elif order and order[0] != locked:
+                order = [locked] + [s for s in order if s != locked]
         return order
 
     def test_sol_replay_consensus_overrides_dissent(self):
@@ -152,10 +156,13 @@ class TestOrderingRules:
         assert self._apply("no", "no", locked="yes",
                            consensus="yes") == ["yes"]
 
-    def test_doge_replay_consensus_drops_dissent(self):
-        """DOGE at :43 — dir_pref=no argmax=no -> consensus yes."""
+    def test_first_emission_ignores_consensus(self):
+        """2026-10-20 KXDOGE15M-0015: a first emission (no recorded side)
+        keeps its own argmax read even against a recorded majority —
+        DOGE's argmax=no was flipped to YES at the top of a basket crash
+        and the majority side settled ~1c."""
         assert self._apply("no", "no", locked=None,
-                           consensus="yes") == ["yes"]
+                           consensus="yes") == ["no"]
 
     def test_lock_retries_same_side_first(self):
         """No consensus: a missed YES retries YES, not a noise flip."""
@@ -172,3 +179,45 @@ class TestOrderingRules:
                            consensus=None) == ["no"]
         assert self._apply("yes", "no", locked=None,
                            consensus=None) == ["yes", "no"]
+
+
+class TestBookMomentumVeto:
+    """quota_side_book_fell — the 2026-10-20 KXXRP15M-0015 pattern:
+    emissions kept buying YES while the ask collapsed 43->39->34."""
+
+    def _hist(self, asks, now=1000.0, gap=8.0):
+        # (ts, yes_ask, no_ask) samples, most recent last
+        return [
+            (now - (len(asks) - 1 - i) * gap, ya, 100 - ya)
+            for i, ya in enumerate(asks)
+        ]
+
+    def test_collapsing_yes_ask_vetoes(self):
+        h = self._hist([43, 40, 37, 34])
+        assert wq.quota_side_book_fell(h, "yes", 34.0, now=1000.0)
+
+    def test_stable_ask_does_not_veto(self):
+        h = self._hist([58, 58, 59, 58])
+        assert not wq.quota_side_book_fell(h, "yes", 58.0, now=1000.0)
+
+    def test_rising_ask_does_not_veto(self):
+        h = self._hist([40, 44, 48, 52])
+        assert not wq.quota_side_book_fell(h, "yes", 52.0, now=1000.0)
+
+    def test_other_side_unaffected(self):
+        # YES ask collapsed but the NO ask rose symmetrically
+        h = self._hist([43, 40, 37, 34])
+        assert not wq.quota_side_book_fell(h, "no", 66.0, now=1000.0)
+
+    def test_insufficient_samples_no_veto(self):
+        h = self._hist([50, 40])
+        assert not wq.quota_side_book_fell(h, "yes", 40.0, now=1000.0)
+
+    def test_stale_samples_ignored(self):
+        h = self._hist([90, 85, 80], gap=60.0)  # all outside 45s lookback
+        h.append((1000.0, 40.0, 60.0))
+        assert not wq.quota_side_book_fell(h, "yes", 40.0, now=1000.0)
+
+    def test_drop_under_threshold_no_veto(self):
+        h = self._hist([46, 44, 43, 41])  # only 5c drop
+        assert not wq.quota_side_book_fell(h, "yes", 41.0, now=1000.0)

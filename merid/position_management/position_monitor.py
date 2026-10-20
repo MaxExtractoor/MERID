@@ -636,6 +636,10 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
 
     MERID_TAIL_LOSS_ENABLED     master switch (default 1)
     MERID_TAIL_LOSS_DROP_CENTS  unrealized drop vs entry that triggers (default 30)
+MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS  shallower drop for no-edge entries
+                            (entry_edge<=0, default 14) - a bounded-lane
+                            admission never had a thesis to ride out, so the
+                            salvage fires before the standard depth
     MERID_TAIL_LOSS_FLOOR_CENTS absolute bid floor that triggers (default 18)
     MERID_TAIL_LOSS_RETRY_S     cooldown before a persistent floor breach re-emits (default 20)
     MERID_TAIL_LOSS_MAX_ATTEMPTS total emissions allowed per position (default 4)
@@ -648,7 +652,8 @@ def _get_tail_loss_floor_config() -> Dict[str, Any]:
             return default
 
     return {
-        "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
+        "drop_no_edge_cents": _int("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", 14),
+    "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
         in ("1", "true", "yes", "on"),
         "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
@@ -4012,7 +4017,21 @@ class PositionMonitor:
             and _tail_floor_fire_allowed(position, _tail_cfg, time.time())
         ):
             _entry_px = getattr(position, "avg_entry_price_cents", 0) or 0
-            _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _tail_cfg["drop_cents"]
+            # 2026-10-20: no-edge entries (quota/bounded lanes, entry_edge
+            # <=0) carry no ride-to-settlement thesis — a shallower drop
+            # salvages before the standard -30c depth.  KXETH15M-0015
+            # YES@58 rode to a 20c salvage (-38c); the 14c drop exits
+            # ~44c (-14c).  Floor-gated downstream so a model-disagreeing
+            # dip still holds.
+            _claimed_edge = getattr(position, "entry_edge", None)
+            try:
+                _no_edge = _claimed_edge is not None and float(_claimed_edge) <= 0.0
+            except (TypeError, ValueError):
+                _no_edge = False
+            _drop_cents = (
+                _tail_cfg["drop_no_edge_cents"] if _no_edge else _tail_cfg["drop_cents"]
+            )
+            _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _drop_cents
             _floor_hit = current_price_cents <= _tail_cfg["floor_cents"]
             if _drop_hit or _floor_hit:
                 _has_fill_provenance = (
@@ -4031,7 +4050,7 @@ class PositionMonitor:
                     _tail_level = max(
                         1,
                         min(
-                            (_entry_px - _tail_cfg["drop_cents"]) if _entry_px > 0 else 99,
+                            (_entry_px - _drop_cents) if _entry_px > 0 else 99,
                             _tail_cfg["floor_cents"],
                         ),
                     )
@@ -4042,7 +4061,7 @@ class PositionMonitor:
                         position.side.value,
                         current_price_cents,
                         _entry_px,
-                        _tail_cfg["drop_cents"],
+                        _drop_cents,
                         _tail_cfg["floor_cents"],
                         _tail_level,
                     )

@@ -9184,6 +9184,31 @@ class LeanAgent15m:
             # else the unaligned argmax.  A countertrend side inside a
             # *_CONFIRMED regime is never emitted (regime_entry_block,
             # same veto the normal lanes use, deep-ITM exception intact).
+            # 2026-10-20 (book-momentum veto): record this evaluation's
+            # BBO asks so the candidate gate can reject a side whose ask
+            # is actively collapsing — buying a falling ask is adverse
+            # selection (Graveyard: dip-buys on crashing favorites lost
+            # 8.3c/fill; "the panic price already knows").  KXXRP15M-0015
+            # emitted YES three times while its ask fell 43->39->34c.
+            _wq_hist = getattr(self, "_wq_ask_hist", None)
+            if _wq_hist is None:
+                from collections import deque as _dq
+
+                _wq_hist = {}
+                self._wq_ask_hist = _wq_hist
+            try:
+                _wq_hist_key = str(
+                    getattr(decision, "ticker", "") or ticker or ""
+                )
+                _wq_hist_dq = _wq_hist.get(_wq_hist_key)
+                if _wq_hist_dq is None:
+                    _wq_hist_dq = _dq(maxlen=240)
+                    _wq_hist[_wq_hist_key] = _wq_hist_dq
+                _wq_hist_dq.append(
+                    (time.time(), float(yes_ask), float(no_ask))
+                )
+            except Exception:
+                pass
             _wq_dir_pref = None
             _wq_dir_reg = getattr(self, "_dir_regime_last", None)
             try:
@@ -9381,13 +9406,22 @@ class LeanAgent15m:
             #   2. side lock: absent a majority, retries lead with this
             #      ticker's established side so a missed attempt reprices
             #      instead of whipsawing onto the opposite side.
+            # 2026-10-20: both rules govern RETRIES ONLY.  A first emission
+            #   keeps its own argmax/dir read — collapsing it to the
+            #   majority flipped KXDOGE15M-0015's argmax=no to a YES buy at
+            #   the top of a basket crash (DOGE YES settled ~1c; the
+            #   argmax side would have won).  The lone-dissenter loss
+            #   pattern this fixes only exists across attempts.
             _wq_consensus = _wq_locked = None
             try:
                 _wq_ticker = str(
                     getattr(decision, "ticker", "") or ticker or ""
                 )
-                _wq_consensus = _wq_quota.quota_window_consensus(_wq_ticker)
                 _wq_locked = _wq_quota.quota_ticker_locked_side(_wq_ticker)
+                if _wq_locked is not None:
+                    _wq_consensus = _wq_quota.quota_window_consensus(
+                        _wq_ticker
+                    )
             except Exception:
                 pass
             if _wq_consensus is not None:
@@ -9440,6 +9474,26 @@ class LeanAgent15m:
                     if _wq_rb is not None:
                         _wq_notes.append(f"{_wq_cand}:regime:{_wq_rb}")
                         continue
+                # 2026-10-20: book-momentum veto — skip a side whose own
+                # ask collapsed within the lookback.  A falling ask means
+                # the book is repricing on information our lagging inputs
+                # (r60/regime label/model) haven't caught — buying it is
+                # the exact dip-buy failure measured at -8.3c/fill.
+                # KXXRP15M-0015: three YES emissions at asks 43/39/34
+                # (-20c LOSS_CAP); the veto falls through to the argmax
+                # side instead.
+                try:
+                    if _wq_quota.quota_side_book_fell(
+                        (_wq_hist or {}).get(_wq_hist_key) or (),
+                        _wq_cand,
+                        float(no_ask) if _wq_cand == "no" else float(yes_ask),
+                    ):
+                        _wq_notes.append(
+                            f"{_wq_cand}:book_falling:{float(no_ask) if _wq_cand == 'no' else float(yes_ask):.0f}c"
+                        )
+                        continue
+                except Exception:
+                    pass
                 _cand_ask = (
                     float(no_ask) if _wq_cand == "no" else float(yes_ask)
                 )

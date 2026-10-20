@@ -251,6 +251,15 @@ class TestTailFloorRetry(unittest.TestCase):
         cfg = _get_tail_loss_floor_config()
         self.assertIn("retry_s", cfg)
         self.assertIn("max_attempts", cfg)
+        self.assertIn("drop_no_edge_cents", cfg)
+
+    def test_no_edge_drop_is_shallower(self):
+        """2026-10-20 0015-window: no-edge quota entries (entry_edge<=0)
+        rode the standard 30c drop to 12-20c salvages.  The shallower
+        no-edge drop exits before the standard depth."""
+        cfg = _get_tail_loss_floor_config()
+        self.assertLess(cfg["drop_no_edge_cents"], cfg["drop_cents"])
+        self.assertEqual(cfg["drop_no_edge_cents"], 14)
 
 
 class TestCreateOrderParseAnnotation(unittest.TestCase):

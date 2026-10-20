@@ -110,7 +110,13 @@ def quota_min_ev_cents() -> float:
     """Claimed net-EV sanity floor in cents (negative).  This is not an
     edge threshold — it only rejects degenerate claims (crossed books,
     missing probability)."""
-    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -15.0)
+    # 2026-10-20: tightened -15 -> -6.  The -15 floor admitted paying 12c+
+    # premiums over model fair - KXXRP15M-0015 bought YES@39/34 with
+    # claimed EV -12.27c/-7.24c into a crashing book (-20c); KXDOGE15M-0015
+    # claimed -12.41c.  The Graveyard 18k-market study measured spread-
+    # crossing favorites at ~-6c/fill - claims beyond that are premium
+    # chasing, not bounded telemetry.
+    return _env_float("MERID_WINDOW_QUOTA_MIN_NET_EV_CENTS", -6.0)
 
 
 def quota_max_spread_cents() -> float:
@@ -162,6 +168,48 @@ def quota_candidate_order(
     elif argmax is not None:
         order.append(argmax)
     return order
+
+
+def quota_book_drop_veto_c() -> float:
+    return _env_float("MERID_WINDOW_QUOTA_BOOK_DROP_VETO_C", 6.0)
+
+
+def quota_book_lookback_s() -> float:
+    return _env_float("MERID_WINDOW_QUOTA_BOOK_LOOKBACK_S", 45.0)
+
+
+def quota_side_book_fell(
+    history,
+    side: str,
+    current_ask: float,
+    *,
+    now: Optional[float] = None,
+    lookback_s: Optional[float] = None,
+    drop_cents: Optional[float] = None,
+) -> bool:
+    """True when the side's own ask collapsed within the lookback — a
+    falling ask means the book is repricing on information our lagging
+    inputs (r60/regime label/model) haven't caught, and buying it is the
+    dip-chase failure measured at -8.3c/fill in the Graveyard 15m study.
+    ``history`` is an iterable of (ts, yes_ask, no_ask) samples; at least
+    3 samples inside the lookback are required so a lone stale tick
+    cannot veto.
+
+    2026-10-20 KXXRP15M-0015: three YES emissions at asks 43/39/34 (-20c
+    LOSS_CAP) — every emission bought into an already-falling book."""
+    if not history:
+        return False
+    now = time.time() if now is None else float(now)
+    lb = quota_book_lookback_s() if lookback_s is None else float(lookback_s)
+    thr = quota_book_drop_veto_c() if drop_cents is None else float(drop_cents)
+    idx = 1 if side == "yes" else 2
+    asks = [
+        float(s[idx]) for s in history
+        if s and now - float(s[0]) <= lb
+    ]
+    if len(asks) < 3:
+        return False
+    return (max(asks) - float(current_ask)) >= thr
 
 
 def quota_consensus_min_votes() -> int:
