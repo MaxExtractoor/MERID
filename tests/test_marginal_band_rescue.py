@@ -39,6 +39,9 @@ def _isolate(monkeypatch):
     # so neutralize both to keep the sweep deterministic.
     monkeypatch.setattr(_td, "MERID_EDGE_MARGINAL_RELIEF_CENTS", 0.0)
     monkeypatch.setattr(_td, "MERID_EDGE_MID_BAND_RELIEF_CENTS", 0.0)
+    # Production .env arms the mid-window NO relief (8c) - it collapses the
+    # NO bound alongside slack and would re-attribute the rescue cohort.
+    monkeypatch.setattr(_td, "MERID_EDGE_MIDWIN_RELIEF_CENTS_NO", 0.0)
 
 
 def _decision(

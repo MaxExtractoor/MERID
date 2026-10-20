@@ -5835,6 +5835,19 @@ def compute_trade_decision(
     _no_mb_rescued = (
         _mb_no_slack > 0.0
         and _no_eff_edge > 0.0
+        # Slack-only bound: with midwin relief also lowering the effective
+        # bound, a >1c miss admitted by relief alone must NOT claim the
+        # marginal_band cohort stamp - attribution stays honest.
+        and _no_eff_edge >= max(0.0, no_min_edge - _mb_no_slack)
+        and _no_eff_edge < no_min_edge
+    )
+    # Mid-window NO relief admitted this side: it clears only because the
+    # relief lowered the bound.  Stamped so the relieved bound — not the
+    # pre-relief one — flows to min_required_edge / submit-time
+    # revalidation, and so outcome joins can isolate the released cohort.
+    _no_mw_rescued = (
+        _mw_no_relief > 0.0
+        and _no_eff_edge > 0.0
         and _no_eff_edge >= _no_edge_eff_bound
         and _no_eff_edge < no_min_edge
     )
@@ -7518,6 +7531,18 @@ def compute_trade_decision(
             )
             selected_threshold = selected_threshold - _sel_slack
             indicators["marginal_band_admission_bound_cents"] = (
+                float(selected_threshold) * 100.0
+            )
+        # 2026-10-20: mid-window NO relief admitted this side under the
+        # relief-lowered bound — the same bound-stamp contract as
+        # marginal_band applies, else submit-time revalidation re-derives
+        # max_price under the pre-relief bound and rejects the candidate.
+        if selected_outcome == "no" and _no_mw_rescued:
+            indicators["midwin_no_relief"] = True
+            selected_threshold = max(
+                0.0, selected_threshold - _mw_no_relief
+            )
+            indicators["midwin_no_admission_bound_cents"] = (
                 float(selected_threshold) * 100.0
             )
 

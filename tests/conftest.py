@@ -96,6 +96,12 @@ _os.environ["MERID_PINNED_FAV_ENABLED"] = "0"
 # the taker-mode 92-98c reserved band is the default the suite was
 # written against; maker-mode tests opt in via fixture.
 _os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
+# 2026-10-20 (mid-window NO relief): production .env arms an 8c bound
+# relief for the measured-positive NO mid-window cohort — it collapses the
+# NO-side dynamic bound and would re-attribute/re-admit candidates in
+# suites written against the unrelieved bound.  Pin off globally;
+# tests/test_midwin_no_relief.py opts in via monkeypatch.
+_os.environ["MERID_EDGE_MIDWIN_RELIEF_CENTS_NO"] = "0"
 # 2026-10-17: production .env arms negative per-cohort provisional floors
 # (MERID_PROVISIONAL_MIN_EV_C_*) — they change no-edge terminal labels to
 # edge_below_lane_floor.  Restore the code defaults (positive bounds) via
