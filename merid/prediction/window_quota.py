@@ -287,8 +287,12 @@ def quota_basket_leader_side(
     SOL/XRP/DOGE/ETH each emitted YES on +0.02-0.08bp r60 microstructure
     noise and lost their full premiums.  A sibling whose candidate
     disagrees with the leader's recorded side is vetoed — abstained, not
-    flipped.  Returns None when the leader has no fresh record (first
-    emissions stay independent) or when this ticker IS the leader."""
+    flipped.  The leader's side binds siblings for the WHOLE window
+    (MERID_BASKET_LEADER_MAX_AGE_S, default 900s): 2026-10-20 0430 BTC
+    recorded yes at :17 (+12c) and a 180s bound let ETH emit no at :20:43
+    — the veto expired mid-window and ETH lost -26c on a rallying basket.
+    Returns None when the leader has no record (first emissions stay
+    independent) or when this ticker IS the leader."""
     leader_series = (
         os.environ.get("MERID_BASKET_LEADER_SERIES", "KXBTC15M").strip().upper()
     )
@@ -298,7 +302,7 @@ def quota_basket_leader_side(
     if key is None:
         return None
     now = time.time() if now is None else float(now)
-    max_age = _env_float("MERID_BASKET_LEADER_MAX_AGE_S", 180.0)
+    max_age = _env_float("MERID_BASKET_LEADER_MAX_AGE_S", 900.0)
     for t, rec in (_load_state(path, now).get("tickers") or {}).items():
         if not str(t).upper().startswith(leader_series + "-"):
             continue

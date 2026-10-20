@@ -211,10 +211,17 @@ class TestBasketLeaderVeto:
             f"KXSOL15M-{W}-15", path=state_path
         ) is None
 
+    def test_leader_binds_for_whole_window(self, state_path):
+        """Default 900s: a 185s-old BTC record still vetoes — the
+        2026-10-20 0430 ETH loss where a 180s bound expired mid-window."""
+        _seed(state_path, {"BTC": "yes"}, ts=time.time() - 185)
+        assert wq.quota_basket_leader_side(
+            f"KXETH15M-{W}-15", path=state_path
+        ) == "yes"
+
     def test_stale_btc_record_expires(self, state_path):
-        """A leader read from minutes ago must not bind — the basket may
-        have genuinely turned."""
-        _seed(state_path, {"BTC": "no"}, ts=time.time() - 300)
+        """Beyond the window the leader's read must not bind."""
+        _seed(state_path, {"BTC": "no"}, ts=time.time() - 901)
         assert wq.quota_basket_leader_side(
             f"KXSOL15M-{W}-15", path=state_path
         ) is None
