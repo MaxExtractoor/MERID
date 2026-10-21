@@ -108,6 +108,12 @@ class TestBoundedLaneMembership:
             # by their own admission floors and durable caps.
             "pinned_fav",
             "window_quota",
+            # 2026-10-21: bid-basis mid-band momentum lane (40-74c,
+            # TTE 180-840s, entry+12c lock) and the NO-side 25-40c
+            # settle-hold sleeve — both bounded by durable per-ticker
+            # and per-day attempt counters.
+            "drift_fav",
+            "cheap_no_settle",
         }
 
 

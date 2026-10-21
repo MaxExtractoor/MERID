@@ -1012,6 +1012,40 @@ def _maker_bid_under_daily_cap() -> bool:
     return int(_maker_bid_daily_state().get("count", 0)) < MERID_MAKER_BID_DAILY_CAP
 
 
+def _bid_pass_enabled() -> bool:
+    """Whether the bid-priced eval pass runs this cycle.
+
+    2026-10-21: the pass is the sole emission vehicle for every bid-basis
+    lane — generic maker_bid, pinned_fav maker mode, drift_fav,
+    cheap_no_settle.  It runs when ANY consumer lane is enabled; each
+    lane's own submission cap is enforced at emission (consume-then-
+    suppress), so no lane's budget can starve the others or hide the
+    pass from the audit ledger.
+    """
+    if MERID_MAKER_BID_LANE_ENABLED:
+        return True
+    try:
+        from merid.prediction import directional_regime as _dr
+        if _dr.pinned_fav_maker_mode():
+            return True
+    except Exception:
+        pass
+    try:
+        from merid.prediction import drift_lane as _dl
+        return bool(_dl.drift_enabled() or _dl.cheap_no_enabled())
+    except Exception:
+        pass
+    return False
+
+
+def _is_generic_maker_bid_lane(lane) -> bool:
+    """True when a bid-pass selection belongs to the generic lane and must
+    consume the maker_bid daily submission counter at emission.  Lane-
+    owned candidates (pinned_fav, drift_fav, cheap_no_settle, cells)
+    consume their own durable counters downstream instead."""
+    return (not lane) or lane == "maker_bid"
+
+
 def _record_maker_bid_submission() -> int:
     """Increment and persist the lane's daily submission counter."""
     state = _maker_bid_daily_state()
@@ -9005,12 +9039,21 @@ class LeanAgent15m:
                 time_in_force = "ioc"
                 execution_mode = "taker"
                 fee_cents = taker_fee_cents
-                if MERID_MAKER_BID_LANE_ENABLED and not _maker_bid_under_daily_cap():
-                    try:
-                        decision.indicators["maker_bid_block"] = "daily_cap"
-                    except Exception:
-                        pass
-                if MERID_MAKER_BID_LANE_ENABLED and _maker_bid_under_daily_cap():
+                # 2026-10-21 (bid-pass vehicle decoupling): the bid-priced
+                # pass is the sole emission vehicle for every bid-basis
+                # lane — generic maker_bid, pinned_fav maker mode,
+                # drift_fav, cheap_no_settle.  The generic lane's daily
+                # submission cap belongs at EMISSION (consume-then-suppress,
+                # the same discipline the bounded lanes use), not at the
+                # eval: gating the pass on the cap starves every lane that
+                # shares the vehicle and erases the pass from the audit
+                # ledger.  Observed 2026-10-21 ~17:56Z: the generic counter
+                # reached the cap -> zero :maker_bid evals -> every
+                # pinned_fav maker-mode ENTER died as
+                # pinned_fav_maker_only -> zero candidates for the rest of
+                # the day.
+                decision_maker_bid = None
+                if _bid_pass_enabled():
                     decision_maker_bid = _call_trade_decision(
                         maker_fee_cents, p_yes_model, route="maker_bid",
                         price_basis="bid",
@@ -9076,22 +9119,128 @@ class LeanAgent15m:
                             except Exception:
                                 pass
                         if _mb_spread >= _mb_spread_floor and not _mb_toxic_bf:
-                            decision = decision_maker_bid
-                            liquidity_role = "maker"
-                            aggressiveness = 0.0
-                            post_only = True
-                            time_in_force = "gtc"
-                            execution_mode = "maker"
-                            fee_cents = maker_fee_cents
-                            _n_mb = _record_maker_bid_submission()
-                            logger.info(
-                                "[MAKER-BID-LANE] asset=%s side=%s spread=%.1fc "
-                                "net_edge=%.2fc asr_meas=%.1fc lane submissions today=%d",
-                                asset, _mb_side, _mb_spread,
-                                float(decision_maker_bid.net_edge or 0) * 100.0,
-                                _mb_asr_meas,
-                                _n_mb,
-                            )
+                            # 2026-10-21: lane-owned candidates (pinned_fav,
+                            # drift_fav, cheap_no_settle, threshold cells)
+                            # carry their own durable counters consumed at
+                            # the bounded-lane emission stage below — they
+                            # must not also burn the generic maker_bid
+                            # budget.  Only a generic (unstamped /
+                            # maker_bid-stamped) selection consumes the
+                            # maker_bid daily cap, as consume-then-suppress
+                            # at emission — matching the pf/escape/quota
+                            # discipline.
+                            _mb_generic = _is_generic_maker_bid_lane(_mb_lane)
+                            _mb_emit = True
+                            _n_mb = None
+                            if _mb_generic:
+                                if not MERID_MAKER_BID_LANE_ENABLED:
+                                    _mb_emit = False
+                                    try:
+                                        decision_maker_bid.indicators[
+                                            "maker_bid_block"
+                                        ] = "lane_disabled"
+                                    except Exception:
+                                        pass
+                                    decision = replace(
+                                        decision_maker_bid,
+                                        selected_outcome=None,
+                                        selected_action=None,
+                                        selected_outcome_price=None,
+                                        no_trade_reason="maker_bid_lane_disabled",
+                                    )
+                                else:
+                                    _n_mb = _record_maker_bid_submission()
+                                    if _n_mb > MERID_MAKER_BID_DAILY_CAP:
+                                        _mb_emit = False
+                                        try:
+                                            from merid.execution.decision_audit_ledger import (
+                                                get_decision_audit_ledger,
+                                            )
+                                            _ticker_mb = str(
+                                                getattr(
+                                                    decision_maker_bid,
+                                                    "ticker",
+                                                    "",
+                                                )
+                                                or ticker
+                                                or ""
+                                            )
+                                            get_decision_audit_ledger().append_decision_event(
+                                                decision_id=str(
+                                                    getattr(
+                                                        decision_maker_bid,
+                                                        "decision_id",
+                                                        "",
+                                                    )
+                                                    or ""
+                                                ),
+                                                event_type="LANE_SUPPRESSED",
+                                                stage="ALLOCATION",
+                                                reason_code="maker_bid_cap_exceeded_at_emission",
+                                                reason_detail={
+                                                    "side": _mb_side,
+                                                    "lane": "maker_bid",
+                                                    "ticker": _ticker_mb,
+                                                    "maker_bid_count_today": int(
+                                                        _n_mb
+                                                    ),
+                                                    "maker_bid_daily_cap": int(
+                                                        MERID_MAKER_BID_DAILY_CAP
+                                                    ),
+                                                },
+                                                trace_id=str(
+                                                    getattr(
+                                                        decision_maker_bid,
+                                                        "decision_id",
+                                                        "",
+                                                    )
+                                                    or ""
+                                                ),
+                                                run_id=(
+                                                    decision_maker_bid.indicators
+                                                    or {}
+                                                ).get("run_id"),
+                                                ticker=_ticker_mb,
+                                                asset=asset,
+                                            )
+                                        except Exception:
+                                            pass
+                                        logger.info(
+                                            "[MAKER-BID-LANE] asset=%s side=%s "
+                                            "suppressed — emission count=%d "
+                                            "exceeded daily cap=%d",
+                                            asset, _mb_side, _n_mb,
+                                            MERID_MAKER_BID_DAILY_CAP,
+                                        )
+                                        decision = replace(
+                                            decision_maker_bid,
+                                            selected_outcome=None,
+                                            selected_action=None,
+                                            selected_outcome_price=None,
+                                            no_trade_reason="maker_bid_cap_exceeded_at_emission",
+                                        )
+                            if _mb_emit:
+                                decision = decision_maker_bid
+                                liquidity_role = "maker"
+                                aggressiveness = 0.0
+                                post_only = True
+                                time_in_force = "gtc"
+                                execution_mode = "maker"
+                                fee_cents = maker_fee_cents
+                                logger.info(
+                                    "[MAKER-BID-LANE] asset=%s side=%s spread=%.1fc "
+                                    "net_edge=%.2fc asr_meas=%.1fc lane=%s "
+                                    "generic_submissions=%s",
+                                    asset, _mb_side, _mb_spread,
+                                    float(decision_maker_bid.net_edge or 0) * 100.0,
+                                    _mb_asr_meas,
+                                    _mb_lane or "maker_bid",
+                                    (
+                                        str(_n_mb)
+                                        if _n_mb is not None
+                                        else "lane-counter"
+                                    ),
+                                )
                         elif _mb_toxic_bf:
                             decision.indicators["maker_bid_block"] = (
                                 f"toxic_bookflow:{_mb_toxic_bf} asr={_mb_asr_meas:.1f}c"
