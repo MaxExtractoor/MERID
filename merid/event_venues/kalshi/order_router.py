@@ -6879,6 +6879,17 @@ def _build_create_order_request(
             max_entry_cents = resolved.max_entry_cents
     except Exception:
         pass
+    # 2026-10-21: bounded admission lanes carry their own verified price
+    # band (e.g. pinned_fav 82-91c maker band) — re-checking a lane order
+    # against the generic profile range rejected canonical-valid intents
+    # (live: ETH buy@81c -> invalid_order_request ... not_in[25,80]).
+    try:
+        from merid.risk.global_slot_allocator import _lane_entry_band_cents
+        _lane_band = _lane_entry_band_cents(getattr(intent, "decision_lane", None))
+        if _lane_band is not None:
+            min_entry_cents, max_entry_cents = _lane_band
+    except Exception:
+        pass
 
     if (effective_order_type or "limit") != "market":
         price = int(final_price_cents)
@@ -13918,7 +13929,8 @@ def _prepare_order_for_gate(
             asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
             if asset:
                 can_allocate, alloc_reason = slot_allocator.can_allocate(
-                    intent.price_cents, asset, count=float(intent.count or 0.0)
+                    intent.price_cents, asset, count=float(intent.count or 0.0),
+                    decision_lane=getattr(intent, "decision_lane", None),
                 )
                 if not can_allocate:
                     latency = (_time.monotonic() - t0) * 1000
