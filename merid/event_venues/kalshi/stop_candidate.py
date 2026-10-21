@@ -269,6 +269,35 @@ def loss_exits_enabled() -> bool:
     return _env_bool("MERID_LOSS_EXITS_ENABLED", False)
 
 
+def no_edge_loss_salvage_enabled() -> bool:
+    """2026-10-21: scoped salvage carve-out for no-edge admissions.
+
+    ``MERID_LOSS_EXITS_ENABLED=0`` rests on evidence that dipped favorites
+    recover ~70% of the time — evidence measured on model-edge entries whose
+    admission carried a positive settle thesis.  A bounded-lane entry
+    (``entry_edge <= 0``: pinned_fav / quota / probe cohorts) never had that
+    thesis — its admission rests on measured cell evidence, and when the bid
+    collapses past the tail floor the position is pure tail risk with no
+    model claim to ride on.  Live evidence 2026-10-21: XRP NO@89 and SOL
+    NO@90 missed their hard-lock IOCs and rode to settlement 0 (-89c/-90c)
+    because the designed 14c no-edge drop floor was suppressed by the
+    global flag.
+
+    With this flag on (default), ``LOSS_CAP``/``HARD_STOP`` candidates
+    carrying a non-positive claimed entry edge regain LOSS_SELL_EXEMPT
+    status inside ``resolve_loss_sell_floor`` so the tail-loss floor can
+    actually submit its swept IOC.  The discriminator is the *minimum* of
+    the position's stamped entry claims (net ``entry_edge_pct`` and gross
+    ``entry_edge``) — the net claim is what distinguishes a bounded-lane
+    admission (pinned_fav stamped -2.9c) from a genuine model-edge entry;
+    the gross stamp alone is positive on maker fills at the bid and would
+    misclassify the whole cohort.  Model-edge positions (all claims > 0)
+    keep the 2026-10-20 ride-to-settlement posture.
+    ``MERID_NO_EDGE_LOSS_SALVAGE_ENABLED=0`` restores the full disable.
+    """
+    return _env_bool("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", True)
+
+
 # Price-depth loss triggers: capital-protection exits keyed on how far the
 # held-side price fell.  Exempt from the breakeven floor only while
 # ``MERID_LOSS_EXITS_ENABLED=1``; with the flag off they face the same
@@ -420,6 +449,20 @@ def resolve_loss_sell_floor(
     _exempt = LOSS_SELL_EXEMPT_TRIGGERS
     if not loss_exits_enabled():
         _exempt = _exempt - _PRICE_DEPTH_LOSS_TRIGGERS
+        # 2026-10-21: no-edge salvage carve-out — a bounded-lane entry
+        # (claimed entry_edge <= 0) regains exempt status for price-depth
+        # loss triggers so the tail floor's swept IOC is not pinned to a
+        # breakeven/hold-value floor it never had a thesis for.  See
+        # no_edge_loss_salvage_enabled.
+        if (
+            str(_tr).upper() in _PRICE_DEPTH_LOSS_TRIGGERS
+            and no_edge_loss_salvage_enabled()
+        ):
+            try:
+                if entry_edge is not None and float(entry_edge) <= 0.0:
+                    return None
+            except (TypeError, ValueError):
+                pass
     if str(_tr).upper() in _exempt:
         return None
     if entry_price_cents is None:
@@ -486,18 +529,34 @@ def _stop_sweep_cents(trigger_reason: Any) -> int:
 
 
 def _candidate_floor_entry_edge(candidate: "StopCandidate") -> Optional[float]:
-    """Entry-edge signal for the breakeven floor, preferring the stamped
-    entry-time lane claim (``claimed_entry_edge`` — the same ``entry_edge``
-    semantic the exit resolver passes from the position record) and falling
-    back to the candidate's model-fair-vs-entry delta.  Either flag marks a
-    no-edge / underwater entry where the "trust the model, ride to
-    settlement" thesis does not apply, so the floor drops to ~fair value
-    instead of pinning to entry.  2026-10-20 KXBTC15M-2230: entry_edge was
-    stamped but never wired here — EDGE_DECAY at bid 74c vs entry 78c was
-    suppressed and the position rode to ~0 (-78c)."""
-    claimed = getattr(candidate, "claimed_entry_edge", None)
-    if claimed is not None:
-        return claimed
+    """Entry-edge signal for the breakeven floor, combining the stamped
+    entry-time claims (``claimed_entry_edge_pct`` — the lane's advertised
+    *net* edge; ``claimed_entry_edge`` — the gross model-vs-market delta the
+    exit resolver passes from the position record) and falling back to the
+    candidate's model-fair-vs-entry delta.  Only the sign is consumed
+    downstream, so the *minimum* of the available claims is returned: any
+    non-positive stamp marks a no-edge / underwater entry where the "trust
+    the model, ride to settlement" thesis does not apply, and the floor
+    drops to ~fair value instead of pinning to entry.  2026-10-20
+    KXBTC15M-2230: entry_edge was stamped but never wired here — EDGE_DECAY
+    at bid 74c vs entry 78c was suppressed and the position rode to ~0
+    (-78c).  2026-10-21 XRP NO@89 / SOL NO@90: gross ``entry_edge`` was
+    positive (+0.006) on a maker fill at the bid while the lane's net claim
+    was -2.9c — reading the gross stamp alone classified a bounded-lane
+    admission as model-edge and suppressed every salvage."""
+    claims = [
+        v
+        for v in (
+            getattr(candidate, "claimed_entry_edge_pct", None),
+            getattr(candidate, "claimed_entry_edge", None),
+        )
+        if v is not None
+    ]
+    if claims:
+        try:
+            return min(float(v) for v in claims)
+        except (TypeError, ValueError):
+            pass
     return getattr(candidate, "entry_edge_cents", None)
 
 
@@ -557,6 +616,14 @@ class StopCandidate:
     # ``entry_edge_cents`` which is model-fair minus entry at candidate time.
     peak_price_cents: Optional[int] = None
     claimed_entry_edge: Optional[float] = None
+    # 2026-10-21: the lane's advertised *net* entry claim
+    # (``Position.entry_edge_pct`` — negative for bounded-negative-EV
+    # admissions such as pinned_fav/quota).  ``claimed_entry_edge`` alone is
+    # the gross model-vs-market delta, which is positive for maker fills
+    # executed at the bid even when the admission's net claim was negative —
+    # XRP NO@89 (entry_edge=+0.0062, entry_edge_pct=-2.89) read as a
+    # model-edge position and the no-edge salvage floor never applied.
+    claimed_entry_edge_pct: Optional[float] = None
     # 2026-10-17: issuing controller identity for structured emergency
     # authorization (validated by the execution firewall; never the reason
     # text).  Defaults to the position monitor, which builds all current
@@ -600,6 +667,7 @@ class StopCandidate:
             "stop_level_cents": self.stop_level_cents,
             "peak_price_cents": self.peak_price_cents,
             "claimed_entry_edge": self.claimed_entry_edge,
+            "claimed_entry_edge_pct": self.claimed_entry_edge_pct,
             "authorization_source": self.authorization_source,
         }
         return d
@@ -1255,6 +1323,7 @@ def build_stop_candidate(
     hard_stop_cents: Optional[int] = None,
     peak_price_cents: Optional[int] = None,
     claimed_entry_edge: Optional[float] = None,
+    claimed_entry_edge_pct: Optional[float] = None,
 ) -> StopCandidate:
     """Build a `StopCandidate` from live market and position state."""
     # Canonical exposure is always an integer number of centi-contracts.
@@ -1336,6 +1405,7 @@ def build_stop_candidate(
         stop_level_cents=stop_level,
         peak_price_cents=peak_price_cents,
         claimed_entry_edge=claimed_entry_edge,
+        claimed_entry_edge_pct=claimed_entry_edge_pct,
     )
 
 

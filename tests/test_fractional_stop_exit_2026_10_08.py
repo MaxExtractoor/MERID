@@ -67,6 +67,11 @@ def _patch_submit_env(monkeypatch, tmp_path, position_cc):
     ledger = _FakeLedger()
     tracker = ResidualExitTracker(tmp_path / "residuals.json")
 
+    # Hermetic: these tests exercise the LOSS_CAP exempt-submission path —
+    # the live .env carries MERID_LOSS_EXITS_ENABLED=0 which floors price-
+    # depth loss exits at entry unless pinned here.
+    monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
+
     monkeypatch.setattr(sc, "get_stop_candidate_ledger", lambda: ledger)
     monkeypatch.setattr(sc, "record_stop_candidate", lambda c: ledger.candidates.append(c))
     monkeypatch.setattr(

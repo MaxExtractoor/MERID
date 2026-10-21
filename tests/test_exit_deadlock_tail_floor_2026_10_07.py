@@ -183,6 +183,10 @@ class TestTailLossFloor:
         (mandatory-risk, non-shadowed) StopCandidate is submitted on the
         reduce-only channel."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
+        # Hermetic: exercises the emission path under the enabled posture —
+        # the live .env carries MERID_LOSS_EXITS_ENABLED=0 and this fixture
+        # carries no negative-edge stamp for the scoped salvage carve-out.
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
         monkeypatch.setattr(monitor, "_is_expired_market", lambda *a, **k: False)
@@ -239,6 +243,7 @@ class TestTailLossFloor:
     def test_floor_is_one_shot(self, monkeypatch):
         """The fired flag prevents re-emission on subsequent polls."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
         monkeypatch.setattr(monitor, "_is_expired_market", lambda *a, **k: False)
@@ -264,6 +269,7 @@ class TestTailLossFloor:
         (e.g. a cheap entry that has gone nearly worthless)."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
         monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_CENTS", "18")
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
         monkeypatch.setattr(monitor, "_is_expired_market", lambda *a, **k: False)

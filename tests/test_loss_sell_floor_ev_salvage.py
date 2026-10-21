@@ -199,9 +199,13 @@ class TestNoEdgeProbeFloor:
             peak_price_cents=68, entry_edge=-0.05,
         ) is False
 
-    def test_no_edge_hard_stop_uses_probe_floor_when_disabled(self):
+    def test_no_edge_hard_stop_uses_probe_floor_when_disabled(self, monkeypatch):
         # flag off + no-edge entry: floor = hold 42 - probe 2 = 40;
         # bid 30 < 40 -> suppressed; bid 42 would pass (+EV vs hold).
+        # 2026-10-21: pin the no-edge salvage carve-out OFF to keep covering
+        # the probe-floor semantics; with it on, a no-edge HARD_STOP/LOSS_CAP
+        # is exempt again (see TestNoEdgeSalvageCarveout).
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "0")
         assert loss_sell_blocked(
             "HARD_STOP", 30, 51, hold_value_cents=42,
             peak_price_cents=68, entry_edge=-0.05,
@@ -210,6 +214,68 @@ class TestNoEdgeProbeFloor:
             "LOSS_CAP", 42, 51, hold_value_cents=42,
             peak_price_cents=68, entry_edge=-0.05,
         ) is False
+
+
+class TestNoEdgeSalvageCarveout:
+    """2026-10-21: MERID_NO_EDGE_LOSS_SALVAGE_ENABLED (default on) re-exempts
+    price-depth loss triggers for bounded-lane entries (entry_edge <= 0)
+    while MERID_LOSS_EXITS_ENABLED=0 keeps model-edge positions riding.
+
+    Live failure: XRP NO@89 and SOL NO@90 (pinned_fav, net claim
+    entry_edge_pct=-2.89) missed their hard-lock IOCs on a collapsing book
+    and rode to settlement 0 (-89c/-90c) — the designed 14c no-edge tail
+    floor was suppressed unconditionally by the 2026-10-20 disable."""
+
+    def test_no_edge_loss_cap_exempt_when_salvage_on(self, monkeypatch):
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "1")
+        # entry 89, bid 69 (< entry - 14c drop -> tail floor fires):
+        # exempt -> no floor -> sell allowed even below entry and hold.
+        assert loss_sell_blocked(
+            "LOSS_CAP", 69, 89, hold_value_cents=88,
+            entry_edge=-0.029,
+        ) is False
+        assert loss_sell_blocked(
+            "LOSS_CAP", 69, 89, hold_value_cents=88,
+            entry_edge=0.0,
+        ) is False
+        assert loss_sell_blocked(
+            "HARD_STOP", 69, 89, hold_value_cents=88,
+            entry_edge=-0.029,
+        ) is False
+
+    def test_no_edge_loss_cap_floored_when_salvage_off(self, monkeypatch):
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "0")
+        # Salvage off -> LOSS_CAP loses exempt status -> probe floor
+        # min(89, 88-2)=86 binds; bid 69 < 86 -> blocked.
+        assert loss_sell_blocked(
+            "LOSS_CAP", 69, 89, hold_value_cents=88,
+            entry_edge=-0.029,
+        ) is True
+
+    def test_positive_edge_still_floored_when_salvage_on(self, monkeypatch):
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "1")
+        # Model-edge entries keep the 2026-10-20 doctrine: LOSS_CAP is
+        # floored and the bid below it is suppressed.
+        assert loss_sell_blocked(
+            "LOSS_CAP", 69, 89, hold_value_cents=88,
+            entry_edge=0.03,
+        ) is True
+
+    def test_missing_edge_still_floored_when_salvage_on(self, monkeypatch):
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "1")
+        # No stamped edge -> cannot prove the no-edge carve-out -> fail closed.
+        assert loss_sell_blocked(
+            "LOSS_CAP", 69, 89, hold_value_cents=88,
+            entry_edge=None,
+        ) is True
+
+    def test_discretionary_triggers_unaffected(self, monkeypatch):
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "1")
+        # EDGE_DECAY is not a price-depth trigger -> no carve-out.
+        assert loss_sell_blocked(
+            "EDGE_DECAY", 69, 89, hold_value_cents=88,
+            entry_edge=-0.029,
+        ) is True
 
     def test_no_edge_floor_never_below_one(self):
         # hold collapsed to 1c -> floor = max(1, min(51, -1)) = 1.

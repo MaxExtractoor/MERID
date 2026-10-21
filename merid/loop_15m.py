@@ -2693,12 +2693,86 @@ def _run_exit_price_guard(
         # between trigger and submit.  With limit=threshold the IOC fills at
         # best available >= threshold, else returns unfilled and the monitor
         # re-evaluates next cycle.
+        # 2026-10-21: bounded below-threshold sweep while still profit-
+        # protected.  A book fading through the threshold during the
+        # trigger->submit window converts at threshold-sweep instead of
+        # missing (XRP NO@89 / SOL NO@90 both latched >=90c then missed a
+        # limit=90 IOC into a collapsing book).  The sweep floor is
+        # entry+min_profit so it can never realize a below-breakeven sell —
+        # for entries inside the lock band (entry >= threshold-min_profit)
+        # the floor binds and the limit stays >= threshold semantics.
+        # Entry unknown fails closed to threshold-only (no sweep without a
+        # verifiable profit floor).
+        #
+        # 2026-10-21 chase ladder: when the freshest bid is already below
+        # the threshold (the lock lapsed before/at submit), price the IOC
+        # as a salvage chase at bid - chase_sweep floored at the position's
+        # salvage bound — model-edge entries floor at entry+min_profit
+        # (profit rescue only; below breakeven the ride doctrine owns the
+        # position), no-edge bounded-lane entries floor at the no-edge
+        # tail-drop depth (entry - MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS) so
+        # the chase actually converts a fading book instead of repricing a
+        # dead level.  A limit is a bound, not a price: the IOC still fills
+        # at best bid when the book holds.
         try:
             _lock_floor = int(os.environ.get("MERID_HARD_PROFIT_LOCK_CENTS", "90"))
         except (TypeError, ValueError):
             _lock_floor = 90
+        try:
+            _lock_sweep = int(os.environ.get("MERID_HARD_LOCK_SWEEP_CENTS", "3"))
+        except (TypeError, ValueError):
+            _lock_sweep = 3
+        try:
+            _lock_chase_sweep = int(
+                os.environ.get("MERID_HARD_LOCK_CHASE_SWEEP_CENTS", "4")
+            )
+        except (TypeError, ValueError):
+            _lock_chase_sweep = 4
+        try:
+            _lock_min_profit = int(
+                os.environ.get("MERID_HARD_LOCK_MIN_PROFIT_CENTS", "1")
+            )
+        except (TypeError, ValueError):
+            _lock_min_profit = 1
         limit_cents = max(1, min(99, _lock_floor))
+        if entry_price > 0:
+            _profit_floor = entry_price + max(0, _lock_min_profit)
+            _chase_floor = _profit_floor
+            _no_edge_claim = False
+            for _ea in ("entry_edge_pct", "entry_edge"):
+                _ev = getattr(position, _ea, None)
+                try:
+                    if _ev is not None and float(_ev) <= 0.0:
+                        _no_edge_claim = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if _no_edge_claim:
+                try:
+                    _ne_drop = int(
+                        os.environ.get("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
+                    )
+                except (TypeError, ValueError):
+                    _ne_drop = 14
+                _chase_floor = max(1, entry_price - max(0, _ne_drop))
+            if (
+                best_bid is not None
+                and best_bid < _lock_floor
+            ):
+                limit_cents = max(
+                    _chase_floor,
+                    min(99, best_bid - _lock_chase_sweep),
+                )
+                record["lock_chase"] = True
+                record["chase_floor_cents"] = _chase_floor
+            elif _lock_sweep > 0:
+                limit_cents = max(
+                    1, min(99, max(_profit_floor, _lock_floor - _lock_sweep))
+                )
         record["lock_threshold_cents"] = _lock_floor
+        record["lock_sweep_cents"] = _lock_sweep
+        record["lock_chase_sweep_cents"] = _lock_chase_sweep
+        record["lock_limit_cents"] = limit_cents
     else:
         limit_cents = max(1, best_bid - slippage)
         if canonical in MERID_PROFIT_EXIT_REASONS and entry_price > 0:
@@ -2765,6 +2839,18 @@ def _run_exit_price_guard(
         # Signal-reversal / model-invalidation exits may have to realize the full
         # position premium.  Bound the loss by the position's own cost basis.
         max_loss = max(MERID_EXIT_MAX_LOSS_CENTS, entry_price) if entry_price > 0 else MERID_EXIT_MAX_LOSS_CENTS
+    elif canonical == "hard_profit_lock":
+        # 2026-10-21: the lock's priced limit IS the loss bound.  A chase-
+        # band IOC floored at the salvage bound legitimately prices below
+        # entry for no-edge salvage (XRP NO@89: floor=75c, limit=83c ->
+        # worst -18c vs the -89c settlement it replaced); the generic 3c
+        # bound would veto exactly the salvage it exists to allow.  Bound
+        # the loss at the priced limit depth, never wider — the floor
+        # derives from the stamped chase bound, not a blanket cap.
+        if entry_price > 0 and limit_cents < entry_price:
+            max_loss = (entry_price - limit_cents) * closed_count + fees
+        else:
+            max_loss = MERID_EXIT_MAX_LOSS_CENTS
     else:
         max_loss = MERID_EXIT_MAX_LOSS_CENTS
 

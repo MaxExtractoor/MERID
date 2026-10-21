@@ -218,9 +218,17 @@ def test_stop_loss_rejected_when_market_gapped_through_slippage():
     assert record["reject_reason"] == "stop_beyond_slippage"
 
 
-def test_take_profit_approved_when_gate_disabled():
+def test_take_profit_approved_when_gate_disabled(monkeypatch):
     """Take-profit is operational again (2026-09-23): it submits through the
     mechanical guard even while the EV gate is disabled."""
+    # Hermetic pricing knobs: the IOC limit is bid - profit slippage,
+    # clamped up to the fee-aware minimum profitable exit when that bound
+    # is below the bid.  The live .env carries
+    # MERID_TAKE_PROFIT_MIN_PROFIT_CENTS=12 and a 5c profit slippage —
+    # without pinning, this assertion depends on operator tuning.
+    monkeypatch.setenv("MERID_EXIT_PROFIT_SLIPPAGE_CENTS", "0")
+    import merid.event_venues.kalshi.fees as _fees
+    monkeypatch.setattr(_fees, "TAKE_PROFIT_MIN_PROFIT_CENTS", 2)
     position = _make_position()
     # Terminal window: the evidence envelope admits this take-profit so the
     # operational path under test executes.
@@ -421,6 +429,14 @@ def test_hard_profit_lock_approved_at_threshold_floor():
     rejected as exit_reason_not_allowed and the position rode to settlement.
     The guard must now approve with the IOC limit anchored at the lock
     threshold (fills >=90c or unfilled, never a faded 87c print).
+
+    2026-10-21 update: the limit is a *floor*, not the fill price — an IOC
+    sells at the best resting bid >= limit.  Anchoring the floor at exactly
+    the 90c threshold meant a book that faded 1-2c during trigger->submit
+    died unfilled (XRP NO@89 / SOL NO@90 settled -89c/-90c).  The limit is
+    now max(entry+min_profit, threshold-sweep): for this entry at 74c the
+    floor is 87c — still profit-protected, converts a transit fade, and a
+    >=90c book still fills at the real bid.
     """
     position = _make_position()
     state = _make_state(no_bid=92, no_ask=93, age_ms=80)
@@ -433,7 +449,56 @@ def test_hard_profit_lock_approved_at_threshold_floor():
     assert record["exit_reason_canonical"] == "hard_profit_lock"
     assert record["exit_class"] == "emergency"
     assert record["status"] == "approved"
-    assert record["limit_cents"] == 90  # threshold floor, not bid-minus-slippage
+    # entry 74 -> profit floor 75; threshold-sweep floor 87 -> limit 87.
+    assert record["limit_cents"] == 87
+    assert price == 87
+
+
+def test_hard_profit_lock_sweep_floored_at_breakeven_plus():
+    """Entries inside the lock band keep >=threshold semantics.
+
+    Entry 89 (a pinned_fav-band fill): threshold-sweep = 87 but the
+    profit floor is entry+1 = 90, so the IOC still prices at 90 — a
+    below-90 sell is a loss and the ride-to-settlement doctrine holds.
+    """
+    position = _make_position(avg_entry_price_cents=89)
+    state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+
+    approved, price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=92, state=state
+    )
+
+    assert approved is True
+    assert record["limit_cents"] == 90
+    assert price == 90
+
+
+def test_hard_profit_lock_sweep_zero_restores_threshold(monkeypatch):
+    """MERID_HARD_LOCK_SWEEP_CENTS=0 restores the exact-threshold anchor."""
+    monkeypatch.setenv("MERID_HARD_LOCK_SWEEP_CENTS", "0")
+    position = _make_position()
+    state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+    approved, price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=92, state=state
+    )
+
+    assert approved is True
+    assert record["limit_cents"] == 90
+    assert price == 90
+
+
+def test_hard_profit_lock_missing_entry_fails_closed_to_threshold():
+    """Without a verifiable entry price there is no profit floor, so the
+    sweep must not enable a below-threshold sell that could realize a loss."""
+    position = _make_position(avg_entry_price_cents=0)
+    state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+
+    approved, price, record, _did = _run_guard(
+        position, "hard_profit_lock", exit_price_cents=92, state=state
+    )
+
+    assert approved is True
+    assert record["limit_cents"] == 90
     assert price == 90
 
 
@@ -484,3 +549,136 @@ def test_hard_profit_lock_bypasses_discretionary_profit_floor():
 
     assert approved is True
     assert record.get("reject_reason") != "profit_exit_not_profitable"
+
+
+class TestHardLockChasePricing:
+    """2026-10-21 chase ladder: when the freshest bid is already below the
+    lock threshold the guard prices a bounded salvage IOC at bid-sweep,
+    floored at the position's salvage bound — it must never reprice the
+    dead threshold level.
+
+    Live failure: XRP NO@89 / SOL NO@90 latched >=90c, submitted one IOC
+    at exactly 90 into a book already below it, missed, and rode to
+    settlement 0 (-89c/-90c) because nothing ever repriced."""
+
+    def test_model_edge_chase_floors_at_breakeven(self):
+        """Model-edge entry 74, threshold 90, submit-time bid 87:
+        chase floor = entry+min_profit = 75; limit = max(75, 87-4) = 83 —
+        still a profit rescue, never a below-breakeven sell."""
+        position = _make_position()  # entry 74, edge stamps absent -> model-edge
+        state = _make_state(no_bid=87, no_ask=88, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=87, state=state
+        )
+
+        assert approved is True
+        assert record["lock_chase"] is True
+        assert record["chase_floor_cents"] == 75
+        assert record["limit_cents"] == 83
+        assert price == 83
+
+    def test_no_edge_chase_floors_at_tail_drop(self):
+        """No-edge bounded-lane entry 89 (pinned_fav: entry_edge_pct=-2.89,
+        gross entry_edge=+0.0062): chase floor = entry - drop_no_edge = 75;
+        limit = max(75, 87-4) = 83.  The net claim — not the gross stamp —
+        selects the deeper salvage floor."""
+        position = _make_position(
+            avg_entry_price_cents=89,
+            entry_edge_pct=-2.89,
+            entry_edge=0.0062,
+        )
+        from merid.event_venues.kalshi.position_cache import (
+            CachedPosition,
+            get_position_cache,
+        )
+
+        get_position_cache()._positions["KXBTC15M-26AUG100000-00"] = (
+            CachedPosition(
+                market_id="KXBTC15M-26AUG100000-00",
+                agent_id="test",
+                contracts=1,
+                side="no",
+                thesis_side="no",
+                avg_price_cents=89,
+            )
+        )
+        state = _make_state(no_bid=87, no_ask=88, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=87, state=state
+        )
+
+        assert approved is True
+        assert record["lock_chase"] is True
+        assert record["chase_floor_cents"] == 75
+        assert record["limit_cents"] == 83
+        assert price == 83
+
+    def test_no_edge_chase_loss_bound_admits_priced_depth(self):
+        """A chase limit below entry projects a bounded loss; the priced
+        limit IS the bound (not the generic 3c cap), so the salvage is not
+        vetoed as max_loss_exceeded."""
+        position = _make_position(
+            avg_entry_price_cents=89,
+            entry_edge_pct=-2.89,
+        )
+        from merid.event_venues.kalshi.position_cache import (
+            CachedPosition,
+            get_position_cache,
+        )
+
+        get_position_cache()._positions["KXBTC15M-26AUG100000-00"] = (
+            CachedPosition(
+                market_id="KXBTC15M-26AUG100000-00",
+                agent_id="test",
+                contracts=1,
+                side="no",
+                thesis_side="no",
+                avg_price_cents=89,
+            )
+        )
+        # bid 85 -> limit 81 -> worst-case (81-89) - fees, ~-10c: beyond the
+        # generic 3c bound but inside the priced-limit bound.
+        state = _make_state(no_bid=85, no_ask=86, age_ms=80)
+
+        approved, _price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=85, state=state
+        )
+
+        assert approved is True
+        assert record["limit_cents"] == 81
+        assert record["projected_net_pnl_cents"] < -3
+        assert record.get("reject_reason") != "max_loss_exceeded"
+        assert record["max_loss_cents"] >= -record["projected_net_pnl_cents"]
+
+    def test_model_edge_chase_never_sells_below_breakeven(self):
+        """A collapsed bid below the profit floor reprices at entry+1,
+        not the raw bid — the IOC cannot realize a loss on a model-edge
+        entry (the ride doctrine owns below-breakeven)."""
+        position = _make_position()  # entry 74
+        # bid 60: chase floor 75 binds -> limit 75, IOC can only fill >=75.
+        state = _make_state(no_bid=60, no_ask=62, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=60, state=state
+        )
+
+        assert approved is True
+        assert record["lock_chase"] is True
+        assert record["limit_cents"] == 75
+        assert price == 75
+
+    def test_above_threshold_bid_keeps_threshold_anchor(self):
+        """Regression: a bid still >= threshold keeps the swept anchor
+        (chase path must not engage on the normal lock attempt)."""
+        position = _make_position()  # entry 74
+        state = _make_state(no_bid=92, no_ask=93, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=92, state=state
+        )
+
+        assert approved is True
+        assert "lock_chase" not in record
+        assert record["limit_cents"] == 87

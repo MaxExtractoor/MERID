@@ -48,6 +48,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     evaluate_edge_stop,
     loss_sell_blocked,
     loss_exits_enabled,
+    no_edge_loss_salvage_enabled,
     maybe_submit_stop_candidate_sync,
     record_stop_candidate,
 )
@@ -904,6 +905,108 @@ def _hard_lock_recovery_max_attempts() -> int:
         return max(0, int(os.getenv("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "3")))
     except Exception:
         return 3
+
+
+def _hard_lock_quote_max_age_ms() -> float:
+    """Max snapshot age a hard-lock trigger may trust.
+
+    The generic exit bound (``EXIT_PRICE_MAX_AGE_MS``, 10s) is far too loose
+    for a lock trigger on a 15m book that can fall several cents per second
+    in the last minutes: a stale REST-owned bid >= threshold would latch an
+    IOC that is dead before it reaches the exchange (2026-10-21 XRP NO@89 /
+    SOL NO@90 — trigger-to-submit lag on a collapsing book, both IOCs
+    cancelled unfilled, positions settled ~0).  Bound the trusted trigger to
+    the REST entry TTL scale (default 2.5s); an older lock-level reading
+    still latches as *untrusted* and verifies via bounded REST recovery.
+    """
+    try:
+        return max(500.0, float(os.getenv("MERID_HARD_LOCK_QUOTE_MAX_AGE_MS", "2500")))
+    except Exception:
+        return 2500.0
+
+
+def _position_no_edge_claim(position: "Position") -> bool:
+    """True when the entry's stamped claims carry no positive-EV ride thesis.
+
+    2026-10-21: the discriminator is the union of the position's stamped
+    entry claims — ``entry_edge_pct`` (the lane's advertised *net* claim:
+    pinned_fav stamps ≈ -2.9c) and ``entry_edge`` (gross model-vs-market
+    delta).  The gross stamp alone is positive on maker fills at the bid
+    (XRP NO@89: +0.0062 vs net claim -2.9), which silently classified every
+    bounded-lane admission as a model-edge entry and suppressed the no-edge
+    salvage floor.  Either stamp <= 0 marks a bounded-lane/underwater
+    admission whose contract is bank-the-win, not ride-the-model.
+    """
+    for attr in ("entry_edge_pct", "entry_edge"):
+        try:
+            v = getattr(position, attr, None)
+            if v is not None and float(v) <= 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _hard_lock_chase_enabled() -> bool:
+    """Bounded chase ladder after a latched lock misses / verifies stale.
+
+    2026-10-21 XRP NO@89 / SOL NO@90: a latched >=90c obligation submitted
+    one IOC at the threshold, missed on the collapsing book, and
+    ``HARD_LOCK_OPPORTUNITY_LOST`` discarded the whole obligation — the
+    positions then rode to settlement 0 (-89c/-90c) with no further exit
+    attempt.  While a fresh trusted bid still holds salvage value the lock
+    now re-emits bounded IOC chases at bid-sweep (priced in
+    ``loop_15m._run_exit_price_guard``) instead of dropping the obligation.
+    """
+    return os.getenv("MERID_HARD_LOCK_CHASE_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _hard_lock_chase_max_attempts() -> int:
+    """Max chase IOCs per latched lock obligation (default 3)."""
+    try:
+        return max(0, int(os.getenv("MERID_HARD_LOCK_CHASE_MAX_ATTEMPTS", "3")))
+    except Exception:
+        return 3
+
+
+def _hard_lock_chase_interval_s() -> float:
+    """Min seconds between chase IOCs (default 2s — collapse moves ~2-5c/s)."""
+    try:
+        return max(0.25, float(os.getenv("MERID_HARD_LOCK_CHASE_INTERVAL_S", "2.0")))
+    except Exception:
+        return 2.0
+
+
+def _hard_lock_chase_floor_cents(position: "Position") -> int:
+    """Lowest bid at which a chase IOC may still be emitted.
+
+    Model-edge entries chase only while the sale still realizes a profit
+    (entry + MERID_HARD_LOCK_MIN_PROFIT_CENTS): below breakeven the 2026-10-20
+    dips-recover / ride-to-settlement doctrine owns the position.  No-edge
+    bounded-lane entries never had that thesis — they salvage down to the
+    no-edge tail-drop depth (entry - MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS,
+    default 14c), below which the tail LOSS_CAP floor owns the exit.  With
+    no verifiable entry the chase is disabled (floor 100).
+    """
+    try:
+        entry = int(getattr(position, "avg_entry_price_cents", 0) or 0)
+    except (TypeError, ValueError):
+        entry = 0
+    if entry <= 0:
+        return 100
+    if _position_no_edge_claim(position):
+        try:
+            drop = int(os.getenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14"))
+        except Exception:
+            drop = 14
+        return max(1, entry - max(0, drop))
+    try:
+        min_profit = int(os.getenv("MERID_HARD_LOCK_MIN_PROFIT_CENTS", "1"))
+    except Exception:
+        min_profit = 1
+    return max(1, entry + max(0, min_profit))
 
 
 # Durable hard-lock lifecycle vocabulary (2026-10-05).  Every witnessed lock
@@ -4027,12 +4130,11 @@ class PositionMonitor:
             # salvages before the standard -30c depth.  KXETH15M-0015
             # YES@58 rode to a 20c salvage (-38c); the 14c drop exits
             # ~44c (-14c).  Floor-gated downstream so a model-disagreeing
-            # dip still holds.
-            _claimed_edge = getattr(position, "entry_edge", None)
-            try:
-                _no_edge = _claimed_edge is not None and float(_claimed_edge) <= 0.0
-            except (TypeError, ValueError):
-                _no_edge = False
+            # dip still holds.  2026-10-21: the discriminator must read the
+            # *net* claim too — gross ``entry_edge`` is positive on maker
+            # fills at the bid, so reading it alone never fired the no-edge
+            # branch for pinned_fav/quota admissions (XRP NO@89 rode to 0).
+            _no_edge = _position_no_edge_claim(position)
             _drop_cents = (
                 _tail_cfg["drop_no_edge_cents"] if _no_edge else _tail_cfg["drop_cents"]
             )
@@ -4048,7 +4150,17 @@ class PositionMonitor:
                 # settlement or a profit/trail/thesis exit.  Even with the
                 # flag on, LOSS_CAP candidates now face the breakeven
                 # floor (exemption removed) — see loss_exits_enabled().
-                if not loss_exits_enabled():
+                # 2026-10-21: scoped carve-out — no-edge bounded-lane
+                # entries (entry_edge<=0) never carried the settle thesis
+                # the dips-recover evidence protects.  XRP NO@89 / SOL
+                # NO@90 rode to settlement 0 (-89c/-90c) because this
+                # designed floor was globally suppressed.  When
+                # MERID_NO_EDGE_LOSS_SALVAGE_ENABLED is on (default) the
+                # floor emits for them; model-edge entries keep riding.
+                _no_edge_salvage = bool(
+                    _no_edge and no_edge_loss_salvage_enabled()
+                )
+                if not loss_exits_enabled() and not _no_edge_salvage:
                     _supp_at = float(
                         getattr(position, "tail_loss_suppress_logged_at", 0.0) or 0.0
                     )
@@ -4159,6 +4271,7 @@ class PositionMonitor:
                                 hard_stop_cents=_tail_level,
                                 peak_price_cents=position.high_watermark_cents,
                                 claimed_entry_edge=getattr(position, "entry_edge", None),
+                                claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
                             )
                             record_stop_candidate(candidate)
                             self._submit_stop_candidate(candidate)
@@ -4460,7 +4573,7 @@ class PositionMonitor:
                     snap is not None
                     and getattr(snap, "executable", False)
                     and getattr(snap, "data_quality", None) == "GOOD"
-                    and snap.is_fresh(EXIT_PRICE_MAX_AGE_MS)
+                    and snap.is_fresh(_hard_lock_quote_max_age_ms())
                 )
 
             _quote_trusted = _hl_snap_trusted(snapshot)
@@ -4520,42 +4633,133 @@ class PositionMonitor:
                     _quote_trusted = _hl_snap_trusted(snapshot)
 
             # 2026-10-05: a latched lock that now sees a *trusted* fresh quote
-            # BELOW the threshold has lost its opportunity — the durable
-            # obligation is to capture the lock price, not to dump at any
-            # price.  An untrusted below-lock reading never terminalizes it.
+            # BELOW the threshold has lost its threshold opportunity — but
+            # 2026-10-21: the obligation is not discarded while the bid still
+            # holds salvage value.  A single IOC at exactly the threshold
+            # misses on a collapsing 15m book (XRP NO@89 / SOL NO@90: latched
+            # >=90c, one IOC at 90, CANCELED unfilled, then -89c/-90c to
+            # settlement 0 with zero further exit attempts).  While the
+            # trusted bid sits in [chase_floor, threshold) a bounded chase
+            # IOC re-emits at bid-sweep; the position only terminalizes when
+            # the bid falls below the chase floor (nothing salvageable — the
+            # tail LOSS_CAP band / ride doctrine owns it), the chase budget
+            # is exhausted, or a fill/exposure change removes the position.
             if (
                 _lock_pending is not None
                 and _quote_trusted
                 and _lock_bid is not None
                 and _lock_bid < _lock_threshold
             ):
-                logger.warning(
-                    "[HARD-LOCK-OPPORTUNITY-LOST] position=%s market=%s "
-                    "latched_bid=%sc current_bid=%sc threshold=%sc - lock "
-                    "opportunity lapsed before execution",
-                    position.position_id[:8],
-                    position.market_id,
-                    _lock_pending.get("trigger_bid_cents"),
-                    _lock_bid,
-                    _lock_threshold,
+                _chase_floor = _hard_lock_chase_floor_cents(position)
+                _chase_attempts = int(
+                    _lock_pending.get("chase_attempts", 0) or 0
                 )
-                _hl_record_event(
-                    position,
-                    "HARD_LOCK_OPPORTUNITY_LOST",
-                    latched_bid_cents=_lock_pending.get("trigger_bid_cents"),
-                    current_bid_cents=_lock_bid,
-                    threshold_cents=_lock_threshold,
-                    reason="BID_BELOW_LOCK_AFTER_LATCH",
+                _chase_last = float(
+                    _lock_pending.get("chase_last_attempt_ts", 0.0) or 0.0
                 )
-                position.hard_lock_pending = None
-                self._log_exit_eval(
-                    position=position,
-                    snapshot=snapshot,
-                    decision="HARD_LOCK_OPPORTUNITY_LOST",
-                    reason_code="BID_BELOW_LOCK_AFTER_LATCH",
-                    target_hit=False,
-                    exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                _chase_possible = (
+                    _hard_lock_chase_enabled()
+                    and _lock_pending.get("state") != "FILLED"
+                    and _lock_bid >= _chase_floor
+                    and _chase_attempts < _hard_lock_chase_max_attempts()
                 )
+                if _chase_possible:
+                    if self._is_exit_intent_in_flight(position.position_id):
+                        # A dispatched lock/chase IOC still owns the
+                        # obligation — do not stack a second order while it
+                        # resolves; re-evaluates on the next quote.
+                        pass
+                    elif (time.time() - _chase_last) < _hard_lock_chase_interval_s():
+                        # Between-attempt cooldown — the persisted counters
+                        # bound the ladder across restarts.
+                        pass
+                    else:
+                        _lock_pending["chase_attempts"] = _chase_attempts + 1
+                        _lock_pending["chase_last_attempt_ts"] = time.time()
+                        _hl_record_event(
+                            position,
+                            "HARD_LOCK_CHASE",
+                            latched_bid_cents=_lock_pending.get("trigger_bid_cents"),
+                            chase_bid_cents=_lock_bid,
+                            chase_floor_cents=_chase_floor,
+                            chase_attempt=_chase_attempts + 1,
+                        )
+                        logger.warning(
+                            "[HARD-LOCK-CHASE] position=%s market=%s "
+                            "latched_bid=%sc current_bid=%sc threshold=%sc "
+                            "floor=%sc attempt=%d/%d - chasing salvage exit "
+                            "at bid-sweep",
+                            position.position_id[:8],
+                            position.market_id,
+                            _lock_pending.get("trigger_bid_cents"),
+                            _lock_bid,
+                            _lock_threshold,
+                            _chase_floor,
+                            _chase_attempts + 1,
+                            _hard_lock_chase_max_attempts(),
+                        )
+                        await self._emit_exit_intent(
+                            position,
+                            ExitReason.HARD_PROFIT_LOCK,
+                            _lock_bid,
+                            snapshot=snapshot,
+                        )
+                        return ExitDecision(
+                            reason=ExitReason.HARD_PROFIT_LOCK,
+                            priority=get_priority_for_reason(ExitReason.HARD_PROFIT_LOCK),
+                            source_layer=ExitSourceLayer.POSITION_LEVEL,
+                            exit_price_cents=_lock_bid,
+                            metadata={
+                                "trigger_family": "HARD_PROFIT_LOCK",
+                                "trigger_reason": "HARD_LOCK_CHASE_SALVAGE",
+                                "lock_threshold_cents": _lock_threshold,
+                                "held_side_executable_bid_cents": _lock_bid,
+                                "chase_floor_cents": _chase_floor,
+                                "chase_attempt": _chase_attempts + 1,
+                            },
+                        )
+                else:
+                    logger.warning(
+                        "[HARD-LOCK-OPPORTUNITY-LOST] position=%s market=%s "
+                        "latched_bid=%sc current_bid=%sc threshold=%sc "
+                        "chase_floor=%sc chase_attempts=%d - lock obligation "
+                        "terminalizes: %s",
+                        position.position_id[:8],
+                        position.market_id,
+                        _lock_pending.get("trigger_bid_cents"),
+                        _lock_bid,
+                        _lock_threshold,
+                        _chase_floor,
+                        _chase_attempts,
+                        (
+                            "bid_below_chase_floor"
+                            if _lock_bid < _chase_floor
+                            else (
+                                "chase_attempts_exhausted"
+                                if _chase_attempts >= _hard_lock_chase_max_attempts()
+                                else "chase_disabled_or_filled"
+                            )
+                        ),
+                    )
+                    _hl_record_event(
+                        position,
+                        "HARD_LOCK_OPPORTUNITY_LOST",
+                        latched_bid_cents=_lock_pending.get("trigger_bid_cents"),
+                        current_bid_cents=_lock_bid,
+                        threshold_cents=_lock_threshold,
+                        chase_floor_cents=_chase_floor,
+                        chase_attempts=_chase_attempts,
+                        reason="BID_BELOW_LOCK_AFTER_LATCH",
+                    )
+                    position.hard_lock_pending = None
+                    self._log_exit_eval(
+                        position=position,
+                        snapshot=snapshot,
+                        decision="HARD_LOCK_OPPORTUNITY_LOST",
+                        reason_code="BID_BELOW_LOCK_AFTER_LATCH",
+                        target_hit=False,
+                        exit_reason=ExitReason.HARD_PROFIT_LOCK,
+                    )
             if _lock_bid is not None and _lock_bid >= _lock_threshold:
                 _lock_qty = int(position.size) if position.size else 0
                 _lock_depth = (
@@ -6162,6 +6366,7 @@ class PositionMonitor:
                 hard_stop_cents=position.hard_stop_price_cents,
                 peak_price_cents=position.high_watermark_cents,
                 claimed_entry_edge=getattr(position, "entry_edge", None),
+                claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
             )
             record_stop_candidate(candidate)
             self._submit_stop_candidate(candidate)
@@ -6252,6 +6457,7 @@ class PositionMonitor:
                     hysteresis_cents=STOP_EDGE_HYSTERESIS_CENTS,
                     peak_price_cents=position.high_watermark_cents,
                     claimed_entry_edge=getattr(position, "entry_edge", None),
+                    claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
                 )
                 record_stop_candidate(candidate)
                 self._submit_stop_candidate(candidate)
@@ -6315,6 +6521,7 @@ class PositionMonitor:
                 hard_stop_cents=position.stop_loss_price_cents,
                 peak_price_cents=position.high_watermark_cents,
                 claimed_entry_edge=getattr(position, "entry_edge", None),
+                claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
             )
             record_stop_candidate(edge_candidate)
             _ev_submit_ok = True
@@ -6371,6 +6578,7 @@ class PositionMonitor:
                     hard_stop_cents=position.stop_loss_price_cents,
                     peak_price_cents=position.high_watermark_cents,
                     claimed_entry_edge=getattr(position, "entry_edge", None),
+                    claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
                 )
                 record_stop_candidate(candidate)
                 self._submit_stop_candidate(candidate)
@@ -6765,13 +6973,41 @@ class PositionMonitor:
                 )
         except Exception:
             _hold_value_cents = None
-        if loss_sell_blocked(
+        # 2026-10-21: the hard-profit-lock is exempt from this discretionary
+        # floor — it is a mechanical risk rule with its own pricing contract
+        # (threshold IOC or bounded chase at bid-sweep floored by the salvage
+        # bound in _hard_lock_chase_floor_cents).  Feeding it through the
+        # breakeven anchor here vetoed the very salvage the chase ladder was
+        # built to deliver: a no-edge chase at bid 87 < entry 89 resolved
+        # floor=89 and was suppressed before the loop ever priced the IOC.
+        if exit_reason != ExitReason.HARD_PROFIT_LOCK and loss_sell_blocked(
             exit_reason,
             exit_price_cents,
             _floor_entry,
             hold_value_cents=_hold_value_cents,
             peak_price_cents=position.high_watermark_cents,
-            entry_edge=getattr(position, "entry_edge", None),
+            # 2026-10-21: pass the *minimum* stamped claim — the lane's net
+            # advertised edge (entry_edge_pct, -2.89 for pinned_fav) and the
+            # gross model-vs-market delta (entry_edge, +0.006 on maker fills
+            # at the bid).  The gross stamp alone classified every bounded-
+            # lane admission as model-edge, anchoring the floor at entry for
+            # positions that never had a ride thesis (XRP NO@89: a chase IOC
+            # priced below entry was vetoed here by its own breakeven floor).
+            entry_edge=min(
+                [
+                    float(v)
+                    for v in (
+                        getattr(position, "entry_edge_pct", None),
+                        getattr(position, "entry_edge", None),
+                    )
+                    if v is not None
+                ] or [0.0]
+            )
+            if (
+                getattr(position, "entry_edge_pct", None) is not None
+                or getattr(position, "entry_edge", None) is not None
+            )
+            else None,
         ):
             logger.warning(
                 "[BREAKEVEN-FLOOR] position=%s market=%s side=%s reason=%s "
@@ -7669,7 +7905,7 @@ class PositionMonitor:
             if not (
                 getattr(snapshot, "executable", False)
                 and getattr(snapshot, "data_quality", None) == "GOOD"
-                and snapshot.is_fresh(EXIT_PRICE_MAX_AGE_MS)
+                and snapshot.is_fresh(_hard_lock_quote_max_age_ms())
             ):
                 # Same durable-obligation rule for a snapshot whose bid reads
                 # >= lock but fails the trust re-check.
