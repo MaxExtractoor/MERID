@@ -678,3 +678,159 @@ def test_maker_mode_low_p_bid_does_not_select(
         d.selected_outcome,
         d.selected_outcome_price,
     )
+
+
+# ------------------------------------------- low-p measured-evidence bypass ----
+# 2026-10-21 catch-22: the lane's min-p pin is a model reachability filter
+# for *zero-evidence* probes.  When the evidence layer has already admitted
+# the side on measured cell evidence — CHALLENGE_ELIGIBLE (recent matched
+# outcomes at/above the entry's break-even) or CELL_EVIDENCE_PASS (a scored
+# cohort that is not a measured loser), both tested on the lane floor — the
+# pin double-gates the exact admissions the challenge mechanism exists to
+# release.  ``pinned_fav_block`` returns ``pinned_fav_maker_low_p`` before
+# the min-EV floor is evaluated, so the bypass re-asserts net_ev >= floor.
+# Sparse/empty passes and ``pinned_fav_probe:*`` demotions are model-edge
+# admissions and must keep the pin.
+
+
+def _challenge_cells():
+    """Stale posterior that cannot clear margin, contradicted by a recent
+    matched run at/above the ~83c break-even -> CHALLENGE_ELIGIBLE."""
+    return {
+        "ETH|yes|75-89|late": {"w": 3.0, "l": 3.0, "n_eff": 6.0,
+                               "n_raw": 30, "recent_w": 4.0,
+                               "recent_l": 0.5, "recent_n": 4},
+    }
+
+
+def _low_p_decision(tmp_path, monkeypatch, cells, **over):
+    """Maker-band candidate whose calibrated pin claim sits just under the
+    0.85 pin (p_yes ~0.85) with net_ev ~ -10.3c, above the -12c floor."""
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, cells),
+    )
+    # Live .env values: the stale 4c code default makes the -12c floor
+    # unreachable for any p<0.85 claim by construction.
+    monkeypatch.setenv("MERID_MAKER_BID_ADV_SEL_CENTS", "1.5")
+    monkeypatch.setenv("MERID_MAKER_BID_MIN_SPREAD_CENTS", "1.0")
+    args = dict(
+        seconds_to_expiry=300.0,
+        spot_price=100.17,
+        model_uncertainty=0.02,
+        yes_bid_cents=84.0,
+        yes_ask_cents=86.0,
+        no_bid_cents=14.0,
+        no_ask_cents=16.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.015,
+        route="maker_bid",
+    )
+    args.update(over)
+    return _decision(**args)
+
+
+def test_maker_low_p_bypass_measured_challenge_admits(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """Measured evidence substitutes for the pin: CHALLENGE_ELIGIBLE
+    admission + net_ev above the lane floor qualifies despite p<0.85."""
+    d = _low_p_decision(tmp_path, monkeypatch, _challenge_cells())
+    ind = d.indicators
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    assert ind.get("yes_evidence_binding_gate") == "CHALLENGE_ELIGIBLE"
+    assert ind.get("yes_admission_decision") == "allowed"
+    assert ind.get("yes_pinned_fav_qualifies") is True
+    assert d.selected_outcome == "yes", (
+        ind.get("yes_block"), d.no_trade_reason,
+    )
+    assert ind.get("decision_lane") == "pinned_fav"
+    assert ind.get("entry_lane") == "pinned_fav"
+
+
+def test_maker_low_p_bypass_reasserts_lane_floor(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """``pinned_fav_block`` returns ``pinned_fav_maker_low_p`` before the
+    min-EV floor runs — the bypass must re-assert net_ev >= -12c so the
+    pin release cannot admit claims the lane itself bounds out.  A dense
+    measured not-losing cell yields CELL_EVIDENCE_PASS (the _pf path
+    checks ``lcb_ev >= 0``, no net-EV floor), so the only thing between
+    this candidate and the lane is the re-asserted floor."""
+    winning = {
+        "ETH|yes|75-89|late": {"w": 100.0, "l": 5.0, "n_eff": 105.0,
+                               "n_raw": 500},
+    }
+    d = _low_p_decision(
+        tmp_path, monkeypatch, winning,
+        spot_price=100.14,   # p_yes ~0.78 -> net_ev < -12c floor
+    )
+    ind = d.indicators
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    yes_bd = d.yes_edge_breakdown
+    assert yes_bd is not None
+    assert float(yes_bd.net_edge) * 100.0 < -12.0
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None
+    assert ind.get("decision_lane") != "pinned_fav"
+
+
+def test_maker_low_p_pin_holds_on_sparse_pass(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """SPARSE_MATCHED_PASS is a model-edge admission (no adequately
+    sampled price-matched cell) — not measured evidence.  The pin must
+    keep filtering it."""
+    d = _low_p_decision(
+        tmp_path, monkeypatch,
+        {"ETH|yes|75-89|late": {"w": 2.0, "l": 0.0, "n_eff": 2.0,
+                                "n_raw": 2}},
+    )
+    ind = d.indicators
+    assert ind.get("yes_evidence_binding_gate") == "SPARSE_MATCHED_PASS"
+    assert ind.get("yes_admission_decision") == "allowed"
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None
+
+
+def test_maker_low_p_pin_holds_on_probe_admission(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """A refused cell demoted to the lane's zero-evidence probe
+    (``pinned_fav_probe:*``) is exactly the cohort the pin exists for —
+    the bypass must not fire."""
+    refused = {
+        "ETH|yes|75-89|late": {"w": 10.0, "l": 0.5, "n_eff": 10.5,
+                               "n_raw": 60},
+        "ETH|yes|50-74|late": {"w": 20.0, "l": 40.0, "n_eff": 60.0,
+                               "n_raw": 300},
+        "BTC|yes|50-74|late": {"w": 8.0, "l": 22.0, "n_eff": 30.0,
+                               "n_raw": 150},
+    }
+    d = _low_p_decision(tmp_path, monkeypatch, refused)
+    ind = d.indicators
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None
+    reason = str(ind.get("yes_admission_reason") or "")
+    if ind.get("yes_admission_decision") == "allowed":
+        # Probe admissions exist but never satisfy the measured-evidence
+        # condition.
+        assert reason.startswith("pinned_fav_probe:")
+
+
+def test_maker_low_p_bypass_hard_block_still_binds(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """A dense measured loser (toxic cell) stays a hard block — measured
+    evidence substitutes for the pin only when it *admits* the side."""
+    toxic = {
+        "ETH|yes|75-89|late": {"w": 15.0, "l": 45.0, "n_eff": 60.0,
+                               "n_raw": 400},
+    }
+    monkeypatch.setenv("MERID_EVIDENCE_HARD_BLOCK_MODE", "veto")
+    d = _low_p_decision(tmp_path, monkeypatch, toxic)
+    ind = d.indicators
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None

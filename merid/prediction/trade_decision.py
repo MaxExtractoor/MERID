@@ -5436,15 +5436,68 @@ def compute_trade_decision(
             else None
         ),
     ) if _no_pf_price else None
+    # 2026-10-21 (maker mode): the lane's min-p pin is a *model*
+    # reachability filter — it exists for zero-evidence probes where no
+    # measured cell record can substitute (the external cohort that made
+    # the pin necessary was unfiltered resting bids).  When the evidence
+    # layer has already admitted the side as a pinned-fav candidate on
+    # measured cell evidence — CHALLENGE_ELIGIBLE (recent matched outcomes
+    # at/above the entry's break-even) or CELL_EVIDENCE_PASS (a scored
+    # cohort that is not a measured loser), both tested on the lane floor —
+    # the model pin double-gates the exact admissions the challenge
+    # mechanism exists to release: the measured record *is* the
+    # reachability discriminator the pin approximates.  Model-edge
+    # admissions (SPARSE_MATCHED_PASS, EVIDENCE_EMPTY_PASS, soft-penalty
+    # passes) and zero-evidence ``pinned_fav_probe:*`` demotions still
+    # require the pin.
+    # Every other lane gate stays enforced: band and TTE via
+    # ``pinned_fav_block``'s other reasons, the min-EV floor via the
+    # lane's own tail_lcb substitution, the daily cap, the per-cell
+    # measured-loss veto, and the escape structural vetoes — all of which
+    # already ran before an admission_decision="allowed" stamp exists.
+    def _pf_evidence_admitted(_s: str) -> bool:
+        # Measured cell evidence admitted the side on the lane's own floor:
+        # CHALLENGE_ELIGIBLE requires recent matched outcomes at/above the
+        # entry's break-even, CELL_EVIDENCE_PASS a scored cohort that is not
+        # a measured loser.  Sparse/empty passes and zero-evidence probes are
+        # model-edge admissions — they do not substitute for the p-pin.
+        return (
+            indicators.get(f"{_s}_admission_decision") == "allowed"
+            and str(
+                indicators.get(f"{_s}_evidence_binding_gate") or ""
+            ).upper()
+            in ("CHALLENGE_ELIGIBLE", "CELL_EVIDENCE_PASS")
+        )
+
+    def _pf_low_p_bypass(_blk: Optional[str], _bd, _s: str) -> bool:
+        # ``pinned_fav_block`` returns ``pinned_fav_maker_low_p`` before the
+        # min-EV floor is evaluated, so a bypassed side must re-assert the
+        # lane floor here or the pin release would admit claims the lane
+        # itself bounds out.
+        if _blk != "pinned_fav_maker_low_p" or not _pf_evidence_admitted(_s):
+            return False
+        _ne = getattr(_bd, "net_edge", None)
+        if _ne is None:
+            return False
+        return float(_ne) * 100.0 >= _dr._pinned_fav_min_ev_cents()
+
+    indicators["yes_pf_block_reason"] = _yes_pf_block
+    indicators["no_pf_block_reason"] = _no_pf_block
     _yes_pf_qualifies = (
         _yes_pf_price
         and _dr.pinned_fav_enabled()
-        and _yes_pf_block is None
+        and (
+            _yes_pf_block is None
+            or _pf_low_p_bypass(_yes_pf_block, yes_breakdown, "yes")
+        )
     )
     _no_pf_qualifies = (
         _no_pf_price
         and _dr.pinned_fav_enabled()
-        and _no_pf_block is None
+        and (
+            _no_pf_block is None
+            or _pf_low_p_bypass(_no_pf_block, no_breakdown, "no")
+        )
     )
 
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
