@@ -9733,21 +9733,41 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             min_no_depth=profile.market_microstructure_min_no_depth,
                             min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
                         )
-                    if (
-                        not passes
-                        and getattr(intent, "decision_lane", None)
-                        == "window_quota"
-                    ):
+                    _micro_lane = getattr(intent, "decision_lane", None)
+                    _bounded_lane_micro_bypass = _micro_lane == "window_quota"
+                    if not _bounded_lane_micro_bypass:
+                        try:
+                            from merid.prediction.trade_decision import (
+                                BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
+                            )
+                            _bounded_lane_micro_bypass = (
+                                _micro_lane in _BOUNDED_LANES
+                                and getattr(intent, "min_required_edge", None)
+                                is not None
+                            )
+                        except Exception:
+                            _bounded_lane_micro_bypass = False
+                    if not passes and _bounded_lane_micro_bypass:
                         # 2026-10-17: quota is paid telemetry, not an edge
                         # claim — the edge-aware microstructure gate's
                         # spread-to-edge ratio is meaningless for it.  Book
                         # sanity still applies: the A5 degenerate-book /
                         # spread / range checks and the emit-side depth
                         # guard are the operative bounds.
+                        # 2026-10-21: same for every bounded lane carrying a
+                        # stamped floor (pinned_fav etc.) — they are admitted
+                        # on authoritative executable economics at a bounded,
+                        # possibly negative, lane floor; the gate's positive
+                        # executable-edge bound structurally rejects their
+                        # entire cohort.  The stamped floor is still enforced
+                        # downstream by the edge-preserving repricer and the
+                        # submit-time EV revalidation at the limit price.
                         logger.info(
-                            "[MICROSTRUCTURE-GATE] ticker=%s window_quota "
+                            "[MICROSTRUCTURE-GATE] ticker=%s lane=%s "
                             "bypasses edge-aware gate: %s",
-                            intent.ticker, reason,
+                            intent.ticker,
+                            getattr(intent, "decision_lane", None),
+                            reason,
                         )
                         passes = True
                     if not passes:
