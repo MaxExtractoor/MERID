@@ -846,12 +846,24 @@ MERID_MARGINAL_BAND_MIN_TTE_S = float(
 # itself — not just the 0-1c marginal band — over-rejects NO-side mid-window.
 # Settled counterfactual on ~22.3k `no_edge_below_threshold` rejects:
 #   TTE 180-420s: +7.8c/tr   TTE 420-660s: +5.2c/tr   (all miss depths
-#   0-8c, all routes maker/taker).  TTE >660s misses LOST -1.2c/tr and the
-#   YES-side lane floor is protective (-2.9c/tr), so the relief is NO-side,
-#   mid-window-only, and floored at the FLB boundary (sub-35c stays
+#   0-8c, all routes maker/taker).  TTE >660s misses LOST -1.2c/tr.
+#   Mid-window-only, floored at the FLB boundary (sub-35c stays
 #   premium-priced).  NPEE remains the economic floor below the bound.
+# 2026-10-20 (authoritative recut): the earlier -2.9c YES figure did not
+# reproduce.  Joining the full rejected_candidates log to settlement
+# outcomes (first edge-miss per ticker+side, positive net edge, >=35c,
+# TTE 180-660s, claim>=4c - the exact released domain):
+#   NO:  +5.83c/tr (n=4257, all 5 assets positive)
+#   YES: +3.68c/tr (n=2043) - DOGE+4.1 ETH+4.5 SOL+5.0 XRP+5.0, BTC -0.3c;
+#   every price bucket positive; stable Sep +2.5c / Oct +9.9c.
+# YES relief is therefore enabled on the identical domain with BTC
+# excluded: BTC runs the deepest/most efficient 15m book, and its YES
+# miss cohort is the only asset-side cell measured flat-to-negative.
 MERID_EDGE_MIDWIN_RELIEF_CENTS_NO = float(
     os.environ.get("MERID_EDGE_MIDWIN_RELIEF_CENTS_NO", "0")
+)
+MERID_EDGE_MIDWIN_RELIEF_CENTS_YES = float(
+    os.environ.get("MERID_EDGE_MIDWIN_RELIEF_CENTS_YES", "0")
 )
 MERID_EDGE_MIDWIN_TTE_LO_S = float(
     os.environ.get("MERID_EDGE_MIDWIN_TTE_LO_S", "180")
@@ -861,6 +873,19 @@ MERID_EDGE_MIDWIN_TTE_HI_S = float(
 )
 MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO = float(
     os.environ.get("MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_NO", "35")
+)
+MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_YES = float(
+    os.environ.get("MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_YES", "35")
+)
+# Assets whose YES mid-window miss cohort measured non-positive
+# (BTC: -0.3c/tr, n=389, claim>=4c) stay bound - measured-losing cells do
+# not get relief regardless of the side-level average.
+MERID_EDGE_MIDWIN_EXCLUDED_ASSETS_YES = frozenset(
+    s.strip().upper()
+    for s in os.environ.get(
+        "MERID_EDGE_MIDWIN_EXCLUDED_ASSETS_YES", ""
+    ).split(",")
+    if s.strip()
 )
 
 
@@ -5805,7 +5830,7 @@ def compute_trade_decision(
     # Early-window misses (TTE>660s) LOST -1.2c/tr, so the relief is
     # TTE-scoped to the measured mid-window and price-scoped above the
     # FLB-toxic sub-35c region.  The 0.0 floor keeps NPEE as the economic
-    # boundary; YES keeps its bound (yes_lane_floor veto was protective).
+    # boundary.
     _mw_no_relief = 0.0
     if (
         MERID_EDGE_MIDWIN_RELIEF_CENTS_NO > 0.0
@@ -5815,9 +5840,28 @@ def compute_trade_decision(
     ):
         _mw_no_relief = MERID_EDGE_MIDWIN_RELIEF_CENTS_NO / 100.0
         indicators["no_midwin_relief_cents"] = _mw_no_relief * 100.0
-    _yes_edge_eff_bound = yes_min_edge - _mb_yes_slack
+    # 2026-10-20 (full-log settled recut): YES mid-window misses measured
+    # +3.68c/tr on the released domain (+4.63c ex-BTC) — the earlier -2.9c
+    # figure did not reproduce on the authoritative join.  Same domain,
+    # same NPEE floor; MERID_EDGE_MIDWIN_EXCLUDED_ASSETS_YES keeps the
+    # measured-flat BTC cell bound.
+    _mw_yes_relief = 0.0
+    if (
+        MERID_EDGE_MIDWIN_RELIEF_CENTS_YES > 0.0
+        and yes_min_edge > 0.0
+        and MERID_EDGE_MIDWIN_TTE_LO_S <= float(seconds_to_expiry) <= MERID_EDGE_MIDWIN_TTE_HI_S
+        and yes_breakdown.executable_entry_price * 100.0 >= MERID_EDGE_MIDWIN_MIN_PRICE_CENTS_YES
+        and str(asset).upper() not in MERID_EDGE_MIDWIN_EXCLUDED_ASSETS_YES
+    ):
+        _mw_yes_relief = MERID_EDGE_MIDWIN_RELIEF_CENTS_YES / 100.0
+        indicators["yes_midwin_relief_cents"] = _mw_yes_relief * 100.0
     # Negative-floor lanes own their bound — relief may lower a positive
     # bound to 0.0 but must never raise a paid-exploration floor.
+    _yes_edge_eff_bound = (
+        max(0.0, yes_min_edge - _mb_yes_slack - _mw_yes_relief)
+        if yes_min_edge >= 0.0
+        else yes_min_edge
+    )
     _no_edge_eff_bound = (
         max(0.0, no_min_edge - _mb_no_slack - _mw_no_relief)
         if no_min_edge >= 0.0
@@ -5841,7 +5885,7 @@ def compute_trade_decision(
         and _no_eff_edge >= max(0.0, no_min_edge - _mb_no_slack)
         and _no_eff_edge < no_min_edge
     )
-    # Mid-window NO relief admitted this side: it clears only because the
+    # Mid-window relief admitted this side: it clears only because the
     # relief lowered the bound.  Stamped so the relieved bound — not the
     # pre-relief one — flows to min_required_edge / submit-time
     # revalidation, and so outcome joins can isolate the released cohort.
@@ -5850,6 +5894,12 @@ def compute_trade_decision(
         and _no_eff_edge > 0.0
         and _no_eff_edge >= _no_edge_eff_bound
         and _no_eff_edge < no_min_edge
+    )
+    _yes_mw_rescued = (
+        _mw_yes_relief > 0.0
+        and _yes_eff_edge > 0.0
+        and _yes_eff_edge >= _yes_edge_eff_bound
+        and _yes_eff_edge < yes_min_edge
     )
     # Shadow rescue: a denied-cohort side that would have been admitted under
     # the unrestricted slack rule.  Never lowers the bound — the record is
@@ -5920,7 +5970,15 @@ def compute_trade_decision(
         ("no", no_breakdown, _no_edge_eff_bound, _no_eff_edge),
     ):
         _min_e = yes_min_edge if _pfx == "yes" else no_min_edge
-        _rescued = _yes_mb_rescued if _pfx == "yes" else _no_mb_rescued
+        # mb- and mw-rescued sides alike were admitted under the relaxed
+        # bound — the stamped required edge must be the relieved bound or
+        # downstream re-gates compare against a bound the side never had
+        # to clear.
+        _rescued = (
+            (_yes_mb_rescued or _yes_mw_rescued)
+            if _pfx == "yes"
+            else (_no_mb_rescued or _no_mw_rescued)
+        )
         _pf_admitted_s = (
             _yes_pf_qualifies if _pfx == "yes" else _no_pf_qualifies
         )
@@ -7533,16 +7591,24 @@ def compute_trade_decision(
             indicators["marginal_band_admission_bound_cents"] = (
                 float(selected_threshold) * 100.0
             )
-        # 2026-10-20: mid-window NO relief admitted this side under the
+        # 2026-10-20: mid-window relief admitted this side under the
         # relief-lowered bound — the same bound-stamp contract as
         # marginal_band applies, else submit-time revalidation re-derives
         # max_price under the pre-relief bound and rejects the candidate.
-        if selected_outcome == "no" and _no_mw_rescued:
-            indicators["midwin_no_relief"] = True
-            selected_threshold = max(
-                0.0, selected_threshold - _mw_no_relief
+        _mw_resc_sel = (
+            _no_mw_rescued
+            if selected_outcome == "no"
+            else _yes_mw_rescued
+        )
+        if _mw_resc_sel:
+            _mw_rel = (
+                _mw_no_relief
+                if selected_outcome == "no"
+                else _mw_yes_relief
             )
-            indicators["midwin_no_admission_bound_cents"] = (
+            indicators[f"midwin_{selected_outcome}_relief"] = True
+            selected_threshold = max(0.0, selected_threshold - _mw_rel)
+            indicators[f"midwin_{selected_outcome}_admission_bound_cents"] = (
                 float(selected_threshold) * 100.0
             )
 

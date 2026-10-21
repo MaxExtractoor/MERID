@@ -102,6 +102,7 @@ _os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
 # suites written against the unrelieved bound.  Pin off globally;
 # tests/test_midwin_no_relief.py opts in via monkeypatch.
 _os.environ["MERID_EDGE_MIDWIN_RELIEF_CENTS_NO"] = "0"
+_os.environ["MERID_EDGE_MIDWIN_RELIEF_CENTS_YES"] = "0"
 # 2026-10-17: production .env arms negative per-cohort provisional floors
 # (MERID_PROVISIONAL_MIN_EV_C_*) — they change no-edge terminal labels to
 # edge_below_lane_floor.  Restore the code defaults (positive bounds) via
