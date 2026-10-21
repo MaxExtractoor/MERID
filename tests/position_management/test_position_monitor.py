@@ -914,7 +914,7 @@ class TestPositionMonitorStartupLoading:
                 thesis_side="yes",
                 avg_price_cents=50,
                 entry_price_state="known",
-                take_profit_price_cents=60,
+                take_profit_price_cents=70,
                 stop_loss_price_cents=40,
                 risk_params_state="original_persisted",
                 risk_params_schema_version=2,
@@ -954,7 +954,11 @@ class TestPositionMonitorStartupLoading:
         assert btc_position.side == PositionSide.YES
         assert btc_position.size == 10
         assert btc_position.avg_entry_price_cents == 50
-        assert btc_position.take_profit_price_cents == 60
+        # TP=70 (+20c gross) clears the env-armed 12c gross floor
+        # (MERID_TAKE_PROFIT_MIN_PROFIT_CENTS in .env) — the fixture must
+        # survive CachedPosition.__post_init__ validation under any
+        # test-order env state.
+        assert btc_position.take_profit_price_cents == 70
         assert btc_position.stop_loss_price_cents == 40
         
         # Verify ETH position

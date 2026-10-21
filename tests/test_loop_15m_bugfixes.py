@@ -2190,16 +2190,14 @@ def test_execute_candidate_returns_true_on_successful_route():
     assert "Order routed successfully" in loop_source, \
         "_execute_candidate should log successful order routing"
     
-    # Find the return True statement after successful routing
+    # Find the return True statement within a few lines after successful routing
     lines = loop_source.split('\n')
-    found_success_log = False
-    found_return_true = False
-    for i, line in enumerate(lines):
-        if "Order routed successfully" in line:
-            found_success_log = True
-        elif found_success_log and "return True" in line and i < len(lines) and i < lines.index(line) + 5:
-            found_return_true = True
-            break
+    success_idx = next(
+        i for i, line in enumerate(lines) if "Order routed successfully" in line
+    )
+    found_return_true = any(
+        "return True" in line for line in lines[success_idx:success_idx + 6]
+    )
     
     assert found_return_true, \
         "_execute_candidate should return True when order is successfully routed"

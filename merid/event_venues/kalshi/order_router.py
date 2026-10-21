@@ -16147,6 +16147,11 @@ async def _route_live(
                     order_intent_id=intent.intent_id,
                     max_hold_seconds=intent.max_hold_seconds,
                     exit_policy=intent.exit_policy,
+                    # 2026-10-21 (drift-lane epoch): lane provenance reaches
+                    # the position through the same registration — the
+                    # monitor keys per-position lock targets and the
+                    # settle-hold contract off it.
+                    decision_lane=getattr(intent, "decision_lane", None),
                 )
             except Exception as _tp_reg_err:
                 logger.warning("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)

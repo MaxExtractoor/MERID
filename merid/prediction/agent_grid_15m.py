@@ -10342,6 +10342,82 @@ class LeanAgent15m:
                         )
                 except Exception:
                     pass
+            if _decision_lane in ("drift_fav", "cheap_no_settle") and (
+                decision.selected_outcome is not None
+            ):
+                # 2026-10-21 (drift-lane epoch): same consume-then-suppress
+                # discipline as window_quota — the durable counter bounds
+                # lane volume even if a process restarts mid-window.
+                try:
+                    from merid.prediction import drift_lane as _dl_lane
+                    _ticker_l = str(
+                        getattr(decision, "ticker", "") or ticker or ""
+                    )
+                    _n_t, _n_d = _dl_lane.record_lane_attempt(
+                        _decision_lane, _ticker_l
+                    )
+                    if _decision_lane == "drift_fav":
+                        _cap_t = _dl_lane.drift_max_per_ticker()
+                        _cap_d = _dl_lane.drift_daily_max()
+                    else:
+                        _cap_t = _dl_lane.cheap_no_max_per_ticker()
+                        _cap_d = _dl_lane.cheap_no_daily_max()
+                    if _n_t > _cap_t or _n_d > _cap_d:
+                        try:
+                            from merid.execution.decision_audit_ledger import (
+                                get_decision_audit_ledger,
+                            )
+                            get_decision_audit_ledger().append_decision_event(
+                                decision_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                event_type="LANE_SUPPRESSED",
+                                stage="ALLOCATION",
+                                reason_code=(
+                                    f"{_decision_lane}_cap_exceeded_at_emission"
+                                ),
+                                reason_detail={
+                                    "side": decision.selected_outcome,
+                                    "lane": _decision_lane,
+                                    "ticker": _ticker_l,
+                                    "lane_ticker_attempts": int(_n_t),
+                                    "lane_ticker_cap": int(_cap_t),
+                                    "lane_count_today": int(_n_d),
+                                    "lane_daily_cap": int(_cap_d),
+                                },
+                                trace_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                run_id=decision.indicators.get("run_id"),
+                                ticker=_ticker_l,
+                                asset=asset,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[DRIFT-LANE] asset=%s lane=%s side=%s suppressed — "
+                            "ticker attempts=%d cap=%d day=%d cap=%d",
+                            asset, _decision_lane, decision.selected_outcome,
+                            _n_t, _cap_t, _n_d, _cap_d,
+                        )
+                        decision = replace(
+                            decision,
+                            selected_outcome=None,
+                            selected_action=None,
+                            selected_outcome_price=None,
+                            no_trade_reason=(
+                                f"{_decision_lane}_cap_exceeded_at_emission"
+                            ),
+                        )
+                    else:
+                        logger.info(
+                            "[DRIFT-LANE] asset=%s lane=%s side=%s ticker=%s "
+                            "attempt=%d/%d day=%d/%d",
+                            asset, _decision_lane, decision.selected_outcome,
+                            _ticker_l, _n_t, _cap_t, _n_d, _cap_d,
+                        )
+                except Exception:
+                    pass
             if _decision_lane == "threshold_cell":
                 try:
                     from merid.prediction import threshold_cells as _tc
@@ -10513,6 +10589,27 @@ class LeanAgent15m:
                     try:
                         from merid.prediction import window_quota as _wq_cap
                         _lane_cap = min(_lane_cap, _wq_cap.quota_max_contracts())
+                    except Exception:
+                        pass
+                elif _decision_lane == "drift_fav":
+                    # 2026-10-21: the drift lane is sized so a fill leaves
+                    # cap room for a concurrent pf lot under $3 — it must
+                    # not inherit a raised generic bounded cap.
+                    try:
+                        from merid.prediction import drift_lane as _dl_cap
+                        _lane_cap = min(
+                            _lane_cap, _dl_cap.drift_max_contracts()
+                        )
+                    except Exception:
+                        pass
+                elif _decision_lane == "cheap_no_settle":
+                    # The settle sleeve is a fractional-contract micro
+                    # probe (default 0.75) — never the generic cap.
+                    try:
+                        from merid.prediction import drift_lane as _dl_cap
+                        _lane_cap = min(
+                            _lane_cap, _dl_cap.cheap_no_max_contracts()
+                        )
                     except Exception:
                         pass
                 if _probe_restricted:

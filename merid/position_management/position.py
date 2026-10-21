@@ -235,6 +235,10 @@ class Position:
     entry_fill_id: Optional[str] = None  # canonical fill_id that opened the position
     entry_order_id: Optional[str] = None  # Kalshi order_id for the entry
     entry_execution_mode: Optional[str] = None  # maker / taker / staged_ioc / passive_quote
+    # 2026-10-21 (drift-lane epoch): admission lane that created the entry
+    # (``drift_fav`` / ``cheap_no_settle`` / normal lanes).  Drives the
+    # per-position profit-lock target and the settle-hold exit contract.
+    decision_lane: Optional[str] = None
     fill_source: Optional[str] = None  # "ws", "rest_sync", "replay", "manual"
     # CRITICAL FIX (2026-08-11): Immutable entry-intent/fill linkage for provenance.
     client_order_id: Optional[str] = None  # client_order_id placed on the wire
@@ -1356,6 +1360,7 @@ class Position:
             "entry_fill_id": self.entry_fill_id,
             "entry_order_id": self.entry_order_id,
             "entry_execution_mode": self.entry_execution_mode,
+            "decision_lane": self.decision_lane,
             "entry_provenance_snapshot_id": self.entry_provenance_snapshot_id,
             "provenance_state": self.provenance_state,
             "fill_source": self.fill_source,
@@ -1469,6 +1474,7 @@ class Position:
             entry_fill_id=data.get("entry_fill_id"),
             entry_order_id=data.get("entry_order_id"),
             entry_execution_mode=data.get("entry_execution_mode"),
+            decision_lane=data.get("decision_lane"),
             entry_provenance_snapshot_id=data.get("entry_provenance_snapshot_id"),
             provenance_state=data.get("provenance_state", "UNKNOWN_PROVENANCE"),
             fill_source=data.get("fill_source"),

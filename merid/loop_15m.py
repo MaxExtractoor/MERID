@@ -2714,10 +2714,33 @@ def _run_exit_price_guard(
         # the chase actually converts a fading book instead of repricing a
         # dead level.  A limit is a bound, not a price: the IOC still fills
         # at best bid when the book holds.
+        # 2026-10-21 (drift-lane epoch): prefer the threshold the monitor
+        # latched at lock-observation time — lane-keyed via
+        # ``_lock_threshold_for`` (drift_fav positions latch at
+        # entry+MERID_DRIFT_LOCK_GAIN_CENTS).  Env/position-helper reads
+        # are the fallbacks for unlatched/global-lock positions.
+        _lock_floor = None
         try:
-            _lock_floor = int(os.environ.get("MERID_HARD_PROFIT_LOCK_CENTS", "90"))
-        except (TypeError, ValueError):
-            _lock_floor = 90
+            _pend_thr = (getattr(position, "hard_lock_pending", None) or {}).get(
+                "threshold_cents"
+            )
+            if _pend_thr is not None:
+                _lock_floor = int(_pend_thr)
+        except Exception:
+            _lock_floor = None
+        if _lock_floor is None:
+            try:
+                from merid.position_management.position_monitor import (
+                    _lock_threshold_for,
+                )
+                _lock_floor = int(_lock_threshold_for(position))
+            except Exception:
+                try:
+                    _lock_floor = int(
+                        os.environ.get("MERID_HARD_PROFIT_LOCK_CENTS", "90")
+                    )
+                except (TypeError, ValueError):
+                    _lock_floor = 90
         try:
             _lock_sweep = int(os.environ.get("MERID_HARD_LOCK_SWEEP_CENTS", "3"))
         except (TypeError, ValueError):

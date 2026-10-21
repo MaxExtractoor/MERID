@@ -63,8 +63,12 @@ def test_settlement_guard_env_override(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_emit_exit_intent_forces_reconcile_on_submission_unknown(monitor):
+async def test_emit_exit_intent_forces_reconcile_on_submission_unknown(monitor, monkeypatch):
     """A SETTLEMENT_GUARD intent must clear a stale SUBMISSION_UNKNOWN lock and re-emit."""
+    # The 2026-10-14 profit_only_v1 breakeven floor suppresses below-entry
+    # sells (exit 30c < entry 50c) before intent emission — orthogonal to the
+    # stale-lock reconcile path under test.
+    monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "0")
     position = _make_position()
     monitor.add_position(position)
 

@@ -877,6 +877,51 @@ def _hard_profit_lock_threshold_cents() -> int:
         return 90
 
 
+def _position_decision_lane(position) -> Optional[str]:
+    """Admission lane stamped on the position (2026-10-21).  Older
+    positions predate the field and return ``None`` — every lane-keyed
+    rule must degrade to the generic contract on ``None``."""
+    try:
+        lane = getattr(position, "decision_lane", None)
+        return str(lane) if lane else None
+    except Exception:
+        return None
+
+
+def _lock_threshold_for(position) -> int:
+    """Per-position profit-lock threshold (2026-10-21 drift-lane epoch).
+
+    ``drift_fav`` entries (40-74c) carry a drift target of
+    ``entry + MERID_DRIFT_LOCK_GAIN_CENTS`` (default +12c): the pooled
+    path audit measured ~75-82c average post-entry max for that cohort —
+    the global 90c threshold misses the modal move entirely.  Every other
+    lane keeps the global threshold.  The latched ``hard_lock_pending``
+    record already stores the threshold it latched at, so this helper is
+    consulted only at trigger/latch time and by the exit-price guard.
+    """
+    lane = _position_decision_lane(position)
+    if lane == "drift_fav":
+        try:
+            entry = getattr(position, "avg_entry_price_cents", None)
+            gain = int(
+                os.getenv("MERID_DRIFT_LOCK_GAIN_CENTS", "12")
+            )
+            if entry is not None:
+                return max(2, min(97, int(entry) + gain))
+        except Exception:
+            pass
+    return _hard_profit_lock_threshold_cents()
+
+
+def _settle_hold(position) -> bool:
+    """``cheap_no_settle`` positions carry a settlement claim — take-profit,
+    dynamic-TP, trailing and ratchet exits would dump the position at the
+    drift price and forfeit the measured settle edge.  The global hard
+    lock still applies (a rally to >=90c pays far more than the settle
+    claim) and LOSS_CAP salvage remains the catastrophe floor."""
+    return _position_decision_lane(position) == "cheap_no_settle"
+
+
 def _hard_lock_fast_path_enabled() -> bool:
     """Evaluate the hard lock on every market-state update, not just poll ticks."""
     return os.getenv("MERID_HARD_LOCK_FAST_PATH", "1").strip().lower() in (
@@ -1699,16 +1744,17 @@ class PositionMonitor:
         # neither an exit trigger nor a recorded intent = missed profit lock.
         try:
             _peak = int(getattr(position, "high_watermark_cents", 0) or 0)
+            _settle_audit_threshold = _lock_threshold_for(position)
             if (
                 _hard_profit_lock_enabled()
-                and _peak >= _hard_profit_lock_threshold_cents()
+                and _peak >= _settle_audit_threshold
                 and not _exit_attempted
                 and not (position.exit_reason or position.exit_triggered)
             ):
                 _p0_exit_alert(
                     "SETTLED_AFTER_LOCK_LEVEL_BID_NO_EXIT",
                     position,
-                    f"peak_bid={_peak}c threshold={_hard_profit_lock_threshold_cents()}c "
+                    f"peak_bid={_peak}c threshold={_settle_audit_threshold}c "
                     f"exit_reason={position.exit_reason} "
                     f"exit_triggered={position.exit_triggered} "
                     f"exit_price={position.exit_price_cents}",
@@ -4018,6 +4064,27 @@ class PositionMonitor:
 
         candidates: List[ExitDecision] = []
 
+        # 2026-10-21 (drift-lane epoch): cheap_no_settle positions carry a
+        # settlement claim — profit-family exits at the drift price would
+        # forfeit the measured settle edge (+7..15c/contract pooled).  The
+        # global hard lock still fires via its own latch path (a >=90c bid
+        # pays far more than the claim), and LOSS_CAP / tail-loss salvage
+        # / SETTLEMENT_GUARD / STOP_LOSS remain fully armed.
+        _settle_hold_pos = _settle_hold(position)
+        _SETTLE_HOLD_SUPPRESSED = {
+            ExitReason.TAKE_PROFIT,
+            ExitReason.DYNAMIC_TAKE_PROFIT,
+            ExitReason.EXTREME_PROFIT,
+            ExitReason.AUTO_EXIT_99C,
+            ExitReason.RATCHET_TRIM,
+            ExitReason.RATCHET_FLOOR,
+            ExitReason.SCALE_OUT,
+            ExitReason.OPPORTUNITY_COST,
+            ExitReason.CANDLE_REVERSAL,
+            ExitReason.ADAPTIVE_TIMING,
+            ExitReason.EDGE_DECAY,
+        }
+
         def _add_candidate(
             reason: ExitReason,
             exit_price_cents: Optional[int] = None,
@@ -4025,6 +4092,21 @@ class PositionMonitor:
             source_layer: ExitSourceLayer = ExitSourceLayer.POSITION_LEVEL,
             metadata: Optional[Dict[str, Any]] = None,
         ) -> None:
+            if _settle_hold_pos and reason in _SETTLE_HOLD_SUPPRESSED:
+                # Settle-hold positions forfeit profit-family exits — the
+                # claim only pays at settlement.  The candidate is dropped
+                # before the resolver ever sees it; the hard lock, LOSS_CAP
+                # salvage and settlement-guard channels are unaffected.
+                if not getattr(position, "_settle_hold_suppressed_logged", False):
+                    position._settle_hold_suppressed_logged = True
+                    logger.info(
+                        "[SETTLE-HOLD] position=%s market=%s suppressing "
+                        "profit-family exits for cheap_no_settle lane "
+                        "(reason=%s)",
+                        position.position_id[:8], position.market_id,
+                        reason.value,
+                    )
+                return
             candidates.append(
                 ExitDecision(
                     reason=reason,
@@ -4564,7 +4646,9 @@ class PositionMonitor:
         if _hard_profit_lock_enabled() and (
             not position.exit_triggered or _lock_stale_exit_flag
         ):
-            _lock_threshold = _hard_profit_lock_threshold_cents()
+            # 2026-10-21: lane-keyed threshold — drift_fav positions latch
+            # at entry+gain, every other lane at the global threshold.
+            _lock_threshold = _lock_threshold_for(position)
             _lock_bid = snapshot.own_side_bid_cents if snapshot is not None else None
             _lock_pending = getattr(position, "hard_lock_pending", None)
 
@@ -6796,7 +6880,8 @@ class PositionMonitor:
             # 2026-10-05: hard-profit-lock observability fields.  Every eval
             # records the lock verdict so a missing trigger is provable from
             # logs alone (held-side executable bid vs threshold), not inferred.
-            _lock_threshold = _hard_profit_lock_threshold_cents()
+            # 2026-10-21: lane-keyed threshold (drift_fav: entry+gain).
+            _lock_threshold = _lock_threshold_for(position)
             _own_bid = snapshot.own_side_bid_cents if snapshot is not None else None
             _own_ask = snapshot.own_side_ask_cents if snapshot is not None else None
             _avail_depth = (
@@ -7876,7 +7961,8 @@ class PositionMonitor:
                 return
             if self._is_exit_intent_in_flight(position.position_id):
                 return
-            threshold = _hard_profit_lock_threshold_cents()
+            # 2026-10-21: lane-keyed threshold (drift_fav: entry+gain).
+            threshold = _lock_threshold_for(position)
             snapshot = self._get_exit_price_snapshot(state, position.side, ticker)
             if snapshot is None:
                 # 2026-10-05: the snapshot gate rejected this update, but the
@@ -8226,14 +8312,15 @@ class PositionMonitor:
                                 and _lock_pending is None
                             ):
                                 _raw_bid = self._raw_observed_lock_bid(position, state)
+                                _raw_lock_thr = _lock_threshold_for(position)
                                 if (
                                     _raw_bid is not None
-                                    and _raw_bid >= _hard_profit_lock_threshold_cents()
+                                    and _raw_bid >= _raw_lock_thr
                                 ):
                                     if self._latch_hard_lock(
                                         position,
                                         bid_cents=int(_raw_bid),
-                                        threshold_cents=_hard_profit_lock_threshold_cents(),
+                                        threshold_cents=_raw_lock_thr,
                                         trusted=False,
                                         via="poll_raw_observation",
                                     ):
@@ -8527,6 +8614,7 @@ class PositionMonitor:
                         entry_fill_id=cached_pos.entry_fill_id or cached_pos.client_order_id or cached_pos.entry_order_id or cached_pos.entry_intent_id,
                         entry_order_id=cached_pos.entry_order_id or cached_pos.client_order_id,
                         entry_execution_mode=cached_pos.entry_execution_mode,
+                        decision_lane=cached_pos.decision_lane,
                         client_order_id=cached_pos.client_order_id,
                         entry_intent_id=cached_pos.entry_intent_id or cached_pos.client_order_id,
                         entry_executable_bid_cents=cached_pos.entry_executable_bid_cents,

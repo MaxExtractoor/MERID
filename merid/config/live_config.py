@@ -442,6 +442,8 @@ _ENV_OVERRIDES.update({
         # master switches these are scoped against.
         "MERID_HARD_LOCK_CHASE_ENABLED", "MERID_NO_EDGE_LOSS_SALVAGE_ENABLED",
         "MERID_LOSS_EXITS_ENABLED", "MERID_TAIL_LOSS_ENABLED",
+        # 2026-10-21 (drift-lane epoch): lane master toggles.
+        "MERID_DRIFT_LANE_ENABLED", "MERID_CHEAP_NO_LANE_ENABLED",
     )
 })
 _ENV_OVERRIDES.update({
@@ -500,6 +502,29 @@ _ENV_OVERRIDES.update({
         ("MERID_ENTRY_TRAP_STICKY_P_DROP_C", "float", 0, 99),
         ("MERID_ENTRY_TRAP_STICKY_P_MAX_DP", "float", 0, 1),
         ("MERID_BASKET_SAME_SIDE_MAX", "int", 0, 5),
+        # 2026-10-21 (drift-lane epoch): mid-band maker rescue lanes.
+        # drift_fav rescues below-bound 40-74c bid-basis candidates with a
+        # per-position lock at entry+gain; cheap_no_settle is the
+        # fractional NO settle sleeve on YES-heavy books.  Bounds here are
+        # the safety envelope — the lane module reads its own defaults.
+        ("MERID_DRIFT_PRICE_LO", "float", 1, 99),
+        ("MERID_DRIFT_PRICE_HI", "float", 1, 99),
+        ("MERID_DRIFT_TTE_MIN_S", "float", 0, None),
+        ("MERID_DRIFT_TTE_MAX_S", "float", 0, None),
+        ("MERID_DRIFT_MIN_NET_EV_CENTS", "float", -99, 99),
+        ("MERID_DRIFT_MAX_CONTRACTS", "float", 0.01, 100),
+        ("MERID_DRIFT_LOCK_GAIN_CENTS", "int", 1, 98),
+        ("MERID_DRIFT_MAX_PER_TICKER", "int", 0, 50),
+        ("MERID_DRIFT_DAILY_MAX", "int", 0, 500),
+        ("MERID_CHEAP_NO_PRICE_LO", "float", 1, 99),
+        ("MERID_CHEAP_NO_PRICE_HI", "float", 1, 99),
+        ("MERID_CHEAP_NO_COMPLEMENT_MIN", "float", 1, 99),
+        ("MERID_CHEAP_NO_TTE_MIN_S", "float", 0, None),
+        ("MERID_CHEAP_NO_MIN_NET_EV_CENTS", "float", -99, 99),
+        ("MERID_CHEAP_NO_MIN_P", "float", 0, 1),
+        ("MERID_CHEAP_NO_MAX_CONTRACTS", "float", 0.01, 100),
+        ("MERID_CHEAP_NO_MAX_PER_TICKER", "int", 0, 50),
+        ("MERID_CHEAP_NO_DAILY_MAX", "int", 0, 500),
     )
 })
 _ENV_OVERRIDES.update({
@@ -507,6 +532,11 @@ _ENV_OVERRIDES.update({
     for name in (
         # Comma-separated lane names exempt from the sticky-calibration veto.
         "MERID_ENTRY_TRAP_EXEMPT_LANES",
+        # 2026-10-21: drift-lane asset allowlist (default excludes BTC —
+        # the pooled cohort measured -1.6c/contract there).
+        "MERID_DRIFT_ASSETS",
+        # Durable attempt-counter path for the drift/settle lanes.
+        "MERID_DRIFT_LANE_STATE_PATH",
         # Comma-separated lane names exempt only from the flat-book veto
         # (settlement convergence and pinned favorite enter flat books by
         # design; they keep the drop and sticky-p vetoes).

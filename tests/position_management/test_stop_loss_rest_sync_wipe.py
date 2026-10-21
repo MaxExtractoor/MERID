@@ -128,7 +128,16 @@ class TestRestSyncStopLossWipe:
         assert merged.stop_loss_price_cents == 59
         assert merged.stop_loss_enabled is True
 
-    def test_equal_trust_upsert_preserves_take_profit(self):
+    def test_equal_trust_upsert_preserves_take_profit(self, monkeypatch):
+        # TAKE_PROFIT_MIN_PROFIT_CENTS is an import-time constant — pin the
+        # documented default so a production .env floor (12c) cannot leak in
+        # and rewrite the preserved 71c TP to the 76c fee-aware floor.
+        monkeypatch.setattr(
+            "merid.position_management.position.TAKE_PROFIT_MIN_PROFIT_CENTS", 5
+        )
+        monkeypatch.setattr(
+            "merid.position_management.position_monitor.TAKE_PROFIT_MIN_PROFIT_CENTS", 5
+        )
         monitor = _monitor()
         monitor.upsert_position(_live_no_position(), caller="position_cache")
 

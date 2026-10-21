@@ -747,6 +747,13 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # edge bar), and its own price band [5,97c]/TTE [120,600s].  Always
     # taker: the quota claim is evaluated at the ask.
     "window_quota",
+    # 2026-10-21 (drift-lane epoch): mid-band maker rescue lanes — both
+    # admit only on the bid basis (taker fees exceed the measured edge at
+    # 40-55c), sized under MERID_DRIFT_MAX_CONTRACTS /
+    # MERID_CHEAP_NO_MAX_CONTRACTS, and bounded by the drift_lane durable
+    # attempt counter.  Post-only is the measured edge itself.
+    "drift_fav",
+    "cheap_no_settle",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -1899,6 +1906,12 @@ def apply_model_edge_floor_gate(decision: TradeDecision) -> TradeDecision:
         # The lane's bound is its own net-EV floor (PINNED_FAV_MIN_EV_CENTS)
         # plus daily cap and 1-contract post-only probe sizing; the cohort's
         # settled counterfactual (+1.9..+7.3c) is the measured evidence.
+        return decision
+    if _floor_lane in ("drift_fav", "cheap_no_settle"):
+        # 2026-10-21 (drift-lane epoch): the lane's own net-EV floor bounds
+        # the rescued cohort (drift/cheap admissions carry raw model gaps
+        # below the universal 4c floor by construction).  Same exemption
+        # contract as pinned_fav.
         return decision
     breakdown = decision.edge_breakdown or (
         decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
@@ -5135,10 +5148,34 @@ def compute_trade_decision(
                             _dr_bound.pinned_fav_enabled()
                             and _dr_bound.pinned_fav_band_match(float(_px))
                         )
+                        # 2026-10-21 (drift-lane epoch): same substitution
+                        # for the rescue lanes — inside an armed lane's
+                        # window its own floor is the side's active bound;
+                        # the formula bound would re-veto the cohort.
+                        from merid.prediction import (
+                            drift_lane as _dl_bound,
+                        )
+                        _drift_bound = (
+                            _dl_bound.drift_enabled()
+                            and _dl_bound.drift_band_match(float(_px))
+                        )
+                        _cheap_bound = (
+                            _side == "no"
+                            and _dl_bound.cheap_no_enabled()
+                            and _dl_bound.cheap_no_band_match(float(_px))
+                        )
                         _side_bound_c = (
                             _dr_bound._pinned_fav_min_ev_cents()
                             if _pf_bound
-                            else float(_d.total) * 100.0
+                            else (
+                                _dl_bound.drift_min_ev_cents()
+                                if _drift_bound
+                                else (
+                                    _dl_bound.cheap_no_min_ev_cents()
+                                    if _cheap_bound
+                                    else float(_d.total) * 100.0
+                                )
+                            )
                         )
                         # 2026-10-05 (pooled-transfer tier): a sparse exact
                         # cell backed by an adequately-sampled price-matched
@@ -5515,6 +5552,73 @@ def compute_trade_decision(
             _no_pf_block is None
             or _pf_low_p_bypass(_no_pf_block, no_breakdown, "no")
         )
+    )
+
+    # 2026-10-21 (drift-lane epoch): mid-band maker rescue lanes.
+    # The pooled 15,637-sample audit measured NO-side 40-74c drift
+    # entries at +0.6..+3.0c/contract under a buy-at-bid -> +12c lock ->
+    # -14c salvage rule, and cheap NO (10-40c) on YES-heavy books at
+    # +7..+15c settle EV — both cohorts unreachable under the generic
+    # >=+2.5c formula bound, so they rescue only the below-bound
+    # population.  Unlike pinned_fav these lanes do NOT own their window:
+    # normal admissions in-band keep their normal stamps, and every
+    # shared structural gate (depth/tail/evidence/throttle/bookflow/
+    # coinflip/trendside) still binds the rescue path.  Maker-only by
+    # construction: taker fees at 40-55c exceed the measured edge.
+    from merid.prediction import drift_lane as _dl
+
+    _yes_drift_price = _dl.drift_band_match(yes_price_cents)
+    _no_drift_price = _dl.drift_band_match(no_price_cents)
+    _yes_drift_block = _dl.drift_block(
+        side_price_cents=float(yes_price_cents) if yes_price_cents else None,
+        net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        asset=asset,
+        entry_price_basis=entry_price_basis,
+        ticker=ticker,
+    ) if _yes_drift_price else None
+    _no_drift_block = _dl.drift_block(
+        side_price_cents=float(no_price_cents) if no_price_cents else None,
+        net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        asset=asset,
+        entry_price_basis=entry_price_basis,
+        ticker=ticker,
+    ) if _no_drift_price else None
+    _no_cheap_price = _dl.cheap_no_band_match(no_price_cents)
+    _no_cheap_block = _dl.cheap_no_block(
+        side="no",
+        side_price_cents=float(no_price_cents) if no_price_cents else None,
+        complement_price_cents=(
+            float(yes_price_cents) if yes_price_cents else None
+        ),
+        net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        p_selected=(
+            float(no_breakdown.p_selected)
+            if no_breakdown.p_selected is not None
+            else None
+        ),
+        entry_price_basis=entry_price_basis,
+        ticker=ticker,
+    ) if _no_cheap_price else None
+    indicators["yes_drift_block_reason"] = _yes_drift_block
+    indicators["no_drift_block_reason"] = _no_drift_block
+    indicators["no_cheap_no_block_reason"] = _no_cheap_block
+    _yes_drift_qualifies = (
+        _yes_drift_price and _yes_drift_block is None and _dl.drift_enabled()
+    )
+    _no_drift_qualifies = (
+        _no_drift_price and _no_drift_block is None and _dl.drift_enabled()
+    )
+    _no_cheap_qualifies = (
+        _no_cheap_price and _no_cheap_block is None and _dl.cheap_no_enabled()
     )
 
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
@@ -6052,6 +6156,30 @@ def compute_trade_decision(
         _pf_admitted_s = (
             _yes_pf_qualifies if _pfx == "yes" else _no_pf_qualifies
         )
+        # 2026-10-21 (drift-lane epoch): a drift_fav / cheap_no_settle
+        # admission was enforced on the lane's own pair — net_ev >= lane
+        # floor — so the downstream stamps must carry that pair too, the
+        # same re-veto hazard as the pinned_fav substitution above.
+        if _pfx == "yes":
+            _lane_admitted_s = _pf_admitted_s or _yes_drift_qualifies
+            _lane_floor_s = (
+                _dr._pinned_fav_min_ev_cents()
+                if _pf_admitted_s
+                else _dl.drift_min_ev_cents()
+            )
+        else:
+            _lane_admitted_s = (
+                _pf_admitted_s or _no_drift_qualifies or _no_cheap_qualifies
+            )
+            _lane_floor_s = (
+                _dr._pinned_fav_min_ev_cents()
+                if _pf_admitted_s
+                else (
+                    _dl.drift_min_ev_cents()
+                    if _no_drift_qualifies
+                    else _dl.cheap_no_min_ev_cents()
+                )
+            )
         # effective_required_edge is the admission bound downstream re-gates
         # must keep comparing against: slackened iff this side was rescued,
         # else the full post-caution route bound.  The gate-comparison bound
@@ -6063,8 +6191,8 @@ def compute_trade_decision(
         # 2026-10-17 11:22 UTC: SOL no@93 emitted, daily cap consumed, then
         # the allocator EDGE stage rejected gate_ev=-1.9c against the
         # un-substituted +4.0c route bound).
-        if _pf_admitted_s:
-            _req_c = _dr._pinned_fav_min_ev_cents()
+        if _lane_admitted_s:
+            _req_c = _lane_floor_s
             _gev_c = float(_bd.net_edge) * 100.0
         else:
             _req_c = (_bnd if _rescued else _min_e) * 100.0
@@ -6072,12 +6200,12 @@ def compute_trade_decision(
         indicators[f"{_pfx}_effective_required_edge_cents"] = _req_c
         indicators[f"{_pfx}_route_required_edge_cents"] = _min_e * 100.0
         indicators[f"{_pfx}_effective_gate_edge_cents"] = (
-            _req_c if _pf_admitted_s else _bnd * 100.0
+            _req_c if _lane_admitted_s else _bnd * 100.0
         )
         indicators[f"{_pfx}_gate_ev_cents"] = _gev_c
         indicators[f"{_pfx}_true_shortfall_cents"] = max(
             0.0,
-            (_req_c if _pf_admitted_s else _bnd * 100.0) - _gev_c,
+            (_req_c if _lane_admitted_s else _bnd * 100.0) - _gev_c,
         )
         indicators[f"{_pfx}_fee_reserve_cents"] = float(_bd.entry_fee) * 100.0
         indicators[f"{_pfx}_impact_reserve_cents"] = (
@@ -6227,6 +6355,7 @@ def compute_trade_decision(
         and (
             _yes_pf_qualifies
             or _yes_trend_hi_qualifies
+            or _yes_drift_qualifies
             or (
                 not _yes_pf_price
                 and not _yes_hi_price
@@ -6254,6 +6383,8 @@ def compute_trade_decision(
         and _no_trendside_block is None
         and (
             _no_pf_qualifies
+            or _no_drift_qualifies
+            or _no_cheap_qualifies
             or (
                 not _no_pf_price
                 and _no_eff_edge >= _no_edge_eff_bound
@@ -6297,6 +6428,10 @@ def compute_trade_decision(
         eff_edge_s: Optional[float] = None,
         cb_epc_exempt_s: bool = False,
         dir_veto_s: Optional[str] = None,
+        drift_price_applies_s: bool = False,
+        drift_block_s: Optional[str] = None,
+        cheap_price_applies_s: bool = False,
+        cheap_block_s: Optional[str] = None,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         if not depth_ok_s:
@@ -6328,16 +6463,39 @@ def compute_trade_decision(
             # not the failure.  The honest labels are edge_below_lane_floor
             # (missed the lane's own bound) and the structural gates; the
             # positive-EV / cost-basis labels only apply on >=0 floors.
+            # 2026-10-21 (drift-lane epoch): a below-bound candidate inside
+            # an armed rescue lane's window is owned by the lane's own gate,
+            # not by the generic EV label — a pass on ANY applicable lane
+            # rescues the admission (falls through to the structural gates);
+            # when every applicable lane gate fails, the lane's specific
+            # reason is the honest label.
+            _lane_window_s = drift_price_applies_s or cheap_price_applies_s
+            _lane_rescued_s = (
+                (drift_price_applies_s and drift_block_s is None)
+                or (cheap_price_applies_s and cheap_block_s is None)
+            )
             if min_edge_s >= 0.0 and _edge_s <= 0:
-                return f"no_positive_executable_edge_{side}"
+                if _lane_window_s:
+                    if not _lane_rescued_s:
+                        return drift_block_s or cheap_block_s
+                else:
+                    return f"no_positive_executable_edge_{side}"
             if _edge_s < min_edge_s:
-                return (
-                    f"edge_below_lane_floor_{side}"
-                    if min_edge_s < 0.0
-                    else f"edge_below_threshold_{side}"
-                )
+                if _lane_window_s:
+                    if not _lane_rescued_s:
+                        return drift_block_s or cheap_block_s
+                else:
+                    return (
+                        f"edge_below_lane_floor_{side}"
+                        if min_edge_s < 0.0
+                        else f"edge_below_threshold_{side}"
+                    )
             if min_edge_s >= 0.0 and bd.p_selected <= min_p_s and not cb_epc_exempt_s:
-                return f"cost_basis_{side}"
+                if _lane_window_s:
+                    if not _lane_rescued_s:
+                        return drift_block_s or cheap_block_s
+                else:
+                    return f"cost_basis_{side}"
         # 91-94c YES window: the lane owns the terminal reason — the strict
         # gate's specific failure when armed, or `trend_yes_hi_disabled` when
         # the price sits in the reserved window with the lane off.  Skipped
@@ -6418,6 +6576,8 @@ def compute_trade_decision(
             eff_edge_s=_yes_eff_edge,
             cb_epc_exempt_s=_yes_cb_epc_exempt,
             dir_veto_s=_yes_dir_veto,
+            drift_price_applies_s=_yes_drift_price,
+            drift_block_s=_yes_drift_block,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -6437,6 +6597,10 @@ def compute_trade_decision(
             eff_edge_s=_no_eff_edge,
             cb_epc_exempt_s=_no_cb_epc_exempt,
             dir_veto_s=_no_dir_veto,
+            drift_price_applies_s=_no_drift_price,
+            drift_block_s=_no_drift_block,
+            cheap_price_applies_s=_no_cheap_price,
+            cheap_block_s=_no_cheap_block,
         ),
     })
 
@@ -7400,6 +7564,20 @@ def compute_trade_decision(
         if _sel_pf_lane:
             from merid.prediction import directional_regime as _dr_evg
             _side_min_edge = _dr_evg._pinned_fav_min_ev_cents() / 100.0
+        # 2026-10-21 (drift-lane epoch): a drift_fav / cheap_no_settle
+        # selection's bound is its own lane floor — same re-veto hazard as
+        # pinned_fav; the EV gate's negative-floor passthrough bounds the
+        # spend at the lane floor and vacates the EV/tail ratio.
+        elif (
+            _yes_drift_qualifies if selected_outcome == "yes"
+            else (_no_drift_qualifies or _no_cheap_qualifies)
+        ):
+            _side_min_edge = (
+                _dl.drift_min_ev_cents()
+                if (selected_outcome == "yes" and _yes_drift_qualifies)
+                or (selected_outcome == "no" and _no_drift_qualifies)
+                else _dl.cheap_no_min_ev_cents()
+            ) / 100.0
         # 2026-10-18: scale the per-contract lane floor to this order's size.
         # min_dollar_ev is an ORDER-level dollar bound; passing the bare
         # per-contract floor silently tightened a -10c/contract lane to
@@ -7562,6 +7740,24 @@ def compute_trade_decision(
                 _sel_thr.provisional_min_ev_cents
             )
 
+        # 2026-10-21 (drift-lane epoch): the rescue lanes stamp AFTER every
+        # cell-owning lane (a normal/cell/provisional admission inside a
+        # rescue window keeps its own identity) but BEFORE the generic
+        # evidence-escape and maker labels — lane ownership is the specific
+        # economics-driven admission and drives the per-position lock
+        # target and settle-hold exit contract downstream.
+        if selected_outcome == "yes" and _yes_drift_qualifies:
+            if not indicators.get("decision_lane"):
+                indicators["decision_lane"] = "drift_fav"
+                indicators["entry_lane"] = "drift_fav"
+        if selected_outcome == "no":
+            if _no_drift_qualifies and not indicators.get("decision_lane"):
+                indicators["decision_lane"] = "drift_fav"
+                indicators["entry_lane"] = "drift_fav"
+            elif _no_cheap_qualifies and not indicators.get("decision_lane"):
+                indicators["decision_lane"] = "cheap_no_settle"
+                indicators["entry_lane"] = "cheap_no_settle"
+
         # Generic evidence escape lane: a pass resting on sparse/pooled cell
         # evidence is admissible only as a bounded post-only canary entry —
         # and only for candidates owned by no cell lane.  A provisional
@@ -7591,13 +7787,20 @@ def compute_trade_decision(
             # the daily cap, the measured-loss cell guard, and the
             # maker_bid spread-floor exemption all key on it, and the
             # post-only contract still applies via BOUNDED_POST_ONLY_LANES.
-            _pf_bid_lane = indicators.get("decision_lane") == "pinned_fav"
+            # 2026-10-21: drift_fav/cheap_no_settle keep their stamps the
+            # same way — the lane drives the per-position lock target and
+            # the settle-hold exit contract downstream.
+            _lane_s = indicators.get("decision_lane")
+            _pf_bid_lane = _lane_s in ("drift_fav", "cheap_no_settle") or (
+                _lane_s == "pinned_fav"
+            )
             try:
-                _pf_bid_lane = _pf_bid_lane and bool(
-                    _dr.pinned_fav_maker_mode()
+                _pf_bid_lane = _pf_bid_lane and (
+                    _lane_s != "pinned_fav"
+                    or bool(_dr.pinned_fav_maker_mode())
                 )
             except Exception:
-                _pf_bid_lane = False
+                _pf_bid_lane = _lane_s in ("drift_fav", "cheap_no_settle")
             if not _pf_bid_lane:
                 indicators["decision_lane"] = (
                     "empirical_marginal_maker"

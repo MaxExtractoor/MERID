@@ -413,8 +413,9 @@ async def test_lock_latch_one_shot_idempotent(monitor):
 
 @pytest.mark.asyncio
 async def test_latch_opportunity_lost_on_subthreshold_recovery(monitor):
-    """Latched at 92c, book recovers at 85c -> terminal OPPORTUNITY_LOST,
-    latch cleared, no second intent emitted."""
+    """Latched at 92c, book collapses below the chase floor (entry+1=82c
+    for a model-edge position) -> terminal OPPORTUNITY_LOST, latch
+    cleared, no second intent emitted."""
     position = _make_position(PositionSide.NO, entry_cents=81)
     monitor.add_position(position)
     calls = _capture_callback(monitor)
@@ -423,9 +424,31 @@ async def test_latch_opportunity_lost_on_subthreshold_recovery(monitor):
     assert position.hard_lock_pending is not None
     assert len(calls) == 1
 
-    # Book recovers below the lock threshold — the lock obligation lapses.
-    await monitor._check_position(position, _snapshot(position, own_bid=85), 2)
+    # Book collapses below the chase floor — the lock obligation lapses.
+    await monitor._check_position(position, _snapshot(position, own_bid=80), 2)
     assert position.hard_lock_pending is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_latch_subthreshold_recovery_inside_chase_band_keeps_obligation(
+    monitor,
+):
+    """2026-10-21 chase ladder: latched at 92c, recovery at 85c sits inside
+    the [82, 90) chase band -> the lock obligation SURVIVES for bounded
+    chase re-emission instead of terminalizing (pre-ladder code discarded
+    it here).  No second order stacks while the original intent is still
+    in-flight; the chase fires once it resolves."""
+    position = _make_position(PositionSide.NO, entry_cents=81)
+    monitor.add_position(position)
+    calls = _capture_callback(monitor)
+
+    await monitor._check_position(position, _snapshot(position, own_bid=92), 1)
+    assert position.hard_lock_pending is not None
+    assert len(calls) == 1
+
+    await monitor._check_position(position, _snapshot(position, own_bid=85), 2)
+    assert position.hard_lock_pending is not None
     assert len(calls) == 1
 
 

@@ -144,6 +144,10 @@ class TestStopCandidateReplay:
         treating ``None`` as 0 cancelled live protective stops."""
         from merid.event_venues.kalshi import stop_candidate as sc
 
+        # The default-on shadow gate (MERID_PRICE_STOP_SHADOW) vetoes all
+        # submissions before the exposure check this test exercises.
+        monkeypatch.setenv("MERID_PRICE_STOP_SHADOW", "0")
+
         recorded = []
         monkeypatch.setattr(sc, "record_stop_candidate", lambda c: recorded.append(c))
 
@@ -172,6 +176,9 @@ class TestStopCandidateReplay:
         explicit 0 — verified flat keeps the flat branch (residual cleanup),
         distinct from the fail-closed unknown path."""
         from merid.event_venues.kalshi import stop_candidate as sc
+
+        # Shadow gate vetoes before the verified-flat branch under test.
+        monkeypatch.setenv("MERID_PRICE_STOP_SHADOW", "0")
 
         recorded = []
         monkeypatch.setattr(sc, "record_stop_candidate", lambda c: recorded.append(c))
@@ -364,6 +371,12 @@ class TestStopCandidateSubmissionIntent:
 
         stop_candidate._STOP_CANDIDATE_LEDGER_PATH = tmp_path / "stop_candidates.jsonl"
         monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "true")
+        # The default-on shadow gate vetoes before intent building.
+        monkeypatch.setenv("MERID_PRICE_STOP_SHADOW", "0")
+        # MERID_LOSS_EXITS_ENABLED defaults OFF (2026-10-20 directive): with it
+        # off HARD_STOP loses LOSS_SELL_EXEMPT status and a below-entry exit is
+        # suppressed by the breakeven floor before intent construction.
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         # 2026-09: discretionary triggers additionally require the EV exit
         # gate; enable it here so the test still exercises intent building.
         monkeypatch.setattr(
@@ -510,9 +523,12 @@ class TestTakeProfitRetryObligation:
 
         position = self._position()
         monitor.add_position(position)
-        snapshot = self._snapshot(position, bid=79)
+        # bid=82 == tp: the configured profit condition holds (required —
+        # below tp the TP evaluator never runs), while thesis fair=82 +
+        # exit cost > 82 means a FRESH TP stays suppressed by the floor.
+        snapshot = self._snapshot(position, bid=82)
 
-        # Baseline: fair=82 + cost > 79 — a fresh TP opportunity is suppressed.
+        # Baseline: fair=82 + cost > 82 — a fresh TP opportunity is suppressed.
         await monitor._check_position(position, snapshot)
         fresh_calls = [
             c for c in callback.call_args_list
@@ -534,7 +550,7 @@ class TestTakeProfitRetryObligation:
         )
         # The emitted price must be the executable own-side bid, not the stale
         # TP level (repriced inside _emit_exit_intent).
-        assert retry_calls[-1].args[2] == 79
+        assert retry_calls[-1].args[2] == 82
 
 
 class TestTrailingActivationBlindSpot:

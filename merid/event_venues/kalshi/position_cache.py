@@ -626,6 +626,11 @@ class CachedPosition:
     # its close buffer and an alert is raised, but the position is not deleted.
     settlement_status: str = "open"
     known_aliases: List[str] = field(default_factory=list)
+    # 2026-10-21 (drift-lane epoch): the admission lane that created the
+    # entry (``drift_fav`` / ``cheap_no_settle`` / normal lanes).  Drives
+    # the per-position profit-lock target and the settle-hold exit
+    # contract in the monitor.
+    decision_lane: Optional[str] = None
     exchange_index: Optional[int] = None  # Kalshi exchange shard index (e.g. 2 for crypto 15m)
     # 2026-10-06: UTC timestamp of the newest REST position snapshot reflected in
     # this record.  A REST snapshot is absolute state — every exchange fill with
@@ -1943,6 +1948,7 @@ class KalshiPositionCache:
         order_intent_id: Optional[str] = None,
         max_hold_seconds: Optional[int] = None,
         exit_policy: Optional[Dict[str, Any]] = None,
+        decision_lane: Optional[str] = None,
     ) -> None:
         """Register TP targets, edge-decay policy and entry provenance for an order before it fills.
 
@@ -1988,6 +1994,11 @@ class KalshiPositionCache:
             "entry_book_source": None,
             "registered_at": replay_time(),
             "exit_policy": exit_policy,
+            # 2026-10-21 (drift-lane epoch): the decision lane rides the
+            # same provenance record so the fill-time CachedPosition and
+            # the monitor's Position carry it — per-lane lock targets and
+            # the settle-hold exit contract key off it downstream.
+            "decision_lane": decision_lane,
         }
 
         # CRITICAL FIX (2026-08-23): Persist a durable edge-decay policy snapshot
@@ -3259,6 +3270,7 @@ class KalshiPositionCache:
                     entry_market_probability=tp_targets.get("entry_market_probability"),
                     entry_edge=tp_targets.get("entry_edge"),
                     entry_book_snapshot_id=tp_targets.get("entry_book_snapshot_id"),
+                    decision_lane=tp_targets.get("decision_lane"),
                     entry_fill_id=fill_id,
                     entry_order_id=tp_targets.get("entry_order_id"),
                     entry_execution_mode=tp_targets.get("entry_execution_mode"),
@@ -4678,6 +4690,9 @@ class KalshiPositionCache:
             vol_regime=tp_targets.get("vol_regime") or "unknown",
             confidence=tp_targets.get("confidence") or "unknown",
             entry_edge_pct=tp_targets.get("edge_pct") or 0.03,
+            # 2026-10-21: lane provenance survives REST reconstruction so
+            # lane-keyed exit policy still applies after a restart.
+            decision_lane=tp_targets.get("decision_lane"),
         )
 
         # CRITICAL FIX (2026-08-23): Attach canonical position key to REST-reconstructed

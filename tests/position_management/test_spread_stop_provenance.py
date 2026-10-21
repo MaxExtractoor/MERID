@@ -94,9 +94,14 @@ def _snapshot(position: Position, bid: int, ask: int) -> ExitPriceSnapshot:
 class TestFallbackTakeProfitSafety:
     """A fallback TP must be based on a trusted fill price and clear the fee buffer."""
 
-    def test_fallback_tp_uses_entry_fill_price(self):
+    def test_fallback_tp_uses_entry_fill_price(self, monkeypatch):
         # CRITICAL FIX (2026-08-12): A fallback TP is only set when the entry model
         # is present. It uses the trusted fill price as the entry and is capped at
+        # TAKE_PROFIT_MIN_PROFIT_CENTS is an import-time constant — pin the
+        # documented default so a production .env floor (12c) cannot leak in.
+        monkeypatch.setattr(
+            "merid.position_management.position.TAKE_PROFIT_MIN_PROFIT_CENTS", 5
+        )
         # the model fair value minus estimated exit fee and a 1c buffer.
         position = Position(
             market_id="KXBTC15M-TEST",
