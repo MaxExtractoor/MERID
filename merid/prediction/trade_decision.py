@@ -4936,7 +4936,7 @@ def compute_trade_decision(
                                 and float(_px) >= MERID_EDGE_MARGINAL_RELIEF_LO_CENTS
                                 and _ne_c >= _d.total * 100.0
                             )
-                            _pf_admit = False
+                            _lane_admit = False
                             if _mr_ok:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "marginal_relief"
@@ -5014,8 +5014,134 @@ def compute_trade_decision(
                                     )
                                 except Exception:
                                     _dr_pf = None  # type: ignore[assignment]
-                                _pf_veto = None
+                                # 2026-10-22: drift/cheap refused-evidence
+                                # probes — same demote semantics as pf.
+                                # These lanes do NOT own their window, so
+                                # reach requires the lane's own admission
+                                # gate to fully pass (``*_block() is None``:
+                                # EV floor/TTE/asset/basis/p-floor/per-ticker
+                                # cap); a generic candidate sitting in-band
+                                # keeps the normal evidence veto.  The
+                                # measured-loss + structural-escape veto
+                                # stack below then bounds the admission
+                                # exactly as the pf probe does.
+                                _drift_reach = False
+                                _cheap_reach = False
+                                _lane_floor_c: Optional[float] = None
                                 if _pf_reach:
+                                    _lane_floor_c = (
+                                        _dr_pf._pinned_fav_min_ev_cents()
+                                    )
+                                if not _pf_reach:
+                                    try:
+                                        from merid.prediction import (
+                                            drift_lane as _dl_pr,
+                                        )
+                                        if (
+                                            _dl_pr.drift_enabled()
+                                            and _dl_pr.drift_band_match(
+                                                float(_px)
+                                            )
+                                        ):
+                                            _drift_reach = (
+                                                _dl_pr.drift_block(
+                                                    side_price_cents=float(
+                                                        _px
+                                                    ),
+                                                    net_ev_cents=float(
+                                                        _ne_c
+                                                    ),
+                                                    tte_seconds=(
+                                                        float(
+                                                            seconds_to_expiry
+                                                        )
+                                                        if seconds_to_expiry
+                                                        is not None
+                                                        else None
+                                                    ),
+                                                    asset=asset,
+                                                    entry_price_basis=(
+                                                        entry_price_basis
+                                                    ),
+                                                    ticker=ticker,
+                                                )
+                                                is None
+                                            )
+                                            if _drift_reach:
+                                                _lane_floor_c = float(
+                                                    _dl_pr.drift_min_ev_cents()
+                                                )
+                                        if (
+                                            not _drift_reach
+                                            and _side == "no"
+                                            and _dl_pr.cheap_no_enabled()
+                                            and _dl_pr.cheap_no_band_match(
+                                                float(_px)
+                                            )
+                                        ):
+                                            _cheap_reach = (
+                                                _dl_pr.cheap_no_block(
+                                                    side="no",
+                                                    side_price_cents=float(
+                                                        _px
+                                                    ),
+                                                    complement_price_cents=(
+                                                        float(
+                                                            yes_price_cents
+                                                        )
+                                                        if yes_price_cents
+                                                        else None
+                                                    ),
+                                                    net_ev_cents=float(
+                                                        _ne_c
+                                                    ),
+                                                    tte_seconds=(
+                                                        float(
+                                                            seconds_to_expiry
+                                                        )
+                                                        if seconds_to_expiry
+                                                        is not None
+                                                        else None
+                                                    ),
+                                                    p_selected=(
+                                                        float(
+                                                            no_breakdown.p_selected
+                                                        )
+                                                        if no_breakdown.p_selected
+                                                        is not None
+                                                        else None
+                                                    ),
+                                                    entry_price_basis=(
+                                                        entry_price_basis
+                                                    ),
+                                                    ticker=ticker,
+                                                )
+                                                is None
+                                            )
+                                            if _cheap_reach:
+                                                _lane_floor_c = float(
+                                                    _dl_pr.cheap_no_min_ev_cents()
+                                                )
+                                    except Exception:
+                                        pass
+                                _lane_reach = bool(
+                                    _pf_reach or _drift_reach or _cheap_reach
+                                )
+                                _lane_name = (
+                                    "pinned_fav"
+                                    if _pf_reach
+                                    else (
+                                        "drift_fav"
+                                        if _drift_reach
+                                        else (
+                                            "cheap_no_settle"
+                                            if _cheap_reach
+                                            else None
+                                        )
+                                    )
+                                )
+                                _lane_veto = None
+                                if _lane_reach:
                                     # Measured-loser check on the scored
                                     # level's *own* weighted win rate, not
                                     # the pooled posterior: a sparse 92-98c
@@ -5039,21 +5165,23 @@ def compute_trade_decision(
                                         < float(_px) / 100.0 + float(fee)
                                     )
                                     if _pf_measured_loss:
-                                        _pf_veto = "pinned_fav_measured_loss"
+                                        _lane_veto = f"{_lane_name}_measured_loss"
                                     elif _ed.matching_hard_block or _ed.code in (
                                         "MATCHING_TOXIC_CELL",
                                         "EVIDENCE_UNUSABLE",
                                         "PINNED_FAV_CAP_EXHAUSTED",
                                     ):
-                                        _pf_veto = _ed.code.lower()
+                                        _lane_veto = _ed.code.lower()
                                     else:
-                                        _pf_veto = _evidence_escape_veto_reason(
+                                        _lane_veto = _evidence_escape_veto_reason(
                                             asset=asset,
                                             side=_side,
                                             price_cents=float(_px),
                                             net_ev_cents=float(_ne_c),
-                                            required_edge_cents=(
-                                                _dr_pf._pinned_fav_min_ev_cents()
+                                            required_edge_cents=float(
+                                                _lane_floor_c
+                                                if _lane_floor_c is not None
+                                                else 0.0
                                             ),
                                             seconds_to_expiry=seconds_to_expiry,
                                             spot_price=spot_price,
@@ -5061,9 +5189,21 @@ def compute_trade_decision(
                                             annualized_vol=resolved_vol,
                                             feature_snapshot=feature_snapshot,
                                             dir_regime=directional_regime,
+                                            # 2026-10-22: when the cell's
+                                            # own measured WR clears
+                                            # break-even on an adequate
+                                            # sample the blind TTE veto
+                                            # (measured on a different
+                                            # cohort) does not apply —
+                                            # CHALLENGE_ELIGIBLE parity.
+                                            skip_late_window=(
+                                                _pf_wn
+                                                >= evidence_policy.min_cell_neff()
+                                                and not _pf_measured_loss
+                                            ),
                                         )
-                                _pf_admit = bool(_pf_reach and _pf_veto is None)
-                                if _pf_admit:
+                                _lane_admit = bool(_lane_reach and _lane_veto is None)
+                                if _lane_admit:
                                     if _side == "yes":
                                         yes_evidence_ok = True
                                         yes_evidence_reason = None
@@ -5071,31 +5211,35 @@ def compute_trade_decision(
                                         no_evidence_ok = True
                                         no_evidence_reason = None
                                     indicators[f"{_side}_admission_owner"] = (
-                                        "pinned_fav"
+                                        _lane_name or "pinned_fav"
                                     )
                                     indicators[
                                         f"{_side}_admission_decision"
                                     ] = "allowed"
                                     indicators[f"{_side}_admission_reason"] = (
-                                        f"pinned_fav_probe:{_ed.code.lower()}"
+                                        f"{_lane_name or 'pinned_fav'}"
+                                        f"_probe:{_ed.code.lower()}"
                                     )
                                     indicators[
                                         f"{_side}_evidence_override"
-                                    ] = "pinned_fav_refused_probe"
+                                    ] = (
+                                        f"{_lane_name or 'pinned_fav'}"
+                                        "_refused_probe"
+                                    )
                                     indicators[
                                         f"{_side}_evidence_override_detail"
                                     ] = _ed.detail()
                                 else:
                                     indicators[f"{_side}_admission_owner"] = (
-                                        "pinned_fav"
-                                        if _pf_reach
+                                        _lane_name
+                                        if _lane_reach
                                         else "evidence_escape"
                                     )
                                     indicators[
                                         f"{_side}_admission_decision"
                                     ] = "blocked"
                                     indicators[f"{_side}_admission_reason"] = (
-                                        _pf_veto
+                                        _lane_veto
                                         or (
                                             "generic_escape_budget_exhausted"
                                             if _ed.code
@@ -5106,7 +5250,7 @@ def compute_trade_decision(
                                             else _ed.code.lower()
                                         )
                                     )
-                            if not _mr_ok and not _pf_admit:
+                            if not _mr_ok and not _lane_admit:
                                 _reason_stem = {
                                     "CELL_EVIDENCE_INSUFFICIENT": "evidence_cell_insufficient",
                                     "SPARSE_MATCHED_INSUFFICIENT": "evidence_sparse_matched",

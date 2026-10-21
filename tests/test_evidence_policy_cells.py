@@ -82,6 +82,16 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "MERID_PINNED_FAV_STATE_PATH", str(tmp_path / "pinned_fav.json")
     )
+    # 2026-10-22: bounded-lane envs must not leak from the production .env —
+    # the lane-floor substitution changes the sparse/empty/challenge bound
+    # whenever the candidate sits inside an armed band, and .env arms
+    # drift/cheap/pf in production.  Lane tests opt in explicitly below.
+    monkeypatch.setenv("MERID_DRIFT_LANE_ENABLED", "0")
+    monkeypatch.setenv("MERID_CHEAP_NO_LANE_ENABLED", "0")
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "0")
+    monkeypatch.setenv(
+        "MERID_DRIFT_LANE_STATE_PATH", str(tmp_path / "drift.json")
+    )
     yield
 
 

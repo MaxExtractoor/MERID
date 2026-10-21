@@ -165,8 +165,18 @@ def hard_challenge_extra_c() -> float:
 
 
 def evidence_stale_s() -> float:
-    """Artifact older than this cannot hard-block; uplift is maxed."""
-    return _env_float("MERID_EVIDENCE_STALE_S", 3600.0)
+    """Artifact older than this cannot hard-block; uplift is maxed.
+
+    Also gates the adaptive CHALLENGE_ELIGIBLE / SOFT_PENALTY tiers inside
+    ``evaluate()`` — past this age every sparse cell falls straight to
+    *_INSUFFICIENT.  2026-10-22: the prior 1h default was shorter than the
+    artifact's own data window (``MERID_LIVE_EVIDENCE_WINDOW_HOURS=4``) and
+    far below the real refresh cadence on the production DB, so the
+    release-tier was dead for most of every session.  Default now 8h to
+    match a stale-but-usable artifact lifecycle; the health tiers still
+    bound the outer horizon and hard blocks remain post-epoch-only.
+    """
+    return _env_float("MERID_EVIDENCE_STALE_S", 28800.0)
 
 
 def escape_lane_enabled() -> bool:
@@ -1106,6 +1116,48 @@ def evaluate(
         _pf_dr = None  # type: ignore[assignment]
         _pf = False
 
+    # 2026-10-22: drift/cheap lane reach — same floor-substitution semantics
+    # as pf.  Each bounded lane carries a negative net-EV floor by design
+    # (drift ~-6c, cheap_no -6c); requiring the generic positive uplift for
+    # their bands makes the challenge tier structurally incapable of
+    # admitting the exact candidates the lanes exist to rescue.  Band-match
+    # only (evaluate() has no basis arg); the lane's own gates (basis, asset,
+    # TTE, EV floor, p-floor) still apply downstream in trade_decision.
+    _drift = False
+    _cheap = False
+    try:
+        from merid.prediction import drift_lane as _dl
+        _drift = bool(
+            _dl.drift_enabled() and _dl.drift_band_match(entry_price_cents)
+        )
+        _cheap = bool(
+            side_l == "no"
+            and _dl.cheap_no_enabled()
+            and _dl.cheap_no_band_match(entry_price_cents)
+        )
+    except Exception:
+        _dl = None  # type: ignore[assignment]
+        _drift = False
+        _cheap = False
+
+    # Lane-floor substitution for the sparse/empty/challenge bounds below.
+    # The lane's own negative floor replaces the generic positive uplift when
+    # the candidate sits inside an armed bounded lane — otherwise the
+    # positive-uplift bound can never admit the exact candidates the lanes
+    # exist to rescue.  Lane caps are enforced at emission (evaluate() has no
+    # ticker for the per-ticker bound); pf keeps its own read-side cap check.
+    if _pf and _pf_dr is not None:
+        _lane_req_edge: Optional[float] = float(
+            _pf_dr._pinned_fav_min_ev_cents()
+        )
+    elif _drift and _dl is not None:
+        _lane_req_edge = float(_dl.drift_min_ev_cents())
+    elif _cheap and _dl is not None:
+        _lane_req_edge = float(_dl.cheap_no_min_ev_cents())
+    else:
+        _lane_req_edge = None
+    _lane_reach = _lane_req_edge is not None
+
     # -- Hard block: matched cell, toxic, uncontradicted.  Two tiers -------
     # (2026-10-09): dense tier n_eff>=50 needs only the -5c demonstrated-loss
     # floor; a sparse matched cell (n_eff>=8) can still hard-block, but only
@@ -1271,9 +1323,7 @@ def evaluate(
         # uncertainty reserve is economic: the side's own net edge must clear
         # the max sparse uplift rather than a posterior bound.
         uplift = sparse_uplift_max_c()
-        req_edge = (
-            _pf_dr._pinned_fav_min_ev_cents() if _pf else uplift
-        )
+        req_edge = _lane_req_edge if _lane_req_edge is not None else uplift
         ok = (
             net_edge_cents is not None
             and float(net_edge_cents) >= req_edge
@@ -1320,9 +1370,7 @@ def evaluate(
         # uncertainty reserve is economic: the model's own net edge must
         # clear the max sparse uplift, and the pass is escape-lane only.
         uplift = sparse_uplift_max_c()
-        req_edge = (
-            _pf_dr._pinned_fav_min_ev_cents() if _pf else uplift
-        )
+        req_edge = _lane_req_edge if _lane_req_edge is not None else uplift
         ok = (
             net_edge_cents is not None
             and float(net_edge_cents) >= req_edge
@@ -1479,12 +1527,15 @@ def evaluate(
         if contradicts:
             # The stale posterior disagrees, so the model must still clear the
             # ordinary all-in margin (base margin + uncertainty uplift) on its
-            # own edge — the challenge is bounded, not free.  Pinned-fav
-            # candidates test against the lane's own floor instead.
+            # own edge — the challenge is bounded, not free.  Candidates
+            # inside an armed bounded lane (pf/drift/cheap) test against the
+            # lane's own floor instead — the lane floor IS the risk bound.
             ch_ok = (
                 net_edge_cents is not None
                 and float(net_edge_cents) >= (
-                    _pf_dr._pinned_fav_min_ev_cents() if _pf else req_margin
+                    _lane_req_edge
+                    if _lane_req_edge is not None
+                    else req_margin
                 )
             )
             gated = _escape_gate(
