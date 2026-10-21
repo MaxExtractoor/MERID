@@ -508,6 +508,7 @@ def test_calibration_gap_reserve(monkeypatch):
     monkeypatch.delenv("MERID_CALIBRATION_GAP_RESERVE", raising=False)
     monkeypatch.delenv("MERID_CALIBRATION_GAP_MIN_BIN_N", raising=False)
     monkeypatch.delenv("MERID_CALIBRATION_GAP_MAX", raising=False)
+    monkeypatch.delenv("MERID_CALIBRATION_GAP_POOL_PRIOR_K", raising=False)
     ev = {
         "calibration_monitor": {
             "ETH": {
@@ -525,10 +526,38 @@ def test_calibration_gap_reserve(monkeypatch):
     assert ep.calibration_gap_frac(ev, "ETH", 0.35) == pytest.approx(0.05)
     # Underconfident bin -> zero charge.
     assert ep.calibration_gap_frac(ev, "ETH", 0.65) == 0.0
-    # Sparse bin -> asset mean_bias fallback (positive part).
-    assert ep.calibration_gap_frac(ev, "ETH", 0.85) == pytest.approx(0.02)
+    # Sparse favorite bin -> pooled favorite-region gap (the sparse bin is
+    # the only populated favorite bin: gap 0.45 -> capped at the 0.15 max).
+    assert ep.calibration_gap_frac(ev, "ETH", 0.85) == pytest.approx(0.15)
+    # Sparse mid-range bin -> shrunk pooled non-favorite gap, not asset
+    # mean_bias: (0.05*120 + (-0.03)*80) / (200 + prior_k=20) = 0.0164.
+    assert ep.calibration_gap_frac(ev, "ETH", 0.45) == pytest.approx(0.0164, abs=1e-3)
     # Negative-bias asset -> nothing to charge anywhere.
     assert ep.calibration_gap_frac(ev, "BTC", 0.35) == 0.0
+    # 2026-10-21 (live monitor shape): an asset whose positive mean_bias is
+    # concentrated in the favorite region must not smear that charge onto
+    # unmeasured mid-range quotes.  DOGE below mirrors the live artifact:
+    # favorites overconfident (settled 0.42-0.58 vs claimed ~0.9), sparse
+    # non-favorite bins net underconfident -> favorites still pay the cap,
+    # mid-range pays ~zero.
+    ev["calibration_monitor"]["DOGE"] = {
+        "n": 60, "mean_bias": 0.20,
+        "bins": {
+            "0": {"n": 7, "mean_p": 0.05, "wr": 0.14},   # underconf.
+            "4": {"n": 3, "mean_p": 0.45, "wr": 0.67},   # underconf.
+            "8": {"n": 30, "mean_p": 0.89, "wr": 0.50},  # +0.39 measured
+            "9": {"n": 20, "mean_p": 0.93, "wr": 0.75},  # +0.18 measured
+        },
+    }
+    # Sparse mid-range bin pools only non-favorite bins:
+    # (7*-0.09 + 3*-0.22)/10 = -0.129 -> positive-only clamp -> 0.
+    assert ep.calibration_gap_frac(ev, "DOGE", 0.45) == 0.0
+    # Bin 9 is populated (n=20 < min_n=30 -> sparse) so the favorite quote
+    # pools the region: (30*0.39 + 20*0.18)/(50+20) = 0.2186 -> cap 0.15.
+    assert ep.calibration_gap_frac(ev, "DOGE", 0.95) == pytest.approx(0.15)
+    # A denser favorite region pools to its measured gap, still capped.
+    ev["calibration_monitor"]["DOGE"]["bins"]["9"]["n"] = 200
+    assert ep.calibration_gap_frac(ev, "DOGE", 0.85) == pytest.approx(0.15)
     # Missing asset/monitor/None -> no charge (fail-open on measurement).
     assert ep.calibration_gap_frac(ev, "SOL", 0.35) == 0.0
     assert ep.calibration_gap_frac(ev, "ETH", None) == 0.0

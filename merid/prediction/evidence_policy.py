@@ -269,6 +269,14 @@ def calibration_gap_max() -> float:
     return _env_float("MERID_CALIBRATION_GAP_MAX", 0.15)
 
 
+def calibration_gap_pool_prior_k() -> float:
+    """Empirical-Bayes prior mass shrinking a sparse regional pool toward
+    zero gap.  A region whose populated bins total far less than k samples
+    yields a charge near zero; a well-sampled region converges to its
+    measured n-weighted gap."""
+    return _env_float("MERID_CALIBRATION_GAP_POOL_PRIOR_K", 20.0)
+
+
 def calibration_gap_frac(
     evidence: Optional[Dict[str, Any]],
     asset: str,
@@ -278,9 +286,20 @@ def calibration_gap_frac(
     calibrated-probability decile containing ``p_selected``.
 
     Positive only: an underconfident bin does not manufacture edge, it is
-    just uncharged.  Missing/sparse bins fall back to the asset's positive
-    ``mean_bias`` (0 when the asset is net-underconfident); a missing monitor
-    block or missing probability charges nothing.
+    just uncharged.  A missing monitor block or missing probability charges
+    nothing.
+
+    Sparse/absent bins fall back to the n-weighted pooled gap of populated
+    bins *in the same region* — favorite deciles (>=7) vs non-favorite
+    deciles (<7) — rather than the asset-wide ``mean_bias``.  The monitor's
+    measured overconfidence on BTC/ETH/DOGE is concentrated in the favorite
+    region (claimed ~0.9, settled 0.5-0.6): pooling that bias into
+    unmeasured mid-range quotes charged a measured favorite-region failure
+    to candidates the cohort never covered.  The pooled gap is shrunk
+    toward zero by ``calibration_gap_pool_prior_k`` so thin regional
+    evidence charges proportionally less.  A region with no populated
+    bins still falls back to ``mean_bias`` so a systematically
+    overconfident asset pays a charge where nothing regional is measured.
     """
     if not calibration_gap_enabled() or p_selected is None:
         return 0.0
@@ -296,15 +315,36 @@ def calibration_gap_frac(
     p = max(0.0, min(1.0, float(p_selected)))
     b = min(int(p * 10), 9)
     gap: Optional[float] = None
+    min_n = calibration_gap_min_bin_n()
     rb = bins.get(str(b))
-    if isinstance(rb, dict) and int(rb.get("n") or 0) >= calibration_gap_min_bin_n():
+    if isinstance(rb, dict) and int(rb.get("n") or 0) >= min_n:
         gap = float(rb.get("mean_p") or 0.0) - float(rb.get("wr") or 0.0)
     else:
-        # Sparse/absent bin: fall back to the asset-wide signed bias so a
-        # systematically overconfident asset still pays a charge outside its
-        # well-sampled region.
-        mb = rec.get("mean_bias")
-        gap = float(mb) if mb is not None else 0.0
+        fav = b >= 7
+        num = 0.0
+        den = 0
+        for bk, br in bins.items():
+            if not isinstance(br, dict):
+                continue
+            try:
+                bi = int(bk)
+            except (TypeError, ValueError):
+                continue
+            if (bi >= 7) != fav:
+                continue
+            n = int(br.get("n") or 0)
+            if n <= 0:
+                continue
+            num += n * (float(br.get("mean_p") or 0.0) - float(br.get("wr") or 0.0))
+            den += n
+        if den > 0:
+            # Shrunk pool mean: sparse regional evidence charges a fraction
+            # of its measured gap rather than the full noisy value.
+            k = calibration_gap_pool_prior_k()
+            gap = num / (den + k)
+        else:
+            mb = rec.get("mean_bias")
+            gap = float(mb) if mb is not None else 0.0
     return max(0.0, min(calibration_gap_max(), float(gap)))
 
 
