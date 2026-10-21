@@ -437,6 +437,11 @@ _ENV_OVERRIDES.update({
         # 2026-10-20: shared entry-trap gate toggles (all-lane admission veto).
         "MERID_ENTRY_TRAP_VETO_ENABLED", "MERID_ENTRY_FLAT_TRAP_ENABLED",
         "MERID_TOXICITY_CHECK_FAIL_OPEN",
+        # 2026-10-21: exit-protection toggles — hard-lock chase ladder,
+        # scoped no-edge salvage carve-out, and the price-depth loss-exit
+        # master switches these are scoped against.
+        "MERID_HARD_LOCK_CHASE_ENABLED", "MERID_NO_EDGE_LOSS_SALVAGE_ENABLED",
+        "MERID_LOSS_EXITS_ENABLED", "MERID_TAIL_LOSS_ENABLED",
     )
 })
 _ENV_OVERRIDES.update({
@@ -463,6 +468,20 @@ _ENV_OVERRIDES.update({
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),
+        # 2026-10-21: hard-lock sweep/chase pricing + freshness + salvage
+        # floors (XRP NO@89 / SOL NO@90 missed-lock postmortem).
+        ("MERID_HARD_LOCK_SWEEP_CENTS", "int", 0, 99),
+        ("MERID_HARD_LOCK_MIN_PROFIT_CENTS", "int", 0, 99),
+        ("MERID_HARD_LOCK_QUOTE_MAX_AGE_MS", "float", 1, None),
+        ("MERID_HARD_LOCK_CHASE_MAX_ATTEMPTS", "int", 0, 10),
+        ("MERID_HARD_LOCK_CHASE_INTERVAL_S", "float", 0.25, None),
+        ("MERID_HARD_LOCK_CHASE_SWEEP_CENTS", "int", 0, 99),
+        # 2026-10-19/21: tail-loss floor + no-edge drop depth.
+        ("MERID_TAIL_LOSS_DROP_CENTS", "int", 1, 99),
+        ("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "int", 1, 99),
+        ("MERID_TAIL_LOSS_FLOOR_CENTS", "int", 1, 99),
+        ("MERID_TAIL_LOSS_RETRY_S", "float", 1, None),
+        ("MERID_TAIL_LOSS_MAX_ATTEMPTS", "int", 1, 20),
         ("MERID_SETTLEMENT_MAX_MISSING_SAMPLES", "int", 0, 60),
         # Rows committed per batch in record_settlement's write phase;
         # batching bounds the WAL read-mark pin and writer-queue starvation

@@ -64,14 +64,14 @@ def test_environment_override_lowers_min_held_price_is_rejected(monkeypatch):
 
 def test_environment_override_raises_fixed_exposure_cap_is_rejected(monkeypatch):
     """A higher exposure cap is unsafe and is ignored; the profile cap wins."""
-    monkeypatch.setenv("MERID_FIXED_EXPOSURE_CAP_USD", "3.00")
+    monkeypatch.setenv("MERID_FIXED_EXPOSURE_CAP_USD", "5.00")
     resolved = resolve_live_config()
-    # The authoritative profile cap is 0.90 as of profile_version 2.4.0
-    # (raised from 0.75 with the bounded cheap-tail canary lane); the unsafe
-    # 3.00 override is rejected.  The version assertion makes a future profile
+    # The authoritative profile cap is 3.00 as of profile_version 2.4.0
+    # (raised for the 3-contract bounded-lane sizing); the unsafe 5.00
+    # override is rejected.  The version assertion makes a future profile
     # drift fail loudly instead of silently re-pointing this test.
     assert resolved.profile_version == "2.4.0"
-    assert resolved.fixed_exposure_cap_usd == Decimal("0.9")
+    assert resolved.fixed_exposure_cap_usd == Decimal("3.00")
     assert any(
         "Exposure cap override rejected" in c for c in resolved.conflicts_caught
     )
@@ -90,11 +90,13 @@ def test_environment_override_daily_loss_above_profile_is_rejected(monkeypatch):
 
 
 def test_stop_loss_detection_decoupled_from_stop_candidate_execution(monkeypatch):
-    """stop_loss_enabled (detection) can be true while execution stays off."""
+    """The 2026-10-20 loss-exit posture disables entry-relative stop
+    detection entirely (ride-or-profit doctrine); candidate submission and
+    unprotected entries stay off with it."""
     monkeypatch.delenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", raising=False)
     monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
     resolved = resolve_live_config()
-    assert resolved.stop_loss_enabled
+    assert not resolved.stop_loss_enabled
     assert not resolved.stop_candidate_submission_enabled
     assert not resolved.unprotected_entries_allowed
 
@@ -113,7 +115,9 @@ def test_entry_price_floor_env_below_canonical_is_rejected(monkeypatch):
     """A lower entry price floor is unsafe and is ignored."""
     monkeypatch.setenv("MERID_MIN_ENTRY_CENTS", "5")
     resolved = resolve_live_config()
-    assert resolved.min_entry_cents == 10
+    # 2026-10-19: canonical floor raised 10c -> 25c (favorite-longshot bias
+    # bleed); the unsafe 5c override is still rejected at the floor.
+    assert resolved.min_entry_cents == 25
     assert any(
         "Minimum entry price override rejected" in c for c in resolved.conflicts_caught
     )
@@ -127,10 +131,10 @@ def test_allowed_environment_override_applies(monkeypatch):
 
 
 def test_price_floor_disagreement_is_caught_and_resolved():
-    """The YAML has price_range.min=10 and guardrails.min=5; resolver picks 10."""
+    """The canonical entry floor resolves to the most restrictive profile
+    source — the 2026-10-19 floor raise aligned every source at 25c."""
     resolved = resolve_live_config()
-    assert resolved.min_entry_cents == 10
-    assert any("Profile price floor disagreement" in c for c in resolved.conflicts_caught)
+    assert resolved.min_entry_cents == 25
 
 
 def test_invariants_checked_lists_every_safety_check():
