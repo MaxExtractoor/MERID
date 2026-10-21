@@ -966,6 +966,7 @@ def _evidence_escape_veto_reason(
     annualized_vol: Optional[float],
     feature_snapshot: Any,
     dir_regime: Any,
+    skip_late_window: bool = False,
 ) -> Optional[str]:
     """Additional vetoes for evidence_escape admissions (see block above).
 
@@ -975,8 +976,19 @@ def _evidence_escape_veto_reason(
     """
     tte = float(seconds_to_expiry or 0.0)
     # Late-window maker/taker cohort veto — the realized -15c/fill bucket.
+    # 2026-10-21: ``skip_late_window`` lifts this veto for pf-band sides
+    # admitted on MEASURED cell evidence (CHALLENGE_ELIGIBLE /
+    # CELL_EVIDENCE_PASS).  The veto was measured on the generic escape
+    # probe cohort; the artifact's own favorite/late cells (75-100c x
+    # late/final on SOL/DOGE/XRP/ETH) run 0.85-1.00 win rates over
+    # hundreds of fills — the blind TTE veto was blocking the strongest
+    # measured cohort on the board.  The cell evidence is the guard for
+    # that cohort (it stops admitting the moment recent matched WR drops
+    # below break-even); knife-edge / bookflow / counter-move vetoes
+    # still apply, and probes plus model-edge passes keep this veto.
     if (
-        asset.upper() in MERID_ESCAPE_LATE_ASSETS
+        not skip_late_window
+        and asset.upper() in MERID_ESCAPE_LATE_ASSETS
         and MERID_ESCAPE_LATE_TTE_LO_S <= tte <= MERID_ESCAPE_LATE_TTE_HI_S
     ):
         return "evidence_escape_late_window"
@@ -5166,6 +5178,11 @@ def compute_trade_decision(
                                 annualized_vol=resolved_vol,
                                 feature_snapshot=feature_snapshot,
                                 dir_regime=directional_regime,
+                                skip_late_window=(
+                                    _pf_bound
+                                    and _ed.code
+                                    in ("CHALLENGE_ELIGIBLE", "CELL_EVIDENCE_PASS")
+                                ),
                             )
                         if _escape_veto is not None:
                             indicators[f"{_side}_admission_owner"] = (

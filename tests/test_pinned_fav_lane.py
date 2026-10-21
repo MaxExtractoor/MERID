@@ -834,3 +834,124 @@ def test_maker_low_p_bypass_hard_block_still_binds(
     ind = d.indicators
     assert ind.get("yes_pinned_fav_qualifies") is False
     assert d.selected_outcome is None
+
+
+# --------------------------------- escape late-window vs measured pf cohort ----
+# 2026-10-21: ``evidence_escape_late_window`` (BTC/SOL/DOGE @ TTE 120-240s)
+# was measured on the GENERIC escape probe cohort (-15c/fill realized), but
+# fired price-blind on in-band pinned-fav sides at the same TTE — live
+# DOGE no@85-90 challenge_eligible admissions were vetoed even though the
+# artifact's own favorite/late cells measure 0.85-1.00 WR over hundreds of
+# fills (SOL|no|75-89|late n=84 wr=1.0; DOGE|yes|75-89|late n=41 wr=1.0).
+# Measured pf admissions now skip it (the cell evidence is the guard);
+# probes, model-edge passes, and non-pf sides keep it.
+
+
+def test_escape_late_window_unit_flag(monkeypatch):
+    kw = dict(
+        asset="DOGE", side="no",
+        net_ev_cents=-8.0, required_edge_cents=-12.0,
+        seconds_to_expiry=200.0,  # inside 120-240s veto window
+        spot_price=None, strike_price=None, annualized_vol=None,
+        feature_snapshot=_Snap({"DOGE": _Slice()}), dir_regime=None,
+    )
+    assert (
+        _td._evidence_escape_veto_reason(price_cents=89.0, **kw)
+        == "evidence_escape_late_window"
+    )
+    assert (
+        _td._evidence_escape_veto_reason(
+            price_cents=89.0, skip_late_window=True, **kw
+        )
+        is None
+    )
+    # Non-listed assets are never inside the veto to begin with.
+    kw_xrp = dict(kw, asset="XRP")
+    assert (
+        _td._evidence_escape_veto_reason(price_cents=89.0, **kw_xrp) is None
+    )
+
+
+def _doge_no_fav_decision(tmp_path, monkeypatch, cells, **over):
+    """DOGE NO-side resting bid ~87c at TTE 200s — the exact live shape that
+    hit evidence_escape_late_window (DOGE is in ESCAPE_LATE_ASSETS)."""
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH",
+        _write_live_evidence(tmp_path, cells),
+    )
+    monkeypatch.setenv("MERID_MAKER_BID_ADV_SEL_CENTS", "1.5")
+    monkeypatch.setenv("MERID_MAKER_BID_MIN_SPREAD_CENTS", "1.0")
+    args = dict(
+        asset="DOGE",
+        seconds_to_expiry=200.0,
+        spot_price=99.60,
+        strike_price=100.0,
+        yes_bid_cents=11.0,
+        yes_ask_cents=13.0,
+        no_bid_cents=87.0,
+        no_ask_cents=89.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.015,
+        model_uncertainty=0.02,
+        route="maker_bid",
+    )
+    args.update(over)
+    return _decision(**args)
+
+
+def _doge_no_challenge_cells():
+    """DOGE|no|75-89|late: stale posterior contradicted by a recent matched
+    winning run -> CHALLENGE_ELIGIBLE (escape_required admission)."""
+    return {
+        "DOGE|no|75-89|late": {"w": 3.0, "l": 3.0, "n_eff": 6.0,
+                               "n_raw": 30, "recent_w": 6.0,
+                               "recent_l": 0.0, "recent_n": 6},
+    }
+
+
+def test_measured_pf_admission_skips_late_window(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """Live 05:27 shape: DOGE no@87 TTE~200 challenge_eligible.  Before the
+    fix the side was blocked evidence_escape_late_window; now the measured
+    admission reaches the lane and the side qualifies."""
+    d = _doge_no_fav_decision(
+        tmp_path, monkeypatch, _doge_no_challenge_cells()
+    )
+    ind = d.indicators
+    reason = str(ind.get("no_admission_reason") or "")
+    assert not reason.startswith("evidence_escape_late_window"), reason
+    assert ind.get("no_admission_decision") == "allowed", (
+        ind.get("no_admission_owner"),
+        ind.get("no_admission_decision"),
+        reason,
+        ind.get("no_evidence_binding_gate"),
+    )
+    assert ind.get("no_pinned_fav_qualifies") is True, (
+        ind.get("no_pinned_fav_block"), ind.get("no_pf_block_reason")
+    )
+    assert d.selected_outcome == "no", (
+        d.selected_outcome, ind.get("no_block"), d.no_trade_reason
+    )
+    assert ind.get("decision_lane") == "pinned_fav"
+
+
+def test_sparse_pf_pass_keeps_late_window_veto(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """The exemption is scoped to MEASURED admission codes.  The same DOGE
+    book with empty evidence (model-edge sparse pass) must still trip the
+    blind late-window veto — the evidence gate binds via no_evidence_ok
+    even when the lane's own economics block passes."""
+    d = _doge_no_fav_decision(tmp_path, monkeypatch, {})
+    ind = d.indicators
+    assert ind.get("no_evidence_ok") is not True, (
+        ind.get("no_admission_owner"),
+        ind.get("no_admission_decision"),
+        ind.get("no_admission_reason"),
+    )
+    assert d.selected_outcome != "no", (
+        ind.get("no_admission_owner"),
+        ind.get("no_admission_reason"),
+        d.selected_outcome,
+    )

@@ -628,6 +628,33 @@ class TestLaneAwareEntryBand:
         ok, reason = allocator.can_allocate(95, asset="BTC")
         assert not ok and "above maximum" in reason
 
+    def test_can_allocate_maker_band(self):
+        """2026-10-21 live blocker: maker-mode pf bids (82-91c band) emitted
+        by the lane died at the router as
+        ``slot_allocation_failed:Entry price 86c above maximum 80c`` — the
+        call site dropped ``decision_lane`` so the profile ceiling applied.
+        With the stamp passed, an 86c bid fits the maker band."""
+        os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "1"
+        try:
+            from merid.risk.global_slot_allocator import (
+                get_global_slot_allocator,
+            )
+            allocator = get_global_slot_allocator()
+            ok, reason = allocator.can_allocate(
+                86, asset="XRP", decision_lane="pinned_fav"
+            )
+            assert ok, reason
+            # Still bounded: above maker hi (91) fails closed, and an
+            # unstamped 86c request still dies at the profile ceiling.
+            ok, reason = allocator.can_allocate(
+                95, asset="XRP", decision_lane="pinned_fav"
+            )
+            assert not ok and "above maximum" in reason
+            ok, reason = allocator.can_allocate(86, asset="XRP")
+            assert not ok and "above maximum" in reason
+        finally:
+            os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
+
     def test_settlement_lane_extends_ceiling(self):
         from merid.risk.global_slot_allocator import get_global_slot_allocator
         allocator = get_global_slot_allocator()

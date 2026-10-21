@@ -8686,7 +8686,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             # Exit orders bypass this check to allow position closure
             if not _is_exit_order(intent):
                 can_allocate, alloc_reason = slot_allocator.can_allocate(
-                    intent.price_cents, asset, count=float(intent.count or 0.0)
+                    intent.price_cents, asset, count=float(intent.count or 0.0),
+                    decision_lane=getattr(intent, "decision_lane", None),
                 )
                 if not can_allocate:
                     # CRITICAL FIX (2026-07-15): Check for phantom slot lockout
@@ -8703,7 +8704,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                             slot_allocator.clear_slots_on_empty_positions(position_count=0)
                             # Retry allocation after clearing phantom slots
                             can_allocate, alloc_reason = slot_allocator.can_allocate(
-                                intent.price_cents, asset, count=float(intent.count or 0.0)
+                                intent.price_cents, asset, count=float(intent.count or 0.0),
+                                decision_lane=getattr(intent, "decision_lane", None),
                             )
                             if can_allocate:
                                 logger.info(
