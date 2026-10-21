@@ -83,6 +83,7 @@ class SubmitRevalidationInput:
     required_edge_per_contract_cents: Decimal = Decimal("0")
     market_trading: bool = True
     resize_allowed: bool = False            # strategy policy
+    post_only: bool = False                 # resting (maker) limit order
     # freshness thresholds (lenient pending measured distributions)
     max_prob_age_ms: int = field(
         default_factory=lambda: _env_ms(
@@ -183,27 +184,57 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
     d.permitted_limit_cents = effective_limit
 
     # --- eligible depth + acquisition cost ------------------------------
-    eligible_cc, expected_cost = _walk_book(
-        book.levels, effective_limit, inp.qty_cc)
-    d.eligible_qty_cc = eligible_cc
-    d.expected_cost_cents = expected_cost
-    if eligible_cc <= 0:
-        d.outcome = SUBMIT_DEPTH_INSUFFICIENT
-        d.reason = f"no_depth_at_or_below:{effective_limit}c"
-        return d
-    permitted_cc = inp.qty_cc
-    if eligible_cc < inp.qty_cc:
-        if not inp.resize_allowed:
-            d.outcome = SUBMIT_DEPTH_INSUFFICIENT
-            d.reason = (f"partial_depth:{eligible_cc}<{inp.qty_cc}cc "
-                        f"at<={effective_limit}c resize_not_permitted")
+    if inp.post_only:
+        # 2026-10-21: resting (maker/post-only) orders do not walk the ask
+        # book — the fill price is the limit itself, so acquisition cost is
+        # the limit and "depth" is the wrong frame.  The earlier taker walk
+        # rejected every non-crossing maker bid on a coherent book
+        # (no asks at-or-below the bid -> submit_depth_insufficient; live:
+        # XRP BUY_YES@90 post-only).  What actually binds a resting order:
+        #   * book validity + freshness (checked above),
+        #   * the max_price bound (checked above),
+        #   * non-crossing validity — a resting buy at-or-above the best
+        #     ask is immediately marketable; the exchange rejects/cancels
+        #     it under post_only, and crossing economics are a different
+        #     admission contract -> reapproval, not a silent rewrite,
+        #   * the EV floor below, computed at the limit.
+        # The adverse-selection cost of resting is priced upstream in the
+        # lane's own reserves (ASR), not by consuming depth.
+        best_ask = book.levels[0][0]
+        if effective_limit >= best_ask:
+            d.outcome = SUBMIT_REAPPROVAL_REQUIRED
+            d.reason = (f"post_only_crosses:limit={effective_limit}"
+                        f">=best_ask={best_ask}")
             return d
-        permitted_cc = eligible_cc
-        # resized order: recompute expected cost for the permitted qty
-        _, expected_cost = _walk_book(
-            book.levels, effective_limit, permitted_cc)
+        permitted_cc = inp.qty_cc
+        expected_cost = (
+            Decimal(effective_limit) * Decimal(permitted_cc) / Decimal(100)
+        )
+        d.eligible_qty_cc = permitted_cc
         d.expected_cost_cents = expected_cost
-    d.permitted_qty_cc = permitted_cc
+        d.permitted_qty_cc = permitted_cc
+    else:
+        eligible_cc, expected_cost = _walk_book(
+            book.levels, effective_limit, inp.qty_cc)
+        d.eligible_qty_cc = eligible_cc
+        d.expected_cost_cents = expected_cost
+        if eligible_cc <= 0:
+            d.outcome = SUBMIT_DEPTH_INSUFFICIENT
+            d.reason = f"no_depth_at_or_below:{effective_limit}c"
+            return d
+        permitted_cc = inp.qty_cc
+        if eligible_cc < inp.qty_cc:
+            if not inp.resize_allowed:
+                d.outcome = SUBMIT_DEPTH_INSUFFICIENT
+                d.reason = (f"partial_depth:{eligible_cc}<{inp.qty_cc}cc "
+                            f"at<={effective_limit}c resize_not_permitted")
+                return d
+            permitted_cc = eligible_cc
+            # resized order: recompute expected cost for the permitted qty
+            _, expected_cost = _walk_book(
+                book.levels, effective_limit, permitted_cc)
+            d.expected_cost_cents = expected_cost
+        d.permitted_qty_cc = permitted_cc
 
     q_contracts = Decimal(permitted_cc) / Decimal(100)
     # Worst permitted cost: every filled contract pays the final limit.
@@ -394,4 +425,7 @@ def input_from_intent(
         market_trading=market_trading,
         resize_allowed=os.environ.get(
             "MERID_SUBMIT_RESIZE_ALLOWED", "0").strip() in ("1", "true"),
+        post_only=bool(getattr(intent, "post_only", False))
+        or str(getattr(intent, "execution_mode", "") or "").lower()
+        in ("maker", "passive_quote"),
     )
