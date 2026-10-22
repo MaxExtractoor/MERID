@@ -382,6 +382,25 @@ class BankrollServiceV2:
         while not self._shutdown:
             loop_start = time.time()
             try:
+                # Skip a redundant API call while the last successful snapshot
+                # is still inside the freshness window.  start()'s initial
+                # fetch already populated _current, so the first loop
+                # iteration would otherwise hit get_balance() ~ms later and
+                # draw a Kalshi 429 that demotes FRESH -> DEGRADED just before
+                # the P0 bankroll_service_fresh gate reads it.
+                if (
+                    self._last_success is not None
+                    and self._current is not None
+                    and self._current.state == BalanceState.FRESH
+                ):
+                    _age_s = (
+                        datetime.now(timezone.utc) - self._last_success
+                    ).total_seconds()
+                    if _age_s < self._refresh_interval:
+                        await asyncio.sleep(
+                            max(0.0, self._refresh_interval - _age_s)
+                        )
+                        continue
                 fetched = await self._fetch_and_update_with_retry()
                 if fetched:
                     retry_count = 0  # Reset on success
