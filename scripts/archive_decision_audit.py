@@ -299,14 +299,13 @@ def main() -> int:
                  args.chunk_ids, args.gzip, args.dry_run, manifest)
     if rc:
         return rc
-    if args.vacuum and not args.dry_run:
-        return vacuum(db_path)
-
     mpath = Path(args.manifest)
     if not args.dry_run:
         mpath.parent.mkdir(parents=True, exist_ok=True)
         mpath.write_text(json.dumps(manifest, indent=2))
         print(f"[archive] manifest -> {mpath}", flush=True)
+    if args.vacuum and not args.dry_run:
+        return vacuum(db_path)
     return 0
 
 

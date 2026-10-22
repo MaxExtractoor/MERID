@@ -447,6 +447,7 @@ data/kalshi_order_attempts.db*
 data/trading_circuit_breaker_http_watermark.json
 data/exit_intents*.json
 data/backup_*/
+data/archive/
 data/final_state_output.txt
 data/evidence/
 data/.regime_*.tmp
@@ -484,6 +485,8 @@ data/_*
 /audit/
 /1791849500
 /=
+pytest_*.txt
+drift_dump.txt
 
 # Runtime backup artifacts
 data/*.backup_20*
