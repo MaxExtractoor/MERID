@@ -346,6 +346,19 @@ _WAL_CHECKPOINT_INTERVAL_S = float(
 # callback cost is noise.
 _EVIDENCE_PROGRESS_STEPS = 100000
 
+# Rolling hot-retention prune.  The ledger is audit/telemetry — live evidence
+# reads only the trailing ~5h, so rows past the retention window are research
+# history.  Prune cadence x batch must exceed daily write volume or the file
+# re-grows toward the multi-GB delete-bottleneck state that motivated the
+# 2026-10-22 rebuild-swap.  Defaults: check hourly, 5k decisions per batch,
+# <=20 batches per invocation (~100k decisions/hour capacity, comfortably
+# above the ~65-215k/day write rate).  <=0 disables.  See
+# scripts/rebuild_hot_decision_audit.py for the one-time compaction flow.
+_PRUNE_INTERVAL_S = float(os.environ.get("MERID_AUDIT_PRUNE_S", "3600"))
+_AUDIT_RETENTION_DAYS = float(os.environ.get("MERID_AUDIT_RETENTION_DAYS", "7"))
+_PRUNE_BATCH = int(os.environ.get("MERID_AUDIT_PRUNE_BATCH", "5000"))
+_PRUNE_MAX_BATCHES = int(os.environ.get("MERID_AUDIT_PRUNE_MAX_BATCHES", "20"))
+
 
 @dataclass(frozen=True)
 class DecisionAuditClassification:
@@ -368,6 +381,7 @@ class DecisionAuditLedger:
         self._shared_conn: Optional[sqlite3.Connection] = None
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_wal_checkpoint = 0.0
+        self._last_prune = 0.0
         self._startup_checkpoint_done = False
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
@@ -3469,6 +3483,75 @@ class DecisionAuditLedger:
                 self._last_wal_checkpoint = now
                 if self.wal_checkpoint("TRUNCATE"):
                     self.wal_checkpoint("PASSIVE")
+
+        # Rolling hot-retention prune: keeps the audit DB bounded at
+        # ~MERID_AUDIT_RETENTION_DAYS so it can never grow back to the
+        # multi-GB delete-bottleneck state.  Batched DELETEs run on this
+        # serialized writer thread, never the event loop; one txn per batch.
+        if _PRUNE_INTERVAL_S > 0:
+            now = time.time()
+            if now - self._last_prune >= _PRUNE_INTERVAL_S:
+                self._last_prune = now
+                self.prune_old_rows()
+
+    def prune_old_rows(self, retention_days: Optional[float] = None,
+                       batch: Optional[int] = None,
+                       max_batches: Optional[int] = None) -> int:
+        """Delete audit rows older than the hot retention window.
+
+        Children are removed before their parent inside each batch
+        transaction — same ordering the offline archiver uses — and
+        heartbeats/gaps are trimmed on created_at.  Best-effort maintenance:
+        failures are logged, never raised to callers.  Returns the number of
+        parent decisions removed this invocation.
+        """
+        if not _is_enabled() or not self.db_path.exists():
+            return 0
+        days = _AUDIT_RETENTION_DAYS if retention_days is None else float(retention_days)
+        if days <= 0:
+            return 0
+        batch = _PRUNE_BATCH if batch is None else int(batch)
+        max_batches = _PRUNE_MAX_BATCHES if max_batches is None else int(max_batches)
+        cutoff = time.time() - days * 86400.0
+        children = (
+            "strategy_decision_events",
+            "strategy_decision_side_ev",
+            "strategy_decision_outcomes",
+            "strategy_decision_snapshots",
+        )
+        total = 0
+        try:
+            with self._lock:
+                conn = self._conn()
+                for _ in range(max_batches):
+                    ids = [r[0] for r in conn.execute(
+                        "SELECT decision_id FROM strategy_decisions "
+                        "WHERE decision_ts < ? ORDER BY decision_ts LIMIT ?",
+                        (cutoff, batch),
+                    ).fetchall()]
+                    if not ids:
+                        break
+                    ph = ",".join("?" for _ in ids)
+                    with conn:
+                        for t in children:
+                            conn.execute(
+                                f"DELETE FROM {t} "
+                                f"WHERE decision_id IN ({ph})", ids)
+                        conn.execute(
+                            "DELETE FROM strategy_decisions "
+                            f"WHERE decision_id IN ({ph})", ids)
+                    total += len(ids)
+                conn.execute(
+                    "DELETE FROM decision_audit_heartbeats "
+                    "WHERE created_at < ?", (cutoff,))
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] prune_old_rows failed: %s", exc)
+        if total:
+            logger.info(
+                "[DECISION-AUDIT-LEDGER] prune_old_rows: removed %s "
+                "decisions older than %.1fd", total, days)
+        return total
 
     def wal_checkpoint(self, mode: str = "PASSIVE") -> bool:
         """Best-effort WAL checkpoint for the audit DB.
