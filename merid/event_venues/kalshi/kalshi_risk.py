@@ -43,6 +43,18 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.kalshi_risk")
 
+def _loss_brakes_enabled() -> bool:
+    """2026-10-22 operator directive: MERID_LOSS_BRAKES_ENABLED=0 disables
+    every loss-triggered entry block while the 15m stack is tuned for
+    per-window execution.  Loss metrics are still tracked/logged; they
+    never reject a risk-increasing entry.  Read live on every call.
+    Integrity brakes (bankroll cap, notional caps, rate limits, fills
+    integrity, post-fee edge, timeframe budget) are unaffected."""
+    return os.environ.get("MERID_LOSS_BRAKES_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
 # Cycle drawdown integration (lazy import to avoid circular deps)
 _cycle_drawdown_manager: Optional[Any] = None
 
@@ -1719,6 +1731,22 @@ class KalshiRiskManager:
             cap_pct = self._derive_bankroll_cap_pct()
             global_bankroll_cap_usd = max(bankroll_cents * cap_pct / 100, 0.0)  # Ensure non-negative
 
+            # 2026-10-22: floor the bankroll-pct cap at the configured fixed
+            # exposure cap (bounded by actual bankroll).  At ~$15 equity the
+            # 1-5% cap resolves to $0.15-$0.75 — far below the $3
+            # MERID_FIXED_EXPOSURE_CAP_USD order cap — which would silently
+            # reject every order if this path ever runs.  The percentage cap
+            # was designed for bankroll-proportional sizing, not the fixed
+            # slot model; the floor keeps it from binding below one max order.
+            try:
+                fixed_cap_usd = float(os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "3.00"))
+            except (ValueError, TypeError):
+                fixed_cap_usd = 3.00
+            global_bankroll_cap_usd = max(
+                global_bankroll_cap_usd,
+                min(fixed_cap_usd, bankroll_cents / 100.0),
+            )
+
             # Check bankroll cap
             if total > global_bankroll_cap_usd:
                 logger.warning(
@@ -1733,37 +1761,40 @@ class KalshiRiskManager:
             )
 
             # 6. Daily loss — use equity-based tracking with per-day reset
-            # Compute worst-case loss for this order (full notional at risk)
-            order_worst_case_loss_usd = notional_usd
-            allowed, reason, daily_loss_usd, post_loss_usd = self._check_daily_loss_limit(
-                self._state.current_equity_usd, order_worst_case_loss_usd
-            )
-            if not allowed:
-                # Do NOT activate killswitch - allow closing trades to reduce loss
-                # Only block risk-INCREASING orders
-                is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
-                if not is_closing_trade:
-                    self._log_breach("daily_loss", reason)
-                    return False, reason, "daily_loss"
-                logger.info(
-                    "[RISK] Allowing risk-reducing order despite daily loss limit: ticker=%s existing=%d contracts=%d",
-                    ticker, existing_position, contracts
+            # 2026-10-22: skipped while MERID_LOSS_BRAKES_ENABLED=0 (tuning mode —
+            # losses still tracked in state; they never reject a risk-increasing order).
+            if _loss_brakes_enabled():
+                # Compute worst-case loss for this order (full notional at risk)
+                order_worst_case_loss_usd = notional_usd
+                allowed, reason, daily_loss_usd, post_loss_usd = self._check_daily_loss_limit(
+                    self._state.current_equity_usd, order_worst_case_loss_usd
                 )
+                if not allowed:
+                    # Do NOT activate killswitch - allow closing trades to reduce loss
+                    # Only block risk-INCREASING orders
+                    is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
+                    if not is_closing_trade:
+                        self._log_breach("daily_loss", reason)
+                        return False, reason, "daily_loss"
+                    logger.info(
+                        "[RISK] Allowing risk-reducing order despite daily loss limit: ticker=%s existing=%d contracts=%d",
+                        ticker, existing_position, contracts
+                    )
 
-            # 6b. Per-cluster stop loss — enforced independently of daily loss
-            cluster_id = self._get_cluster_id(asset, timeframe)
-            sl_allowed, sl_reason, cluster_loss, post_cluster_loss = self._check_cluster_stop_loss(
-                cluster_id, order_worst_case_loss_usd
-            )
-            if not sl_allowed:
-                # Log breach but do NOT activate kill switch (cluster stop is independent)
-                self._log_breach("cluster_stop_loss", sl_reason)
-                return False, sl_reason, "cluster_stop_loss"
+                # 6b. Per-cluster stop loss — enforced independently of daily loss
+                cluster_id = self._get_cluster_id(asset, timeframe)
+                sl_allowed, sl_reason, cluster_loss, post_cluster_loss = self._check_cluster_stop_loss(
+                    cluster_id, order_worst_case_loss_usd
+                )
+                if not sl_allowed:
+                    # Log breach but do NOT activate kill switch (cluster stop is independent)
+                    self._log_breach("cluster_stop_loss", sl_reason)
+                    return False, sl_reason, "cluster_stop_loss"
 
             # 7. Drawdown - only blocks NEW orders, allows closing positions
             # NOTE: Killswitch removed per operator directive - agents must trade
             # to close positions and lock in profits without permanent halts
-            if self._state.peak_equity_usd > 0:
+            if _loss_brakes_enabled() and self._state.peak_equity_usd > 0:
                 drawdown = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
 
                 # Helper to check if we should block based on drawdown
@@ -1820,9 +1851,11 @@ class KalshiRiskManager:
                 return False, integrity_reason, "fills_integrity"
 
             # 11. Cycle drawdown check — gates new risk based on 15-minute cycle state
+            # 2026-10-22: skipped while MERID_LOSS_BRAKES_ENABLED=0 (loss-triggered
+            # entry brake; cycle state still updated so metrics stay current).
             try:
                 cdm = _get_cycle_drawdown_manager()
-                if cdm is not None:
+                if cdm is not None and _loss_brakes_enabled():
                     # Update cycle state with current equity
                     equity = self._state.current_equity_usd
                     cdm.update_cycle_state(equity)

@@ -37,6 +37,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,19 @@ import yaml
 from utils.logger import get_logger
 
 logger = get_logger("merid.risk.unified_risk_manager")
+
+
+def _loss_brakes_enabled() -> bool:
+    """2026-10-22 operator directive: MERID_LOSS_BRAKES_ENABLED=0 disables
+    every loss-triggered entry block while the 15m stack is tuned for
+    per-window execution.  Loss metrics (daily/weekly PnL, drawdown) are
+    still tracked and logged; they simply never reject or zero-size an
+    entry.  Read live on every call so the flip needs no restart.
+    Integrity brakes (emergency halt, bankroll caps, exposure caps,
+    rate limits, reconciliation/circuit-breaker halts) are unaffected."""
+    return os.environ.get("MERID_LOSS_BRAKES_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 @dataclass
@@ -376,6 +390,10 @@ class UnifiedRiskManager:
         bites in the 3x-per-trade / 2x-daily ballpark instead of being dominated
         by a loose percentage of a large bankroll.
         """
+        # 2026-10-22: loss brakes off during execution-coverage tuning —
+        # never throttle size on realized loss (still tracked in _daily/_weekly).
+        if not _loss_brakes_enabled():
+            return 1.0
         with self._lock:
             if self._bankroll_usd <= 0:
                 return 1.0
@@ -599,25 +617,28 @@ class UnifiedRiskManager:
             # CRITICAL FIX (2026-08-16): New order notional is NOT a realized loss.
             # The loss guard should only trigger on realized PnL, not on open
             # position sizing. Position sizing is bounded by per-trade/total caps above.
-            daily_loss_cap = self._bankroll_usd * self._limits.daily_loss_pct
-            if self._daily_loss_usd > daily_loss_cap:
-                reason = (
-                    f"DAILY_LOSS: realized=${self._daily_loss_usd:.2f} "
-                    f"> ${daily_loss_cap:.2f}"
-                )
-                self._rejections += 1
-                logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
-                return False, reason
+            # 2026-10-22: skipped entirely while MERID_LOSS_BRAKES_ENABLED=0 —
+            # losses are tracked above but never block an entry (tuning mode).
+            if _loss_brakes_enabled():
+                daily_loss_cap = self._bankroll_usd * self._limits.daily_loss_pct
+                if self._daily_loss_usd > daily_loss_cap:
+                    reason = (
+                        f"DAILY_LOSS: realized=${self._daily_loss_usd:.2f} "
+                        f"> ${daily_loss_cap:.2f}"
+                    )
+                    self._rejections += 1
+                    logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
+                    return False, reason
 
-            weekly_loss_cap = self._bankroll_usd * self._limits.weekly_loss_pct
-            if self._weekly_loss_usd > weekly_loss_cap:
-                reason = (
-                    f"WEEKLY_LOSS: realized=${self._weekly_loss_usd:.2f} "
-                    f"> ${weekly_loss_cap:.2f}"
-                )
-                self._rejections += 1
-                logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
-                return False, reason
+                weekly_loss_cap = self._bankroll_usd * self._limits.weekly_loss_pct
+                if self._weekly_loss_usd > weekly_loss_cap:
+                    reason = (
+                        f"WEEKLY_LOSS: realized=${self._weekly_loss_usd:.2f} "
+                        f"> ${weekly_loss_cap:.2f}"
+                    )
+                    self._rejections += 1
+                    logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
+                    return False, reason
             
             # Rate limiting check
             now = time.time()

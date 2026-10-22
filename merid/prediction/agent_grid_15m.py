@@ -4241,6 +4241,17 @@ class LeanAgent15m:
 
         """
 
+        # 2026-10-22: MERID_LOSS_BRAKES_ENABLED=0 — rolling loss halts never
+        # block an entry during execution-coverage tuning; history above is
+        # still recorded so the metrics stay accurate for later re-enable.
+        if os.environ.get("MERID_LOSS_BRAKES_ENABLED", "1").strip().lower() in (
+
+            "0", "false", "no", "off",
+
+        ):
+
+            return True, "loss_brakes_disabled"
+
         if not self._rolling_pnl_enabled or asset not in self._rolling_pnl_limits:
 
             return True, "rolling_pnl_disabled"

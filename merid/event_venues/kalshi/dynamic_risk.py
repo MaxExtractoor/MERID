@@ -20,6 +20,7 @@ Core Principles:
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -373,14 +374,19 @@ class DynamicRiskEngine:
                 self._cooldown_reason = None
         
         # Check daily loss limit
-        if self._daily_start_bankroll > 0:
+        # 2026-10-22: MERID_LOSS_BRAKES_ENABLED=0 disables loss-triggered
+        # entry blocks during execution-coverage tuning; PnL is still tracked.
+        _loss_brakes = os.environ.get("MERID_LOSS_BRAKES_ENABLED", "1").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+        if _loss_brakes and self._daily_start_bankroll > 0:
             daily_loss_pct = -self._daily_pnl_usd / self._daily_start_bankroll
             if daily_loss_pct > self.MAX_DAILY_LOSS_PCT:
                 return False, f"daily loss limit hit: {daily_loss_pct:.2%} > {self.MAX_DAILY_LOSS_PCT:.2%}"
         
         # Check rolling loss limit
         rolling_pnl = self.get_recent_pnl_sum(100)
-        if self._daily_start_bankroll > 0:
+        if _loss_brakes and self._daily_start_bankroll > 0:
             rolling_loss_pct = -rolling_pnl / self._daily_start_bankroll
             if rolling_loss_pct > self.MAX_ROLLING_LOSS_PCT:
                 return False, f"rolling loss limit hit: {rolling_loss_pct:.2%} > {self.MAX_ROLLING_LOSS_PCT:.2%}"
