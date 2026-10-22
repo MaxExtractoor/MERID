@@ -153,6 +153,37 @@ _MAX_AUTH_FAILURES = 3
 _WARN_ERROR_CODES = {"invalid_channel", "bad_request", "unknown_ticker"}
 
 
+def _resurrect_default_executor() -> bool:
+    """Clear a shut-down default executor on the running event loop.
+
+    ``websockets.connect()`` resolves DNS through
+    ``loop.getaddrinfo`` -> ``loop.run_in_executor(None, ...)``, which reuses
+    ``loop._default_executor``.  If that pool was shut down while the loop
+    stayed alive — e.g. ``asyncio.Runner.close()`` or
+    ``loop.shutdown_default_executor()`` on a reused loop — every submit
+    raises ``RuntimeError('cannot schedule new futures after shutdown')``
+    forever and reconnects can never succeed.  Clearing the reference lets
+    ``run_in_executor`` lazily mint a fresh pool.  Returns True when a dead
+    executor was cleared.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    executor = getattr(loop, "_default_executor", None)
+    if executor is not None and getattr(executor, "_shutdown", False):
+        try:
+            loop._default_executor = None
+        except Exception:
+            return False
+        logger.warning(
+            "[kalshi-ws] resurrected dead default executor on running loop %s",
+            id(loop),
+        )
+        return True
+    return False
+
+
 class KalshiWebSocket(EventVenueStream):
     """WebSocket client for real-time Kalshi data.
 
@@ -544,7 +575,14 @@ class KalshiWebSocket(EventVenueStream):
         from pathlib import Path
 
         logger.info("[WS-CLIENT-CONNECT] connect() method invoked")
-        
+
+        # 2026-10-22: a prior loop-lifecycle bug can leave the running loop's
+        # _default_executor shut down ("cannot schedule new futures after
+        # shutdown") — every websockets.connect() DNS lookup then fails
+        # instantly and the reconnect loop wedges permanently.  Heal before
+        # attempting so a dead pool self-recovers instead of spinning.
+        _resurrect_default_executor()
+
         if is_replay_active():
             logger.info("[WS-REPLAY] Using replay tape for Kalshi WebSocket")
             dispatcher = get_replay_dispatcher()

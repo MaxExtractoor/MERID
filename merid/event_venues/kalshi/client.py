@@ -311,6 +311,36 @@ KALSHI_RATE_TIERS = {
 }
 
 
+def _resurrect_default_executor() -> bool:
+    """Clear a shut-down default executor on the running event loop.
+
+    ``loop.run_in_executor(None, ...)`` reuses ``loop._default_executor``.
+    If that pool was shut down — e.g. ``asyncio.Runner.close()`` or
+    ``loop.shutdown_default_executor()`` ran against a loop object that is
+    still in service — every subsequent submit raises
+    ``RuntimeError('cannot schedule new futures after shutdown')`` forever,
+    permanently wedging DNS/HTTP on an otherwise-live loop.  Clearing the
+    reference lets ``run_in_executor`` lazily mint a fresh pool on the next
+    call.  Returns True when a dead executor was cleared.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    executor = getattr(loop, "_default_executor", None)
+    if executor is not None and getattr(executor, "_shutdown", False):
+        try:
+            loop._default_executor = None
+        except Exception:
+            return False
+        logger.warning(
+            "[kalshi] resurrected dead default executor on running loop %s",
+            id(loop),
+        )
+        return True
+    return False
+
+
 class KalshiTokenBucket:
     """Token-bucket rate limiter — self-limit before hitting 429s.
 
@@ -563,6 +593,15 @@ class KalshiVenueClient(EventVenueClient):
         other loop and triggers a fatal asyncio.exceptions.InvalidStateError in the
         IocpProactor.  We only close a client from the loop it was bound to.
         """
+        # 2026-10-22: resurrect the running loop's default executor first —
+        # "cannot schedule new futures after shutdown" means the loop's
+        # _default_executor pool was shut down while the loop stayed alive
+        # (e.g. a reused loop after asyncio.Runner.close() /
+        # loop.shutdown_default_executor()).  Resetting only the httpx client
+        # leaves DNS dead: getaddrinfo -> run_in_executor(None) -> the same
+        # dead pool forever.  Clearing the reference lets the loop lazily mint
+        # a fresh pool on the next submit.
+        _resurrect_default_executor()
         current_loop_id = self._get_current_loop_id()
 
         # Remove this loop's client from the per-loop registry.
