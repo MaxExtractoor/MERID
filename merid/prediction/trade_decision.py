@@ -39,6 +39,7 @@ from merid.prediction.threshold_cells import (
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
 from merid.prediction import empirical_price_calibration as _epc
 from merid.prediction import model_calibration_log as _mcl
+from merid.prediction import forecast_event as _fe
 from merid.prediction.settlement_distribution import SettlementDistribution
 from merid.data.ingress_replay import replay_time
 from merid.audit.replay_state_diff import record_state_checksum
@@ -2400,7 +2401,8 @@ def _apply_cheap_tail_canary_lane(
     if not ev_result.allowed:
         return _log_canary_rejected(decision, canary_side, canary_breakdown, ev_result, "canary_ev_gate_rejected")
 
-    _increment_canary_daily_count(decision.asset)
+    if not _fe.side_effects_suppressed():
+        _increment_canary_daily_count(decision.asset)
     logger.info(
         "[CHEAP-TAIL-CANARY-SELECTED] asset=%s ticker=%s side=%s "
         "price_cents=%d p_selected=%.3f gross_edge=%.4f net_edge=%.4f "
@@ -3540,6 +3542,82 @@ MERID_PRICE_CAP_EXCEPT_BTC_NO = os.environ.get(
 
 def compute_trade_decision(
     *,
+    forecast_event_source: str = "production",
+    scheduled_horizon_s: Optional[int] = None,
+    scheduled_target_ts: Optional[float] = None,
+    forecast_opportunity_id: Optional[str] = None,
+    evaluation_id: Optional[str] = None,
+    attempt_index: int = 0,
+    execution_inputs: Optional[str] = None,
+    max_delay_s: Optional[float] = None,
+    forecast_arms_fn: Optional[Any] = None,
+    **kwargs,
+) -> TradeDecision:
+    """Same-event telemetry wrapper around ``_compute_trade_decision_impl``.
+
+    Mints one ``forecast_event_id`` at evaluation entry and emits exactly one
+    forecast-event envelope on every exit path — completed, early-returned
+    (``_no_trade``), or raised.  The event's ``opportunity_id`` is the
+    ``decision_id``, which joins it to the decision ledger without
+    modifying the returned decision — telemetry on/off produces identical
+    return values.  ``MERID_FORECAST_EVENT_LOG_ENABLED=0`` makes the wrapper
+    a transparent pass-through; it never alters arguments, return values,
+    or exceptions.
+    """
+    event = _fe.begin_event(
+        kwargs,
+        evaluation_source=forecast_event_source,
+        scheduled_horizon_s=scheduled_horizon_s,
+        scheduled_target_ts=scheduled_target_ts,
+        opportunity_id=forecast_opportunity_id,
+        evaluation_id=evaluation_id,
+        attempt_index=attempt_index,
+        execution_inputs=execution_inputs,
+        max_delay_s=max_delay_s,
+        artifact_paths=_forecast_artifact_paths(),
+    )
+    if event is not None:
+        # Same clock as decision_ts so event/decision timestamps reconcile
+        # under replay (ingress_replay.replay_time is wall-clock in live).
+        event["evaluation_start_ts"] = float(replay_time())
+    try:
+        decision = _compute_trade_decision_impl(**kwargs)
+    except Exception as exc:
+        _fe.finalize_exception(event, exc)
+        raise
+    if event is not None and forecast_arms_fn is not None:
+        try:
+            event["arms"] = forecast_arms_fn(decision)
+        except Exception:
+            event["arms"] = None
+    _fe.finalize_from_decision(event, decision)
+    return decision
+
+
+def _forecast_artifact_paths() -> Dict[str, Optional[str]]:
+    """Resolve the artifact files that fed this evaluation (for hashing)."""
+    try:
+        tail_path = os.environ.get("MERID_TAIL_CALIBRATION_PATH") or str(
+            __import__(
+                "merid.risk.probability.tail_calibrator", fromlist=["x"]
+            )._default_calibration_path()
+        )
+    except Exception:
+        tail_path = os.environ.get("MERID_TAIL_CALIBRATION_PATH")
+    try:
+        epc_path = str(_epc.artifact_path())
+    except Exception:
+        epc_path = None
+    return {
+        "walkforward": _WALKFWD_CAL_PATH,
+        "epc": epc_path,
+        "tail": tail_path,
+        "q0": os.environ.get("MERID_Q0_CALIBRATOR_PATH"),
+    }
+
+
+def _compute_trade_decision_impl(
+    *,
     run_id: str,
     decision_id: str,
     ticker: str,
@@ -3678,7 +3756,8 @@ def compute_trade_decision(
             build_sha=_build_sha,
             indicators=dict(indicators),
         )
-        record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
+        if not _fe.side_effects_suppressed():
+            record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
         return decision
 
     # Layer-1: market / time gates.
@@ -3845,6 +3924,8 @@ def compute_trade_decision(
     # the dual-inflation bug where capping cheap-YES p_yes forced p_no = 0.95,
     # fabricating large NO edges on expensive NO contracts.
     p_no_raw = 1.0 - p_yes_raw
+    indicators["p_yes_raw"] = float(p_yes_raw)
+    indicators["p_no_raw"] = float(p_no_raw)
 
     # 2026-08-28: accept externally supplied p_yes_model only when hybrid
     # probabilities are explicitly enabled.  Bachelier-only is the live default.
@@ -3914,6 +3995,7 @@ def compute_trade_decision(
         p_no_for_no = 1.0 - p_yes_for_yes
     else:
         indicators["walkforward_cal_applied"] = False
+    indicators["fe_post_walkforward_p_yes"] = p_yes_for_yes
 
     # 2026-10-14: model-probability telemetry independent of the EPC
     # artifact (see merid/prediction/model_calibration_log.py).  The raw
@@ -3924,7 +4006,11 @@ def compute_trade_decision(
         ("yes", p_yes_for_yes, yes_entry),
         ("no", p_no_for_no, no_entry),
     ):
-        if _mc_entry is not None and seconds_to_expiry is not None:
+        if (
+            _mc_entry is not None
+            and seconds_to_expiry is not None
+            and not _fe.side_effects_suppressed()
+        ):
             _mcl.log_model_observation(
                 ticker=ticker, asset=asset, side=_mc_side, p_model=float(_mc_p),
                 entry_price_cents=float(_mc_entry) * 100.0,
@@ -3967,13 +4053,16 @@ def compute_trade_decision(
                 else:
                     p_yes_for_yes = _epc_est.p
                     p_no_for_no = min(p_no_for_no, 1.0 - _epc_est.p)
-            _epc.log_observation(
-                ticker=ticker, asset=asset, side=_epc_side, mode=_epc_mode,
-                held_price_cents=float(_epc_entry) * 100.0,
-                seconds_to_expiry=float(seconds_to_expiry), est=_epc_est,
-                p_model=float(_epc_cur), applied=_epc_apply,
-                fee_cents=float(fee_per_contract_cents) if fee_per_contract_cents is not None else None,
-            )
+            if not _fe.side_effects_suppressed():
+                _epc.log_observation(
+                    ticker=ticker, asset=asset, side=_epc_side, mode=_epc_mode,
+                    held_price_cents=float(_epc_entry) * 100.0,
+                    seconds_to_expiry=float(seconds_to_expiry), est=_epc_est,
+                    p_model=float(_epc_cur), applied=_epc_apply,
+                    fee_cents=float(fee_per_contract_cents) if fee_per_contract_cents is not None else None,
+                )
+    indicators["fe_post_epc_p_yes"] = p_yes_for_yes
+    indicators["fe_post_epc_p_no_for_no"] = p_no_for_no
 
     # YES-held curve: calibrate p_yes when the artifact has support at the held
     # price.  2026-09-25: extended from tail-only (<35c) to the full fitted
@@ -4020,6 +4109,7 @@ def compute_trade_decision(
     _lane_p_lo = 1.0 - _lane_p_hi
     p_yes_for_yes = max(_lane_p_lo, min(_lane_p_hi, p_yes_for_yes))
     p_no_for_yes = 1.0 - p_yes_for_yes
+    indicators["fe_post_tail_p_yes"] = p_yes_for_yes
 
     # NO-held curve: calibrate p_no if NO is in the cheap tail.
     # The NO curve in the calibration file is currently a dual, so this is a
@@ -4068,6 +4158,7 @@ def compute_trade_decision(
                     tail_calibration_no_applied = True
     p_no_for_no = max(_lane_p_lo, min(_lane_p_hi, p_no_for_no))
     p_yes_for_no = 1.0 - p_no_for_no
+    indicators["fe_post_tail_p_no_for_no"] = p_no_for_no
 
     # 2026-10-15 (FIX 14): streaming calibration overlay.  The artifact cap
     # is only as fresh as its last manual refit; the streaming state updates
@@ -4109,6 +4200,12 @@ def compute_trade_decision(
     indicators["streaming_cal_applied"] = bool(
         _stream_bound_yes is not None or _stream_bound_no is not None
     )
+    indicators["fe_post_stream_p_yes"] = p_yes_for_yes
+    indicators["fe_post_stream_p_no_for_no"] = p_no_for_no
+    # Final canonical pre-admission probabilities: the drift reserve,
+    # deviation guard, and edge gates below never modify them again.
+    indicators["fe_final_p_yes"] = p_yes_for_yes
+    indicators["fe_final_p_no_for_no"] = p_no_for_no
 
     # 2026-10-15 (FIX 15): calibration-drift alarm.  A cell whose CUSUM of
     # (claim - outcome) trips the threshold carries systematic overconfidence
@@ -8259,12 +8356,13 @@ def compute_trade_decision(
     )
     decision = apply_model_edge_floor_gate(decision)
 
-    record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
+    if not _fe.side_effects_suppressed():
+        record_state_checksum(decision_id, asdict(decision), kind="trade_decision")
 
     # 2026-08-29: Write the decision-time ledger snapshot before any order is
     # submitted.  The ledger is append-only; subsequent fills/exit events are
     # recorded by the order lifecycle.
-    if MERID_ORDER_DECISION_LEDGER_ENABLED:
+    if MERID_ORDER_DECISION_LEDGER_ENABLED and not _fe.side_effects_suppressed():
         from merid.execution.order_decision_ledger import (
             build_order_decision_record_from_trade_decision,
             get_order_decision_ledger,

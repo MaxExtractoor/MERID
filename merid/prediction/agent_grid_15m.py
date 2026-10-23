@@ -8788,7 +8788,7 @@ class LeanAgent15m:
                     self._dir_regime_last = _dir_regime
             except Exception as _dr_err:
                 logger.debug("[REGIME] compute failed: %s", _dr_err)
-            decision = compute_trade_decision(
+            td_kwargs = dict(
                 run_id=run_id,
                 decision_id=f"{candidate_id}:{route}",
                 ticker=ticker,
@@ -8828,6 +8828,18 @@ class LeanAgent15m:
                 adverse_selection_reserve=adv_sel_reserve,
                 route=route,
             )
+            decision = compute_trade_decision(**td_kwargs)
+            # P1a: scheduled-shadow opportunities (additive, read-only).
+            # Due contract x horizon targets are re-evaluated on this same
+            # frozen input bundle under side-effect suppression; emitted
+            # events carry evaluation_source="scheduled_shadow".
+            try:
+                from merid.prediction import shadow_evaluator as _shadow
+                _shadow.maybe_emit_scheduled(
+                    ticker=ticker, asset=asset, base_kwargs=td_kwargs
+                )
+            except Exception as _sh_err:
+                logger.debug("[SHADOW] scheduled emit failed: %s", _sh_err)
             _record_decision_audit(
                 decision,
                 market_state,

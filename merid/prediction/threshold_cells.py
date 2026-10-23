@@ -2130,6 +2130,9 @@ def record_cell_invariant_violation(cell_id: Optional[str], reason: str) -> None
 
 def bump_cell_funnel(stage: str, cell_id: Optional[str] = None) -> None:
     """Increment a funnel stage counter (validated + persisted)."""
+    from merid.prediction import forecast_event as _fe
+    if _fe.side_effects_suppressed():
+        return
     if stage not in FUNNEL_STAGES:
         logger.debug("[THRESHOLD-CELL] unknown funnel stage %r", stage)
         return
@@ -2165,6 +2168,9 @@ def _lifecycle_path() -> str:
 
 def emit_cell_lifecycle(stage: str, **fields: Any) -> None:
     """Append one correlated lifecycle event to logs/threshold_cell_lifecycle.jsonl."""
+    from merid.prediction import forecast_event as _fe
+    if _fe.side_effects_suppressed():
+        return
     try:
         rec = {
             "event": "threshold_cell_lifecycle",

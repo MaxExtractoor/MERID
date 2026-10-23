@@ -239,7 +239,8 @@ def log_rejected_candidate(
     band_shadow: Optional[dict] = None,
 ) -> None:
     """Append one rejected-candidate record.  Never raises."""
-    if not _ENABLED or not should_log(reason):
+    from merid.prediction import forecast_event as _fe
+    if _fe.side_effects_suppressed() or not _ENABLED or not should_log(reason):
         return
     try:
         # Derived attribution: the true shortfall is how far the candidate's
