@@ -106,6 +106,44 @@ MERID_EDGE_MID_BAND_RELIEF_CENTS = max(
 MERID_EDGE_MID_BAND_LO_CENTS = float(
     os.environ.get("MERID_EDGE_MID_BAND_LO_CENTS", "50")
 )
+
+
+def _risk_scaled_sizing_enabled() -> bool:
+    """2026-10-22: MERID_RISK_SCALED_SIZING_ENABLED=1 sizes entries by
+    worst-case loss (contracts = loss_budget / entry_price) instead of a
+    fixed contract count.  Read live so the flip needs no restart."""
+    return os.environ.get("MERID_RISK_SCALED_SIZING_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _per_trade_loss_budget_cents() -> float:
+    """Max worst-case loss per entry, in cents.  Binary worst case for a
+    buy is the premium paid (settle 0).  Default 75c ~ 5% of a $15
+    bankroll; scale up with equity."""
+    try:
+        return float(os.environ.get("MERID_PER_TRADE_LOSS_BUDGET_CENTS", "75"))
+    except Exception:
+        return 75.0
+
+
+def _fav_settle_align_enabled() -> bool:
+    """2026-10-22: MERID_FAV_SETTLE_ALIGN_ENABLED=1 vetoes expensive
+    favorite entries whose settlement reference (spot vs strike) is
+    currently against the held side.  Read live."""
+    return os.environ.get("MERID_FAV_SETTLE_ALIGN_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _fav_settle_align_min_price_cents() -> float:
+    """Entry price (cents) at/above which the alignment gate applies.
+    Below this the contract is cheap enough that adverse-reference buys
+    are positive-skew tail plays rather than stale-favorite mistakes."""
+    try:
+        return float(os.environ.get("MERID_FAV_SETTLE_ALIGN_MIN_PRICE_CENTS", "80"))
+    except Exception:
+        return 80.0
 MERID_EDGE_MID_BAND_HI_CENTS = float(
     os.environ.get("MERID_EDGE_MID_BAND_HI_CENTS", "89")
 )
@@ -7380,6 +7418,38 @@ def compute_trade_decision(
 
     if selected_outcome is not None:
         selected_action = "buy"
+        # 2026-10-22: settlement-alignment gate for expensive favorites.
+        # Turbine's 40/40-variant favorite recipe requires spot direction to
+        # confirm the held side.  Buying a >=80c contract while the
+        # settlement reference is AGAINST it means buying a stale or
+        # dislodged favorite — the 2026-10-23 BTC NO@83 (settled YES, -$2.49)
+        # and DOGE NO@85 (-$2.13) tails.  Cheap entries carry positive skew
+        # and are exempt; missing spot/strike skips the gate (fail-open).
+        if (
+            _fav_settle_align_enabled()
+            and edge_breakdown is not None
+            and spot_price is not None
+            and strike_price
+        ):
+            _fav_entry_px_c = float(edge_breakdown.executable_entry_price) * 100.0
+            _fav_align_min = _fav_settle_align_min_price_cents()
+            if _fav_entry_px_c >= _fav_align_min:
+                _spot_above = float(spot_price) > float(strike_price)
+                _side_is_yes = selected_outcome == "yes"
+                if _spot_above != _side_is_yes:
+                    logger.info(
+                        "[FAV-ALIGN-GATE] asset=%s ticker=%s vetoed %s@%.1fc: "
+                        "spot=%s %s strike=%s — settlement reference opposes "
+                        "the held side at a >=%dc entry price",
+                        asset, ticker, selected_outcome.upper(), _fav_entry_px_c,
+                        spot_price, ">" if _spot_above else "<=", strike_price,
+                        _fav_align_min,
+                    )
+                    no_trade_reason = f"fav_settle_misaligned_{selected_outcome}"
+                    selected_outcome = None
+                    edge_breakdown = None
+
+    if selected_outcome is not None:
         # 2026-08-29: Use the resolved live-config per-order contract cap as the
         # default approved size.  In canary mode this is one contract (100 cc).
         _max_contracts = _get_resolved_max_contracts()
@@ -7400,6 +7470,24 @@ def compute_trade_decision(
                 }
                 _max_contracts = _evh_cap
         approved_size_cc = Decimal(str(_max_contracts * 100))
+        # 2026-10-22: risk-scaled sizing — equal worst-case loss per trade.
+        # contracts = budget_cents / price_cents: an 85c favorite gets ~1/3
+        # the size of a 25c entry at identical dollar risk.  Full-cap sizing
+        # at every price put 17% of equity on one 15m tail (x300 @83c =
+        # -$2.49 on $14.86).  Only ever shrinks approved size; env-budgeted.
+        if _risk_scaled_sizing_enabled() and edge_breakdown is not None:
+            _rs_px_c = float(edge_breakdown.executable_entry_price) * 100.0
+            _rs_budget_c = _per_trade_loss_budget_cents()
+            if _rs_px_c > 0 and _rs_budget_c > 0:
+                _risk_cc = int(_rs_budget_c * 100.0 / _rs_px_c)
+                if _risk_cc < int(approved_size_cc):
+                    indicators["risk_scaled_size"] = {
+                        "budget_cents": _rs_budget_c,
+                        "entry_price_cents": _rs_px_c,
+                        "requested_cc": int(approved_size_cc),
+                        "approved_cc": _risk_cc,
+                    }
+                    approved_size_cc = Decimal(str(max(_risk_cc, 0)))
         p_selected = Decimal(str(edge_breakdown.p_selected))
         p_opposite = Decimal(str(edge_breakdown.p_opposite))
         selected_outcome_price = Decimal(str(edge_breakdown.executable_entry_price))
