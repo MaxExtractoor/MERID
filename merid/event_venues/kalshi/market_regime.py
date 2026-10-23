@@ -9,7 +9,8 @@ Reference: OddsShopper Kalshi trading research and Kalshi Research calibration p
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, Dict, Literal, Optional
 
@@ -128,6 +129,32 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
         enabled=False,
     ),
 }
+
+# 2026-10-23: env floor clamp for band min-TTEs.  Band floors at 120-180s
+# left the classifier rejecting BOTH sides of mid-priced markets at TTE
+# 60-120s (and favorites outside 82-91c at 120-180s) before the decision
+# engine's economics could evaluate them — the same ordering bug fixed
+# 2026-10-14 by lowering skewed bands 240->180s.  The engine's own entry
+# floor (90s) still bounds actual entries; this only stops the classifier
+# from pre-empting it.  Never raises a floor, never enables a band.
+_REGIME_MIN_TTE_FLOOR_S = float(
+    os.environ.get("MERID_REGIME_MIN_TTE_FLOOR_S", "0")
+)
+if _REGIME_MIN_TTE_FLOOR_S > 0:
+    REGIME_CONFIGS = {
+        _name: (
+            replace(_r, min_time_to_expiry_seconds=int(_REGIME_MIN_TTE_FLOOR_S))
+            if _r.enabled
+            and _r.min_time_to_expiry_seconds > _REGIME_MIN_TTE_FLOOR_S
+            else _r
+        )
+        for _name, _r in REGIME_CONFIGS.items()
+    }
+    logger.info(
+        "[REGIME-TTE-CLAMP] MERID_REGIME_MIN_TTE_FLOOR_S=%.0f — enabled band "
+        "min-TTEs lowered to the engine floor",
+        _REGIME_MIN_TTE_FLOOR_S,
+    )
 
 
 def classify_market_regime(
