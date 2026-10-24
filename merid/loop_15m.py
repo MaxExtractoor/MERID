@@ -6219,6 +6219,10 @@ async def _run_loop(self) -> None:
                             _supp_cid = _supp_cand.get("candidate_id")
                             if not _supp_cid:
                                 continue
+                            _supp_td = _supp_cand.get("trade_decision")
+                            _supp_did = getattr(_supp_td, "decision_id", None)
+                            if _supp_did:
+                                _supp_cand["decision_id"] = _supp_did
                             if not hasattr(self, "_candidate_context"):
                                 self._candidate_context = {}
                             self._candidate_context[_supp_cid] = _supp_cand
@@ -6227,7 +6231,25 @@ async def _run_loop(self) -> None:
                                 from_state="GENERATED",
                                 to_state="BLOCKED_ENTRIES_DISABLED",
                                 reason="entries_disabled:allow_new_entries_false",
-                                context={"asset": _supp_cand.get("asset"), "ticker": _supp_cand.get("ticker")},
+                                context={
+                                    "asset": _supp_cand.get("asset"),
+                                    "ticker": _supp_cand.get("ticker"),
+                                    # 2026-10-24: record the owning control and
+                                    # reason — a bare boolean cannot distinguish
+                                    # a halt from warmup, stale WS, or posture.
+                                    "allow_new_entries": False,
+                                    "entries_block_reason": getattr(
+                                        self, "_entries_block_reason", None),
+                                    "operational_state": getattr(
+                                        self, "live_runtime_state", None),
+                                    "decision_lane": _supp_cand.get("decision_lane"),
+                                    "admission_lane": _supp_cand.get("admission_lane"),
+                                    "post_only": _supp_cand.get("post_only"),
+                                    "approved_price_cents": _supp_cand.get(
+                                        "approved_price_cents"
+                                        or _supp_cand.get("price_cents")),
+                                    "edge_pct": _supp_cand.get("edge_pct"),
+                                },
                             )
                         except Exception:
                             pass
@@ -6239,6 +6261,15 @@ async def _run_loop(self) -> None:
                             # CRITICAL FIX: 2026-08-02 - Log candidate lifecycle event for RECEIVED state
                             candidate_id = candidate.get("candidate_id", f"unknown-{int(time.time()*1000)}")
                             try:
+                                # 2026-10-24: stamp the route-suffixed decision
+                                # identity as early as possible so every
+                                # pre-dispatch lifecycle event attaches to a real
+                                # strategy_decisions row, not the signal-stamped
+                                # base id (which has no row and orphans the event).
+                                _td_early = candidate.get("trade_decision")
+                                _early_did = getattr(_td_early, "decision_id", None)
+                                if _early_did:
+                                    candidate["decision_id"] = _early_did
                                 if not hasattr(self, "_candidate_context"):
                                     self._candidate_context = {}
                                 self._candidate_context[candidate_id] = candidate
@@ -6251,7 +6282,18 @@ async def _run_loop(self) -> None:
                                 from_state="GENERATED",
                                 to_state="RECEIVED",
                                 reason="Candidate received from agent_grid_15m",
-                                context={"ticker": candidate.get("ticker"), "edge_pct": candidate.get("edge_pct")}
+                                context={
+                                    "ticker": candidate.get("ticker"),
+                                    "edge_pct": candidate.get("edge_pct"),
+                                    # 2026-10-24: dispatch-disposition fields so
+                                    # the funnel join never depends on log text.
+                                    "decision_lane": candidate.get("decision_lane"),
+                                    "admission_lane": candidate.get("admission_lane"),
+                                    "post_only": candidate.get("post_only"),
+                                    "approved_price_cents": candidate.get("approved_price_cents"),
+                                    "effective_required_edge_cents": candidate.get("effective_required_edge_cents"),
+                                    "gate_ev_cents": candidate.get("gate_ev_cents"),
+                                }
                             )
                             
                             # Extract asset from ticker (e.g., "KXBTC15M-26JUN300345-45" -> "BTC")
@@ -6989,7 +7031,19 @@ async def _run_loop(self) -> None:
                                     from_state="RECEIVED",
                                     to_state="EXECUTED",
                                     reason="Order submitted successfully",
-                                    context={"ticker": ticker, "order_id": candidate.get("order_id")}
+                                    context={
+                                        "ticker": ticker,
+                                        "order_id": candidate.get("order_id"),
+                                        # 2026-10-24: link selection -> intent
+                                        # -> exchange order on one row.
+                                        "intent_id": candidate.get("intent_id"),
+                                        "client_order_id": candidate.get("client_order_id"),
+                                        "count": candidate.get("count"),
+                                        "price_cents": candidate.get("submitted_price_cents") or candidate.get("approved_price_cents"),
+                                        "post_only": candidate.get("post_only"),
+                                        "decision_lane": candidate.get("decision_lane"),
+                                        "dispatch_attempt": candidate.get("_dispatch_attempt"),
+                                    }
                                 )
                                 
                                 # CRITICAL FIX (2026-07-29): Add timestamp to candidate for stale order detection
@@ -7050,7 +7104,19 @@ async def _run_loop(self) -> None:
                                 current_state = self._candidate_lifecycle_states.get(candidate_id, "RECEIVED")
                                 if current_state not in terminal_states:
                                     _rj_detail = candidate.get("_reject_detail") or {}
-                                    _rj_reason = _rj_detail.get("router_reason") or _rj_detail.get("reasons") or _rj_detail.get("exception") or "Order submission failed or blocked"
+                                    _rj_reason = _rj_detail.get("router_reason") or _rj_detail.get("reasons") or _rj_detail.get("reason") or _rj_detail.get("exception") or "Order submission failed or blocked"
+                                    # 2026-10-24: admission margin = the edge the
+                                    # candidate was admitted on minus its required
+                                    # bound — recorded so dispatch rejections can be
+                                    # compared against the original admission margin.
+                                    _adm_margin = None
+                                    try:
+                                        _gev = candidate.get("gate_ev_cents")
+                                        _req = candidate.get("effective_required_edge_cents")
+                                        if _gev is not None and _req is not None:
+                                            _adm_margin = float(_gev) - float(_req)
+                                    except Exception:
+                                        pass
                                     self._log_candidate_lifecycle_event(
                                         candidate_id=candidate_id,
                                         from_state="RECEIVED",
@@ -7062,10 +7128,21 @@ async def _run_loop(self) -> None:
                                             "price_cents": candidate.get("approved_price_cents") or candidate.get("submitted_price_cents"),
                                             "post_only": candidate.get("post_only"),
                                             "decision_lane": candidate.get("decision_lane"),
+                                            "admission_lane": candidate.get("admission_lane"),
                                             "threshold_cell_id": candidate.get("threshold_cell_id"),
                                             "provisional_cell_id": candidate.get("provisional_cell_id"),
                                             "router_engaged": bool(candidate.get("_router_engaged")),
                                             "exchange_order_id": candidate.get("order_id"),
+                                            "intent_id": candidate.get("intent_id"),
+                                            "client_order_id": candidate.get("client_order_id"),
+                                            # dispatch-disposition fields
+                                            "allow_new_entries": True,
+                                            "entries_block_reason": getattr(self, "_entries_block_reason", None),
+                                            "original_admission_margin_cents": _adm_margin,
+                                            "effective_required_edge_cents": candidate.get("effective_required_edge_cents"),
+                                            "gate_ev_cents": candidate.get("gate_ev_cents"),
+                                            "original_snapshot_id": candidate.get("snapshot_id"),
+                                            "dispatch_attempt": candidate.get("_dispatch_attempt"),
                                             **_rj_detail,
                                         }
                                     )
@@ -7155,7 +7232,18 @@ async def _run_loop(self) -> None:
                                 from_state="RECEIVED",
                                 to_state="REJECTED",
                                 reason=f"Execution exception: {e}",
-                                context={"asset": asset, "ticker": ticker, "error": str(e)}
+                                context={
+                                    "asset": asset,
+                                    "ticker": ticker,
+                                    "error": str(e),
+                                    # 2026-10-24: explicit error disposition so
+                                    # exceptions are distinguishable from gates.
+                                    "stage": "dispatch_error",
+                                    "error_type": type(e).__name__,
+                                    "dispatch_attempt": candidate.get("_dispatch_attempt"),
+                                    "decision_lane": candidate.get("decision_lane"),
+                                    "router_engaged": bool(candidate.get("_router_engaged")),
+                                }
                             )
                 
                 # COUNTER SANITY CHECK: Verify candidate → order flow consistency
@@ -9826,6 +9914,24 @@ def _entry_max_rest_seconds() -> int:
         return 45
 
 
+def _mark_reject(self, candidate: Dict, stage: str, reason: str, **fields) -> bool:
+    # Stamp the furthest-stage rejection detail and return False so callers can
+    # write `return self._mark_reject(candidate, "gate", "why", observed=..)`.
+    # The caller-side REJECTED lifecycle event spreads this dict into its
+    # context, giving every pre-intent return a named gate + observed/required.
+    try:
+        d = candidate.get("_reject_detail") or {}
+        d["stage"] = stage
+        d["reason"] = reason
+        for k, v in fields.items():
+            if v is not None:
+                d[k] = v
+        candidate["_reject_detail"] = d
+    except Exception:
+        pass
+    return False
+
+
 async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Convert candidate dict to OrderIntent and route to order router.
     # Returns True if order was submitted, False if order was rejected/skipped.
@@ -9833,6 +9939,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
     # Furthest-stage marker: every return path updates this so the caller-side
     # REJECTED lifecycle event names where the candidate actually died.
     candidate["_reject_detail"] = {"stage": "candidate_validation"}
+    candidate["_dispatch_attempt"] = int(candidate.get("_dispatch_attempt") or 0) + 1
     try:
         from merid.event_venues.kalshi.order_router import (
             OrderIntent,
@@ -9847,7 +9954,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         ticker = candidate.get("ticker")
         if not ticker:
             logger.warning("[15M-LOOP] Candidate missing ticker, skipping")
-            return False
+            return self._mark_reject(candidate, "candidate_validation", "missing_ticker")
 
         # CRITICAL FIX (2026-09-21): Reject missing side/action up-front.  The
         # canonical-range and exit-policy code below used `or "yes"` defaults;
@@ -9860,7 +9967,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "preventing systematic YES bias by rejecting incomplete data",
                 candidate.get("side"), candidate.get("action"), ticker
             )
-            return False
+            return self._mark_reject(
+                candidate, "candidate_validation", "missing_side_or_action",
+                observed=candidate.get("side") or candidate.get("action"))
 
         # 2026-08-29: Extract the authoritative TradeDecision up-front.  The EV
         # gate approved a specific executable price and quantity; the order must
@@ -9948,7 +10057,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             
             if asset is None:
                 logger.warning("[15M-LOOP] Could not determine asset from ticker %s", ticker)
-                return False
+                return self._mark_reject(
+                    candidate, "candidate_validation", "asset_unresolved",
+                    observed=ticker)
 
             # CRITICAL FIX (2026-08-12): Extract signal model state up-front.
             # resolve_exit_policy() needs these before constructing OrderIntent.
@@ -10025,7 +10136,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "[15M-LOOP] Failed to resolve policy setup for %s: %s - REJECTING ORDER for safety",
                 ticker, e, exc_info=True
             )
-            return False
+            return self._mark_reject(
+                candidate, "exit_policy_resolution", "policy_setup_exception",
+                exception=str(e))
         
         # CRITICAL FIX (2026-08-29): The EV gate approved a specific executable
         # price.  That price is the single source of truth for the order limit.
@@ -10047,7 +10160,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "[15M-LOOP] REJECTING CANDIDATE: unparsable side=%r for ticker=%s",
                 candidate.get("side"), ticker,
             )
-            return False
+            return self._mark_reject(
+                candidate, "candidate_validation", "side_unparsable",
+                observed=candidate.get("side"))
         _candidate_price_cents = int(candidate.get("price_cents", 0) or 0)
         min_price_cents, max_price_cents = get_canonical_price_range(_candidate_side)
         # 2026-10-17: window-quota candidates span the lane's own band —
@@ -10128,7 +10243,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     # CRITICAL FIX: If side is missing, log error and skip
                     if not candidate_side:
                         logger.error("[15M-LOOP] CRITICAL: candidate missing 'side' field for ticker=%s - CANNOT DETERMINE PRICE - SKIPPING", ticker)
-                        return False
+                        return self._mark_reject(
+                            candidate, "price_resolution", "side_missing_for_pricing")
                     if candidate_side == "no" or candidate_side == "buy_no":
                         # NO order: calculate NO mid-price
                         if market_state.best_bid_cents and market_state.best_ask_cents:
@@ -10147,7 +10263,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             # fail closed; the old 42c default fabricated an economic
                             # coordinate that could reach the exchange.
                             logger.error("[15M-LOOP] NO order but no market state data for %s - REJECTING (no fabricated price)", ticker)
-                            return False
+                            return self._mark_reject(
+                                candidate, "price_resolution", "no_executable_no_price")
                     else:
                         # YES order: use YES mid-price
                         if market_state.mid_cents:
@@ -10167,16 +10284,20 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                             # CRITICAL FIX (2026-09-21): missing executable YES price
                             # must fail closed; never fabricate a price.
                             logger.error("[15M-LOOP] YES order but no market state data for %s - REJECTING (no fabricated price)", ticker)
-                            return False
+                            return self._mark_reject(
+                                candidate, "price_resolution", "no_executable_yes_price")
                 else:
                     # CRITICAL FIX (2026-09-21): missing market state means no
                     # executable price exists; the old 42c default could place a
                     # live order at a fabricated coordinate.
                     logger.error("[15M-LOOP] No market state available for %s - REJECTING (no fabricated price)", ticker)
-                    return False
+                    return self._mark_reject(
+                        candidate, "price_resolution", "no_market_state")
             except Exception as e:
                 logger.error("[15M-LOOP] Failed to get price from market state for %s: %s - REJECTING (no fabricated price)", ticker, e)
-                return False
+                return self._mark_reject(
+                    candidate, "price_resolution", "market_state_error",
+                    exception=str(e))
 
         # Kalshi prices are whole cents; normalize any float/numpy scalar that may
         # have leaked through from market-state arithmetic before building the intent.
@@ -10230,7 +10351,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         "[15M-LOOP] Unrecognized exit policy mode=%s for %s - rejecting order",
                         _exit_mode, ticker,
                     )
-                    return False
+                    return self._mark_reject(
+                        candidate, "exit_policy_resolution", "unrecognized_exit_mode",
+                        observed=_exit_mode, required="ACTIVE_MANAGEMENT|HOLD_TO_SETTLEMENT")
                 # profit_only_v1: an ACTIVE_MANAGEMENT policy with no armed
                 # TP/SL is NOT a rejection - it derives a HOLD_TO_SETTLEMENT
                 # lifecycle plan at the router (settlement is the exit).  Only
@@ -10247,14 +10370,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             else:
                 self._rejection_counters["exit_policy_failed"] += 1
                 logger.error("[15M-LOOP] exit_policy is None after resolution! asset=%s regime=%s", asset, regime)
-                return False
+                return self._mark_reject(
+                    candidate, "exit_policy_resolution", "exit_policy_none",
+                    observed=f"asset={asset},regime={regime}")
         except Exception as e:
             self._rejection_counters["exit_policy_failed"] += 1
             logger.error(
                 "[15M-LOOP] Failed to resolve exit policy for %s: %s - REJECTING ORDER for safety",
                 ticker, e, exc_info=True
             )
-            return False
+            return self._mark_reject(
+                candidate, "exit_policy_resolution", "exit_policy_exception",
+                exception=str(e))
 
         # Past policy resolution — failures from here are sizing/gate-check
         # rejections (EV re-gate, maker-disabled, edge/parity) unless a more
@@ -10318,7 +10445,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         # Validate count is reasonable.  Anything below one centi-contract is effectively zero.
         if count < 0.01:
             logger.warning("[15M-LOOP] Invalid count=%s from candidate, rejecting", count)
-            return False
+            return self._mark_reject(
+                candidate, "sizing", "count_below_minimum",
+                observed=count, required=0.01)
         
         # Calculate notional for logging
         position_notional_usd = (count * price_cents) / 100.0
@@ -10463,7 +10592,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "[15M-LOOP] EV re-gate failed for ticker=%s: %s - rejecting for safety",
                     ticker, ev_err,
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "executable_cost_ev_gate", "ev_regate_exception",
+                    exception=str(ev_err))
 
         # BUG #34 FIX: Extract edge_pct, confidence, model_prob from candidate
         # These are now computed in signal generation (BUG #36) and carried through candidate
@@ -10576,7 +10707,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "preventing systematic YES bias by rejecting incomplete data",
                 side_raw, action_raw, ticker
             )
-            return False
+            return self._mark_reject(
+                candidate, "candidate_validation", "missing_side_or_action",
+                observed=f"side={side_raw},action={action_raw}")
         
         logger.debug("[15M-LOOP] Converting side/action: side_raw=%s action_raw=%s", side_raw, action_raw)
         
@@ -10589,7 +10722,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "[15M-LOOP] Invalid side/action combination: side=%s action=%s for ticker=%s - %s",
                 side_raw, action_raw, ticker, e
             )
-            return False
+            return self._mark_reject(
+                candidate, "candidate_validation", "side_action_invalid",
+                observed=f"{action_raw}:{side_raw}", exception=str(e))
         
         # CRITICAL INVARIANT CHECK: Entry orders must ALWAYS use BUY actions
         # Entry trades: BUY_YES (bullish) or BUY_NO (bearish)
@@ -10612,7 +10747,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "Rejecting this entry order to prevent SELL YES/SELL_NO on entry.",
                     ticker, side_raw, action_raw, kalshi_side
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "entry_sell_action",
+                    observed=action_raw, required="buy")
         
         # CRITICAL INVARIANT CHECK: Position-delta invariant for entry/exit direction
         # ENTRY: applying fill must strictly increase position magnitude (0 to >0)
@@ -10643,7 +10780,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "which violates the entry/exit direction invariant. Rejecting.",
                     ticker, entry_or_exit, pre_position_size
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "entry_pre_position_nonzero",
+                    observed=pre_position_size, required=0)
             if expected_post_position_size <= 0:
                 self._rejection_counters["other"] += 1
                 logger.error(
@@ -10651,7 +10790,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "ENTRY orders must result in positive position. This violates the entry/exit direction invariant. Rejecting.",
                     ticker, entry_or_exit, expected_post_position_size
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "entry_post_position_nonpositive",
+                    observed=expected_post_position_size, required=">0")
         elif entry_or_exit == "exit":
             # Exit: must decrease position magnitude, never go from 0 to nonzero
             if pre_position_size <= 0:
@@ -10662,7 +10803,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "This violates the entry/exit direction invariant. Rejecting.",
                     ticker, entry_or_exit, pre_position_size
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "exit_pre_position_nonpositive",
+                    observed=pre_position_size, required=">0")
             if expected_post_position_size >= pre_position_size:
                 self._rejection_counters["other"] += 1
                 logger.error(
@@ -10671,7 +10814,10 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "This violates the entry/exit direction invariant. Rejecting.",
                     ticker, entry_or_exit, pre_position_size, expected_post_position_size
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "exit_not_decreasing",
+                    observed=expected_post_position_size,
+                    required=f"<{pre_position_size}")
             # Check for position flip (e.g., +5 -> -1) - exit trying to open opposite leg
             if expected_post_position_size < 0:
                 self._rejection_counters["other"] += 1
@@ -10681,7 +10827,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "instead of closing the current position. This violates the entry/exit direction invariant. Rejecting.",
                     ticker, entry_or_exit, pre_position_size, expected_post_position_size
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "exit_position_flip",
+                    observed=expected_post_position_size, required=">=0")
         
         # CRITICAL FIX (2026-07-19): Validate strategy intent vs net exposure
         # This prevents side/price mapping bugs where intent doesn't match exposure
@@ -10703,7 +10851,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     ticker, candidate_side, side_raw
                 )
                 # Block the trade - this is a critical bug
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "side_preservation_violation",
+                    observed=f"{candidate_side}!={side_raw}", required="equal")
 
         if strategy_intent:
             # DIRECTION POLICY (2026-08-07): Entry orders must use BUY actions only
@@ -10722,7 +10872,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     "Entry orders must use BUY actions (BUY_YES or BUY_NO). Rejecting candidate.",
                     ticker, kalshi_side
                 )
-                return False
+                return self._mark_reject(
+                    candidate, "position_delta_check", "direction_policy_sell_on_entry",
+                    observed=kalshi_side, required="BUY_YES|BUY_NO")
             else:
                 net_exposure = "unknown"
 
@@ -10973,13 +11125,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             is_valid, prob_error = validate_probability_model_consistency(candidate, ticker)
             if not is_valid:
                 logger.warning("[15M-LOOP] Probability model consistency check failed: %s - rejecting candidate", prob_error)
-                return False
+                return self._mark_reject(
+                    candidate, "probability_model", "consistency_check_failed",
+                    observed=str(prob_error))
             
             # Enrich candidate with validated BinaryProbability model
             is_valid, enrich_error = enrich_intent_with_binary_probability(candidate, ticker)
             if not is_valid:
                 logger.warning("[15M-LOOP] Failed to enrich candidate with probability model: %s - rejecting candidate", enrich_error)
-                return False
+                return self._mark_reject(
+                    candidate, "probability_model", "binary_probability_enrich_failed",
+                    observed=str(enrich_error))
             
             # Use validated probability model for p_hat fields
             # CRITICAL FIX 2026-08-02: Ensure probability interpretation matches router expectations
@@ -11443,6 +11599,15 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             intent.admission_owner = (
                 candidate.get("admission_owner") or _lane or "formula"
             )
+            # 2026-10-24: link the routed intent back onto the candidate so
+            # every downstream lifecycle event (EXECUTED and router rejections)
+            # can join selection -> intent -> order on one durable row.
+            try:
+                candidate["intent_id"] = intent.intent_id
+                candidate["client_order_id"] = getattr(
+                    intent, "client_order_id", None)
+            except Exception:
+                pass
             intent.exec_stage_marks_ns["intent_created"] = time.monotonic_ns()
             # Eval→submit span: upstream producer marks take precedence
             # (first-write-wins semantics in the emitter); these capture
@@ -12141,12 +12306,36 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 from_state="RECEIVED",
                 to_state="BLOCKED_EDGE_THRESHOLD",
                 reason="Edge threshold failed (both sides below min_edge)",
-                context={"ticker": ticker, "edge_yes": edge_yes, "edge_no": edge_no, "min_edge": min_edge}
+                context={
+                    "ticker": ticker,
+                    "edge_yes": edge_yes,
+                    "edge_no": edge_no,
+                    "min_edge": min_edge,
+                    "gate": "canonical_edge_threshold",
+                    "observed_value": max(edge_yes or 0.0, edge_no or 0.0),
+                    "required_value": min_edge,
+                    "decision_lane": candidate.get("decision_lane"),
+                    "admission_lane": candidate.get("admission_lane"),
+                    "approved_price_cents": candidate.get("approved_price_cents"),
+                    "effective_required_edge_cents": candidate.get("effective_required_edge_cents"),
+                    "dispatch_attempt": candidate.get("_dispatch_attempt"),
+                }
             )
             logger.warning(
                 "[15M-LOOP] EDGE THRESHOLD BLOCK: ticker=%s edge_yes=%.4f edge_no=%.4f min_edge=%.4f - NO TRADE",
                 ticker, edge_yes, edge_no, min_edge
             )
+            candidate["_reject_detail"] = {
+                "stage": "canonical_edge_threshold",
+                "reasons": ["edge_below_min_edge"],
+                "edge_yes": edge_yes,
+                "edge_no": edge_no,
+                "observed_value": max(edge_yes or 0.0, edge_no or 0.0),
+                "required_value": min_edge,
+                "decision_lane": candidate.get("decision_lane"),
+                "admission_lane": candidate.get("admission_lane"),
+                "approved_price_cents": candidate.get("approved_price_cents"),
+            }
             # Skip routing this order - return to skip this candidate
             return False
         
@@ -12172,7 +12361,17 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 from_state="RECEIVED",
                 to_state="BLOCKED_PARITY",
                 reason=f"Parity check failed: {block_reason}",
-                context={"ticker": ticker, "edge_yes": edge_yes, "edge_no": edge_no, "min_edge": min_edge}
+                context={
+                    "ticker": ticker,
+                    "edge_yes": edge_yes,
+                    "edge_no": edge_no,
+                    "min_edge": min_edge,
+                    "gate": "yes_no_parity",
+                    "parity_block_reason": block_reason,
+                    "decision_lane": candidate.get("decision_lane"),
+                    "approved_price_cents": candidate.get("approved_price_cents"),
+                    "dispatch_attempt": candidate.get("_dispatch_attempt"),
+                }
             )
             
             # 2026-07-25: Log pipeline trace for blocked candidate
@@ -12180,6 +12379,15 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 "[PIPELINE-TRACE] ticker=%s side=%s canonical_edge_yes=%.4f canonical_edge_no=%.4f min_edge_frac=%.4f decision=BLOCK_REASON=PARITY_%s",
                 ticker, kalshi_side, edge_yes, edge_no, min_edge, block_reason.upper()
             )
+            candidate["_reject_detail"] = {
+                "stage": "yes_no_parity",
+                "reasons": [block_reason],
+                "edge_yes": edge_yes,
+                "edge_no": edge_no,
+                "min_edge": min_edge,
+                "decision_lane": candidate.get("decision_lane"),
+                "approved_price_cents": candidate.get("approved_price_cents"),
+            }
             # Skip routing this order - return to skip this candidate
             return False
 

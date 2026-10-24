@@ -21007,9 +21007,39 @@ class LeanAgentGrid15m:
             # Among similar edges, select the cheapest (lowest price_cents)
             if len(similar_edges) > 1:
                 similar_edges.sort(key=lambda c: c.get('price_cents', 999))
-                filtered_candidates.append(similar_edges[0])
+                winner = similar_edges[0]
             else:
-                filtered_candidates.append(best_edge)
+                winner = best_edge
+            filtered_candidates.append(winner)
+
+            # 2026-10-24: dispatch-disposition completeness.  Every candidate
+            # that reached this stage was MODEL_SELECTED upstream; the losers
+            # must leave a durable disposition or the funnel record shows
+            # "selected then nothing".  Fail-open, never raises.
+            _winner_cid = winner.get('candidate_id')
+            for _loser in asset_cands:
+                if _loser is winner:
+                    continue
+                try:
+                    _loser_td = _loser.get('trade_decision')
+                    _loser_did = (
+                        getattr(_loser_td, 'decision_id', None)
+                        or _loser.get('decision_id')
+                    )
+                    _append_candidate_lifecycle_event(
+                        {**_loser, 'decision_id': _loser_did},
+                        event_type="ROUTE_NOT_DISPATCHED",
+                        stage="ROUTE_SELECTION",
+                        reason="lost_best_edge_per_asset",
+                        extra={
+                            "winner_candidate_id": _winner_cid,
+                            "winner_edge_pct": winner.get('edge_pct'),
+                            "loser_edge_pct": _loser.get('edge_pct'),
+                            "asset": asset,
+                        },
+                    )
+                except Exception:
+                    pass
 
         return filtered_candidates
 
@@ -22385,6 +22415,12 @@ class LeanAgentGrid15m:
 
                         candidate_id=str(candidate.get('candidate_id', '') or ''),
 
+                        decision_id=str(
+                            getattr(candidate.get('trade_decision'), 'decision_id', None)
+                            or candidate.get('decision_id')
+                            or ''
+                        ) or None,
+
                         cost_breakdown_cents=candidate.get('cost_breakdown_cents'),
 
                         quote_owner=_quote_owner,
@@ -22536,6 +22572,12 @@ class LeanAgentGrid15m:
                         # path and audit ledger record who owned the price.
                         original_candidate['quote_owner'] = getattr(order, 'quote_owner', 'UNKNOWN')
                         original_candidate['degraded_mode'] = bool(getattr(order, 'degraded_mode', False))
+                        # 2026-10-24: keep the route decision identity on the
+                        # returned dict so every post-model lifecycle event has
+                        # a durable decision row to attach to.
+                        _order_decision_id = getattr(order, 'decision_id', None)
+                        if _order_decision_id and not original_candidate.get('decision_id'):
+                            original_candidate['decision_id'] = _order_decision_id
                         candidates.append(original_candidate)
                         logger.info(
                             "[GLOBAL-ALLOCATOR-RETURN] asset=%s ticker=%s side=%s price=%dc count=%s edge=%.1f%% owner=%s",
@@ -22699,7 +22741,15 @@ def _append_candidate_lifecycle_event(
     candidate.  Fail-open: never raises into the trading path.
     """
     try:
-        decision_id = candidate.get("decision_id")
+        # 2026-10-24: prefer the route-suffixed TradeDecision identity
+        # ({candidate_id}:{route}) — it matches a strategy_decisions row, so
+        # the event is joinable.  The signal-stamped base decision_id is the
+        # fallback; when both are missing the event is dropped (fail-open).
+        _td = candidate.get("trade_decision")
+        decision_id = (
+            getattr(_td, "decision_id", None)
+            or candidate.get("decision_id")
+        )
         if not decision_id:
             return
         from merid.execution.decision_audit_ledger import get_decision_audit_ledger

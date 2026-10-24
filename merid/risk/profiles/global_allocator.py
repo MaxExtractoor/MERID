@@ -111,6 +111,12 @@ class OrderCandidate:
     # admitted via an EPC lift is not vetoed a second time on a different
     # economic metric.  Falls back to edge_pct when absent.
     gate_ev_cents: Optional[float] = None
+    # 2026-10-24: the route-suffixed TradeDecision identity ({candidate_id}:{route})
+    # must travel with the order through allocation.  Without it, post-model
+    # lifecycle events (ALLOCATION_REJECTED, suppression, dispatch rejections)
+    # have no durable decision row to attach to and the funnel goes silent
+    # between MODEL_SELECTED and router handoff.
+    decision_id: Optional[str] = None
 
     @property
     def notional_usd(self) -> float:
