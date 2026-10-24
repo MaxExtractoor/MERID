@@ -107,8 +107,8 @@ the next server restart must automatically execute the live startup sequence bel
 14. Verify the live model configuration is approved:
    - Use Bachelier-only with TWAP-appropriate volatility unless another model has a documented approved release.
    - Disable hybrid Bachelier-plus-delta signals—velocity, MACD, RSI, OBI, FVG, and regime—unless explicitly validated and approved.
-   - Apply held-side tail calibration unconditionally below `MERID_TAIL_CALIBRATION_PRICE_FLOOR`.
-   - Block NO-tail entries until a validated NO-held calibration artifact is approved.
+   - Apply held-side tail calibration per the loaded artifact's scope. With `MERID_CALIBRATION_CAP_FULL_RANGE` (default on) the YES curve caps at every held price; a fitted non-dual NO curve (`no_curve_is_dual=false`, e.g. `tail_pava:n10220`) is applied the same way, while a provisional dual NO curve remains a cheap-tail stop-gap gated by `MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR`/`_TRANSITION`. `MERID_TAIL_CALIBRATION_PRICE_FLOOR` (default 0.35) bounds the tail region whenever full-range is off.
+   - NO-side entries are enabled — governed by measured per-asset moneyness bands, not a blanket tail block. Global `MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO=50` with audited overrides: BTC-NO max 79c (51-64c pocket blocked), ETH-NO max 89c (51-64c blocked), DOGE/SOL-NO max 75c, XRP-NO max 1c (hard-blocked: audited -9.54 USD, unpriceable down-moves). Deep NO tails >=80c additionally face the tail-LCB gate (`MERID_TAIL_LCB_MIN_PRICE_CENTS=80`). Band changes require the same settled-fill + veto-counterfactual audit evidence that produced the current split.
    - Require the corrected full fee and execution-cost model for every entry decision.
 
 15. If every preflight step succeeds, persist an immutable startup release record and set:
@@ -196,7 +196,7 @@ The live system must not submit entries outside this canonical decision path.
 
 ### Execution mode: full live, no canary lanes
 
-Production runs one decision path: the core Bachelier/TWAP lane with the held-price floor, π* premium, and executable-cost EV gate. The exploration overlays (`MERID_CHEAP_TAIL_CANARY_*`, `MERID_CANARY_4C_LCB`, `MERID_LIVE_CANARY`) are **off** and must stay off unless a documented, approved experiment re-enables one. Order size is bounded by the account (`MERID_MAX_CONTRACTS_PER_ORDER`, `MERID_FIXED_EXPOSURE_CAP_USD`), not by a canary flag; raise both together as the bankroll grows. A low account balance is not a reason to halt entries — the system must size to what the trading shard can collateralize and otherwise trade normally.
+Production runs one decision path: the core Bachelier/TWAP lane with the held-price floor, π* premium, and executable-cost EV gate. Bounded sub-lanes within that path — settlement (`MERID_SETTLEMENT_LANE_*`), pinned-fav (`MERID_PINNED_FAV_*`), cheap-NO (`MERID_CHEAP_NO_*`), mband (`MERID_MBAND_*`), and `current_build_provisional` cells — are production features with their own audited domains and kill switches; they are not canary overlays. The exploration overlays (`MERID_CHEAP_TAIL_CANARY_*`, `MERID_CANARY_4C_LCB`, `MERID_LIVE_CANARY`) are **off** and must stay off unless a documented, approved experiment re-enables one. Order size is bounded by the account (`MERID_MAX_CONTRACTS_PER_ORDER`, `MERID_FIXED_EXPOSURE_CAP_USD`), not by a canary flag; raise both together as the bankroll grows. A low account balance is not a reason to halt entries — the system must size to what the trading shard can collateralize and otherwise trade normally.
 
 `MERID_OBSERVE_ONLY` is an operator emergency read-only switch. `start_15m.ps1` derives its default from `auto_execution_mode` (1 → `0`); it must never silently default to read-only while this contract says auto-execute.
 
@@ -260,7 +260,7 @@ Production startup with `auto_execution_mode: 1` must fail closed if any of the 
 - Reconciliation, trusted-fill canonicalization, exit firewall, or protective-exit controls are disabled.
 - The active router is not the canonical live Kalshi router.
 - The selected model is not approved for live use.
-- The NO-tail calibration artifact is missing or unapproved while NO-tail entries are enabled.
+- The tail calibration artifact is missing, invalid, or unapproved for either held side (a provisional dual NO curve is acceptable only as the documented tail-scope fallback, not as the fitted NO curve `MERID_CALIBRATION_CAP_FULL_RANGE` assumes).
 
 The system must log the resolved runtime configuration at startup, excluding secret values, including:
 
@@ -415,11 +415,15 @@ and `model_calibration_version`; the guard annotates evaluations with the
 legacy verdict (`legacy_outcome` record lines) so replay can join the legacy
 comparison population by `evaluation_id`.
 
-### Shadow-validation phase (current)
+### Gate status (current): enabled in `ev_gated` mode
 
-The gate is OFF. The live campaign runs normal trading across BTC, ETH, SOL,
-XRP, and DOGE with all discretionary exits shadowed. Per 15-minute window the
-loop emits `EV-EXIT-SHADOW-SUMMARY` per asset and `EV-EXIT-SHADOW-GLOBAL`
+The gate is ON: `MERID_ENABLE_EV_EXIT_GATE=1` and
+`MERID_DISCRETIONARY_EXIT_MODE=ev_gated` in the resolved live config. Every
+discretionary exit must pass the settlement-aligned sell-vs-hold evaluation;
+operational and emergency exits keep their mechanical bypasses. The shadow
+phase below is retained for provenance — it ran across BTC, ETH, SOL, XRP,
+and DOGE with all discretionary exits shadowed while the loop emitted
+`EV-EXIT-SHADOW-SUMMARY` per asset and `EV-EXIT-SHADOW-GLOBAL`
 (positions evaluated, legacy triggers, EV sell/hold/data-insufficient/
 near-settlement/uncalibrated counts, side mismatches, legacy-EV disagreements,
 median RTI/book age, median bid depth, attempts in flight, unmatched fills).
@@ -432,9 +436,10 @@ inputs are not ready — it is not evidence the gate is too strict. Under pytest
 the singleton registry never writes to `logs/`; `MERID_EV_EXIT_LOG_DIR`
 overrides the directory, `MERID_EV_EXIT_DISABLE_PERSIST` disables writes.
 
-### Canary scope (parsed now, OFF by default)
+### Canary scope (parsed, not active)
 
-When the gate is later enabled with `MERID_DISCRETIONARY_EXIT_MODE=ev_gated_canary`,
+The live mode resolved to `ev_gated`, not `ev_gated_canary` — the canary
+envelope is not active. If the mode is set to `ev_gated_canary`,
 a `SELL_SIGNALLED` decision must additionally satisfy the canary envelope or it
 becomes `HOLD_OUTSIDE_CANARY_SCOPE`: `MERID_EV_EXIT_CANARY_ASSETS` (e.g. `BTC`),
 `MERID_EV_EXIT_CANARY_SIDES` (e.g. `YES`), `MERID_EV_EXIT_CANARY_REASONS`

@@ -45,7 +45,7 @@ _RESOLUTION_STATUSES = ("emitted", "late", "missed", "unavailable",
 
 
 def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
-    for _ln, r in _iter_jsonl_numbered(path):
+    for _ln, r, _lh in _iter_jsonl_numbered(path):
         yield r
 
 

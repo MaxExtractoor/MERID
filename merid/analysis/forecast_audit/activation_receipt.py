@@ -104,8 +104,9 @@ def _detect_process() -> Dict[str, Any]:
         if isinstance(rows, dict):
             rows = [rows]
         hits = [r for r in rows
-                if "agent_grid" in (r.get("CommandLine") or "")
-                or "loop_15m" in (r.get("CommandLine") or "")]
+                if any(k in (r.get("CommandLine") or "")
+                       for k in ("main_15m_lean", "agent_grid",
+                                 "loop_15m", "start_15m"))]
         return {"queried": len(rows), "agent_processes": hits,
                 "detected": bool(hits)}
     except Exception as exc:
@@ -253,8 +254,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "receipt_schema": 1,
         "captured_ts": time.time(),
         "segment_id": rec["segment_id"],
-        "collection_status": ("awaiting_production_start"
-                              if not activated else "collecting"),
+        "collection_status": (
+            "collecting" if activated else (
+                "process_detected_awaiting_first_in_segment_evaluation"
+                if proc.get("detected")
+                else "awaiting_production_start")),
         "exclusion_manifest": (
             "test_residue_exclusions.json" if exclusions else None),
         "segment_window_utc": [rec["start_utc"], rec["fixed_end_utc"]],
