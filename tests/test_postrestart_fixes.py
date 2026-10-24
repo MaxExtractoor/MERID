@@ -241,6 +241,86 @@ class TestTailDropPersistence:
         assert pos.tail_drop_breach_obs == 0
 
 
+class TestNearMissAttribution:
+    """PRFS-style dedup + settlement counterfactual for rejected rows."""
+
+    def _row(self, ticker, side, price, ts, **kw):
+        return {
+            "type": "rejected_candidate",
+            "ticker": ticker,
+            "side": side,
+            "executable_price_cents": price,
+            "event_ts_utc": ts,
+            "asset": kw.get("asset", "BTC"),
+            "reject_reason": "no_positive_executable_edge",
+            "price_bucket": kw.get("bucket", "40-49c"),
+        }
+
+    def test_dedup_collapses_repeated_evals(self):
+        from merid.analysis.near_miss_attribution import dedup_opportunities
+
+        rows = [
+            self._row("T1", "no", 55.0, "2026-10-24T01:00:00Z"),
+            self._row("T1", "no", 54.0, "2026-10-24T01:00:05Z"),
+            self._row("T1", "no", 53.0, "2026-10-24T01:00:10Z"),
+            self._row("T1", "yes", 45.0, "2026-10-24T01:00:00Z"),
+            self._row("T2", "no", 55.0, "2026-10-24T01:15:00Z"),
+        ]
+        opps = dedup_opportunities(rows)
+        assert len(opps) == 3  # T1-no, T1-yes, T2-no
+        t1no = [o for o in opps if o["key"] == ("T1", "no")][0]
+        assert t1no["price_cents"] == 55.0  # earliest snapshot kept
+
+    def test_cf_net_cents(self):
+        from merid.analysis.near_miss_attribution import cf_net_cents
+
+        # Buy NO at 50c, 1c fee: win pays 49c, loss costs 51c.
+        assert cf_net_cents(50.0, True, 1.0) == 49.0
+        assert cf_net_cents(50.0, False, 1.0) == -51.0
+
+    def test_exact_fee(self):
+        from merid.analysis.near_miss_attribution import exact_fee_cents
+
+        # 50c contract: 0.07*0.5*0.5 = $0.0175 = 1.75c
+        assert abs(exact_fee_cents(50.0) - 1.75) < 1e-9
+        # 90c contract: 0.07*0.9*0.1 = $0.0063 = 0.63c
+        assert abs(exact_fee_cents(90.0) - 0.63) < 1e-9
+
+    def test_attribute_cells_dominance(self):
+        from merid.analysis.near_miss_attribution import (
+            attribute_cells, dedup_opportunities,
+        )
+
+        rows = []
+        for i in range(6):
+            rows.append(
+                self._row(f"T{i}", "no", 50.0, f"2026-10-24T01:{i:02d}:00Z",
+                          bucket="50-59c")
+            )
+        opps = dedup_opportunities(rows)
+        # 5 of 6 settle NO (side wins) -> positive mean EV.
+        settled = {f"T{i}": (i < 5) == False for i in range(6)}
+        cells = attribute_cells(opps, settled, {}, fill_prior=0.5, min_samples=5)
+        assert len(cells) == 1
+        c = cells[0]
+        assert c["n_opportunities"] == 6 and c["n_resolved"] == 6
+        assert c["cf_mean_net_cents"] > 0
+        assert c["dominance_flag"] is True
+        assert c["fill_adjusted_ev_cents"] == round(c["cf_mean_net_cents"] * 0.5, 2)
+
+    def test_unresolved_excluded(self):
+        from merid.analysis.near_miss_attribution import (
+            attribute_cells, dedup_opportunities,
+        )
+
+        opps = dedup_opportunities(
+            [self._row("T9", "yes", 20.0, "2026-10-24T02:00:00Z")]
+        )
+        cells = attribute_cells(opps, {}, {}, min_samples=1)
+        assert cells[0]["n_resolved"] == 0
+        assert cells[0]["dominance_flag"] is False
+
+
 class TestWatchdogDecide:
     def test_healthy_resets(self):
         action, times, misses = wd.decide([], 2, [100.0], None, 200.0)
