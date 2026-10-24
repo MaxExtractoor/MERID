@@ -1,0 +1,39 @@
+{
+  "run_id": "flb_residual_runB_first_entry_grouped",
+  "label": "Run B — corrected replay, first-entry opportunities, ticker-grouped partition",
+  "status": "current_best_historical_replay_still_mixed_vintage",
+  "source": "logs/flb_study_extract.jsonl (377,486 rows, same extract as Run A)",
+  "population": {
+    "dedup_rule": "first eligible decision per (ticker, side) — fixed entry rule",
+    "first_entry_opportunities": 3021,
+    "unique_tickers": 1922
+  },
+  "partition": {
+    "method": "chronological + ticker_grouped",
+    "tickers_shared_fit_eval": 0,
+    "both_sides_same_partition": true,
+    "fit_opportunities": 1791,
+    "fit_tickers": 1153,
+    "eval_opportunities": 1230,
+    "eval_tickers": 769,
+    "label_ordering_asserted": "max(fit.close_ts) < min(eval.decision_ts)"
+  },
+  "residual_decomposition": {
+    "note": "bucket census below is ALL fit rows; means table is admitted-under-ZERO_FLB cohort",
+    "fit_bucket_census_all_rows": {"0_4c": 296, "5_9c": 5, "10_14c": 15, "15_19c": 20, "20_24c": 51, "25_29c": 149, "30_34c": 1255},
+    "admitted_under_zero_flb_fit": {
+      "0_4c": {"n": 288, "nev_minus_cf": 0.00, "prob_resid_pp": -29.2},
+      "25_29c": {"n": 15, "nev_minus_cf": -2.86, "prob_resid_pp": 28.9},
+      "30_34c": {"n": 59, "nev_minus_cf": -6.05, "prob_resid_pp": 1.6}
+    },
+    "prob_resid_anomaly": "stored calibrated_probability is pre-bound vintage, not p_selected; -29pp at 0-4c is a field-basis artifact, not measured underclaim"
+  },
+  "results_eval_first_entry": {
+    "CURRENT_FLB": {"admissions": 16, "tickers": 16, "cf_pnl_cents": -0.8, "avg_per_ticker": -0.05, "cluster_se_by_ticker": 10.54},
+    "ZERO_FLB": {"admissions": 217, "tickers": 209, "cf_pnl_cents": 144.3, "avg_per_ticker": 0.69, "cluster_se_by_ticker": 1.00},
+    "NONNEGATIVE_RESIDUAL_FLB": {"admissions": 217, "tickers": 209, "cf_pnl_cents": 144.3, "avg_per_ticker": 0.69, "cluster_se_by_ticker": 1.00, "invariant_nonneg_le_zero": true},
+    "SIGNED_RESIDUAL_ADJUSTMENT": {"admissions": 526, "tickers": 443, "cf_pnl_cents": 633.1, "avg_per_ticker": 1.43, "cluster_se_by_ticker": 1.75, "signed_only_admissions": 309, "export": "logs/signed_adj_extra_admissions.csv"}
+  },
+  "conclusion": "no variant statistically positive; nonnegative refit is identically zero; challenges incremental justification of current FLB shape only",
+  "caveat": "current-policy replay with possible artifact drift; historical net_ev embeds reserve buffers — nev-cf is not a clean forecast residual"
+}

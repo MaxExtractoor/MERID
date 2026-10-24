@@ -141,11 +141,11 @@ removal or replacement.
 
 ## Known prior artifacts (run manifests preserved — do not conflate)
 
-- logs/flb_study_runA_manifest.json — Run A: 60s-bucket dedup,
+- docs/flb_study_runA_manifest.json — Run A: 60s-bucket dedup,
   chronological-only partition, signed variant admitted 4,828 with 3,351
   subsidy-only admissions, +9,143.6c aggregate on a pseudoreplicated
   population. Superseded for decision; retained for diagnosis.
-- logs/flb_study_runB_manifest.json — Run B: first-entry opportunities,
+- docs/flb_study_runB_manifest.json — Run B: first-entry opportunities,
   ticker-grouped partition, four named variants; signed variant admitted
   526 with 309 subsidy-only admissions, +633.1c on POP_FIRST_ENTRY.
   Current best historical replay; still mixed-vintage.

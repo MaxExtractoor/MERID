@@ -1,0 +1,44 @@
+{
+  "run_id": "flb_residual_runA_60s_bucket",
+  "label": "Run A — historical replay, ticker x side x 60s-bucket dedup",
+  "status": "superseded_for_decision_retain_for_diagnosis",
+  "source": "data/decision_audit.db side_ev x outcomes join",
+  "extract": "logs/flb_study_extract.jsonl",
+  "population": {
+    "raw_sub35c_side_evals": 377005,
+    "dedup_rule": "ticker x side x 60s_bucket",
+    "deduped_side_evals": 17004,
+    "note": "repeated snapshots sharing one settlement outcome counted as separate rows; minute-level pseudoreplication present"
+  },
+  "partition": {
+    "method": "chronological_only",
+    "ticker_grouped": false,
+    "fit_side_evals": 10202,
+    "eval_side_evals": 6802,
+    "leakage_check": "ordering only; related tickers may cross partitions"
+  },
+  "residual_target": "historical_net_ev_minus_counterfactual_pnl (conflates prob residual, reserves, admission buffer)",
+  "fit_bucket_census_admitted_under_zero_flb": {
+    "0_4c": {"n": 1501, "mean_overclaim_cents": 0.04},
+    "5_9c": {"n": null, "note": "not shown in original table"},
+    "10_14c": {"n": 2, "mean_overclaim_cents": 9.29, "sparse": true},
+    "20_24c": {"n": 22, "mean_overclaim_cents": 1.58},
+    "25_29c": {"n": 241, "mean_overclaim_cents": 3.97},
+    "30_34c": {"n": 335, "mean_overclaim_cents": -1.00}
+  },
+  "fitted_residual_slope": -1.68,
+  "signed_adjustment": true,
+  "results_eval": {
+    "current_flb": {"admissions": 70, "cf_pnl_cents": 70.8, "avg_cents": 1.01, "se": 4.75},
+    "zero_flb": {"admissions": 1477, "cf_pnl_cents": 198.3, "avg_cents": 0.13, "se": 0.30},
+    "signed_residual_adj": {"admissions": 4828, "cf_pnl_cents": 9143.6, "avg_cents": 1.89, "se": 0.50, "signed_only_admissions_vs_zero": 3351}
+  },
+  "known_flaws": [
+    "signed variant grants hurdle credits (not a nonnegative penalty)",
+    "60s-bucket dedup leaves pseudoreplication on shared settlement outcomes",
+    "no ticker-grouped partition",
+    "no clustered uncertainty",
+    "mixed deduction vintages in historical net_ev"
+  ],
+  "caveat": "aggregate +9143.6c is a counterfactual on a pseudoreplicated population; NOT comparable to Run B per-opportunity results"
+}
