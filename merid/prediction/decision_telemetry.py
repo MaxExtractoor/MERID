@@ -436,6 +436,52 @@ def build_asset_record(
         ),
         "yes_ev_net_cents": _yes_ev_c,
         "no_ev_net_cents": _no_ev_c,
+        # 2026-10-24 (Phase-A accounting trace): probability actually used
+        # inside net_edge, plus the ordered correction-stage chain.  Without
+        # these, a bounded/adjusted probability reads as an unexplained
+        # cost in downstream audit (the XRP ~22c discrepancy).
+        "yes_p_selected": _first_float(
+            _resolve(candidate, decision, ["yes_p_selected"], ["yes_p_selected"])
+        ),
+        "no_p_selected": _first_float(
+            _resolve(candidate, decision, ["no_p_selected"], ["no_p_selected"])
+        ),
+        "yes_gross_edge_cents": _first_float(
+            _resolve(candidate, decision, ["yes_gross_edge_cents"], ["yes_gross_edge_cents"])
+        ),
+        "no_gross_edge_cents": _first_float(
+            _resolve(candidate, decision, ["no_gross_edge_cents"], ["no_gross_edge_cents"])
+        ),
+        "fe_post_tail_p_yes": _first_float(
+            _resolve(candidate, decision, ["fe_post_tail_p_yes"], ["fe_post_tail_p_yes"])
+        ),
+        "fe_post_tail_p_no_for_no": _first_float(
+            _resolve(candidate, decision, ["fe_post_tail_p_no_for_no"], ["fe_post_tail_p_no_for_no"])
+        ),
+        "streaming_cal_bound_yes": _first_float(
+            _resolve(candidate, decision, ["streaming_cal_bound_yes"], ["streaming_cal_bound_yes"])
+        ),
+        "streaming_cal_bound_no": _first_float(
+            _resolve(candidate, decision, ["streaming_cal_bound_no"], ["streaming_cal_bound_no"])
+        ),
+        "fe_post_stream_p_yes": _first_float(
+            _resolve(candidate, decision, ["fe_post_stream_p_yes"], ["fe_post_stream_p_yes"])
+        ),
+        "fe_post_stream_p_no_for_no": _first_float(
+            _resolve(candidate, decision, ["fe_post_stream_p_no_for_no"], ["fe_post_stream_p_no_for_no"])
+        ),
+        "fe_final_p_yes": _first_float(
+            _resolve(candidate, decision, ["fe_final_p_yes"], ["fe_final_p_yes"])
+        ),
+        "fe_final_p_no_for_no": _first_float(
+            _resolve(candidate, decision, ["fe_final_p_no_for_no"], ["fe_final_p_no_for_no"])
+        ),
+        "tail_calibration_yes_applied": _resolve(
+            candidate, decision, ["tail_calibration_yes_applied"], ["tail_calibration_yes_applied"]
+        ),
+        "tail_calibration_no_applied": _resolve(
+            candidate, decision, ["tail_calibration_no_applied"], ["tail_calibration_no_applied"]
+        ),
         "required_edge_yes_cents": _first_float(
             _resolve(candidate, decision, ["required_edge_yes_cents"], ["required_edge_yes_cents"])
         ),
