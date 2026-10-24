@@ -231,6 +231,30 @@ _EMERGENCY_CANONICAL_REASONS = frozenset({
     "loss_cap",
 })
 
+# 2026-10-24: signal-family operational exits sell on model information, not
+# mechanical necessity — they are the operational reasons whose economic
+# justification is "the model flipped".  Live evidence showed these bypasses
+# converting would-be settlement winners into realized losses (YES positions
+# sold at 42-52c on contracts that settled YES) while the same-evaluator EV
+# comparison was simultaneously holding discretionary stops as
+# HOLD_SELL_VALUE_INFERIOR.  The evaluator already computes net-sell vs
+# conservative-hold economics for every exit class; for these reasons, when
+# that comparison is computable it now vetoes a sell below the model's
+# conservative hold value instead of bypassing.  When the economics cannot be
+# priced (no bid, no model value) the exit still bypasses — the mechanical
+# fallback the 2026-09-23 deadlock fix requires — and when the sell value
+# legitimately exceeds the conservative hold (breach) it proceeds
+# mechanically without added persistence.
+_SIGNAL_FAMILY_VETO_REASONS = frozenset({
+    "signal_reversal",
+    "edge_decay",
+    "model_invalidation",
+})
+
+
+def _signal_exit_ev_veto_enabled() -> bool:
+    return _env_bool("MERID_SIGNAL_EXIT_EV_VETO", True)
+
 # Raw trigger-reason strings used by the StopCandidate path.  They classify a
 # candidate before it is ever converted into an order intent.
 _OPERATIONAL_TRIGGER_REASONS = frozenset({
@@ -1329,8 +1353,18 @@ class SettlementAlignedExitEvaluator:
                     canonical,
                 )
             elif exit_class == ExitClass.OPERATIONAL:
-                ev.decision = EvDecision.BYPASS_OPERATIONAL
-                ev.detail = "operational_exit_not_ev_gated"
+                if (
+                    _signal_exit_ev_veto_enabled()
+                    and canonical in _SIGNAL_FAMILY_VETO_REASONS
+                    and net_sell is not None
+                    and cons_hold is not None
+                    and not breach
+                ):
+                    ev.decision = EvDecision.HOLD_SELL_VALUE_INFERIOR
+                    ev.detail = "operational_sell_below_conservative_hold"
+                else:
+                    ev.decision = EvDecision.BYPASS_OPERATIONAL
+                    ev.detail = "operational_exit_not_ev_gated"
             else:
                 ev.decision = EvDecision.BYPASS_EMERGENCY
                 ev.detail = "emergency_exit_not_ev_gated"

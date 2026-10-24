@@ -1668,10 +1668,18 @@ def pinned_fav_maker_mode() -> bool:
 
 def _pinned_fav_lo() -> float:
     # 92c, not 91c: measured edge at 91c/TTE 300-600s is ~0 (-0.05c avg).
-    # Maker mode: 82c — the realizable resting-bid floor on a converged
-    # favorite book (the measured winning cohort rested "in the 80s").
+    # Maker mode: see the dated note below — the 80s resting-bid cohort
+    # thesis was falsified by realized fills and published calibration.
     if pinned_fav_maker_mode():
-        return _env_float("MERID_PINNED_FAV_MAKER_LO", 82.0)
+        # 2026-10-24: floor raised 82->90 on falsifying evidence.  The
+        # "rested in the 80s" claim was a counterfactual projection; the
+        # realized cohort (2026-10-24 fills at 76-89c) ran ~50% settle rate
+        # vs the ~80-89% breakeven those prices demand, matching published
+        # Kalshi crypto calibration (70-89c bands settle 43-57% vs 75-85%
+        # implied, a -22..-32pt overprice; only >=90c approaches fair).
+        # The probe keeps probing the converged-favorite mechanics, just
+        # outside the documented toxic pocket.
+        return _env_float("MERID_PINNED_FAV_MAKER_LO", 90.0)
     return _env_float("MERID_PINNED_FAV_PRICE_LO", 92.0)
 
 

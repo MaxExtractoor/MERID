@@ -108,7 +108,7 @@ the next server restart must automatically execute the live startup sequence bel
    - Use Bachelier-only with TWAP-appropriate volatility unless another model has a documented approved release.
    - Disable hybrid Bachelier-plus-delta signals—velocity, MACD, RSI, OBI, FVG, and regime—unless explicitly validated and approved.
    - Apply held-side tail calibration per the loaded artifact's scope. With `MERID_CALIBRATION_CAP_FULL_RANGE` (default on) the YES curve caps at every held price; a fitted non-dual NO curve (`no_curve_is_dual=false`, e.g. `tail_pava:n10220`) is applied the same way, while a provisional dual NO curve remains a cheap-tail stop-gap gated by `MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR`/`_TRANSITION`. `MERID_TAIL_CALIBRATION_PRICE_FLOOR` (default 0.35) bounds the tail region whenever full-range is off.
-   - NO-side entries are enabled — governed by measured per-asset moneyness bands, not a blanket tail block. Global `MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO=50` with audited overrides: BTC-NO max 79c (51-64c pocket blocked), ETH-NO max 89c (51-64c blocked), DOGE/SOL-NO max 75c, XRP-NO max 1c (hard-blocked: audited -9.54 USD, unpriceable down-moves). Deep NO tails >=80c additionally face the tail-LCB gate (`MERID_TAIL_LCB_MIN_PRICE_CENTS=80`). Band changes require the same settled-fill + veto-counterfactual audit evidence that produced the current split. These per-asset caps also bind inside bounded sub-lanes: the pinned-fav lane enforces them via `pinned_fav_moneyness_cap` (`MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS`, default on; `MERID_PRICE_CAP_EXCEPT_BTC_NO` remains the only explicit exception for +EV BTC-NO probes). The global side baselines do not bind in-lane — the lane's audited domain sits above them by design.
+   - NO-side entries are enabled — governed by measured per-asset moneyness bands, not a blanket tail block. Global `MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO=50` with audited overrides: BTC-NO max 79c (51-64c pocket blocked), ETH-NO max 89c (51-64c blocked), DOGE/SOL-NO max 75c, XRP-NO max 1c (hard-blocked: audited -9.54 USD, unpriceable down-moves). Deep NO tails >=80c additionally face the tail-LCB gate (`MERID_TAIL_LCB_MIN_PRICE_CENTS=80`). Band changes require the same settled-fill + veto-counterfactual audit evidence that produced the current split. These per-asset caps also bind inside bounded sub-lanes: the pinned-fav lane enforces them via `pinned_fav_moneyness_cap` (`MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS`, default on; `MERID_PRICE_CAP_EXCEPT_BTC_NO` remains the only explicit exception for +EV BTC-NO probes). The global side baselines do not bind in-lane — the lane's audited domain sits above them by design. The pinned-fav maker band is additionally floored at `MERID_PINNED_FAV_MAKER_LO=90` (2026-10-24): the 76-89c favorite pocket was falsified by realized fills (~50% settle rate vs ~80-89% breakeven) and published Kalshi crypto calibration (70-89c bands settle 43-57% vs 75-85% implied, a -22..-32pt overprice; only >=90c approaches fair value).
    - Require the corrected full fee and execution-cost model for every entry decision.
 
 15. If every preflight step succeeds, persist an immutable startup release record and set:
@@ -361,6 +361,18 @@ documented mechanical closeouts) and emergency exits (`expiry_liquidation`,
 hard risk) remain live with their existing mechanical checks. Unknown reasons
 fail closed.
 
+2026-10-24 — signal-family operational exits (`signal_reversal`, `edge_decay`,
+`model_invalidation`) additionally face a **conservative-hold veto**
+(`MERID_SIGNAL_EXIT_EV_VETO`, default on): when the evaluator can price the
+sell-vs-hold comparison and the net sell value does not exceed the
+conservative hold value, the exit is held as `HOLD_SELL_VALUE_INFERIOR`
+instead of bypassing. An unpriceable exit (no bid, no model value) keeps the
+mechanical bypass — the fallback the 2026-09-23 deadlock fix requires — and a
+genuine breach (sell value above conservative hold + margin) proceeds
+mechanically without added persistence. This closed the false-stop hole where
+signal exits sold at 42-52c on contracts that settled YES while the same
+evaluator was holding discretionary stops as inferior sells.
+
 The final authority for a discretionary exit is the settlement-aligned
 sell-vs-hold comparison in
 `merid/event_venues/kalshi/settlement_aligned_exit.py`, enforced at
@@ -420,7 +432,8 @@ comparison population by `evaluation_id`.
 The gate is ON: `MERID_ENABLE_EV_EXIT_GATE=1` and
 `MERID_DISCRETIONARY_EXIT_MODE=ev_gated` in the resolved live config. Every
 discretionary exit must pass the settlement-aligned sell-vs-hold evaluation;
-operational and emergency exits keep their mechanical bypasses. The shadow
+operational and emergency exits keep their mechanical bypasses subject to the
+signal-family conservative-hold veto above. The shadow
 phase below is retained for provenance — it ran across BTC, ETH, SOL, XRP,
 and DOGE with all discretionary exits shadowed while the loop emitted
 `EV-EXIT-SHADOW-SUMMARY` per asset and `EV-EXIT-SHADOW-GLOBAL`

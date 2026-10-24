@@ -387,3 +387,135 @@ class TestWatchdogDecide:
             "log_age_s": 500.0,
         }
         assert wd.signals_failed(status, 90.0) == ["log_silent"]
+
+class TestSignalExitEvVeto:
+    """Operational signal-family exits face the conservative-hold veto.
+
+    2026-10-24 live evidence: signal_reversal BYPASS_OPERATIONAL exits sold
+    YES positions at 42-52c on contracts that settled YES, while the same
+    evaluator was holding discretionary stops as HOLD_SELL_VALUE_INFERIOR.
+    The veto applies only when sell-vs-hold economics are computable; an
+    unpriceable exit keeps the mechanical bypass (the 2026-09-23 deadlock
+    fix), and a genuine breach (sell value above conservative hold) still
+    proceeds mechanically.
+    """
+
+    def _evaluator(self):
+        from merid.event_venues.kalshi.settlement_aligned_exit import (
+            SettlementAlignedExitEvaluator,
+        )
+
+        return SettlementAlignedExitEvaluator(
+            rti_provider=lambda asset: None,
+            tail_calibrator=None,
+        )
+
+    def _position(self):
+        return types.SimpleNamespace(
+            position_id="pos-signal-veto",
+            market_id="KXBTC15M-26OCT240715-15",
+            size=1.0,
+            outcome_side="yes",
+            thesis_side="yes",
+        )
+
+    def _eval(self, evaluator, **kw):
+        return evaluator.evaluate(
+            self._position(),
+            market_key="KXBTC15M-26OCT240715-15",
+            held_side="yes",
+            canonical_reason="signal_reversal",
+            quantity_contracts=1.0,
+            gate_enabled=True,
+            record=False,
+            **kw,
+        )
+
+    def test_veto_holds_sell_below_conservative_hold(self):
+        """The false-stop replay: bid 50 with model hold ~80 is vetoed."""
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        ev = self._eval(
+            self._evaluator(),
+            fair_value_cents=80,
+            executable_bid_cents=50,
+        )
+        assert ev.decision == EvDecision.HOLD_SELL_VALUE_INFERIOR
+        assert ev.detail == "operational_sell_below_conservative_hold"
+
+    def test_breach_still_bypasses(self):
+        """Model flipped to 30: sell value exceeds hold, exit proceeds."""
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        ev = self._eval(
+            self._evaluator(),
+            fair_value_cents=30,
+            executable_bid_cents=50,
+        )
+        assert ev.decision == EvDecision.BYPASS_OPERATIONAL
+
+    def test_unpriceable_exit_bypasses(self):
+        """No bid and no model value -> deadlock-safe mechanical bypass."""
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        ev = self._eval(
+            self._evaluator(),
+            fair_value_cents=None,
+            executable_bid_cents=None,
+        )
+        assert ev.decision == EvDecision.BYPASS_OPERATIONAL
+
+    def test_flag_off_restores_bypass(self, monkeypatch):
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        monkeypatch.setenv("MERID_SIGNAL_EXIT_EV_VETO", "0")
+        ev = self._eval(
+            self._evaluator(),
+            fair_value_cents=80,
+            executable_bid_cents=50,
+        )
+        assert ev.decision == EvDecision.BYPASS_OPERATIONAL
+
+    def test_non_signal_operational_reason_not_vetoed(self):
+        """trailing_stop is mechanical, not model-information: untouched."""
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        ev = self._evaluator().evaluate(
+            self._position(),
+            market_key="KXBTC15M-26OCT240715-15",
+            held_side="yes",
+            canonical_reason="trailing_stop",
+            quantity_contracts=1.0,
+            fair_value_cents=80,
+            executable_bid_cents=50,
+            gate_enabled=True,
+            record=False,
+        )
+        assert ev.decision == EvDecision.BYPASS_OPERATIONAL
+
+    def test_emergency_reasons_not_vetoed(self):
+        """loss_cap is emergency class: the veto never applies."""
+        from merid.event_venues.kalshi.settlement_aligned_exit import EvDecision
+
+        ev = self._evaluator().evaluate(
+            self._position(),
+            market_key="KXBTC15M-26OCT240715-15",
+            held_side="yes",
+            canonical_reason="loss_cap",
+            quantity_contracts=1.0,
+            fair_value_cents=80,
+            executable_bid_cents=50,
+            gate_enabled=True,
+            record=False,
+        )
+        assert ev.decision == EvDecision.BYPASS_EMERGENCY
+
+def test_maker_floor_default_is_90(monkeypatch):
+    """2026-10-24: maker LO default 82/76->90 on falsifying evidence —
+    the 76-89c favorite pocket settled ~50% vs ~80-89% breakeven, matching
+    published Kalshi crypto calibration (-22..-32pt overprice)."""
+    monkeypatch.delenv("MERID_PINNED_FAV_MAKER_LO", raising=False)
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
+    assert dr._pinned_fav_lo() == 90.0
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "85")
+    assert dr._pinned_fav_lo() == 85.0  # env override still binds
