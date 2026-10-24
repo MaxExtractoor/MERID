@@ -239,6 +239,10 @@ def test_no_side_mirror(monkeypatch):
     """NO at 93c (yes_bid=7 -> no_price=93) uses the same lane machinery."""
     monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
     monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    # 2026-10-24: the lane now honors audited per-asset moneyness caps
+    # (.env ETH-NO=89 would veto 93c); pin above the price to keep this
+    # test about the mirror machinery, not the cap gate.
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_ETH", "95")
     d = _decision(
         spot_price=99.0,              # spot well below strike: p_no ~0.99
         yes_bid_cents=7.0, yes_ask_cents=9.0,
@@ -915,6 +919,10 @@ def test_measured_pf_admission_skips_late_window(
     """Live 05:27 shape: DOGE no@87 TTE~200 challenge_eligible.  Before the
     fix the side was blocked evidence_escape_late_window; now the measured
     admission reaches the lane and the side qualifies."""
+    # 2026-10-24: the lane honors per-asset moneyness caps; DOGE-NO=75 in
+    # .env would veto no@87.  Pin above to keep this test about the
+    # late-window exemption, not the cap gate.
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_DOGE", "95")
     d = _doge_no_fav_decision(
         tmp_path, monkeypatch, _doge_no_challenge_cells()
     )

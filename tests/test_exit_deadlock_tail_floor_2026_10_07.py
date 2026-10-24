@@ -183,6 +183,10 @@ class TestTailLossFloor:
         (mandatory-risk, non-shadowed) StopCandidate is submitted on the
         reduce-only channel."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
+        # 2026-10-24: drop-trigger persistence defaults to 2 consecutive
+        # observations; pin to 1 to keep this test about the emission
+        # path, not the debounce.
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_MIN_OBS", "1")
         # Hermetic: exercises the emission path under the enabled posture —
         # the live .env carries MERID_LOSS_EXITS_ENABLED=0 and this fixture
         # carries no negative-edge stamp for the scoped salvage carve-out.

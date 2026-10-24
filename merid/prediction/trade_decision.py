@@ -5751,6 +5751,8 @@ def _compute_trade_decision_impl(
         tte_seconds=(
             float(seconds_to_expiry) if seconds_to_expiry is not None else None
         ),
+        held_side="yes",
+        asset=asset,
         p_selected=(
             float(yes_breakdown.p_selected)
             if yes_breakdown.p_selected is not None
@@ -5763,6 +5765,8 @@ def _compute_trade_decision_impl(
         tte_seconds=(
             float(seconds_to_expiry) if seconds_to_expiry is not None else None
         ),
+        held_side="no",
+        asset=asset,
         p_selected=(
             float(no_breakdown.p_selected)
             if no_breakdown.p_selected is not None

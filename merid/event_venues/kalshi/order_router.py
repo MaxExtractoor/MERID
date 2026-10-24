@@ -3791,6 +3791,23 @@ def _resolve_kalshi_side(intent: OrderIntent) -> Optional[str]:
     return None
 
 
+def _exit_conversion_price_cents(
+    action: str, limit_cents: int, bid_cents: int, ask_cents: int
+) -> Optional[int]:
+    """Marketable price for a crossed reduce-only exit, else None.
+
+    A post-only exit rejected as crossed means the book moved through our
+    limit, so the fresh touch is at-or-better: sells fill at bid >= limit,
+    buy-to-close fills at ask <= limit.  If the refetched book no longer
+    satisfies that bound the moment passed — decline rather than chase.
+    """
+    if action == "sell":
+        return bid_cents if bid_cents > 0 and bid_cents >= limit_cents else None
+    if action == "buy":
+        return ask_cents if 0 < ask_cents <= limit_cents else None
+    return None
+
+
 def _is_exit_order(intent: OrderIntent) -> bool:
     """Check if this is an exit order (sell/close) that should bypass non-critical checks.
     
@@ -17267,10 +17284,23 @@ async def _route_live(
             nonlocal placed_res, latency, final_price_cents
             if getattr(intent, "_postonly_converted_taker", False):
                 return False
-            if (getattr(intent, "action", "") or "").lower() != "buy":
-                return False
-            _cap = _max_edge_preserving_buy_price(intent)
-            if _cap is None:
+            _act = (getattr(intent, "action", "") or "").lower()
+            _exit = _is_exit_order(intent)
+            _cap = None
+            if _exit:
+                # 2026-10-24: reduce-only exits convert too.  A crossed
+                # post-only exit means the touch is already at-or-better
+                # than our limit, so the marketable conversion is
+                # price-improving — never a chase.  Bound by the intended
+                # limit: sells require bid >= limit, buy-to-close requires
+                # ask <= limit.
+                if _act not in ("sell", "buy"):
+                    return False
+            elif _act == "buy":
+                _cap = _max_edge_preserving_buy_price(intent)
+                if _cap is None:
+                    return False
+            else:
                 return False
             try:
                 _cb_ob = await asyncio.wait_for(
@@ -17281,12 +17311,23 @@ async def _route_live(
                     return False
                 _cb_side = _side_aware_book_for_intent(_cb_book, intent.side)
                 _cb_ask = int(_cb_side.get("ask_cents") or 0)
+                _cb_bid = int(_cb_side.get("bid_cents") or 0)
             except Exception:
                 return False
-            if _cb_ask <= 0 or _cb_ask > _cap:
-                return False
+            if _exit:
+                _conv_px = _exit_conversion_price_cents(
+                    _act,
+                    int(getattr(intent, "price_cents", 0) or 0),
+                    _cb_bid,
+                    _cb_ask,
+                )
+                if _conv_px is None:
+                    return False
+            else:
+                if _cb_ask <= 0 or _cb_ask > _cap:
+                    return False
+                _conv_px = min(_cb_ask, _cap)
             intent._postonly_converted_taker = True
-            _conv_px = min(_cb_ask, _cap)
             _conv_old_px = int(getattr(intent, "price_cents", 0) or 0)
             intent.price_cents = _conv_px
             # The wire price is derived from final_price_cents, not
@@ -17439,6 +17480,20 @@ async def _route_live(
                     "[POST-ONLY-REPRICE] retry failed intent_id=%s ticker=%s err=%s",
                     intent.intent_id, intent.ticker, _rt_exc,
                 )
+
+        # 2026-10-24: exits skip the passive reprice stage (entry-only by
+        # design above) and go straight to the bounded marketable
+        # conversion — a crossed reduce-only order means the touch is
+        # already better than our limit.  One-shot, guarded by the
+        # conversion's own limit check.
+        if (
+            placed_res is not None
+            and not placed_res.success
+            and "post only cross" in _po_err_lower
+            and bool(getattr(create_request, "post_only", False))
+            and _is_exit_order(intent)
+        ):
+            await _convert_to_ioc()
 
         # 2026-09-29: consolidated pipeline stage timing — decision age,
         # router-entry to economics revalidation, revalidation to wire, wire

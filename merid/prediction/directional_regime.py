@@ -1791,11 +1791,80 @@ def pinned_fav_reachable(
     return _pinned_fav_min_tte() <= tte <= _pinned_fav_max_tte()
 
 
+def pinned_fav_honor_moneyness_caps() -> bool:
+    """Whether the pinned-fav lane enforces per-asset moneyness caps.
+
+    2026-10-24: default ON.  KXBTC15M-...2145 buy_no maker @86c and
+    KXSOL15M-...1945 buy_no maker @83c filled inside the audited-toxic
+    NO-side pockets (BTC-NO cap 79, SOL-NO cap 75) because the lane gate
+    never consulted ``MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_*`` — the
+    maker band 76-91 deliberately includes those prices, but the
+    per-asset caps exist on settled-fill evidence the lane is not
+    authorized to override.  Set ``MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS=0``
+    to restore the unbounded probe.
+    """
+    return os.getenv("MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _moneyness_max_entry_price_cents(
+    held_side: Optional[str], asset: Optional[str]
+) -> Optional[float]:
+    """Per-asset held-side max entry price — no global fallback by design.
+
+    Only the per-asset overrides (``..._NO_BTC=79``, ``..._NO_SOL=75``,
+    ``..._NO_XRP=1``, ``..._YES_XRP=89``, ...) encode settled-fill toxicity
+    evidence, so only they bind inside the lane.  The generic side
+    globals (NO=50, YES=75) are superseded per-asset where measured and
+    would otherwise veto the lane's entire audited 76-98c domain — the
+    lane's own cohort evidence came from prices above them.
+    """
+    side = (held_side or "").strip().lower()
+    if side not in ("yes", "no") or not asset:
+        return None
+    per_asset = _env_float(
+        f"MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{side.upper()}_{asset.upper()}",
+        None,
+    )
+    return float(per_asset) if per_asset is not None else None
+
+
+def _moneyness_cap_exception(
+    held_side: Optional[str],
+    asset: Optional[str],
+    side_price_cents: float,
+    net_ev_cents: Optional[float],
+) -> bool:
+    """BTC-NO 75-89.99c escape hatch — mirrors the economics-path exception.
+
+    ``MERID_PRICE_CAP_EXCEPT_BTC_NO`` authorizes exploration of the BTC-NO
+    pocket between the shared 50c baseline and the 90c ceiling only when the
+    conservative net-EV claim is >= +2c/contract.
+    """
+    if (held_side or "").strip().lower() != "no":
+        return False
+    if (asset or "").strip().upper() != "BTC":
+        return False
+    if os.getenv("MERID_PRICE_CAP_EXCEPT_BTC_NO", "0").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return False
+    if not (75.0 < float(side_price_cents) <= 89.99):
+        return False
+    try:
+        return float(net_ev_cents) >= 2.0
+    except (TypeError, ValueError):
+        return False
+
+
 def pinned_fav_block(
     side_price_cents: Optional[float],
     net_ev_cents: Optional[float],
     tte_seconds: Optional[float],
     p_selected: Optional[float] = None,
+    held_side: Optional[str] = None,
+    asset: Optional[str] = None,
 ) -> Optional[str]:
     """Strict pinned-favorite admission gate.
 
@@ -1811,6 +1880,12 @@ def pinned_fav_block(
     filter): a resting favorite bid without a strong z-distance claim is
     the configuration that measured -0.26c/contract unfiltered.  Fail
     closed when p is unavailable.
+
+    When ``held_side``/``asset`` are supplied and
+    ``MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS`` is on, the per-asset
+    moneyness cap applies inside the lane: a resting favorite inside the
+    maker band but above the audited cap vetoes with
+    ``pinned_fav_moneyness_cap``.
     """
     if not pinned_fav_enabled():
         return None
@@ -1818,6 +1893,18 @@ def pinned_fav_block(
         # Fail closed when armed: a caller that forgot the band pre-check
         # must get a veto, not a pass.
         return "pinned_fav_band"
+    if (
+        pinned_fav_honor_moneyness_caps()
+        and side_price_cents is not None
+        and held_side is not None
+    ):
+        _cap = _moneyness_max_entry_price_cents(held_side, asset)
+        if _cap is not None and float(side_price_cents) > _cap and not (
+            _moneyness_cap_exception(
+                held_side, asset, float(side_price_cents), net_ev_cents
+            )
+        ):
+            return "pinned_fav_moneyness_cap"
     if tte_seconds is None or not (
         _pinned_fav_min_tte() <= float(tte_seconds) <= _pinned_fav_max_tte()
     ):
