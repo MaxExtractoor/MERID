@@ -592,6 +592,45 @@ def build_asset_record(
         "no_adverse_selection_reserve_cents": _first_float(
             _resolve(candidate, decision, ["no_adverse_selection_reserve_cents"], ["no_adverse_selection_reserve_cents"])
         ),
+        # 2026-10-24 (Phase-A ledger): remaining EdgeBreakdown components —
+        # entry_fee, exit_cost_reserve, model_risk, policy_giveback,
+        # impl_shortfall, edge_bias.  net_edge = gross - Σ(components).
+        "yes_entry_fee_cents": _first_float(
+            _resolve(candidate, decision, ["yes_entry_fee_cents"], ["yes_entry_fee_cents"])
+        ),
+        "no_entry_fee_cents": _first_float(
+            _resolve(candidate, decision, ["no_entry_fee_cents"], ["no_entry_fee_cents"])
+        ),
+        "yes_exit_cost_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_exit_cost_reserve_cents"], ["yes_exit_cost_reserve_cents"])
+        ),
+        "no_exit_cost_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_exit_cost_reserve_cents"], ["no_exit_cost_reserve_cents"])
+        ),
+        "yes_model_risk_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_model_risk_reserve_cents"], ["yes_model_risk_reserve_cents"])
+        ),
+        "no_model_risk_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_model_risk_reserve_cents"], ["no_model_risk_reserve_cents"])
+        ),
+        "yes_policy_giveback_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_policy_giveback_reserve_cents"], ["yes_policy_giveback_reserve_cents"])
+        ),
+        "no_policy_giveback_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_policy_giveback_reserve_cents"], ["no_policy_giveback_reserve_cents"])
+        ),
+        "yes_impl_shortfall_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["yes_impl_shortfall_reserve_cents"], ["yes_impl_shortfall_reserve_cents"])
+        ),
+        "no_impl_shortfall_reserve_cents": _first_float(
+            _resolve(candidate, decision, ["no_impl_shortfall_reserve_cents"], ["no_impl_shortfall_reserve_cents"])
+        ),
+        "yes_edge_bias_correction_cents": _first_float(
+            _resolve(candidate, decision, ["yes_edge_bias_correction_cents"], ["yes_edge_bias_correction_cents"])
+        ),
+        "no_edge_bias_correction_cents": _first_float(
+            _resolve(candidate, decision, ["no_edge_bias_correction_cents"], ["no_edge_bias_correction_cents"])
+        ),
         "order_route": _first_str(
             _resolve(candidate, decision, ["order_route"], ["order_route"])
         ),
