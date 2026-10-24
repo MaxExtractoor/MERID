@@ -23,6 +23,51 @@ policy. Production policy is unchanged; all variants run offline only.
 - Artifact versions recorded per record; analysis must be separable by
   (model_version, calibration_version, config_version).
 
+## Collection gate (all must hold before eval outcomes are examined)
+
+The evaluation dataset is sealed only when every criterion below is met on
+post-v4 records. Until then, no eval-period outcome may be inspected for
+any variant or bucket:
+
+1. Fit period: >= 500 first-entry opportunities in the FLB domain
+   (entry px < 35c) AND >= 200 unique tickers.
+2. Eval period: >= 300 first-entry opportunities AND >= 150 unique tickers
+   AND >= 20 distinct settlement intervals.
+3. Bucket coverage: every bucket reported separately contains >= 30
+   opportunities in BOTH periods; otherwise it is pooled into an adjacent
+   bucket per the sparse-bucket rule before any estimate is quoted.
+4. Schema coverage: >= 95% of in-domain post-v4 decision_records carry the
+   full required field set. Nonconforming records are counted, reported as
+   exclusions by reason, and not silently dropped.
+5. Label completeness: >= 99% of opportunities have settlement outcomes.
+   Unsettled rows are excluded and counted.
+6. Artifact provenance: every record carries model_version,
+   calibration_version, config_version. An artifact-version change inside
+   a period is either a partition boundary or an explicit stratification
+   variable — never silently pooled.
+7. Eval seal: the eval cutoff timestamp is recorded when the gate is met;
+   no variant is tuned, re-fit, or re-run on eval outcomes.
+
+## Named populations (every estimate states its denominator)
+
+Each reported number must name exactly one of these populations:
+
+- POP_RAW_SIDE_EVALS — all sub-35c side evaluations in the extract
+  (377,486 rows; no dedup).
+- POP_60S_DEDUP — ticker x side x 60s-bucket dedup (17,004 side evals;
+  Run A basis; retains settlement-outcome pseudoreplication).
+- POP_FIRST_ENTRY — first eligible decision per (ticker, side)
+  (3,021 opportunities / 1,922 tickers; Run B basis; canonical unit).
+- POP_FIRST_ENTRY_ADMITTED_<VARIANT> — POP_FIRST_ENTRY rows admitted by
+  the named variant, e.g. POP_FIRST_ENTRY_ADMITTED_ZERO_FLB.
+- POP_BUCKET_<LO>_<HI>_<BASE> — a price bucket over a named base
+  population, e.g. POP_BUCKET_25_29_FIRST_ENTRY.
+
+Resolved legacy figure: "25–29c mean overclaim" was +3.97c on n=241 of
+POP_60S_DEDUP admitted under zero-FLB, and −2.86c on n=15 of
+POP_FIRST_ENTRY_ADMITTED_ZERO_FLB (fit period). These are different
+denominators over the same bucket — never cite one under the other's n.
+
 ## Partition rules (both required)
 
 - Chronological: fit period strictly precedes evaluation period.
@@ -94,13 +139,25 @@ A negative or zero fitted residual alone justifies demoting FLB to
 "unproven prior" in documentation — it does not by itself authorize
 removal or replacement.
 
-## Known prior artifacts
+## Known prior artifacts (run manifests preserved — do not conflate)
 
-- logs/flb_study_extract.jsonl — 377,486 sub-35c settled side-ev rows
-  (mixed vintages; superseded for final decision, retained for diagnosis).
-- logs/signed_adj_extra_admissions.csv — the 309 admissions attributable
-  purely to the signed subsidy.
+- logs/flb_study_runA_manifest.json — Run A: 60s-bucket dedup,
+  chronological-only partition, signed variant admitted 4,828 with 3,351
+  subsidy-only admissions, +9,143.6c aggregate on a pseudoreplicated
+  population. Superseded for decision; retained for diagnosis.
+- logs/flb_study_runB_manifest.json — Run B: first-entry opportunities,
+  ticker-grouped partition, four named variants; signed variant admitted
+  526 with 309 subsidy-only admissions, +633.1c on POP_FIRST_ENTRY.
+  Current best historical replay; still mixed-vintage.
+- The 3,351/+9,143.6c figures (Run A, POP_60S_DEDUP) and the 309/+633.1c
+  figures (Run B, POP_FIRST_ENTRY) describe different populations and
+  dedup rules. Neither may be quoted under the other's population label.
+- logs/flb_study_extract.jsonl — shared extract for both runs
+  (377,486 sub-35c settled side-ev rows, mixed vintages).
+- logs/signed_adj_extra_admissions.csv — Run B's 309 subsidy-only
+  admissions with candidate-level threshold deltas.
 - logs/reserve_validation_export.csv — post-v4 ledger rows.
-- Fit-period bucket census (historical, deduped first-entry):
-  0-4c:296, 5-9c:5, 10-14c:15, 15-19c:20, 20-24c:51, 25-29c:149, 30-34c:1255
-  — mid-tail buckets are sparse; prior bucket means carry low n.
+- Fit-period bucket census (Run B, POP_FIRST_ENTRY, all rows):
+  0-4c:296, 5-9c:5, 10-14c:15, 15-19c:20, 20-24c:51, 25-29c:149,
+  30-34c:1255 — mid-tail buckets are sparse; prior bucket means carry
+  low n and are not standalone evidence.
