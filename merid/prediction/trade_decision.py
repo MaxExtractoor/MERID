@@ -834,6 +834,36 @@ MERID_MODEL_EDGE_FLOOR_CENTS = float(
     os.environ.get("MERID_MODEL_EDGE_FLOOR_CENTS", "0")
 )
 
+# 2026-10-24 (EPC reconciliation): substitute bound for floors that were
+# fitted on *raw model claims*.  When a validated empirical cell supplied
+# the selected side's probability (`{side}_epc_applied`), the raw pre-EPC
+# model gap is ~0 by construction — the overlay fires exactly where the
+# market's own price is wrong — so a raw-gap floor rejects the entire EPC
+# cohort without measuring it.  The EPC analogue of the floor is the cell's
+# own conservative bound, price-adjusted to the executable price
+# (`{side}_epc_adj_lcb_cents`): the candidate bypasses the raw-gap floor
+# and the held-price floor only when that bound still clears this floor at
+# the actual price.  Same category argument as the settlement_convergence /
+# pinned_fav lane exemptions already in the floor gate.  0.0 accepts any
+# non-negative validated bound.
+MERID_EPC_FLOOR_MIN_LCB_CENTS = float(
+    os.environ.get("MERID_EPC_FLOOR_MIN_LCB_CENTS", "0.0")
+)
+
+
+def _epc_floor_lcb_cents(indicators: Dict[str, Any], side: str) -> Optional[float]:
+    """Price-adjusted empirical LCB for a side whose p came from a validated
+    EPC cell, else None."""
+    if not indicators.get(f"{side}_epc_applied"):
+        return None
+    _lcb = indicators.get(f"{side}_epc_adj_lcb_cents")
+    if _lcb is None:
+        return None
+    try:
+        return float(_lcb)
+    except (TypeError, ValueError):
+        return None
+
 # 2026-10-04 (counterfactual audit): marginal-band edge rescue.  The settled
 # counterfactual join over logs/rejected_candidates.jsonl shows candidates
 # whose net edge fell <=1c short of the stacked dynamic threshold were
@@ -1952,6 +1982,37 @@ def apply_model_edge_floor_gate(decision: TradeDecision) -> TradeDecision:
         # below the universal 4c floor by construction).  Same exemption
         # contract as pinned_fav.
         return decision
+    # 2026-10-24 (EPC reconciliation): a validated empirical cell supplied
+    # this side's probability — bound the cell's price-adjusted LCB instead
+    # of the raw pre-EPC model gap (which is ~0 by construction here).  The
+    # 4c floor was fitted on raw model claims; the empirical bound is the
+    # same kind of evidence the floor encodes (fee-net, half-stable,
+    # conservative), evaluated at the actual executable price.
+    _epc_lcb_c = _epc_floor_lcb_cents(ind, sel)
+    if _epc_lcb_c is not None:
+        if _epc_lcb_c >= MERID_EPC_FLOOR_MIN_LCB_CENTS - 1e-9:
+            new_ind = dict(ind)
+            new_ind["model_edge_floor"] = {
+                "edge_c": None,
+                "epc_lcb_c": round(_epc_lcb_c, 3),
+                "floor_c": MERID_EPC_FLOOR_MIN_LCB_CENTS,
+                "passed": True,
+                "basis": "epc_cell_lcb",
+            }
+            return replace(decision, indicators=new_ind)
+        record = {
+            "gate": "model_edge_floor",
+            "basis": "epc_cell_lcb",
+            "epc_lcb_c": round(_epc_lcb_c, 3),
+            "floor_c": MERID_EPC_FLOOR_MIN_LCB_CENTS,
+            "would_enter_at_prior": True,
+        }
+        _reason = (
+            f"model_edge_floor:epc_lcb={_epc_lcb_c:.2f}c<"
+            f"{MERID_EPC_FLOOR_MIN_LCB_CENTS:.2f}c"
+        )
+        _log_bounded_domain_reject(decision, _reason)
+        return _downgrade_live_selection(decision, _reason, record)
     breakdown = decision.edge_breakdown or (
         decision.yes_edge_breakdown if sel == "yes" else decision.no_edge_breakdown
     )
@@ -7654,9 +7715,30 @@ def _compute_trade_decision_impl(
         # model is extremely confident (p_selected >= MERID_CHEAP_TAIL_P_EXCEPTION).
         min_held_price_dollars = min_held_price_cents / 100.0
         held_price = float(selected_outcome_price)
+        # 2026-10-24 (EPC reconciliation): the 25c floor was fitted on the
+        # settled counterfactual of *model-claimed* cheap entries (15-24c
+        # claims lost -2.4..-3.4c/trade).  A validated EPC cell is the
+        # price-specific empirical evidence the generic floor substitutes
+        # for — when the cell's price-adjusted LCB still clears
+        # MERID_EPC_FLOOR_MIN_LCB_CENTS at this held price, the validated
+        # cohort (e.g. epc_no_10_19_m3: n=625, +5.3c, LCB +2.1) supersedes
+        # the pooled model-claim counterfactual.  Non-EPC candidates keep
+        # the floor unchanged.
+        _epc_lcb_c = _epc_floor_lcb_cents(indicators, selected_outcome)
+        _epc_held_floor_exempt = (
+            _epc_lcb_c is not None
+            and _epc_lcb_c >= MERID_EPC_FLOOR_MIN_LCB_CENTS - 1e-9
+        )
+        if _epc_held_floor_exempt:
+            indicators["held_price_floor_epc_exempt"] = {
+                "epc_lcb_c": round(_epc_lcb_c, 3),
+                "held_price_cents": round(held_price * 100.0, 6),
+                "floor_cents": min_held_price_cents,
+            }
         if (
             held_price < min_held_price_dollars
             and edge_breakdown.p_selected < MERID_CHEAP_TAIL_P_EXCEPTION - 1e-9
+            and not _epc_held_floor_exempt
         ):
             _floor_p = edge_breakdown.p_selected
             _held_price_cents = round(held_price * 100.0, 6)

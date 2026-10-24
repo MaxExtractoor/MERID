@@ -458,7 +458,8 @@ data/current_build_provisional_lane.json
 data/directional_regime_state.json
 data/directional_throttle.json
 data/directional_throttle.json.bak_*
-data/epc_train_until_*.json
+data/drift_lane_state.json
+data/epc_train_*.json
 data/epc_wf_*.json
 data/evidence_escape_fills.json
 data/evidence_rehab_probes.json
