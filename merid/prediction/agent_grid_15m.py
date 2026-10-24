@@ -12946,6 +12946,21 @@ class LeanAgent15m:
                 "fe_post_stream_p_no_for_no": _ind.get("fe_post_stream_p_no_for_no"),
                 "fe_final_p_yes": _ind.get("fe_final_p_yes"),
                 "fe_final_p_no_for_no": _ind.get("fe_final_p_no_for_no"),
+                # 2026-10-24 (Phase-A ledger): EdgeBreakdown cost components —
+                # this row is the sole conduit into decision_record's
+                # `candidate`, so net_edge = gross - Σcomponents reconciles.
+                "yes_entry_fee_cents": _ind.get("yes_entry_fee_cents"),
+                "no_entry_fee_cents": _ind.get("no_entry_fee_cents"),
+                "yes_exit_cost_reserve_cents": _ind.get("yes_exit_cost_reserve_cents"),
+                "no_exit_cost_reserve_cents": _ind.get("no_exit_cost_reserve_cents"),
+                "yes_model_risk_reserve_cents": _ind.get("yes_model_risk_reserve_cents"),
+                "no_model_risk_reserve_cents": _ind.get("no_model_risk_reserve_cents"),
+                "yes_policy_giveback_reserve_cents": _ind.get("yes_policy_giveback_reserve_cents"),
+                "no_policy_giveback_reserve_cents": _ind.get("no_policy_giveback_reserve_cents"),
+                "yes_impl_shortfall_reserve_cents": _ind.get("yes_impl_shortfall_reserve_cents"),
+                "no_impl_shortfall_reserve_cents": _ind.get("no_impl_shortfall_reserve_cents"),
+                "yes_edge_bias_correction_cents": _ind.get("yes_edge_bias_correction_cents"),
+                "no_edge_bias_correction_cents": _ind.get("no_edge_bias_correction_cents"),
                 "required_edge_yes_cents": (float(_ind["yes_min_edge"]) * 100.0) if _ind.get("yes_min_edge") is not None else None,
                 "required_edge_no_cents": (float(_ind["no_min_edge"]) * 100.0) if _ind.get("no_min_edge") is not None else None,
                 # Dynamic-threshold decomposition + best-side snapshot: proves
