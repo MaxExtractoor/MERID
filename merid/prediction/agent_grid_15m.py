@@ -12921,6 +12921,31 @@ class LeanAgent15m:
                 "no_entry_price_cents": _ind.get("no_entry_price_cents"),
                 "yes_ev_net_cents": _ind.get("yes_ev_net_cents"),
                 "no_ev_net_cents": _ind.get("no_ev_net_cents"),
+                # 2026-10-24 (Phase-A accounting): the probability and gross
+                # edge actually used inside net_edge — post tail-cap /
+                # streaming-bound — so auditors can reconcile ev_net without
+                # mistaking a probability correction for a hidden reserve.
+                "yes_p_selected": _ind.get("yes_p_selected"),
+                "no_p_selected": _ind.get("no_p_selected"),
+                "yes_gross_edge_cents": _ind.get("yes_gross_edge_cents"),
+                "no_gross_edge_cents": _ind.get("no_gross_edge_cents"),
+                "tail_calibration_yes_applied": _ind.get("tail_calibration_yes_applied"),
+                "tail_calibration_no_applied": _ind.get("tail_calibration_no_applied"),
+                "tail_calibration_yes_reason": _ind.get("tail_calibration_yes_reason"),
+                "tail_calibration_no_reason": _ind.get("tail_calibration_no_reason"),
+                # Ordered probability-stage trace (raw -> tail-cap ->
+                # streaming-bound -> final -> p_selected in EdgeBreakdown).
+                "fe_post_tail_p_yes": _ind.get("fe_post_tail_p_yes"),
+                "fe_post_tail_p_no_for_no": _ind.get("fe_post_tail_p_no_for_no"),
+                "streaming_cal_bound_yes": _ind.get("streaming_cal_bound_yes"),
+                "streaming_cal_bound_no": _ind.get("streaming_cal_bound_no"),
+                "streaming_cal_bound_source_yes": _ind.get("streaming_cal_bound_source_yes"),
+                "streaming_cal_bound_source_no": _ind.get("streaming_cal_bound_source_no"),
+                "streaming_cal_applied": _ind.get("streaming_cal_applied"),
+                "fe_post_stream_p_yes": _ind.get("fe_post_stream_p_yes"),
+                "fe_post_stream_p_no_for_no": _ind.get("fe_post_stream_p_no_for_no"),
+                "fe_final_p_yes": _ind.get("fe_final_p_yes"),
+                "fe_final_p_no_for_no": _ind.get("fe_final_p_no_for_no"),
                 "required_edge_yes_cents": (float(_ind["yes_min_edge"]) * 100.0) if _ind.get("yes_min_edge") is not None else None,
                 "required_edge_no_cents": (float(_ind["no_min_edge"]) * 100.0) if _ind.get("no_min_edge") is not None else None,
                 # Dynamic-threshold decomposition + best-side snapshot: proves

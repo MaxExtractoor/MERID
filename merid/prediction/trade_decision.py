@@ -1438,6 +1438,13 @@ def _resolve_annualized_vol(
     return clamped, source, mn, mx, components
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _get_resolved_live_config() -> Optional[Any]:
     """Return the resolved live config if available, otherwise None."""
     try:
@@ -1475,6 +1482,7 @@ class EdgeThresholdDecomposition(NamedTuple):
     flb_premium: float         # favorite-longshot-bias premium (p < 0.35)
     clamped_floor: bool        # True if the 0.02 floor bound
     clamped_ceiling: bool      # True if the 0.15 ceiling bound
+    convexity_k: float = 0.0   # coefficient applied (K_LO below 50c, K_HI at/above)
     band_relief: float = 0.0   # 50-89c marginal-band threshold relief (subtracted)
     cell_id: Optional[str] = None       # threshold-cell override id
     cell_min_ev_cents: Optional[float] = None  # cell threshold, cents
@@ -1576,9 +1584,16 @@ def _decompose_dynamic_min_required_edge(
 
     # Price-adj convexity term.  At 50c, p*(1-p) = 0.25 -> 0.01 (1 point).
     # At 10c/90c, p*(1-p) = 0.09 -> 0.0036 (0.36 points).
+    # 2026-10-24: K values are env-readable (defaults unchanged) so the
+    # all-gates shadow auditor can replay SYMMETRIC_CONVEXITY_K variants
+    # through this same function instead of a copied formula.
     p = float(price_cents) / 100.0
     p = max(0.01, min(0.99, p))
-    convexity_k = 0.04 if p < 0.5 else 0.02
+    convexity_k = (
+        _env_float("MERID_EDGE_CONVEXITY_K_LO", 0.04)
+        if p < 0.5
+        else _env_float("MERID_EDGE_CONVEXITY_K_HI", 0.02)
+    )
     price_adj = convexity_k * p * (1.0 - p)
 
     # Favorite-longshot bias reserve.  Our own settled-candidate join
@@ -1670,6 +1685,7 @@ def _decompose_dynamic_min_required_edge(
         global_floor=float(floor_min_required_edge),
         asset_base=asset_base,
         convexity=price_adj,
+        convexity_k=convexity_k,
         flb_premium=flb_adj,
         band_relief=band_relief,
         clamped_floor=(cell is None and total == 0.02 and dynamic < 0.02),
