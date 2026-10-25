@@ -50,6 +50,29 @@ from merid.event_venues.kalshi.binary_price_space import (
 
 logger = get_logger("merid.event_venues.kalshi.order_gate")
 
+
+def _lane_band_match(decision_lane: Optional[str], price_cents: int) -> bool:
+    """Banded-lane escape for the canonical entry-range cap.
+
+    The canonical side-aware range (YES 1-85, NO 15-99) predates the bounded
+    admission lanes whose own bands sit above it: pinned_fav maker band
+    (MAKER_LO..MAKER_HI, currently 90-98c) and window_quota (5-97c).  An
+    intent admitted by one of those lanes must not be price_guard-rejected
+    for exceeding the legacy ceiling — observed live 2026-10-25 as
+    ``price_guard:price=98c outside side-aware range`` on a pinned_fav YES.
+    """
+    try:
+        if decision_lane == "pinned_fav":
+            from merid.prediction import directional_regime as _dr
+            return bool(_dr.pinned_fav_band_match(float(price_cents)))
+        if decision_lane == "window_quota":
+            from merid.prediction import window_quota as _wq
+            return bool(_wq.quota_band_match(price_cents))
+    except Exception:
+        pass
+    return False
+
+
 # SEV-1 FIX: Track envelope failure count for alerting
 _envelope_failure_count = 0
 _envelope_failure_window_start = _time.time()
@@ -941,6 +964,10 @@ class PreTradeGate:
         reduce_only: bool = False,
         # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
         target_qty_cc: Optional[int] = None,
+        # 2026-10-25: admission lane so banded lanes (pinned_fav 90-98c,
+        # window_quota 5-97c) aren't rejected by the canonical range cap
+        # that predates them.
+        decision_lane: Optional[str] = None,
     ) -> GateVerdict:
         """Run pre-trade gate checks.
 
@@ -1259,7 +1286,10 @@ class PreTradeGate:
         _canonical_side = _canonical_side.lower()
 
         _is_exit = (entry_or_exit == "exit") or reduce_only
-        if not _is_exit and not is_price_in_canonical_range(price_cents, _canonical_side):
+        _in_range = is_price_in_canonical_range(price_cents, _canonical_side)
+        if not _in_range and not _is_exit:
+            _in_range = _lane_band_match(decision_lane, price_cents)
+        if not _is_exit and not _in_range:
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
                 "[GATE-ALERT] price_guard_blocked coid=%s contract=%s side=%s price=%dc outside side-aware executable range (rejected)",
@@ -1462,6 +1492,10 @@ class PreTradeGate:
         reduce_only: bool = False,
         # CRITICAL FIX (2026-08-18): canonical fractional quantity in centi-contracts
         target_qty_cc: Optional[int] = None,
+        # 2026-10-25: admission lane so banded lanes (pinned_fav 90-98c,
+        # window_quota 5-97c) aren't rejected by the canonical range cap
+        # that predates them.
+        decision_lane: Optional[str] = None,
     ) -> GateVerdict:
         """Async version of pre-trade gate check using asyncio.Lock.
 
@@ -1630,7 +1664,10 @@ class PreTradeGate:
         _canonical_side = _canonical_side.lower()
 
         _is_exit = (entry_or_exit == "exit") or reduce_only
-        if not _is_exit and not is_price_in_canonical_range(price_cents, _canonical_side):
+        _in_range = is_price_in_canonical_range(price_cents, _canonical_side)
+        if not _in_range and not _is_exit:
+            _in_range = _lane_band_match(decision_lane, price_cents)
+        if not _is_exit and not _in_range:
             self._store._metrics.blocked_price_guard += 1
             logger.warning(
                 "[GATE-ALERT] price_guard_blocked coid=%s contract=%s side=%s price=%dc outside side-aware executable range (rejected)",

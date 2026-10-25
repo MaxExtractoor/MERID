@@ -19480,6 +19480,10 @@ def _run_pre_trade_gate(
             reduce_only=intent.reduce_only,
             # CRITICAL FIX (2026-08-18): fractional canonical quantity
             target_qty_cc=_target_qty_cc,
+            # 2026-10-25: admission lane so banded lanes (pinned_fav
+            # 90-98c, window_quota 5-97c) survive the canonical-range
+            # price_guard which predates them.
+            decision_lane=getattr(intent, "decision_lane", None),
         )
         if not verdict.allowed:
             latency = (_time.monotonic() - t0) * 1000
