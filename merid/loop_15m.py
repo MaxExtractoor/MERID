@@ -2761,15 +2761,29 @@ def _run_exit_price_guard(
         if entry_price > 0:
             _profit_floor = entry_price + max(0, _lock_min_profit)
             _chase_floor = _profit_floor
+            # 2026-10-26: authorized-net-claim contract governs no-edge
+            # classification when enabled (same discriminator as the
+            # position monitor's salvage floor); legacy union is fallback.
             _no_edge_claim = False
-            for _ea in ("entry_edge_pct", "entry_edge"):
-                _ev = getattr(position, _ea, None)
-                try:
-                    if _ev is not None and float(_ev) <= 0.0:
-                        _no_edge_claim = True
-                        break
-                except (TypeError, ValueError):
-                    continue
+            try:
+                if os.environ.get("MERID_POSITION_RISK_CONTRACT", "1").strip().lower() in (
+                    "1", "true", "yes",
+                ):
+                    from merid.position_management.position_risk_contract import (
+                        no_edge_salvage_eligible,
+                    )
+                    _no_edge_claim, _no_edge_reason = no_edge_salvage_eligible(position)
+                else:
+                    raise RuntimeError("contract_disabled")
+            except Exception:
+                for _ea in ("entry_edge_pct", "entry_edge"):
+                    _ev = getattr(position, _ea, None)
+                    try:
+                        if _ev is not None and float(_ev) <= 0.0:
+                            _no_edge_claim = True
+                            break
+                    except (TypeError, ValueError):
+                        continue
             if _no_edge_claim:
                 try:
                     _ne_drop = int(
@@ -11557,6 +11571,24 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             intent.policy_epoch = (
                 _dec_inds.get("policy_epoch")
                 or os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01")
+            )
+        except Exception:
+            pass
+
+        # 2026-10-26 (net-claim lineage): carry the exact pair the admission
+        # gate compared — gate_ev_cents (the quantity, breakdown.net_edge for
+        # lane-admitted sides) vs effective_required_edge_cents (the enforced
+        # bound, e.g. the -12c pinned_fav floor) — plus the lane's admission
+        # owner.  The position risk contract must persist the gate operand,
+        # not a downstream EV field.
+        try:
+            intent.gate_ev_cents = candidate.get("gate_ev_cents")
+            intent.effective_required_edge_cents = candidate.get(
+                "effective_required_edge_cents"
+            )
+            intent.admission_owner = (
+                candidate.get("admission_owner")
+                or getattr(intent, "admission_owner", None)
             )
         except Exception:
             pass

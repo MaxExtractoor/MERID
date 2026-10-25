@@ -1236,6 +1236,77 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     return _resolve_execution_mode_with_reason(intent)[0]
 
 
+def _position_risk_contract(intent: "OrderIntent") -> Optional[dict]:
+    """Build the persisted position risk contract for a submitted intent.
+
+    The authorized net claim is ``intent.gate_ev_cents`` when present — the
+    exact quantity the admission gate compared against
+    ``effective_required_edge_cents`` (``trade_decision`` stamps
+    ``{side}_gate_ev_cents`` = ``breakdown.net_edge`` for lane-admitted
+    sides; the allocator's EDGE stage re-compares the same pair).
+    ``intent.ev_net_cents`` (calibrated net-of-cost EV) is the documented
+    fallback — a *different* number from the gate operand when both exist.
+    ``edge_pct`` (raw/anchored model-minus-market) never participates.
+    Provenance fields are stamped best-effort; missing provenance yields
+    honest Nones, never a manufactured claim.
+    """
+    try:
+        from merid.position_management.position_risk_contract import (
+            risk_contract_fields,
+        )
+    except Exception:
+        return None
+    try:
+        _pol = getattr(intent, "execution_policy", None)
+        _gross = getattr(intent, "entry_edge", None)
+        _gate_ev = getattr(intent, "gate_ev_cents", None)
+        _net_claim = (
+            _gate_ev
+            if _gate_ev is not None
+            else getattr(intent, "ev_net_cents", None)
+        )
+        _net_source = (
+            "intent.gate_ev_cents"
+            if _gate_ev is not None
+            else (
+                "intent.ev_net_cents"
+                if getattr(intent, "ev_net_cents", None) is not None
+                else "absent"
+            )
+        )
+        _threshold = getattr(intent, "effective_required_edge_cents", None)
+        if _threshold is None:
+            _threshold = getattr(intent, "effective_gate_edge_cents", None)
+        if _threshold is None:
+            _mre = getattr(intent, "min_required_edge", None)
+            # min_required_edge is a fraction (0.02 = 2c) — convert to cents.
+            _threshold = (
+                float(_mre) * 100.0 if _mre is not None else None
+            )
+        return risk_contract_fields(
+            gross_edge_c=(float(_gross) * 100.0) if _gross is not None else None,
+            authorized_net_edge_c=_net_claim,
+            net_edge_source=_net_source,
+            admission_type=(
+                getattr(intent, "admission_type", None)
+                or getattr(intent, "admission_owner", None)
+            ),
+            admission_lane=(
+                getattr(_pol, "lane", None)
+                or getattr(intent, "decision_lane", None)
+                or _admission_lane(intent)
+            ),
+            effective_threshold_c=_threshold,
+            decision_id=getattr(intent, "decision_id", None),
+            selected_route=(
+                getattr(intent, "order_route", None)
+                or getattr(intent, "execution_mode", None)
+            ),
+        )
+    except Exception:
+        return None
+
+
 def _admission_lane(intent: OrderIntent) -> str:
     """The lane the candidate was admitted under, for the execution contract.
 
@@ -16137,13 +16208,29 @@ async def _route_live(
                     # legacy field is not populated by loop_15m and always read as
                     # 0.0/None, which forced positions onto the 0.03 default edge
                     # and the noisy live-model fallback path.
-                    entry_edge_pct=intent.edge_pct or intent.edgepct or None,
+                    # 2026-10-26: presence checks replace `or` chains so an
+                    # explicit 0.0 claim survives; absent stays absent (the
+                    # +3% fabrication downstream is gone).
+                    entry_edge_pct=(
+                        intent.edge_pct
+                        if getattr(intent, "edge_pct", None) is not None
+                        else getattr(intent, "edgepct", None)
+                    ),
                     entry_signal_id=intent.entry_signal_id or intent.client_tag,
                     entry_model=intent.entry_model or intent.source,
                     entry_model_version=intent.entry_model_version or intent.data_version,
                     entry_model_probability=intent.entry_model_probability or intent.model_prob,
                     entry_market_probability=intent.entry_market_probability or (intent.price_cents / 100.0 if intent.price_cents else None),
-                    entry_edge=intent.entry_edge or intent.edge_pct or intent.edgepct or None,
+                    entry_edge=(
+                        intent.entry_edge
+                        if getattr(intent, "entry_edge", None) is not None
+                        else (
+                            intent.edge_pct
+                            if getattr(intent, "edge_pct", None) is not None
+                            else getattr(intent, "edgepct", None)
+                        )
+                    ),
+                    risk_contract=_position_risk_contract(intent),
                     entry_book_snapshot_id=intent.entry_book_snapshot_id,
                     # CRITICAL FIX (2026-09-24): entry_execution_mode is not an
                     # OrderIntent field; the bare attribute access raised
@@ -17731,7 +17818,15 @@ async def _route_live(
                 entry_model_version=intent.entry_model_version or intent.data_version,
                 entry_model_probability=intent.entry_model_probability or intent.model_prob,
                 entry_market_probability=intent.entry_market_probability,
-                entry_edge=intent.entry_edge or intent.edge_pct or intent.edgepct,
+                entry_edge=(
+                    intent.entry_edge
+                    if getattr(intent, "entry_edge", None) is not None
+                    else (
+                        intent.edge_pct
+                        if getattr(intent, "edge_pct", None) is not None
+                        else getattr(intent, "edgepct", None)
+                    )
+                ),
                 entry_book_snapshot_id=intent.entry_book_snapshot_id,
                 # 2026-09-24: getattr fallback — entry_execution_mode is not an
                 # OrderIntent field; bare access raised AttributeError and the

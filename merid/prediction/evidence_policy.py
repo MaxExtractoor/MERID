@@ -389,6 +389,32 @@ def impl_shortfall_prior_cents() -> float:
     return _env_float("MERID_IMPL_SHORTFALL_PRIOR_CENTS", 1.0)
 
 
+def _impl_shortfall_rec(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Resolve the implementation-shortfall cohort record.
+
+    Returns ``(key, rec)`` for the first adequately-sampled record along the
+    fallback chain ``ASSET|side|basis`` -> ``ASSET|*|basis`` -> ``*|*|basis``,
+    or ``(None, None)`` when unmeasured.
+    """
+    block = (evidence or {}).get("implementation_shortfall")
+    recs = (block or {}).get("by_basis")
+    if not isinstance(recs, dict):
+        return None, None
+    a = (str(asset).upper()) or "UNKNOWN"
+    s = str(side).lower()
+    b = "bid" if str(basis).lower() == "bid" else "ask"
+    for key in (f"{a}|{s}|{b}", f"{a}|*|{b}", f"*|*|{b}"):
+        rec = recs.get(key)
+        if isinstance(rec, dict) and int(rec.get("n") or 0) >= impl_shortfall_min_n():
+            return key, rec
+    return None, None
+
+
 def measured_implementation_shortfall_cents(
     evidence: Optional[Dict[str, Any]],
     asset: str,
@@ -404,21 +430,37 @@ def measured_implementation_shortfall_cents(
     """
     if not impl_shortfall_enabled():
         return None
-    block = (evidence or {}).get("implementation_shortfall")
-    recs = (block or {}).get("by_basis")
-    if not isinstance(recs, dict):
+    _key, rec = _impl_shortfall_rec(evidence, asset, side, basis)
+    if rec is None:
         return None
-    a = (str(asset).upper()) or "UNKNOWN"
-    s = str(side).lower()
-    b = "bid" if str(basis).lower() == "bid" else "ask"
-    for key in (f"{a}|{s}|{b}", f"{a}|*|{b}", f"*|*|{b}"):
-        rec = recs.get(key)
-        if isinstance(rec, dict) and int(rec.get("n") or 0) >= impl_shortfall_min_n():
-            return max(
-                0.0,
-                min(impl_shortfall_cap_cents(), float(rec.get("q75_cents") or 0.0)),
-            )
-    return None
+    return max(
+        0.0,
+        min(impl_shortfall_cap_cents(), float(rec.get("q75_cents") or 0.0)),
+    )
+
+
+def implementation_shortfall_provenance(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+) -> Dict[str, Any]:
+    """Resolved cohort identity for the artifact-side impl-shortfall charge.
+
+    ``{"key", "n", "q75_cents"}`` names the exact ``by_basis`` cohort the
+    measured value came from (or ``None`` fields when unmeasured) — pure
+    metadata; does not alter the charged reserve.
+    """
+    if not impl_shortfall_enabled():
+        return {"key": None, "n": 0, "q75_cents": None}
+    key, rec = _impl_shortfall_rec(evidence, asset, side, basis)
+    if rec is None:
+        return {"key": None, "n": 0, "q75_cents": None}
+    return {
+        "key": key,
+        "n": int(rec.get("n") or 0),
+        "q75_cents": float(rec.get("q75_cents") or 0.0),
+    }
 
 
 def implementation_shortfall_cents(
@@ -508,13 +550,14 @@ def _edge_bias_source(asset: str, side: str, basis: str) -> str:
     return f"{s}_ask"
 
 
-def _edge_bias_rec(
+def _edge_bias_lookup(
     evidence: Optional[Dict[str, Any]], asset: str, side: str, basis: str
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Resolve the edge-bias cohort record and the key that supplied it."""
     block = (evidence or {}).get("edge_bias")
     recs = (block or {}).get("by_source")
     if not isinstance(recs, dict):
-        return None
+        return None, None
     a = (str(asset).upper()) or "UNKNOWN"
     s = str(side).lower()
     for key in (
@@ -523,8 +566,44 @@ def _edge_bias_rec(
     ):
         rec = recs.get(key)
         if isinstance(rec, dict):
-            return rec
-    return None
+            return key, rec
+    return None, None
+
+
+def _edge_bias_rec(
+    evidence: Optional[Dict[str, Any]], asset: str, side: str, basis: str
+) -> Optional[Dict[str, Any]]:
+    return _edge_bias_lookup(evidence, asset, side, basis)[1]
+
+
+def edge_bias_provenance(
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+) -> Dict[str, Any]:
+    """Resolved cohort identity for the edge-bias correction (metadata only).
+
+    ``{"key", "n_eff", "gap_wsum", "correction_cents"}`` names the exact
+    ``by_source`` cohort consumed (or the ``ASSET|side|*`` fallback) along
+    with its effective sample count — the audit fields needed to reproduce
+    which measured population a charge or rebate came from.
+    """
+    key, rec = _edge_bias_lookup(evidence, asset, side, basis)
+    if rec is None:
+        return {"key": None, "n_eff": 0.0, "gap_wsum": None, "correction_cents": 0.0}
+    if evidence_epoch_ts() > 0.0:
+        n_eff = float(rec.get("n_eff_post") or 0.0)
+        wsum = float(rec.get("gap_wsum_post") or 0.0)
+    else:
+        n_eff = float(rec.get("n_eff") or 0.0)
+        wsum = float(rec.get("gap_wsum") or 0.0)
+    return {
+        "key": key,
+        "n_eff": n_eff,
+        "gap_wsum": wsum,
+        "correction_cents": edge_bias_correction_cents(evidence, asset, side, basis),
+    }
 
 
 def edge_bias_correction_cents(

@@ -8534,7 +8534,12 @@ class LeanAgent15m:
         # build it rejects the entry rather than silently falling back to the
         # point-Bachelier path.
         settlement_distribution: Optional[Any] = None
+        # 2026-10-26: per-eval V2 status for the decision record.  Build failures
+        # still reject; this makes the flag_off/built distinction a persisted
+        # fact rather than an inference from raw-probability shape.
+        self._last_v2_dist_status = "flag_off"
         if MERID_SETTLEMENT_DISTRIBUTION_V2:
+            self._last_v2_dist_status = "enabled"
             if not _SETTLEMENT_DISTRIBUTION_AVAILABLE:
                 logger.warning(
                     "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but module unavailable; refusing entry",
@@ -8605,6 +8610,7 @@ class LeanAgent15m:
                     annualized_vol=resolved_dist_vol,
                     max_missing_samples=_settlement_max_missing_samples(),
                 )
+                self._last_v2_dist_status = "built"
             except Exception as sd_exc:
                 # Expected near the settlement-sample window boundary: elapsed
                 # slots exist before the sampler has recorded any values.
@@ -8829,6 +8835,15 @@ class LeanAgent15m:
                 route=route,
             )
             decision = compute_trade_decision(**td_kwargs)
+            # 2026-10-26: persist the V2 branch result on the decision's
+            # indicators so eval records carry settlement_status as a fact.
+            try:
+                if getattr(decision, "indicators", None) is not None:
+                    decision.indicators["settlement_status"] = getattr(
+                        self, "_last_v2_dist_status", "unknown"
+                    )
+            except Exception:
+                pass
             # P1a: scheduled-shadow opportunities (additive, read-only).
             # Due contract x horizon targets are re-evaluated on this same
             # frozen input bundle under side-effect suppression; emitted
@@ -13080,6 +13095,12 @@ class LeanAgent15m:
                 "model_p_yes": float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
                 "model_p_no": float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
                 "p_yes_raw": _ind.get("p_yes_raw"),
+                "endpoint_p_yes_raw": _ind.get("endpoint_p_yes_raw"),
+                "settlement_raw_probability": _ind.get("settlement_raw_probability"),
+                "settlement_override_applied": _ind.get("settlement_override_applied"),
+                "selected_raw_probability_source": _ind.get("selected_raw_probability_source"),
+                "settlement_status": _ind.get("settlement_status"),
+                "settlement_phase": _ind.get("settlement_phase"),
                 "yes_bid_cents": _ind.get("yes_bid_cents"),
                 "yes_ask_cents": _ind.get("yes_ask_cents"),
                 "no_bid_cents": _ind.get("no_bid_cents"),
@@ -13128,6 +13149,23 @@ class LeanAgent15m:
                 "no_impl_shortfall_reserve_cents": _ind.get("no_impl_shortfall_reserve_cents"),
                 "yes_edge_bias_correction_cents": _ind.get("yes_edge_bias_correction_cents"),
                 "no_edge_bias_correction_cents": _ind.get("no_edge_bias_correction_cents"),
+                # 2026-10-25 (EV-reconciliation): split gate verdicts +
+                # reserve measured-cohort identity so vetoed/emitted rows
+                # alike name which bound applied and which cohort charged.
+                "yes_formula_gate_passed": _ind.get("yes_formula_gate_passed"),
+                "no_formula_gate_passed": _ind.get("no_formula_gate_passed"),
+                "yes_effective_edge_gate_passed": _ind.get("yes_effective_edge_gate_passed"),
+                "no_effective_edge_gate_passed": _ind.get("no_effective_edge_gate_passed"),
+                "yes_effective_required_source": _ind.get("yes_effective_required_source"),
+                "no_effective_required_source": _ind.get("no_effective_required_source"),
+                "reserve_snapshot_id": _ind.get("reserve_snapshot_id"),
+                "reserve_artifact_hash": _ind.get("reserve_artifact_hash"),
+                "reserve_artifact_asof": _ind.get("reserve_artifact_asof"),
+                "reserve_estimator_version": _ind.get("reserve_estimator_version"),
+                "yes_reserve_cohort_key": _ind.get("yes_reserve_cohort_key"),
+                "no_reserve_cohort_key": _ind.get("no_reserve_cohort_key"),
+                "yes_reserve_cohort_sample_count": _ind.get("yes_reserve_cohort_sample_count"),
+                "no_reserve_cohort_sample_count": _ind.get("no_reserve_cohort_sample_count"),
                 "required_edge_yes_cents": (float(_ind["yes_min_edge"]) * 100.0) if _ind.get("yes_min_edge") is not None else None,
                 "required_edge_no_cents": (float(_ind["no_min_edge"]) * 100.0) if _ind.get("no_min_edge") is not None else None,
                 # Dynamic-threshold decomposition + best-side snapshot: proves

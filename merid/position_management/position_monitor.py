@@ -994,7 +994,37 @@ def _position_no_edge_claim(position: "Position") -> bool:
     bounded-lane admission as a model-edge entry and suppressed the no-edge
     salvage floor.  Either stamp <= 0 marks a bounded-lane/underwater
     admission whose contract is bank-the-win, not ride-the-model.
+
+    2026-10-26 (position_risk_contract): when the versioned contract is
+    enabled, the persisted *authorized net claim* governs eligibility.
+    Legacy union semantics remain the fallback when the contract path is
+    unavailable or disabled; divergent outcomes are logged for review.
     """
+    if os.environ.get("MERID_POSITION_RISK_CONTRACT", "1").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        try:
+            from merid.position_management.position_risk_contract import (
+                legacy_union_no_edge_claim,
+                no_edge_salvage_eligible,
+            )
+            _legacy = legacy_union_no_edge_claim(position)
+            _elig, _reason = no_edge_salvage_eligible(position)
+            if _elig != _legacy:
+                logger.warning(
+                    "[NET-CLAIM-CONTRACT] position=%s eligible=%s legacy_union=%s reason=%s",
+                    getattr(position, "market_id", getattr(position, "ticker", "?")),
+                    _elig, _legacy, _reason,
+                )
+            elif str(_reason).startswith(("unknown", "claim_conflict")):
+                logger.info(
+                    "[NET-CLAIM-CONTRACT] position=%s flagged reason=%s",
+                    getattr(position, "market_id", getattr(position, "ticker", "?")),
+                    _reason,
+                )
+            return _elig
+        except Exception:
+            pass
     for attr in ("entry_edge_pct", "entry_edge"):
         try:
             v = getattr(position, attr, None)

@@ -1238,51 +1238,96 @@ def _get_model_fair_value_cents(state: Any, held_contract: Literal["yes", "no"])
     return None
 
 
-def _get_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
-    """Return model fair value in the held contract's price space."""
-    # The active model's P(YES), published by the agent decision path, is the
-    # most faithful fair value — it is the same probability entries use.  A
-    # stale model value is worse than none: a market whose model stopped
-    # updating must not borrow a frozen probability for a live EV decision.
+def _get_fair_value_provenance(state: Any, held_contract: Literal["yes", "no"]) -> Dict[str, Any]:
+    """Resolve the continuation fair value plus which source supplied it.
+
+    Same precedence and short-circuit semantics as ``_get_fair_value_cents`` —
+    that function is now a thin wrapper so the two cannot drift:
+
+      1. ``model_fair_prob`` fresh within ``_model_fair_value_max_age_s()``
+         (stale/out-of-range falls through).
+      2. ``external_fair_value`` (present-but-out-of-range stops resolution).
+      3. ``implied_prob`` — book mid (present-but-out-of-range stops).
+
+    Reporting only — identical return values.  Provenance fields: ``source``
+    (``model_fair_prob`` | ``external_fair_value`` | ``implied_prob`` |
+    ``none``), ``model_available``/``model_fresh`` (publication presence and
+    staleness, independent of whether it won), ``model_asof_ts`` /
+    ``model_age_ms`` where a publication timestamp exists, and
+    ``fallback_reason`` for why a higher-precedence source did not win.
+    """
+    out: Dict[str, Any] = {
+        "value_cents": None,
+        "source": "none",
+        "model_available": False,
+        "model_fresh": False,
+        "model_asof_ts": None,
+        "model_age_ms": None,
+        "fallback_reason": None,
+    }
     unified = state
-    if hasattr(unified, "model_fair_prob") and unified.model_fair_prob is not None:
+
+    model_val = getattr(unified, "model_fair_prob", None)
+    if hasattr(unified, "model_fair_prob") and model_val is not None:
         try:
             prob_ts = float(getattr(unified, "model_fair_prob_ts", 0.0) or 0.0)
             age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
+            out["model_available"] = True
+            out["model_asof_ts"] = prob_ts if prob_ts > 0 else None
+            out["model_age_ms"] = int(age_s * 1000) if age_s != float("inf") else None
             if age_s <= _model_fair_value_max_age_s():
-                yes_fair = int(round(float(unified.model_fair_prob) * 100))
+                out["model_fresh"] = True
+                yes_fair = int(round(float(model_val) * 100))
                 if 1 <= yes_fair <= 99:
-                    if held_contract == "yes":
-                        return yes_fair
-                    return 100 - yes_fair
+                    out["value_cents"] = yes_fair if held_contract == "yes" else 100 - yes_fair
+                    out["source"] = "model_fair_prob"
+                    return out
+                out["fallback_reason"] = "model_fair_prob_out_of_range"
+            else:
+                out["fallback_reason"] = "model_fair_prob_stale"
         except Exception:
-            pass
+            out["fallback_reason"] = "model_fair_prob_invalid"
+    elif hasattr(unified, "model_fair_prob"):
+        out["fallback_reason"] = "model_fair_prob_absent"
+    else:
+        out["fallback_reason"] = "model_fair_prob_field_missing"
 
     # Unified market state carries external_fair_value as P(YES).
-    if hasattr(unified, "external_fair_value") and unified.external_fair_value is not None:
+    ext_val = getattr(unified, "external_fair_value", None)
+    if ext_val is not None:
         try:
-            yes_fair = int(round(float(unified.external_fair_value) * 100))
+            yes_fair = int(round(float(ext_val) * 100))
             if not 1 <= yes_fair <= 99:
-                return None
-            if held_contract == "yes":
-                return yes_fair
-            return 100 - yes_fair
+                out["fallback_reason"] = "external_fair_value_out_of_range"
+                return out
+            out["value_cents"] = yes_fair if held_contract == "yes" else 100 - yes_fair
+            out["source"] = "external_fair_value"
+            return out
         except Exception:
-            pass
+            out["fallback_reason"] = "external_fair_value_invalid"
 
     # Fall back to implied probability.
-    if hasattr(unified, "implied_prob") and unified.implied_prob is not None:
+    implied_val = getattr(unified, "implied_prob", None)
+    if implied_val is not None:
         try:
-            yes_fair = int(round(float(unified.implied_prob) * 100))
+            yes_fair = int(round(float(implied_val) * 100))
             if not 1 <= yes_fair <= 99:
-                return None
-            if held_contract == "yes":
-                return yes_fair
-            return 100 - yes_fair
+                out["fallback_reason"] = "implied_prob_out_of_range"
+                return out
+            out["value_cents"] = yes_fair if held_contract == "yes" else 100 - yes_fair
+            out["source"] = "implied_prob"
+            return out
         except Exception:
-            pass
+            out["fallback_reason"] = "implied_prob_invalid"
 
-    return None
+    if out["fallback_reason"] is None:
+        out["fallback_reason"] = "no_fair_value_source"
+    return out
+
+
+def _get_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
+    """Return model fair value in the held contract's price space."""
+    return _get_fair_value_provenance(state, held_contract)["value_cents"]
 
 
 def _seconds_to_expiry(state: Any) -> Optional[float]:
@@ -2773,12 +2818,32 @@ async def maybe_submit_stop_candidate(
             _oid = getattr(result, "order_id", None)
             _rstatus = str(getattr(result, "status", "") or "").lower()
             if _oid:
+                # 2026-10-26: bounded exchange-ack capture for exit-order
+                # forensics (BTC LOSS_CAP unfilled-IOC audit).  Whitelisted
+                # scalar fields only, credentials excluded, nonblocking —
+                # a diagnostic failure must never abort an exit submission.
+                _ack_payload = None
+                try:
+                    _res_fill = getattr(result, "fill", None) or {}
+                    _ack_payload = {
+                        "route_status": _rstatus or None,
+                        "reason": getattr(result, "reason", None),
+                        "exchange_order_id": _oid,
+                        "client_order_id": getattr(result, "client_order_id", None),
+                        "executed_quantity_cc": getattr(result, "executed_quantity_cc", None),
+                        "remaining_quantity_cc": getattr(result, "remaining_quantity_cc", None),
+                        "latency_ms": getattr(result, "latency_ms", None),
+                        "fill_keys": sorted(_res_fill.keys())[:24] if isinstance(_res_fill, dict) else None,
+                    }
+                except Exception:
+                    _ack_payload = None
                 _OAStore().transition_exit_attempt(
                     _exit_attempt.attempt_id,
                     _EAS.ACKNOWLEDGED.value,
                     actor="stop_candidate",
                     reason=f"route_ack:{_rstatus}",
                     exchange_order_id=_oid,
+                    raw_payload=_ack_payload,
                 )
             elif _rstatus in ("rejected", "error"):
                 _OAStore().transition_exit_attempt(

@@ -9,6 +9,7 @@ inputs to the decision engine.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import statistics
@@ -682,6 +683,10 @@ _ANNUALIZED_VOL_BANDS = {
 # (applied as max(asset_floor, GLOBAL_MIN)).
 _ANNUALIZED_VOL_GLOBAL_MIN = float(os.environ.get("MERID_MIN_ANNUALIZED_VOL", "0.15"))
 _ANNUALIZED_VOL_GLOBAL_MAX = float(os.environ.get("MERID_MAX_ANNUALIZED_VOL", "1.20"))
+# 365-day year used by the vol estimator, endpoint model, and settlement
+# distribution alike (realized_vol.SECONDS_PER_YEAR).  One audit exception:
+# the evidence_escape knife-edge veto uses a 365.25-day year (31557600).
+_SECONDS_PER_YEAR_CONST = 365.0 * 24.0 * 60.0 * 60.0
 
 # Optional vol sources (off by default).  Realized vol is preferred when fresh;
 # market-implied vol is a cross-check against the Kalshi price.  Both are sanity
@@ -3171,7 +3176,12 @@ def _compute_confidence(
 
 # mtime-cached view of data/live_entry_evidence.json, rebuilt on each
 # settlement by the decision audit ledger.  See MERID_LIVE_EVIDENCE_GATE.
-_live_evidence_cache: Dict[str, Any] = {"mtime": None, "data": None}
+# ``sha256``/``path`` fingerprint the exact artifact bytes each decision
+# consumed so a mutable-file cohort can be reconstructed from durable audit
+# fields rather than a later regenerated artifact.
+_live_evidence_cache: Dict[str, Any] = {
+    "mtime": None, "data": None, "sha256": None, "path": None,
+}
 
 
 def _load_live_evidence() -> Optional[Dict[str, Any]]:
@@ -3197,13 +3207,16 @@ def _load_live_evidence() -> Optional[Dict[str, Any]]:
     if _live_evidence_cache["mtime"] == mtime and _live_evidence_cache["data"] is not None:
         return _live_evidence_cache["data"]
     try:
-        with open(path, "r") as f:
-            data = json.load(f)
+        with open(path, "rb") as f:
+            raw = f.read()
+        data = json.loads(raw)
     except Exception:
         # Unreadable/corrupt artifact = same fail-closed missing state.
         return {"artifact_missing": True, "generated_at": 0.0}
     _live_evidence_cache["mtime"] = mtime
     _live_evidence_cache["data"] = data
+    _live_evidence_cache["sha256"] = hashlib.sha256(raw).hexdigest()
+    _live_evidence_cache["path"] = path
     return data
 
 
@@ -3216,9 +3229,24 @@ def _live_evidence_mtime() -> Optional[float]:
         return None
 
 
+def _live_evidence_identity() -> Dict[str, Any]:
+    """Fingerprint of the artifact bytes the cached view was loaded from.
+
+    ``{"path", "mtime", "sha256"}`` — all ``None`` when nothing has been
+    loaded this process.  Reporting metadata only.
+    """
+    return {
+        "path": _live_evidence_cache.get("path"),
+        "mtime": _live_evidence_cache.get("mtime"),
+        "sha256": _live_evidence_cache.get("sha256"),
+    }
+
+
 def _clear_live_evidence_cache() -> None:
     _live_evidence_cache["mtime"] = None
     _live_evidence_cache["data"] = None
+    _live_evidence_cache["sha256"] = None
+    _live_evidence_cache["path"] = None
 
 
 def _wilson_lower_bound(wr: float, n: int, z: float) -> float:
@@ -3967,22 +3995,47 @@ def _compute_trade_decision_impl(
         "annualized_vol_source": vol_source,
         "annualized_vol_band_min": band_min,
         "annualized_vol_band_max": band_max,
+        # Reporting-only sigma metadata: explicit units + time basis so an
+        # audit can distinguish relative vs absolute vol without reading code.
+        "sigma_value": resolved_vol,
+        "sigma_units": "relative_log_return_annualized",
+        "sigma_time_basis_seconds_per_year": _SECONDS_PER_YEAR_CONST,
+        "sigma_source": vol_source,
+        "endpoint_model_family": "black_lognormal_digital",
         "log_moneyness": log_moneyness,
         "z_score": z,
         "market_prob_for_implied_vol": market_prob,
         "bachelier_spot": float(spot_price),
         "strike": float(strike_price),
     })
+    # Vol-estimate as-of/lookback provenance when the resolver consumed the
+    # realized-vol tracker; other sources carry no lookback to report.
+    if str(vol_source).startswith("realized"):
+        try:
+            _rv_est = get_realized_vol_tracker().annualized_vol(asset)
+            if _rv_est is not None:
+                indicators["sigma_asof"] = float(_rv_est.last_tick_ts)
+                indicators["sigma_lookback_samples"] = int(_rv_est.samples)
+                indicators["sigma_lookback_span_s"] = float(_rv_est.span_s)
+        except Exception:
+            pass
 
     # If a settlement-aware distribution is supplied, use it as the canonical
     # distribution of the final 60-second settlement average.  This overrides
     # the legacy point-price Bachelier p_yes for probability but preserves the
     # same cost/edge/tail gates.
     if settlement_distribution is not None and math.isfinite(settlement_distribution.p_yes_raw):
+        # 2026-10-26 lineage stamps (reporting only): preserve the pre-override
+        # endpoint baseline so ``p_yes_raw`` no longer silently collapses the
+        # two candidate raw sources into one field.
+        indicators["endpoint_p_yes_raw"] = float(p_yes_raw)
         p_yes_raw = float(settlement_distribution.p_yes_raw)
         log_moneyness = (float(settlement_distribution.mean) - float(strike_price)) / max(abs(float(strike_price)), 1e-12)
         z = float(settlement_distribution.z_score)
         indicators.update({
+            "settlement_override_applied": True,
+            "settlement_raw_probability": float(p_yes_raw),
+            "selected_raw_probability_source": "settlement_rti_bachelier_v2",
             "settlement_forecast_mean": float(settlement_distribution.mean),
             "settlement_forecast_std": float(settlement_distribution.std),
             "settlement_observed_count": int(settlement_distribution.observed_count),
@@ -3990,10 +4043,27 @@ def _compute_trade_decision_impl(
             "settlement_phase": settlement_distribution.phase,
             "settlement_forecast_method": settlement_distribution.forecast_method,
             "settlement_model_version": settlement_distribution.model_version,
+            # sigma rel->abs conversion provenance (reporting-only):
+            # sigma_abs = sigma_rel * latest_rti, reference = decision-time spot.
+            "sigma_conversion_expression": "sigma_abs=sigma_rel*latest_rti",
+            "sigma_conversion_reference_price": float(spot_price),
+            "sigma_abs_value": resolved_vol * float(spot_price),
+            "settlement_mean_units": "price",
+            "settlement_variance_units": "price_squared",
             "log_moneyness": log_moneyness,
             "z_score": z,
             "p_yes_raw": p_yes_raw,
         })
+    else:
+        # No usable settlement distribution reached the decision: the raw is
+        # the point-expiry Bachelier baseline.  Recorded explicitly so the
+        # endpoint-vs-settlement lineage is a persisted fact, not an inference.
+        indicators["settlement_override_applied"] = False
+        indicators["selected_raw_probability_source"] = (
+            "endpoint_bachelier_dist_unavailable"
+            if settlement_distribution is not None
+            else "endpoint_bachelier"
+        )
 
     # 2026-08-30: Per-side tail calibration.  The YES and NO held-side
     # probabilities are calibrated independently from their own tail curves,
@@ -4546,6 +4616,29 @@ def _compute_trade_decision_impl(
     indicators["yes_calibration_gap_cents"] = _calib_gap_yes * 100.0
     indicators["no_calibration_gap_cents"] = _calib_gap_no * 100.0
 
+    # 2026-10-25 (EV-reconciliation provenance): fingerprint the exact
+    # artifact bytes the reserve stack consumed.  The artifact is rebuilt in
+    # place on each settlement, so a decision later than a settlement reads a
+    # *different* cohort — mtime+sha256 snapshot identity is the only way a
+    # durable audit row can name which measured population produced each
+    # charge.  Metadata only; consumed values still come from EdgeBreakdown.
+    _ev_ident = _live_evidence_identity()
+    _ev_mtime = _ev_ident.get("mtime") or _live_evidence_mtime()
+    _ev_sha = _ev_ident.get("sha256")
+    indicators["reserve_artifact_hash"] = _ev_sha
+    indicators["reserve_artifact_asof"] = (
+        (_cal_ev or {}).get("generated_at") or _ev_mtime
+    )
+    indicators["reserve_snapshot_id"] = (
+        f"live_entry_evidence@{_ev_mtime}:{str(_ev_sha)[:16]}"
+        if _ev_mtime is not None
+        else None
+    )
+    indicators["reserve_estimator_version"] = (
+        f"{evidence_policy.EVIDENCE_POLICY_VERSION}|giveback:exit_markouts_v1|"
+        f"impl:evidence_q75+fq_q75|bias:shrunk_gap_v1"
+    )
+
     # 2026-10-06 (EV reconciliation): the adverse-selection reserve is the
     # realized pick-off cost of a *resting* fill — measured from the
     # provisional lane's post-only markouts.  It therefore applies only to
@@ -4591,9 +4684,14 @@ def _compute_trade_decision_impl(
     # each side p_trigger * E[max(0,-markout_60s) | profit exit], measured
     # from logs/exit_markouts.jsonl per asset (global fallback).
     _giveback_per_trigger = 0.0
+    _gb_prov: Dict[str, Any] = {"key": None, "n": 0, "mean_cents": None}
     try:
         from merid.prediction import exit_giveback as _xg
         _giveback_per_trigger = float(_xg.giveback_per_trigger_cents(asset)) / 100.0
+        try:
+            _gb_prov = _xg.giveback_provenance(asset)
+        except Exception:
+            _gb_prov = {"key": None, "n": 0, "mean_cents": None}
     except Exception:
         _giveback_per_trigger = 0.0
     _policy_gb_yes = _exit_p_yes * _giveback_per_trigger
@@ -4611,6 +4709,10 @@ def _compute_trade_decision_impl(
     # basis) — a disjoint, previously uncharged cost.
     _impl_sf_yes = 0.0
     _impl_sf_no = 0.0
+    _impl_prov_yes: Dict[str, Any] = {"key": None, "n": 0, "q75_cents": None}
+    _impl_prov_no: Dict[str, Any] = {"key": None, "n": 0, "q75_cents": None}
+    _fq_prov_yes: Dict[str, Any] = {"key": None, "n": 0, "q75": None}
+    _fq_prov_no: Dict[str, Any] = {"key": None, "n": 0, "q75": None}
     try:
         # fill_quality.jsonl only observes post-only (bid-basis) fills; on
         # that basis its near-real-time Q75 merges with the audit cohort.
@@ -4619,11 +4721,23 @@ def _compute_trade_decision_impl(
             try:
                 from merid.execution.fill_quality_tracker import (
                     measured_impl_shortfall_cents as _fq_impl,
+                    measured_impl_shortfall_provenance as _fq_prov,
                 )
                 _impl_log_yes = _fq_impl(asset, "yes", "bid")
                 _impl_log_no = _fq_impl(asset, "no", "bid")
+                try:
+                    _fq_prov_yes = _fq_prov(asset, "yes", "bid")
+                    _fq_prov_no = _fq_prov(asset, "no", "bid")
+                except Exception:
+                    pass
             except Exception:
                 _impl_log_yes = _impl_log_no = None
+        _impl_prov_yes = evidence_policy.implementation_shortfall_provenance(
+            _cal_ev, asset, "yes", entry_price_basis
+        )
+        _impl_prov_no = evidence_policy.implementation_shortfall_provenance(
+            _cal_ev, asset, "no", entry_price_basis
+        )
         _impl_sf_yes = evidence_policy.implementation_shortfall_cents(
             _cal_ev, asset, "yes", entry_price_basis,
             fill_quality_meas=_impl_log_yes,
@@ -4648,6 +4762,8 @@ def _compute_trade_decision_impl(
     # subtracts from net edge, negative adds back.
     _bias_yes = 0.0
     _bias_no = 0.0
+    _bias_prov_yes: Dict[str, Any] = {"key": None, "n_eff": 0.0, "gap_wsum": None}
+    _bias_prov_no: Dict[str, Any] = {"key": None, "n_eff": 0.0, "gap_wsum": None}
     try:
         _bias_yes = evidence_policy.edge_bias_correction_cents(
             _cal_ev, asset, "yes", entry_price_basis
@@ -4655,10 +4771,40 @@ def _compute_trade_decision_impl(
         _bias_no = evidence_policy.edge_bias_correction_cents(
             _cal_ev, asset, "no", entry_price_basis
         ) / 100.0
+        try:
+            _bias_prov_yes = evidence_policy.edge_bias_provenance(
+                _cal_ev, asset, "yes", entry_price_basis
+            )
+            _bias_prov_no = evidence_policy.edge_bias_provenance(
+                _cal_ev, asset, "no", entry_price_basis
+            )
+        except Exception:
+            pass
     except Exception:
         _bias_yes = _bias_no = 0.0
     indicators["yes_edge_bias_correction_cents"] = _bias_yes * 100.0
     indicators["no_edge_bias_correction_cents"] = _bias_no * 100.0
+
+    # 2026-10-25 (EV-reconciliation provenance): name the exact measured
+    # cohorts each hidden reserve consumed — the missing 2.92c class of bug
+    # only reconstructs when giveback/impl/bias each carry their source key
+    # and sample size.  Metadata only; breakdown values are unchanged.
+    for _pfx, _gbp, _ip, _fp, _bp in (
+        ("yes", _gb_prov, _impl_prov_yes, _fq_prov_yes, _bias_prov_yes),
+        ("no", _gb_prov, _impl_prov_no, _fq_prov_no, _bias_prov_no),
+    ):
+        indicators[f"{_pfx}_reserve_cohort_key"] = json.dumps({
+            "giveback": _gbp.get("key"),
+            "impl_evidence": _ip.get("key"),
+            "impl_fill_quality": _fp.get("key"),
+            "edge_bias": _bp.get("key"),
+        })
+        indicators[f"{_pfx}_reserve_cohort_sample_count"] = json.dumps({
+            "giveback_n": _gbp.get("n"),
+            "impl_evidence_n": _ip.get("n"),
+            "impl_fill_quality_n": _fp.get("n"),
+            "edge_bias_n_eff": _bp.get("n_eff"),
+        })
 
     # 2026-10-19 (settlement-lane reserve): the generic model_uncertainty +
     # calibration-gap + drift stack prices *model-form* uncertainty — but the
@@ -6566,6 +6712,44 @@ def _compute_trade_decision_impl(
         indicators[f"{_pfx}_true_shortfall_cents"] = max(
             0.0,
             (_req_c if _lane_admitted_s else _bnd * 100.0) - _gev_c,
+        )
+        # 2026-10-25 (EV-reconciliation): split the two gate verdicts that
+        # passed_edge_gate was collapsing — the ordinary formula comparison
+        # (net EV vs formula required edge) and the effective comparison the
+        # admission actually enforced (gate EV vs the post-substitution
+        # bound), plus which bound source was enforced.  Reporting only.
+        try:
+            _formula_req_c_s = float(
+                indicators[f"{_pfx}_formula_required_edge_cents"]
+            )
+        except (KeyError, TypeError, ValueError):
+            _formula_req_c_s = None
+        indicators[f"{_pfx}_formula_gate_passed"] = bool(
+            _formula_req_c_s is not None
+            and float(_bd.net_edge) * 100.0 >= _formula_req_c_s - 1e-9
+        )
+        indicators[f"{_pfx}_effective_edge_gate_passed"] = bool(
+            math.isfinite(_gev_c)
+            and _gev_c
+            >= indicators[f"{_pfx}_effective_gate_edge_cents"] - 1e-9
+        )
+        _lane_name_s = None
+        if _lane_admitted_s:
+            _lane_name_s = (
+                "pinned_fav"
+                if _pf_admitted_s
+                else (
+                    "drift_fav"
+                    if (
+                        (_yes_drift_qualifies if _pfx == "yes" else _no_drift_qualifies)
+                    )
+                    else "cheap_no_settle"
+                )
+            )
+        indicators[f"{_pfx}_effective_required_source"] = (
+            f"lane_floor:{_lane_name_s}"
+            if _lane_admitted_s
+            else ("rescued_route_bound" if _rescued else "route_bound")
         )
         indicators[f"{_pfx}_fee_reserve_cents"] = float(_bd.entry_fee) * 100.0
         indicators[f"{_pfx}_impact_reserve_cents"] = (

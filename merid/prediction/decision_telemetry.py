@@ -310,6 +310,23 @@ def build_asset_record(
     quotes, and provenance.  The decision dict and waterfall supply gate
     diagnostics and rejection reasons.  We prefer candidate, then decision.
     """
+    # 2026-10-25 (EV-reconciliation): the candidate carries the full
+    # TradeDecision whose indicators hold the complete EdgeBreakdown cost
+    # decomposition and reserve-cohort provenance.  The per-cycle decision
+    # snapshot only captures that context on the *rejection* path — emitted
+    # records were losing every indicator-sourced field (reserve components,
+    # gate decomposition, evidence stamps).  Backfill decision keys from the
+    # TradeDecision's indicators as the lowest-priority source so emitted
+    # rows reconcile; explicit decision/candidate values still win.
+    _td_ind: Dict[str, Any] = {}
+    if candidate:
+        _td = candidate.get("trade_decision")
+        _ind = getattr(_td, "indicators", None)
+        if isinstance(_ind, dict):
+            _td_ind = _ind
+    if _td_ind:
+        decision = {**_td_ind, **(decision or {})}
+
     rejection_reason = _resolve(
         candidate, decision,
         ["rejection_reason", "no_trade_reason"],
@@ -425,6 +442,28 @@ def build_asset_record(
         # "which side, at what price, with what EV, blocked by what".
         "p_yes_raw": _first_float(
             _resolve(candidate, decision, ["p_yes_raw"], ["p_yes_raw"])
+        ),
+        # 2026-10-26 lineage stamps: the V2 branch result and both raw sources
+        # so endpoint-vs-settlement identity is a persisted fact.  ``p_yes_raw``
+        # remains the selected raw for compatibility.
+        "endpoint_p_yes_raw": _first_float(
+            _resolve(candidate, decision, ["endpoint_p_yes_raw"], ["endpoint_p_yes_raw"])
+        ),
+        "settlement_raw_probability": _first_float(
+            _resolve(candidate, decision, ["settlement_raw_probability"], ["settlement_raw_probability"])
+        ),
+        "settlement_override_applied": _resolve(
+            candidate, decision, ["settlement_override_applied"], ["settlement_override_applied"]
+        ),
+        "selected_raw_probability_source": _resolve(
+            candidate, decision,
+            ["selected_raw_probability_source"], ["selected_raw_probability_source"]
+        ),
+        "settlement_status": _resolve(
+            candidate, decision, ["settlement_status"], ["settlement_status"]
+        ),
+        "settlement_phase": _resolve(
+            candidate, decision, ["settlement_phase"], ["settlement_phase"]
         ),
         "p_yes_calibrated": _p_yes,
         "p_no_calibrated": _p_no,
@@ -767,6 +806,54 @@ def build_asset_record(
         ),
         "admission_reason": _first_str(
             _resolve(candidate, decision, ["admission_reason"], ["admission_reason"])
+        ),
+        # 2026-10-25 (EV-reconciliation): split the gate verdicts — the
+        # ordinary formula comparison vs the effective bound that actually
+        # authorized the side — plus the measured-cohort identity behind the
+        # giveback/impl-shortfall/edge-bias charges.  Without these the
+        # emitted row cannot show which bound admitted it or which artifact
+        # version produced its reserves.
+        "yes_formula_gate_passed": _first_bool(
+            _resolve(candidate, decision, ["yes_formula_gate_passed"], ["yes_formula_gate_passed"])
+        ),
+        "no_formula_gate_passed": _first_bool(
+            _resolve(candidate, decision, ["no_formula_gate_passed"], ["no_formula_gate_passed"])
+        ),
+        "yes_effective_edge_gate_passed": _first_bool(
+            _resolve(candidate, decision, ["yes_effective_edge_gate_passed"], ["yes_effective_edge_gate_passed"])
+        ),
+        "no_effective_edge_gate_passed": _first_bool(
+            _resolve(candidate, decision, ["no_effective_edge_gate_passed"], ["no_effective_edge_gate_passed"])
+        ),
+        "yes_effective_required_source": _first_str(
+            _resolve(candidate, decision, ["yes_effective_required_source"], ["yes_effective_required_source"])
+        ),
+        "no_effective_required_source": _first_str(
+            _resolve(candidate, decision, ["no_effective_required_source"], ["no_effective_required_source"])
+        ),
+        "reserve_snapshot_id": _first_str(
+            _resolve(candidate, decision, ["reserve_snapshot_id"], ["reserve_snapshot_id"])
+        ),
+        "reserve_artifact_hash": _first_str(
+            _resolve(candidate, decision, ["reserve_artifact_hash"], ["reserve_artifact_hash"])
+        ),
+        "reserve_artifact_asof": _first_float(
+            _resolve(candidate, decision, ["reserve_artifact_asof"], ["reserve_artifact_asof"])
+        ),
+        "reserve_estimator_version": _first_str(
+            _resolve(candidate, decision, ["reserve_estimator_version"], ["reserve_estimator_version"])
+        ),
+        "yes_reserve_cohort_key": _first_str(
+            _resolve(candidate, decision, ["yes_reserve_cohort_key"], ["yes_reserve_cohort_key"])
+        ),
+        "no_reserve_cohort_key": _first_str(
+            _resolve(candidate, decision, ["no_reserve_cohort_key"], ["no_reserve_cohort_key"])
+        ),
+        "yes_reserve_cohort_sample_count": _first_str(
+            _resolve(candidate, decision, ["yes_reserve_cohort_sample_count"], ["yes_reserve_cohort_sample_count"])
+        ),
+        "no_reserve_cohort_sample_count": _first_str(
+            _resolve(candidate, decision, ["no_reserve_cohort_sample_count"], ["no_reserve_cohort_sample_count"])
         ),
         "yes_evidence_override": _first_str(
             _resolve(candidate, decision, ["yes_evidence_override"], ["yes_evidence_override"])

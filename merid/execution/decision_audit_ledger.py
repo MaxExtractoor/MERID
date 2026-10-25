@@ -752,6 +752,27 @@ class DecisionAuditLedger:
         _add_column(conn, "strategy_decision_side_ev", "evidence_artifact_mtime", "REAL")
         _add_column(conn, "strategy_decision_side_ev", "evidence_last_refresh_success_at", "REAL")
 
+        # 2026-10-25 (EV-reconciliation provenance): the three reserve
+        # components the EdgeBreakdown consumed but the export previously
+        # dropped — the missing 2.92c class of reconstruction gap — plus
+        # split gate verdicts (ordinary formula vs the effective bound that
+        # actually admitted) and the measured-cohort identity behind each
+        # reserve so a mutable artifact is not needed to rebuild the row.
+        _add_column(conn, "strategy_decision_side_ev", "policy_giveback_reserve_c", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "implementation_shortfall_reserve_c", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "edge_bias_correction_c", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "formula_required_c", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "effective_required_c", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "effective_required_source", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "formula_gate_passed", "INTEGER")
+        _add_column(conn, "strategy_decision_side_ev", "effective_edge_gate_passed", "INTEGER")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_snapshot_id", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_artifact_hash", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_artifact_asof", "REAL")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_cohort_key", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_cohort_sample_count", "TEXT")
+        _add_column(conn, "strategy_decision_side_ev", "reserve_estimator_version", "TEXT")
+
         # Add the research/environment index now that the column is guaranteed to exist.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_environment "
@@ -4094,8 +4115,15 @@ class DecisionAuditLedger:
                         decision_lane,
                         evidence_state, evidence_age_s, evidence_action,
                         evidence_binding_gate, evidence_artifact_mtime,
-                        evidence_last_refresh_success_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        evidence_last_refresh_success_at,
+                        policy_giveback_reserve_c, implementation_shortfall_reserve_c,
+                        edge_bias_correction_c, formula_required_c, effective_required_c,
+                        effective_required_source, formula_gate_passed,
+                        effective_edge_gate_passed, reserve_snapshot_id,
+                        reserve_artifact_hash, reserve_artifact_asof,
+                        reserve_cohort_key, reserve_cohort_sample_count,
+                        reserve_estimator_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -4145,6 +4173,20 @@ class DecisionAuditLedger:
                         side_row.get("evidence_binding_gate"),
                         side_row.get("evidence_artifact_mtime"),
                         side_row.get("evidence_last_refresh_success_at"),
+                        side_row.get("policy_giveback_reserve_c"),
+                        side_row.get("implementation_shortfall_reserve_c"),
+                        side_row.get("edge_bias_correction_c"),
+                        side_row.get("formula_required_c"),
+                        side_row.get("effective_required_c"),
+                        side_row.get("effective_required_source"),
+                        side_row.get("formula_gate_passed"),
+                        side_row.get("effective_edge_gate_passed"),
+                        side_row.get("reserve_snapshot_id"),
+                        side_row.get("reserve_artifact_hash"),
+                        side_row.get("reserve_artifact_asof"),
+                        side_row.get("reserve_cohort_key"),
+                        side_row.get("reserve_cohort_sample_count"),
+                        side_row.get("reserve_estimator_version"),
                     ),
                 )
 
@@ -4473,6 +4515,57 @@ def _build_side_ev_row(
         "passed_edge_gate": bool(passed_edge),
         "gate_ev_cents": _gate_ev_cents,
         "enforced_edge_bound_cents": _enforced_bound_cents,
+        # 2026-10-25 (EV-reconciliation): the three reserve components the
+        # EdgeBreakdown consumed but the export dropped.  Values come from
+        # the breakdown itself (the exact charged numbers), with the
+        # indicator stamps as fallback so a partially-persisted decision
+        # still names what it knows.
+        "policy_giveback_reserve_c": _first_present(
+            _mult_100(_to_float(getattr(breakdown, "policy_giveback_reserve", None))),
+            _to_float(indicators.get(f"{side}_policy_giveback_reserve_cents")),
+            _to_float(indicators.get(f"{side}_policy_giveback_cents")),
+        ),
+        "implementation_shortfall_reserve_c": _first_present(
+            _mult_100(_to_float(getattr(breakdown, "implementation_shortfall_reserve", None))),
+            _to_float(indicators.get(f"{side}_impl_shortfall_reserve_cents")),
+            _to_float(indicators.get(f"{side}_impl_shortfall_cents")),
+        ),
+        "edge_bias_correction_c": _first_present(
+            _mult_100(_to_float(getattr(breakdown, "edge_bias_correction", None))),
+            _to_float(indicators.get(f"{side}_edge_bias_correction_cents")),
+        ),
+        # Split gate semantics: the ordinary formula comparison vs the
+        # bound that actually authorized the side (post lane/rescue
+        # substitution), and which bound source was enforced.
+        "formula_required_c": _first_present(
+            _to_float(indicators.get(f"{side}_formula_required_edge_cents")),
+            required_edge_cents,
+        ),
+        "effective_required_c": _first_present(
+            _to_float(indicators.get(f"{side}_effective_required_edge_cents")),
+            _enforced_bound_cents,
+        ),
+        "effective_required_source": (
+            indicators.get(f"{side}_effective_required_source")
+            or indicators.get(f"{side}_admission_owner")
+            or indicators.get(f"{side}_threshold_source")
+        ),
+        "formula_gate_passed": _to_int_flag(
+            indicators.get(f"{side}_formula_gate_passed")
+        ),
+        "effective_edge_gate_passed": _to_int_flag(
+            indicators.get(f"{side}_effective_edge_gate_passed"),
+            fallback=bool(passed_edge),
+        ),
+        # Reserve measured-cohort identity: which artifact version + which
+        # cohorts inside it produced the charges — hash + mtime snapshot id
+        # because the artifact file is mutable and rebuilt per settlement.
+        "reserve_snapshot_id": indicators.get("reserve_snapshot_id"),
+        "reserve_artifact_hash": indicators.get("reserve_artifact_hash"),
+        "reserve_artifact_asof": _to_float(indicators.get("reserve_artifact_asof")),
+        "reserve_cohort_key": indicators.get(f"{side}_reserve_cohort_key"),
+        "reserve_cohort_sample_count": indicators.get(f"{side}_reserve_cohort_sample_count"),
+        "reserve_estimator_version": indicators.get("reserve_estimator_version"),
         # The admission lane is decision-level (a canary/bounded lane admits
         # the selected side below the full enforced-route bound) — stamping it
         # per row makes `selected=1 AND passed_edge_gate=0` interpretable
@@ -4590,6 +4683,45 @@ def _legacy_side_ev_row(
         "lower_confidence_bound_ev_cents": lcb,
         "required_edge_cents": required_edge_cents,
         "passed_edge_gate": passed_edge,
+        # Legacy rows have no EdgeBreakdown; indicator stamps are the only
+        # provenance for the reserve components and split gate verdicts.
+        "policy_giveback_reserve_c": _first_present(
+            _to_float(indicators.get(f"{side}_policy_giveback_reserve_cents")),
+            _to_float(indicators.get(f"{side}_policy_giveback_cents")),
+        ),
+        "implementation_shortfall_reserve_c": _first_present(
+            _to_float(indicators.get(f"{side}_impl_shortfall_reserve_cents")),
+            _to_float(indicators.get(f"{side}_impl_shortfall_cents")),
+        ),
+        "edge_bias_correction_c": _to_float(
+            indicators.get(f"{side}_edge_bias_correction_cents")
+        ),
+        "formula_required_c": _first_present(
+            _to_float(indicators.get(f"{side}_formula_required_edge_cents")),
+            required_edge_cents,
+        ),
+        "effective_required_c": _first_present(
+            _to_float(indicators.get(f"{side}_effective_required_edge_cents")),
+            _to_float(indicators.get(f"{side}_effective_gate_edge_cents")),
+        ),
+        "effective_required_source": (
+            indicators.get(f"{side}_effective_required_source")
+            or indicators.get(f"{side}_admission_owner")
+            or indicators.get(f"{side}_threshold_source")
+        ),
+        "formula_gate_passed": _to_int_flag(
+            indicators.get(f"{side}_formula_gate_passed")
+        ),
+        "effective_edge_gate_passed": _to_int_flag(
+            indicators.get(f"{side}_effective_edge_gate_passed"),
+            fallback=bool(passed_edge),
+        ),
+        "reserve_snapshot_id": indicators.get("reserve_snapshot_id"),
+        "reserve_artifact_hash": indicators.get("reserve_artifact_hash"),
+        "reserve_artifact_asof": _to_float(indicators.get("reserve_artifact_asof")),
+        "reserve_cohort_key": indicators.get(f"{side}_reserve_cohort_key"),
+        "reserve_cohort_sample_count": indicators.get(f"{side}_reserve_cohort_sample_count"),
+        "reserve_estimator_version": indicators.get("reserve_estimator_version"),
         "admission_owner": indicators.get(f"{side}_admission_owner"),
         "threshold_source": indicators.get(f"{side}_threshold_source"),
         "legacy_risk_label": indicators.get(f"{side}_legacy_risk_label"),
@@ -4850,6 +4982,27 @@ def _to_int(value: Any) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _first_present(*values: Any) -> Any:
+    """First non-None value, preserving zeros (0.0 is a real measurement)."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
+def _mult_100(value: Optional[float]) -> Optional[float]:
+    return value * 100.0 if value is not None else None
+
+
+def _to_int_flag(value: Any, fallback: Optional[bool] = None) -> Optional[int]:
+    """Boolean-ish indicator to 0/1 column; fallback when the key is absent."""
+    if value is None:
+        return (1 if fallback else 0) if fallback is not None else None
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in ("1", "true", "yes", "on") else 0
+    return 1 if bool(value) else 0
 
 
 def _safe_attr(obj: Any, name: str) -> Optional[str]:

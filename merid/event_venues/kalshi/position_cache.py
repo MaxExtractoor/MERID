@@ -571,6 +571,25 @@ class CachedPosition:
     confidence: str = "unknown"  # Signal confidence at entry time (unknown/low/medium/high)
     # CRITICAL FIX (2026-08-07): Entry edge percentage for dynamic TP adjustment
     entry_edge_pct: float = 0.03
+    # 2026-10-26 position risk contract (position_risk_contract.py).
+    # entry_edge_pct keeps its compat numeric meaning for edge-decay;
+    # provenance is explicit, and the authorized net claim is a separate
+    # field that no longer depends on the fabricated +3% default.
+    entry_edge_pct_claim_source: Optional[str] = None
+    entry_gross_edge_c: Optional[float] = None
+    entry_authorized_net_edge_c: Optional[float] = None
+    entry_authorized_net_edge_source: Optional[str] = None
+    entry_admission_type: Optional[str] = None
+    entry_admission_lane: Optional[str] = None
+    entry_effective_threshold_c: Optional[float] = None
+    risk_decision_id: Optional[str] = None
+    risk_selected_route: Optional[str] = None
+    risk_policy_id: Optional[str] = None
+    risk_policy_version: Optional[str] = None
+    net_claim_state: Optional[str] = None
+    net_claim_state_source: Optional[str] = None
+    no_edge_salvage_eligible: Optional[bool] = None
+    no_edge_salvage_eligibility_reason: Optional[str] = None
     # CRITICAL 2026-08-09: Canonical position size in centi-contracts (100 = 1 contract).
     quantity_cc: int = 0  # Initialized from contracts*100 if not explicitly provided
 
@@ -1781,6 +1800,27 @@ class KalshiPositionCache:
                 entry_model_probability=tp_targets.get("entry_model_probability") or cached_position.entry_model_probability,
                 entry_market_probability=tp_targets.get("entry_market_probability") or cached_position.entry_market_probability,
                 entry_edge=tp_targets.get("entry_edge") or cached_position.entry_edge,
+                entry_edge_pct_claim_source=(
+                    cached_position.entry_edge_pct_claim_source
+                    or ("intent" if tp_targets.get("edge_pct") is not None else None)
+                ),
+                # 2026-10-26: forward the persisted risk contract so the
+                # no-edge salvage discriminator reads the authorized net
+                # claim, not the compat edge_pct field.
+                entry_gross_edge_c=cached_position.entry_gross_edge_c,
+                entry_authorized_net_edge_c=cached_position.entry_authorized_net_edge_c,
+                entry_authorized_net_edge_source=cached_position.entry_authorized_net_edge_source,
+                entry_admission_type=cached_position.entry_admission_type,
+                entry_admission_lane=cached_position.entry_admission_lane,
+                entry_effective_threshold_c=cached_position.entry_effective_threshold_c,
+                risk_decision_id=cached_position.risk_decision_id,
+                risk_selected_route=cached_position.risk_selected_route,
+                risk_policy_id=cached_position.risk_policy_id,
+                risk_policy_version=cached_position.risk_policy_version,
+                net_claim_state=cached_position.net_claim_state,
+                net_claim_state_source=cached_position.net_claim_state_source,
+                no_edge_salvage_eligible=cached_position.no_edge_salvage_eligible,
+                no_edge_salvage_eligibility_reason=cached_position.no_edge_salvage_eligibility_reason,
                 entry_book_snapshot_id=tp_targets.get("entry_book_snapshot_id") or cached_position.entry_book_snapshot_id,
                 entry_fill_id=cached_position.entry_fill_id or fill_id,
                 entry_order_id=tp_targets.get("entry_order_id") or client_order_id or cached_position.client_order_id,
@@ -1949,6 +1989,7 @@ class KalshiPositionCache:
         max_hold_seconds: Optional[int] = None,
         exit_policy: Optional[Dict[str, Any]] = None,
         decision_lane: Optional[str] = None,
+        risk_contract: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Register TP targets, edge-decay policy and entry provenance for an order before it fills.
 
@@ -1994,6 +2035,9 @@ class KalshiPositionCache:
             "entry_book_source": None,
             "registered_at": replay_time(),
             "exit_policy": exit_policy,
+            # 2026-10-26: versioned risk contract from the submitted route's
+            # authorized admission semantics (position_risk_contract.py).
+            "risk_contract": dict(risk_contract) if risk_contract else None,
             # 2026-10-21 (drift-lane epoch): the decision lane rides the
             # same provenance record so the fill-time CachedPosition and
             # the monitor's Position carry it — per-lane lock targets and
@@ -3261,7 +3305,19 @@ class KalshiPositionCache:
                     vol_regime=tp_targets.get("vol_regime") or "unknown",
                     confidence=tp_targets.get("confidence") or "unknown",
                     # CRITICAL FIX (2026-08-07): Store entry edge percentage from tp_targets
-                    entry_edge_pct=tp_targets.get("edge_pct") or 0.03,
+                    # 2026-10-26: presence-check — an explicit 0.0 survives;
+                    # an absent claim is None + "missing" source, never a
+                    # fabricated +3% (no-edge classification now reads the
+                    # authorized net claim below, not this compat field).
+                    entry_edge_pct=(
+                        tp_targets["edge_pct"]
+                        if tp_targets.get("edge_pct") is not None
+                        else None
+                    ),
+                    entry_edge_pct_claim_source=(
+                        "intent" if tp_targets.get("edge_pct") is not None else "missing"
+                    ),
+                    **(tp_targets.get("risk_contract") or {}),
                     # CRITICAL FIX (2026-08-10): Durable entry-model provenance for exit attribution
                     entry_signal_id=tp_targets.get("entry_signal_id") or fill_id,
                     entry_model=tp_targets.get("entry_model"),
@@ -4689,7 +4745,15 @@ class KalshiPositionCache:
             # Volatility/confidence from persisted targets.
             vol_regime=tp_targets.get("vol_regime") or "unknown",
             confidence=tp_targets.get("confidence") or "unknown",
-            entry_edge_pct=tp_targets.get("edge_pct") or 0.03,
+            entry_edge_pct=(
+                tp_targets["edge_pct"]
+                if tp_targets.get("edge_pct") is not None
+                else None
+            ),
+            entry_edge_pct_claim_source=(
+                "intent" if tp_targets.get("edge_pct") is not None else "rest_reconstruct_missing"
+            ),
+            **(tp_targets.get("risk_contract") or {}),
             # 2026-10-21: lane provenance survives REST reconstruction so
             # lane-keyed exit policy still applies after a restart.
             decision_lane=tp_targets.get("decision_lane"),
@@ -4816,6 +4880,11 @@ class KalshiPositionCache:
             if snapshot.entry_edge is not None
             else position.entry_edge_pct
         )
+        # 2026-10-26: the legacy snapshot path maps the GROSS stamp into the
+        # net-claim field — label it so the contract resolver excludes it
+        # from claim evidence (preserved controls, honest provenance).
+        if snapshot.entry_edge is not None:
+            position.entry_edge_pct_claim_source = "snapshot_gross_alias"
         position.entry_model = snapshot.exit_policy_id or position.entry_model
         position.entry_model_version = snapshot.tp_policy_version or position.entry_model_version
         position.vol_regime = position.vol_regime or "unknown"

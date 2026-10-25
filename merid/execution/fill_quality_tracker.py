@@ -28,7 +28,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -698,6 +698,97 @@ def _impl_env_float(name: str, default: float) -> float:
         return default
 
 
+def _impl_shortfall_stats(basis: str) -> Dict[str, Dict[str, Any]]:
+    """TTL-cached ``{key: {n, q75}}`` fill-vs-decision gap stats by basis."""
+    field = (
+        "impl_shortfall_vs_bid_cents"
+        if str(basis).lower() == "bid"
+        else "impl_shortfall_vs_ask_cents"
+    )
+    now = time.time()
+    if now - float(_IMPL_CACHE["ts"]) < _IMPL_CACHE_TTL_S:
+        return _IMPL_CACHE["stats"]
+    stats: Dict[str, Dict[str, Any]] = {}
+    try:
+        path = _logs_path()
+        rows = []
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                rows.append(line)
+                if len(rows) > _IMPL_TAIL_ROWS:
+                    rows.pop(0)
+        by_key: Dict[str, list] = {}
+        for line in rows:
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("event") != "fill":
+                continue
+            gap = ev.get(field)
+            if gap is None:
+                continue
+            tick = str(ev.get("ticker") or "")
+            a = (tick.split("-")[0] or "").upper()
+            if not a:
+                continue
+            s = _fill_side_space(ev)
+            if not s:
+                continue
+            key = f"{a}|{s}"
+            by_key.setdefault(key, []).append(float(gap))
+            by_key.setdefault(f"{a}|*", []).append(float(gap))
+            by_key.setdefault("*|*", []).append(float(gap))
+        for k, vals in by_key.items():
+            vals.sort()
+            n = len(vals)
+            stats[k] = {
+                "n": n,
+                "q75": vals[min(n - 1, max(0, int(round(0.75 * (n - 1)))))],
+            }
+    except Exception as e:
+        logger.debug("[FILL-QUALITY] impl-shortfall read failed: %s", e)
+    _IMPL_CACHE["ts"] = now
+    _IMPL_CACHE["stats"] = stats
+    return stats
+
+
+def _impl_shortfall_resolve(
+    stats: Dict[str, Dict[str, Any]],
+    asset: Optional[str],
+    side: Optional[str],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """First adequately-sampled ``(key, rec)`` along the fallback chain."""
+    min_n = max(
+        1, int(_impl_env_float("MERID_IMPL_SHORTFALL_MIN_N", 8))
+    )
+    a = (str(asset or "").upper()) or "*"
+    s = str(side or "*").lower()
+    for key in (f"{a}|{s}", f"{a}|*", "*|*"):
+        rec = stats.get(key)
+        if rec and rec["n"] >= min_n:
+            return key, rec
+    return None, None
+
+
+def measured_impl_shortfall_provenance(
+    asset: Optional[str] = None,
+    side: Optional[str] = None,
+    basis: str = "bid",
+) -> Dict[str, Any]:
+    """Resolved cohort identity for the fill-quality impl-shortfall charge.
+
+    ``{"key", "n", "q75"}`` names the exact fill-quality cohort consumed
+    (or ``None`` fields when unmeasured) — pure metadata; does not alter
+    the charged reserve.
+    """
+    stats = _impl_shortfall_stats(basis)
+    key, rec = _impl_shortfall_resolve(stats, asset, side)
+    if rec is None:
+        return {"key": None, "n": 0, "q75": None}
+    return {"key": key, "n": int(rec["n"]), "q75": float(rec["q75"])}
+
+
 def measured_impl_shortfall_cents(
     asset: Optional[str] = None,
     side: Optional[str] = None,
@@ -713,67 +804,11 @@ def measured_impl_shortfall_cents(
     Positive-only upstream: callers floor at 0 since a fill under the
     decision price is not a cost.
     """
-    field = (
-        "impl_shortfall_vs_bid_cents"
-        if str(basis).lower() == "bid"
-        else "impl_shortfall_vs_ask_cents"
-    )
-    now = time.time()
-    if now - float(_IMPL_CACHE["ts"]) < _IMPL_CACHE_TTL_S:
-        stats = _IMPL_CACHE["stats"]
-    else:
-        stats = {}
-        try:
-            path = _logs_path()
-            rows = []
-            with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    rows.append(line)
-                    if len(rows) > _IMPL_TAIL_ROWS:
-                        rows.pop(0)
-            by_key: Dict[str, list] = {}
-            for line in rows:
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
-                if ev.get("event") != "fill":
-                    continue
-                gap = ev.get(field)
-                if gap is None:
-                    continue
-                tick = str(ev.get("ticker") or "")
-                a = (tick.split("-")[0] or "").upper()
-                if not a:
-                    continue
-                s = _fill_side_space(ev)
-                if not s:
-                    continue
-                key = f"{a}|{s}"
-                by_key.setdefault(key, []).append(float(gap))
-                by_key.setdefault(f"{a}|*", []).append(float(gap))
-                by_key.setdefault("*|*", []).append(float(gap))
-            for k, vals in by_key.items():
-                vals.sort()
-                n = len(vals)
-                stats[k] = {
-                    "n": n,
-                    "q75": vals[min(n - 1, max(0, int(round(0.75 * (n - 1)))))],
-                }
-        except Exception as e:
-            logger.debug("[FILL-QUALITY] impl-shortfall read failed: %s", e)
-        _IMPL_CACHE["ts"] = now
-        _IMPL_CACHE["stats"] = stats
-    min_n = max(
-        1, int(_impl_env_float("MERID_IMPL_SHORTFALL_MIN_N", 8))
-    )
-    a = (str(asset or "").upper()) or "*"
-    s = str(side or "*").lower()
-    for key in (f"{a}|{s}", f"{a}|*", "*|*"):
-        rec = stats.get(key)
-        if rec and rec["n"] >= min_n:
-            return float(rec["q75"])
-    return None
+    stats = _impl_shortfall_stats(basis)
+    _key, rec = _impl_shortfall_resolve(stats, asset, side)
+    if rec is None:
+        return None
+    return float(rec["q75"])
 
 
 def _fill_side_space(ev: Dict[str, Any]) -> Optional[str]:

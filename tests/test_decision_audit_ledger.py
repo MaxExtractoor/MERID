@@ -32,6 +32,10 @@ class _FakeEdgeBreakdown:
     model_risk_reserve: float = 0.0
     gross_edge: float = 0.0
     net_edge: float = 0.0
+    adverse_selection_reserve: float = 0.0
+    policy_giveback_reserve: float = 0.0
+    implementation_shortfall_reserve: float = 0.0
+    edge_bias_correction: float = 0.0
 
 
 @dataclass
@@ -1145,3 +1149,122 @@ def test_compute_capital_realized_fifo_partial() -> None:
     assert compute_capital_realized_pnl(
         fills=fills, target_fill_id="missing", held_side="yes",
         settle_value_yes_cents=0) is None
+
+
+def _full_reserve_decision() -> _FakeTradeDecision:
+    """Decision with all seven EdgeBreakdown cost components populated."""
+    dec = _FakeTradeDecision(decision_id="run_reserve_full")
+    dec.indicators = {
+        "yes_min_edge": 0.05,
+        "no_min_edge": 0.05,
+        "yes_formula_required_edge_cents": 2.6638,
+        "no_formula_required_edge_cents": 3.1,
+        "yes_effective_required_edge_cents": -12.0,
+        "yes_effective_gate_edge_cents": -12.0,
+        "yes_gate_ev_cents": -11.1974347697,
+        "yes_formula_gate_passed": False,
+        "yes_effective_edge_gate_passed": True,
+        "yes_effective_required_source": "lane_floor:pinned_fav",
+        "yes_admission_owner": "pinned_fav",
+        "reserve_snapshot_id": "live_entry_evidence@1761000000.5:abc123def4567890",
+        "reserve_artifact_hash": "abc123def4567890deadbeef",
+        "reserve_artifact_asof": 1761000000.5,
+        "reserve_estimator_version": "cell_aware_v1|giveback:exit_markouts_v1",
+        "yes_reserve_cohort_key": '{"giveback":"DOGE","impl_evidence":"DOGE|yes|bid","edge_bias":"DOGE|yes|no_bid_complement"}',
+        "yes_reserve_cohort_sample_count": '{"giveback_n":12,"impl_evidence_n":14,"edge_bias_n_eff":8.9}',
+    }
+    dec.yes_edge_breakdown = _FakeEdgeBreakdown(
+        p_selected=0.9041756523,
+        p_opposite=0.0958243477,
+        executable_entry_price=0.91,
+        entry_fee=0.0015,
+        exit_cost_reserve=0.00045,
+        model_risk_reserve=0.02,
+        adverse_selection_reserve=0.055,
+        policy_giveback_reserve=0.0292,
+        implementation_shortfall_reserve=0.0,
+        edge_bias_correction=0.0,
+        gross_edge=-0.0058243477,
+        net_edge=-0.1119743477,
+    )
+    dec.no_edge_breakdown = _FakeEdgeBreakdown(
+        p_selected=0.4,
+        executable_entry_price=0.27,
+        gross_edge=0.13,
+        net_edge=0.09,
+    )
+    dec.selected_outcome = "yes"
+    dec.selected_action = "buy"
+    dec.selected_outcome_price = Decimal("0.91")
+    return dec
+
+
+def test_side_ev_persists_reserve_components_and_split_gates(tmp_db: Path) -> None:
+    """The three hidden reserve charges + split gate semantics + cohort
+    provenance must persist so net_edge reconstructs without re-reading a
+    mutable evidence artifact."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _full_reserve_decision()
+    ledger.record_trade_decision(dec)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        yes = conn.execute(
+            "SELECT * FROM strategy_decision_side_ev WHERE decision_id = ? AND side = 'yes'",
+            (dec.decision_id,),
+        ).fetchone()
+        assert yes is not None
+
+        assert yes["policy_giveback_reserve_c"] == pytest.approx(2.92)
+        assert yes["implementation_shortfall_reserve_c"] == pytest.approx(0.0)
+        assert yes["edge_bias_correction_c"] == pytest.approx(0.0)
+        assert yes["adverse_selection_haircut_cents"] == pytest.approx(5.5)
+
+        r = (
+            yes["gross_edge_cents"]
+            - yes["entry_fee_cents"]
+            - yes["exit_or_settlement_fee_cents"]
+            - yes["model_uncertainty_haircut_cents"]
+            - yes["adverse_selection_haircut_cents"]
+            - yes["policy_giveback_reserve_c"]
+            - yes["implementation_shortfall_reserve_c"]
+            - yes["edge_bias_correction_c"]
+            - yes["expected_net_ev_cents"]
+        )
+        assert r == pytest.approx(0.0, abs=1e-6)
+
+        assert yes["formula_required_c"] == pytest.approx(2.6638)
+        assert yes["effective_required_c"] == pytest.approx(-12.0)
+        assert yes["formula_gate_passed"] == 0
+        assert yes["effective_edge_gate_passed"] == 1
+        assert yes["effective_required_source"] == "lane_floor:pinned_fav"
+        assert yes["passed_edge_gate"] == 1
+
+        assert yes["reserve_snapshot_id"].startswith("live_entry_evidence@")
+        assert yes["reserve_artifact_hash"] == "abc123def4567890deadbeef"
+        assert yes["reserve_artifact_asof"] == pytest.approx(1761000000.5)
+        assert "DOGE|yes|bid" in yes["reserve_cohort_key"]
+        assert "giveback_n" in yes["reserve_cohort_sample_count"]
+        assert yes["reserve_estimator_version"].startswith("cell_aware_v1")
+
+
+def test_side_ev_missing_component_snapshot_stays_null(tmp_db: Path) -> None:
+    """A decision without the new indicator/breakdown stamps must persist
+    NULLs for cohort provenance, never a fabricated cohort."""
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    ledger.record_trade_decision(dec)
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        yes = conn.execute(
+            "SELECT * FROM strategy_decision_side_ev WHERE decision_id = ? AND side = 'yes'",
+            (dec.decision_id,),
+        ).fetchone()
+        assert yes["reserve_snapshot_id"] is None
+        assert yes["reserve_cohort_key"] is None
+        assert yes["reserve_estimator_version"] is None
+        assert yes["formula_gate_passed"] is None
+        assert yes["effective_edge_gate_passed"] == 1

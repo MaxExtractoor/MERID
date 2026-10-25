@@ -913,6 +913,31 @@ class EvExitEvaluation:
     model_calibration_no_dual: bool = False
     p_held_raw_cents: Optional[int] = None
     p_held_calibrated_cents: Optional[int] = None
+    # 2026-10-26 lineage instrumentation (reporting only, no behavior change):
+    # which source supplied ``model_prob_cents`` under the
+    # ``_get_fair_value_cents`` precedence (model_fair_prob | external_fair_value
+    # | implied_prob | caller_supplied | none), plus publication freshness and
+    # why a higher-precedence source did not win.  Stops presenting market mid
+    # as an unidentified model probability.
+    continuation_value_source: str = ""
+    market_mid_cents: Optional[int] = None
+    continuation_value_asof_ts: Optional[float] = None
+    continuation_value_age_ms: Optional[int] = None
+    model_available: bool = False
+    model_fresh: bool = False
+    fallback_reason: str = ""
+    # Whether the EV comparison (net_sell vs conservative_hold + margin) gated
+    # submission for this evaluation — True only for DISCRETIONARY exits.  For
+    # emergency/operational classes the economics are audit-only.
+    economic_rule_enforced: bool = False
+    # Dual TTE evidence: the snapshot value consumed by policy vs the value
+    # recomputed as expiry_timestamp - evaluation event time.  Divergence flags
+    # snapshot staleness; replay must declare which basis it reproduces.
+    tte_snapshot_seconds: Optional[float] = None
+    tte_recomputed_seconds: Optional[float] = None
+    tte_difference_seconds: Optional[float] = None
+    snapshot_asof_ts: Optional[float] = None
+    expiry_timestamp: Optional[float] = None
     # Fee/depth audit fields — the exit value is only meaningful when the
     # applied fee model, execution assumption, and executable depth are
     # recorded alongside it.
@@ -1220,8 +1245,54 @@ class SettlementAlignedExitEvaluator:
             rti_ok = False
 
         fair = _safe_int_cents(fair_value_cents)
+        fair_prov: Optional[Dict[str, Any]] = None
         if fair is None:
-            fair = self._model_fair_value(unified_state, kalshi_state, held)
+            fair_prov = self._model_fair_value_provenance(
+                unified_state, kalshi_state, held
+            )
+            if fair_prov is not None:
+                fair = fair_prov.get("value_cents")
+
+        # Dual TTE evidence (2026-10-26): the snapshot ``seconds_to_expiry``
+        # consumed by policy is persisted alongside a recomputed value so
+        # replay can quantify snapshot staleness instead of substituting one
+        # basis for the other silently.
+        expiry_ts_val: Optional[float] = None
+        for _st in (kalshi_state, unified_state):
+            if _st is None:
+                continue
+            for _attr in ("expiry_ts", "expiration_ts", "close_time", "market_close_ts"):
+                _v = getattr(_st, _attr, None)
+                if _v is None:
+                    continue
+                try:
+                    if hasattr(_v, "timestamp"):
+                        expiry_ts_val = float(_v.timestamp())
+                    else:
+                        expiry_ts_val = float(_v)
+                    break
+                except Exception:
+                    continue
+            if expiry_ts_val is not None:
+                break
+        eval_ts = time.time()
+        tte_recomputed: Optional[float] = None
+        tte_difference: Optional[float] = None
+        if expiry_ts_val is not None:
+            tte_recomputed = max(0.0, expiry_ts_val - eval_ts)
+            if s2e is not None:
+                tte_difference = float(s2e) - tte_recomputed
+        snapshot_asof: Optional[float] = None
+        for _st in (kalshi_state, unified_state):
+            if _st is None:
+                continue
+            for _attr in ("snapshot_asof_ts", "last_update_wall_ts", "updated_at_ts"):
+                _v = getattr(_st, _attr, None)
+                if isinstance(_v, (int, float)) and _v > 0:
+                    snapshot_asof = float(_v)
+                    break
+            if snapshot_asof is not None:
+                break
 
         # Model-input quality.  A raw Bachelier estimate with default/unresolved
         # volatility or no calibration artifact is not settlement-aligned: it is
@@ -1299,6 +1370,36 @@ class SettlementAlignedExitEvaluator:
             model_calibration_no_dual=calib_no_dual,
             p_held_raw_cents=fair,
             p_held_calibrated_cents=p_held_cal,
+            continuation_value_source=(
+                "caller_supplied"
+                if _safe_int_cents(fair_value_cents) is not None
+                else (fair_prov.get("source", "") if fair_prov else "none")
+            ),
+            market_mid_cents=next(
+                (
+                    int(round(float(getattr(_st, "implied_prob")) * 100))
+                    for _st in (unified_state, kalshi_state)
+                    if _st is not None
+                    and getattr(_st, "implied_prob", None) is not None
+                    and 1 <= int(round(float(getattr(_st, "implied_prob")) * 100)) <= 99
+                ),
+                None,
+            ),
+            continuation_value_asof_ts=(
+                fair_prov.get("model_asof_ts") if fair_prov else None
+            ),
+            continuation_value_age_ms=(
+                fair_prov.get("model_age_ms") if fair_prov else None
+            ),
+            model_available=bool(fair_prov and fair_prov.get("model_available")),
+            model_fresh=bool(fair_prov and fair_prov.get("model_fresh")),
+            fallback_reason=(fair_prov.get("fallback_reason", "") if fair_prov else ""),
+            economic_rule_enforced=(exit_class == ExitClass.DISCRETIONARY),
+            tte_snapshot_seconds=s2e,
+            tte_recomputed_seconds=tte_recomputed,
+            tte_difference_seconds=tte_difference,
+            snapshot_asof_ts=snapshot_asof,
+            expiry_timestamp=expiry_ts_val,
             asset=_asset_for_market(mkey),
             visible_bid_depth=quote.visible_size,
             fee_order_type_assumption="taker_marketable_limit",
@@ -1513,20 +1614,38 @@ class SettlementAlignedExitEvaluator:
         self, unified_state: Any, kalshi_state: Any, held: str
     ) -> Optional[int]:
         """Held-side settlement probability from the model state."""
+        prov = self._model_fair_value_provenance(unified_state, kalshi_state, held)
+        return prov["value_cents"] if prov else None
+
+    def _model_fair_value_provenance(
+        self, unified_state: Any, kalshi_state: Any, held: str
+    ) -> Optional[Dict[str, Any]]:
+        """Same (unified, kalshi) walk as ``_model_fair_value`` — the first
+        state yielding a value wins, tagged with ``state_source``; when no
+        state yields a value the first state's diagnostics are returned so the
+        eval record still shows why the fair value is absent."""
         if held not in ("yes", "no"):
             return None
         try:
-            from merid.event_venues.kalshi.stop_candidate import _get_fair_value_cents
+            from merid.event_venues.kalshi.stop_candidate import (
+                _get_fair_value_provenance,
+            )
 
-            for state in (unified_state, kalshi_state):
+            first: Optional[Dict[str, Any]] = None
+            for name, state in (("unified", unified_state), ("kalshi", kalshi_state)):
                 if state is None:
                     continue
-                fair = _get_fair_value_cents(state, held)
-                if fair is not None:
-                    return fair
+                prov = _get_fair_value_provenance(state, held)
+                if first is None:
+                    first = prov
+                if prov.get("value_cents") is not None:
+                    prov["state_source"] = name
+                    return prov
+            if first is not None:
+                first["state_source"] = "none"
+            return first
         except Exception:
-            pass
-        return None
+            return None
 
     def _model_vol_source(self, *states: Any) -> str:
         """Volatility-source label for the active model estimate."""

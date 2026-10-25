@@ -116,6 +116,27 @@ print(f"lane_would_admit: {sum(1 for r in recs if r.get('lane_would_admit'))}  "
       f"verdicts:", dict(collections.Counter(r.get("lane_verdict") for r in recs)))
 print("first non-pass stage:", {f"{k[0]}:{k[1]}": v for k, v in first_fail.most_common()})
 
+print("\n=== SEPARATED COUNTS (raw records; see lwf_enrich.py for enriched w3/w4) ===")
+def _ask(r):
+    try:
+        return float(r["ask_cents"])
+    except Exception:
+        return -1.0
+print(f"above_85_price_candidates:        {sum(1 for r in recs if 85 < _ask(r) <= 99)}")
+print(f"research_86_89_price_candidates:  {sum(1 for r in recs if 86 <= _ask(r) <= 89)}")
+print(f"complete_input_candidates (raw):  {sum(1 for r in recs if r.get('strike') is not None and r.get('annualized_vol') is not None)}")
+print(f"position_and_trend_qualified:     {sum(1 for r in recs if (r.get('stages') or {}).get('w3_correct_side') == 'pass' and (r.get('stages') or {}).get('w4_trend_non_shrinking') == 'pass')}")
+print(f"valid_forecast_candidates:        {sum(1 for r in recs if r.get('probability_status') == 'COMPUTED_VALID')}")
+print(f"shadow_economic_admissions:       {sum(1 for r in recs if r.get('lane_would_admit'))}")
+print("production_divergences:", dict(collections.Counter(
+    (r.get("eval_path"), r.get("engine_decision_reason")) for r in recs)))
+_ev = [r["event_ts_utc"] for r in recs]
+if _ev:
+    print(f"entry-interval coverage: {min(_ev)[11:19]}..{max(_ev)[11:19]}Z "
+          f"(records span the ~30s entry interval 120<tte<=150, not the full "
+          f"remaining 2.5min; skipped-out-of-window invocations are in the "
+          f"heartbeat counters, not this population)")
+
 print("\n=== PRODUCTION FLOOR CONFLICTS ===")
 xt = collections.Counter((r.get("engine_would_reject_tte"), r.get("eval_path"),
                           r.get("engine_decision_reason") or "?") for r in recs)

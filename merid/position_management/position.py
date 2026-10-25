@@ -299,6 +299,30 @@ class Position:
     dynamic_tp_target_cents: Optional[int] = None  # Dynamic take profit target based on entry price
     dynamic_tp_triggered: bool = False  # Track if dynamic TP has been triggered
     entry_edge_pct: float = 0.03  # Edge percentage at entry (default 3% for dynamic TP adjustment)
+    # 2026-10-26: Provenance label for entry_edge_pct.  The 0.03 compat
+    # default is kept for edge-decay/dynamic-TP consumers but is no longer
+    # concealed: "intent" when the route stamped it, otherwise the name of
+    # the compat path that fabricated it.
+    entry_edge_pct_claim_source: Optional[str] = None
+    # 2026-10-26 position risk contract (position_risk_contract.py): the
+    # authorized net claim is the submitted route's net-of-cost EV vs its
+    # effective threshold, persisted separately from the legacy gross stamp
+    # so the no-edge salvage discriminator no longer infers risk class from
+    # a fabricated +3% default.
+    entry_gross_edge_c: Optional[float] = None
+    entry_authorized_net_edge_c: Optional[float] = None
+    entry_authorized_net_edge_source: Optional[str] = None
+    entry_admission_type: Optional[str] = None
+    entry_admission_lane: Optional[str] = None
+    entry_effective_threshold_c: Optional[float] = None
+    risk_decision_id: Optional[str] = None
+    risk_selected_route: Optional[str] = None
+    risk_policy_id: Optional[str] = None
+    risk_policy_version: Optional[str] = None
+    net_claim_state: Optional[str] = None
+    net_claim_state_source: Optional[str] = None
+    no_edge_salvage_eligible: Optional[bool] = None
+    no_edge_salvage_eligibility_reason: Optional[str] = None
     # CRITICAL FIX (2026-08-12): Edge-decay confirmation counter to avoid one-tick loss exits
     edge_decay_confirmations: int = 0
 
@@ -385,8 +409,13 @@ class Position:
                     pass
 
         # 2026-08-12: Defensive defaults for edge tracking fields.
+        # 2026-10-26: the +3% compat value is preserved for numeric
+        # edge-decay/dynamic-TP consumers but is explicitly labeled as a
+        # fabricated default — it is not a persisted claim.
         if self.entry_edge_pct is None:
             self.entry_edge_pct = 0.03
+            if self.entry_edge_pct_claim_source is None:
+                self.entry_edge_pct_claim_source = "post_init_compat_default"
         if self.edge_decay_confirmations is None:
             self.edge_decay_confirmations = 0
 
@@ -1383,6 +1412,21 @@ class Position:
             "dynamic_tp_target_cents": self.dynamic_tp_target_cents,  # CRITICAL: Persist dynamic TP target
             "dynamic_tp_triggered": self.dynamic_tp_triggered,
             "entry_edge_pct": self.entry_edge_pct,
+            "entry_edge_pct_claim_source": self.entry_edge_pct_claim_source,
+            "entry_gross_edge_c": self.entry_gross_edge_c,
+            "entry_authorized_net_edge_c": self.entry_authorized_net_edge_c,
+            "entry_authorized_net_edge_source": self.entry_authorized_net_edge_source,
+            "entry_admission_type": self.entry_admission_type,
+            "entry_admission_lane": self.entry_admission_lane,
+            "entry_effective_threshold_c": self.entry_effective_threshold_c,
+            "risk_decision_id": self.risk_decision_id,
+            "risk_selected_route": self.risk_selected_route,
+            "risk_policy_id": self.risk_policy_id,
+            "risk_policy_version": self.risk_policy_version,
+            "net_claim_state": self.net_claim_state,
+            "net_claim_state_source": self.net_claim_state_source,
+            "no_edge_salvage_eligible": self.no_edge_salvage_eligible,
+            "no_edge_salvage_eligibility_reason": self.no_edge_salvage_eligibility_reason,
             "edge_decay_confirmations": self.edge_decay_confirmations,
             "initial_risk_cents": self.initial_risk_cents,
             "thesis_side": self.thesis_side,
@@ -1496,7 +1540,32 @@ class Position:
             ratchet_trimmed=data.get("ratchet_trimmed", False),
             dynamic_tp_target_cents=data.get("dynamic_tp_target_cents"),  # CRITICAL: Restore dynamic TP target
             dynamic_tp_triggered=data.get("dynamic_tp_triggered", False),
-            entry_edge_pct=data.get("entry_edge_pct") or 0.03,
+            # 2026-10-26: presence-check — a persisted explicit 0.0 survives;
+            # an absent field keeps the 0.03 compat numeric but is labeled
+            # as a fabricated default, never as a real claim.
+            entry_edge_pct=(
+                data["entry_edge_pct"]
+                if data.get("entry_edge_pct") is not None
+                else 0.03
+            ),
+            entry_edge_pct_claim_source=(
+                data.get("entry_edge_pct_claim_source")
+                or ("persisted" if data.get("entry_edge_pct") is not None else "deserialize_compat_default")
+            ),
+            entry_gross_edge_c=data.get("entry_gross_edge_c"),
+            entry_authorized_net_edge_c=data.get("entry_authorized_net_edge_c"),
+            entry_authorized_net_edge_source=data.get("entry_authorized_net_edge_source"),
+            entry_admission_type=data.get("entry_admission_type"),
+            entry_admission_lane=data.get("entry_admission_lane"),
+            entry_effective_threshold_c=data.get("entry_effective_threshold_c"),
+            risk_decision_id=data.get("risk_decision_id"),
+            risk_selected_route=data.get("risk_selected_route"),
+            risk_policy_id=data.get("risk_policy_id"),
+            risk_policy_version=data.get("risk_policy_version"),
+            net_claim_state=data.get("net_claim_state"),
+            net_claim_state_source=data.get("net_claim_state_source"),
+            no_edge_salvage_eligible=data.get("no_edge_salvage_eligible"),
+            no_edge_salvage_eligibility_reason=data.get("no_edge_salvage_eligibility_reason"),
             edge_decay_confirmations=data.get("edge_decay_confirmations", 0),
             initial_risk_cents=data.get("initial_risk_cents", 0),
             thesis_side=data.get("thesis_side"),
