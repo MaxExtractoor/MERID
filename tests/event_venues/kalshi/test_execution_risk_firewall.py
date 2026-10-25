@@ -291,6 +291,7 @@ async def test_port_approves_exit_with_valid_firewall_token(monkeypatch):
         price_cents=55,
         order_type="limit",
         reduce_only=True,
+        time_in_force="ioc",
         client_order_id=decision.client_order_id,
         metadata={"firewall_decision_id": decision.decision_id, "entry_or_exit": "exit"},
     )
