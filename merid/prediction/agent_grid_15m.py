@@ -12618,6 +12618,102 @@ class LeanAgent15m:
         except Exception:
             return None, None, None
 
+    def _emit_lwf_held_position_shadow(
+        self,
+        asset: str,
+        current_window_ticker: Optional[str],
+        open_positions: Dict[str, Any],
+        tick: Any,
+    ) -> None:
+        """late_window_trend_favorite shadow for the held-position path
+        (observe-only, never raises, never touches routing state).
+
+        Markets where a position is already held return upstream of
+        _generate_signal, so neither the pre_engine nor post_engine hook
+        fires — the exact population this lane trades was invisible.  This
+        records the evaluation with INPUTS_MISSING provenance (the engine
+        produced no forecast on this path).  In-window evals write records;
+        out-of-window calls still feed the contract-keyed distance history
+        used by the trend stage.  Only in-memory snapshots are read
+        (market_state_store, spot cache, position objects already in scope)
+        — no provider or metadata fetches.
+        """
+        try:
+            from merid.prediction.lwf_shadow_lane import log_lwf_shadow
+
+            run_id, cid = self._candidate_identity(
+                asset, current_window_ticker, tick
+            )
+            fb_ticker, tte, strike = self._resolve_current_contract_fallback(asset)
+            ticker = fb_ticker or current_window_ticker
+            ms = (
+                self.market_state_store.get(ticker)
+                if (self.market_state_store and ticker)
+                else None
+            )
+            yb = float(getattr(ms, "best_bid_cents", 0.0) or 0.0)
+            ya = float(getattr(ms, "best_ask_cents", 0.0) or 0.0)
+            pos = next(iter(open_positions.values()), None)
+            held_side = held_contracts = held_avg_px = None
+            if pos is not None:
+                held_side = (
+                    getattr(pos, "outcome_side", None)
+                    or getattr(pos, "thesis_side", None)
+                    or getattr(pos, "side", None)
+                )
+                held_contracts = getattr(pos, "contracts", None)
+                _avg = getattr(pos, "avg_price_cents", None)
+                held_avg_px = float(_avg) if _avg is not None else None
+            # Pure snapshot read of the spot cache — no provider call, so the
+            # observer cannot block this path.
+            spot = None
+            sc = self._spot_cache.get(asset)
+            if sc is not None and time.monotonic() - sc[0] < self._spot_cache_ttl_sec:
+                spot = sc[1]
+            log_lwf_shadow(
+                run_id=run_id,
+                decision_id=f"{cid}:held",
+                asset=asset,
+                ticker=ticker,
+                eval_path="held_position",
+                yes_bid_cents=yb,
+                yes_ask_cents=ya,
+                no_bid_cents=(100.0 - ya) if ya else 0.0,
+                no_ask_cents=(100.0 - yb) if yb else 0.0,
+                yes_depth_cc=float(getattr(ms, "min_depth_yes", 0.0) or 0.0) * 100.0,
+                no_depth_cc=float(getattr(ms, "min_depth_no", 0.0) or 0.0) * 100.0,
+                strike=strike,
+                strike_source="market_metadata",
+                ref_price=None,          # module resolves live RTI itself
+                ref_source=None,
+                ref_tick=None,
+                rti_age_ms=None,
+                p_yes_calibrated=None,   # engine never ran: no forecast exists
+                p_no_calibrated=None,
+                p_yes_raw=None,
+                p_no_raw=None,
+                net_edge_taker_yes=None,
+                net_edge_taker_no=None,
+                tte_seconds=tte,
+                quote_age_ms=getattr(ms, "quote_age_ms", None),
+                book_is_executable=getattr(ms, "book_is_executable", None),
+                annualized_vol=None,
+                vol_source=None,
+                regime=None,
+                decision_reason="position_limit",
+                was_selected=False,
+                stage_indicators={
+                    "pre_engine_reject_cause": "position_limit",
+                    "position_limit_scope": "window" if open_positions else "global",
+                    "held_side": held_side,
+                    "held_contracts": held_contracts,
+                    "held_avg_price_cents": held_avg_px,
+                },
+                spot_price=spot,
+            )
+        except Exception:
+            pass
+
     def _emit_pre_decision_audit(
         self,
         tick: Any,
@@ -19534,6 +19630,14 @@ class LeanAgent15m:
 
                         self._record_waterfall("position_limit", False, f"positions={position_count} >= max={_per_asset_max}")
                         self._set_final_reason(f"risk_guard:position_limit positions={position_count} max={_per_asset_max}")
+
+                        # late_window_trend_favorite shadow (observe-only):
+                        # held-position markets return here, upstream of
+                        # _generate_signal, so neither existing hook fires —
+                        # the exact population this lane trades was invisible.
+                        self._emit_lwf_held_position_shadow(
+                            asset, current_window_ticker, open_positions, tick
+                        )
 
                         return None
 

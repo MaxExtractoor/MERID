@@ -144,6 +144,7 @@ _SEEN_MAX = 2048
 _PREMODEL_REASONS = frozenset({
     "min_tte_entry_disabled", "confidence_valid", "yes_regime", "no_regime",
     "market_time", "tte_entry_cutoff", "price_band_both_sides_disabled",
+    "position_limit",  # held-position early return: engine never ran
 })
 
 
@@ -391,7 +392,11 @@ def log_lwf_shadow(
         if not (TTE_LO_S < tte <= TTE_HI_S):
             return
 
-        dq = _hist.get((ticker, K)) if (ticker and K is not None) else deque()
+        # ``_hist.get`` returns None when this contract has no fed sample yet
+        # (e.g. ref missing so _feed_history never created the deque) — iterate
+        # an empty deque instead of crashing and losing the INPUTS_MISSING
+        # record the lane contract requires.
+        dq = _hist.get((ticker, K)) or deque()
         sig_frac = None
         sig_price = None
         if annualized_vol:
