@@ -10958,6 +10958,20 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             except Exception:
                 pass
 
+        if (
+            adjusted_price < ALLOCATOR_MIN_PRICE
+            and original_price >= ALLOCATOR_MIN_PRICE
+            and is_buy
+            and role == "maker"
+            and side_ask is not None
+            and ALLOCATOR_MIN_PRICE < side_ask
+        ):
+            # 2026-10-25: On a tight spread where original_price was at or above the
+            # allocator floor and strictly below the ask, do not let multi-cent post-only
+            # buffers force the price below the lane floor. Resting at ALLOCATOR_MIN_PRICE
+            # (which is <= side_ask - 1) is a non-crossing post-only order.
+            adjusted_price = ALLOCATOR_MIN_PRICE
+
         if adjusted_price < ALLOCATOR_MIN_PRICE:
             # 2026-10-19: below-band entries reject, never clamp upward —
             # raising the limit can cross the book or pay more than the

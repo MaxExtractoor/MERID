@@ -769,11 +769,18 @@ class KalshiMarketCatalog:
         
         # CRITICAL ALERT: Log if any critical assets are missing
         if missing_assets:
-            logger.error(
-                "[CATALOG-HEALTH] CRITICAL: Missing tradeable 15m markets for assets: %s. "
-                "This will cause trading failures for these assets.",
-                missing_assets
-            )
+            _is_rollover = (now.minute % 15 == 0 and now.second < 20)
+            if _is_rollover:
+                logger.info(
+                    "[CATALOG-HEALTH] Window rollover transition: refreshing tradeable 15m markets for assets: %s",
+                    missing_assets
+                )
+            else:
+                logger.error(
+                    "[CATALOG-HEALTH] CRITICAL: Missing tradeable 15m markets for assets: %s. "
+                    "This will cause trading failures for these assets.",
+                    missing_assets
+                )
         
         return {
             "last_refresh": last_refresh.isoformat() if last_refresh else None,

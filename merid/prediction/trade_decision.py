@@ -5295,6 +5295,18 @@ def _compute_trade_decision_impl(
                                 and _ne_c >= _d.total * 100.0
                             )
                             _lane_admit = False
+                            _in_rescue_band = False
+                            try:
+                                from merid.prediction import directional_regime as _dr_pf_chk
+                                from merid.prediction import drift_lane as _dl_chk
+                                _in_rescue_band = bool(
+                                    (_dr_pf_chk.pinned_fav_enabled() and _dr_pf_chk.pinned_fav_band_match(float(_px)))
+                                    or (_dl_chk.drift_enabled() and _dl_chk.drift_band_match(float(_px)))
+                                    or (_side == "no" and _dl_chk.cheap_no_enabled() and _dl_chk.cheap_no_band_match(float(_px)))
+                                )
+                            except Exception:
+                                _in_rescue_band = False
+
                             if _mr_ok:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "marginal_relief"
@@ -5312,7 +5324,7 @@ def _compute_trade_decision_impl(
                                 indicators[
                                     f"{_side}_evidence_override_detail"
                                 ] = _ed.detail()
-                            elif _d.cell_id is not None:
+                            elif _d.cell_id is not None and not _in_rescue_band:
                                 indicators[f"{_side}_admission_owner"] = (
                                     "hard_block"
                                     if _ed.matching_hard_block
@@ -5328,7 +5340,7 @@ def _compute_trade_decision_impl(
                                 indicators[
                                     f"{_side}_evidence_override_denied"
                                 ] = _ovr_reason
-                            elif _d.provisional_cell_id is not None:
+                            elif _d.provisional_cell_id is not None and not _in_rescue_band:
                                 _cbp.bump_provisional_funnel(
                                     "blocked_by_evidence", _d.provisional_cell_id
                                 )
@@ -6200,19 +6212,23 @@ def _compute_trade_decision_impl(
     # telemetry via *_coinflip_exempt.
     _yes_coinflip_eff = _coinflip_block
     _no_coinflip_eff = _coinflip_block
-    if _coinflip_block is not None and _provisional_coinflip_exempt():
-        if (
-            _yes_edge_thr is not None
-            and _yes_edge_thr.provisional_cell_id is not None
-        ):
-            _yes_coinflip_eff = None
-            indicators["yes_coinflip_exempt"] = _coinflip_block
-        if (
-            _no_edge_thr is not None
-            and _no_edge_thr.provisional_cell_id is not None
-        ):
+    if _coinflip_block is not None:
+        if _provisional_coinflip_exempt():
+            if (
+                _yes_edge_thr is not None
+                and _yes_edge_thr.provisional_cell_id is not None
+            ):
+                _yes_coinflip_eff = None
+                indicators["yes_coinflip_exempt"] = _coinflip_block
+            if (
+                _no_edge_thr is not None
+                and _no_edge_thr.provisional_cell_id is not None
+            ):
+                _no_coinflip_eff = None
+                indicators["no_coinflip_exempt"] = _coinflip_block
+        if _no_cheap_qualifies:
             _no_coinflip_eff = None
-            indicators["no_coinflip_exempt"] = _coinflip_block
+            indicators["no_coinflip_cheap_exempt"] = _coinflip_block
     # Price cap applies to NO unconditionally; YES applies it only on the
     # normal path — the trend_yes_hi lane (91-94c) is separately gated.
     _yes_price_cap_block = _dr.entry_price_cap_block_reason(
@@ -6879,6 +6895,16 @@ def _compute_trade_decision_impl(
                         _no_dir_veto = None
                 else:
                     indicators[f"{_pfx}_counter_model_probe_blocked"] = _dv
+    # 2026-10-25: cheap_no_settle and drift_fav rescue lanes are designed for
+    # underpriced NO on YES-heavy / balanced books (p_no in [0.12, 0.50]).
+    # The generic counter-model gate (p < 0.45 floor) would unconditionally
+    # veto cheap_no candidates; when the lane's own gate passes, exempt it.
+    if _no_cheap_qualifies and _no_dir_veto is not None:
+        indicators["no_counter_model_cheap_exempt"] = _no_dir_veto
+        _no_dir_veto = None
+    if _no_drift_qualifies and _no_dir_veto is not None:
+        indicators["no_counter_model_drift_exempt"] = _no_dir_veto
+        _no_dir_veto = None
     if _yes_dir_veto is not None:
         indicators["directional_veto_yes"] = _yes_dir_veto
     if _no_dir_veto is not None:
