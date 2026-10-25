@@ -140,6 +140,14 @@ def plan_lift_sizing() -> bool:
     return _env_flag("MERID_WINDOW_PLAN_LIFT_SIZING", True)
 
 
+def plan_enforce_basket_leader() -> bool:
+    """True when sibling alts (ETH, SOL, XRP, DOGE) are forbidden from
+    trading against BTC's committed or pending direction this window.
+    All five series are one correlated move; trading against the leader
+    is an unhedged dissenter loss pattern."""
+    return _env_flag("MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER", True)
+
+
 def plan_state_path() -> str:
     return os.environ.get(
         "MERID_WINDOW_PLAN_STATE_PATH", "data/window_plan_state.json"
@@ -262,8 +270,8 @@ def _get_state(suffix: str) -> _PlanState:
     return _state
 
 
-def _committed_from_authoritative(suffix: str) -> Tuple[Decimal, int, Dict[str, Decimal], Dict[str, Decimal], bool]:
-    """(total_cost_usd, total_cc, per_asset_cost, per_side_cost, scan_ok)
+def _committed_from_authoritative(suffix: str) -> Tuple[Decimal, int, Dict[str, Decimal], Dict[str, Decimal], Dict[str, str], bool]:
+    """(total_cost_usd, total_cc, per_asset_cost, per_side_cost, asset_sides, scan_ok)
     committed by fills ledger + resting monitor for this window's tickers.
 
     Fills: group canonical fills per ticker; a ticker whose net signed YES
@@ -279,6 +287,7 @@ def _committed_from_authoritative(suffix: str) -> Tuple[Decimal, int, Dict[str, 
     cc = 0
     per_asset: Dict[str, Decimal] = {}
     per_side: Dict[str, Decimal] = {}
+    asset_sides: Dict[str, str] = {}
     scan_ok = True
 
     # --- trusted fills ledger -------------------------------------------
@@ -334,6 +343,7 @@ def _committed_from_authoritative(suffix: str) -> Tuple[Decimal, int, Dict[str, 
                 per_asset[asset] = per_asset.get(asset, Decimal("0")) + c
                 side_dir = "yes" if net > 0 else "no"
                 per_side[side_dir] = per_side.get(side_dir, Decimal("0")) + c
+                asset_sides[asset] = side_dir
     except Exception as e:
         scan_ok = False
         logger.warning("[WINDOW-PLAN] ledger committed scan failed: %s", e)
@@ -365,16 +375,19 @@ def _committed_from_authoritative(suffix: str) -> Tuple[Decimal, int, Dict[str, 
                 c = px * Decimal(str(rem))
                 cost += c
                 cc += int(rem * 100)
-                asset = str(getattr(rec, "asset", "") or "") or _extract_asset(tk)
+                asset = (
+                    str(getattr(rec, "asset", "") or "") or _extract_asset(tk)
+                ).upper()
                 per_asset[asset] = per_asset.get(asset, Decimal("0")) + c
                 side_dir = str(getattr(rec, "side", "") or "").lower()
                 if side_dir in ("yes", "no"):
                     per_side[side_dir] = per_side.get(side_dir, Decimal("0")) + c
+                    asset_sides[asset] = side_dir
     except Exception as e:
         scan_ok = False
         logger.warning("[WINDOW-PLAN] resting committed scan failed: %s", e)
 
-    return cost, cc, per_asset, per_side, scan_ok
+    return cost, cc, per_asset, per_side, asset_sides, scan_ok
 
 
 def _reconcile_pending(st: _PlanState, now: float) -> Decimal:
@@ -463,7 +476,7 @@ def admit(
         return False, 0.0, "window_plan_no_window", detail
     st = _get_state(suffix)
 
-    committed_cost, committed_cc, per_asset, per_side, scan_ok = _committed_from_authoritative(suffix)
+    committed_cost, committed_cc, per_asset, per_side, asset_sides, scan_ok = _committed_from_authoritative(suffix)
     if not scan_ok:
         # Fail closed: cannot bound committed exposure without the ledger and
         # the resting monitor.  This is a budget control, not an entry gate —
@@ -473,15 +486,19 @@ def admit(
     pending_cc = int(sum(int(p.get("cc", 0) or 0) for p in st.pending.values()))
     pending_by_asset: Dict[str, Decimal] = {}
     pending_by_side: Dict[str, Decimal] = {}
+    pending_asset_sides: Dict[str, str] = {}
     for p in st.pending.values():
-        a = str(p.get("asset") or "")
+        a = str(p.get("asset") or "").upper()
         s = str(p.get("side") or "").lower()
         c = Decimal(str(p.get("cost_usd", 0) or 0))
         if a:
             pending_by_asset[a] = pending_by_asset.get(a, Decimal("0")) + c
+            if s in ("yes", "no"):
+                pending_asset_sides[a] = s
         if s in ("yes", "no"):
             pending_by_side[s] = pending_by_side.get(s, Decimal("0")) + c
 
+    asset = str(asset or "").upper()
     budget = plan_budget_usd()
     used_cost = committed_cost + pending_cost
     used_cc = committed_cc + pending_cc
@@ -499,6 +516,43 @@ def admit(
         "submissions": st.submissions,
         "tte_s": tte_s,
     })
+
+    # 0. Basket-leader alignment: all 5 crypto series co-move with BTC.
+    # A sibling may not trade against the leader's direction this window.
+    # Precedence mirrors the quota lane: a committed leader (open position,
+    # resting entry, or plan reservation) binds first — real exposure is
+    # the strongest signal; then the durable emitted-record read; then the
+    # leader's freshest live directional read (r60/confirmed-label only,
+    # <=90s via basket_direction).  The leader itself is never vetoed and
+    # no leader signal fails open to independence.
+    leader_asset = (
+        os.environ.get("MERID_BASKET_LEADER_ASSET", "BTC").strip().upper() or "BTC"
+    )
+    if plan_enforce_basket_leader() and asset != leader_asset:
+        leader_side = (
+            asset_sides.get(leader_asset) or pending_asset_sides.get(leader_asset)
+        )
+        leader_src = "committed" if leader_side else None
+        if leader_side is None:
+            try:
+                from merid.prediction.window_quota import quota_basket_leader_side
+                leader_side = quota_basket_leader_side(ticker)
+            except Exception:
+                leader_side = None
+            leader_src = "record" if leader_side else None
+        if leader_side is None:
+            try:
+                from merid.prediction import basket_direction as _bd
+                leader_side = _bd.leader_direction(asset)
+            except Exception:
+                leader_side = None
+            leader_src = "live" if leader_side else None
+        if leader_side in ("yes", "no") and side_dir != leader_side:
+            detail["leader_asset"] = leader_asset
+            detail["leader_side"] = leader_side
+            detail["leader_source"] = leader_src
+            detail["candidate_side"] = side_dir
+            return False, 0.0, "window_plan_basket_dissenter", detail
 
     # 1. Submission quota (wire attempts; deterministic bound).
     if st.submissions >= plan_max_submissions():

@@ -446,6 +446,7 @@ _ENV_OVERRIDES.update({
         "MERID_DRIFT_LANE_ENABLED", "MERID_CHEAP_NO_LANE_ENABLED",
         # 2026-10-25: deterministic per-window plan toggles.
         "MERID_WINDOW_PLAN_ENABLED", "MERID_WINDOW_PLAN_LIFT_SIZING",
+        "MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER",
     )
 })
 _ENV_OVERRIDES.update({

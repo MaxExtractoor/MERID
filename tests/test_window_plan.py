@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from merid.prediction import window_plan as wp
+from merid.prediction import basket_direction as bd
 
 
 @pytest.fixture(autouse=True)
@@ -37,12 +38,14 @@ def _plan_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MERID_MAX_CONTRACTS_PER_ORDER", "4")
     monkeypatch.setenv("MERID_WINDOW_PLAN_STATE_PATH", str(tmp_path / "wp.json"))
     wp.reset_for_tests()
+    bd.clear()
     yield
     wp.reset_for_tests()
+    bd.clear()
 
 
 def _no_committed():
-    return Decimal("0"), 0, {}, {}, True
+    return Decimal("0"), 0, {}, {}, {}, True
 
 
 def _pending_cost_real(st, now):
@@ -59,14 +62,16 @@ def _patches(committed=None):
         patch.object(wp, "_committed_from_authoritative",
                      return_value=committed if committed is not None else _no_committed()),
         patch.object(wp, "_reconcile_pending", side_effect=_pending_cost_real),
+        patch("merid.prediction.window_quota.quota_basket_leader_side",
+              return_value=None),
     )
 
 
 def test_budget_fit_and_lift():
     """90c taker: corr cap leaves a $2.25 same-side room ->
     floor(2.25/0.9063 * 100) = 248cc = 2.48 contracts (~$2.25)."""
-    p1, p2 = _patches()
-    with p1, p2:
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
         ok, count, reason, detail = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500, decision_id="d1",
@@ -78,8 +83,8 @@ def test_budget_fit_and_lift():
 
 def test_no_lift_clamps_only(monkeypatch):
     monkeypatch.setenv("MERID_WINDOW_PLAN_LIFT_SIZING", "0")
-    p1, p2 = _patches()
-    with p1, p2:
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
         ok, count, _, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500, decision_id="d1",
@@ -88,8 +93,8 @@ def test_no_lift_clamps_only(monkeypatch):
 
 
 def test_bounded_lane_never_lifted():
-    p1, p2 = _patches()
-    with p1, p2:
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
         ok, count, _, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500,
@@ -100,9 +105,9 @@ def test_bounded_lane_never_lifted():
 
 def test_budget_exhausted():
     """$2.90 already committed on the NO side: only $0.10 room -> no size."""
-    committed = (Decimal("2.90"), 300, {"SOL": Decimal("2.90")}, {"no": Decimal("2.90")}, True)
-    p1, p2 = _patches(committed)
-    with p1, p2:
+    committed = (Decimal("2.90"), 300, {"SOL": Decimal("2.90")}, {"no": Decimal("2.90")}, {"SOL": "no"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
         ok, count, reason, _ = wp.admit(
             ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500, decision_id="d2",
@@ -111,12 +116,13 @@ def test_budget_exhausted():
     assert count == 0.0
 
 
-def test_corr_cap_same_side_blocks_opposite_allows():
+def test_corr_cap_same_side_blocks_opposite_allows(monkeypatch):
     """$2.25 same-side committed: another YES admission is corr-capped,
     a NO admission fits in the remaining $0.75."""
-    committed = (Decimal("2.25"), 250, {"BTC": Decimal("2.25")}, {"yes": Decimal("2.25")}, True)
-    p1, p2 = _patches(committed)
-    with p1, p2:
+    monkeypatch.setenv("MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER", "0")
+    committed = (Decimal("2.25"), 250, {"BTC": Decimal("2.25")}, {"yes": Decimal("2.25")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
         ok_yes, _, reason_yes, _ = wp.admit(
             ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
             price_cents=60, requested_count=1.0, tte_s=500, decision_id="dy",
@@ -131,10 +137,97 @@ def test_corr_cap_same_side_blocks_opposite_allows():
     assert count_no == pytest.approx(1.21)
 
 
+def test_basket_leader_dissenter():
+    """When BTC has committed YES this window, sibling alts (ETH, SOL, XRP, DOGE)
+    are forbidden from trading NO (fighting the basket leader)."""
+    committed = (Decimal("1.00"), 100, {"BTC": Decimal("1.00")}, {"yes": Decimal("1.00")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
+        # Sibling on same side (YES) is allowed
+        ok_same, _, reason_same, _ = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="d_same",
+        )
+        # Sibling on opposite side (NO) is vetoed as dissenter
+        ok_opp, _, reason_opp, det = wp.admit(
+            ticker="KXSOL15M-26OCT251445-45", asset="SOL", side="no",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="d_opp",
+        )
+        # BTC itself on any side is never vetoed by the leader rule
+        ok_btc, _, _, _ = wp.admit(
+            ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="no",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="d_btc",
+        )
+    assert ok_same and reason_same == "window_plan_admitted"
+    assert not ok_opp and reason_opp == "window_plan_basket_dissenter"
+    assert det.get("leader_side") == "yes" and det.get("candidate_side") == "no"
+    assert det.get("leader_source") == "committed"
+    assert ok_btc
+
+
+def test_basket_leader_live_read_veto():
+    """BTC with no committed exposure but a fresh live directional read
+    (r60/confirmed-label stamped by agent evaluation) still vetoes
+    dissenting siblings; an undirected leader fails open."""
+    bd.record_direction("BTC", "no", source="agent_r60")
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
+        ok_opp, _, reason_opp, det = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="lv_opp",
+        )
+        ok_same, _, reason_same, _ = wp.admit(
+            ticker="KXSOL15M-26OCT251445-45", asset="SOL", side="no",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="lv_same",
+        )
+    assert not ok_opp and reason_opp == "window_plan_basket_dissenter"
+    assert det.get("leader_source") == "live"
+    assert ok_same and reason_same == "window_plan_admitted"
+
+    # Fresh but undirected read -> no veto (fail open to independence).
+    bd.clear()
+    bd.record_direction("BTC", None, source="agent_r60")
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
+        ok, _, reason, _ = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="lv_open",
+        )
+    assert ok and reason == "window_plan_admitted"
+
+
+def test_basket_leader_committed_outranks_live():
+    """A committed BTC direction binds over a conflicting fresh live read:
+    the emitted-record discipline is whole-window, per the documented
+    0430-window loss the veto was built for."""
+    bd.record_direction("BTC", "no", source="agent_r60")  # live says down
+    committed = (Decimal("1.00"), 100, {"BTC": Decimal("1.00")}, {"yes": Decimal("1.00")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
+        ok_opp, _, reason_opp, det = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="no",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="c_opp",
+        )
+    assert not ok_opp and reason_opp == "window_plan_basket_dissenter"
+    assert det.get("leader_side") == "yes" and det.get("leader_source") == "committed"
+
+
+def test_basket_leader_disabled(monkeypatch):
+    monkeypatch.setenv("MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER", "0")
+    committed = (Decimal("1.00"), 100, {"BTC": Decimal("1.00")}, {"yes": Decimal("1.00")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
+        ok, _, reason, _ = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="no",
+            price_cents=60, requested_count=1.0, tte_s=500, decision_id="off1",
+        )
+    assert ok and reason == "window_plan_admitted"
+
+
 def test_per_asset_cap():
-    committed = (Decimal("1.80"), 200, {"BTC": Decimal("1.80")}, {"yes": Decimal("1.80")}, True)
-    p1, p2 = _patches(committed)
-    with p1, p2, patch.object(wp, "plan_per_asset_cap_usd", return_value=Decimal("2.00")):
+    committed = (Decimal("1.80"), 200, {"BTC": Decimal("1.80")}, {"yes": Decimal("1.80")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3, patch.object(wp, "plan_per_asset_cap_usd", return_value=Decimal("2.00")):
         ok, count, reason, detail = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500, decision_id="d1",
@@ -147,8 +240,8 @@ def test_submission_cap_and_pacing():
     """Cell allowances: early(>300s)=2, mid(120-300)=4, late(<=120)=6."""
     st = wp._get_state("26OCT251445")
     st.submissions = 2  # early allowance exhausted
-    p1, p2 = _patches()
-    with p1, p2:
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
         ok_early, _, reason_early, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=50, requested_count=1.0, tte_s=500, decision_id="e3",
@@ -162,8 +255,8 @@ def test_submission_cap_and_pacing():
 
     st2 = wp._get_state("26OCT251445")
     st2.submissions = 6
-    p3, p4 = _patches()
-    with p3, p4:
+    p3, p4, p5 = _patches()
+    with p3, p4, p5:
         ok, _, reason, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=50, requested_count=1.0, tte_s=60, decision_id="l1",
@@ -172,9 +265,9 @@ def test_submission_cap_and_pacing():
 
 
 def test_contract_cap():
-    committed = (Decimal("1.0"), 500, {}, {}, True)  # 5.00 contracts already open
-    p1, p2 = _patches(committed)
-    with p1, p2:
+    committed = (Decimal("1.0"), 500, {}, {}, {}, True)  # 5.00 contracts already open
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
         ok, _, reason, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=20, requested_count=1.0, tte_s=500, decision_id="d1",
@@ -183,8 +276,8 @@ def test_contract_cap():
 
 
 def test_record_submission_durable_and_release(tmp_path):
-    p1, p2 = _patches()
-    with p1, p2:
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
         ok, _, _, _ = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
             price_cents=90, requested_count=1.0, tte_s=500, decision_id="d1",
@@ -200,8 +293,8 @@ def test_record_submission_durable_and_release(tmp_path):
     assert "coid_1" in st2.submitted_ids
 
     # Pre-wire death releases the budget reservation.
-    p3, p4 = _patches()
-    with p3, p4:
+    p3, p4, p5 = _patches()
+    with p3, p4, p5:
         ok2, _, _, _ = wp.admit(
             ticker="KXETH15M-26OCT251445-45", asset="ETH", side="no",
             price_cents=50, requested_count=1.0, tte_s=500, decision_id="d2",

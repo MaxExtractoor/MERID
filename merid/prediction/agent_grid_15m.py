@@ -8794,6 +8794,44 @@ class LeanAgent15m:
                     self._dir_regime_last = _dir_regime
             except Exception as _dr_err:
                 logger.debug("[REGIME] compute failed: %s", _dr_err)
+            # 2026-10-26: basket-direction registry — stamp this asset's
+            # directional read EVERY tick (all five agents evaluate
+            # in-process before the execution loop admits candidates).
+            # The window-plan dissenter veto consumes the leader's freshest
+            # read even when BTC never trades this window.  Same filtered
+            # read the quota lane prefers — asset r60 beyond the DIR_R60_BP
+            # threshold, else the confirmed regime label; bare argmax is
+            # deliberately NOT stamped (it is routinely inside noise).  An
+            # undirected stamp still records freshness so consumers can
+            # distinguish "evaluated, no direction" from "stale".
+            try:
+                from merid.prediction import basket_direction as _bd_reg
+
+                _bd_side = None
+                _bd_r60 = (getattr(_dir_regime, "asset_r60", None) or {}).get(
+                    str(asset).upper()
+                )
+                try:
+                    _bd_min_r60 = float(
+                        os.environ.get("MERID_WINDOW_QUOTA_DIR_R60_BP", "2.0")
+                    ) / 10000.0
+                except Exception:
+                    _bd_min_r60 = 2.0 / 10000.0
+                if (
+                    _bd_r60 is not None
+                    and math.isfinite(float(_bd_r60))
+                    and abs(float(_bd_r60)) >= _bd_min_r60
+                ):
+                    _bd_side = "yes" if float(_bd_r60) > 0 else "no"
+                else:
+                    _bd_lbl = (getattr(_dir_regime, "label", "") or "").upper()
+                    if _bd_lbl == "RALLY_CONFIRMED":
+                        _bd_side = "yes"
+                    elif _bd_lbl == "SELL_OFF_CONFIRMED":
+                        _bd_side = "no"
+                _bd_reg.record_direction(asset, _bd_side, source="agent_r60")
+            except Exception:
+                pass
             td_kwargs = dict(
                 run_id=run_id,
                 decision_id=f"{candidate_id}:{route}",
