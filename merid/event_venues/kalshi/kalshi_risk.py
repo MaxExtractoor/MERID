@@ -1405,18 +1405,23 @@ class KalshiRiskManager:
                 _portfolio_equity_usd, contracts, ticker
             )
 
-        # DYNAMIC ENTRY WINDOW: Check if order is within allowed window (crypto 15m only)
+        # ENTRY TTE FLOOR: reject new entries too close to expiry (crypto 15m only).
+        # 2026-10-25: the dynamic_entry_window module no longer exists; the
+        # import died inside this try and the fail-open except silently
+        # disabled the check entirely.  Canonical replacement is the
+        # entry-time policy floor (MERID_ENTRY_MIN_SECONDS_TO_EXPIRY,
+        # default 180s) - the same floor the resting monitor now enforces on
+        # live orders.  Risk-reducing (exit) orders are exempt: they must
+        # always be able to trade near expiry.
         try:
-            from merid.prediction.dynamic_entry_window import resolve_entry_window
-            from config.kalshi_crypto_config import kalshi_ticker_to_asset
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
-            
+
             # Only check crypto assets on 15m timeframe
             if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE") and timeframe == "15m":
                 # Get market from catalog (should have normalized minutes_to_expiry from STAGE 1)
                 catalog = get_market_catalog()
                 market = catalog.get_market(ticker)
-                
+
                 # CRITICAL FIX: Use normalized minutes_to_expiry from catalog (canonical field)
                 # This ensures we use the canonical expiry time from contract_normalization.py
                 # which prioritizes close_ts over end_date for 15m contracts
@@ -1433,34 +1438,34 @@ class KalshiRiskManager:
                         ticker
                     )
                     minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
-                
+
                 if minutes_to_expiry is not None:
-                    edge_pct = edge * 100  # Convert decimal to percentage
-                    
-                    resolution = resolve_entry_window(
-                        asset=asset,
-                        minutes_to_expiry=minutes_to_expiry,
-                        edge_pct=edge_pct,
-                        ticker=ticker
-                    )
-                    
-                    if not resolution.allowed:
-                        reason = f"dynamic_window:{resolution.reason.value} policy={resolution.active_policy_name} bucket={resolution.bucket}"
-                        logger.info(
-                            "[RISK] Dynamic window rejection: ticker=%s asset=%s minutes_to_expiry=%.1f edge_pct=%.2f reason=%s policy=%s bucket=%s",
-                            ticker,
-                            asset,
-                            minutes_to_expiry,
-                            edge_pct,
-                            resolution.reason.value,
-                            resolution.active_policy_name,
-                            resolution.bucket
-                        )
-                        self._log_breach("dynamic_window", reason)
-                        return False, reason, "dynamic_window"
+                    is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
+                    if not is_closing_trade:
+                        try:
+                            _min_tte_s = float(os.environ.get(
+                                "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180"
+                            ))
+                        except Exception:
+                            _min_tte_s = 180.0
+                        if minutes_to_expiry * 60.0 < _min_tte_s:
+                            reason = (
+                                f"entry_tte_floor:{minutes_to_expiry:.1f}min<"
+                                f"{_min_tte_s:.0f}s"
+                            )
+                            logger.info(
+                                "[RISK] Entry TTE floor rejection: ticker=%s asset=%s "
+                                "minutes_to_expiry=%.1f floor_s=%.0f",
+                                ticker,
+                                asset,
+                                minutes_to_expiry,
+                                _min_tte_s
+                            )
+                            self._log_breach("entry_tte_floor", reason)
+                            return False, reason, "entry_tte_floor"
         except Exception as exc:
-            logger.debug("[RISK] Dynamic window check failed for ticker=%s: %s", ticker, exc)
-            # Fail-open: allow order through if dynamic window check fails
+            logger.debug("[RISK] Entry TTE floor check failed for ticker=%s: %s", ticker, exc)
+            # Fail-open: allow order through if TTE floor check fails
 
         with self._lock:
             self._maybe_reset_daily(now)
