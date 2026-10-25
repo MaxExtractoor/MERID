@@ -1121,7 +1121,31 @@ class RestingOrderMonitor:
             # Always keep remaining_size in sync (even for all-at-once fills)
             record_remaining_before = record.remaining_size
             record.remaining_size = remaining_size
-            
+
+            # Cross-check the trusted fills ledger: Kalshi's order-status
+            # endpoint can lag a real fill by several seconds (KXSOL15M-
+            # 26OCT251445-45, 2026-10-25: http_poller ingested the 100cc fill
+            # at 18:37:58 while GET /orders still returned remaining=1,
+            # filled=0 at 18:38:02 and 18:38:07).  Authoritative ledger fills
+            # are strictly better evidence than the lagging REST snapshot:
+            # take the max so a stale poll can never un-report a fill.
+            _ledger_filled = 0.0
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                _oid = str(record.kalshi_order_id or "")
+                _coid = str(record.client_order_id or "")
+                _ledger_cc = 0.0
+                for _f in get_fills_ledger().get_canonical_fills(
+                    market_ticker=record.ticker
+                ).authoritative:
+                    if str(getattr(_f, "order_id", "") or "") == _oid or (
+                        _coid and str(getattr(_f, "client_order_id", "") or "") == _coid
+                    ):
+                        _ledger_cc += float(getattr(_f, "quantity_cc", 0) or 0)
+                _ledger_filled = _ledger_cc / 100.0
+            except Exception:
+                _ledger_filled = 0.0
+
             # Update filled_size (cumulative filled amount).  Prefer the
             # venue's authoritative fill_count: a canceled order reports
             # remaining_count=0 for an unfilled remainder, so deriving
@@ -1140,9 +1164,27 @@ class RestingOrderMonitor:
             except Exception:
                 _venue_filled = None
             if _venue_filled is not None:
-                record.filled_size = _venue_filled
+                record.filled_size = max(_venue_filled, _ledger_filled)
+            elif _ledger_filled > 0:
+                record.filled_size = _ledger_filled
             else:
                 record.filled_size = record.original_size - remaining_size
+
+            # If the ledger shows the order (fully) filled while the venue
+            # snapshot still reports it resting, trust the ledger: collapse
+            # the remainder and treat as terminal-filled now instead of
+            # narrating a phantom live order (and sending a spurious cancel)
+            # for another poll cycle.
+            if _ledger_filled > 0:
+                _eff_remaining = max(
+                    0.0, float(record.original_size or 0) - _ledger_filled
+                )
+                if _eff_remaining < remaining_size:
+                    remaining_size = _eff_remaining
+                    record.remaining_size = remaining_size
+                    if _eff_remaining <= 0 and status in RESTING_STATUSES:
+                        status = "filled"
+                        record.status = status
             
             # Partial fill detection
             if remaining_size > 0 and record_remaining_before > remaining_size:
