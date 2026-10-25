@@ -10104,6 +10104,77 @@ class LeanAgent15m:
         except Exception:
             pass
 
+        # late_window_trend_favorite research shadow (observe-only): every
+        # 120<tte<=150 evaluation is recorded with the per-side waterfall —
+        # trusted inputs, >85c ask, correct-side position, non-shrinking
+        # cushion, model probability, taker economics — so the lane's scoped
+        # floor exemption can be graded against settlement out-of-sample.
+        # Never routes; the exemption cannot affect other lanes.
+        try:
+            from merid.prediction.lwf_shadow_lane import log_lwf_shadow
+            from merid.prediction.directional_regime import bookflow_block_reason as _lwf_bf_reason
+            _ind_lwf = (decision_taker.indicators or {}) if decision_taker is not None else {}
+            _fs_lwf = getattr(self, "_feature_snapshot", None)
+            _lwf_dir = locals().get("dir_regime")
+            _d_ind = decision.indicators or {}
+            if not isinstance(_lwf_dir, str):
+                _lwf_dir = getattr(_lwf_dir, "label", None) or _d_ind.get("dir_regime")
+            log_lwf_shadow(
+                run_id=run_id,
+                decision_id=decision.decision_id,
+                asset=asset,
+                ticker=ticker,
+                eval_path="post_engine",
+                yes_bid_cents=float(yes_bid),
+                yes_ask_cents=float(yes_ask),
+                no_bid_cents=float(no_bid),
+                no_ask_cents=float(no_ask),
+                yes_depth_cc=float(yes_depth_cc),
+                no_depth_cc=float(no_depth_cc),
+                strike=float(strike) if strike is not None else None,
+                strike_source=locals().get("strike_source"),
+                ref_price=float(settlement_input_price) if settlement_input_price is not None else None,
+                ref_source=locals().get("settlement_reference"),
+                ref_tick=float(bachelier_spot_price) if bachelier_spot_price is not None else None,
+                rti_age_ms=_rti_age_ms_for_decision,
+                p_yes_calibrated=float(decision.p_yes_calibrated) if decision.p_yes_calibrated is not None else None,
+                p_no_calibrated=float(decision.p_no_calibrated) if decision.p_no_calibrated is not None else None,
+                p_yes_raw=float(_ind_lwf.get("p_yes_raw")) if _ind_lwf.get("p_yes_raw") is not None else None,
+                p_no_raw=float(_ind_lwf.get("p_no_raw")) if _ind_lwf.get("p_no_raw") is not None else None,
+                net_edge_taker_yes=float(decision_taker.yes_net_edge) if decision_taker is not None and decision_taker.yes_net_edge is not None else None,
+                net_edge_taker_no=float(decision_taker.no_net_edge) if decision_taker is not None and decision_taker.no_net_edge is not None else None,
+                tte_seconds=float(seconds_to_expiry) if seconds_to_expiry is not None else None,
+                quote_age_ms=_quote_age_ms_for_decision,
+                book_is_executable=(
+                    getattr(market_state, "book_is_executable", None)
+                    if getattr(market_state, "book_is_executable", None) is not None
+                    else getattr(market_state, "is_executable", None)
+                ),
+                annualized_vol=(
+                    float(_ind_lwf.get("annualized_vol"))
+                    if _ind_lwf.get("annualized_vol") is not None
+                    else (float(annualized_vol) if annualized_vol is not None else None)
+                ),
+                vol_source=_ind_lwf.get("annualized_vol_source"),
+                admission_owner_yes=_ind_lwf.get("yes_admission_owner"),
+                admission_owner_no=_ind_lwf.get("no_admission_owner"),
+                bookflow_block_yes=(
+                    _lwf_bf_reason(_fs_lwf, asset, "yes") if _fs_lwf is not None else None
+                ),
+                bookflow_block_no=(
+                    _lwf_bf_reason(_fs_lwf, asset, "no") if _fs_lwf is not None else None
+                ),
+                regime=regime,
+                dir_regime=_lwf_dir,
+                decision_lane=_d_ind.get("decision_lane"),
+                decision_reason=decision.no_trade_reason or ("selected" if decision.selected_outcome else "none"),
+                was_selected=bool(decision.selected_outcome),
+                stage_indicators=_ind_lwf,
+                spot_price=float(spot_price) if spot_price is not None else None,
+            )
+        except Exception:
+            pass
+
         # Cheap-tail canary lane must be post-only/maker, one contract, short TTL.
         # This is enforced regardless of the ordinary taker/maker selection because
         # the canary is an exploration lane with explicit no-chase rules.
@@ -15763,6 +15834,67 @@ class LeanAgent15m:
                             ),
                         },
                     )
+            except Exception:
+                pass
+
+            # late_window_trend_favorite shadow (observe-only): the
+            # band-disabled / TTE-cutoff population never reaches the
+            # decision engine, so it is recorded here with provenance
+            # marked INPUTS_MISSING — the model produced no forecast for
+            # these candidates and the funnel must not count one.
+            try:
+                from merid.prediction.lwf_shadow_lane import log_lwf_shadow
+                _lwf_run_id, _lwf_cid = self._candidate_identity(asset, ticker, tick)
+                _lwf_yb = locals().get("best_bid") or (100.0 - float(no_price_cents or 0))
+                _lwf_ya = locals().get("best_ask") or float(yes_price_cents or 0)
+                log_lwf_shadow(
+                    run_id=_lwf_run_id,
+                    decision_id=f"{_lwf_cid}:pre",
+                    asset=asset,
+                    ticker=ticker,
+                    eval_path="pre_engine_band",
+                    yes_bid_cents=float(_lwf_yb),
+                    yes_ask_cents=float(_lwf_ya),
+                    no_bid_cents=100.0 - float(_lwf_ya),
+                    no_ask_cents=float(no_price_cents or 0),
+                    yes_depth_cc=float(getattr(market_state, "min_depth_no", 0) or 0) * 100.0,
+                    no_depth_cc=float(getattr(market_state, "min_depth_yes", 0) or 0) * 100.0,
+                    strike=locals().get("_strike"),
+                    strike_source="market_metadata",
+                    ref_price=None,          # module resolves live RTI itself
+                    ref_source=None,
+                    ref_tick=None,
+                    rti_age_ms=None,
+                    p_yes_calibrated=None,   # engine never ran: no forecast exists
+                    p_no_calibrated=None,
+                    p_yes_raw=None,
+                    p_no_raw=None,
+                    net_edge_taker_yes=None,
+                    net_edge_taker_no=None,
+                    tte_seconds=seconds_to_expiry,
+                    quote_age_ms=(
+                        getattr(market_state, "quote_age_ms", None)
+                        if market_state else None
+                    ),
+                    book_is_executable=(
+                        getattr(market_state, "book_is_executable", None)
+                        if market_state else None
+                    ),
+                    annualized_vol=None,
+                    vol_source=None,
+                    regime=None,
+                    decision_reason=(
+                        "tte_entry_cutoff" if _regime_reject_cause == "tte_floor"
+                        else "price_band_both_sides_disabled"
+                    ),
+                    was_selected=False,
+                    stage_indicators={
+                        "pre_engine_reject_cause": _regime_reject_cause,
+                        "yes_price_band_reason": _yes_band_reason,
+                        "no_price_band_reason": _no_band_reason,
+                    },
+                    spot_price=float(spot_price) if spot_price is not None else None,
+                )
             except Exception:
                 pass
             return None
