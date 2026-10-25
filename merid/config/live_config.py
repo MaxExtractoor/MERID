@@ -543,6 +543,13 @@ _ENV_OVERRIDES.update({
         ("MERID_WINDOW_PLAN_PENDING_TTL_S", "float", 1, 900),
         ("MERID_WINDOW_PLAN_TTE_EARLY_S", "float", 0, 900),
         ("MERID_WINDOW_PLAN_TTE_MID_S", "float", 0, 900),
+        # 2026-10-26: basket-leader freshness bounds for the window-plan
+        # dissenter veto (emitted-record window scope; live r60/label read).
+        ("MERID_BASKET_LEADER_MAX_AGE_S", "float", 0, 3600),
+        ("MERID_BASKET_LEADER_LIVE_MAX_AGE_S", "float", 0, 900),
+        # r60 threshold (bp) shared by the quota lane and the always-on
+        # basket_direction registry stamp in agent_grid_15m.
+        ("MERID_WINDOW_QUOTA_DIR_R60_BP", "float", 0, 100),
     )
 })
 _ENV_OVERRIDES.update({
@@ -563,6 +570,11 @@ _ENV_OVERRIDES.update({
         # (early,mid,late) and the durable submission-counter sidecar path.
         "MERID_WINDOW_PLAN_CELL_SHARES",
         "MERID_WINDOW_PLAN_STATE_PATH",
+        # 2026-10-26: basket-leader identity for the dissenter veto —
+        # asset form (window_plan/basket_direction) and series form
+        # (window_quota emitted-record lookup).
+        "MERID_BASKET_LEADER_ASSET",
+        "MERID_BASKET_LEADER_SERIES",
     )
 })
 
