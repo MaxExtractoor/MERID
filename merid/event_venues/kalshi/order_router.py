@@ -10140,6 +10140,15 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
             _in_range = _wq_otm.quota_band_match(intent.price_cents)
         except Exception:
             _in_range = False
+    if not _in_range and getattr(intent, "decision_lane", None) == "pinned_fav":
+        # 2026-10-25: pinned-fav emissions span the lane's own band
+        # (MAKER_LO..MAKER_HI, 90-98) which sits above the canonical YES
+        # 85c ceiling — the lane band is the validity bound.
+        try:
+            from merid.prediction import directional_regime as _dr_otm
+            _in_range = _dr_otm.pinned_fav_band_match(float(intent.price_cents))
+        except Exception:
+            _in_range = False
 
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
     logger.info(
@@ -12165,6 +12174,15 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
         try:
             from merid.prediction import window_quota as _wq_dep
             _in_range = _wq_dep.quota_band_match(intent.price_cents)
+        except Exception:
+            _in_range = False
+    if not _in_range and getattr(intent, "decision_lane", None) == "pinned_fav":
+        # 2026-10-25: pinned-fav emissions span the lane's own band
+        # (MAKER_LO..MAKER_HI, 90-98) which sits above the canonical YES
+        # 85c ceiling — the lane band is the validity bound.
+        try:
+            from merid.prediction import directional_regime as _dr_dep
+            _in_range = _dr_dep.pinned_fav_band_match(float(intent.price_cents))
         except Exception:
             _in_range = False
     if not _in_range:
@@ -15508,6 +15526,21 @@ async def _route_live(
                     try:
                         from merid.prediction import window_quota as _wq_a5
                         _tgt_in_range = _wq_a5.quota_band_match(_target_price)
+                    except Exception:
+                        _tgt_in_range = False
+                if (
+                    not _tgt_in_range
+                    and getattr(intent, "decision_lane", None)
+                    == "pinned_fav"
+                ):
+                    # 2026-10-25: pinned-fav emissions span the lane's own
+                    # band (MAKER_LO..MAKER_HI, 90-98) which sits above the
+                    # canonical YES 85c cap — without the escape every
+                    # band-admitted YES buy dies here as
+                    # price_out_of_side_aware_range (live: ETH ask 96c).
+                    try:
+                        from merid.prediction import directional_regime as _dr_a5
+                        _tgt_in_range = _dr_a5.pinned_fav_band_match(_target_price)
                     except Exception:
                         _tgt_in_range = False
                 if _target_price > 0 and not _tgt_in_range:

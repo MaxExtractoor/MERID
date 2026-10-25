@@ -1295,6 +1295,18 @@ def validate_canonical_intent(
             )
         except Exception:
             pass
+    elif i.decision_lane == "pinned_fav":
+        # The pinned-fav maker band (MAKER_LO..MAKER_HI, currently 90-98)
+        # deliberately sits above the symmetric canonical cap.  The normalize
+        # stage already admits it via is_price_in_canonical_range +
+        # pinned_fav_band_match; this gate must apply the same band or a
+        # band-admitted candidate dies here as invalid_price.
+        try:
+            from merid.prediction import directional_regime as _dr_vci
+            if _dr_vci.pinned_fav_band_match(float(i.limit_cents)):
+                _open_max_cents = max(_open_max_cents, int(i.limit_cents))
+        except Exception:
+            pass
     if i.purpose == "open" and not (CANONICAL_MIN_CENTS <= i.limit_cents <= _open_max_cents):
         raise OrderIntentValidationError(f"invalid_price:price_cents={i.limit_cents}")
     if i.purpose == "close" and not (1 <= i.limit_cents <= 99):
