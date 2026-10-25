@@ -9921,11 +9921,18 @@ def _entry_max_rest_seconds() -> int:
     the ETH NO@34 fill landed 150s after submission with the model's own
     fill-time edge at -23.5c.  Entries now share the bounded-lane 45s
     contract (env-overridable); exit orders keep the 180s default.
+
+    2026-10-25: default tightened 45s -> 15s.  fill_quality markouts show the
+    median candidate drifts +3.5c within 1-5s of posting (+5.5c by 30s), so
+    the fill-or-miss outcome resolves in seconds; the extra rest time only
+    exposed the bid to adversely-selected fills.  An unfilled expiry releases
+    the idempotency slot (2026-10-05 dedupe release, now fixed to see true
+    venue fill counts), permitting one fresh re-quote per key.
     """
     try:
-        return max(1, int(os.environ.get("MERID_ENTRY_MAX_REST_S", "45")))
+        return max(1, int(os.environ.get("MERID_ENTRY_MAX_REST_S", "15")))
     except Exception:
-        return 45
+        return 15
 
 
 def _mark_reject(self, candidate: Dict, stage: str, reason: str, **fields) -> bool:

@@ -59,8 +59,20 @@ def is_exit_order_from_source(source: Optional[str]) -> bool:
     """
     if not source:
         return False
-    
+
     source_lower = source.lower()
+    # 2026-10-25: ``exit_policy_<hex>`` is the auto-generated
+    # ExitPolicyResolution policy_id stamped on every ENTRY intent as
+    # position-exit lineage (unified_exit_policy_engine).  It describes the
+    # future exit policy of the position, not this order's purpose, but it
+    # substring-matches the "exit" marker - with the result that every
+    # resting entry order was classified as an exit order and exempted from
+    # the resting monitor's cancel rules (toxic-mid, pre-expiry, window,
+    # model-quality, max-hold) and counted as exit coverage in the position
+    # monitor.  Real exit orders carry exit markers in client_order_id /
+    # intent_id / source, and are also caught by the signed-YES delta test.
+    if source_lower.startswith("exit_policy_"):
+        return False
     return any(marker in source_lower for marker in EXIT_ORDER_MARKERS)
 
 

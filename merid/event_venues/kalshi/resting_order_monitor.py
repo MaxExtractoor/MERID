@@ -798,9 +798,6 @@ class RestingOrderMonitor:
                         model_quality_good=None,
                     )
             
-            from merid.prediction.dynamic_entry_window import resolve_entry_window
-            from config.kalshi_crypto_config import kalshi_ticker_to_asset
-            
             # Get current regime
             regime = "normal"  # Default fallback
             try:
@@ -812,20 +809,29 @@ class RestingOrderMonitor:
             except Exception as e:
                 logger.debug(f"[RESTING_ORDER_MONITOR] Could not get regime: {e}")
             
-            # Get model quality
-            model_quality_good = False
+            # Get model quality.  Tri-state: None means insufficient data —
+            # the stores return pessimistic defaults when empty (brier 0.25
+            # coin-flip, hit_ratio 0.0 on a cold process), which would make
+            # this rule mass-cancel every Tier-A resting entry at its first
+            # recheck.  Only a *measured* bad quality may cancel.
+            model_quality_good = None
             try:
                 from merid.metrics.calibration import get_calibration_store
                 from merid.metrics.hit_ratio import get_hit_ratio_tracker
-                
+
                 cal_store = get_calibration_store()
                 hit_tracker = get_hit_ratio_tracker()
-                
-                brier = cal_store.get_brier("edge_model_v1", "crypto")
+
+                brier_stats = cal_store.get_stats("edge_model_v1", "crypto")
                 hit_stats = hit_tracker.stats
-                hit_ratio = hit_stats.get("hit_ratio", 0.5)
-                
-                model_quality_good = (brier < 0.20 and hit_ratio > 0.55)
+                n_resolved = int(getattr(brier_stats, "resolved_count", 0) or 0)
+                n_hits = int(hit_stats.get("total_records", 0) or 0)
+                _min_samples = int(os.environ.get("MERID_MODEL_QUALITY_MIN_SAMPLES", "20"))
+                if n_resolved >= _min_samples and n_hits >= _min_samples:
+                    model_quality_good = (
+                        brier_stats.ewma_brier < 0.20
+                        and hit_stats.get("hit_ratio", 0.0) > 0.55
+                    )
             except Exception as e:
                 logger.debug(f"[RESTING_ORDER_MONITOR] Could not get model quality: {e}")
             
@@ -837,12 +843,27 @@ class RestingOrderMonitor:
                 elapsed_minutes = (now - record.created_at).total_seconds() / 60.0
                 minutes_to_expiry = max(0, record.original_minutes_to_expiry - elapsed_minutes)
             
-            window_res = resolve_entry_window(
-                asset=record.asset,
-                minutes_to_expiry=minutes_to_expiry,
-                edge_pct=record.original_edge_pct,
-                ticker=record.ticker
+            # The dynamic_entry_window module no longer exists - this import
+            # died silently under the outer except (every non-exempt recheck
+            # returned keep/recheck_error, so no cancel rule ever ran).  The
+            # canonical replacement is the entry-time policy floor: a resting
+            # entry may not outlive the horizon at which a fresh entry would
+            # be rejected (MERID_ENTRY_MIN_SECONDS_TO_EXPIRY, default 180s).
+            try:
+                _min_entry_tte_s = float(os.environ.get(
+                    "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180"
+                ))
+            except Exception:
+                _min_entry_tte_s = 180.0
+            window_allowed = (
+                minutes_to_expiry is None
+                or (minutes_to_expiry * 60.0) >= _min_entry_tte_s
             )
+            window_reason_value = (
+                None if window_allowed
+                else f"min_tte_entry:{minutes_to_expiry:.1f}min<{_min_entry_tte_s:.0f}s"
+            )
+            window_vol_tier = None
             
             # Check if order should be cancelled
             # 1. Defensive regime or halt
@@ -853,31 +874,33 @@ class RestingOrderMonitor:
                     action="cancel",
                     reason=f"regime_{regime}",
                     current_regime=regime,
-                    current_vol_tier=window_res.volatility_tier,
+                    current_vol_tier=window_vol_tier,
                     model_quality_good=model_quality_good,
                 )
             
             # 2. Entry window no longer allowed
-            if not window_res.allowed:
+            if not window_allowed:
                 return RecheckResult(
                     intent_id=record.intent_id,
                     ticker=record.ticker,
                     action="cancel",
-                    reason=f"window_not_allowed:{window_res.reason.value}",
+                    reason=f"window_not_allowed:{window_reason_value}",
                     current_regime=regime,
-                    current_vol_tier=window_res.volatility_tier,
+                    current_vol_tier=window_vol_tier,
                     model_quality_good=model_quality_good,
                 )
             
-            # 3. Model quality degraded and order was Tier A
-            if record.risk_tier == "A" and not model_quality_good:
+            # 3. Model quality degraded and order was Tier A.  Only fires on
+            # *measured* bad quality (model_quality_good is False); None means
+            # the stores lack enough resolved samples to judge.
+            if record.risk_tier == "A" and model_quality_good is False:
                 return RecheckResult(
                     intent_id=record.intent_id,
                     ticker=record.ticker,
                     action="cancel",
                     reason="model_quality_degraded",
                     current_regime=regime,
-                    current_vol_tier=window_res.volatility_tier,
+                    current_vol_tier=window_vol_tier,
                     model_quality_good=model_quality_good,
                 )
             
@@ -893,7 +916,7 @@ class RestingOrderMonitor:
                     action="cancel",
                     reason=f"pre_expiry_cancel:{minutes_to_expiry:.1f}min",
                     current_regime=regime,
-                    current_vol_tier=window_res.volatility_tier,
+                    current_vol_tier=window_vol_tier,
                     model_quality_good=model_quality_good,
                 )
             
@@ -906,7 +929,7 @@ class RestingOrderMonitor:
                     action="cancel",
                     reason="max_hold_time_exceeded",
                     current_regime=regime,
-                    current_vol_tier=window_res.volatility_tier,
+                    current_vol_tier=window_vol_tier,
                     model_quality_good=model_quality_good,
                 )
 
@@ -968,7 +991,7 @@ class RestingOrderMonitor:
                                     action="cancel",
                                     reason=f"toxic_mid_cross:mid={_side_mid:.1f}<=limit={_lim}",
                                     current_regime=regime,
-                                    current_vol_tier=window_res.volatility_tier,
+                                    current_vol_tier=window_vol_tier,
                                     model_quality_good=model_quality_good,
                                 )
                             if not _is_buy and _lim > 0 and _side_mid >= _lim:
@@ -985,7 +1008,7 @@ class RestingOrderMonitor:
                                     action="cancel",
                                     reason=f"toxic_mid_cross:mid={_side_mid:.1f}>=limit={_lim}",
                                     current_regime=regime,
-                                    current_vol_tier=window_res.volatility_tier,
+                                    current_vol_tier=window_vol_tier,
                                     model_quality_good=model_quality_good,
                                 )
             except Exception as _tox_exc:
@@ -1019,7 +1042,7 @@ class RestingOrderMonitor:
                             action="cancel",
                             reason=f"market_order_fallback:{fallback_decision.reason}",
                             current_regime=regime,
-                            current_vol_tier=window_res.volatility_tier,
+                            current_vol_tier=window_vol_tier,
                             model_quality_good=model_quality_good,
                         )
                 except Exception as e:
@@ -1032,7 +1055,7 @@ class RestingOrderMonitor:
                 action="keep",
                 reason="still_valid",
                 current_regime=regime,
-                current_vol_tier=window_res.volatility_tier,
+                current_vol_tier=window_vol_tier,
                 model_quality_good=model_quality_good,
             )
             
@@ -1099,8 +1122,27 @@ class RestingOrderMonitor:
             record_remaining_before = record.remaining_size
             record.remaining_size = remaining_size
             
-            # Update filled_size (cumulative filled amount)
-            record.filled_size = record.original_size - remaining_size
+            # Update filled_size (cumulative filled amount).  Prefer the
+            # venue's authoritative fill_count: a canceled order reports
+            # remaining_count=0 for an unfilled remainder, so deriving
+            # original-remaining would fabricate a full fill on every
+            # venue-terminal cancel - and (worse) suppress the
+            # _release_entry_dedupe_for_terminal call below, leaving the
+            # (ticker, contract) idempotency record stuck "submitted" for
+            # its 900s TTL after an unfilled expiry.
+            _venue_filled_raw = getattr(order_data, "filled_size", None)
+            try:
+                _venue_filled = (
+                    float(_venue_filled_raw)
+                    if _venue_filled_raw is not None and str(_venue_filled_raw) != ""
+                    else None
+                )
+            except Exception:
+                _venue_filled = None
+            if _venue_filled is not None:
+                record.filled_size = _venue_filled
+            else:
+                record.filled_size = record.original_size - remaining_size
             
             # Partial fill detection
             if remaining_size > 0 and record_remaining_before > remaining_size:
