@@ -6270,6 +6270,16 @@ async def _run_loop(self) -> None:
                 else:
                     # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
                     logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
+                    # 2026-10-25: deterministic window plan — rank the whole
+                    # batch globally (net edge desc + stable tie-breaks) so the
+                    # shared budget/quota gate admits the best candidates first
+                    # regardless of asset iteration order.
+                    try:
+                        from merid.prediction import window_plan as _wp_sort
+                        if _wp_sort.plan_enabled():
+                            candidates = _wp_sort.sort_candidates(candidates)
+                    except Exception as _wp_sort_err:
+                        logger.debug("[15m-LOOP] window_plan sort skipped: %s", _wp_sort_err)
                     for candidate in candidates:
                         try:
                             # CRITICAL FIX: 2026-08-02 - Log candidate lifecycle event for RECEIVED state
@@ -7033,9 +7043,121 @@ async def _run_loop(self) -> None:
                                     _fallback_count, sizing_err
                                 )
                                 candidate["count"] = _fallback_count
-                            
+
+                            # 2026-10-25: deterministic window plan — clamp the
+                            # order to the shared per-window budget / contract /
+                            # submission / per-asset / correlated-side caps, or
+                            # reject with a stable window_plan_* reason.  The plan
+                            # only ever sizes DOWN (or to the budget fit under
+                            # LIFT); it cannot resurrect a sizing reject.
+                            try:
+                                from merid.prediction import window_plan as _wp
+                                if _wp.plan_enabled():
+                                    _wp_side = str(candidate.get("side", "") or "").lower()
+                                    _wp_price = int(candidate.get("price_cents") or 0)
+                                    if _wp_price <= 0:
+                                        try:
+                                            _wp_price = int(price_cents)
+                                        except Exception:
+                                            _wp_price = 0
+                                    if not _wp_side or _wp_price <= 0:
+                                        self._rejection_counters["window_plan_no_price"] = (
+                                            self._rejection_counters.get("window_plan_no_price", 0) + 1
+                                        )
+                                        self._log_candidate_lifecycle_event(
+                                            candidate_id=candidate_id,
+                                            from_state="RECEIVED",
+                                            to_state="REJECTED",
+                                            reason="window_plan_no_price",
+                                            context={"ticker": ticker, "side": _wp_side, "price_cents": _wp_price},
+                                        )
+                                        continue
+                                    _wp_asset = asset
+                                    try:
+                                        _wp_asset
+                                    except NameError:
+                                        _wp_asset = extract_asset(ticker)
+                                    _wp_allowed, _wp_count, _wp_reason, _wp_detail = _wp.admit(
+                                        ticker=ticker,
+                                        asset=_wp_asset,
+                                        side=_wp_side,
+                                        price_cents=_wp_price,
+                                        requested_count=float(candidate.get("count") or 0.0),
+                                        tte_s=candidate.get("time_to_expiry_seconds"),
+                                        post_only=bool(candidate.get("post_only")),
+                                        decision_id=str(
+                                            candidate.get("decision_id")
+                                            or candidate_id
+                                        ),
+                                        # Bounded lanes carry their own stamped
+                                        # contract caps — the plan may clamp them
+                                        # but never lift above the lane's count.
+                                        allow_lift=(
+                                            candidate.get("decision_lane")
+                                            not in BOUNDED_POST_ONLY_LANES
+                                        ),
+                                    )
+                                    if _wp_allowed:
+                                        if float(_wp_count) != float(candidate.get("count") or 0.0):
+                                            logger.info(
+                                                "[WINDOW-PLAN] resize ticker=%s count=%s -> %s (%s)",
+                                                ticker, candidate.get("count"), _wp_count,
+                                                _wp_detail.get("room_usd"),
+                                            )
+                                        candidate["count"] = _wp_count
+                                        candidate["window_plan_reserved_usd"] = _wp_detail.get("reserved_usd")
+                                    else:
+                                        self._rejection_counters[_wp_reason] = (
+                                            self._rejection_counters.get(_wp_reason, 0) + 1
+                                        )
+                                        self._log_candidate_lifecycle_event(
+                                            candidate_id=candidate_id,
+                                            from_state="RECEIVED",
+                                            to_state="REJECTED",
+                                            reason=_wp_reason,
+                                            context={
+                                                "ticker": ticker,
+                                                "decision_id": candidate.get("decision_id"),
+                                                "count": candidate.get("count"),
+                                                **_wp_detail,
+                                            },
+                                        )
+                                        logger.info(
+                                            "[WINDOW-PLAN] admission rejected ticker=%s reason=%s detail=%s",
+                                            ticker, _wp_reason, _wp_detail,
+                                        )
+                                        continue
+                            except Exception as _wp_err:
+                                # Degraded mode on an unexpected plan error:
+                                # the order proceeds under the pre-existing caps
+                                # (MAX_CONTRACTS_PER_ORDER, slot allocator, $3
+                                # fixed exposure) which still bound it — a plan
+                                # bug must not silently disable all entries, and
+                                # a scan failure already fails closed inside
+                                # admit() with window_plan_scan_failed.
+                                logger.error("[WINDOW-PLAN] admission error ticker=%s: %s", ticker, _wp_err)
+                                self._rejection_counters["window_plan_error"] = (
+                                    self._rejection_counters.get("window_plan_error", 0) + 1
+                                )
+
                             # Execute candidate and check if order was actually submitted
                             order_submitted = await self._execute_candidate(candidate, tick_id)
+
+                            # 2026-10-25: window plan — the wire attempt is real
+                            # only when the order was actually submitted; consume
+                            # a durable submission slot and bind the coid so the
+                            # pending reservation reconciles against monitor/ledger.
+                            if order_submitted:
+                                try:
+                                    from merid.prediction import window_plan as _wp_rec
+                                    if _wp_rec.plan_enabled():
+                                        _wp_rec.record_submission(
+                                            str(candidate.get("decision_id") or candidate_id),
+                                            client_order_id=candidate.get("client_order_id"),
+                                            ticker=ticker,
+                                        )
+                                except Exception as _wp_rec_err:
+                                    logger.debug("[WINDOW-PLAN] record_submission failed: %s", _wp_rec_err)
 
                             # Only track as executed if order was actually submitted
                             if order_submitted:
@@ -7095,6 +7217,18 @@ async def _run_loop(self) -> None:
                                         if candidate.get("decision_lane") == "window_quota":
                                             from merid.prediction import window_quota as _wq_rel
                                             _wq_rel.release_quota_submission(ticker)
+                                        # 2026-10-25: window plan — the candidate
+                                        # died before the wire; its budget
+                                        # reservation releases without consuming
+                                        # a submission slot.
+                                        try:
+                                            from merid.prediction import window_plan as _wp_rel
+                                            if _wp_rel.plan_enabled():
+                                                _wp_rel.release_reservation(
+                                                    str(candidate.get("decision_id") or candidate_id)
+                                                )
+                                        except Exception:
+                                            pass
                                         if _pre_wire_cell:
                                             from merid.prediction import threshold_cells as _tc
                                             _tc.release_cell_submission_reservation(
