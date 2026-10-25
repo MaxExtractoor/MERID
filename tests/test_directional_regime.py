@@ -493,6 +493,37 @@ def test_countertrend_lane_min_markouts_zero_opens(regime_state, throttle_path, 
     assert blk and blk.startswith("countertrend_lane_cold_start")
 
 
+def test_countertrend_lane_deep_itm_exempt(regime_state, throttle_path, monkeypatch):
+    """Cold-start sample gate skips the deep-ITM class the regime veto
+    already exempts (``regime_entry_block`` |z|>=deep rule); near-money
+    countertrend entries still require markout samples."""
+    monkeypatch.setenv("MERID_ASR_COUNTERTREND_MIN_MARKOUTS", "20")
+    reg = _drive(_snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001))
+    assert reg is not None and reg.label == "RALLY_CONFIRMED"
+    # Deep-ITM NO during a rally (spot far below strike) -> exempt at n=0.
+    assert dr.countertrend_lane_block("DOGE", "no", reg, zscore=-0.9) is None
+    # Near-money NO still blocked; missing z also blocks (no new info).
+    blk = dr.countertrend_lane_block("DOGE", "no", reg, zscore=-0.1)
+    assert blk and blk.startswith("countertrend_lane_cold_start")
+    blk = dr.countertrend_lane_block("DOGE", "no", reg, zscore=None)
+    assert blk and blk.startswith("countertrend_lane_cold_start")
+    # Wrong-sign z (deep OTM) is not an exemption.
+    blk = dr.countertrend_lane_block("DOGE", "no", reg, zscore=+0.9)
+    assert blk and blk.startswith("countertrend_lane_cold_start")
+    # Trend-side and non-confirmed labels unaffected by the exemption.
+    assert dr.countertrend_lane_block("DOGE", "yes", reg, zscore=+0.9) is None
+
+
+def test_countertrend_lane_deep_itm_exempt_selloff(regime_state, throttle_path, monkeypatch):
+    monkeypatch.setenv("MERID_ASR_COUNTERTREND_MIN_MARKOUTS", "20")
+    reg = _drive(_snap_map(BTC=-0.001, ETH=-0.002, SOL=-0.001, XRP=-0.0005, DOGE=0.001))
+    assert reg is not None and reg.label == "SELL_OFF_CONFIRMED"
+    # Deep-ITM YES during a selloff (spot far above strike) -> exempt at n=0.
+    assert dr.countertrend_lane_block("ETH", "yes", reg, zscore=+0.9) is None
+    blk = dr.countertrend_lane_block("ETH", "yes", reg, zscore=+0.1)
+    assert blk and blk.startswith("countertrend_lane_cold_start")
+
+
 # ------------------------------------------------- graded lane machine ----
 
 def test_first_loss_caution_not_suspension(throttle_path):

@@ -6175,8 +6175,8 @@ def _compute_trade_decision_impl(
     _no_throttle_block = _dr.side_throttle_block("no", now.timestamp(), asset=asset) or _dr.strip_concentration_block(
         "no", float(no_breakdown.net_edge) * 100.0, ts=now.timestamp()
     )
-    _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg)
-    _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg)
+    _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg, z)
+    _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg, z)
     # 2026-10-04: the book-flow confirmation gate exists to protect RESTING
     # (passive) entries from being picked off into adverse flow — an IOC
     # taker pays the ask once and never rests in the book, so the veto does

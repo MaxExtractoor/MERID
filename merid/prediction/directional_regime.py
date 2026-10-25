@@ -657,6 +657,7 @@ def countertrend_lane_block(
     asset: str,
     side: str,
     regime: Optional[DirectionalRegime],
+    zscore: Optional[float] = None,
 ) -> Optional[str]:
     """No passive countertrend entry until the lane has measured its cost.
 
@@ -665,6 +666,13 @@ def countertrend_lane_block(
     required before a rally-NO / selloff-YES lane opens.  Counts marks
     regardless of fill — an unfilled resting order that never got picked off
     is itself evidence the context is not toxic.
+
+    Deep-ITM countertrend holds are exempt under the same |z| rule
+    ``regime_entry_block`` uses: at 82c+ the held side is already aligned
+    with settlement, which is the audited-safe class — and markout samples
+    only accrue from orders this lane admits, so a cold-start veto on the
+    deep-ITM cohort can never clear itself (2026-10-25 forfeiture audit:
+    DOGE/ETH/SOL n=0 cohorts settled 89-99% wins at 82-84c, +12.8..+16.3c/tr).
     """
     if regime is None or not directional_regime_enabled():
         return None
@@ -675,6 +683,14 @@ def countertrend_lane_block(
         want = "SELL_OFF_CONFIRMED"
     if want is None:
         return None
+    z = zscore if (zscore is not None and math.isfinite(zscore)) else None
+    if z is not None:
+        deep = _deep_itm_z()
+        if (
+            (want == "RALLY_CONFIRMED" and z <= -deep)
+            or (want == "SELL_OFF_CONFIRMED" and z >= deep)
+        ):
+            return None
     try:
         from merid.prediction import current_build_provisional as _cbp
         n = _cbp.regime_markout_sample_count(asset, side, want)
