@@ -444,6 +444,8 @@ _ENV_OVERRIDES.update({
         "MERID_LOSS_EXITS_ENABLED", "MERID_TAIL_LOSS_ENABLED",
         # 2026-10-21 (drift-lane epoch): lane master toggles.
         "MERID_DRIFT_LANE_ENABLED", "MERID_CHEAP_NO_LANE_ENABLED",
+        # 2026-10-25: deterministic per-window plan toggles.
+        "MERID_WINDOW_PLAN_ENABLED", "MERID_WINDOW_PLAN_LIFT_SIZING",
     )
 })
 _ENV_OVERRIDES.update({
@@ -525,6 +527,21 @@ _ENV_OVERRIDES.update({
         ("MERID_CHEAP_NO_MAX_CONTRACTS", "float", 0.01, 100),
         ("MERID_CHEAP_NO_MAX_PER_TICKER", "int", 0, 50),
         ("MERID_CHEAP_NO_DAILY_MAX", "int", 0, 500),
+        # 2026-10-25: deterministic per-window trade plan knobs — one shared
+        # budget/contract/submission bound across all five series per window.
+        # Bounds here are the safety envelope; merid.prediction.window_plan
+        # reads its own env defaults.
+        ("MERID_WINDOW_PLAN_BUDGET_USD", "float", 0.01, 1000),
+        ("MERID_WINDOW_PLAN_MAX_CONTRACTS", "float", 0.01, 100),
+        ("MERID_WINDOW_PLAN_MAX_SUBMISSIONS", "int", 0, 500),
+        ("MERID_WINDOW_PLAN_ORDER_CAP_USD", "float", 0.01, 1000),
+        ("MERID_WINDOW_PLAN_MAX_QTY_CC", "int", 1, 100000),
+        ("MERID_WINDOW_PLAN_MIN_QTY_CC", "int", 1, 100000),
+        ("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", "float", 0.01, 1000),
+        ("MERID_WINDOW_PLAN_CORR_CAP_PCT", "float", 0, 1),
+        ("MERID_WINDOW_PLAN_PENDING_TTL_S", "float", 1, 900),
+        ("MERID_WINDOW_PLAN_TTE_EARLY_S", "float", 0, 900),
+        ("MERID_WINDOW_PLAN_TTE_MID_S", "float", 0, 900),
     )
 })
 _ENV_OVERRIDES.update({
@@ -541,6 +558,10 @@ _ENV_OVERRIDES.update({
         # (settlement convergence and pinned favorite enter flat books by
         # design; they keep the drop and sticky-p vetoes).
         "MERID_ENTRY_TRAP_FLAT_EXEMPT_LANES",
+        # 2026-10-25: window plan — TTE-cell submission pacing shares
+        # (early,mid,late) and the durable submission-counter sidecar path.
+        "MERID_WINDOW_PLAN_CELL_SHARES",
+        "MERID_WINDOW_PLAN_STATE_PATH",
     )
 })
 
