@@ -4017,6 +4017,11 @@ class KalshiFillsLedger:
         avg_price_cents = 0
         thesis_side: Optional[str] = None
         excluded_from_live_replay = 0
+        # Generation id of the CURRENT exposure episode: the fill that moved
+        # exposure off zero (or flipped its sign).  The firewall binds exit
+        # emergency authorization to this, so it must survive the replay —
+        # discarding it made every ledger-sourced snapshot generationless.
+        episode_opener_fill_id: Optional[str] = None
 
         for fill_id in fill_ids:
             fill = self._fills.get(fill_id)
@@ -4075,6 +4080,7 @@ class KalshiFillsLedger:
             total_fees += fill.fee_cost
 
             abs_exposure = abs(signed_yes)
+            prev_signed = signed_yes
             if abs_exposure == 0:
                 avg_price_cents = fill_price
             else:
@@ -4083,6 +4089,14 @@ class KalshiFillsLedger:
                 avg_price_cents = int(total_cost // (abs_exposure + count))
 
             signed_yes += fill_yes
+
+            # A new exposure episode opens when exposure moves off zero, and
+            # restarts when a single fill flips the sign through zero.  Either
+            # way the opening fill is the position's generation id.
+            if signed_yes != 0 and (
+                prev_signed == 0 or (signed_yes > 0) != (prev_signed > 0)
+            ):
+                episode_opener_fill_id = fill.fill_id
 
             # Set thesis side from first non-zero exposure so subsequent fill prices
             # are interpreted in the same price space.
@@ -4107,6 +4121,9 @@ class KalshiFillsLedger:
             "computed_from_fills": len(fill_ids),
             "excluded_from_live_replay": excluded_from_live_replay,
             "signed_yes_exposure": signed_yes,
+            # The fill that opened this exposure episode — the position's
+            # generation id for exit-authorization binding.
+            "entry_fill_id": episode_opener_fill_id,
         }
 
     def compute_net_positions(self, since_hours: int = 24) -> Dict[str, Dict[str, Any]]:

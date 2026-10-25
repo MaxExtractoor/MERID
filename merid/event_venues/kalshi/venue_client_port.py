@@ -86,6 +86,14 @@ class KalshiVenueClientExecutionPort:
             max_execution_cost_cents=request.max_execution_cost_cents,
             cancel_order_on_pause=request.cancel_order_on_pause,
         )
+        # Correlation ids for transport-boundary wire snapshots — the client
+        # reads getattr(order, "intent_id"/"order_attempt_id"); stamping here
+        # links the persisted wire record back to the order attempt ledger.
+        try:
+            order.intent_id = request.metadata.get("intent_id")
+            order.order_attempt_id = request.metadata.get("order_attempt_id")
+        except Exception:
+            pass
 
         if is_exit:
             from merid.event_venues.kalshi.execution_risk_firewall import ExecutionRiskFirewall

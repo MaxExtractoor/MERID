@@ -11,6 +11,7 @@ import os
 import threading
 import asyncio
 import base64
+import hashlib
 import json
 import random
 import time as _time
@@ -233,6 +234,27 @@ def _format_count_fp(size) -> str:
     if size_decimal == size_decimal.to_integral_value():
         return str(int(size_decimal))
     return f"{size_decimal:.2f}"
+
+
+def _persist_wire_snapshot(record: Dict[str, Any]) -> None:
+    """Bounded, credential-free final-request snapshot at the transport boundary.
+
+    Written AFTER every price/quantity transform and immediately before the
+    HTTP call, so a process crash mid-flight still leaves the exact wire body
+    (the BTC LOSS_CAP discrepancy — local 61c, venue 93c — was only resolvable
+    from the exchange record because no such capture existed).  The order body
+    contains no credentials (auth lives in headers, which are never persisted).
+    A diagnostic write failure must never block an exit submission.
+    """
+    try:
+        _dir = os.environ.get("MERID_WIRE_SNAPSHOT_DIR") or "logs"
+        os.makedirs(_dir, exist_ok=True)
+        _is_test = os.environ.get("PYTEST_CURRENT_TEST") is not None
+        _fname = "wire_requests_test.jsonl" if _is_test else "wire_requests.jsonl"
+        with open(os.path.join(_dir, _fname), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    except Exception as _exc:
+        logger.debug("[WIRE-SNAPSHOT] persist failed (non-blocking): %s", _exc)
 
 
 # ── Kalshi-specific exceptions ───────────────────────────────────────────
@@ -2737,11 +2759,93 @@ class KalshiVenueClient(EventVenueClient):
         if hasattr(order, "idempotency_key") and order.idempotency_key:
             headers["Idempotency-Key"] = order.idempotency_key
             logger.info(f"[IDEMPOTENCY-KEY] Using idempotency_key={order.idempotency_key} for order")
-        
+
+        # ── Transport-boundary final-request snapshot (2026-10-26) ──────────
+        # Persist the exact serialized body (with the firewall decision's
+        # requested-vs-resolved price attribution) immediately before the wire
+        # call.  Bounded, credential-free, nonblocking — a snapshot failure
+        # cannot prevent submission.
+        _request_sent_at = _time.time()
+        try:
+            _fw_decision = None
+            try:
+                from merid.event_venues.kalshi.execution_risk_firewall import (
+                    ExecutionRiskFirewall,
+                )
+                _fw_decision = ExecutionRiskFirewall.get_instance().get_decision(
+                    canonical_coid
+                )
+            except Exception:
+                _fw_decision = None
+            _persist_wire_snapshot({
+                "phase": "request",
+                "attempt_id": getattr(order, "order_attempt_id", None),
+                "intent_id": getattr(order, "intent_id", None),
+                "client_order_id": canonical_coid,
+                "endpoint_version": "v2",
+                "endpoint": "POST /portfolio/events/orders",
+                "request_body": kalshi_order,
+                "request_body_hash": hashlib.sha256(
+                    json.dumps(kalshi_order, sort_keys=True, default=str).encode()
+                ).hexdigest(),
+                "request_sent_at": _request_sent_at,
+                "requested_limit_cents": getattr(
+                    _fw_decision, "requested_limit_cents", None
+                ),
+                "resolved_limit_cents": raw_price_cents,
+                "serialized_price": wire_price,
+                "serialized_side": kalshi_order.get("side"),
+                "serialized_quantity": count_fp_str,
+                "execution_mode": getattr(_fw_decision, "execution_mode", None),
+                "marketable_at_snapshot": getattr(
+                    _fw_decision, "marketable_at_snapshot", None
+                ),
+                "nonmarketable_reason": getattr(
+                    _fw_decision, "nonmarketable_reason", None
+                ),
+                "price_transforms": getattr(
+                    _fw_decision, "price_transforms", None
+                ),
+            })
+        except Exception:
+            pass
+
         result = await self._request_with_resilience(
             "POST", "/portfolio/events/orders", json_data=kalshi_order, operation_name="place_order", headers=headers
         )
-        
+
+        try:
+            _resp_raw = {}
+            if result.success and result.data is not None:
+                _rd = getattr(result.data, "raw_data", None)
+                if isinstance(_rd, dict):
+                    _resp_raw = _rd
+            _persist_wire_snapshot({
+                "phase": "response",
+                "client_order_id": canonical_coid,
+                "attempt_id": getattr(order, "order_attempt_id", None),
+                "intent_id": getattr(order, "intent_id", None),
+                "response_received_at": _time.time(),
+                "success": bool(result.success),
+                "error": (str(result.error)[:500] if result.error else None),
+                "latency_ms": getattr(result, "latency_ms", None),
+                "exchange_order_id": (
+                    getattr(result.data, "order_id", None) if result.data else None
+                ),
+                "status": getattr(result.data, "status", None) if result.data else None,
+                "filled_quantity": (
+                    getattr(result.data, "filled_size", None) if result.data else None
+                ),
+                "remaining_quantity": (
+                    getattr(result.data, "remaining_size", None) if result.data else None
+                ),
+                "exchange_processed_at": (
+                    _resp_raw.get("created_time") or _resp_raw.get("updated_time")
+                ),
+            })
+        except Exception:
+            pass
+
         if not result.success:
             return OperationResult.fail(
                 result.error,
@@ -2997,9 +3101,59 @@ class KalshiVenueClient(EventVenueClient):
             count_fp_str,
         )
 
+        # Transport-boundary final-request snapshot (bounded, credential-free,
+        # nonblocking) — see the V2 path for the full contract.
+        _request_sent_at = _time.time()
+        try:
+            _persist_wire_snapshot({
+                "phase": "request",
+                "attempt_id": getattr(order, "order_attempt_id", None),
+                "intent_id": getattr(order, "intent_id", None),
+                "client_order_id": client_order_id,
+                "endpoint_version": "legacy",
+                "endpoint": "POST /portfolio/orders",
+                "request_body": kalshi_order,
+                "request_body_hash": hashlib.sha256(
+                    json.dumps(kalshi_order, sort_keys=True, default=str).encode()
+                ).hexdigest(),
+                "request_sent_at": _request_sent_at,
+                "resolved_limit_cents": int(round(float(order.price) * 100))
+                if order.price is not None else None,
+                "serialized_price": kalshi_order.get(price_field),
+                "serialized_side": outcome,
+                "serialized_quantity": count_fp_str,
+            })
+        except Exception:
+            pass
+
         result = await self._request_with_resilience(
             "POST", "/portfolio/orders", json_data=kalshi_order, operation_name="place_order_legacy"
         )
+
+        try:
+            _resp_order_l = {}
+            if result.success and isinstance(result.data, dict):
+                _resp_order_l = result.data.get("order", result.data) or {}
+            _persist_wire_snapshot({
+                "phase": "response",
+                "client_order_id": client_order_id,
+                "attempt_id": getattr(order, "order_attempt_id", None),
+                "intent_id": getattr(order, "intent_id", None),
+                "response_received_at": _time.time(),
+                "success": bool(result.success),
+                "error": (str(result.error)[:500] if result.error else None),
+                "latency_ms": getattr(result, "latency_ms", None),
+                "exchange_order_id": _resp_order_l.get("order_id"),
+                "status": _resp_order_l.get("status"),
+                "filled_quantity": _resp_order_l.get("fill_count_fp"),
+                "remaining_quantity": _resp_order_l.get("remaining_count_fp"),
+                "exchange_processed_at": (
+                    _resp_order_l.get("created_time")
+                    or _resp_order_l.get("updated_time")
+                ),
+            })
+        except Exception:
+            pass
 
         if not result.success:
             return OperationResult.fail(

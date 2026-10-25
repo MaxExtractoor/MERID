@@ -133,6 +133,23 @@ class FirewallDecision:
     intent_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     raw: Dict[str, Any] = field(default_factory=dict)
+    # Execution contract (2026-10-26): every transformation between the
+    # requested limit and the wire limit is attributed, and the final limit
+    # is classified against the book snapshot evaluated here.
+    #   execution_mode: "immediate_risk_reduction" when structured emergency
+    #     authorization exempted the min-proceeds floor, else
+    #     "price_constrained_exit".
+    #   marketable_at_snapshot: approved limit vs the evaluated book's best
+    #     executable level (sell: limit <= best_bid; buy: limit >= best_ask).
+    #   nonmarketable_reason: set when a policy transform (e.g. the
+    #     min-proceeds floor) pushed the approved limit outside executability
+    #     — "PRICE_CONSTRAINT_PREVENTS_IMMEDIATE_EXIT".
+    requested_limit_cents: Optional[int] = None
+    policy_floor_cents: Optional[int] = None
+    execution_mode: str = ""
+    marketable_at_snapshot: Optional[bool] = None
+    nonmarketable_reason: Optional[str] = None
+    price_transforms: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -313,6 +330,11 @@ class ExecutionRiskFirewall:
                 )
 
         # 7. Limit must be executable at the requested size (VWAP check).
+        # Capture the requested limit and start the attribution chain BEFORE
+        # any firewall transform so the persisted decision can explain every
+        # cent between the exit's requested price and the wire price.
+        requested_limit = int(canonical.limit_cents)
+        price_transforms: List[Dict[str, Any]] = []
         if not self._limit_executable(canonical, book):
             # 2026-10-16 (loss audit): a forced/safety exit must not wedge on a
             # limit that sits inside the book's walk — the BTC hard stop at
@@ -351,6 +373,15 @@ class ExecutionRiskFirewall:
                     book.available_qty_cc,
                 )
                 canonical = replace(canonical, limit_cents=_new_limit)
+                price_transforms.append(
+                    {
+                        "stage": "forced_exit_reprice",
+                        "input_cents": _old_limit,
+                        "output_cents": _new_limit,
+                        "reason": "depth_marginal_clamp",
+                        "policy_id": "MERID_FIREWALL_FORCED_EXIT_REPRICE",
+                    }
+                )
             else:
                 return self._rejected(
                     f"limit_not_executable:limit={canonical.limit_cents}:vwap={book.vwap_cents}",
@@ -391,6 +422,16 @@ class ExecutionRiskFirewall:
 
         # 11. Approve with a clamped worst-case limit and deterministic client order id.
         approved_limit = self._clamp_exit_limit(canonical, book)
+        if approved_limit != int(canonical.limit_cents):
+            price_transforms.append(
+                {
+                    "stage": "vwap_clamp",
+                    "input_cents": int(canonical.limit_cents),
+                    "output_cents": approved_limit,
+                    "reason": "vwap_bound",
+                    "policy_id": "exit_vwap_clamp",
+                }
+            )
 
         # 11a. Minimum-proceeds floor for ordinary profit exits (2026-10-17).
         # A voluntary profit-taking exit may not submit below the position's
@@ -405,6 +446,7 @@ class ExecutionRiskFirewall:
         _min_proceeds_exempt = self._is_min_proceeds_exempt(
             original_intent, canonical, pos
         )
+        _applied_floor_cents: Optional[int] = None
         if not _min_proceeds_exempt:
             _entry_c = pos.avg_price_cents
             if _entry_c is not None and 1 <= int(_entry_c) <= 99:
@@ -440,6 +482,21 @@ class ExecutionRiskFirewall:
                             ticker, canonical.intent_id,
                             approved_limit, _floor, int(_entry_c),
                         )
+                        price_transforms.append(
+                            {
+                                "stage": "min_proceeds_floor",
+                                "input_cents": approved_limit,
+                                "output_cents": _floor,
+                                "reason": "fee_adjusted_breakeven_floor",
+                                "policy_id": "MERID_MIN_PROCEEDS_FEE_ADJUST",
+                                "source_claim": {
+                                    "entry_cents": int(_entry_c),
+                                    "trail_lock_cents": _trail_lock,
+                                    "emergency_authorized": False,
+                                },
+                            }
+                        )
+                        _applied_floor_cents = _floor
                         approved_limit = _floor
                     elif canonical.action == "buy" and approved_limit > 100 - _floor:
                         logger.warning(
@@ -450,7 +507,62 @@ class ExecutionRiskFirewall:
                             ticker, canonical.intent_id,
                             approved_limit, 100 - _floor, _floor, int(_entry_c),
                         )
+                        price_transforms.append(
+                            {
+                                "stage": "min_proceeds_floor",
+                                "input_cents": approved_limit,
+                                "output_cents": 100 - _floor,
+                                "reason": "fee_adjusted_breakeven_floor",
+                                "policy_id": "MERID_MIN_PROCEEDS_FEE_ADJUST",
+                                "source_claim": {
+                                    "entry_cents": int(_entry_c),
+                                    "trail_lock_cents": _trail_lock,
+                                    "emergency_authorized": False,
+                                },
+                            }
+                        )
+                        _applied_floor_cents = _floor
                         approved_limit = 100 - _floor
+
+        # Execution contract classification (2026-10-26): an emergency-
+        # authorized exit is an immediate-risk-reduction submission; every
+        # other exit is price-constrained.  Marketability is judged against
+        # the same book snapshot the approval was computed from — a sell is
+        # executable when its limit reaches the best bid, a buy when it
+        # reaches the best ask.  A policy transform that pushes the limit
+        # outside executability yields PRICE_CONSTRAINT_PREVENTS_IMMEDIATE_EXIT
+        # — submitted, but honest about not being immediate protection.
+        _execution_mode = (
+            "immediate_risk_reduction" if _min_proceeds_exempt
+            else "price_constrained_exit"
+        )
+        if canonical.action == "sell":
+            _marketable: Optional[bool] = (
+                approved_limit <= book.best_bid_cents
+            )
+        elif book.best_ask_cents is not None:
+            _marketable = approved_limit >= book.best_ask_cents
+        else:
+            _marketable = None
+        _nonmarketable_reason = (
+            "PRICE_CONSTRAINT_PREVENTS_IMMEDIATE_EXIT"
+            if _marketable is False
+            else None
+        )
+        if _nonmarketable_reason:
+            logger.warning(
+                "[FIREWALL-PRICE-CONSTRAINT] ticker=%s intent_id=%s "
+                "approved_limit=%dc not executable at snapshot "
+                "(best_bid=%sc best_ask=%sc vwap=%sc) - %s; unfilled IOC "
+                "quantity leaves residual exposure to settlement",
+                ticker,
+                canonical.intent_id,
+                approved_limit,
+                book.best_bid_cents,
+                book.best_ask_cents,
+                book.vwap_cents,
+                _nonmarketable_reason,
+            )
 
         coid = self._deterministic_coid(canonical, pos, approved_limit, parent)
         decision_id = f"firewall_{uuid.uuid4().hex}"
@@ -480,6 +592,12 @@ class ExecutionRiskFirewall:
             reduce_only=bool(getattr(canonical, "reduce_only", False)),
             exchange_index=getattr(canonical, "exchange_index", None),
             intent_id=getattr(canonical, "intent_id", None),
+            requested_limit_cents=requested_limit,
+            policy_floor_cents=_applied_floor_cents,
+            execution_mode=_execution_mode,
+            marketable_at_snapshot=_marketable,
+            nonmarketable_reason=_nonmarketable_reason,
+            price_transforms=price_transforms,
             raw={
                 "latency_ms": round((time.monotonic() - t0) * 1000, 2),
                 "fee_cents": fee_cents,
@@ -1463,7 +1581,12 @@ class ExecutionRiskFirewall:
                         avg_price_cents=avg_price,
                         version=f"fills_ledger:{version}",
                         snapshot_age_ms=0,
-                        parent_entry_fill_id=None,
+                        # 2026-10-26: the ledger replay knows the fill that
+                        # opened this exposure episode — use it as the
+                        # generation id so structured emergency authorization
+                        # can bind (LOSS_CAP was denied below-floor authority
+                        # purely because this field was dropped here).
+                        parent_entry_fill_id=pos_dict.get("entry_fill_id"),
                     )
         except Exception as exc:
             logger.warning(
