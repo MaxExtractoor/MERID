@@ -120,6 +120,7 @@ def test_corr_cap_same_side_blocks_opposite_allows(monkeypatch):
     """$2.25 same-side committed: another YES admission is corr-capped,
     a NO admission fits in the remaining $0.75."""
     monkeypatch.setenv("MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER", "0")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_CORR_CAP_PCT", "0.75")
     committed = (Decimal("2.25"), 250, {"BTC": Decimal("2.25")}, {"yes": Decimal("2.25")}, {"BTC": "yes"}, True)
     p1, p2, p3 = _patches(committed)
     with p1, p2, p3:
