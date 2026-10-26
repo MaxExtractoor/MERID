@@ -7572,11 +7572,20 @@ def _compute_trade_decision_impl(
             _cb_p = (
                 yes_breakdown.p_selected if best_side == "yes" else no_breakdown.p_selected
             )
+            _lane_admitted_best = (
+                (_yes_drift_qualifies or _yes_pf_qualifies) if best_side == "yes"
+                else (_no_drift_qualifies or _no_cheap_qualifies or _no_pf_qualifies)
+            )
             _cb_epc_overrides = (
                 best_threshold >= 0
                 and _cb_p <= best_min_p
-                and (_yes_cb_epc_exempt if best_side == "yes" else _no_cb_epc_exempt)
+                and (
+                    (_yes_cb_epc_exempt if best_side == "yes" else _no_cb_epc_exempt)
+                    or _lane_admitted_best
+                )
             )
+            if _cb_epc_overrides and _lane_admitted_best:
+                indicators[f"cost_basis_lane_overridden_{best_side}"] = True
             if _best_gate_ev <= 0 and best_threshold >= 0:
                 # 2026-09-30: both legs uneconomic is an EV rejection, not an
                 # evidence-policy veto.  Label it honestly so the funnel can

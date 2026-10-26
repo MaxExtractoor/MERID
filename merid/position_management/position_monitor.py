@@ -912,15 +912,27 @@ def _lock_threshold_for(position) -> int:
     record already stores the threshold it latched at, so this helper is
     consulted only at trigger/latch time and by the exit-price guard.
     """
+    entry = getattr(position, "avg_entry_price_cents", None)
     lane = _position_decision_lane(position)
     if lane == "drift_fav":
         try:
-            entry = getattr(position, "avg_entry_price_cents", None)
             gain = int(
                 os.getenv("MERID_DRIFT_LOCK_GAIN_CENTS", "12")
             )
             if entry is not None:
                 return max(2, min(97, int(entry) + gain))
+        except Exception:
+            pass
+    # 2026-10-26: Dynamic profit lock for favorite entries (>=75c).
+    # Buying at 85-93c cannot wait for a static 90c latch (it enters at or above 90c);
+    # latching at entry + MERID_FAV_LOCK_GAIN_CENTS (default +5c, max 98c)
+    # allows profitable positions to bank wins mid-window rather than holding
+    # into unpredictable late settlement wicks.
+    if entry is not None and int(entry) >= 75:
+        try:
+            fav_gain = int(os.getenv("MERID_FAV_LOCK_GAIN_CENTS", "5"))
+            if fav_gain > 0:
+                return max(2, min(98, int(entry) + fav_gain))
         except Exception:
             pass
     return _hard_profit_lock_threshold_cents()

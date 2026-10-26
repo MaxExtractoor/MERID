@@ -528,6 +528,9 @@ _ENV_OVERRIDES.update({
         ("MERID_CHEAP_NO_MAX_CONTRACTS", "float", 0.01, 100),
         ("MERID_CHEAP_NO_MAX_PER_TICKER", "int", 0, 50),
         ("MERID_CHEAP_NO_DAILY_MAX", "int", 0, 500),
+        ("MERID_FAV_LOCK_GAIN_CENTS", "int", 1, 98),
+        ("MERID_EXIT_ENVELOPE_PROFIT_LOCK_C", "float", 0.1, 99),
+        ("MERID_PER_TRADE_LOSS_BUDGET_CENTS", "float", 1, 1000),
         # 2026-10-25: deterministic per-window trade plan knobs — one shared
         # budget/contract/submission bound across all five series per window.
         # Bounds here are the safety envelope; merid.prediction.window_plan
