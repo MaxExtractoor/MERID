@@ -4673,8 +4673,15 @@ def _compute_trade_decision_impl(
             ) / 100.0
         except Exception:
             _asr_meas_yes = _asr_meas_no = 0.0
-    _asr_yes = max(_asr_param, _asr_meas_yes)
-    _asr_no = max(_asr_param, _asr_meas_no)
+    if settlement_lane:
+        # 2026-10-27: Settlement convergence risk is pure distribution tail loss
+        # (charged downstream via _lane_mrr); markout pick-off cost does not
+        # apply to arithmetic banked samples converging to $1 or $0.
+        _asr_yes = 0.0
+        _asr_no = 0.0
+    else:
+        _asr_yes = max(_asr_param, _asr_meas_yes)
+        _asr_no = max(_asr_param, _asr_meas_no)
     indicators["yes_adverse_selection_measured_cents"] = _asr_meas_yes * 100.0
     indicators["no_adverse_selection_measured_cents"] = _asr_meas_no * 100.0
 

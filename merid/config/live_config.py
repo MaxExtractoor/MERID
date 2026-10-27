@@ -470,6 +470,8 @@ _ENV_OVERRIDES.update({
         ("MERID_SETTLEMENT_LANE_MIN_OBSERVED", "int", 0, 60),
         ("MERID_SETTLEMENT_LANE_MIN_TTE_S", "float", 0, None),
         ("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "decimal", 1, 99),
+        ("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "decimal", 0, 50),
+        ("MERID_SETTLEMENT_LANE_P_CAP", "decimal", 0, 1),
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),

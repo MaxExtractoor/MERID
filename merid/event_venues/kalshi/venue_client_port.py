@@ -85,6 +85,7 @@ class KalshiVenueClientExecutionPort:
             self_trade_prevention_type=request.self_trade_prevention_type,
             max_execution_cost_cents=request.max_execution_cost_cents,
             cancel_order_on_pause=request.cancel_order_on_pause,
+            decision_lane=request.metadata.get("decision_lane"),
         )
         # Correlation ids for transport-boundary wire snapshots — the client
         # reads getattr(order, "intent_id"/"order_attempt_id"); stamping here

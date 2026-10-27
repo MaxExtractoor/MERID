@@ -7017,6 +7017,10 @@ def _build_create_order_request(
         "entry_or_exit": getattr(intent, "entry_or_exit", None),
         "firewall_decision_id": getattr(intent, "firewall_decision_id", None),
         "firewall_client_order_id": getattr(intent, "firewall_client_order_id", None),
+        # 2026-10-26: bounded admission lanes carry their own verified price
+        # band; the wire-level price guard needs the lane identity to apply
+        # the same band the router gates approved.
+        "decision_lane": getattr(intent, "decision_lane", None),
     }
 
     # Fail-closed: no live request leaves the process without a canonical coid.
@@ -15514,35 +15518,48 @@ async def _route_live(
                 # Use the price the order will actually hit for min/max gate.
                 _target_price = _ask if _action == "buy" else _bid
 
+                # 2026-10-26: a limit order can never trade worse than its own
+                # limit — a buy pays at most ``price_cents``, a sell receives at
+                # least ``price_cents``.  Checking the far-side quote killed
+                # in-band resting bids whenever the book straddled the band edge
+                # (live: pinned_fav 98c bids on SOL/ETH rejected as
+                # ``price_out_of_side_aware_range:99:yes`` on a 98/99 book).
+                # The effective price is min(ask, limit) for buys and
+                # max(bid, limit) for sells; the far-side quote remains the
+                # fallback when the intent carries no limit.
+                try:
+                    _eff_limit = int(getattr(intent, "price_cents", None) or 0)
+                except (TypeError, ValueError):
+                    _eff_limit = 0
+                if 0 < _eff_limit < 100:
+                    if _action == "buy":
+                        _target_price = min(_ask, _eff_limit) if _ask > 0 else _eff_limit
+                    elif _action == "sell":
+                        _target_price = max(_bid, _eff_limit) if _bid > 0 else _eff_limit
+
                 # Canonical executable range (matches agent_grid: YES 1-85, NO 15-99).
                 # Prevents false rejection of one-sided late-expiry markets.
                 _tgt_in_range = is_price_in_canonical_range(_target_price, _canonical_side)
-                if (
-                    not _tgt_in_range
-                    and getattr(intent, "decision_lane", None)
-                    == "window_quota"
-                ):
-                    # 2026-10-17: quota emissions span the lane's own band.
+                if not _tgt_in_range:
+                    # 2026-10-26: bounded admission lanes carry their own
+                    # verified price band which can sit above the canonical
+                    # caps (pinned_fav 90-98, window_quota, settlement<=99).
+                    # A lane-stamped intent was admitted inside that band by
+                    # its own gate — re-checking it against the generic band
+                    # rejects canonical-valid lane orders.
                     try:
-                        from merid.prediction import window_quota as _wq_a5
-                        _tgt_in_range = _wq_a5.quota_band_match(_target_price)
+                        from merid.risk.global_slot_allocator import (
+                            _lane_entry_band_cents,
+                        )
+                        _lane_band_a5 = _lane_entry_band_cents(
+                            getattr(intent, "decision_lane", None)
+                        )
                     except Exception:
-                        _tgt_in_range = False
-                if (
-                    not _tgt_in_range
-                    and getattr(intent, "decision_lane", None)
-                    == "pinned_fav"
-                ):
-                    # 2026-10-25: pinned-fav emissions span the lane's own
-                    # band (MAKER_LO..MAKER_HI, 90-98) which sits above the
-                    # canonical YES 85c cap — without the escape every
-                    # band-admitted YES buy dies here as
-                    # price_out_of_side_aware_range (live: ETH ask 96c).
-                    try:
-                        from merid.prediction import directional_regime as _dr_a5
-                        _tgt_in_range = _dr_a5.pinned_fav_band_match(_target_price)
-                    except Exception:
-                        _tgt_in_range = False
+                        _lane_band_a5 = None
+                    if _lane_band_a5 is not None:
+                        _tgt_in_range = (
+                            _lane_band_a5[0] <= _target_price <= _lane_band_a5[1]
+                        )
                 if _target_price > 0 and not _tgt_in_range:
                     logger.warning(
                         "[order-router] A5: market %s price %dc outside side-aware executable range for side=%s",

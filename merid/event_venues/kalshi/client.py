@@ -75,6 +75,29 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.client")
 
 
+def _entry_price_in_range(order: Any, price_cents: int, outcome: str) -> bool:
+    """Side-aware entry price guard for the wire boundary.
+
+    Ordinary orders are bounded by the canonical range.  Bounded admission
+    lanes (``pinned_fav``, ``window_quota``, ``settlement_convergence``) were
+    admitted inside their own verified price band upstream — the lane band,
+    not the generic canonical range, is the correct guard for lane-stamped
+    orders (a pinned_fav YES buy at 96-98c died here as
+    ``Price outside canonical range`` despite lane approval, 2026-10-26).
+    """
+    try:
+        from merid.risk.global_slot_allocator import _lane_entry_band_cents
+
+        lane_band = _lane_entry_band_cents(getattr(order, "decision_lane", None))
+    except Exception:
+        lane_band = None
+    if lane_band is not None:
+        return lane_band[0] <= price_cents <= lane_band[1]
+    from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
+
+    return is_price_in_canonical_range(price_cents, outcome)
+
+
 async def _validate_ticker_exists(ticker: str) -> tuple[bool, Optional[str]]:
     """Validate that a ticker exists in the Kalshi market catalog.
 
@@ -2475,13 +2498,13 @@ class KalshiVenueClient(EventVenueClient):
         # CRITICAL: Price guard - side-aware canonical entry range.
         # This is the FINAL safety net before API call and applies in the
         # order's own price space (YES or NO) per binary_price_space invariants.
-        from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
-
+        # Bounded admission lanes apply their own verified band instead.
         if not getattr(order, "reduce_only", False):
-            if not is_price_in_canonical_range(raw_price_cents, outcome):
+            if not _entry_price_in_range(order, raw_price_cents, outcome):
                 logger.critical(
-                    "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s",
-                    raw_price_cents, outcome, ticker, outcome
+                    "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s lane=%s",
+                    raw_price_cents, outcome, ticker, outcome,
+                    getattr(order, "decision_lane", None),
                 )
                 return OperationResult.fail(
                     f"Price outside canonical range: price={raw_price_cents}c side={outcome}",
@@ -3054,14 +3077,14 @@ class KalshiVenueClient(EventVenueClient):
 
             # CRITICAL: Price guard - side-aware canonical entry range (entries only).
             # Exits/reduce-only orders may cross the book at any valid 1c-99c
-            # price to close a position.
-            from merid.event_venues.kalshi.binary_price_space import is_price_in_canonical_range
-
+            # price to close a position.  Bounded admission lanes apply their
+            # own verified band instead of the generic canonical range.
             if not getattr(order, "reduce_only", False):
-                if not is_price_in_canonical_range(_price_cents, outcome):
+                if not _entry_price_in_range(order, _price_cents, outcome):
                     logger.critical(
-                        "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s",
+                        "[KALSHI_CLIENT_BLOCKED] Price outside side-aware canonical range: price=%dc side=%s | ticker=%s outcome=%s lane=%s",
                         _price_cents, outcome, ticker, outcome,
+                        getattr(order, "decision_lane", None),
                     )
                     return OperationResult.fail(
                         f"Price outside canonical range: price={_price_cents}c side={outcome}",

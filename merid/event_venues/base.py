@@ -85,6 +85,10 @@ class VenueOrder:
     self_trade_prevention_type: Optional[str] = None  # Kalshi STP mode
     max_execution_cost_cents: Optional[int] = None  # fee-aware EV-derived cost cap
     cancel_order_on_pause: Optional[bool] = None  # cancel resting order if Kalshi pauses
+    # Bounded admission lanes (pinned_fav, window_quota, settlement_convergence)
+    # carry their own verified price band; the wire-level price guard applies
+    # the lane band instead of the generic canonical range when set.
+    decision_lane: Optional[str] = None
 
 
 @dataclass

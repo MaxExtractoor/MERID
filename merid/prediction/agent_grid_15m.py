@@ -15701,13 +15701,15 @@ class LeanAgent15m:
                 from merid.event_venues.kalshi.market_regime import SkewRegime
                 _sd_min_tte = float(_settlement_lane_min_tte())
                 _sd_max_px = _settlement_lane_max_price_cents()
+                _sd_min_edge = Decimal(str(os.environ.get("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "0.75")))
+                _sd_max_spread = int(os.environ.get("MERID_SETTLEMENT_LANE_MAX_SPREAD_CENTS", "5"))
                 _settle_regime = SkewRegime(
                     name="settlement_convergence",
                     min_price_cents=1,
                     max_price_cents=_sd_max_px,
-                    min_net_edge_cents=Decimal("2.0"),
+                    min_net_edge_cents=_sd_min_edge,
                     min_confidence=Decimal("0.80"),
-                    max_spread_cents=1,
+                    max_spread_cents=_sd_max_spread,
                     min_depth_multiple=Decimal("2.0"),
                     size_multiplier=Decimal("0.50"),
                     enabled=True,
@@ -15735,7 +15737,19 @@ class LeanAgent15m:
         tradable_regime = None
         tradable_price_cents = None
         
-        if yes_regime is not None:
+        if yes_regime is not None and no_regime is not None:
+            # If both sides qualify (common in settlement convergence), pick the side
+            # that aligns with the settlement distribution / model probability rather than arbitrarily defaulting to YES.
+            _p_raw = getattr(settlement_distribution, "p_yes_raw", None) if settlement_distribution is not None else None
+            if _p_raw is not None and float(_p_raw) < 0.5:
+                tradable_side = "no"
+                tradable_regime = no_regime
+                tradable_price_cents = no_price_cents
+            else:
+                tradable_side = "yes"
+                tradable_regime = yes_regime
+                tradable_price_cents = yes_price_cents
+        elif yes_regime is not None:
             tradable_side = "yes"
             tradable_regime = yes_regime
             tradable_price_cents = yes_price_cents
