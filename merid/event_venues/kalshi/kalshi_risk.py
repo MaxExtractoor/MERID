@@ -1744,9 +1744,9 @@ class KalshiRiskManager:
             # was designed for bankroll-proportional sizing, not the fixed
             # slot model; the floor keeps it from binding below one max order.
             try:
-                fixed_cap_usd = float(os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "3.00"))
+                fixed_cap_usd = float(os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "6.00"))
             except (ValueError, TypeError):
-                fixed_cap_usd = 3.00
+                fixed_cap_usd = 6.00
             global_bankroll_cap_usd = max(
                 global_bankroll_cap_usd,
                 min(fixed_cap_usd, bankroll_cents / 100.0),

@@ -79,10 +79,10 @@ class ResolvedLiveConfig:
     resolved_at: float = 0.0
 
     # Exposure and sizing
-    fixed_exposure_cap_usd: Decimal = Decimal("3.00")
-    max_total_notional_usd: Decimal = Decimal("3.00")
-    max_single_order_notional_usd: Decimal = Decimal("3.00")
-    max_contracts_per_order: int = 3
+    fixed_exposure_cap_usd: Decimal = Decimal("6.00")
+    max_total_notional_usd: Decimal = Decimal("6.00")
+    max_single_order_notional_usd: Decimal = Decimal("6.00")
+    max_contracts_per_order: int = 6
     max_positions_per_asset: int = 1
 
     # Price collar (execution; router must be a subset of this)

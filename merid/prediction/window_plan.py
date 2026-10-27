@@ -2,7 +2,7 @@
 submission quota + pacing across all five 15m crypto series.
 
 2026-10-25: the operator asked for deterministic per-window allocation under
-the configured $3 fixed-exposure cap — "deterministic about how many
+the configured $6 fixed-exposure cap — "deterministic about how many
 contracts and candidates it should trade per 15-minute window" — while
 keeping every existing EV/risk gate.  Research synthesis (multi-binary
 Kelly with cardinality constraint, budget pacing, queue-position fill
@@ -37,12 +37,12 @@ Design:
 
 Knobs (all env-tunable):
   MERID_WINDOW_PLAN_ENABLED            1     master switch
-  MERID_WINDOW_PLAN_BUDGET_USD         =MERID_FIXED_EXPOSURE_CAP_USD (3.00)
-  MERID_WINDOW_PLAN_MAX_CONTRACTS      5     filled+resting+pending contracts
+  MERID_WINDOW_PLAN_BUDGET_USD         =MERID_FIXED_EXPOSURE_CAP_USD (6.00)
+  MERID_WINDOW_PLAN_MAX_CONTRACTS      10    filled+resting+pending contracts
   MERID_WINDOW_PLAN_MAX_SUBMISSIONS    6     wire attempts per window
-  MERID_WINDOW_PLAN_ORDER_CAP_USD      3.00  per-order notional ceiling
-  MERID_WINDOW_PLAN_MAX_QTY_CC         400   per-order contract ceiling
-  MERID_WINDOW_PLAN_PER_ASSET_CAP_USD  3.00  single asset may take budget;
+  MERID_WINDOW_PLAN_ORDER_CAP_USD      6.00  per-order notional ceiling
+  MERID_WINDOW_PLAN_MAX_QTY_CC         600   per-order contract ceiling
+  MERID_WINDOW_PLAN_PER_ASSET_CAP_USD  6.00  single asset may take budget;
                                              correlation cap does the spread
   MERID_WINDOW_PLAN_CORR_CAP_PCT       0.75  same-side committed <= 75% of
                                              budget ($2.25) — 5 crypto series
@@ -94,15 +94,15 @@ def plan_budget_usd() -> Decimal:
     the plan can never widen the account-level bound the operator set."""
     raw = os.environ.get("MERID_WINDOW_PLAN_BUDGET_USD")
     if raw is None:
-        raw = os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "3.00")
+        raw = os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "6.00")
     try:
         return Decimal(str(raw))
     except Exception:
-        return Decimal("3.00")
+        return Decimal("6.00")
 
 
 def plan_max_contracts_cc() -> int:
-    return int(_env_float("MERID_WINDOW_PLAN_MAX_CONTRACTS", 5.0) * 100)
+    return int(_env_float("MERID_WINDOW_PLAN_MAX_CONTRACTS", 6.0) * 100)
 
 
 def plan_max_submissions() -> int:
@@ -110,11 +110,11 @@ def plan_max_submissions() -> int:
 
 
 def plan_order_cap_usd() -> Decimal:
-    return Decimal(str(_env_float("MERID_WINDOW_PLAN_ORDER_CAP_USD", 3.00)))
+    return Decimal(str(_env_float("MERID_WINDOW_PLAN_ORDER_CAP_USD", 6.00)))
 
 
 def plan_max_qty_cc() -> int:
-    return int(_env_float("MERID_WINDOW_PLAN_MAX_QTY_CC", 400.0))
+    return int(_env_float("MERID_WINDOW_PLAN_MAX_QTY_CC", 600.0))
 
 
 def plan_min_qty_cc() -> int:
@@ -124,7 +124,7 @@ def plan_min_qty_cc() -> int:
 
 
 def plan_per_asset_cap_usd() -> Decimal:
-    return Decimal(str(_env_float("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", 3.00)))
+    return Decimal(str(_env_float("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", 6.00)))
 
 
 def plan_corr_cap_usd() -> Decimal:

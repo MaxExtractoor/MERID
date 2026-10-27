@@ -8850,7 +8850,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             if not _is_exit_order(intent):
                 current_exposure = slot_allocator.get_total_exposure()
                 order_notional = (qty_cc * price_cents_int) / 10000.0
-                fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '3.00'))
+                fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '6.00'))
 
                 # CRITICAL FIX (2026-07-31): Log contract count enforcement for the fixed-cap rule
                 logger.info(

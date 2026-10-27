@@ -64,14 +64,14 @@ def test_environment_override_lowers_min_held_price_is_rejected(monkeypatch):
 
 def test_environment_override_raises_fixed_exposure_cap_is_rejected(monkeypatch):
     """A higher exposure cap is unsafe and is ignored; the profile cap wins."""
-    monkeypatch.setenv("MERID_FIXED_EXPOSURE_CAP_USD", "5.00")
+    monkeypatch.setenv("MERID_FIXED_EXPOSURE_CAP_USD", "7.00")
     resolved = resolve_live_config()
-    # The authoritative profile cap is 3.00 as of profile_version 2.4.0
-    # (raised for the 3-contract bounded-lane sizing); the unsafe 5.00
+    # The authoritative profile cap is 6.00 as of profile_version 2.5.0
+    # (raised for the 6-contract bounded-lane sizing); the unsafe 7.00
     # override is rejected.  The version assertion makes a future profile
     # drift fail loudly instead of silently re-pointing this test.
-    assert resolved.profile_version == "2.4.0"
-    assert resolved.fixed_exposure_cap_usd == Decimal("3.00")
+    assert resolved.profile_version == "2.5.0"
+    assert resolved.fixed_exposure_cap_usd == Decimal("6.00")
     assert any(
         "Exposure cap override rejected" in c for c in resolved.conflicts_caught
     )

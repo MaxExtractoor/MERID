@@ -7,9 +7,9 @@ configurations, preventing drift between test and live environments.
 Key Invariants:
 - Test profile configuration must match production profile configuration
 - Risk limits in tests must match production risk limits
-- Price ranges in tests must match production canonical range (10-75c)
+- Price ranges in tests must match production canonical range (25-80c)
 - Asset universe in tests must include all critical assets (BTC, ETH, SOL, XRP, DOGE)
-- Fixed exposure cap in tests must match production ($1.00)
+- Fixed exposure cap in tests must match production ($6.00)
 - No hardcoded values that diverge from production config
 
 Usage::
@@ -67,10 +67,10 @@ class ConfigInvariantChecker:
     
     # Production canonical values (from memories and codebase)
     PRODUCTION_VALUES = {
-        "min_price_cents": 10,
-        "max_price_cents": 75,
-        "fixed_exposure_cap_usd": 3.00,
-        "max_contracts_per_trade": 3,
+        "min_price_cents": 25,
+        "max_price_cents": 80,
+        "fixed_exposure_cap_usd": 6.00,
+        "max_contracts_per_trade": 6,
         "critical_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE"],
         "min_edge_threshold": 0.01,
         "max_spread_cents": 30,
@@ -150,8 +150,8 @@ class ConfigInvariantChecker:
         """INVARIANT: Risk limits in tests must match production risk limits.
         
         Critical fields that must match:
-        - fixed_exposure_cap_usd ($3.00)
-        - max_contracts_per_trade (3)
+        - fixed_exposure_cap_usd ($6.00)
+        - max_contracts_per_trade (6)
         - Percentage-based caps should be 0.0 (disabled, using fixed cap)
         """
         if production_risk_limits is None:
@@ -224,7 +224,7 @@ class ConfigInvariantChecker:
         test_min_price_cents: int,
         test_max_price_cents: int,
     ) -> ConfigCheckResult:
-        """INVARIANT: Price ranges in tests must match production canonical range (10-75c).
+        """INVARIANT: Price ranges in tests must match production canonical range (25-80c).
         
         This ensures tests are using the correct price range for the 15m Kalshi system.
         """
@@ -254,7 +254,7 @@ class ConfigInvariantChecker:
         return ConfigCheckResult(
             is_valid=True,
             violation_type=None,
-            message="Price range aligned with production (10-75c)",
+            message="Price range aligned with production (25-80c)",
             context=context,
         )
     
@@ -297,9 +297,9 @@ class ConfigInvariantChecker:
         self,
         test_exposure_cap_usd: float,
     ) -> ConfigCheckResult:
-        """INVARIANT: Fixed exposure cap in tests must match production ($1.00).
+        """INVARIANT: Fixed exposure cap in tests must match production ($6.00).
         
-        The $1 global risk exposure cap must NEVER be changed.
+        The $6 global risk exposure cap must NEVER be changed.
         """
         context = {
             "test_exposure_cap_usd": test_exposure_cap_usd,
@@ -317,7 +317,7 @@ class ConfigInvariantChecker:
         return ConfigCheckResult(
             is_valid=True,
             violation_type=None,
-            message="Exposure cap aligned with production ($1.00)",
+            message="Exposure cap aligned with production ($6.00)",
             context=context,
         )
     
@@ -378,8 +378,8 @@ class ConfigInvariantChecker:
         results.append(result)
         
         # Check price range alignment
-        min_price = test_profile.get("min_price_cents", 10)
-        max_price = test_profile.get("max_price_cents", 75)
+        min_price = test_profile.get("min_price_cents", 25)
+        max_price = test_profile.get("max_price_cents", 80)
         result = self.check_price_range_alignment(min_price, max_price)
         results.append(result)
         
@@ -451,15 +451,15 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
     
     # Valid case: all configs match production
     test_profile_valid = {
-        "min_price_cents": 10,
-        "max_price_cents": 75,
-        "fixed_exposure_cap_usd": 3.00,
-        "max_contracts_per_trade": 3,
+        "min_price_cents": 25,
+        "max_price_cents": 80,
+        "fixed_exposure_cap_usd": 6.00,
+        "max_contracts_per_trade": 6,
     }
     
     test_risk_limits_valid = {
-        "fixed_exposure_cap_usd": 3.00,
-        "max_contracts_per_trade": 3,
+        "fixed_exposure_cap_usd": 6.00,
+        "max_contracts_per_trade": 6,
         "max_cycle_risk_pct": 0.0,
         "max_total_risk_pct": 0.0,
         "max_notional_pct": 0.0,
@@ -472,26 +472,26 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
         "test_profile": test_profile_valid,
         "test_risk_limits": test_risk_limits_valid,
         "test_assets": test_assets_valid,
-        "test_exposure_cap_usd": 1.00,
+        "test_exposure_cap_usd": 6.00,
         "expected_valid": True,
         "description": "All configurations match production - valid",
     })
     
     # Invalid case: price range mismatch
     test_profile_invalid_price = {
-        "min_price_cents": 10,
-        "max_price_cents": 50,  # Old value, should be 75
-        "fixed_exposure_cap_usd": 3.00,
-        "max_contracts_per_trade": 3,
+        "min_price_cents": 25,
+        "max_price_cents": 50,  # Old value, should be 80
+        "fixed_exposure_cap_usd": 6.00,
+        "max_contracts_per_trade": 6,
     }
     
     test_cases.append({
         "test_profile": test_profile_invalid_price,
         "test_risk_limits": test_risk_limits_valid,
         "test_assets": test_assets_valid,
-        "test_exposure_cap_usd": 1.00,
+        "test_exposure_cap_usd": 6.00,
         "expected_valid": False,
-        "description": "Max price cents is 50 instead of 75 - violation",
+        "description": "Max price cents is 50 instead of 80 - violation",
     })
     
     # Invalid case: missing critical asset
@@ -501,7 +501,7 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
         "test_profile": test_profile_valid,
         "test_risk_limits": test_risk_limits_valid,
         "test_assets": test_assets_missing,
-        "test_exposure_cap_usd": 1.00,
+        "test_exposure_cap_usd": 6.00,
         "expected_valid": False,
         "description": "Asset universe missing XRP and DOGE - violation",
     })
@@ -511,15 +511,15 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
         "test_profile": test_profile_valid,
         "test_risk_limits": test_risk_limits_valid,
         "test_assets": test_assets_valid,
-        "test_exposure_cap_usd": 2.00,  # Should be 1.00
+        "test_exposure_cap_usd": 2.00,  # Should be 6.00
         "expected_valid": False,
-        "description": "Exposure cap is $2.00 instead of $1.00 - violation",
+        "description": "Exposure cap is $2.00 instead of $6.00 - violation",
     })
     
     # Invalid case: percentage-based cap not disabled
     test_risk_limits_pct = {
-        "fixed_exposure_cap_usd": 3.00,
-        "max_contracts_per_trade": 3,
+        "fixed_exposure_cap_usd": 6.00,
+        "max_contracts_per_trade": 6,
         "max_cycle_risk_pct": 0.05,  # Should be 0.0
         "max_total_risk_pct": 0.0,
         "max_notional_pct": 0.0,
@@ -530,7 +530,7 @@ def generate_synthetic_config_test_cases() -> List[Dict[str, Any]]:
         "test_profile": test_profile_valid,
         "test_risk_limits": test_risk_limits_pct,
         "test_assets": test_assets_valid,
-        "test_exposure_cap_usd": 1.00,
+        "test_exposure_cap_usd": 6.00,
         "expected_valid": False,
         "description": "max_cycle_risk_pct is 0.05 instead of 0.0 - violation",
     })

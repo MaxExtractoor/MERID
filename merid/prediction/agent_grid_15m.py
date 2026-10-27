@@ -77,9 +77,9 @@ def _default_entry_contracts() -> float:
     except Exception:
         pass
     try:
-        return float(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
+        return float(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
     except Exception:
-        return 3.0
+        return 6.0
 
 
 def _bounded_lane_max_contracts() -> float:
@@ -117,14 +117,14 @@ def _canary_lane_max_contracts() -> float:
 
 
 def _probe_lane_max_contracts() -> float:
-    """Hard cap for *evidence-refused* probes (default 3.0 contracts).
+    """Hard cap for *evidence-refused* probes (default 6.0 contracts).
 
-    2026-10-19: aligned with MERID_MAX_CONTRACTS_PER_ORDER=3 and
-    MERID_BOUNDED_LANE_MAX_CONTRACTS=3 so bounded/probe entries can size up
-    to 3 contracts when the $3.00 global exposure cap and book depth allow.
+    2026-10-27: default tracks MERID_MAX_CONTRACTS_PER_ORDER=6 under the
+    $6.00 global exposure cap; production may pin a lower value via
+    MERID_PROBE_LANE_MAX_CONTRACTS to keep probes cheap.
     """
     try:
-        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "3"))
+        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "6"))
     except Exception:
         return 3.0
     return max(0.01, min(v, 100.0))

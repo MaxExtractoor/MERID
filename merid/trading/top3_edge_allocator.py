@@ -256,7 +256,7 @@ class Top3SelectionSpec:
     # consume the entire cycle budget before Edges #2/#3 were considered.
     # DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # DISABLED
     # DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # DISABLED
-    DEFAULT_CYCLE_RISK_CAP_USD: float = float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "3.00"))  # Fixed exposure cap (replaces percentage-based)
+    DEFAULT_CYCLE_RISK_CAP_USD: float = float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "6.00"))  # Fixed exposure cap (replaces percentage-based)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
     MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))  # CRITICAL FIX: 3 (was 5) - enforce top-3 limit to prevent venue window bottleneck
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
@@ -449,7 +449,7 @@ class Top3EdgeAllocator:
 
         2026-07-08 UPDATE: Fixed USD exposure cap instead of percentage-based.
         2026-10-14: Default tracks MERID_FIXED_EXPOSURE_CAP_USD (the resolved
-        global exposure authority, $3.00) — the stale $1.00 default let Edge #1
+        global exposure authority, $6.00) — the stale $1.00 default let Edge #1
         exhaust the budget before later edges were considered.
         """
         env_val = os.getenv("TOP3_CYCLE_RISK_CAP_USD", "")

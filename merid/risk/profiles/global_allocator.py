@@ -6,7 +6,7 @@ Replaces per-asset caps with a top-N edge knapsack allocator under venue cap.
 Core idea:
 - Collect all candidates from all agents in a cycle
 - Sort by edge (descending)
-- Optimal knapsack fill under the venue cap (resolved fixed_exposure_cap_usd, currently $3.00)
+- Optimal knapsack fill under the venue cap (resolved fixed_exposure_cap_usd, currently $6.00)
 - Only submit orders that fit under the cap
 
 This ensures:

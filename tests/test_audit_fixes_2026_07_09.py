@@ -130,9 +130,9 @@ class TestPositionSizingLimits:
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that max_single_order_contracts is 2
-        has_max_contracts_two = 'max_single_order_contracts: 2' in content
-        assert has_max_contracts_two, "max_single_order_contracts should be 2 for $2 fixed exposure cap"
+        # Check that max_single_order_contracts is 6
+        has_max_contracts_two = 'max_single_order_contracts: 6' in content
+        assert has_max_contracts_two, "max_single_order_contracts should be 6 for $6 fixed exposure cap"
     
     def test_unified_risk_manager_enforces_single_contract(self):
         """Verify UnifiedRiskManager enforces single contract limit."""
@@ -142,9 +142,9 @@ class TestPositionSizingLimits:
         
         content = risk_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that per_trade_max_contracts defaults to 2
-        has_single_contract = 'per_trade_max_contracts: int = 2' in content
-        assert has_single_contract, "per_trade_max_contracts should default to 2"
+        # Check that per_trade_max_contracts defaults to 6
+        has_single_contract = 'per_trade_max_contracts: int = 6' in content
+        assert has_single_contract, "per_trade_max_contracts should default to 6"
         
         # Check that contracts > max_contracts is enforced
         has_enforcement = 'contracts > self._limits.per_trade_max_contracts' in content
@@ -154,29 +154,29 @@ class TestPositionSizingLimits:
 class TestProfileConfiguration:
     """Test profile configuration consistency."""
     
-    def test_price_range_max_is_75c(self):
-        """Verify profile price_range.max_price_cents is 75 (expanded for market conditions)."""
+    def test_price_range_max_is_80c(self):
+        """Verify profile price_range.max_price_cents is 80 (2026-10-19 ceiling)."""
         profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
         if not profile_path.exists():
             pytest.skip("kalshi_crypto_15m_v2.yaml not found")
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that price_range max is 75c (expanded from 50c for market conditions)
-        has_75c_max = 'max_price_cents: 75' in content
-        assert has_75c_max, "price_range.max_price_cents should be 75"
+        # Check that price_range max is 80c (2026-10-19: prevents 85c+ asymmetric bounce traps)
+        has_80c_max = 'max_price_cents: 80' in content
+        assert has_80c_max, "price_range.max_price_cents should be 80"
     
-    def test_price_range_min_is_10c(self):
-        """Verify profile price_range.min_price_cents is 10."""
+    def test_price_range_min_is_25c(self):
+        """Verify profile price_range.min_price_cents is 25 (2026-10-19 floor)."""
         profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
         if not profile_path.exists():
             pytest.skip("kalshi_crypto_15m_v2.yaml not found")
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that price_range min is 10c
-        has_10c_min = 'min_price_cents: 10' in content
-        assert has_10c_min, "price_range.min_price_cents should be 10"
+        # Check that price_range min is 25c (2026-10-19: prevents favorite-longshot bias bleed)
+        has_25c_min = 'min_price_cents: 25' in content
+        assert has_25c_min, "price_range.min_price_cents should be 25"
 
 
 class TestExitPolicyPrecedence:
@@ -242,11 +242,11 @@ class TestSingleContractPerOrder:
         from decimal import Decimal
         from merid.prediction.unified_sizing import compute_order_size, _get_max_contracts_per_asset
 
-        # v2.4.0 profile allows up to 2 contracts within the $2 exposure cap.
+        # v2.5.0 profile allows up to 6 contracts within the $6 exposure cap.
         max_contracts = _get_max_contracts_per_asset("BTC")
         assert max_contracts >= 1, "Profile must allow at least 1 contract"
 
-        fixed_exposure_cap_cents = 200  # $2.00 cap expressed in cents
+        fixed_exposure_cap_cents = 600  # $6.00 cap expressed in cents
 
         for price_cents in (10, 43, 75, 99):
             contract_count, notional, _ = compute_order_size(

@@ -252,8 +252,8 @@ def test_profile_per_trade_risk_pct_3_percent():
 
     # Verify fixed exposure cap is present (profile is the source of truth)
     risk_policy = profile.get('risk_policy', {})
-    assert risk_policy.get('fixed_exposure_cap_usd') == 3.00, \
-        "fixed_exposure_cap_usd should be $3.00 (profile value, commit 2ec54fe6)"
+    assert risk_policy.get('fixed_exposure_cap_usd') == 6.00, \
+        "fixed_exposure_cap_usd should be $6.00 (profile value, raised 2026-10-27)"
 
 
 def test_profile_dynamic_sizing_multipliers():
@@ -291,17 +291,17 @@ def test_profile_max_contracts_hierarchy():
     with open(profile_path, 'r', encoding='utf-8') as f:
         profile = yaml.safe_load(f)
 
-    # Check dynamic_sizing max_contracts is 3 (fixed $3 exposure cap, commit 2ec54fe6)
+    # Check dynamic_sizing max_contracts is 6 (fixed $6 exposure cap, 2026-10-27)
     dynamic_sizing = profile['dynamic_sizing']
-    assert dynamic_sizing['max_contracts'] == 3, \
-        "dynamic_sizing max_contracts should be 3 (fixed $3 exposure cap)"
+    assert dynamic_sizing['max_contracts'] == 6, \
+        "dynamic_sizing max_contracts should be 6 (fixed $6 exposure cap)"
 
-    # Check per-asset max_contracts are 3 (fixed $3 exposure cap)
+    # Check per-asset max_contracts are 6 (fixed $6 exposure cap)
     assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
     for asset in assets:
         asset_config = profile['assets'][asset]
         max_contracts = asset_config['max_contracts']['value']
-        assert max_contracts == 3, f"{asset} max_contracts should be 3 (fixed $3 exposure cap)"
+        assert max_contracts == 6, f"{asset} max_contracts should be 6 (fixed $6 exposure cap)"
 
 
 def test_profile_no_tier_based_depth_thresholds():

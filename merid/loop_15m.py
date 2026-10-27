@@ -524,9 +524,9 @@ def _get_max_contracts_per_order() -> int:
         return get_global_slot_allocator().max_contracts_per_order
     except Exception:
         try:
-            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
+            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
         except Exception:
-            return 3
+            return 6
 
 logger = get_logger("merid.loop_15m")
 

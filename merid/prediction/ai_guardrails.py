@@ -127,7 +127,7 @@ class GuardrailConfig:
     come from the profile instead of bankroll-derived computations.
     """
     # Position limits (ENV-DRIVEN, contract counts)
-    max_contracts_per_order: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_ORDER", 3))  # 2026-10-06: default 3 to match the 3-contract entry target
+    max_contracts_per_order: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_ORDER", 6))  # 2026-10-27: default 6 to match the 6-contract entry target
     max_contracts_per_market: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_MARKET", 200))
     
     # NOTIONAL LIMITS: These are computed from actual Kalshi balance, not hardcoded.

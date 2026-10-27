@@ -33,10 +33,10 @@ class TestConfigInvariants:
         """
         # Valid case: test profile matches production
         test_profile = {
-            "min_price_cents": 10,
-            "max_price_cents": 75,
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "min_price_cents": 25,
+            "max_price_cents": 80,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
         }
         
         result = checker.check_profile_alignment(test_profile)
@@ -44,10 +44,10 @@ class TestConfigInvariants:
         
         # Invalid case: max_price_cents mismatch
         test_profile_invalid = {
-            "min_price_cents": 10,
-            "max_price_cents": 50,  # Old value, should be 75
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "min_price_cents": 25,
+            "max_price_cents": 50,  # Old value, should be 80
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
         }
         
         result = checker.check_profile_alignment(test_profile_invalid)
@@ -56,44 +56,44 @@ class TestConfigInvariants:
     
     def test_price_range_matches_canonical_values(self, checker):
         """
-        min_price_cents=10, max_price_cents=75.
+        min_price_cents=25, max_price_cents=80.
         """
         # Valid case: matches canonical range
         result = checker.check_price_range_alignment(
-            test_min_price_cents=10,
-            test_max_price_cents=75,
+            test_min_price_cents=25,
+            test_max_price_cents=80,
         )
         assert result.is_valid
         
         # Invalid case: min_price_cents mismatch
         result = checker.check_price_range_alignment(
-            test_min_price_cents=5,  # Wrong, should be 10
-            test_max_price_cents=75,
+            test_min_price_cents=5,  # Wrong, should be 25
+            test_max_price_cents=80,
         )
         assert not result.is_valid
         assert result.violation_type == ConfigViolation.PRICE_RANGE_MISMATCH
         
         # Invalid case: max_price_cents mismatch
         result = checker.check_price_range_alignment(
-            test_min_price_cents=10,
-            test_max_price_cents=50,  # Wrong, should be 75
+            test_min_price_cents=25,
+            test_max_price_cents=50,  # Wrong, should be 80
         )
         assert not result.is_valid
         assert result.violation_type == ConfigViolation.PRICE_RANGE_MISMATCH
     
     def test_exposure_cap_and_asset_universe_match_production(self, checker):
         """
-        fixed_exposure_cap_usd=3.00; asset universe includes BTC/ETH/SOL/XRP/DOGE.
+        fixed_exposure_cap_usd=6.00; asset universe includes BTC/ETH/SOL/XRP/DOGE.
         """
         # Valid case: exposure cap matches
         result = checker.check_exposure_cap_alignment(
-            test_exposure_cap_usd=3.00,
+            test_exposure_cap_usd=6.00,
         )
         assert result.is_valid
         
         # Invalid case: exposure cap mismatch
         result = checker.check_exposure_cap_alignment(
-            test_exposure_cap_usd=1.00,  # Wrong, should be 3.00
+            test_exposure_cap_usd=1.00,  # Wrong, should be 6.00
         )
         assert not result.is_valid
         assert result.violation_type == ConfigViolation.EXPOSURE_CAP_MISMATCH
@@ -117,9 +117,9 @@ class TestConfigInvariants:
         """
         # Valid case: hardcoded values match production
         hardcoded_values = {
-            "min_price_cents": 10,
-            "max_price_cents": 75,
-            "fixed_exposure_cap_usd": 3.00,
+            "min_price_cents": 25,
+            "max_price_cents": 80,
+            "fixed_exposure_cap_usd": 6.00,
         }
         
         result = checker.check_hardcoded_value_alignment(
@@ -130,9 +130,9 @@ class TestConfigInvariants:
         
         # Invalid case: hardcoded values diverge
         hardcoded_values_invalid = {
-            "min_price_cents": 10,
+            "min_price_cents": 25,
             "max_price_cents": 50,  # Diverges from production
-            "fixed_exposure_cap_usd": 3.00,
+            "fixed_exposure_cap_usd": 6.00,
         }
         
         result = checker.check_hardcoded_value_alignment(
@@ -146,8 +146,8 @@ class TestConfigInvariants:
         """Test risk limits alignment."""
         # Valid case: risk limits match production
         test_risk_limits = {
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
             "max_cycle_risk_pct": 0.0,  # Disabled
             "max_total_risk_pct": 0.0,  # Disabled
             "max_notional_pct": 0.0,  # Disabled
@@ -159,7 +159,7 @@ class TestConfigInvariants:
         
         # Invalid case: fixed exposure cap mismatch
         test_risk_limits_invalid = {
-            "fixed_exposure_cap_usd": 1.00,  # Wrong, should be 3.00
+            "fixed_exposure_cap_usd": 1.00,  # Wrong, should be 6.00
             "max_contracts_per_trade": 1,
             "max_cycle_risk_pct": 0.0,
             "max_total_risk_pct": 0.0,
@@ -173,8 +173,8 @@ class TestConfigInvariants:
         
         # Invalid case: percentage-based cap not disabled
         test_risk_limits_pct = {
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
             "max_cycle_risk_pct": 0.05,  # Should be 0.0
             "max_total_risk_pct": 0.0,
             "max_notional_pct": 0.0,
@@ -188,15 +188,15 @@ class TestConfigInvariants:
     def test_check_all_invariants(self, checker):
         """Test running all configuration invariants together."""
         test_profile = {
-            "min_price_cents": 10,
-            "max_price_cents": 75,
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "min_price_cents": 25,
+            "max_price_cents": 80,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
         }
         
         test_risk_limits = {
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
             "max_cycle_risk_pct": 0.0,
             "max_total_risk_pct": 0.0,
             "max_notional_pct": 0.0,
@@ -209,7 +209,7 @@ class TestConfigInvariants:
             test_profile=test_profile,
             test_risk_limits=test_risk_limits,
             test_assets=test_assets,
-            test_exposure_cap_usd=3.00,
+            test_exposure_cap_usd=6.00,
         )
         
         assert len(results) == 5  # Five invariants checked
@@ -218,15 +218,15 @@ class TestConfigInvariants:
     def test_check_all_invariants_with_violations(self, checker):
         """Test running all invariants with violations."""
         test_profile = {
-            "min_price_cents": 10,
+            "min_price_cents": 25,
             "max_price_cents": 50,  # Wrong
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
         }
         
         test_risk_limits = {
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
             "max_cycle_risk_pct": 0.0,
             "max_total_risk_pct": 0.0,
             "max_notional_pct": 0.0,
@@ -239,7 +239,7 @@ class TestConfigInvariants:
             test_profile=test_profile,
             test_risk_limits=test_risk_limits,
             test_assets=test_assets,
-            test_exposure_cap_usd=3.00,
+            test_exposure_cap_usd=6.00,
         )
         
         assert len(results) == 5
@@ -254,10 +254,10 @@ class TestConvenienceFunctions:
     def test_check_profile_alignment(self):
         """Test convenience function for profile alignment."""
         test_profile = {
-            "min_price_cents": 10,
-            "max_price_cents": 75,
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "min_price_cents": 25,
+            "max_price_cents": 80,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
         }
         
         result = check_profile_alignment(test_profile)
@@ -266,8 +266,8 @@ class TestConvenienceFunctions:
     def test_check_risk_limits_alignment(self):
         """Test convenience function for risk limits alignment."""
         test_risk_limits = {
-            "fixed_exposure_cap_usd": 3.00,
-            "max_contracts_per_trade": 3,
+            "fixed_exposure_cap_usd": 6.00,
+            "max_contracts_per_trade": 6,
             "max_cycle_risk_pct": 0.0,
             "max_total_risk_pct": 0.0,
             "max_notional_pct": 0.0,
@@ -280,8 +280,8 @@ class TestConvenienceFunctions:
     def test_check_price_range_alignment(self):
         """Test convenience function for price range alignment."""
         result = check_price_range_alignment(
-            test_min_price_cents=10,
-            test_max_price_cents=75,
+            test_min_price_cents=25,
+            test_max_price_cents=80,
         )
         assert result.is_valid
     
@@ -295,7 +295,7 @@ class TestConvenienceFunctions:
     def test_check_exposure_cap_alignment(self):
         """Test convenience function for exposure cap alignment."""
         result = check_exposure_cap_alignment(
-            test_exposure_cap_usd=3.00,
+            test_exposure_cap_usd=6.00,
         )
         assert result.is_valid
 
@@ -376,10 +376,10 @@ class TestProductionValues:
         checker = ConfigInvariantChecker()
         
         # Verify production values
-        assert checker.PRODUCTION_VALUES["min_price_cents"] == 10
-        assert checker.PRODUCTION_VALUES["max_price_cents"] == 75
-        assert checker.PRODUCTION_VALUES["fixed_exposure_cap_usd"] == 3.00
-        assert checker.PRODUCTION_VALUES["max_contracts_per_trade"] == 3
+        assert checker.PRODUCTION_VALUES["min_price_cents"] == 25
+        assert checker.PRODUCTION_VALUES["max_price_cents"] == 80
+        assert checker.PRODUCTION_VALUES["fixed_exposure_cap_usd"] == 6.00
+        assert checker.PRODUCTION_VALUES["max_contracts_per_trade"] == 6
         assert "BTC" in checker.PRODUCTION_VALUES["critical_assets"]
         assert "ETH" in checker.PRODUCTION_VALUES["critical_assets"]
         assert "SOL" in checker.PRODUCTION_VALUES["critical_assets"]

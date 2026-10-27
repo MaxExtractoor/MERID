@@ -1,15 +1,15 @@
 """
 Global Slot Allocator for 15m Kalshi Crypto Trading
 
-Enforces hard $3 exposure cap across all 5 assets with slot-based position management.
-Each contract consumes its entry price from the $3 cap, and slots free up on exit.
+Enforces hard $6 exposure cap across all 5 assets with slot-based position management.
+Each contract consumes its entry price from the $6 cap, and slots free up on exit.
 
 Key Rules:
-- Max 3 contracts per trade (hard cap, still bounded by the $3 exposure cap)
+- Max 6 contracts per trade (hard cap, still bounded by the $6 exposure cap)
 - Entry price must be 25-80c (hard enforcement; env-overridable via
   MERID_MIN_ENTRY_CENTS / MERID_MAX_ENTRY_CENTS)
-- Total exposure across all 5 assets ≤ $3 (hard enforcement)
-- Sequential trading: new entries blocked until $3 frees up
+- Total exposure across all 5 assets ≤ $6 (hard enforcement)
+- Sequential trading: new entries blocked until $6 frees up
 - Re-entry allowed when positions close (slot recycling)
 - Portfolio-level optimization using numerical methods for optimal allocation
 """
@@ -43,9 +43,9 @@ def _get_resolved_or_default() -> Optional[Any]:
     return None
 
 
-# Maximum contracts per order under the fixed $3 exposure cap.
-# 2026-10-06: Raised from 2 to 3 for the 3-contract entry target; total ≤ $3.
-MAX_CONTRACTS_PER_ORDER = 3
+# Maximum contracts per order under the fixed $6 exposure cap.
+# 2026-10-27: Raised from 3 to 6 for the 6-contract entry target; total ≤ $6.
+MAX_CONTRACTS_PER_ORDER = 6
 
 
 class SlotStatus(Enum):
@@ -175,11 +175,11 @@ class GlobalSlotAllocator:
     can be lowered without code changes while the account is small.
     """
 
-    # Hard limits (env-overridable; default to the $3 / 3-contract policy values)
-    MAX_EXPOSURE_USD = float(os.getenv("MERID_MAX_EXPOSURE_USD", "3.00"))
+    # Hard limits (env-overridable; default to the $6 / 6-contract policy values)
+    MAX_EXPOSURE_USD = float(os.getenv("MERID_MAX_EXPOSURE_USD", "6.00"))
     MIN_ENTRY_CENTS = int(os.getenv("MERID_MIN_ENTRY_CENTS", "25"))
     MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "80"))
-    MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "3"))
+    MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
     MAX_POSITIONS_PER_ASSET = int(os.getenv("MERID_MAX_POSITIONS_PER_ASSET", "1"))
 
     def __init__(self):
