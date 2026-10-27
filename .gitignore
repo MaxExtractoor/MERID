@@ -1,14 +1,15 @@
-You are operating on the MERID repo for a live Kalshi 15-minute crypto trading system (BTC, ETH, SOL, XRP, DOGE). Your job is to debug and fix why the Kalshi Agent Grid and Merid trading loop are not starting after our recent refactor, and to ensure the entire system is wired and behaving as expected.
+# ============================================================================
+# MERID .gitignore
+# Live Kalshi 15-minute crypto trading system (BTC, ETH, SOL, XRP, DOGE).
+#
+# RULES FOR CONTRIBUTORS AND AGENTS:
+#  - NEVER commit secrets or credentials (.env, *.pem, *.key, secrets/, etc.)
+#  - NEVER commit runtime artifacts (logs, *.db, server_output*, data/*.jsonl)
+#  - The sections below are grouped by purpose; keep new rules in the
+#    appropriate section.
+# ============================================================================
 
-You MUST respect these constraints when reading or editing files:
-
-0) DO NOT ACCESS .env EVEN IF YOUR TOOLING ALLOWS IT
-
-Even if your IDE, “cascade access to .gitignore files” setting, or any other option would let you open gitignored files, you MUST still treat the following as completely off-limits. Do NOT read, edit, list, or otherwise access their contents.
-
-1) DO NOT READ OR COMMIT SECRETS OR CREDENTIALS
-
-Never access or modify any of these:
+# --- Secrets and credentials -------------------------------------------------
 
 .env
 .env.*
@@ -24,9 +25,14 @@ secrets/
 vault-token
 .vault-token
 
-2) DO NOT OPEN OR RELY ON LARGE / NOISY LOG OR OUTPUT FILES
+# Documented credential templates stay committable
+!.env.example
+!.env.*.example
+!.env.template
+!.merid_env.template
 
-These are either huge or irrelevant audit artifacts and should be treated as write-only:
+# --- Large / noisy log and output artifacts ----------------------------------
+# Treat these as write-only; never diff or rely on their contents.
 
 data/audit/audit_log.jsonl
 web/react/jest_output.txt
@@ -47,7 +53,7 @@ audit_*.txt
 full_collect*.txt
 _pytest_tail*.txt
 
-Also treat these as non-source artifacts (read only if absolutely needed, never commit changes):
+# Non-source artifacts (read only if absolutely needed, never commit changes):
 
 coverage.json
 coverage.xml
@@ -76,9 +82,8 @@ ci_test_report.json
 comprehensive_merid_audit_report.json
 swarm_agent_hits.txt
 
-3) IGNORE LOCAL / BUILD / RUNTIME ARTIFACTS
-
-Do not rely on or modify these; they are environment-specific:
+# --- Local / build / runtime artifacts ---------------------------------------
+# Environment-specific; do not rely on or modify.
 
 # Python / venv
 .hypothesis/
@@ -110,7 +115,10 @@ env/
 
 # IDE / OS
 .idea/
-.vscode/
+# .vscode is ignored except for the tracked, team-shared settings files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 *.swp
 *.swo
 *~
@@ -179,52 +187,51 @@ devtools_options.yaml
 .coverage_dir_backup/
 desktop.ini
 
-4) IGNORE LEGACY DIRECTORIES AND MODULES
+# --- Legacy directories and modules ------------------------------------------
+# Dead/archived; do not resurrect them or wire them into main.
 
-Treat these as dead/archived; do not resurrect them or wire them into main:
-
-# Legacy frontends
-android/
-ios/
-linux/
-macos/
-windows/
-flutter/
-assets/fonts/
+# Legacy frontends (root-anchored: these retired dirs live at repo root only)
+/android/
+/ios/
+/linux/
+/macos/
+/windows/
+/flutter/
+/assets/fonts/
 
 # Legacy backends / APIs
-backend/
-merid-api/
+/backend/
+/merid-api/
 /src/
-docker/
-librex/
+/docker/
+/librex/
 
 # Legacy domain modules (no active imports)
-cognitive_core/
-sovereignty/
-collaborative/
-knowledge/
-learning/
-legal/
-onboarding/
-trust/
-marketing_swarm/
+/cognitive_core/
+/sovereignty/
+/collaborative/
+/knowledge/
+/learning/
+/legal/
+/onboarding/
+/trust/
+/marketing_swarm/
 
 # Legacy infra / tooling
 /artifacts/
-baselines/
-examples/
-experiments/
-flink/
+/baselines/
+/examples/
+/experiments/
+/flink/
 /hooks/
-infra/
-mocks/
-operations/
-packages/
-policy/
-runbooks/
-voting/
-test/
+/infra/
+/mocks/
+/operations/
+/packages/
+/policy/
+/runbooks/
+/voting/
+/test/
 
 # Binary tools
 .tools/
@@ -240,110 +247,105 @@ data/auth_users.json
 data/*.backup_*
 data/*.db.backup*
 
-# Root-level stale scripts and AI artifacts
-create_shortcut.ps1
-COMPLETE_*.md
-*_REMOVED.md
-ENHANCED_*.md
-MINIMAL_*.md
-LIGHTWEIGHT_*.md
-CONCISE_*.md
-CODEBASE_BASELINE.*
-HIGH_LEVERAGE_TASKS.md
-HISTORICAL_AUDIT_GAP_REPORT.md
-DUPLICATES_COLLISIONS_REPORT.md
-UI_CLEANUP_FINAL_REPORT.md
-PHASE_2_OPTIMIZATION.md
-RECONCILIATION_OPTIMIZATION_PLAN.md
-DASHBOARD_README.md
-AUDIT_REPORT.md
-BTC_15M_GO_LIVE_CHECKLIST.md
-KALSHI_*.md
-MERID_KALSHI_*.md
-MULTI_VENUE_*.md
-CRYPTO_*.md
-EXECUTION_*.md
-ARBITRAGE_EXECUTION_*.md
-CEX_EXECUTION_*.md
-BLOCKCHAIN_MODULE_*.md
-EXECUTION_GUARD_*.md
-EXECUTION_MOAT_*.md
-Dockerfile.enhanced
-crypto_classification_debug.json
-crypto_markets_investigation.json
-kalshi_access_diagnosis.json
-swarm_agent_hits.txt
-aws_ecs_deployment.py
-change_mode.py
-comprehensive_fix.py
-create_kalshi_venue_api.py
-get_telegram_chat_id.py
-merid_integration_gap_summary.py
-patch_*.py
-fix_*.py
-debug_*.py
-check_*.py
-# 2026-10-18: the check_*.py scratch rule above silently ignored committed
-# CI infrastructure — scripts/check_kill_switch_default.py (ci.yml gate),
-# scripts/check_version_drift.py (version-drift job), and everything under
-# scripts/ci/ — so those jobs could never pass on a runner. Un-ignore the
-# CI-referenced ones; ad-hoc check_*.py scripts elsewhere stay ignored.
-!scripts/ci/check_*.py
-!scripts/check_kill_switch_default.py
-!scripts/check_version_drift.py
-!scripts/check_live_readiness.py
-diagnose_*.py
-audit_*.py
-complete_*.py
-concrete_*.py
-final_*.py
-find_*.py
-integrate_*.py
-investigate_*.py
-production_*.py
-real_merid_*.py
-refresh_*.py
-update_*.py
-wire_*.py
-verify_*.py
-init_production_mesh.py
-health_check_temp.py
-ui_cleanup_plan.py
-ui_ux_crypto_gap_analysis.py
-minimal_backend.py
-minimal_server.py
-dashboard_api_endpoints.py
-temp_line.txt
-temp_mode.json
-engine_bugs_analysis.md
-merid_integration_final_summary.md
-real_merid_integration_instructions.md
-concrete_integration_summary.md
-test_results_*.txt
-_fix_*.py
-test_agent_robustness.py
-test_behavioral_enhancements.py
-test_chat_ids.py
-test_commitments_endpoint.py
-test_integrations.py
-test_market_fix.py
-test_notifications.py
-test_refactoring.py
-test_risk_debate_integration.py
-test_risk_endpoints.py
+# --- Root-level stale scripts and AI artifacts -------------------------------
+# These patterns are anchored to the repo root (leading /): they ignore the
+# ad-hoc scratch dumps that accumulate next to README, without silently
+# swallowing legitimate same-named source files deeper in the tree
+# (e.g. scripts/analyze_*.py, tests/**/__init__.py).
+/create_shortcut.ps1
+/COMPLETE_*.md
+/*_REMOVED.md
+/ENHANCED_*.md
+/MINIMAL_*.md
+/LIGHTWEIGHT_*.md
+/CONCISE_*.md
+/CODEBASE_BASELINE.*
+/HIGH_LEVERAGE_TASKS.md
+/HISTORICAL_AUDIT_GAP_REPORT.md
+/DUPLICATES_COLLISIONS_REPORT.md
+/UI_CLEANUP_FINAL_REPORT.md
+/PHASE_2_OPTIMIZATION.md
+/RECONCILIATION_OPTIMIZATION_PLAN.md
+/DASHBOARD_README.md
+/AUDIT_REPORT.md
+/BTC_15M_GO_LIVE_CHECKLIST.md
+/KALSHI_*.md
+/MERID_KALSHI_*.md
+/MULTI_VENUE_*.md
+/CRYPTO_*.md
+/EXECUTION_*.md
+/ARBITRAGE_EXECUTION_*.md
+/CEX_EXECUTION_*.md
+/BLOCKCHAIN_MODULE_*.md
+/EXECUTION_GUARD_*.md
+/EXECUTION_MOAT_*.md
+/Dockerfile.enhanced
+/crypto_classification_debug.json
+/crypto_markets_investigation.json
+/kalshi_access_diagnosis.json
+/swarm_agent_hits.txt
+/aws_ecs_deployment.py
+/change_mode.py
+/comprehensive_fix.py
+/create_kalshi_venue_api.py
+/get_telegram_chat_id.py
+/merid_integration_gap_summary.py
+/patch_*.py
+/fix_*.py
+/debug_*.py
+/check_*.py
+/diagnose_*.py
+/audit_*.py
+/complete_*.py
+/concrete_*.py
+/final_*.py
+/find_*.py
+/integrate_*.py
+/investigate_*.py
+/production_*.py
+/real_merid_*.py
+/refresh_*.py
+/update_*.py
+/wire_*.py
+/verify_*.py
+/init_production_mesh.py
+/health_check_temp.py
+/ui_cleanup_plan.py
+/ui_ux_crypto_gap_analysis.py
+/minimal_backend.py
+/minimal_server.py
+/dashboard_api_endpoints.py
+/temp_line.txt
+/temp_mode.json
+/engine_bugs_analysis.md
+/merid_integration_final_summary.md
+/real_merid_integration_instructions.md
+/concrete_integration_summary.md
+/test_results_*.txt
+/_fix_*.py
+/test_agent_robustness.py
+/test_behavioral_enhancements.py
+/test_chat_ids.py
+/test_commitments_endpoint.py
+/test_integrations.py
+/test_market_fix.py
+/test_notifications.py
+/test_refactoring.py
+/test_risk_debate_integration.py
+/test_risk_endpoints.py
 /test_telegram_*.py
-test_ui_integrations.py
-test_unified_signal_integration.py
-test_*.sh
-*_COMPLETE.md
-*_COMPLETE_REPORT.md
-*_PROGRESS.md
-*_SUMMARY.md
-*_CONFIRMED.md
-*_FIXED.md
-SESSION_COMPLETE_PROGRESS.md
-PROJECT_COMPLETE.md
-MEMORY.md
+/test_ui_integrations.py
+/test_unified_signal_integration.py
+/test_*.sh
+/*_COMPLETE.md
+/*_COMPLETE_REPORT.md
+/*_PROGRESS.md
+/*_SUMMARY.md
+/*_CONFIRMED.md
+/*_FIXED.md
+/SESSION_COMPLETE_PROGRESS.md
+/PROJECT_COMPLETE.md
+/MEMORY.md
 *.bak
 web/health_diagnostic.txt
 web/react/test-output.txt
@@ -356,39 +358,25 @@ backups/
 logs/
 tmp/
 
-# Ad-hoc diagnostic / runtime artifacts (added 2026-08-25)
-.tmp_*.py
-_*.py
-_*.txt
-tmp_*.py
-.venv-clean/
-2026-08-14
-2026-08-14/
-tmp_*.txt
-tmp_*.json
-query_*.py
-_test_*.py
-analyze_*.py
-fetch_*.py
-get_*.py
-summarize_*.py
-run_subset.py
-inspect_*.py
-tmp_check_*.py
-tmp_diagnose_*.py
-tmp_find_*.py
-tmp_test_*.py
-tmp_trace_*.py
-tmp_watch_*.py
-tmp_transfer_*.py
-tmp_full_test_output.txt
-tmp_errors_today.py
-tmp_fills_today.py
-tmp_audit_today.py
-tmp_risk_snapshot.py
-tmp_tail*.txt
-tmp_tail*.py
-two_window_tail*.txt
+# --- Ad-hoc diagnostic / runtime artifacts (added 2026-08-25) ----------------
+# Root-anchored: these scratch dumps live next to README. Anchoring prevents
+# `_*.py` from ignoring every `__init__.py` in the tree, and keeps
+# scripts/analyze_*, scripts/verify_*, etc. committable.
+/.tmp_*.py
+/_*.py
+/_*.txt
+/tmp_*
+/.venv-clean/
+/2026-08-14
+/2026-08-14/
+/query_*.py
+/analyze_*.py
+/fetch_*.py
+/get_*.py
+/summarize_*.py
+/run_subset.py
+/inspect_*.py
+/two_window_tail*.txt
 
 # Output / audit artifacts
 reports/
@@ -434,6 +422,7 @@ data/shadow/artifacts/*.sha256
 data/shadow/first_failure_report_*.json
 data/shadow/startup_record_shadow_*.json
 data/*.txt
+!data/README*
 data/eth_*.json
 data/*_reconciliation.json
 data/reconciliation_record_*.json
@@ -476,11 +465,19 @@ data/stop_residuals.json
 data/streaming_calibration.json
 data/threshold_cell_*.json
 data/window_funnel_*.json
+data/window_plan_state.json
 data/window_quota_fills.json
 
 # Local operator investigation scratch (never commit)
 scripts/_*
 data/_*
+data/check_*.py
+data/inspect_*.py
+data/find_*.py
+data/analyze_*.py
+tests/_*
+tests/debug_*.py
+tests/diagnose_*.py
 
 # Stray root-level scratch dumps
 /audit/

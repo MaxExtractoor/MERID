@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Execution and routing hardening (2026-10)
+
+- Added bounded chase requote for unfilled resting entry orders, with
+  extended rest (75s vs 15s TTL) for chase-capable entries.
+- Added adverse-reprice veto on maker→taker IOC conversion
+  (BTC-1245 postmortem).
+- Settlement convergence: lane-bounded orders admitted by
+  routing/settlement; dropped out-of-scope `settlement_distribution`
+  reference in dual-regime pick.
+- Trading-shard collateral management: preflight and loop relocate idle
+  cash to the market's exchange shard via intra-account transfer
+  (`MERID_AUTO_FUND_TRADING_SHARD`, `MERID_KALSHI_TRADING_SHARD`).
+- NO-side entries enabled with measured per-asset moneyness bands;
+  pinned-fav maker band floored at `MERID_PINNED_FAV_MAKER_LO=90` after
+  realized-fill falsification of the 76–89c pocket.
+- Repository hygiene: `SECURITY.md`, `LICENSE`, issue templates, corrected
+  `CODEOWNERS`, refreshed `CONTRIBUTING.md`.
+
 ### Identity, recovery, and fail-closed market-data hardening
 
 - Added durable `OrderAttemptStore` (SQLite WAL) for canonical

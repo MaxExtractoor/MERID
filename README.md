@@ -143,8 +143,11 @@ CI gates on `main` include: `kalshi-15m-ci`, `merid-safety-ci`, `kill-switch-ci`
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Onboarding |
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | API reference |
 | [`docs/trader_tracker_exposure_layers.md`](docs/trader_tracker_exposure_layers.md) | Exposure-cap layers |
+| [`LIVE_TRADING_STATUS.md`](LIVE_TRADING_STATUS.md) | Current production state |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev workflow, code style, CI gates |
+| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting + security scope |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
 
 ## License
 
-Proprietary — All rights reserved.
+Proprietary — All rights reserved. See [`LICENSE`](LICENSE).

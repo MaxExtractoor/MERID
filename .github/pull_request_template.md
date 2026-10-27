@@ -34,7 +34,7 @@
 
 ## Production readiness checklist
 
-> **Required** for any PR touching `execution/`, `trading/`, `merid/execution/`, `core/kill_switches*`, `trading/trade_mode.py`, `trading/guards/`, `merid/risk/`, or `web/api/operator_*`.
+> **Required** for any PR touching `merid/event_venues/kalshi/`, `merid/loop_15m.py`, `merid/execution/`, `merid/risk/`, `execution/`, `trading/`, `core/kill_switches*`, `trading/trade_mode.py`, `trading/guards/`, `web/api/operator_*`, `start_15m.ps1`, or `AGENTS.md`.
 > Skip this section if none of those paths are modified.
 
 - [ ] Kill-switch path verified — no new code path bypasses `check_execution_gate()` or `set_trade_mode()`

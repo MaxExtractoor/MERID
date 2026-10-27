@@ -1,38 +1,45 @@
 # CODEOWNERS — required reviewers for sensitive paths
 # Syntax: <path pattern> <@github-username or @org/team>
 # At least one listed owner must approve before merge to main.
+#
+# NOTE: GitHub CODEOWNERS can only name real users or org teams with repo
+# access. On this personal-account repo that means @MaxExtractoor; if the
+# repo moves to an org, restore team handles (e.g. @org/risk-team).
 
-# Execution and order routing — any change requires review
-execution/                          @merid-risk-team
-trading/                            @merid-risk-team
-merid/execution/                    @merid-risk-team
-merid/risk/                         @merid-risk-team
+# Live-trading operational contract — changes here change live behavior
+AGENTS.md                           @MaxExtractoor
+start_15m.ps1                       @MaxExtractoor
+merid/loop_15m.py                   @MaxExtractoor
 
-# Mode integrity — trade_mode and live-trading guards
-trading/trade_mode.py               @merid-risk-team
-trading/guards/                     @merid-risk-team
-trading/mode_controller.py          @merid-risk-team
+# Canonical Kalshi execution path — any change requires review
+merid/event_venues/kalshi/          @MaxExtractoor
+merid/execution/                    @MaxExtractoor
+merid/execution_guard.py            @MaxExtractoor
+core/execution_gate.py              @MaxExtractoor
 
-# Kill switch wiring
-core/kill_switches.py               @merid-risk-team
-core/execution_gate.py              @merid-risk-team
-merid/execution_guard.py            @merid-risk-team
+# Execution and order routing
+execution/                          @MaxExtractoor
+trading/                            @MaxExtractoor
+trading/trade_mode.py               @MaxExtractoor
+trading/guards/                     @MaxExtractoor
+trading/mode_controller.py          @MaxExtractoor
 
-# Risk controls
-core/guardrails.py                  @merid-risk-team
-merid/guardrails/                   @merid-risk-team
-governance/                         @merid-risk-team
+# Risk controls and governance
+merid/risk/                         @MaxExtractoor
+core/guardrails.py                  @MaxExtractoor
+merid/guardrails/                   @MaxExtractoor
+governance/                         @MaxExtractoor
 
 # Secrets and configuration
-merid/settings.py                   @merid-ops-team
-config/                             @merid-ops-team
-core/secrets_guard.py               @merid-ops-team
-.env.example                        @merid-ops-team
+merid/settings.py                   @MaxExtractoor
+config/                             @MaxExtractoor
+core/secrets_guard.py               @MaxExtractoor
+.env.example                        @MaxExtractoor
 
 # CI/CD pipeline
-.github/                            @merid-ops-team
+.github/                            @MaxExtractoor
 
 # Deployment manifests
-Dockerfile                          @merid-ops-team
-docker-compose*.yml                 @merid-ops-team
-deploy/                             @merid-ops-team
+Dockerfile                          @MaxExtractoor
+docker-compose*.yml                 @MaxExtractoor
+deploy/                             @MaxExtractoor
