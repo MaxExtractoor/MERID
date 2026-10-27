@@ -5579,12 +5579,19 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         allow_new_entries = False
         self._entries_block_reason = "observe_only"
 
+    # ws_time_since_last_event stays inf when the bridge health block was
+    # skipped (earlier gate already blocked entries) or no event has been
+    # seen — report n/a rather than "infs" which reads as infinite lag.
+    _ws_lag_str = (
+        f"{ws_time_since_last_event:.3f}s"
+        if math.isfinite(ws_time_since_last_event) else "n/a"
+    )
     logger.info(
         "[15m-LOOP] allow_new_entries=%s infra_ready=%s markets_expected=%s markets_present=%s "
-        "ready_assets=%d md_fresh=%d spot_fresh=%d ws_queue=%d ws_lag=%.3fs ws_first=%.3f "
+        "ready_assets=%d md_fresh=%d spot_fresh=%d ws_queue=%d ws_lag=%s ws_first=%.3f "
         "portfolio_authoritative=%s portfolio_age_ms=%d bankroll_state=%s bankroll_drawdown=%.2f%%",
         allow_new_entries, infra_ready, markets_expected, markets_present, ready_assets_count, md_fresh_count, spot_fresh_count,
-        ws_queue_size, ws_time_since_last_event, ws_first_event_ts, portfolio_authoritative, portfolio_age_ms,
+        ws_queue_size, _ws_lag_str, ws_first_event_ts, portfolio_authoritative, portfolio_age_ms,
         bankroll_circuit_state or "n/a",
         bankroll_drawdown_pct or 0.0,
     )
@@ -5843,13 +5850,13 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     # whether the trading cycle is allowed to place new orders.
     logger.info(
         "[15m-LOOP] allow_new_entries_final=%s derived_from_per_ticker=%s "
-        "markets_ready=%d markets_total=%d ws_queue=%d ws_lag=%.3fs portfolio_authoritative=%s",
+        "markets_ready=%d markets_total=%d ws_queue=%d ws_lag=%s portfolio_authoritative=%s",
         allow_new_entries,
         any(rec["all_ready"] for rec in readiness_records) if readiness_records else None,
         sum(1 for rec in readiness_records if rec["all_ready"]),
         len(readiness_records),
         ws_queue_size,
-        ws_time_since_last_event,
+        _ws_lag_str,
         portfolio_authoritative,
     )
 

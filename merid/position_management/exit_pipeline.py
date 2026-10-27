@@ -436,6 +436,49 @@ def _reconcile_stuck_alert_s() -> float:
         return 180.0
 
 
+def _market_dead_after_s() -> float:
+    """Margin past the ticker-embedded window end before a closed market's
+    orders may be inferred terminal (covers clock skew / close lag)."""
+    try:
+        return float(os.environ.get("MERID_EXIT_MARKET_DEAD_AFTER_S", "120"))
+    except Exception:
+        return 120.0
+
+
+def _market_is_terminal(market_id: Optional[str]) -> bool:
+    """True when the attempt's market is provably past close — every order
+    on it is terminal by construction.
+
+    Kalshi cancels all resting orders when a market closes and begins
+    settlement, so a market whose window end has passed (plus margin)
+    cannot host a working or fillable order.  An unfindable order on a
+    closed market is therefore dead evidence — the same inference class
+    as ``ioc_terminal_inferred``, keyed on market lifecycle instead of
+    the order's time-in-force.
+
+    For KX*15M tickers the window end is embedded in the market id
+    itself (``parse_kalshi_15m_window_end_utc``) — deterministic, no
+    feed dependency.  An unparseable market id stays inconclusive
+    (fail-closed).
+    """
+    mid = str(market_id or "").strip()
+    if not mid:
+        return False
+    try:
+        from merid.event_venues.kalshi.expiry_fallback import (
+            parse_kalshi_15m_window_end_utc,
+        )
+        end_utc = parse_kalshi_15m_window_end_utc(mid)
+    except Exception:
+        end_utc = None
+    if end_utc is None:
+        return False
+    try:
+        return time.time() > end_utc.timestamp() + _market_dead_after_s()
+    except Exception:
+        return False
+
+
 def _attempt_is_ioc(attempt: Any) -> bool:
     """True when the attempt's order is provably immediate-only (IOC/FOK).
 
@@ -581,6 +624,23 @@ async def reconcile_attempt(
             arb.resolve_reconcile(position_key, ReconcileEvidence(
                 order_found=True, terminal=True, filled_cc=0,
                 source="ioc_terminal_inferred"))
+        elif _market_is_terminal(
+                market_id or position_key.split("|", 1)[0]):
+            # Market close cancels every resting order — an unfindable
+            # order on a closed market is dead by construction, same
+            # inference class as ioc_terminal_inferred.  Without this path
+            # any resting-limit attempt whose market expired wedged in
+            # RECONCILING forever: the coid lookup only covers current
+            # order views, and Kalshi ages terminal orders off them, so
+            # for an expired market the lookup can never succeed
+            # (observed 2026-10-27: 3 model_exit attempts 2-9 days old on
+            # settled markets alerting every tick, 15k+ history entries).
+            # The position itself is accounted independently by the
+            # fills/settlement ledger, and no replacement proposal can be
+            # minted for a closed market — releasing cannot stack exposure.
+            arb.resolve_reconcile(position_key, ReconcileEvidence(
+                order_found=True, terminal=True, filled_cc=0,
+                source="market_terminal_inferred"))
         else:
             # Lookup inconclusive or order absent — absence is NOT proof
             # of death (a found-but-empty list may lag the wire).
@@ -608,6 +668,14 @@ async def reconcile_attempt(
                 "[EXIT-RECONCILE] unrecognised order status key=%s "
                 "status=%s — staying unresolved", position_key, status)
     att = arb.attempt_store.get_active(position_key)
+    # Settled-market cleanup: a resolved attempt on a market past close can
+    # never mint a replacement, so "RETRY_ELIGIBLE" is a dead active row.
+    # Close it into bounded history (the store's load path sweeps the same
+    # class of stragglers at restart).
+    if att is not None and att.state == AttemptState.RETRY_ELIGIBLE:
+        if _market_is_terminal(market_id or position_key.split("|", 1)[0]):
+            arb.mark_flat(position_key, "market_settled")
+            att = arb.attempt_store.get_active(position_key)
     return att.state.value if att is not None else "FLAT"
 
 

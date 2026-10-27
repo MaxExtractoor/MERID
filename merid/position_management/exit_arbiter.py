@@ -121,6 +121,30 @@ def _submitting_stale_s() -> float:
         return 30.0
 
 
+def _market_is_terminal_id(market_id: str) -> bool:
+    """True when a market id is provably past its embedded close time.
+
+    Load-path mirror of ``_market_is_terminal`` (exit_pipeline) — kept
+    local to avoid an exit_pipeline -> exit_arbiter import cycle.  Both
+    read the same ``MERID_EXIT_MARKET_DEAD_AFTER_S`` margin.
+    """
+    try:
+        from merid.event_venues.kalshi.expiry_fallback import (
+            parse_kalshi_15m_window_end_utc,
+        )
+        end_utc = parse_kalshi_15m_window_end_utc(market_id)
+        if end_utc is None:
+            return False
+        try:
+            margin = float(
+                os.environ.get("MERID_EXIT_MARKET_DEAD_AFTER_S", "120"))
+        except Exception:
+            margin = 120.0
+        return time.time() > end_utc.timestamp() + margin
+    except Exception:
+        return False
+
+
 class ProposalKind(str, Enum):
     PROFIT_LOCK = "profit_lock"
     TRAILING_PROFIT = "trailing_profit"
@@ -339,6 +363,29 @@ class ExitAttemptStore:
                 active["state"] = AttemptState.RECONCILING.value
                 active["updated_ts"] = time.time()
                 self._flush()
+        # Retire resolved attempts on settled markets into bounded closed
+        # history at load: a market past its embedded close can never mint
+        # a replacement attempt, so a dead RETRY_ELIGIBLE active row is
+        # finished (2026-10-27: 40 such rows lingered in the ledger).
+        migrated = False
+        for key, entry in self._positions.items():
+            active = entry.get("active")
+            if not isinstance(active, dict):
+                continue
+            if active.get("state") != AttemptState.RETRY_ELIGIBLE.value:
+                continue
+            if not _market_is_terminal_id(key.split("|", 1)[0]):
+                continue
+            closed = entry.get("closed")
+            if not isinstance(closed, list):
+                closed = entry["closed"] = []
+            closed.append(active)
+            if len(closed) > self._MAX_CLOSED_PER_POSITION:
+                del closed[:-self._MAX_CLOSED_PER_POSITION]
+            entry["active"] = None
+            migrated = True
+        if migrated:
+            self._flush()
 
     # Closed attempts retained per position in the JSON ledger.  The file is
     # rewritten on every attempt transition, so unbounded closed history
@@ -348,6 +395,24 @@ class ExitAttemptStore:
     # the full durable lifecycle; this ledger only needs recent depth for
     # restart reconcile and forensic review.
     _MAX_CLOSED_PER_POSITION = 50
+
+    # The same bound applies to a live attempt's transition history: a
+    # wedged RECONCILING attempt appends two entries per reconcile pass
+    # (~2/min with backoff) and can never terminate on its own — observed
+    # 15000 entries / 3.7MB ledger on a 9-day-old wedge (2026-10-27), with
+    # every entry triggering a full-file rewrite.  500 entries retains
+    # days of forensic depth; a tombstone records how much was dropped.
+    _MAX_ACTIVE_HISTORY = 500
+
+    def _cap_active_history(self, attempt: "ExitAttempt") -> None:
+        h = attempt.history
+        if len(h) <= self._MAX_ACTIVE_HISTORY:
+            return
+        keep = self._MAX_ACTIVE_HISTORY - 1
+        h[:] = [{
+            "ts": time.time(), "from": "-", "to": "-",
+            "note": f"history_truncated:dropped={len(h) - keep}",
+        }] + h[-keep:]
 
     def _flush(self) -> None:
         try:
@@ -403,6 +468,7 @@ class ExitAttemptStore:
                 rec["attempt_seq"] = max(int(rec.get("attempt_seq", 0)), seq)
             except (ValueError, IndexError):
                 pass
+            self._cap_active_history(attempt)
             rec["active"] = attempt.to_dict()
         self._flush()
 
@@ -413,6 +479,8 @@ class ExitAttemptStore:
             if not rec:
                 return
             if rec.get("active", {}).get("attempt_id") == attempt.attempt_id:
+                self._cap_active_history(attempt)
+                rec["active"] = attempt.to_dict()
                 rec["closed"].append(rec["active"])
                 if len(rec["closed"]) > self._MAX_CLOSED_PER_POSITION:
                     del rec["closed"][:-self._MAX_CLOSED_PER_POSITION]
@@ -932,6 +1000,19 @@ class ExitArbiter:
                 # Wedged submission: post_route_update never landed.  Same
                 # contract as a lost ack — reconcile by coid/order_id.
                 keys.append(key)
+        # Youngest first: a freshly wedged attempt guards a live position,
+        # while a long-lived zombie only needs eventual cleanup — ordering
+        # by age keeps the bounded per-tick sweep/lookup budget on the
+        # exposure that is actually at risk (dict order would always let
+        # the oldest zombie consume the slots first).
+        def _created(k: str) -> float:
+            rec = self._attempts._positions.get(k)
+            a = rec.get("active") if isinstance(rec, dict) else None
+            try:
+                return float(a.get("created_ts") or 0.0)
+            except Exception:
+                return 0.0
+        keys.sort(key=_created, reverse=True)
         return keys
 
     def validate_attempt_token(

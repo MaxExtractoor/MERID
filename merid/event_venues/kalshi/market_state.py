@@ -1834,6 +1834,7 @@ class KalshiMarketStateStore:
                 round((_now_mono - _parity_since) * 1000.0, 1)
                 if _parity_since else None
             )
+            _ob = self._ob.get_book(ticker)
             logger.warning(
                 "[BOOK-STATE-TRANSITION] %s",
                 json.dumps(
@@ -1849,7 +1850,10 @@ class KalshiMarketStateStore:
                         "book_health": getattr(state, "book_health", ""),
                         "quote_owner": getattr(state, "quote_owner", ""),
                         "data_quality": getattr(state, "data_quality", ""),
-                        "expected_sequence": getattr(state, "ws_last_seq", None),
+                        # last applied WS delta seq (None until first delta);
+                        # book_last_seq also reflects WS snapshot seq.
+                        "last_applied_seq": getattr(state, "ws_last_seq", None),
+                        "book_last_seq": getattr(_ob, "last_seq", None),
                         "book_gap_total": getattr(state, "book_gap_total", 0),
                         "resync_attempt": getattr(state, "book_resync_total", 0),
                         "buffered_delta_count": qd,

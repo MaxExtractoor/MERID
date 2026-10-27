@@ -14817,17 +14817,25 @@ class LeanAgent15m:
 
 
 
-        # If last_update_ts is 0 or very old (uninitialized), treat as fresh
+        # last_update_ts is stamped by market_state writers with
+        # time.monotonic(), not epoch — comparing it to time.time() yields
+        # ~1.7e15ms for every state, so the old "<1e9 => uninitialized"
+        # guard silently disabled this gate entirely.  Split on clock
+        # domain instead: monotonic stamps are uptime seconds (always
+        # < 1e9), epoch stamps are ~1.7e12.
+        if last_update <= 0:
 
-        # This allows trading to start before WS bridge populates data
-
-        if last_update == 0 or last_update < 1000000000:  # Before 2001-09-09
-
+            # Never stamped — treat as fresh here; depth/liquidity and the
+            # downstream ws_fresh/quote_owner gates still apply.
             staleness_ms = 0
+
+        elif last_update < 1_000_000_000:
+
+            staleness_ms = max(0, int((time.monotonic() - last_update) * 1000))
 
         else:
 
-            staleness_ms = int((now - last_update) * 1000)
+            staleness_ms = max(0, int((now - last_update) * 1000))
 
 
 
