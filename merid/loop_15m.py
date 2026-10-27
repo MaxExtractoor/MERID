@@ -10069,6 +10069,54 @@ def _entry_max_rest_seconds() -> int:
         return 15
 
 
+def _entry_requote_rest_seconds() -> int:
+    """Extended rest horizon for chase-capable entry orders (2026-10-27).
+
+    The 15s ``MERID_ENTRY_MAX_REST_S`` encodes the audited fill-or-miss TTL,
+    but it also guarantees the venue expires the order before the
+    resting-order monitor's bounded chase amend can engage (min-age 15s+).
+    A live-quote analysis of the 2026-10-27 session showed the fill loss was
+    not adverse selection but coverage: orders expired unfilled at top-of-book
+    and the next fully-gated re-quote arrived ~3min later (only 2 quotes in a
+    15-min window; market ran 90c->99c meanwhile).
+
+    Entries carrying verified EV provenance — for which the router can derive
+    an admission-time ``economic_cap`` — may rest up to this bound so a quote
+    that drifted >=3c away from market can be amended to ask-1 *within the EV
+    contract* instead of expiring and waiting a full decision cycle.  The
+    stale-fill risk the TTL proxied for is now bounded by instruments that
+    were broken when the TTL was set (the exit-substring bug exempted every
+    entry from monitor rechecks): toxic-mid cancel on an adverse cross at ~5s
+    cadence, plus the chase's own econ cap.  Env: MERID_ENTRY_CHASE_REST_S
+    (default 75s)."""
+    try:
+        return max(15, int(os.environ.get("MERID_ENTRY_CHASE_REST_S", "75")))
+    except Exception:
+        return 75
+
+
+def _entry_requote_rest_eligible(candidate: Dict) -> bool:
+    """True when the candidate carries the provenance the router needs to
+    derive a *verified* admission-time economic cap.
+
+    ``_max_edge_preserving_buy_price`` requires ``selected_outcome_price``
+    (>0) and ``ev_net_cents``; without them the only cap is the unverified
+    selected-price+chase band and the order must keep the audited 15s TTL —
+    fail closed.  Sells/exits never reach here (callers gate on
+    entry_or_exit == "entry")."""
+    try:
+        sel_px = candidate.get("selected_outcome_price")
+        ev = candidate.get("ev_net_cents")
+        return (
+            sel_px is not None
+            and float(sel_px) > 0
+            and ev is not None
+            and float(ev) > -99.0
+        )
+    except Exception:
+        return False
+
+
 def _mark_reject(self, candidate: Dict, stage: str, reason: str, **fields) -> bool:
     # Stamp the furthest-stage rejection detail and return False so callers can
     # write `return self._mark_reject(candidate, "gate", "why", observed=..)`.
@@ -11562,6 +11610,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     _resolved_max_rest_s = None
             if _resolved_max_rest_s is None:
                 _resolved_max_rest_s = _entry_max_rest_seconds()
+                # 2026-10-27: chase-capable entries rest long enough for the
+                # monitor's bounded amend to keep the quote live through the
+                # fill-or-miss horizon instead of expiring into a ~3min
+                # re-quote gap.  Unpriceable intents keep the audited TTL.
+                if _entry_requote_rest_eligible(candidate):
+                    _resolved_max_rest_s = max(
+                        _resolved_max_rest_s, _entry_requote_rest_seconds()
+                    )
 
         intent = OrderIntent(
             ticker=ticker,

@@ -484,6 +484,11 @@ _ENV_OVERRIDES.update({
         ("MERID_RESTING_REPRICE_COOLDOWN_S", "float", 1, None),
         ("MERID_RESTING_REPRICE_MIN_TTE_S", "float", 0, None),
         ("MERID_RESTING_REPRICE_MAX_CENTS", "int", 1, 99),
+        # 2026-10-27: extended rest horizon for chase-capable entries —
+        # verified-EV intents rest past the 15s fill-or-miss TTL so the
+        # monitor's bounded amend can recover fill rate; capped well under
+        # the 180s entry-TTE floor.
+        ("MERID_ENTRY_CHASE_REST_S", "int", 15, 600),
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),

@@ -1091,8 +1091,8 @@ class RestingOrderMonitor:
                     ):
                         _trigger = float(_os2.environ.get("MERID_RESTING_REPRICE_TRIGGER_CENTS", "3"))
                         _max_n = int(_os2.environ.get("MERID_RESTING_REPRICE_MAX", "2"))
-                        _min_age_s = float(_os2.environ.get("MERID_RESTING_REPRICE_MIN_AGE_S", "30"))
-                        _cooldown_s = float(_os2.environ.get("MERID_RESTING_REPRICE_COOLDOWN_S", "45"))
+                        _min_age_s = float(_os2.environ.get("MERID_RESTING_REPRICE_MIN_AGE_S", "15"))
+                        _cooldown_s = float(_os2.environ.get("MERID_RESTING_REPRICE_COOLDOWN_S", "25"))
                         _min_tte_s = float(_os2.environ.get("MERID_RESTING_REPRICE_MIN_TTE_S", "240"))
                         _ceil = int(_os2.environ.get("MERID_RESTING_REPRICE_MAX_CENTS", "98"))
                         _age_s = (now - record.created_at).total_seconds() if record.created_at else 0.0
