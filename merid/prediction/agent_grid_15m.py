@@ -15692,6 +15692,75 @@ class LeanAgent15m:
         except Exception:
             pass
 
+        # 2026-10-27 (observe-only): counterfactual tracker for the
+        # pinned-fav maker band below MAKER_LO — 85-91c shadow window with
+        # the live 90-91c edge as control.  The 2026-10-24 floor raise to
+        # 90 was driven by the 76-89 falsification; this measures what the
+        # excluded pocket (and the live edge) WOULD have done at settlement
+        # so the floor decision is re-made on fresh data.  Evaluates the
+        # lane's own gates read-only on every in-window own-side bid and
+        # appends to logs/pinned_fav_maker_shadow.jsonl.  Write-only —
+        # cannot submit, consume the daily cap, or touch evidence state.
+        try:
+            from merid.prediction.pinned_fav_maker_shadow import (
+                evaluate as _pf_shadow_eval,
+            )
+            _pf_run_id, _pf_cid = self._candidate_identity(asset, ticker, tick)
+            _pf_yb = locals().get("best_bid")
+            _pf_ya = locals().get("best_ask")
+            _pf_market = locals().get("market")
+            _pf_shadow_eval(
+                run_id=_pf_run_id,
+                decision_id=f"{_pf_cid}:pfshadow",
+                asset=asset,
+                ticker=ticker,
+                yes_bid_cents=float(_pf_yb) if _pf_yb else None,
+                yes_ask_cents=float(_pf_ya) if _pf_ya else None,
+                no_bid_cents=(100.0 - float(_pf_ya)) if _pf_ya else None,
+                no_ask_cents=(100.0 - float(_pf_yb)) if _pf_yb else None,
+                tte_seconds=(
+                    float(seconds_to_expiry)
+                    if seconds_to_expiry is not None
+                    else None
+                ),
+                p_yes=(
+                    getattr(market_state, "model_fair_prob", None)
+                    if market_state else None
+                ),
+                spot_price=locals().get("spot_price"),
+                strike_price=(
+                    (
+                        getattr(_pf_market, "strike", None)
+                        or getattr(getattr(_pf_market, "market", None), "strike", None)
+                        or getattr(_pf_market, "floor_strike", None)
+                        or getattr(getattr(_pf_market, "market", None), "floor_strike", None)
+                    )
+                    if _pf_market else None
+                ),
+                depth_at_own_bid_yes_cc=(
+                    getattr(market_state, "min_depth_yes", None)
+                    if market_state else None
+                ),
+                depth_at_own_bid_no_cc=(
+                    getattr(market_state, "min_depth_no", None)
+                    if market_state else None
+                ),
+                quote_state=(
+                    getattr(market_state, "quote_owner", None)
+                    if market_state else None
+                ),
+                quote_age_ms=(
+                    getattr(market_state, "quote_age_ms", None)
+                    if market_state else None
+                ),
+                book_source_degraded=(
+                    bool(getattr(market_state, "degraded_mode", False))
+                    if market_state else None
+                ),
+            )
+        except Exception:
+            pass
+
         # 2026-10-12 (post_drawdown epoch): settlement-convergence lane bypass.
         # Every enabled band carries a min-TTE floor >= 120s, so inside the
         # final settlement minute the classifier rejects BOTH sides before
