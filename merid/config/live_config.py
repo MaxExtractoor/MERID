@@ -447,6 +447,8 @@ _ENV_OVERRIDES.update({
         # 2026-10-25: deterministic per-window plan toggles.
         "MERID_WINDOW_PLAN_ENABLED", "MERID_WINDOW_PLAN_LIFT_SIZING",
         "MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER",
+        # 2026-10-27: bounded resting-order chase/requote toggle.
+        "MERID_RESTING_REPRICE_ENABLED",
     )
 })
 _ENV_OVERRIDES.update({
@@ -472,6 +474,16 @@ _ENV_OVERRIDES.update({
         ("MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", "decimal", 1, 99),
         ("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "decimal", 0, 50),
         ("MERID_SETTLEMENT_LANE_P_CAP", "decimal", 0, 1),
+        # 2026-10-27: bounded chase requote for resting entry orders —
+        # amend toward ask-1 only when the gap clears the queue-value
+        # trigger, inside the admission-time economic cap, with age/cooldown/
+        # TTE/count bounds so queue priority is not churned.
+        ("MERID_RESTING_REPRICE_TRIGGER_CENTS", "float", 1, 20),
+        ("MERID_RESTING_REPRICE_MAX", "int", 0, 5),
+        ("MERID_RESTING_REPRICE_MIN_AGE_S", "float", 0, None),
+        ("MERID_RESTING_REPRICE_COOLDOWN_S", "float", 1, None),
+        ("MERID_RESTING_REPRICE_MIN_TTE_S", "float", 0, None),
+        ("MERID_RESTING_REPRICE_MAX_CENTS", "int", 1, 99),
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),

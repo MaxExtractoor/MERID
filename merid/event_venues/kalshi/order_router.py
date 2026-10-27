@@ -18775,10 +18775,48 @@ async def _route_live(
                     kalshi_order_id = placed_res.order_id or ""
                     if kalshi_order_id:
                         monitor = get_resting_order_monitor()
-                        
+
                         # Extract asset from ticker
                         asset = kalshi_ticker_to_asset(intent.ticker) or "UNKNOWN"
-                        
+
+                        # Bounded chase contract for the resting-order monitor:
+                        # the admission-time execution contract's economic_cap
+                        # (highest buy price preserving min_required_edge, or
+                        # selected_price + MERID_ENTRY_MAX_CHASE_CENTS) is the
+                        # EV authority for any post-submit requote; intersect
+                        # with the lane band hi and the global ceiling so an
+                        # amend can never leave the audited admission domain.
+                        _rq_contract = getattr(intent, "_execution_contract", None) or {}
+                        _rq_lane = str(_rq_contract.get("admission_lane") or "")
+                        _rq_econ = _rq_contract.get("economic_cap")
+                        _rq_band_hi = None
+                        try:
+                            from merid.risk.global_slot_allocator import _lane_entry_band_cents
+                            _rq_band = _lane_entry_band_cents(_rq_lane or None)
+                            if _rq_band:
+                                _rq_band_hi = int(_rq_band[1])
+                        except Exception:
+                            _rq_band_hi = None
+                        _rq_ceil = int(os.environ.get("MERID_RESTING_REPRICE_MAX_CENTS", "98"))
+                        # Fail closed: without an admission-time economic cap
+                        # there is no verified EV>=min_required_edge price
+                        # bound, so no chase is permitted.  economic_cap is
+                        # None only when neither _max_edge_preserving_buy_price
+                        # nor the selected-price chase cap could be computed.
+                        if _rq_econ is None:
+                            _reprice_cap = None
+                        else:
+                            _rq_bounds = [
+                                int(c) for c in (_rq_band_hi, _rq_ceil)
+                                if c is not None
+                            ]
+                            _reprice_cap = min([int(_rq_econ)] + _rq_bounds)
+                        if (
+                            _reprice_cap is not None
+                            and str(getattr(intent, "action", "") or "").lower() != "buy"
+                        ):
+                            _reprice_cap = None  # chase applies to buy entries only
+
                         # Create resting order record
                         resting_record = RestingOrderRecord(
                             kalshi_order_id=kalshi_order_id,
@@ -18792,6 +18830,8 @@ async def _route_live(
                             remaining_size=remaining_count,
                             price_cents=intent.price_cents,
                             asset=asset,
+                            reprice_cap_cents=_reprice_cap,
+                            decision_lane=_rq_lane,
                             # Risk contract linkage
                             window_resolution_id=intent.window_resolution_id,
                             exit_policy_id=intent.exit_policy_id,

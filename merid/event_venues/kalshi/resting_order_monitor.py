@@ -232,7 +232,18 @@ class RestingOrderRecord:
     original_minutes_to_expiry: Optional[float] = None
     original_edge_pct: Optional[float] = None
     confidence: Optional[float] = None
-    
+
+    # Bounded post-submit chase contract (2026-10-27): the admission-time
+    # execution contract's economic_cap (highest buy price preserving
+    # min_required_edge) intersected with the lane band hi and the global
+    # reprice ceiling.  A chase amend may never exceed this bound — it is the
+    # only EV authority the monitor needs, so a requote cannot silently turn
+    # a +EV maker entry into a −EV fill.
+    reprice_cap_cents: Optional[int] = None
+    reprice_count: int = 0
+    last_reprice_monotonic: Optional[float] = None
+    decision_lane: str = ""
+
     # Status tracking (from portfolio endpoint)
     status: str = ""  # Set at registration time, not as default
     last_sync_at: Optional[datetime] = None
@@ -259,6 +270,7 @@ class RecheckResult:
     current_regime: Optional[str] = None
     current_vol_tier: Optional[str] = None
     model_quality_good: Optional[bool] = None
+    new_price_cents: Optional[int] = None  # set when action == "adjust"
 
 
 @dataclass
@@ -337,6 +349,7 @@ class RestingOrderMonitor:
         self._cancel_count = 0
         self._keep_count = 0
         self._poll_count = 0
+        self._reprice_count = 0
         self._last_poll_time: Optional[datetime] = None  # Health monitoring
 
         # Market order fallback engine
@@ -1047,7 +1060,122 @@ class RestingOrderMonitor:
                         )
                 except Exception as e:
                     logger.error(f"[RESTING_ORDER_MONITOR] Fallback evaluation failed: {e}")
-            
+
+            # 6. Bounded chase requote (2026-10-27): a resting buy whose
+            # side-aware ask has drifted >= trigger cents above its limit has
+            # near-zero fill probability — the queue at our level will never
+            # deplete to us.  Per Kalshi amend semantics a price change
+            # forfeits queue position (identical cost to cancel/replace), so
+            # research (Moallemi/Yuan queue-value; HFT limit/market switching)
+            # says amend ONLY when the fill-probability gain dominates the
+            # lost queue value: gap must clear MERID_RESTING_REPRICE_TRIGGER_
+            # CENTS, the order must have rested >= min-age (queue needs time
+            # to work), and cool >= cooldown since the last amend.  The new
+            # price = min(side_ask-1, reprice_cap) is strictly passive by
+            # construction and stays inside the admission-time economic cap —
+            # the EV contract stamped at registration bounds how far a chase
+            # may go; the monitor never re-derives EV itself.  Buys only
+            # (sells on entries do not exist; exits are exempted above).
+            try:
+                import os as _os2
+                if _os2.environ.get("MERID_RESTING_REPRICE_ENABLED", "1").strip().lower() in ("1", "true", "yes"):
+                    _lim = int(record.price_cents or 0)
+                    _act = (record.action or "").lower()
+                    _is_buy = "buy" in _act
+                    _cap = record.reprice_cap_cents
+                    if (
+                        _is_buy
+                        and _lim > 0
+                        and _cap is not None
+                        and int(_cap) > _lim
+                    ):
+                        _trigger = float(_os2.environ.get("MERID_RESTING_REPRICE_TRIGGER_CENTS", "3"))
+                        _max_n = int(_os2.environ.get("MERID_RESTING_REPRICE_MAX", "2"))
+                        _min_age_s = float(_os2.environ.get("MERID_RESTING_REPRICE_MIN_AGE_S", "30"))
+                        _cooldown_s = float(_os2.environ.get("MERID_RESTING_REPRICE_COOLDOWN_S", "45"))
+                        _min_tte_s = float(_os2.environ.get("MERID_RESTING_REPRICE_MIN_TTE_S", "240"))
+                        _ceil = int(_os2.environ.get("MERID_RESTING_REPRICE_MAX_CENTS", "98"))
+                        _age_s = (now - record.created_at).total_seconds() if record.created_at else 0.0
+                        _tte_s = (
+                            (minutes_to_expiry * 60.0)
+                            if minutes_to_expiry is not None else None
+                        )
+                        _mono = time.monotonic()
+                        _since_last = (
+                            (_mono - record.last_reprice_monotonic)
+                            if record.last_reprice_monotonic is not None else None
+                        )
+                        if (
+                            record.reprice_count < _max_n
+                            and _age_s >= _min_age_s
+                            and (_since_last is None or _since_last >= _cooldown_s)
+                            and (_tte_s is None or _tte_s >= _min_tte_s)
+                        ):
+                            from merid.event_venues.kalshi.market_state import (
+                                get_kalshi_market_state_store,
+                            )
+                            _rq_store = get_kalshi_market_state_store()
+                            _rq_state = _rq_store.get(record.ticker) if _rq_store else None
+                            if _rq_state is not None:
+                                _yb = getattr(_rq_state, "best_bid_cents", None)
+                                _ya = getattr(_rq_state, "best_ask_cents", None)
+                                _upd = (
+                                    getattr(_rq_state, "book_updated_ts", None)
+                                    or getattr(_rq_state, "last_book_update_ts", None)
+                                )
+                                _age_ms = (
+                                    max(0, int((_mono - float(_upd)) * 1000))
+                                    if isinstance(_upd, (int, float)) and _upd > 0
+                                    else None
+                                )
+                                _max_age_ms = float(
+                                    _os2.environ.get("MERID_RESTING_TOXIC_MID_MAX_AGE_MS", "10000")
+                                )
+                                if (
+                                    _yb is not None and _ya is not None
+                                    and 0 < float(_yb) < 100 and 0 < float(_ya) < 100
+                                    and _age_ms is not None and _age_ms <= _max_age_ms
+                                ):
+                                    _is_no = "no" in (record.side or "").lower()
+                                    # Side-aware ask: a NO buyer's ask is
+                                    # 100 - yes_bid.
+                                    _side_ask = (100.0 - float(_yb)) if _is_no else float(_ya)
+                                    _gap = _side_ask - _lim
+                                    if _gap >= _trigger:
+                                        _new_px = int(min(
+                                            _side_ask - 1.0,
+                                            float(int(_cap)),
+                                            float(_ceil),
+                                        ))
+                                        if _new_px > _lim and _new_px < _side_ask:
+                                            logger.info(
+                                                "[RESTING-ORDER-CHASE] kalshi_order_id=%s ticker=%s "
+                                                "side=%s limit=%dc -> %dc side_ask=%.1fc gap=%.1fc "
+                                                "cap=%dc age=%.1fs reprice#%d lane=%s",
+                                                record.kalshi_order_id, record.ticker,
+                                                record.side, _lim, _new_px, _side_ask, _gap,
+                                                int(_cap), _age_s, record.reprice_count + 1,
+                                                record.decision_lane or "?",
+                                            )
+                                            return RecheckResult(
+                                                intent_id=record.intent_id,
+                                                ticker=record.ticker,
+                                                action="adjust",
+                                                reason=(
+                                                    f"chase_requote:limit={_lim}->new={_new_px}:"
+                                                    f"side_ask={_side_ask:.1f}:gap={_gap:.1f}:cap={int(_cap)}"
+                                                ),
+                                                current_regime=regime,
+                                                current_vol_tier=window_vol_tier,
+                                                model_quality_good=model_quality_good,
+                                                new_price_cents=_new_px,
+                                            )
+            except Exception as _rq_exc:
+                logger.debug(
+                    "[RESTING_ORDER_MONITOR] chase-requote check failed for %s: %s",
+                    record.kalshi_order_id, _rq_exc,
+                )
+
             # Keep the order
             return RecheckResult(
                 intent_id=record.intent_id,
@@ -1360,6 +1488,56 @@ class RestingOrderMonitor:
 
                 # Unregister cancelled order
                 self.unregister_order(record.kalshi_order_id)
+            elif result.action == "adjust" and result.new_price_cents:
+                # Bounded chase requote: amend price in place via the Kalshi
+                # amend endpoint (keeps order_id/intent lineage and fill
+                # attribution; Kalshi forfeits queue position on a price
+                # change — same cost as cancel/replace, without the
+                # cancel/submit gap where neither order is live).  A
+                # cancel/fill race surfaces as an amend error or a
+                # validation failure; the order is kept and the next
+                # portfolio poll reconciles the terminal state.
+                _new_px = int(result.new_price_cents)
+                _old_px = int(record.price_cents or 0)
+                self._reprice_count += 1
+                _amend_ok = False
+                try:
+                    from merid.event_venues.kalshi.client import get_kalshi_client
+                    client = get_kalshi_client()
+                    _is_no = "no" in (record.side or "").lower()
+                    await client.amend_order_and_validate(
+                        order_id=record.kalshi_order_id,
+                        expected_ticker=record.ticker,
+                        no_price=_new_px if _is_no else None,
+                        yes_price=None if _is_no else _new_px,
+                    )
+                    _amend_ok = True
+                except Exception as _amend_exc:
+                    logger.warning(
+                        "[RESTING-ORDER-CHASE] amend failed: kalshi_order_id=%s "
+                        "ticker=%s %dc->%dc error=%s - keeping order, next poll reconciles",
+                        record.kalshi_order_id, record.ticker,
+                        _old_px, _new_px, _amend_exc,
+                    )
+                if _amend_ok:
+                    record.price_cents = _new_px
+                    record.reprice_count += 1
+                    record.last_reprice_monotonic = time.monotonic()
+                    logger.info(
+                        "[RESTING-ORDER-CHASE] amend acknowledged: kalshi_order_id=%s "
+                        "ticker=%s side=%s %dc->%dc reprice#%d",
+                        record.kalshi_order_id, record.ticker, record.side,
+                        _old_px, _new_px, record.reprice_count,
+                    )
+                _emit_resting_lifecycle(
+                    "RESTING_ORDER_REPRICED" if _amend_ok else "RESTING_ORDER_REPRICE_FAILED",
+                    record,
+                    trigger=result.reason,
+                    old_price_cents=_old_px,
+                    new_price_cents=_new_px,
+                    reprice_count=record.reprice_count,
+                    decision_lane=record.decision_lane or None,
+                )
             else:
                 self._keep_count += 1
 
@@ -1478,6 +1656,7 @@ class RestingOrderMonitor:
             "cancel_count": self._cancel_count,
             "keep_count": self._keep_count,
             "poll_count": self._poll_count,
+            "reprice_count": self._reprice_count,
             "recheck_interval_seconds": self.recheck_interval,
             "poll_interval_seconds": self.poll_interval,
             "last_poll_time": self._last_poll_time,
