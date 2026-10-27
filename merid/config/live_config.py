@@ -489,6 +489,14 @@ _ENV_OVERRIDES.update({
         # monitor's bounded amend can recover fill rate; capped well under
         # the 180s entry-TTE floor.
         ("MERID_ENTRY_CHASE_REST_S", "int", 15, 600),
+        # 2026-10-27: maker->taker conversion drift veto (postmortem
+        # KXBTC15M-26OCT271245-45).  Declines the IOC fallback when the
+        # side-aware ask dropped this many cents below the last
+        # economics-verified book — a falling ask is a repriced thesis,
+        # not price improvement.  Tighter than the submit-path
+        # MAX_IMPROVEMENT_CENTS because conversion fires only after the
+        # venue already rejected our passive quote.
+        ("MERID_MAKER_TAKER_DRIFT_VETO_C", "float", 1, 20),
         ("MERID_HARD_PROFIT_LOCK_CENTS", "int", 1, 99),
         ("MERID_HARD_LOCK_RECOVERY_INTERVAL_S", "float", 0.5, None),
         ("MERID_HARD_LOCK_RECOVERY_MAX_ATTEMPTS", "int", 0, 10),

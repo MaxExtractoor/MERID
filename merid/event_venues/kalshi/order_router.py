@@ -5528,6 +5528,13 @@ async def _revalidate_entry_economics(
         intent.entry_model_probability = _p_sel_fresh
     intent._execution_revalidated = True
     intent._revalidated_mono = _time.monotonic()
+    # 2026-10-27: retain the side-aware book this ALLOW was verified
+    # against.  The maker->taker conversion path fetches its own fresh
+    # book seconds later; without an economics-verified anchor it cannot
+    # tell a genuine price improvement from a market that repriced
+    # against the thesis after revalidation.
+    intent._reval_side_bid_cents = int(_side_book["bid_cents"])
+    intent._reval_side_ask_cents = int(_side_book["ask_cents"])
     logger.info(
         "[EXEC-REVALIDATION] intent_id=%s ticker=%s side=%s action=%s role=%s "
         "candidate_px=%dc routed_px=%dc exec_px=%dc side_bid=%dc side_ask=%dc "
@@ -17476,6 +17483,46 @@ async def _route_live(
                     return False
             else:
                 if _cb_ask <= 0 or _cb_ask > _cap:
+                    return False
+                # 2026-10-27 (postmortem KXBTC15M-26OCT271245-45):
+                # adverse-reprice veto.  The conversion only reaches here
+                # after the venue rejected our passive quote as crossed —
+                # the market has demonstrably moved since the economics
+                # were last verified.  The edge cap bounds the IOC against
+                # *admission-time* economics, so it cannot distinguish a
+                # genuine price improvement from an informed-seller
+                # repricing on a now-stale thesis.  If the side-aware ask
+                # has dropped >= MERID_MAKER_TAKER_DRIFT_VETO_C below the
+                # last verified book (revalidation book, else the
+                # decision-time book), decline rather than buy the
+                # falling ask.  Buy@93 admitted on a 93/94 book converted
+                # at ask=90 seconds later settled NO for -270c; the
+                # submit-path drift gate tolerates up to
+                # MAX_IMPROVEMENT_CENTS=8, so this is the missing
+                # tighter bound on the conversion path specifically.
+                _drift_veto_c = float(
+                    os.environ.get("MERID_MAKER_TAKER_DRIFT_VETO_C", "3")
+                )
+                _verified_ask = getattr(intent, "_reval_side_ask_cents", None)
+                if _verified_ask is None:
+                    if (getattr(intent, "side", "") or "").lower() == "no":
+                        _yb = getattr(intent, "yes_bid_cents", None)
+                        _verified_ask = 100 - int(_yb) if _yb is not None else None
+                    else:
+                        _ya = getattr(intent, "yes_ask_cents", None)
+                        _verified_ask = int(_ya) if _ya is not None else None
+                if (
+                    _verified_ask is not None
+                    and (int(_verified_ask) - _cb_ask) >= _drift_veto_c
+                ):
+                    logger.warning(
+                        "[MAKER->TAKER-VETO] intent_id=%s ticker=%s "
+                        "verified_ask=%dc fresh_ask=%dc drift=%dc>=%.0fc — "
+                        "book repriced against the thesis since the last "
+                        "verified quote; declining IOC conversion",
+                        intent.intent_id, intent.ticker, int(_verified_ask),
+                        _cb_ask, int(_verified_ask) - _cb_ask, _drift_veto_c,
+                    )
                     return False
                 _conv_px = min(_cb_ask, _cap)
             intent._postonly_converted_taker = True
