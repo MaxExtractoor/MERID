@@ -715,6 +715,11 @@ class KalshiWebSocketBridge:
         self._last_sequence: Dict[str, Optional[int]] = {}  # event_type -> last sequence
         self._sequence_gaps: int = 0
         self._sequence_gaps_list: List[Tuple[str, int, int]] = []  # Track (event_type, gap_start, gap_end) for logging
+        # Per-ticker throttle for gap-triggered REST resnapshots (Kalshi
+        # prescribes a snapshot refresh on any orderbook seq gap; without a
+        # throttle a burst of gaps would schedule a fetch per message).
+        self._last_gap_resync_ts: Dict[str, float] = {}
+        self._gap_resync_min_interval_s: float = 5.0
 
         # Deterministic, single-writer sequence ordering (flag-gated bridge hardening)
         try:
@@ -4004,6 +4009,23 @@ class KalshiWebSocketBridge:
                                 "WS orderbook sequence gap: key=%s ticker=%s expected %s, got %s, gap=%s, total_gaps=%s",
                                 event_type, _ob_ticker, expected, seq, gap, self._sequence_gaps
                             )
+                        # Kalshi orderbook contract: a seq gap means dropped
+                        # deltas, so the only safe recovery is a fresh snapshot
+                        # for the affected market.  Throttle per ticker so a gap
+                        # burst cannot schedule a REST fetch per message.
+                        try:
+                            _now_gap = _time.monotonic()
+                            _last_gap = self._last_gap_resync_ts.get(_ob_ticker, 0.0)
+                            if (
+                                _ob_ticker and _ob_ticker != "unknown"
+                                and _now_gap - _last_gap >= self._gap_resync_min_interval_s
+                            ):
+                                self._last_gap_resync_ts[_ob_ticker] = _now_gap
+                                _loop = getattr(self, "_main_loop", None)
+                                if _loop is not None and not _loop.is_closed():
+                                    _loop.call_soon_threadsafe(self._request_ws_snapshot, _ob_ticker)
+                        except Exception:
+                            pass
                 self._last_sequence[event_type] = seq
         
         # Message deduplication check

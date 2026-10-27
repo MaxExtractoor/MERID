@@ -1661,8 +1661,51 @@ def resolve_live_config(
             resolved.operation_mode,
             resolved.config_hash,
         )
+        _unknown_prefix = "Unknown MERID_* variable not in live-config schema:"
+        _unknown_vars: List[str] = []
         for conflict in resolved.conflicts_caught:
-            logger.warning("[LIVE-CONFIG] conflict: %s", conflict)
+            if conflict.startswith(_unknown_prefix):
+                _unknown_vars.append(conflict[len(_unknown_prefix):].split("=", 1)[0].strip())
+            else:
+                logger.warning("[LIVE-CONFIG] conflict: %s", conflict)
+        if _unknown_vars:
+            # Collapse the schema-drift class into one auditable line — these
+            # vars still apply via direct os.environ reads, they simply bypass
+            # the hashed safety-critical overlay.  The full list remains in
+            # resolved.conflicts_caught (and therefore the config hash).
+            logger.warning(
+                "[LIVE-CONFIG] %d MERID_* env vars outside live-config schema "
+                "(ignored for safety-critical resolution): %s",
+                len(_unknown_vars),
+                ",".join(sorted(_unknown_vars)),
+            )
+
+        # AGENTS.md: emit the resolved runtime configuration at startup,
+        # excluding secrets, so the release record can be audited against the
+        # expected live environment.
+        try:
+            _rc = {
+                "runtime_profile": os.environ.get("MERID_PM_PROFILE", "baseline"),
+                "auto_execution_mode": os.environ.get("MERID_AUTO_EXECUTION_MODE", "0"),
+                "venue_environment": getattr(resolved, "kalshi_env", None) or os.environ.get("MERID_KALSHI_ENV", "unknown"),
+                "router_implementation": os.environ.get("MERID_KALSHI_ORDER_ROUTER", "canonical_live"),
+                "paper_mode": os.environ.get("MERID_PAPER_MODE", "0"),
+                "shadow_mode": os.environ.get("MERID_SHADOW_MODE", "0"),
+                "simulation_mode": os.environ.get("MERID_SIMULATION_MODE", "0"),
+                "replay_mode": os.environ.get("MERID_REPLAY_MODE", "0"),
+                "exit_firewall_mode": os.environ.get("MERID_EXIT_FIREWALL_MODE", "unknown"),
+                "require_exit_parentage": os.environ.get("MERID_REQUIRE_EXIT_PARENTAGE", "unknown"),
+                "model_release_id": os.environ.get("MERID_MODEL_RELEASE_ID", "unversioned"),
+                "tail_calibration_artifact_hash": os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH", "unversioned"),
+                "trading_shard": os.environ.get("MERID_KALSHI_TRADING_SHARD", "auto"),
+                "auto_fund_trading_shard": os.environ.get("MERID_AUTO_FUND_TRADING_SHARD", "1"),
+            }
+            logger.info(
+                "[LIVE-CONFIG] resolved_runtime_config %s",
+                " ".join(f"{k}={v}" for k, v in _rc.items()),
+            )
+        except Exception:
+            pass
 
         return resolved
 

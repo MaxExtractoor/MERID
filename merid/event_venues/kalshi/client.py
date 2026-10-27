@@ -923,12 +923,13 @@ class KalshiVenueClient(EventVenueClient):
             
             self._auth_token = data.get("token")
             self._member_id = data.get("member_id")
-            
+
             # Update client with auth header
             self._http_client.headers["Authorization"] = f"Bearer {self._auth_token}"
-            
+
             logger.info(f"Authenticated with Kalshi (member: {self._member_id})")
-            
+            self._assert_account_identity()
+
         except (ConnectionError, RuntimeError, ValueError, httpx.HTTPStatusError) as e:
             # BUG-2: httpx.HTTPStatusError (raised by raise_for_status()) was not caught.
             # STARTUP FIX: Do NOT record auth failures against the circuit breaker.
@@ -938,7 +939,52 @@ class KalshiVenueClient(EventVenueClient):
             # Auth is already retried by _ensure_client() and the per-request retry loop.
             logger.error("[kalshi] Authentication failed (%s): %s", type(e).__name__, e)
             raise
-    
+
+    def _assert_account_identity(self) -> None:
+        """Verify the authenticated account matches the configured live account.
+
+        AGENTS.md requires that the account identity match the configured
+        intended live account.  When ``MERID_KALSHI_EXPECTED_MEMBER_ID`` (or the
+        legacy ``MERID_KALSHI_ACCOUNT_ID``) is configured and the exchange
+        reports a different member, fail closed — trading against an unexpected
+        account is an environment-safety violation.  When no expectation is
+        configured the observed member is only logged (identity is recorded in
+        the startup release record via live_runtime_state telemetry).
+        """
+        expected = (
+            os.environ.get("MERID_KALSHI_EXPECTED_MEMBER_ID")
+            or os.environ.get("MERID_KALSHI_ACCOUNT_ID")
+            or ""
+        ).strip()
+        if not expected:
+            if self._member_id:
+                logger.info(
+                    "[ACCOUNT-IDENTITY] member_id=%s (no expected account configured; "
+                    "set MERID_KALSHI_EXPECTED_MEMBER_ID to enforce)",
+                    self._member_id,
+                )
+            else:
+                logger.info(
+                    "[ACCOUNT-IDENTITY] member_id not exposed by this auth path "
+                    "(RSA); set MERID_KALSHI_EXPECTED_MEMBER_ID to enforce identity"
+                )
+            return
+        if self._member_id and self._member_id != expected:
+            logger.critical(
+                "[ACCOUNT-IDENTITY-MISMATCH] authenticated member_id=%s does not match "
+                "configured MERID_KALSHI_EXPECTED_MEMBER_ID — refusing to continue",
+                self._member_id,
+            )
+            raise RuntimeError(
+                "kalshi account identity mismatch: authenticated account does not "
+                "match the configured intended live account"
+            )
+        if not self._member_id:
+            logger.warning(
+                "[ACCOUNT-IDENTITY] MERID_KALSHI_EXPECTED_MEMBER_ID configured but "
+                "member_id is not exposed by this auth path; identity unverified"
+            )
+
     async def _authenticate_rsa(self) -> None:
         """Load RSA private key for per-request signing.
 
@@ -980,6 +1026,10 @@ class KalshiVenueClient(EventVenueClient):
             self._auth_mode = "rsa"
             self._cached_key_source = _this_cache_key
             logger.info("Kalshi RSA auth ready")
+            # RSA auth learns member_id lazily (first signed response); still run
+            # the identity assertion so a configured expectation is logged/enforced
+            # as soon as a member_id is present on this client.
+            self._assert_account_identity()
         except ImportError as e:
             # BUG-3: no silent fallback — cryptography is a required dependency for RSA auth
             raise RuntimeError(

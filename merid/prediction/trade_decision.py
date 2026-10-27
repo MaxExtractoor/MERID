@@ -1295,6 +1295,33 @@ def _compute_market_implied_vol(
     return sigma
 
 
+_VOL_CLAMP_LOG_INTERVAL_S = 300.0
+_vol_clamp_last_log: Dict[tuple, float] = {}
+_vol_clamp_suppressed: Dict[tuple, int] = {}
+
+
+def _vol_clamp_log(signature: tuple, msg: str, *args) -> None:
+    """Rate-limit VOL-SANITY-CLAMP warnings per (asset, source, direction).
+
+    The clamp fires on every decision evaluation for out-of-band inputs — a
+    persistent sub-band market vol produced ~150 warnings per 3 minutes at the
+    2026-10-27 restart.  Emit immediately on a new signature, then at most once
+    per interval with the suppressed count appended so drift stays auditable.
+    """
+    import time as _t
+    now = _t.monotonic()
+    last = _vol_clamp_last_log.get(signature, 0.0)
+    if now - last < _VOL_CLAMP_LOG_INTERVAL_S:
+        _vol_clamp_suppressed[signature] = _vol_clamp_suppressed.get(signature, 0) + 1
+        return
+    _vol_clamp_last_log[signature] = now
+    suppressed = _vol_clamp_suppressed.pop(signature, 0)
+    if suppressed:
+        msg = msg + " (suppressed %d repeats in last %.0fs)"
+        args = args + (suppressed, _VOL_CLAMP_LOG_INTERVAL_S)
+    logger.warning(msg, *args)
+
+
 def _clamp_annualized_vol(asset: str, vol: float, source: str = "default") -> float:
     """Clamp annualized vol to the per-asset sanity band and log drift.
 
@@ -1322,19 +1349,22 @@ def _clamp_annualized_vol(asset: str, vol: float, source: str = "default") -> fl
     mx = min(mx, _ANNUALIZED_VOL_GLOBAL_MAX)
 
     if not math.isfinite(vol) or vol <= 0:
-        logger.warning(
+        _vol_clamp_log(
+            (asset, source, "nonfinite"),
             "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%s is non-finite or non-positive; falling back to %.4f",
             asset, source, vol, mn,
         )
         return mn
     if vol < mn:
-        logger.warning(
+        _vol_clamp_log(
+            (asset, source, "below"),
             "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%.4f below band [%.4f, %.4f]; clamping to %.4f",
             asset, source, vol, mn, mx, mn,
         )
         return mn
     if vol > mx:
-        logger.warning(
+        _vol_clamp_log(
+            (asset, source, "above"),
             "[VOL-SANITY-CLAMP] asset=%s source=%s vol=%.4f above band [%.4f, %.4f]; clamping to %.4f",
             asset, source, vol, mn, mx, mx,
         )

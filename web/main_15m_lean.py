@@ -554,12 +554,23 @@ async def lifespan(app: FastAPI):
 
     # CRITICAL FIX (2026-08-11): Fail-hard startup guard.  Single-user operator
     # bypass must never be combined with live trading latches.
+    # Named so the persisted release assertion records WHICH live latch is set
+    # rather than an anonymous 4-element boolean list.
+    _live_latch_names = [
+        "TRADING_ENABLED",
+        "MERID_PM_LIVE_ENABLED",
+        "MERID_ALLOW_LIVE_TRADES",
+        "MERID_PM_TRADING_MODE_EQ_live",
+    ]
     live_latches = [
         os.getenv("TRADING_ENABLED", "").lower() in ("1", "true"),
         os.getenv("MERID_PM_LIVE_ENABLED", "").lower() in ("1", "true"),
         os.getenv("MERID_ALLOW_LIVE_TRADES", "").lower() in ("1", "true"),
         os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live",
     ]
+    live_latches_named = {
+        name: value for name, value in zip(_live_latch_names, live_latches)
+    }
     if os.getenv("MERID_SINGLE_USER_OPERATOR") == "1" and any(live_latches):
         logger.critical(
             "[LIFESPAN-SECURITY] MERID_SINGLE_USER_OPERATOR=1 with live trading latches "
@@ -772,7 +783,7 @@ async def lifespan(app: FastAPI):
                         "startup_phases_completed": True,
                         "p0_preflight_passed": p0_preflight_passed,
                         "p0_preflight_detail": p0_preflight_detail,
-                        "live_latches": live_latches,
+                        "live_latches": live_latches_named,
                         "auto_execution_enabled": auto_enable,
                     },
                 )

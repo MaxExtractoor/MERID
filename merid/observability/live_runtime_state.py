@@ -243,6 +243,115 @@ class LiveRuntimeState:
             reason_codes,
         )
 
+    def _startup_telemetry_fields(
+        self, preflight_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Assemble the AGENTS.md startup-telemetry field set (step 17).
+
+        Every field is gathered best-effort so a missing probe can never break
+        the state machine; absent values surface as ``unavailable`` rather than
+        being silently dropped from the release record.
+        """
+        fields: Dict[str, Any] = {
+            "run_id": self._run_id,
+            "process_id": self._process_id,
+            "deployment_sha": self._deployment_sha,
+            "config_hash": self._config_hash,
+        }
+
+        # kalshi_account_id — the authenticated member/account identity.
+        account_id: Optional[str] = None
+        try:
+            from merid.event_venues.kalshi import client as _kalshi_client_mod
+            for _attr in ("get_client", "get_kalshi_client"):
+                _fn = getattr(_kalshi_client_mod, _attr, None)
+                if callable(_fn):
+                    _c = _fn()
+                    account_id = getattr(_c, "_member_id", None) or getattr(_c, "member_id", None)
+                    if account_id:
+                        break
+        except Exception:
+            pass
+        if not account_id:
+            try:
+                from merid.event_venues.kalshi.client import KalshiClient
+                _inst = getattr(KalshiClient, "_instance", None)
+                account_id = getattr(_inst, "_member_id", None) if _inst else None
+            except Exception:
+                pass
+        fields["kalshi_account_id"] = account_id or "unavailable"
+
+        # venue_environment — the resolved Kalshi environment.
+        try:
+            from merid.config.live_config import resolve_live_config
+            _lc = resolve_live_config()
+            fields["venue_environment"] = getattr(_lc, "kalshi_env", None) or getattr(_lc, "env", None) or "unknown"
+        except Exception:
+            fields["venue_environment"] = os.environ.get("MERID_KALSHI_ENV", "unknown")
+
+        # reconciliation_snapshot_id — deterministic fingerprint of the
+        # preflight reconciliation detail so a snapshot is independently
+        # referable in audit trails.
+        snap_src = preflight_context.get("p0_preflight_detail") if preflight_context else None
+        try:
+            import hashlib as _hl
+            fields["reconciliation_snapshot_id"] = (
+                "recon_" + _hl.sha256(json.dumps(snap_src, sort_keys=True, default=str).encode()).hexdigest()[:12]
+                if snap_src is not None else "unavailable"
+            )
+        except Exception:
+            fields["reconciliation_snapshot_id"] = "unavailable"
+
+        # fill_watermark — the trusted-fill watermark observed at preflight.
+        watermark: Any = None
+        try:
+            from merid.governance.trading_circuit_breaker import get_trading_circuit_breaker
+            watermark = getattr(get_trading_circuit_breaker(), "_http_fill_watermark", None)
+        except Exception:
+            pass
+        if watermark is None:
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                _ledger = get_fills_ledger()
+                _fills = getattr(_ledger, "_fills", {}) or {}
+                if _fills:
+                    watermark = max(
+                        getattr(f, "created_time", None) for f in _fills.values()
+                        if getattr(f, "created_time", None) is not None
+                    )
+            except Exception:
+                pass
+        fields["fill_watermark"] = str(watermark) if watermark else "unavailable"
+
+        # model_release_id / tail_calibration_artifact_hash — the approved
+        # model/calibration release bound to this run.
+        fields["model_release_id"] = (
+            os.environ.get("MERID_MODEL_RELEASE_ID")
+            or os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_ID")
+            or "unversioned"
+        )
+        fields["tail_calibration_artifact_hash"] = (
+            os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH") or "unversioned"
+        )
+        return fields
+
+    def _emit_startup_telemetry(
+        self,
+        event: str,
+        preflight_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Emit the contract's structured startup event and return its fields."""
+        fields = self._startup_telemetry_fields(preflight_context)
+        try:
+            logger.critical(
+                "%s %s",
+                event,
+                " ".join(f"{k}={v}" for k, v in fields.items()),
+            )
+        except Exception:
+            pass
+        return fields
+
     def transition(
         self,
         new_state: str,
@@ -346,8 +455,14 @@ class LiveRuntimeState:
                 # Already in a terminal or enabled state; only move to halted
                 # if the preflight is being re-run.
                 return
+            # AGENTS.md step 17: emit the structured preflight telemetry for
+            # both outcomes, then bind the same fields into the durable
+            # release assertion.
+            _telemetry = self._emit_startup_telemetry(
+                "live_startup_preflight_passed", preflight_context
+            )
             if auto_enable:
-                self._release_assertion = (preflight_context or {}) | {
+                self._release_assertion = (preflight_context or {}) | _telemetry | {
                     "enabled_at": self._now(),
                     "auto_enable": True,
                 }
@@ -356,6 +471,9 @@ class LiveRuntimeState:
                     "auto_enable_after_preflight",
                     reason_codes=["AUTO_ENABLE", "PREFLIGHT_PASSED"],
                     context={"preflight_context": preflight_context or {}},
+                )
+                self._emit_startup_telemetry(
+                    "live_entries_enabled", preflight_context
                 )
             else:
                 self.transition(

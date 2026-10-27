@@ -1559,6 +1559,16 @@ class KalshiFillsLedger:
         self._dlq_buffer: List[Dict[str, Any]] = []
         self._dlq_buffer_max = 50  # Flush buffer at this size
 
+        # Proceeds-repair deferral for bulk ingest/restore.  During a batch load
+        # every _index_fill would otherwise trigger a market-wide repair pass
+        # (O(n^2) passes over self._fills) and emit transient-corrected warnings
+        # as expected proceeds oscillate while the fill set grows.  While
+        # deferred, markets are marked dirty and repaired exactly once when the
+        # batch drains — the values land final-correct in a single pass.
+        self._defer_proceeds_repair: bool = False
+        self._proceeds_repair_dirty: set = set()
+        self._proceeds_repair_defer_since: float = 0.0
+
         # Task 4: PnL tracker integration for hedge fill callbacks
         self._pnl_tracker: Optional["HedgePnLTracker"] = None
 
@@ -2051,6 +2061,12 @@ class KalshiFillsLedger:
 
         mutex = self._ensure_mutex()
         async with mutex:
+            # Defer per-fill proceeds repair across the batch: each new fill
+            # marks its market dirty and a single repair pass per market runs
+            # when the batch drains (O(n^2) -> O(markets), no transient-value
+            # warning storms or event-loop starvation during big backfills).
+            self._defer_proceeds_repair = True
+            self._proceeds_repair_defer_since = time.time()
             for raw in fills:
                 # 2026-08-12: Avoid re-parsing a fill already known to this ledger.
                 # Re-parsing can re-flag the fill as unmatched (if the OrderIntent was
@@ -2411,6 +2427,9 @@ class KalshiFillsLedger:
                     fill.count_fp,
                 )
 
+            # Drain deferred proceeds repairs once per dirty market while still
+            # holding the ingest mutex so no fill ingest interleaves.
+            self._flush_deferred_proceeds_repairs()
             self._http_ingested += new_count
 
         if new_count > 0 or merged_duplicate:
@@ -5794,7 +5813,7 @@ class KalshiFillsLedger:
             pos_fills = pos.get("fills", [])
             pos["fills"] = [new_id if fid == old_id else fid for fid in pos_fills]
 
-    async def _backfill_canonical_from_raw(self) -> int:
+    async def _backfill_canonical_from_raw(self, db=None) -> int:
         """Re-canonicalize persisted rows whose canonicalization version is stale.
 
         Rows written before the V2 canonicalizer (and any live-router fill that
@@ -5803,13 +5822,38 @@ class KalshiFillsLedger:
         stale canonical side/action, leg price, signed proceeds, and fee values on
         the next restart without requiring a manual DB migration.
 
+        When ``db`` is provided the bumped canonicalization version (and any
+        corrected canonical economics) is persisted, so repaired/quarantined rows
+        are not re-parsed — and re-warned — on every restart.
+
         Returns the number of rows whose canonical economics changed.
         """
         changed = 0
+        _version_bumped_ids: List[str] = []
+        _changed_rows: List[KalshiFill] = []
         for original in list(self._fills.values()):
             if original.canonicalization_version >= CANONICALIZATION_VERSION:
                 continue
             if not original.raw_payload:
+                continue
+            # Repair/audit envelopes are not exchange raws: the proceeds repair
+            # writes proceeds_dollars_at_ingest/proceeds_repaired_reason into a
+            # raw_payload that may be otherwise empty (router-sourced fills have
+            # no exchange payload).  A dict with no fill-identity key cannot be
+            # canonicalized — feeding it to _parse_fill manufactures a derived_*
+            # id and an UNTRUSTED quarantine every restart.
+            _rp = original.raw_payload
+            if isinstance(_rp, str):
+                try:
+                    _rp = json.loads(_rp)
+                except Exception:
+                    _rp = None
+            if isinstance(_rp, dict) and not any(
+                _rp.get(k) for k in ("fill_id", "trade_id", "id", "market_ticker", "ticker")
+            ):
+                original.canonicalization_version = CANONICALIZATION_VERSION
+                original.ledger_schema_version = LEDGER_SCHEMA_VERSION
+                _version_bumped_ids.append(original.fill_id)
                 continue
             try:
                 reparsed = self._parse_fill(original.raw_payload, original.ingestion_source or "http_poller")
@@ -5821,6 +5865,12 @@ class KalshiFillsLedger:
                     "[FILLS-LEDGER-BACKFILL] %s reparse untrusted (%s); leaving original",
                     original.fill_id, reparsed.canonicalization_state,
                 )
+                # Still stamp the row with the current version: the reparse
+                # outcome is deterministic for this canonicalizer, so without the
+                # bump the same warnings re-emit on every restart forever.
+                original.canonicalization_version = CANONICALIZATION_VERSION
+                original.ledger_schema_version = LEDGER_SCHEMA_VERSION
+                _version_bumped_ids.append(original.fill_id)
                 continue
 
             # Only update the canonical economics.  Preserve identity, intent
@@ -5858,6 +5908,7 @@ class KalshiFillsLedger:
                 original.canonical_yes_delta_cc = reparsed.canonical_yes_delta_cc
                 original.canonicalization_state = reparsed.canonicalization_state
                 changed += 1
+                _changed_rows.append(original)
                 logger.info(
                     "[FILLS-LEDGER-BACKFILL] %s re-canonicalized to side=%s action=%s "
                     "canon=%s/%s leg=%s proceeds=%s",
@@ -5869,6 +5920,50 @@ class KalshiFillsLedger:
             # Always bump the version so this row is not re-parsed on every restart.
             original.canonicalization_version = CANONICALIZATION_VERSION
             original.ledger_schema_version = LEDGER_SCHEMA_VERSION
+            if not _economics_changed:
+                _version_bumped_ids.append(original.fill_id)
+
+        # Persist the durable outcome: version stamps for every reparsed row and
+        # corrected canonical economics for rows whose re-parse produced trusted
+        # changes.  Without this the in-memory bump evaporates on exit and the
+        # whole backfill (plus its warning storm) replays on the next restart.
+        if db is not None and (_version_bumped_ids or changed):
+            for _fid in _version_bumped_ids:
+                try:
+                    await self._execute_with_retry(
+                        db,
+                        "UPDATE kalshi_fills SET canonicalization_version=?, ledger_schema_version=? WHERE fill_id=?",
+                        (CANONICALIZATION_VERSION, LEDGER_SCHEMA_VERSION, _fid),
+                    )
+                except Exception as e:
+                    logger.debug("[FILLS-LEDGER-BACKFILL] version stamp failed %s: %s", _fid, e)
+            for original in _changed_rows:
+                try:
+                    await self._execute_with_retry(
+                        db,
+                        "UPDATE kalshi_fills SET side=?, action=?, execution_outcome_side=?, "
+                        "execution_action=?, execution_price_cents=?, yes_price_dollars=?, "
+                        "no_price_dollars=?, fee_cost=?, proceeds_dollars=?, "
+                        "canonical_position_side=?, canonical_position_action=?, "
+                        "canonical_leg_price_cents=?, canonical_yes_delta_cc=?, "
+                        "canonicalization_state=?, canonicalization_version=?, "
+                        "ledger_schema_version=? WHERE fill_id=?",
+                        (
+                            original.side, original.action,
+                            original.execution_outcome_side, original.execution_action,
+                            original.execution_price_cents,
+                            str(original.yes_price_dollars) if original.yes_price_dollars is not None else None,
+                            str(original.no_price_dollars) if original.no_price_dollars is not None else None,
+                            str(original.fee_cost) if original.fee_cost is not None else None,
+                            str(original.proceeds_dollars) if original.proceeds_dollars is not None else None,
+                            original.canonical_position_side, original.canonical_position_action,
+                            original.canonical_leg_price_cents, original.canonical_yes_delta_cc,
+                            original.canonicalization_state, CANONICALIZATION_VERSION,
+                            LEDGER_SCHEMA_VERSION, original.fill_id,
+                        ),
+                    )
+                except Exception as e:
+                    logger.debug("[FILLS-LEDGER-BACKFILL] persist failed %s: %s", original.fill_id, e)
 
         return changed
 
@@ -7902,8 +7997,11 @@ class KalshiFillsLedger:
         fill_id = raw.get("fill_id") or raw.get("trade_id") or raw.get("id")
         derived_id_flag = False
         if not fill_id:
-            # Generate deterministic ID from content for safety
-            fill_id = f"derived_{int(hashlib.sha256(json.dumps(raw, sort_keys=True, default=_json_default).encode()).hexdigest()[:8], 16)}"
+            # Generate deterministic ID from content for safety.  The source is
+            # part of the hash material so identical payloads arriving through
+            # different lanes do not alias onto one derived id.
+            _derived_material = {"_ingestion_source": source, **raw}
+            fill_id = f"derived_{int(hashlib.sha256(json.dumps(_derived_material, sort_keys=True, default=_json_default).encode()).hexdigest()[:8], 16)}"
             derived_id_flag = True
             # BUG-FIX: Removed nested 'import os' - os is already imported at module level
             strict_mode = os.environ.get("MERID_STRICT_FILL_ID", "").strip() == "1"
@@ -8876,9 +8974,45 @@ class KalshiFillsLedger:
         # contract.  Recompute this market's proceeds whenever a fill lands so
         # stale rows self-repair (idempotent; only divergent rows are touched).
         try:
-            self._repair_stale_proceeds_for_market(getattr(fill, "market_ticker", None))
+            _mt = getattr(fill, "market_ticker", None)
+            if self._defer_proceeds_repair:
+                # Bounded deferral: if a batch died mid-flight without flushing,
+                # expire the deferral rather than letting it stick forever.
+                if time.time() - self._proceeds_repair_defer_since > 300.0:
+                    logger.warning(
+                        "[FILLS-LEDGER] deferred proceeds repair exceeded 300s; flushing (batch likely failed mid-flight)"
+                    )
+                    self._flush_deferred_proceeds_repairs()
+                    self._repair_stale_proceeds_for_market(_mt)
+                elif _mt:
+                    self._proceeds_repair_dirty.add(_mt)
+            else:
+                self._repair_stale_proceeds_for_market(_mt)
         except Exception as exc:
             logger.debug("[FILLS-LEDGER] proceeds repair pass failed (non-critical): %s", exc)
+
+    def _flush_deferred_proceeds_repairs(self) -> int:
+        """Run the deferred per-market proceeds repair once per dirty market.
+
+        Called at the end of a bulk ingest/restore batch while
+        ``_defer_proceeds_repair`` was active.  Returns rows repaired.
+        """
+        dirty = sorted(self._proceeds_repair_dirty)
+        self._proceeds_repair_dirty.clear()
+        self._defer_proceeds_repair = False
+        self._proceeds_repair_defer_since = 0.0
+        repaired = 0
+        for mt in dirty:
+            try:
+                repaired += self._repair_stale_proceeds_for_market(mt)
+            except Exception as exc:
+                logger.debug("[FILLS-LEDGER] deferred proceeds repair failed for %s: %s", mt, exc)
+        if dirty:
+            logger.info(
+                "[FILLS-LEDGER] deferred proceeds repair: markets=%d rows_repaired=%d",
+                len(dirty), repaired,
+            )
+        return repaired
 
     async def _init_db(self) -> None:
         """Initialize SQLite with WAL mode and proper settings.
@@ -10150,6 +10284,11 @@ class KalshiFillsLedger:
                 untrusted_legacy = 0
                 rows_excluded = 0
                 canonicalization_failures = 0
+                # Defer per-fill proceeds repair until the restore + backfill
+                # batch completes; each _index_fill marks its market dirty and a
+                # single repair pass per market runs at the end.
+                self._defer_proceeds_repair = True
+                self._proceeds_repair_defer_since = time.time()
                 for row in rows:
                     # Skip test fixture fills that leaked into the DB
                     if _is_test_fixture_fill(row["fill_id"]):
@@ -10361,7 +10500,7 @@ class KalshiFillsLedger:
                 # have been written in counterparty form; replaying them through the
                 # current _parse_fill and re-computing proceeds fixes realized PnL and
                 # prevents duplicate/phantom position effects on the next restart.
-                _backfilled = await self._backfill_canonical_from_raw()
+                _backfilled = await self._backfill_canonical_from_raw(db)
                 if _backfilled:
                     logger.info("[FILLS-LEDGER-BACKFILL] re-canonicalized %d rows", _backfilled)
 
@@ -10371,6 +10510,10 @@ class KalshiFillsLedger:
                 _deleted = await self._delete_stale_live_router_rows(db)
                 if _deleted:
                     logger.info("[FILLS-LEDGER-BACKFILL] deleted %d stale live-router rows", _deleted)
+
+                # Drain deferred proceeds repairs once per dirty market now that
+                # the full fill set (post-backfill, post-deletion) is stable.
+                self._flush_deferred_proceeds_repairs()
 
                 self._last_migration_summary = {
                     "legacy_rows_total": legacy_rows_total,
