@@ -15738,10 +15738,13 @@ class LeanAgent15m:
         tradable_price_cents = None
         
         if yes_regime is not None and no_regime is not None:
-            # If both sides qualify (common in settlement convergence), pick the side
-            # that aligns with the settlement distribution / model probability rather than arbitrarily defaulting to YES.
-            _p_raw = getattr(settlement_distribution, "p_yes_raw", None) if settlement_distribution is not None else None
-            if _p_raw is not None and float(_p_raw) < 0.5:
+            # If both sides qualify (common in settlement convergence), pick the
+            # market-implied favorite rather than arbitrarily defaulting to YES.
+            # In a converged final-minute book the winning side is the expensive
+            # one (no_ask ~= 100 - yes_bid), so the higher own-side price is the
+            # same favored side the settlement distribution would report once the
+            # engine builds it downstream.  Ties keep the historical YES default.
+            if (no_price_cents or 0) > (yes_price_cents or 0):
                 tradable_side = "no"
                 tradable_regime = no_regime
                 tradable_price_cents = no_price_cents
