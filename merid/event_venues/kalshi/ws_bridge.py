@@ -414,6 +414,26 @@ def _validate_fill_keys(agent_id: Optional[str], market_id: Optional[str]) -> tu
 # the freshness budget invalidate + resync rather than being replayed).
 _BRIDGE_QUEUE_SIZE = int(os.getenv("MERID_BRIDGE_QUEUE_SIZE", "8192"))
 
+# Events that must survive market-data backpressure.  A dropped orderbook
+# delta only costs a throttled snapshot resync (the book is invalidated and
+# rebuilt); a dropped fill / order / position / balance event leaves account
+# state stale until the next REST reconciliation and can hide real fills.
+# Every drop path consults this set: when the queue is over pressure we evict
+# the oldest *droppable* (non-critical) event, never the literal oldest.
+_CRITICAL_WS_EVENT_TYPES = frozenset({
+    "fill", "user_fill",
+    "order_update", "user_order", "user_orders",
+    "order_group_update", "order_group_updates",
+    "market_position", "market_positions", "position", "position_update",
+    "balance", "portfolio", "account",
+})
+
+# How deep into the queue the droppable-scan looks before giving up.  The
+# scan runs under the queue mutex on the hot callback path, so it must stay
+# bounded; in a flood the first dozens of events are virtually all orderbook
+# deltas anyway.
+_DROP_SCAN_LIMIT = 256
+
 # UI coalescing interval (seconds) — don't push every tick to React
 _UI_COALESCE_INTERVAL = 0.100  # 100ms
 
@@ -3907,6 +3927,81 @@ class KalshiWebSocketBridge:
 
     # ── Enqueue (called from WS listen callback) ─────────────────────────
 
+    async def _dead_letter_fill(self, raw: Any) -> None:
+        """Buffer a fill that could not be enqueued for later processing.
+
+        Only reachable when the bridge queue is 100% full of protected
+        events — near-impossible, but a silently lost fill is unacceptable.
+        Reuses the reconnect dead-letter queue: ``_process_dead_letter_queue``
+        replays items once the pipeline drains.
+
+        NOTE: called from ``_enqueue_event`` on the WS io loop, while the
+        reconnect dead-letter lock is an ``asyncio.Lock`` bound to the main
+        loop — acquiring it here would poison the binding for the consumer
+        side.  A dedicated threading.Lock guards scan+append instead;
+        ``_process_dead_letter_queue``'s copy+clear stays atomic under the
+        GIL and can only lose a *duplicate* (re-deduped at replay anyway).
+        """
+        if not isinstance(raw, dict):
+            return
+        try:
+            overflow_lock = getattr(self, "_fill_dead_letter_overflow_lock", None)
+            if overflow_lock is None:
+                import threading as _th
+                overflow_lock = self._fill_dead_letter_overflow_lock = _th.Lock()
+            with overflow_lock:
+                if len(self._fill_dead_letter_queue) >= self._max_dead_letter_size:
+                    logger.critical(
+                        "[WS_BRIDGE_FILL_LOST] Dead-letter queue full (%d) — fill dropped: %s",
+                        self._max_dead_letter_size,
+                        raw.get("fill_id") or raw.get("id"),
+                    )
+                    return
+                fill_id = raw.get("fill_id") or raw.get("id")
+                if not any(
+                    (f.get("fill_id") or f.get("id")) == fill_id
+                    for f in self._fill_dead_letter_queue
+                ):
+                    self._fill_dead_letter_queue.append(raw)
+                    logger.warning(
+                        "[WS_BRIDGE_FILL_QUEUED] Fill %s dead-lettered from bridge overflow. Queue size: %d/%d",
+                        fill_id,
+                        len(self._fill_dead_letter_queue),
+                        self._max_dead_letter_size,
+                    )
+        except Exception as exc:
+            logger.error("[WS_BRIDGE_FILL_LOST] Dead-letter append failed: %s", exc)
+
+    @staticmethod
+    def _is_critical_event(event: Any) -> bool:
+        """Fill/order/position/balance events are never load-shed."""
+        if not isinstance(event, dict):
+            return False
+        etype = event.get("type") or event.get("channel") or ""
+        return etype in _CRITICAL_WS_EVENT_TYPES
+
+    def _drop_oldest_droppable_event(self) -> Optional[Any]:
+        """Evict the oldest non-critical event from the thread queue.
+
+        Popping the literal oldest sacrificed fills whenever a fill was the
+        head of the backlog — exactly the events this buffer exists to
+        protect.  Scan a bounded window for the first droppable event and
+        remove it in place, keeping queue order otherwise intact.  Returns
+        the evicted event, or ``None`` when nothing in the window is
+        droppable (e.g. the queue is all criticals — callers then decide).
+        """
+        q = self._thread_queue
+        with q.mutex:
+            n = min(len(q.queue), _DROP_SCAN_LIMIT)
+            for i in range(n):
+                ev = q.queue[i]
+                if not self._is_critical_event(ev):
+                    del q.queue[i]
+                    q.unfinished_tasks -= 1
+                    q.not_full.notify()
+                    return ev
+        return None
+
     async def _enqueue_event(self, event: Any) -> None:
         """Put event into bounded queue; drop oldest if full.
 
@@ -4030,11 +4125,21 @@ class KalshiWebSocketBridge:
         
         # Message deduplication check
         if isinstance(event, dict):
-            ticker = event.get("ticker") or event.get("market_ticker") or event.get("msg", {}).get("market_ticker") if isinstance(event.get("msg"), dict) else None
+            _msg = event.get("msg")
+            ticker = (
+                event.get("ticker")
+                or event.get("market_ticker")
+                or (_msg.get("market_ticker") if isinstance(_msg, dict) else None)
+            )
             event_type = event.get("type")
-            if ticker and event_type:
+            _seq = event.get("seq") if event.get("seq") is not None else event.get("sequence")
+            # Only dedupe on a real sequencing identity: a seq-less event has
+            # no way to be distinguished from a legitimate same-type repeat
+            # for the same ticker, and dropping those is silent data loss
+            # (e.g. fills on channels that omit seq).
+            if ticker and event_type and _seq is not None:
                 # Lightweight tuple key for deduplication (no hashlib/I/O in hot path)
-                event_key = (ticker, event_type, event.get("seq"), event.get("sequence"))
+                event_key = (ticker, event_type, event.get("sid"), _seq)
 
                 existing = self._message_cache.get(ticker)
                 if existing and existing.get("key") == event_key:
@@ -4066,36 +4171,32 @@ class KalshiWebSocketBridge:
         
         if current_qsize >= PRESSURE_STOP:
             # P1 FIX: Instead of dropping, use ring buffer overflow strategy
-            # Drop oldest non-fill event to make room for new event.
-            # Keep at debug to avoid log I/O blocking the hot callback path.
+            # Evict the oldest *droppable* (non-critical) event to make room
+            # for the new one.  Keep at debug to avoid log I/O blocking the
+            # hot callback path.
             logger.debug(
-                "[WS-BACKPRESSURE] queue_size=%d >= %d - using ring buffer overflow (drop oldest non-fill)",
+                "[WS-BACKPRESSURE] queue_size=%d >= %d - using ring buffer overflow (drop oldest droppable)",
                 current_qsize, PRESSURE_STOP,
             )
-            
-            # Try to drop oldest non-fill event from queue
-            try:
-                # Get oldest event from queue
-                oldest = self._thread_queue.get_nowait()
-                event_type = oldest.get("type") if isinstance(oldest, dict) else "unknown"
 
-                # If oldest is not a fill, count as dropped and continue
-                if event_type != "fill":
-                    self._events_dropped += 1
-                    _inc_ws_events_dropped(event_type)
-                    self._mark_orderbook_drop_untrusted(oldest, "BRIDGE_QUEUE_DROP_OLDEST")
-                    logger.debug("[WS-BACKPRESSURE] Dropped oldest non-fill event (type=%s)", event_type)
-                else:
-                    # Oldest was a fill, put it back and drop current instead
-                    self._thread_queue.put_nowait(oldest)
-                    self._events_dropped += 1
-                    current_event_type = event.get("type") if isinstance(event, dict) else "unknown"
-                    _inc_ws_events_dropped(current_event_type)
-                    logger.debug("[WS-BACKPRESSURE] Oldest was fill, dropping current event (type=%s)", current_event_type)
-                    return
-            except queue.Empty:
-                # Queue was actually empty, should not happen but handle gracefully
-                pass
+            dropped = self._drop_oldest_droppable_event()
+            if dropped is not None:
+                event_type = dropped.get("type") if isinstance(dropped, dict) else "unknown"
+                self._events_dropped += 1
+                _inc_ws_events_dropped(event_type)
+                self._mark_orderbook_drop_untrusted(dropped, "BRIDGE_QUEUE_DROP_OLDEST")
+                logger.debug("[WS-BACKPRESSURE] Dropped oldest droppable event (type=%s)", event_type)
+            elif not self._is_critical_event(event):
+                # Nothing droppable in the scan window — shed the incoming
+                # market-data event rather than any queued critical one.
+                event_type = event.get("type") if isinstance(event, dict) else "unknown"
+                self._events_dropped += 1
+                _inc_ws_events_dropped(event_type)
+                self._mark_orderbook_drop_untrusted(event, "BRIDGE_QUEUE_DROP_PRESSURE")
+                logger.debug("[WS-BACKPRESSURE] All-critical backlog, dropping current event (type=%s)", event_type)
+                return
+            # else: the incoming event is critical — fall through and enqueue;
+            # the queue is at >=90% but not full, so put_nowait succeeds.
         
         # Log high queue pressure for observability (rate-limited to avoid log I/O in hot path)
         if queue_pressure > 0.8 and self._events_dropped > 0 and self._events_dropped % 1000 == 0:
@@ -4108,11 +4209,14 @@ class KalshiWebSocketBridge:
                     queue_pressure * 100, current_qsize, _BRIDGE_QUEUE_SIZE
                 )
 
-        # CRITICAL: If queue is nearly full (>95%), drop non-fill events aggressively
-        # to preserve capacity for fills (order executions)
+        # CRITICAL: If queue is nearly full (>95%), shed non-critical events
+        # aggressively to preserve capacity for fills / order / account
+        # events.  Critical events bypass the shed entirely — losing an
+        # order_group_update or fill is strictly worse than an orderbook
+        # invalidation.
         if queue_pressure > 0.95:
             event_type = event.get("type") if isinstance(event, dict) else "unknown"
-            if event_type != "fill":
+            if not self._is_critical_event(event):
                 self._events_dropped += 1
                 # P2 Task 7: Update Prometheus metrics
                 _inc_ws_events_dropped(event_type)
@@ -4122,7 +4226,7 @@ class KalshiWebSocketBridge:
                 if now - getattr(self, '_last_backpressure_warn_ts', 0) > 5.0:
                     self._last_backpressure_warn_ts = now
                     logger.warning(
-                        "[BACKPRESSURE] Dropping non-fill event (type=%s) — queue at %.0f%% capacity",
+                        "[BACKPRESSURE] Dropping non-critical event (type=%s) — queue at %.0f%% capacity",
                         event_type, queue_pressure * 100
                     )
                 return  # Drop this event entirely
@@ -4154,28 +4258,35 @@ class KalshiWebSocketBridge:
             self._thread_queue.put_nowait(event)
             self._ws_events_enqueued += 1  # Track successful enqueues
         except queue.Full:
-            # Drop oldest to make room
-            try:
-                dropped = self._thread_queue.get_nowait()
+            # Evict the oldest droppable event to make room — never a queued
+            # critical one.
+            dropped = self._drop_oldest_droppable_event()
+            if dropped is not None:
                 self._mark_orderbook_drop_untrusted(dropped, "BRIDGE_QUEUE_FULL")
-                # Track if we dropped a fill
-                if isinstance(dropped, dict) and dropped.get("type") == "fill":
-                    self._fills_dropped += 1
-                    # P2 Task 7: Update Prometheus metrics
-                    if ws_fills_dropped_total:
-                        ws_fills_dropped_total.inc()
-            except queue.Empty:
-                pass
             # DUAL-QUEUE BRIDGE PATTERN: Always use the thread-safe _thread_queue;
             # the legacy _queue alias is the same object, but referencing it here
             # is a foot-gun if it is ever reassigned to an asyncio.Queue.
             try:
                 self._thread_queue.put_nowait(event)
             except queue.Full:
-                # A racing producer refilled the freed slot — drop the event
-                # rather than letting QueueFull escape into the WS callback.
-                # Only now is THIS event's ticker the one that lost a delta.
-                self._mark_orderbook_drop_untrusted(event, "BRIDGE_QUEUE_FULL_RETRY")
+                # A racing producer refilled the freed slot (or nothing in the
+                # window was droppable).  Never let QueueFull escape into the
+                # WS callback, and never silently lose a fill — fills that
+                # can't land go to the dead-letter queue processed on
+                # reconnect/recovery; other criticals are counted and logged.
+                if isinstance(event, dict) and event.get("type") == "fill":
+                    self._fills_dropped += 1
+                    if ws_fills_dropped_total:
+                        ws_fills_dropped_total.inc()
+                    await self._dead_letter_fill(event)
+                else:
+                    if self._is_critical_event(event):
+                        logger.error(
+                            "[BACKPRESSURE] Critical event could not be enqueued "
+                            "(type=%s) — queue full of protected events",
+                            event.get("type"),
+                        )
+                    self._mark_orderbook_drop_untrusted(event, "BRIDGE_QUEUE_FULL_RETRY")
             self._events_dropped += 1
             # Log every 100 drops so operators see the problem
             if self._events_dropped % 100 == 1:
@@ -4441,15 +4552,41 @@ class KalshiWebSocketBridge:
                 )
 
         try:
-            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            from merid.event_venues.kalshi.market_state import (
+                get_kalshi_market_state_store,
+                _BOOK_MAX_UPSTREAM_WAIT_MS,
+            )
             store = get_kalshi_market_state_store()
             _recv_ns = event.get("_t_bridge_recv_ns")
-            if _recv_ns and ws_book_bridge_wait_ms is not None:
+            _wait_ms = None
+            if _recv_ns:
                 try:
                     _wait_ms = (_time.monotonic_ns() - float(_recv_ns)) / 1e6
-                    ws_book_bridge_wait_ms.labels(ticker=str(ticker)).set(_wait_ms)
+                    if ws_book_bridge_wait_ms is not None:
+                        ws_book_bridge_wait_ms.labels(ticker=str(ticker)).set(_wait_ms)
                 except Exception:
                     pass
+
+            # 2026-10-28 backlog fast-path: a delta that already waited past
+            # the upstream freshness bound is rejected by _enqueue_delta's
+            # BOOK_UPSTREAM_LAG gate anyway.  Running it through the full
+            # apply gauntlet first just keeps the drain thread saturated
+            # (observed ~1.5-2.5s residence during rollover floods).  Skip the
+            # apply and go straight to the same invalidate+resync the gate
+            # performs — identical outcome, ~10x cheaper.  Snapshots are
+            # exempt: a stale snapshot still establishes book state and the
+            # downstream sequence/age checks decide its validity.
+            if (
+                event_type == "orderbook_delta"
+                and _wait_ms is not None
+                and _wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS
+            ):
+                store.mark_book_untrusted_for_bridge(
+                    ticker,
+                    "BOOK_UPSTREAM_LAG",
+                    upstream_wait_ms=round(_wait_ms, 1),
+                )
+                return
             store.apply_orderbook_message(event, "bridge_queue")
         except Exception as apply_exc:
             now = _time.monotonic()

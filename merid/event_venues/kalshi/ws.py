@@ -191,6 +191,10 @@ class KalshiWebSocket(EventVenueStream):
     error handling, backpressure, and observability.
     """
 
+    # Priorities <= this are critical account/order events: they go to the
+    # dedicated priority lane and are never sacrificed to queue pressure.
+    _CRITICAL_PRIORITY_MAX = 2
+
     def __init__(self, config: Optional[Any] = None):
         # Use unified config by default (kalshi_config.py)
         self.config = config or get_kalshi_config()
@@ -258,6 +262,7 @@ class KalshiWebSocket(EventVenueStream):
         self._msg_queue: Optional[asyncio.Queue] = None
         self._msg_queue_guard = threading.Lock()
         self._processor_task: Optional[asyncio.Task] = None
+        self._priority_msg_queue: Optional[asyncio.Queue] = None
 
         # ── Orderbook snapshot cache ───────────────────────────────────
         self._ob_snapshots: Dict[str, Dict[str, Any]] = {}  # market -> snapshot
@@ -403,6 +408,49 @@ class KalshiWebSocket(EventVenueStream):
 
         # B3: register graceful-shutdown snapshot handler
         self.register_sigterm_snapshot()
+
+    def _ensure_priority_msg_queue(self) -> asyncio.Queue:
+        """Lazy-initialize the critical-message priority queue on this loop.
+
+        2026-10-28: ``_msg_queue`` is a plain FIFO shared by every channel.
+        During orderbook floods, fill / order_group / position / balance
+        messages sat behind tens of thousands of deltas (observed ~2s of
+        ``pq_wait``) and were sacrificed by the drop-lowest-priority path.
+        Critical, low-volume channel messages now go to a dedicated queue
+        that ``_process_queue`` always drains first — the same
+        channel-isolation model Kalshi's own SDK uses (one bounded queue per
+        subscription) and the standard venue best practice of keeping
+        account/order traffic off the market-data path.  Mirrors the
+        stale-loop rebind guard in ``_ensure_msg_queue``.
+        """
+        guard = getattr(self, "_msg_queue_guard", None)
+        if guard is None:
+            guard = self._msg_queue_guard = threading.Lock()
+        with guard:
+            q = self._priority_msg_queue
+            if q is not None:
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                bound_loop = getattr(q, "_loop", None)
+                if running_loop is not None and bound_loop is not None and bound_loop is not running_loop:
+                    new_q = asyncio.Queue(maxsize=q.maxsize)
+                    migrated = 0
+                    while True:
+                        try:
+                            new_q.put_nowait(q.get_nowait())
+                            migrated += 1
+                        except (asyncio.QueueEmpty, asyncio.QueueFull):
+                            break
+                    self._priority_msg_queue = new_q
+                    logger.warning(
+                        "[WS-QUEUE] Priority queue bound to a stale event loop; recreated (migrated=%d)",
+                        migrated,
+                    )
+            if self._priority_msg_queue is None:
+                self._priority_msg_queue = asyncio.Queue(maxsize=1024)
+            return self._priority_msg_queue
 
     def _ensure_msg_queue(self) -> asyncio.Queue:
         """Lazy-initialize the message queue in the current event loop.
@@ -1855,9 +1903,25 @@ class KalshiWebSocket(EventVenueStream):
                             self._direct_enqueue_count = 0
                         self._direct_enqueue_count += 1
                         if self._direct_enqueue_count <= 10:
-                            logger.debug("[WS-DIRECT-ENQUEUE-BYPASS] #%d: type=%s queue_id=%s queue_size=%d", 
+                            logger.debug("[WS-DIRECT-ENQUEUE-BYPASS] #%d: type=%s queue_id=%s queue_size=%d",
                                        self._direct_enqueue_count, data.get('type'), id(self._ensure_msg_queue()), self._ensure_msg_queue().qsize())
-                        self._ensure_msg_queue().put_nowait((msg_priority, data))
+                        if msg_priority <= self._CRITICAL_PRIORITY_MAX:
+                            # Critical low-volume channels (fills, order/account
+                            # events) get a dedicated lane so market-data floods
+                            # can never starve or displace them.  A full
+                            # priority queue applies socket backpressure rather
+                            # than dropping account events.
+                            try:
+                                self._ensure_priority_msg_queue().put_nowait((msg_priority, data))
+                            except asyncio.QueueFull:
+                                await self._ensure_priority_msg_queue().put((msg_priority, data))
+                                logger.error(
+                                    "WS priority queue full — applied socket "
+                                    "backpressure for critical msg type=%s",
+                                    data.get("type"),
+                                )
+                        else:
+                            self._ensure_msg_queue().put_nowait((msg_priority, data))
                             
                             # P0 FIX: REMOVED direct callback invocation - this creates a parallel path that bypasses the bridge queue
                             # The callback is now ONLY called from _process_queue, ensuring single pipeline:
@@ -2059,9 +2123,10 @@ class KalshiWebSocket(EventVenueStream):
                     logger.debug("[WS-PROCESSOR] Before queue_util: queue_size=%d maxsize=%d", 
                                self._ensure_msg_queue().qsize(), self._ensure_msg_queue().maxsize)
                 
-                # Capture the queue for this batch so get()/task_done() stay
+                # Capture the queues for this batch so get()/task_done() stay
                 # paired even if _ensure_msg_queue rebinds to a new loop later.
                 batch_queue = self._ensure_msg_queue()
+                priority_queue = self._ensure_priority_msg_queue()
 
                 # Calculate current queue pressure for adaptive batch sizing
                 queue_size = batch_queue.qsize()
@@ -2093,20 +2158,66 @@ class KalshiWebSocket(EventVenueStream):
                 if not callable(safe_callback):
                     safe_callback = self._noop_async_callback
 
+                # Items consumed by a double-completed idle wait are stashed
+                # here and dispatched on the next slots — an asyncio.Queue
+                # get() future removes its item when it completes, so results
+                # must never be thrown away.
+                pending_items = getattr(self, "_pq_pending_items", None)
+                if pending_items is None:
+                    pending_items = self._pq_pending_items = []
+
                 for i in range(batch_size):
+                    item_queue = batch_queue
                     try:
-                        # First message in a batch can wait briefly; subsequent messages
-                        # must not sleep or we lose throughput under a fast producer.
-                        if i == 0:
-                            try:
-                                item = await asyncio.wait_for(batch_queue.get(), timeout=1.0)
-                            except asyncio.TimeoutError:
-                                break
+                        # 2026-10-28: drain the critical lane before market
+                        # data on every slot — fills / order / position /
+                        # balance events must never wait behind a delta flood
+                        # (fills lost to a 90%-pressure shed or ~2s of pq_wait
+                        # previously produced silent account staleness).
+                        if pending_items:
+                            item, item_queue = pending_items.pop(0)
                         else:
                             try:
-                                item = batch_queue.get_nowait()
+                                item = priority_queue.get_nowait()
+                                item_queue = priority_queue
                             except asyncio.QueueEmpty:
-                                break
+                                # First message in a batch can wait briefly;
+                                # subsequent messages must not sleep or we lose
+                                # throughput under a fast producer.  When idle
+                                # we wait on BOTH queues so a critical event
+                                # never sits up to the 1s main-queue timeout.
+                                if i == 0:
+                                    _get_main = asyncio.ensure_future(batch_queue.get())
+                                    _get_prio = asyncio.ensure_future(priority_queue.get())
+                                    _done, _pending = await asyncio.wait(
+                                        (_get_main, _get_prio),
+                                        timeout=1.0,
+                                        return_when=asyncio.FIRST_COMPLETED,
+                                    )
+                                    for _p in (_get_main, _get_prio):
+                                        if not _p.done():
+                                            _p.cancel()
+                                    # Collect every completed result — a
+                                    # second future can win the same tick;
+                                    # its item is dispatched on the next slot
+                                    # (priority lane first preserves intent).
+                                    _results = sorted(
+                                        (
+                                            (_f.result(), priority_queue if _f is _get_prio else batch_queue)
+                                            for _f in (_get_main, _get_prio)
+                                            if _f.done() and not _f.cancelled()
+                                        ),
+                                        key=lambda _rq: 0 if _rq[1] is priority_queue else 1,
+                                    )
+                                    if not _results:
+                                        break
+                                    item, item_queue = _results[0]
+                                    pending_items.extend(_results[1:])
+                                else:
+                                    try:
+                                        item = batch_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        break
                     except asyncio.TimeoutError:
                         break  # No more messages available
 
@@ -2237,7 +2348,7 @@ class KalshiWebSocket(EventVenueStream):
                                         _tk, _res_ms,
                                     )
                                     try:
-                                        batch_queue.task_done()
+                                        item_queue.task_done()
                                     except Exception:
                                         pass
                                     continue
@@ -2263,7 +2374,7 @@ class KalshiWebSocket(EventVenueStream):
                             pass
                     finally:
                         try:
-                            batch_queue.task_done()
+                            item_queue.task_done()
                         except Exception:
                             pass
                     messages_processed += 1
@@ -2624,13 +2735,16 @@ class KalshiWebSocket(EventVenueStream):
         if seq is None:
             return True  # not all channels have seq
 
-        # Kalshi WS seq is a connection-global counter shared by all channels,
-        # so sequence *tracking* stays keyed to a single connection bucket.
-        # The market ticker (nested under ``msg`` for orderbook frames) is only
-        # needed to target snapshot/state recovery at the right book — using
-        # "global" there would discard nothing real and request a snapshot for
-        # a bogus ticker.
-        market_id = "conn"
+        # Kalshi WS ``seq`` is scoped to the *subscription* (``sid``), not the
+        # connection: each channel subscription carries its own monotonic
+        # counter (docs.kalshi.com/websockets/orderbook-updates).  Tracking
+        # every channel in one bucket made the high-volume orderbook sid's seq
+        # dwarf the counters of low-volume sids (fill, order_group_updates,
+        # ticker, trade), so their messages were silently dropped as
+        # "duplicates" and freshly (re)subscribed sids — which restart at
+        # seq=1 — stayed dead until they passed the connection max.
+        sid = data.get("sid")
+        market_id = f"sid:{sid}" if sid is not None else "conn"
         nested = data.get("msg")
         recovery_ticker = (
             (nested.get("market_ticker") or nested.get("ticker"))
@@ -3797,9 +3911,11 @@ class KalshiWebSocket(EventVenueStream):
         )
         max_lag_ms = max(lag_samples) * 1000 if lag_samples else 0
         
-        # Queue metrics
+        # Queue metrics (main market-data lane + critical account lane)
         queue_depth = self._ensure_msg_queue().qsize()
         queue_utilization = queue_depth / self._ensure_msg_queue().maxsize if self._ensure_msg_queue().maxsize > 0 else 0
+        _pq = getattr(self, "_priority_msg_queue", None)
+        priority_queue_depth = _pq.qsize() if _pq is not None else 0
         
         # Supervisor audit timestamps
         last_shed_ago = None
@@ -3820,6 +3936,7 @@ class KalshiWebSocket(EventVenueStream):
             "queue_depth": queue_depth,
             "queue_max": self._ensure_msg_queue().maxsize,
             "queue_utilization_pct": round(queue_utilization * 100, 1),
+            "priority_queue_depth": priority_queue_depth,
             "last_msg_ago_s": round(last_msg_ago, 1) if last_msg_ago else None,
             "ob_cached_markets": len(self._ob_initialised),
             "subscriptions": len(self._subscriptions),
@@ -3857,7 +3974,13 @@ class KalshiWebSocket(EventVenueStream):
         msg_type = data.get("type", "")
         if msg_type == "fill":
             return 1
-        if msg_type in ("order_group_update", "order_group_updates"):
+        if msg_type in (
+            "order_group_update", "order_group_updates",
+            "order_update", "user_order", "user_orders",
+            "market_position", "market_positions",
+            "position", "position_update",
+            "balance", "portfolio", "account",
+        ):
             return 2
         if msg_type == "orderbook_snapshot":
             return 3
