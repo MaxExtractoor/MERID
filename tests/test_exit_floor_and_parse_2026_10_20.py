@@ -285,8 +285,17 @@ class TestTailFloorRetry(unittest.TestCase):
     def test_no_edge_drop_is_shallower(self):
         """2026-10-20 0015-window: no-edge quota entries (entry_edge<=0)
         rode the standard 30c drop to 12-20c salvages.  The shallower
-        no-edge drop exits before the standard depth."""
-        cfg = _get_tail_loss_floor_config()
+        no-edge drop exits before the standard depth.
+
+        The live .env retunes these knobs (env takes precedence over the
+        coded default per AGENTS.md), so pin them to the documented
+        defaults — the contract under test is "no-edge shallower than
+        standard", not the deployment's current tuning."""
+        with mock.patch.dict(os.environ, {
+            "MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS": "14",
+            "MERID_TAIL_LOSS_DROP_CENTS": "30",
+        }):
+            cfg = _get_tail_loss_floor_config()
         self.assertLess(cfg["drop_no_edge_cents"], cfg["drop_cents"])
         self.assertEqual(cfg["drop_no_edge_cents"], 14)
 

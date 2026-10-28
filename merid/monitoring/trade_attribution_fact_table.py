@@ -413,20 +413,108 @@ class TradeAttributionTable:
             if settlement_ts is None:
                 settlement_ts = datetime.now(timezone.utc).isoformat()
 
+            # 2026-10-28: when the position is gone or carries no entry
+            # provenance (REST-synced orphans before the coverage repair),
+            # join the settlement to the canonical fills ledger by ticker —
+            # the latest non-exit fill is the position's entry.  Keeps the
+            # intent->order->fill->settlement chain auditable instead of
+            # writing a permanently unlinked row.
+            _entry_fill = None
+            _needs_linkage = position is None or not (
+                getattr(position, "entry_intent_id", None)
+                or getattr(position, "entry_fill_id", None)
+                or getattr(position, "client_order_id", None)
+            )
+            if _needs_linkage:
+                try:
+                    from merid.event_venues.kalshi.fills_ledger import (
+                        get_fills_ledger,
+                    )
+
+                    _fills = (
+                        get_fills_ledger().get_fills_by_market(market_ticker)
+                        or []
+                    )
+                    _entries = [
+                        f for f in _fills
+                        if not getattr(f, "is_exit", False)
+                    ]
+                    _entry_fill = _entries[-1] if _entries else None
+                except Exception as _lf_err:
+                    logger.debug(
+                        "[TRADE-ATTRIBUTION] fills-ledger fallback for %s failed: %s",
+                        market_ticker, _lf_err,
+                    )
+                    _entry_fill = None
+
+            _entry_avg_price = getattr(position, "avg_price_cents", None) or getattr(
+                position, "avg_entry_price_cents", None
+            )
+            if _entry_avg_price is None and _entry_fill is not None:
+                _delta = getattr(_entry_fill, "canonical_yes_delta_cc", None)
+                if _delta is not None and _delta < 0:
+                    _pd = getattr(_entry_fill, "no_price_dollars", None)
+                else:
+                    _pd = getattr(_entry_fill, "yes_price_dollars", None)
+                try:
+                    _entry_avg_price = (
+                        int(round(float(_pd) * 100)) if _pd is not None else None
+                    )
+                except (TypeError, ValueError):
+                    _entry_avg_price = None
+
             row: Dict[str, Any] = {
-                "intent_id": getattr(position, "entry_intent_id", None) if position else None,
+                "intent_id": (
+                    (getattr(position, "entry_intent_id", None) if position else None)
+                    or (getattr(_entry_fill, "intent_id", None) if _entry_fill else None)
+                ),
                 "ticker": market_ticker,
-                "side": getattr(position, "side", None),
-                "count_fp": str(getattr(position, "contracts", None)) if position else None,
+                "side": (
+                    (getattr(position, "side", None) if position else None)
+                    or (
+                        "no"
+                        if (getattr(_entry_fill, "canonical_yes_delta_cc", 0) or 0) < 0
+                        else ("yes" if _entry_fill is not None else None)
+                    )
+                ),
+                "count_fp": (
+                    str(getattr(position, "contracts", None)) if position else None
+                ) or (
+                    str(getattr(_entry_fill, "count_fp", None)) if _entry_fill else None
+                ),
                 "realized_pnl_cents": realized_pnl_cents,
                 "settlement_outcome": outcome,
                 "settlement_price_cents": settlement_price_cents,
                 "settlement_ts": settlement_ts,
                 "metadata": json.dumps(
                     {
-                        "avg_price_cents": getattr(position, "avg_price_cents", None),
-                        "entry_intent_id": getattr(position, "entry_intent_id", None),
-                        "fill_source": getattr(position, "fill_source", None),
+                        "avg_price_cents": _entry_avg_price,
+                        "entry_intent_id": (
+                            getattr(position, "entry_intent_id", None)
+                            if position else None
+                        ) or (
+                            getattr(_entry_fill, "intent_id", None)
+                            if _entry_fill else None
+                        ),
+                        "fill_source": (
+                            getattr(position, "fill_source", None)
+                            if position else None
+                        ) or (
+                            getattr(_entry_fill, "fill_source", None)
+                            if _entry_fill else None
+                        ),
+                        "entry_fill_id": (
+                            getattr(position, "entry_fill_id", None)
+                            if position else None
+                        ) or (
+                            getattr(_entry_fill, "fill_id", None)
+                            if _entry_fill else None
+                        ),
+                        "linkage_source": (
+                            "position"
+                            if not _needs_linkage
+                            else ("fills_ledger" if _entry_fill is not None else None)
+                        ),
                     },
                     default=str,
                 ),

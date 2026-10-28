@@ -1687,24 +1687,28 @@ def _pinned_fav_lo() -> float:
     # Maker mode: see the dated note below — the 80s resting-bid cohort
     # thesis was falsified by realized fills and published calibration.
     if pinned_fav_maker_mode():
-        # 2026-10-24: floor raised 82->90 on falsifying evidence.  The
-        # "rested in the 80s" claim was a counterfactual projection; the
-        # realized cohort (2026-10-24 fills at 76-89c) ran ~50% settle rate
-        # vs the ~80-89% breakeven those prices demand, matching published
-        # Kalshi crypto calibration (70-89c bands settle 43-57% vs 75-85%
-        # implied, a -22..-32pt overprice; only >=90c approaches fair).
-        # The probe keeps probing the converged-favorite mechanics, just
-        # outside the documented toxic pocket.
-        return _env_float("MERID_PINNED_FAV_MAKER_LO", 90.0)
+        # 2026-10-28: floor raised 90->92 — the band floor itself is the
+        # toxic pocket at maker fills.  Post-10/24 realized cohort: px<=91
+        # ran 73% win / -1405c over 82 contracts (every post-floor loss);
+        # px>=92 ran 100% / +611c over 103.  A resting bid at the floor
+        # fills exactly when the pin breaks — the fill is the adverse
+        # signal (prior falsification history: 82->90 on 2026-10-24 after
+        # the 76-89c pocket ran ~50% vs ~80-89% breakeven, matching
+        # published Kalshi crypto calibration where only >=90c approaches
+        # fair).
+        return _env_float("MERID_PINNED_FAV_MAKER_LO", 92.0)
     return _env_float("MERID_PINNED_FAV_PRICE_LO", 92.0)
 
 
 def _pinned_fav_hi() -> float:
     # 98c, not 99c: 99-100c has <=1c of payoff headroom before fees.
-    # Maker mode: 91c — a resting bid at 92+ on a converged book is a de
-    # facto taker order (no payoff headroom after costs).
+    # Maker mode: 2026-10-28 -> 98.  The old 91 cap's claim that a resting
+    # bid at 92+ is "a de facto taker order" is falsified by the realized
+    # cohort — 92-98c maker fills ran 100% / +611c over 103 contracts
+    # while every post-floor loss sat at 90-91c.  99-100c still has <=1c
+    # headroom after costs.
     if pinned_fav_maker_mode():
-        return _env_float("MERID_PINNED_FAV_MAKER_HI", 91.0)
+        return _env_float("MERID_PINNED_FAV_MAKER_HI", 98.0)
     return _env_float("MERID_PINNED_FAV_PRICE_HI", 98.0)
 
 

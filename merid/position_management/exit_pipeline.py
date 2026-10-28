@@ -58,12 +58,36 @@ class ExitContext:
     book: Optional[ExitBook] = None
 
 
+# Sentinel strings producers stamp into linkage fields when the real id is
+# absent (REST-synced / reconstructed positions).  They must not be promoted
+# into a generation id — fall through to the position-scoped fallback instead.
+_GENERATION_ID_SENTINELS = frozenset({
+    "rest_sync", "unknown", "n/a", "none", "null", "manual",
+    "replay", "historical",
+})
+
+
 def _generation_id_of(position: Any) -> Optional[str]:
     for attr in ("parent_entry_fill_id", "entry_fill_id",
                  "entry_intent_id", "client_order_id"):
         v = getattr(position, attr, None)
-        if v:
+        if v and str(v).strip() and str(v).strip().lower() not in _GENERATION_ID_SENTINELS:
             return str(v)
+    # 2026-10-28: REST-synced positions can hold only weaker linkage — an
+    # exchange order id, a signal id, or nothing at all.  An empty generation
+    # makes the position unexitable: no arbiter context -> no approved attempt
+    # -> the router gate rejects every exit (KXDOGE15M-26OCT281300-00 lost
+    # 540c behind 13 hard-profit-lock rejections).  Derive the coarsest
+    # honest scope instead: the position's own durable id keeps the arbiter
+    # key position-scoped ("{market_id}|position:{position_id}") without
+    # falsifying fill parentage.
+    for attr in ("entry_order_id", "entry_signal_id"):
+        v = getattr(position, attr, None)
+        if v and str(v).strip() and str(v).strip().lower() not in _GENERATION_ID_SENTINELS:
+            return str(v)
+    v = getattr(position, "position_id", None) or getattr(position, "market_id", None)
+    if v and str(v).strip():
+        return f"position:{str(v).strip()}"
     return None
 
 

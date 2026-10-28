@@ -2401,6 +2401,42 @@ class DecisionAuditLedger:
             )
         return healed
 
+    def get_side_ev_claims(
+        self, decision_id: str, side: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read the persisted gate claims for one decision side.
+
+        2026-10-28 (orphaned-position risk-contract restore): a position that
+        REST-synced before its canonical fill event carries no entry claims —
+        its fill's ``decision_trace_id`` is the durable key back to the exact
+        net-of-cost claim the admission gate enforced.  Returns the small
+        claim set needed to rebuild ``risk_contract_fields`` or ``None``.
+
+        Pure read on the WAL read connection; never raises.
+        """
+        try:
+            if not decision_id:
+                return None
+            self._ensure_db()
+            row = self._read().execute(
+                "SELECT side, selected, decision_lane, gate_ev_cents, "
+                "expected_net_ev_cents, gross_edge_cents, "
+                "enforced_edge_bound_cents, executable_entry_price_cents, "
+                "calibrated_probability "
+                "FROM strategy_decision_side_ev "
+                "WHERE decision_id = ? AND side = ?",
+                (str(decision_id), str(side).lower()),
+            ).fetchone()
+            if row is None:
+                return None
+            return {k: row[k] for k in row.keys()}
+        except Exception as exc:
+            logger.debug(
+                "[DECISION-AUDIT-LEDGER] get_side_ev_claims(%s,%s) failed: %s",
+                decision_id, side, exc,
+            )
+            return None
+
     def record_settlement(
         self,
         ticker: str,

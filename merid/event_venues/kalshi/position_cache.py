@@ -364,6 +364,200 @@ def _is_expired_ticker(ticker: str) -> bool:
     return False
 
 
+def _fill_delta_cc(fill: Any) -> Optional[int]:
+    """Canonical signed YES delta (centi-contracts) for a ledger fill."""
+    delta = getattr(fill, "canonical_yes_delta_cc", None)
+    if delta is not None:
+        return delta
+    try:
+        _side = (
+            getattr(fill, "canonical_position_side", None)
+            or getattr(fill, "side", "") or ""
+        ).lower()
+        _act = (
+            getattr(fill, "canonical_position_action", None)
+            or getattr(fill, "action", "") or ""
+        ).lower()
+        _qty = int(
+            getattr(fill, "quantity_cc", None)
+            or int(getattr(fill, "count_fp", 0) or 0) * 100
+        )
+        return yes_delta(_act, _side, _qty)
+    except Exception:
+        return None
+
+
+def _select_covered_entry_fill(
+    covered_fills: List[Any], pos_yes: int
+) -> Optional[Any]:
+    """The covered ledger fill that opened the currently-held position.
+
+    Positions are serial per market (entries are blocked while one exists),
+    exit fills always carry the opposite delta sign, and scale-ins cannot
+    occur — so the most recent covered same-direction non-exit fill is the
+    entry that opened this position.  (The earliest would steal provenance
+    from a same-day prior position on re-entry.)
+    """
+    if pos_yes == 0 or not covered_fills:
+        return None
+    def _ct(f: Any) -> datetime:
+        return _fill_created_time_dt(f) or datetime.min.replace(tzinfo=timezone.utc)
+    for fill in sorted(covered_fills, key=_ct, reverse=True):
+        if getattr(fill, "is_exit", None) is True:
+            continue
+        fill_delta = _fill_delta_cc(fill)
+        if not (fill_delta and (fill_delta > 0) == (pos_yes > 0)):
+            continue
+        if not getattr(fill, "fill_id", None):
+            continue
+        return fill
+    return None
+
+
+def _backfill_linkage_from_covered_fills(
+    cached_pos: Any,
+    covered_fills: List[Any],
+    pos_yes: int,
+) -> bool:
+    """Restore entry linkage on a REST-synced position from covered ledger fills.
+
+    2026-10-28: When a REST position snapshot subsumes the entry fill before
+    the canonical fill event arrives (or the event is never delivered), the
+    cached position keeps no durable parentage and every exit attempt dies at
+    the arbiter gate with ``no_approved_attempt`` — KXDOGE15M-26OCT281300-00
+    rode a 6-lot NO to settlement past a +6c profit-lock window.  Mirror the
+    on_fill covered-path migration here: pick the most recent covered fill
+    that opens the currently-held side and copy its durable ids.  Never
+    overwrites existing linkage, never stamps an exit fill as the entry.
+    Idempotent — also repairs positions orphaned before this fix.
+    """
+    if cached_pos is None:
+        return False
+    if (
+        getattr(cached_pos, "entry_fill_id", None)
+        or getattr(cached_pos, "client_order_id", None)
+        or getattr(cached_pos, "entry_order_id", None)
+        or getattr(cached_pos, "entry_intent_id", None)
+    ):
+        return False
+    fill = _select_covered_entry_fill(covered_fills, pos_yes)
+    if fill is None:
+        return False
+    fill_id = getattr(fill, "fill_id", None)
+    _coid = getattr(fill, "client_order_id", None)
+    _order = getattr(fill, "order_id", None)
+    _intent = getattr(fill, "intent_id", None)
+    cached_pos.entry_fill_id = fill_id
+    if _coid:
+        cached_pos.client_order_id = _coid
+    if _order:
+        cached_pos.entry_order_id = _order
+    if _intent:
+        cached_pos.entry_intent_id = _intent
+    if _coid and (
+        not getattr(cached_pos, "entry_signal_id", None)
+        or str(cached_pos.entry_signal_id).lower()
+        in ("rest_sync", "unknown", "n/a", "none")
+    ):
+        cached_pos.entry_signal_id = _coid
+    if not getattr(cached_pos, "entry_fill_price_cents", None):
+        cached_pos.entry_fill_price_cents = (
+            _fill_position_side_price_cents(
+                fill, "yes" if pos_yes > 0 else "no")
+            or getattr(fill, "canonical_leg_price_cents", None)
+        )
+    if not getattr(cached_pos, "entry_fill_timestamp", None):
+        cached_pos.entry_fill_timestamp = _fill_created_time_dt(fill)
+    logger.info(
+        "[POSITION-CACHE-LINKAGE-RESTORED] market=%s entry_fill_id=%s "
+        "client_order_id=%s order_id=%s intent_id=%s "
+        "(entry fill covered by REST snapshot)",
+        getattr(cached_pos, "market_id", "?"), fill_id, _coid, _order, _intent,
+    )
+    return True
+
+
+def _backfill_entry_risk_contract(
+    cached_pos: Any,
+    covered_fills: List[Any],
+    pos_yes: int,
+) -> bool:
+    """Restore the persisted position risk contract on an orphaned position.
+
+    2026-10-28: the same REST-coverage race that stripped entry linkage also
+    stripped the authorized net claim (``entry_authorized_net_edge_c``).  With
+    the claim UNKNOWN the no-edge salvage carve-out could not engage, so under
+    ``MERID_LOSS_EXITS_ENABLED=0`` the tail-loss floor stayed suppressed even
+    after the arbiter gate was fixed — KXDOGE15M-26OCT281300-00 still would
+    have ridden 90c -> 1c with zero salvage emitted.  The durable claim lives
+    in ``strategy_decision_side_ev`` keyed by the fill's ``decision_trace_id``
+    (the exact ``gate_ev_cents`` the admission enforced).
+
+    Independent of linkage restore: runs whenever the contract is missing,
+    including positions whose linkage arrived via the ``on_fill``
+    covered-path migration (which stamps ids but not claims).  Never
+    overwrites an existing contract or persisted salvage verdict; the audit
+    read is best-effort and cannot block the sync.
+    """
+    if cached_pos is None:
+        return False
+    if (
+        getattr(cached_pos, "entry_authorized_net_edge_c", None) is not None
+        or getattr(cached_pos, "no_edge_salvage_eligible", None) is not None
+    ):
+        return False
+    fill = _select_covered_entry_fill(covered_fills, pos_yes)
+    if fill is None:
+        return False
+    decision_id = getattr(fill, "decision_trace_id", None)
+    if not decision_id:
+        return False
+    try:
+        from merid.execution.decision_audit_ledger import (
+            get_decision_audit_ledger,
+        )
+        from merid.position_management.position_risk_contract import (
+            risk_contract_fields,
+        )
+        claims = get_decision_audit_ledger().get_side_ev_claims(
+            str(decision_id), "yes" if pos_yes > 0 else "no"
+        )
+    except Exception as _claims_err:
+        logger.debug(
+            "[POSITION-CACHE-CLAIMS-RESTORE] claims lookup failed for %s: %s",
+            getattr(cached_pos, "market_id", "?"), _claims_err,
+        )
+        return False
+    if not claims:
+        return False
+    net_claim = (
+        claims.get("gate_ev_cents")
+        if claims.get("gate_ev_cents") is not None
+        else claims.get("expected_net_ev_cents")
+    )
+    contract = risk_contract_fields(
+        gross_edge_c=claims.get("gross_edge_cents"),
+        authorized_net_edge_c=net_claim,
+        net_edge_source="decision_audit:strategy_decision_side_ev",
+        admission_type=None,
+        admission_lane=claims.get("decision_lane"),
+        effective_threshold_c=claims.get("enforced_edge_bound_cents"),
+        decision_id=str(decision_id),
+        selected_route=None,
+    )
+    for _k, _v in contract.items():
+        setattr(cached_pos, _k, _v)
+    if not getattr(cached_pos, "decision_lane", None) and claims.get("decision_lane"):
+        cached_pos.decision_lane = claims.get("decision_lane")
+    logger.info(
+        "[POSITION-CACHE-CLAIMS-RESTORED] market=%s decision_id=%s "
+        "net_claim=%s lane=%s salvage_eligible=%s",
+        getattr(cached_pos, "market_id", "?"), decision_id, net_claim,
+        claims.get("decision_lane"), contract.get("no_edge_salvage_eligible"),
+    )
+    return True
+
+
 def _fill_created_time_dt(fill_record: Any) -> Optional[datetime]:
     """Return a tz-aware UTC datetime for a fill record's ``created_time``.
 
@@ -2484,6 +2678,17 @@ class KalshiPositionCache:
                             _fintent = getattr(_cover_rec, "intent_id", None)
                             if _fintent and not pre_position.entry_intent_id:
                                 pre_position.entry_intent_id = _fintent
+                            # 2026-10-28: the snapshot that covered this fill
+                            # also left the position without its authorized
+                            # net claim — restore the risk contract from the
+                            # decision audit so the no-edge tail-loss salvage
+                            # can engage (same gap the sync coverage path
+                            # repairs via _backfill_entry_risk_contract).
+                            _backfill_entry_risk_contract(
+                                pre_position,
+                                [_cover_rec] if _cover_rec is not None else [],
+                                _pos_yes,
+                            )
                         return
 
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
@@ -5992,23 +6197,61 @@ class KalshiPositionCache:
                         _sync_ledger = self._get_fills_ledger()
                         if _sync_ledger is not None:
                             _newly_covered = 0
+                            _covered_entry_fills = []
+                            _covered_pos_yes = (
+                                self._positions[market_id]._yes_exposure()
+                                if market_id in self._positions else 0
+                            )
                             for _lf in _sync_ledger.get_fills_by_market(market_id) or []:
                                 _lf_id = getattr(_lf, "fill_id", None)
                                 _lf_ct = _fill_created_time_dt(_lf)
                                 if (
                                     _lf_id
-                                    and _lf_id not in self._applied_fill_ids
                                     and _lf_ct is not None
                                     and _lf_ct <= rest_sync_dt
                                 ):
-                                    self._applied_fill_ids[_lf_id] = replay_time()
-                                    _newly_covered += 1
+                                    if _lf_id not in self._applied_fill_ids:
+                                        self._applied_fill_ids[_lf_id] = replay_time()
+                                        _newly_covered += 1
+                                    _covered_entry_fills.append((_lf_ct, _lf))
                             if _newly_covered:
                                 logger.info(
                                     "[POSITION-CACHE-REST-COVERAGE] market=%s marked %d ledger "
                                     "fill(s) applied (covered by REST snapshot ts=%s)",
                                     market_id, _newly_covered, rest_sync_dt.isoformat(),
                                 )
+                            # 2026-10-28: A covered entry fill is provenance the
+                            # REST snapshot cannot carry.  Mirror the on_fill
+                            # covered-path migration: when the snapshot subsumed
+                            # the entry fill before the canonical fill event
+                            # arrived (or the event was never delivered at all),
+                            # the position is left with no durable parentage and
+                            # every exit attempt dies at the arbiter gate with
+                            # ``no_approved_attempt`` (KXDOGE15M-26OCT281300-00
+                            # rode a 6-lot NO to settlement past a +6c lock).
+                            # Restore linkage from the most recent covered fill
+                            # that opens the currently-held side — idempotent,
+                            # and it also repairs positions orphaned before
+                            # this fix.
+                            _covered_records = [f for _ct, f in _covered_entry_fills]
+                            _backfill_linkage_from_covered_fills(
+                                self._positions.get(market_id),
+                                _covered_records,
+                                _covered_pos_yes,
+                            )
+                            # 2026-10-28: the same race also stripped the
+                            # authorized net claim — without it the no-edge
+                            # tail-loss salvage stays suppressed under
+                            # LOSS_EXITS_ENABLED=0.  Restore the persisted
+                            # risk contract from the decision audit via the
+                            # fill's decision_trace_id.  Independent of the
+                            # linkage result: also covers positions whose
+                            # linkage arrived via the on_fill covered path.
+                            _backfill_entry_risk_contract(
+                                self._positions.get(market_id),
+                                _covered_records,
+                                _covered_pos_yes,
+                            )
                     except Exception as _cover_err:
                         logger.debug(
                             "[POSITION-CACHE-REST-COVERAGE] fill coverage marking failed for %s: %s",

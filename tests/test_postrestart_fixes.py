@@ -41,6 +41,17 @@ def _pf_env(monkeypatch):
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_P", "0.85")
     monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", "480")
     monkeypatch.delenv("MERID_PRICE_CAP_EXCEPT_BTC_NO", raising=False)
+    # 2026-10-27 NO-side mirror: production .env arms lane-scoped
+    # MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET} (98 for
+    # BTC/ETH/DOGE/SOL NO) which is consulted BEFORE the per-asset cap and
+    # would shadow the per-asset path these tests exercise.  Clear them so
+    # the audited per-asset cap binds as documented.
+    for _side in ("YES", "NO"):
+        for _asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            monkeypatch.delenv(
+                f"MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{_side}_{_asset}",
+                raising=False,
+            )
     monkeypatch.setattr(dr, "pinned_fav_cap_remaining", lambda *a, **k: 5)
     return monkeypatch
 
@@ -510,12 +521,14 @@ class TestSignalExitEvVeto:
         )
         assert ev.decision == EvDecision.BYPASS_EMERGENCY
 
-def test_maker_floor_default_is_90(monkeypatch):
-    """2026-10-24: maker LO default 82/76->90 on falsifying evidence —
-    the 76-89c favorite pocket settled ~50% vs ~80-89% breakeven, matching
-    published Kalshi crypto calibration (-22..-32pt overprice)."""
+def test_maker_floor_default_is_92(monkeypatch):
+    """2026-10-28: maker LO default 90->92 — the floor pocket itself was
+    the toxic zone at maker fills: post-10/24 cohort px<=91 ran 73% win /
+    -1405c over 82 contracts while px>=92 ran 100% / +611c over 103.
+    (Prior raise: 82/76->90 on 2026-10-24 after the 76-89c pocket settled
+    ~50% vs ~80-89% breakeven.)"""
     monkeypatch.delenv("MERID_PINNED_FAV_MAKER_LO", raising=False)
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
-    assert dr._pinned_fav_lo() == 90.0
+    assert dr._pinned_fav_lo() == 92.0
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "85")
     assert dr._pinned_fav_lo() == 85.0  # env override still binds
