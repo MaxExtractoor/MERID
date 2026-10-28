@@ -82,16 +82,62 @@ def _standard_error_response(
 
 # ── Lazy imports ──────────────────────────────────────────────────────
 
-def _loop():
-    try:
-        # Try 15m loop first
-        from merid.loop_15m import get_merid_loop_15m
-        return get_merid_loop_15m()
-    except ImportError:
-        # LEGACY REMOVAL: Fallback to legacy loop removed for 15m stack separation
-        # from merid.loop import get_merid_loop
-        # return get_merid_loop()
-        raise RuntimeError("15m loop not available and legacy loop fallback disabled for stack separation")
+def _loop(request: Request = None):
+    """Return the production ``Kalshi15mLoop``.
+
+    The real loop instance is stored on ``app.state`` by main_15m_lean.py
+    (``kalshi_15m_loop``, with ``loop_15m`` as a secondary alias).  There is no
+    module-level singleton accessor — the legacy ``get_merid_loop_15m`` path
+    was removed.  Returns ``None`` when the loop has not been started.
+    """
+    if request is not None:
+        loop = getattr(request.app.state, "kalshi_15m_loop", None)
+        if loop is not None:
+            return loop
+        loop = getattr(request.app.state, "loop_15m", None)
+        if loop is not None:
+            return loop
+    return None
+
+
+def _loop_status(loop) -> Dict[str, Any]:
+    """Truthful status dict for a loop object.
+
+    ``Kalshi15mLoop`` exposes ``summary()`` (dynamically bound); generic loop
+    objects may expose ``status()``.  Falls back to raw attributes and never
+    fabricates fields that do not exist.
+    """
+    if loop is None:
+        return {}
+    summary_fn = getattr(loop, "summary", None)
+    if callable(summary_fn):
+        try:
+            out = summary_fn()
+            if isinstance(out, dict):
+                return out
+        except Exception as exc:
+            logger.warning(f"loop.summary() failed: {exc}")
+    status_fn = getattr(loop, "status", None)
+    if callable(status_fn):
+        try:
+            out = status_fn()
+            if isinstance(out, dict):
+                return out
+        except Exception as exc:
+            logger.warning(f"loop.status() failed: {exc}")
+    return {
+        "running": getattr(loop, "is_running", getattr(loop, "_running", None)),
+        "tick": getattr(loop, "_tick", None),
+        "cycle_count": getattr(loop, "_cycle_count", None),
+        "error_count": getattr(loop, "_error_count", None),
+        "cadence_seconds": getattr(loop, "cadence_seconds", None),
+        "last_cycle_at": (
+            getattr(loop, "_last_cycle_at").isoformat()
+            if hasattr(getattr(loop, "_last_cycle_at", None), "isoformat")
+            else getattr(loop, "_last_cycle_at", None)
+        ),
+        "halted_due_to_drawdown": getattr(loop, "_halted_due_to_drawdown", None),
+    }
 
 def _guard():
     from merid.execution_guard import get_execution_guard
@@ -106,8 +152,16 @@ def _session():
     return get_operator_session()
 
 def _ws_feed():
-    from merid.signals.ws_price_feed import get_ws_feed_manager
-    return get_ws_feed_manager()
+    """WS feed manager accessor.  Returns None when the underlying module is
+    unavailable or broken (e.g. ``get_ws_feed_manager()`` raising NameError
+    from an undeclared singleton) so endpoints degrade to 'not connected'
+    instead of a 500."""
+    try:
+        from merid.signals.ws_price_feed import get_ws_feed_manager
+        return get_ws_feed_manager()
+    except Exception as exc:
+        logger.warning(f"ws_feed_manager unavailable: {exc}")
+        return None
 
 def _live_feeds():
     from merid.signals.live_feeds import get_live_feed_manager
@@ -117,11 +171,16 @@ def _live_feeds():
 # ── Loop status ───────────────────────────────────────────────────────
 
 @loop_api_router.get("/status")
-async def get_loop_status() -> Dict[str, Any]:
-    """Get MeridLoop running state, config, and metrics."""
+async def get_loop_status(request: Request) -> Dict[str, Any]:
+    """Get Kalshi15mLoop running state, config, and metrics."""
     def _fetch():
-        loop = _loop()
-        return loop.status()
+        loop = _loop(request)
+        if loop is None:
+            return {"running": False, "available": False,
+                    "error": "kalshi_15m_loop not initialized on app.state"}
+        out = _loop_status(loop)
+        out["available"] = True
+        return out
     result = await _with_timeout(_fetch, timeout=5.0, fallback={"running": False, "error": "Loop status timed out (5s)"})
     return result
 
@@ -187,7 +246,7 @@ def get_tick_log_summary() -> Dict[str, Any]:
 
 
 @loop_api_router.get("/execution/status")
-def get_execution_status() -> Dict[str, Any]:
+def get_execution_status(request: Request) -> Dict[str, Any]:
     """Execution loop status — running state, last tick, error count.
 
     ERROR HANDLING IMPROVEMENT: Specific exception handling.
@@ -196,17 +255,30 @@ def get_execution_status() -> Dict[str, Any]:
     - AttributeError: Missing required methods
     """
     try:
-        loop = _loop()
-        s = loop.status()
+        loop = _loop(request)
+        if loop is None:
+            return {"running": False, "available": False,
+                    "error": "kalshi_15m_loop not initialized on app.state"}
+        s = _loop_status(loop)
         guard = _guard()
         gs = guard.summary()
+        running = s.get("running")
+        if running is None:
+            running = getattr(loop, "is_running", getattr(loop, "_running", False))
         return {
-            "running": s.get("running", False),
-            "last_tick": s.get("last_tick"),
-            "tick_count": s.get("tick_count", 0),
+            "running": bool(running),
+            "last_tick": s.get("last_cycle_at") or s.get("last_tick"),
+            # Kalshi15mLoop counts scheduler ticks in `tick` and completed
+            # cycles in `cycle_count` — expose both, keep legacy key.
+            "tick_count": s.get("tick", s.get("tick_count", 0)),
+            "cycle_count": s.get("cycle_count", s.get("tick", 0)),
             "error_count": s.get("error_count", 0),
-            "kill_switch_active": gs.get("kill_switch_active", False),
-            "paused": s.get("paused", False),
+            "kill_switch_active": gs.get("global_kill_switch",
+                                        gs.get("kill_switch_active", False)),
+            # No pause state exists on Kalshi15mLoop — null, not fabricated.
+            "paused": s.get("paused"),
+            "halted_due_to_drawdown": s.get("halted_due_to_drawdown"),
+            "available": True,
         }
     except ImportError as e:
         logger.warning(f"execution_status_import_error: {e}")
@@ -337,22 +409,30 @@ def get_guard_verdicts(
     except ImportError as exc2:
         logger.debug(f"guard_verdicts consensus fallback disabled - consensus module deleted: {exc2}")
 
-    # Also include agent cycle scan verdicts
+    # Also include agent cycle scan verdicts (real LeanAgentGrid15m fields only)
     try:
         from merid.prediction.agent_grid_15m import get_agent_grid
         import datetime as _dt
         grid = get_agent_grid()
         _now = _dt.datetime.now(_dt.timezone.utc).isoformat()
-        for agent in grid.agents:
-            if agent.state.cycles_run > 0:
-                verdicts.append({
-                    "ts": _now,
-                    "ticker": f"{agent.config.assets[0]}/*" if agent.config.assets else "",
-                    "action": "scan",
-                    "allowed": True,
-                    "reason": f"{agent.config.name}: {agent.state.cycles_run} cycles, {agent.state.orders_placed} orders",
-                    "source": "agent_grid",
-                })
+        for agent in getattr(grid, "_agents", []) or []:
+            cfg = getattr(agent, "config", None)
+            name = getattr(cfg, "name", None) or "agent"
+            cd = getattr(agent, "_cycle_decision", None) or {}
+            if not isinstance(cd, dict):
+                cd = {}
+            ticker = cd.get("ticker") or ""
+            reason = cd.get("rejection_reason")
+            selected = cd.get("selected_side")
+            verdicts.append({
+                "ts": _now,
+                "ticker": ticker,
+                "action": "scan" if not selected else f"signal:{selected}",
+                "allowed": reason is None,
+                "reason": f"{name}: " + (f"veto:{reason}" if reason else
+                                        (f"selected {selected}" if selected else "scanning")),
+                "source": "agent_grid",
+            })
     except ImportError as e:
         logger.debug(f"guard_verdicts_agent_grid_import_error: {e}")
     except AttributeError as e:
@@ -591,14 +671,14 @@ async def get_live_readiness(request: Request) -> Dict[str, Any]:
     checks = {}
     ready = True
 
-    # Check loop running (prefer the actual Kalshi15mLoop from app.state;
-    # fall back to the legacy singleton accessor)
+    # Check loop running — the production Kalshi15mLoop lives on app.state;
+    # `is_running` is a property backed by `_running`.
     def _check_loop():
-        loop = getattr(request.app.state, "kalshi_15m_loop", None)
-        if loop is not None:
-            return bool(getattr(loop, "is_running", getattr(loop, "running", False)))
-        loop = _loop()
-        return loop.running if hasattr(loop, "running") else True
+        loop = _loop(request)
+        if loop is None:
+            return False
+        running = getattr(loop, "is_running", getattr(loop, "_running", None))
+        return bool(running) if running is not None else False
     loop_running = await _with_timeout(_check_loop, timeout=3.0, fallback=None)
     if loop_running is None:
         checks["loop_running"] = False

@@ -1,5 +1,5 @@
 /**
- * Sidebar Smoke Tests — validates that the 8-stage workflow sidebar renders
+ * Sidebar Smoke Tests — validates that the agent-centric sidebar renders
  * all expected nav items and fires onChange with the correct view key.
  */
 
@@ -26,9 +26,12 @@ jest.mock('../../context/KalshiModeContext', () => ({
   useKalshiMode: () => ({ data: null, isLive: false }),
 }));
 
-// Expected nav items in the current 8-View Architecture Sidebar implementation
-// (see Sidebar.tsx: tradingCore, swarmIntelligence, analytics, operatorSection, system)
+// Expected nav items in the agent-centric Sidebar implementation
+// (see Sidebar.tsx: agents, tradingCore, swarmIntelligence, analytics, operatorSection, system)
 const EXPECTED_ITEMS: Array<{ name: string; href: string }> = [
+  { name: 'Agent Wall', href: 'agent-wall' },
+  { name: 'Mission Control', href: 'mission-control' },
+  { name: 'Agent Detail', href: 'agent-detail' },
   { name: 'Dashboard', href: 'dashboard' },
   { name: 'Markets', href: 'kalshi-dashboard' },
   { name: 'Portfolio', href: 'kalshi-portfolio' },
@@ -42,7 +45,7 @@ const EXPECTED_ITEMS: Array<{ name: string; href: string }> = [
 ];
 
 const EXPECTED_SECTION_LABELS = [
-  'Trading', 'Swarm Intelligence', 'Analytics', 'Operator', 'System',
+  'Agents', 'Trading', 'Swarm Intelligence', 'Analytics', 'Operator', 'System',
 ];
 
 describe('Sidebar Smoke Tests', () => {
@@ -52,7 +55,7 @@ describe('Sidebar Smoke Tests', () => {
     mockOnChange.mockClear();
   });
 
-  it('renders all section headers for the 8-View Architecture', () => {
+  it('renders all section headers', () => {
     render(<Sidebar current="dashboard" onChange={mockOnChange} />);
     for (const label of EXPECTED_SECTION_LABELS) {
       const matches = screen.getAllByText(label);
@@ -76,7 +79,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it.skip('highlights the active item [SKIPPED - implementation changed]', () => {
-    render(<Sidebar current="protect" onChange={mockOnChange} />);
+    render(<Sidebar current="risk" onChange={mockOnChange} />);
     const riskButton = screen.getByText('Risk').closest('button');
     expect(riskButton).not.toBeNull();
     // Active item uses the red-accent bg (stage color "red")
@@ -84,7 +87,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it.skip('does not highlight non-active items [SKIPPED - implementation changed]', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
     const riskButton = screen.getByText('Risk').closest('button');
     expect(riskButton?.className).not.toMatch(/bg-red-500\/10/);
   });
@@ -123,7 +126,7 @@ describe('Sidebar Collapsed Mode', () => {
   });
 
   it.skip('shows tooltips when collapsed [SKIPPED - implementation changed]', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
     const buttons = screen.getAllByRole('button');
     const navButtons = buttons.filter(b => b.title && !b.title.toLowerCase().includes('sidebar'));
     expect(navButtons.length).toBe(EXPECTED_ITEMS.length);

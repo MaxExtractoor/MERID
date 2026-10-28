@@ -14,18 +14,28 @@
  * Data: System health, kill switch, key metrics, alerts (all from store)
  */
 
-import { useEffect, useState } from 'react';
-import { useKalshiStore, selectPortfolio, selectRisk, selectSystem, selectConnected } from '../store';
+import { useEffect, useRef, useState } from 'react';
+import { useKalshiStore, selectPortfolio, selectRisk, selectGrid, selectSystem, selectConnected } from '../store';
 import { LayoutDashboard, ShieldAlert, Activity, DollarSign, Briefcase, AlertTriangle } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui';
+import { ConfirmModal } from '../components/ConfirmModal';
+import { AGENT_ENDPOINTS, haltEntries, postJson, releaseEntries } from '../agents/api';
 import Kalshi15mAlignmentPanel from '../components/Kalshi15mAlignmentPanel';
 import Kalshi15mHealthPanel from '../components/Kalshi15mHealthPanel';
 
+// Kalshi kill-switch POST takes `activate` as a QUERY param (verified in
+// kalshi_api.py — the JSON body field `active` is ignored by FastAPI).
+const setKalshiKillSwitch = (activate: boolean) =>
+  postJson<Record<string, unknown>>(`${AGENT_ENDPOINTS.KILL_SWITCH}?activate=${activate}`);
+
 const Dashboard = () => {
   const refreshAll = useKalshiStore(state => state.refreshAll);
-  const [togglingKillSwitch, setTogglingKillSwitch] = useState(false);
+  const inFlightRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<null | { kind: 'activate' | 'reset' | 'halt' | 'release' }>(null);
 
   // Fetch initial data on mount (WebSocket disabled - using API polling)
   useEffect(() => {
@@ -40,13 +50,35 @@ const Dashboard = () => {
   // Select data from store
   const portfolio = useKalshiStore(selectPortfolio);
   const risk = useKalshiStore(selectRisk);
+  const grid = useKalshiStore(selectGrid);
   const system = useKalshiStore(selectSystem);
   const connected = useKalshiStore(selectConnected);
 
   // Derived metrics
   const positionsCount = portfolio.positions?.length || 0;
-  const agentsRunning = system.health.services?.agent_grid?.ok ? 5 : 0; // TODO: Get from grid slice
+  const agentsRunning = grid.agents?.filter(a => a.running).length || 0;
   const recentAlerts = risk.alerts?.slice(0, 5) || [];
+  const entryHalted = system.live?.entry_halted === true;
+
+  // Safety-critical mutations: synchronous in-flight guard + confirm + refresh.
+  const runAction = async (kind: 'activate' | 'reset' | 'halt' | 'release') => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    setActionError(null);
+    try {
+      if (kind === 'activate') await setKalshiKillSwitch(true);
+      else if (kind === 'reset') await setKalshiKillSwitch(false);
+      else if (kind === 'halt') await haltEntries('operator_halt');
+      else await releaseEntries();
+      await refreshAll(); // authoritative state after mutation
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      inFlightRef.current = false;
+      setBusy(false);
+    }
+  };
   
   // Per-asset metrics for 5-asset crypto stack
   const assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
@@ -158,46 +190,70 @@ const Dashboard = () => {
               Waiting for backend connection...
             </div>
           ) : (
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Badge variant={risk.kill_switch_active ? 'danger' : 'success'}>
-                  {risk.kill_switch_active ? 'ACTIVE' : 'INACTIVE'}
-                </Badge>
-                {risk.kill_switch_reason && (
-                  <span className="text-sm text-slate-400">{risk.kill_switch_reason}</span>
-                )}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Badge variant={risk.kill_switch_active ? 'danger' : 'success'}>
+                    {risk.kill_switch_active ? 'ACTIVE' : 'INACTIVE'}
+                  </Badge>
+                  {risk.kill_switch_reason && (
+                    <span className="text-sm text-slate-400">{risk.kill_switch_reason}</span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {risk.kill_switch_active ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setConfirmAction({ kind: 'reset' })}
+                      disabled={busy}
+                    >
+                      {busy ? 'Working...' : 'Reset Kill Switch'}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => setConfirmAction({ kind: 'activate' })}
+                      disabled={busy}
+                    >
+                      {busy ? 'Working...' : 'Activate Kill Switch'}
+                    </Button>
+                  )}
+                </div>
               </div>
-              <div className="flex gap-2">
-                {risk.kill_switch_active ? (
-                  <Button 
-                    variant="outline" 
-                    size="sm"
-                    onClick={() => {
-                      if (togglingKillSwitch) return;
-                      setTogglingKillSwitch(true);
-                      // TODO: Implement kill switch reset API call
-                      setTimeout(() => setTogglingKillSwitch(false), 500);
-                    }}
-                    disabled={togglingKillSwitch}
-                  >
-                    {togglingKillSwitch ? 'Resetting...' : 'Reset Kill Switch'}
-                  </Button>
-                ) : (
-                  <Button 
-                    variant="danger" 
-                    size="sm"
-                    onClick={() => {
-                      if (togglingKillSwitch) return;
-                      setTogglingKillSwitch(true);
-                      // TODO: Implement kill switch activation API call
-                      setTimeout(() => setTogglingKillSwitch(false), 500);
-                    }}
-                    disabled={togglingKillSwitch}
-                  >
-                    {togglingKillSwitch ? 'Activating...' : 'Activate Kill Switch'}
-                  </Button>
-                )}
+              <div className="flex items-center justify-between border-t border-slate-700/60 pt-3">
+                <div className="flex items-center gap-3">
+                  <Badge variant={entryHalted ? 'warning' : 'success'}>
+                    {system.live?.state ?? 'UNKNOWN'}
+                  </Badge>
+                  <span className="text-sm text-slate-400">Live entries</span>
+                </div>
+                <div className="flex gap-2">
+                  {entryHalted ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setConfirmAction({ kind: 'release' })}
+                      disabled={busy}
+                    >
+                      {busy ? 'Working...' : 'Release Entries'}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => setConfirmAction({ kind: 'halt' })}
+                      disabled={busy}
+                    >
+                      {busy ? 'Working...' : 'Halt Entries'}
+                    </Button>
+                  )}
+                </div>
               </div>
+              {actionError && (
+                <div className="text-xs text-red-400 break-words">Error: {actionError}</div>
+              )}
             </div>
           )}
         </CardContent>
@@ -290,6 +346,33 @@ const Dashboard = () => {
           )}
         </CardContent>
       </Card>
+
+      <ConfirmModal
+        isOpen={confirmAction !== null}
+        title={
+          confirmAction?.kind === 'activate' ? 'Activate Kill Switch'
+            : confirmAction?.kind === 'reset' ? 'Reset Kill Switch'
+            : confirmAction?.kind === 'halt' ? 'Halt Live Entries'
+            : 'Release Live Entries'
+        }
+        message={
+          confirmAction?.kind === 'activate'
+            ? 'Activate the Kalshi kill switch? This halts all trading immediately.'
+            : confirmAction?.kind === 'reset'
+              ? 'Reset the kill switch? Trading remains subject to runtime halt gates.'
+              : confirmAction?.kind === 'halt'
+                ? 'Halt new live entries? Exits and cancellations remain active.'
+                : 'Release live entries? Entries resume only if all safety gates pass.'
+        }
+        confirmText="Confirm"
+        confirmVariant={confirmAction?.kind === 'activate' || confirmAction?.kind === 'halt' ? 'danger' : 'primary'}
+        onConfirm={() => {
+          const kind = confirmAction?.kind;
+          setConfirmAction(null);
+          if (kind) void runAction(kind);
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 };

@@ -33,6 +33,14 @@ export const Card = React.memo(function Card({
   padding = 'md',
   onClick 
 }: CardProps) {
+  const handleKeyDown = onClick
+    ? (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }
+    : undefined;
   return (
     <div 
       className={`
@@ -43,6 +51,9 @@ export const Card = React.memo(function Card({
         ${className}
       `}
       onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
     >
       {children}
     </div>

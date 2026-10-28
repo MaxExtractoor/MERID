@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Briefcase, Gauge, Activity, Sliders, Rocket, FileText, Crosshair, Award } from '../ui/icons';
+import { Search, ArrowRight, LayoutDashboard, Monitor, Settings, Briefcase, Gauge, FileText, Crosshair, Globe, Grid, Activity } from '../ui/icons';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -13,38 +13,30 @@ interface CommandItem {
   legacy?: boolean;
 }
 
+// Only views present in App.tsx VIEW_COMPONENTS — dead ids removed.
 const COMMANDS: CommandItem[] = [
-  // Stage 1: Discover (Consolidated - unified view with tabs)
-  { id: 'discover', label: 'Discover Markets', section: 'Discover', icon: Search, keywords: ['kalshi', 'markets', 'catalog', 'discovery', 'trade', 'all', 'universe', 'trending', 'focus'] },
-  
-  // Stage 2: Analyze
-  { id: 'analyze-sentiment', label: 'Sentiment', section: 'Analyze', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
-  { id: 'analyze-vol', label: 'Vol & ATR', section: 'Analyze', icon: Gauge, keywords: ['volatility', 'atr', 'sizing', 'kelly', 'sharpe'] },
-  
-  // Stage 3: Consensus
-  { id: 'consensus-performance', label: 'Performance', section: 'Consensus', icon: Award, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
-  { id: 'consensus-calibration', label: 'Calibration', section: 'Consensus', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'accuracy'] },
-  
-  // Stage 4: Size (Consolidated - unified view with tabs)
-  { id: 'size', label: 'Size & Bankroll', section: 'Size', icon: Sliders, keywords: ['bankroll', 'capital', 'equity', 'balance', 'lane', 'timeframe', 'sizing', 'kelly', 'risk', 'allocation'] },
-  
-  // Stage 5: Execute (Consolidated - unified view with tabs)
-  { id: 'execute', label: 'Execute Terminal', section: 'Execute', icon: Terminal, keywords: ['terminal', 'trade', 'orderbook', 'ticket', 'execute', 'orders', 'resting', 'cancel', 'positions', 'holdings', 'exposure'] },
-  
-  // Stage 6: Monitor (Consolidated - unified view with tabs)
-  { id: 'monitor', label: 'Monitor Portfolio', section: 'Monitor', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'returns', 'history', 'profit', 'loss', 'health', 'status', 'diagnostics'] },
-  
-  // Stage 7: Promote (Consolidated - unified view with tabs)
-  { id: 'promote', label: 'Promote Pipeline', section: 'Promote', icon: Rocket, keywords: ['pipeline', 'promote', 'paper', 'shadow', 'live', 'deployment', 'grid', 'agents', 'ladder'] },
-  
-  // Stage 8: Protect (Consolidated - unified view with tabs)
-  { id: 'protect', label: 'Protect Risk Center', section: 'Protect', icon: ShieldAlert, keywords: ['risk', 'alerts', 'exposure', 'limits', 'kill', 'halt', 'safety', 'emergency'] },
-  
+  // Agents
+  { id: 'agent-wall', label: 'Agent Wall', section: 'Agents', icon: Grid, keywords: ['agents', 'fleet', 'btc', 'eth', 'sol', 'xrp', 'doge', 'wall', 'home'] },
+  { id: 'mission-control', label: 'Mission Control', section: 'Agents', icon: Activity, keywords: ['mission', 'wallboard', 'lanes', 'matrix', 'heatmap', 'ops'] },
+  { id: 'agent-detail', label: 'Agent Detail', section: 'Agents', icon: Crosshair, keywords: ['agent', 'detail', 'asset', 'book', 'depth', 'gates', 'funnel'] },
+
+  // Trading
+  { id: 'dashboard', label: 'Dashboard', section: 'Trading', icon: LayoutDashboard, keywords: ['home', 'overview', 'summary', 'health', 'kill', 'switch', 'balance', 'pnl'] },
+  { id: 'trade', label: 'Trade', section: 'Trading', icon: Monitor, keywords: ['terminal', 'order', 'ticket', 'execute', 'markets', '15m', 'orderbook', 'positions', 'orders', 'cancel'] },
+  { id: 'monitor', label: 'Monitor', section: 'Trading', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'history', 'profit', 'loss', 'health'] },
+  { id: 'grid', label: 'Agent Grid', section: 'Trading', icon: Grid, keywords: ['grid', 'agents', 'btc', 'eth', 'sol', 'xrp', 'doge', 'swarm'] },
+
+  // Analytics
+  { id: 'risk', label: 'Risk', section: 'Analytics', icon: Gauge, keywords: ['risk', 'alerts', 'exposure', 'limits', 'drawdown', 'kill', 'halt', 'safety', 'emergency'] },
+  { id: 'calibration', label: 'Calibration', section: 'Analytics', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'cell', 'edge', 'accuracy'] },
+
+  // Legacy deep-link views (still mounted in VIEW_COMPONENTS)
+  { id: 'kalshi-dashboard', label: 'Kalshi Markets', section: 'Kalshi', icon: Globe, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
+  { id: 'kalshi-portfolio', label: 'Kalshi Portfolio', section: 'Kalshi', icon: Briefcase, keywords: ['kalshi', 'portfolio', 'positions', 'holdings'] },
+
   // System
-  { id: 'overview', label: 'Overview', section: 'System', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
-  { id: 'operator', label: 'Operator', section: 'System', icon: Sliders, keywords: ['ops', 'control', 'status', 'operator', 'orchestrator'] },
-  { id: 'logs', label: 'Logs', section: 'System', icon: FileText, keywords: ['log', 'error', 'debug'] },
-  { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme'] },
+  { id: 'logs', label: 'Logs', section: 'System', icon: FileText, keywords: ['log', 'error', 'debug', 'tick'] },
+  { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme', 'state'] },
 ];
 
 interface CommandPaletteProps {

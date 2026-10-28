@@ -3,11 +3,10 @@ import { Search, Menu, Sun, Moon, Settings } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
-import { useKalshiMode } from '../context/KalshiModeContext';
+import { useKalshiStore, selectSystem } from '../store';
 import type { View } from '../types/views';
 import LiveNotifications from './LiveNotifications';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
-import WebSocketIndicator from './WebSocketIndicator';
 
 export interface TopBarProps {
   onMenuClick: () => void;
@@ -15,7 +14,7 @@ export interface TopBarProps {
   onOpenSearch?: () => void;
 }
 
-function TopBar({ onMenuClick }: TopBarProps) {
+function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
 
   const { data: pnlData } = useApiData<{ daily_pnl_usd?: number }>(
@@ -26,7 +25,12 @@ function TopBar({ onMenuClick }: TopBarProps) {
     API_ENDPOINTS.KALSHI_BALANCE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
-  const { isLive } = useKalshiMode();
+  // Honest live-entry state from the store — populated by the real
+  // /api/v1/live-runtime-state endpoint, not the legacy mode context.
+  const system = useKalshiStore(selectSystem);
+  const liveState = system.live?.state ?? null;
+  const isLive = liveState === 'LIVE_ENTRIES_ENABLED';
+  const entriesHalted = liveState === 'LIVE_ENTRIES_HALTED';
 
   const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
   const pnlPositive = dailyPnl >= 0;
@@ -49,7 +53,7 @@ function TopBar({ onMenuClick }: TopBarProps) {
 
         {/* MERID Logo & Brand */}
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/50 animate-glow">
+          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/50">
             <span className="text-white font-bold text-sm">M</span>
           </div>
           <div className="hidden lg:block">
@@ -60,17 +64,19 @@ function TopBar({ onMenuClick }: TopBarProps) {
           </div>
         </div>
 
-        {/* Environment badge */}
+        {/* Environment badge — truthful live runtime state */}
         <div className="flex items-center gap-3">
           <span className={`px-3 py-1 text-xs font-bold rounded-full shadow-lg animate-pulse-slow ${
             isLive
               ? 'text-red-400 bg-gradient-to-r from-red-500/20 to-rose-500/20 border border-red-400/50 shadow-red-500/30'
-              : 'text-amber-400 bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/50 shadow-amber-500/30'
+              : entriesHalted
+                ? 'text-amber-400 bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/50 shadow-amber-500/30'
+                : 'text-slate-400 bg-slate-700/40 border border-slate-500/50'
           }`}>
             <span className={`inline-block w-2 h-2 rounded-full mr-1.5 animate-pulse ${
-              isLive ? 'bg-red-400' : 'bg-amber-400'
+              isLive ? 'bg-red-400' : entriesHalted ? 'bg-amber-400' : 'bg-slate-400'
             }`}></span>
-            {isLive ? 'LIVE' : 'PAPER'}
+            {isLive ? 'LIVE' : entriesHalted ? 'ENTRIES HALTED' : 'STATE UNKNOWN'}
           </span>
           
           {/* Kalshi Balance + Daily P&L */}
@@ -93,7 +99,7 @@ function TopBar({ onMenuClick }: TopBarProps) {
         </div>
       </div>
 
-      {/* Center - Search */}
+      {/* Center - Search (opens command palette) */}
       <div className="hidden md:block flex-1 max-w-md mx-8">
         <div className="relative group">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-blue-400 transition-colors" />
@@ -101,16 +107,19 @@ function TopBar({ onMenuClick }: TopBarProps) {
             id="global-search"
             name="globalSearch"
             type="text"
-            placeholder="Search symbols, commands, or actions..."
-            className="w-full pl-10 pr-4 py-2.5 bg-slate-800/50 border border-slate-700/50 rounded-lg text-sm text-slate-200 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:bg-slate-800/70 focus:shadow-lg focus:shadow-blue-500/20 transition-all"
+            readOnly
+            onClick={() => onOpenSearch?.()}
+            onFocus={() => onOpenSearch?.()}
+            placeholder="Search symbols, commands, or actions...  (Ctrl+K)"
+            className="w-full pl-10 pr-4 py-2.5 bg-slate-800/50 border border-slate-700/50 rounded-lg text-sm text-slate-200 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:bg-slate-800/70 focus:shadow-lg focus:shadow-blue-500/20 transition-all cursor-pointer"
           />
         </div>
       </div>
 
       {/* Right side */}
       <div className="flex items-center gap-2">
-        {/* WebSocket Indicator */}
-        <WebSocketIndicator />
+        {/* (WebSocketIndicator removed — no WS router exists; backend
+            connectivity is shown by ConnectionStatusIndicator below.) */}
 
         {/* Theme toggle */}
         <button type="button"
@@ -132,7 +141,12 @@ function TopBar({ onMenuClick }: TopBarProps) {
         <LiveNotifications />
 
         {/* Settings */}
-        <button type="button" className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105" title="Settings" aria-label="Settings">
+        <button type="button"
+          onClick={() => onNavigate?.('settings')}
+          className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105"
+          title="Settings"
+          aria-label="Settings"
+        >
           <Settings className="w-5 h-5 text-slate-300" />
         </button>
 

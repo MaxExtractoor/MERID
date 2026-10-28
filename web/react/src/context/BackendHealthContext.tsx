@@ -38,9 +38,9 @@ export const BackendHealthContext = createContext<BackendHealthState>({
   lastSuccessAt: null,
   nextRetryAt: null,
   consecutiveFailures: 0,
-  probeNow: () => {},
-  reportSuccess: () => {},
-  reportFailure: () => {},
+  probeNow: () => undefined,
+  reportSuccess: () => undefined,
+  reportFailure: () => undefined,
 });
 
 // ── Shared singleton state so hooks outside the React tree can read it ──
@@ -101,7 +101,7 @@ export const BackendHealthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // ── Schedule helper (ref-stable, no useCallback needed) ──
   // Uses a ref so runProbe can call it without a circular dependency.
-  const scheduleProbeRef = useRef<() => void>(() => {});
+  const scheduleProbeRef = useRef<() => void>(() => undefined);
 
   // ── Probe function ──
   // Stable via ref indirection for scheduleProbe; no deps required.

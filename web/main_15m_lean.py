@@ -1298,7 +1298,9 @@ if loop_router is not None:
 if spot_router is not None:
     app.include_router(spot_router, prefix="/api/v1")
 if auth_router is not None:
-    app.include_router(auth_router, prefix="/api/v1")
+    # auth.py already declares prefix="/api/v1/auth"; adding "/api/v1" here
+    # produced /api/v1/api/v1/auth/* (double-prefix collision).
+    app.include_router(auth_router)
 if health_snapshot_router is not None:
     app.include_router(health_snapshot_router)
 

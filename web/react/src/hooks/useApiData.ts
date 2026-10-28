@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { API_BASE_URL, AUTH_TOKEN_KEY } from "../config/constants";
+import { apiUrl } from "../config/apiBase";
 
 export interface UseApiDataOptions<T> {
   pollingInterval?: number;
@@ -75,11 +76,9 @@ export function useApiData<T>(
     setError(null);
 
     try {
-      // Prepend API_BASE_URL unless endpoint is already absolute or empty
-      let url =
-        endpoint && !endpoint.startsWith("http")
-          ? `${API_BASE_URL}${endpoint}`
-          : endpoint;
+      // Canonical URL building via apiUrl(): same-origin when API_BASE is '',
+      // absolute http(s) endpoints pass through untouched.
+      let url = endpoint ? apiUrl(endpoint) : endpoint;
 
       // Append query params if provided — filter out undefined values
       const currentQuery = queryRef.current;

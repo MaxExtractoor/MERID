@@ -26,7 +26,7 @@ export function formatTs(timestamp: number | Date | string): string {
 /**
  * Format USD amount with proper formatting
  */
-export function fmtUsd(amount: number | string, decimals: number = 2): string {
+export function fmtUsd(amount: number | string, decimals = 2): string {
   const num = typeof amount === 'string' ? parseFloat(amount) : amount;
   
   if (isNaN(num)) return '$0.00';
@@ -42,7 +42,7 @@ export function fmtUsd(amount: number | string, decimals: number = 2): string {
 /**
  * Format percentage
  */
-export function fmtPct(value: number, decimals: number = 2): string {
+export function fmtPct(value: number, decimals = 2): string {
   return `${(value * 100).toFixed(decimals)}%`;
 }
 
@@ -80,7 +80,7 @@ export function getRelativeTime(timestamp: number | Date): string {
 /**
  * Check if data is stale based on age
  */
-export function isDataStale(lastUpdated: number | Date, thresholdMs: number = 30000): boolean {
+export function isDataStale(lastUpdated: number | Date, thresholdMs = 30000): boolean {
   const time = typeof lastUpdated === 'number' ? lastUpdated : lastUpdated.getTime();
   return Date.now() - time > thresholdMs;
 }

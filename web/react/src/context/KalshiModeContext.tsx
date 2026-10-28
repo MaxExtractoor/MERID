@@ -20,7 +20,7 @@ interface KalshiModeContextValue {
   wsKillAt: number | null;
 }
 
-const _noop = () => {};
+const _noop = () => undefined;
 
 const KalshiModeContext = createContext<KalshiModeContextValue>({
   data: null,

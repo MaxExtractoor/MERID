@@ -64,6 +64,14 @@ export const MetricCard = React.memo(function MetricCard({
     );
   }
   
+  const handleKeyDown = onClick
+    ? (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }
+    : undefined;
   return (
     <div 
       className={`
@@ -73,6 +81,9 @@ export const MetricCard = React.memo(function MetricCard({
         ${className}
       `}
       onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
     >
       <div className="flex items-start justify-between">
         <div>

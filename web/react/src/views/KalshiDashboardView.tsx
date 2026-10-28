@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { API_ENDPOINTS } from "../config/constants";
+import { apiUrl } from "../config/apiBase";
 
 export default function KalshiDashboardView() {
   const [markets, setMarkets] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(`${API_ENDPOINTS.KALSHI_MARKETS}`)
+    fetch(apiUrl(API_ENDPOINTS.KALSHI_MARKETS))
       .then((r) => r.json())
       .then((data) => setMarkets(data?.markets || []))
       .catch(() => setMarkets([]));

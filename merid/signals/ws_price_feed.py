@@ -352,7 +352,7 @@ WebSocketPriceFeed = CoinbasePriceFeed
 
 # ── Singleton ─────────────────────────────────────────────────────────
 
-_feed: Optional[WebSocketPriceFeed] = None
+_ws_mgr: Optional[WSFeedManager] = None
 # LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
 # Single-threaded FastAPI startup doesn't need lock protection
 

@@ -6,54 +6,155 @@
  * Content:
  * - Market discovery (15m crypto markets only)
  * - Order entry (trade ticket)
- * - Orderbook (real-time)
- * - Orders management (resting, filled, cancelled)
+ * - Orders management (resting + cancel, backed by /api/v1/kalshi/orders)
  * - Positions summary (exposure, unrealized PnL)
  * 
- * Data: Markets, orders, positions (from store)
- * 
- * TODO: Integrate with store once orders/positions are available via WebSocket
+ * Data: Markets/positions/orders — all from verified backend endpoints.
  */
 
-import { useState } from 'react';
-import { useKalshiStore, selectPortfolio } from '../store';
+import { useEffect, useRef, useState } from 'react';
+import { useKalshiStore, selectPortfolio, selectSystem } from '../store';
 import { Monitor, Search, Briefcase, ClipboardList } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
-import { API_BASE_URL } from '../config/constants';
+import { Button } from '../ui';
+import { apiUrl } from '../config/apiBase';
 import { useApiQuery } from '../hooks/useTanStackQuery';
+import { ConfirmModal } from '../components/ConfirmModal';
 import KalshiTradeTicket from '../components/KalshiTradeTicket';
+
+// Real market row shape from GET /api/v1/kalshi/markets (verified in kalshi_api.py).
+interface MarketOutcome {
+  name?: string;
+  id?: string;
+  price?: number | null;
+  bid?: number | null;
+  ask?: number | null;
+}
 
 interface KalshiMarket {
   ticker: string;
-  title: string;
-  subtitle: string;
-  close_time: string;
-  yes_price: number;
-  no_price: number;
-  volume: number;
+  question: string;
+  category?: string;
+  asset?: string;
+  timeframe?: string;
+  market_type?: string;
+  active?: boolean;
+  volume?: number;
+  expires_at?: string | null;
+  minutes_to_expiry?: number | null;
+  outcomes?: MarketOutcome[];
 }
+
+interface OrderRow {
+  order_id: string;
+  ticker: string;
+  side?: string;
+  size?: number;
+  price?: number;      // dollars (0-1)
+  filled?: number;
+  remaining?: number | null;
+  status?: string;
+  created_at?: string | null;
+}
+
+const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+// 15m tickers look like KXBTC15M-... — match case-insensitively on the ticker
+// itself plus structured asset/timeframe fields when present.
+const is15mCrypto = (m: KalshiMarket): boolean => {
+  const tickerHit = /15m/i.test(m.ticker ?? '');
+  const tfHit = String(m.timeframe ?? '').toLowerCase() === '15m';
+  const mtHit = /15m/i.test(String(m.market_type ?? ''));
+  const assetHit = m.asset
+    ? ASSETS.includes(m.asset.toUpperCase())
+    : ASSETS.some(a => (m.ticker ?? '').toUpperCase().includes(a));
+  return (tickerHit || tfHit || mtHit) && assetHit;
+};
+
+const outcomePrice = (m: KalshiMarket, name: 'yes' | 'no'): number => {
+  const o = m.outcomes?.find(x => (x.name ?? x.id ?? '').toLowerCase() === name);
+  const p = o?.price;
+  return typeof p === 'number' && Number.isFinite(p) ? p : name === 'yes' ? 0.5 : 0.5;
+};
 
 const Trade = () => {
   const portfolio = useKalshiStore(selectPortfolio);
+  const system = useKalshiStore(selectSystem);
+  const refreshAll = useKalshiStore(s => s.refreshAll);
   const positions = portfolio.positions;
   const [selectedMarket, setSelectedMarket] = useState<KalshiMarket | null>(null);
   const [activeTab, setActiveTab] = useState<'markets' | 'positions' | 'orders'>('markets');
 
+  // Store refresh — positions/orders/system come from refreshAll probes.
+  useEffect(() => {
+    void refreshAll();
+    const interval = setInterval(() => { void refreshAll(); }, 30_000);
+    return () => clearInterval(interval);
+  }, [refreshAll]);
+
+  // Order-management state (guarded mutations).
+  const cancelRef = useRef(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState<
+    { kind: 'single'; orderId: string; ticker: string } | { kind: 'all' } | null
+  >(null);
+
   // Fetch Kalshi market catalog for 15m crypto using TanStack Query
   const { data: marketsData, isLoading, error } = useApiQuery<{ markets: KalshiMarket[] }>(
-    `${API_BASE_URL}/api/v1/kalshi/markets`,
+    apiUrl('/api/v1/kalshi/markets'),
     {
       refetchInterval: 30_000, // Refresh every 30 seconds
       staleTime: 10_000,
     }
   );
 
+  // Orders — real resting/working orders from the venue.
+  const {
+    data: ordersData,
+    error: ordersError,
+    refetch: refetchOrders,
+  } = useApiQuery<{ count: number; orders: OrderRow[] }>(
+    apiUrl('/api/v1/kalshi/orders'),
+    { refetchInterval: 15_000, staleTime: 5_000 }
+  );
+  const orders = ordersData?.orders ?? [];
+
+  const runCancel = async (target: { kind: 'single'; orderId: string } | { kind: 'all' }) => {
+    if (cancelRef.current) return;
+    cancelRef.current = true;
+    setCancelBusy(true);
+    setCancelError(null);
+    try {
+      const url = target.kind === 'single'
+        ? apiUrl(`/api/v1/kalshi/orders/${encodeURIComponent(target.orderId)}`)
+        : apiUrl('/api/v1/kalshi/orders');
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const detail = (body as { detail?: unknown }).detail;
+        throw new Error(
+          typeof detail === 'string' ? detail : `Cancel failed (HTTP ${res.status})`
+        );
+      }
+      await refetchOrders();
+      await refreshAll();
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : String(e));
+    } finally {
+      cancelRef.current = false;
+      setCancelBusy(false);
+    }
+  };
+
   // Filter for 15m crypto markets (BTC, ETH, SOL, XRP, DOGE)
-  const markets = marketsData?.markets?.filter((m: KalshiMarket) => 
-    ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].some(asset => m.ticker.includes(asset)) &&
-    m.ticker.includes('15m')
-  ) || [];
+  const markets = (marketsData?.markets ?? []).filter((m: KalshiMarket) => is15mCrypto(m) && m.active !== false);
+
+  const expiryLabel = (m: KalshiMarket): string => {
+    if (m.minutes_to_expiry != null) return `${Math.round(m.minutes_to_expiry)}m`;
+    if (m.expires_at) return new Date(m.expires_at).toLocaleTimeString();
+    return '—';
+  };
 
   return (
     <div className="space-y-6">
@@ -104,7 +205,7 @@ const Trade = () => {
           }`}
         >
           <ClipboardList className="w-4 h-4" aria-hidden="true" />
-          Orders
+          Orders {orders.length > 0 && <span className="text-xs text-slate-500">({orders.length})</span>}
         </button>
       </div>
 
@@ -134,7 +235,7 @@ const Trade = () => {
                         <th className="text-right p-3" scope="col">Yes Price</th>
                         <th className="text-right p-3" scope="col">No Price</th>
                         <th className="text-right p-3" scope="col">Volume</th>
-                        <th className="text-right p-3" scope="col">Closes</th>
+                        <th className="text-right p-3" scope="col">Expires</th>
                         <th className="text-right p-3" scope="col">Action</th>
                       </tr>
                     </thead>
@@ -143,13 +244,13 @@ const Trade = () => {
                         <tr key={market.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                           <td className="p-3">
                             <div className="font-medium text-white">{market.ticker}</div>
-                            <div className="text-xs text-slate-500">{market.title}</div>
+                            <div className="text-xs text-slate-500">{market.question}</div>
                           </td>
-                          <td className="p-3 text-right font-mono text-green-400">{(market.yes_price * 100).toFixed(0)}¢</td>
-                          <td className="p-3 text-right font-mono text-red-400">{(market.no_price * 100).toFixed(0)}¢</td>
-                          <td className="p-3 text-right">{market.volume}</td>
+                          <td className="p-3 text-right font-mono text-green-400">{(outcomePrice(market, 'yes') * 100).toFixed(0)}¢</td>
+                          <td className="p-3 text-right font-mono text-red-400">{(outcomePrice(market, 'no') * 100).toFixed(0)}¢</td>
+                          <td className="p-3 text-right">{market.volume ?? '—'}</td>
                           <td className="p-3 text-right text-xs text-slate-400">
-                            {new Date(market.close_time).toLocaleTimeString()}
+                            {expiryLabel(market)}
                           </td>
                           <td className="p-3 text-right">
                             <button
@@ -186,14 +287,19 @@ const Trade = () => {
               <CardContent>
                 <KalshiTradeTicket
                   ticker={selectedMarket.ticker}
-                  question={selectedMarket.title}
-                  outcomes={[
-                    { id: 'yes', name: 'Yes', price: selectedMarket.yes_price, bid: null, ask: null },
-                    { id: 'no', name: 'No', price: selectedMarket.no_price, bid: null, ask: null }
-                  ]}
-                  mode="paper"
+                  question={selectedMarket.question}
+                  outcomes={(selectedMarket.outcomes ?? []).map(o => ({
+                    id: o.id ?? o.name ?? '',
+                    name: o.name ?? o.id ?? '',
+                    price: o.price ?? 0.5,
+                    bid: o.bid ?? null,
+                    ask: o.ask ?? null,
+                  }))}
+                  mode={system.mode}
+                  lastUpdated={marketsData ? Date.now() : undefined}
                   onOrderPlaced={() => {
-                    // Refresh positions after order
+                    void refreshAll();
+                    void refetchOrders();
                   }}
                 />
               </CardContent>
@@ -227,7 +333,7 @@ const Trade = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.map((pos: any, idx: number) => (
+                    {positions.map((pos, idx: number) => (
                       <tr key={pos.ticker || idx} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                         <td className="p-3">
                           <div className="font-medium text-white">{pos.ticker}</div>
@@ -261,17 +367,108 @@ const Trade = () => {
       {activeTab === 'orders' && (
         <Card>
           <CardHeader>
-            <CardTitle>Orders</CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle>Orders</CardTitle>
+              {orders.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={cancelBusy}
+                  onClick={() => setConfirmCancel({ kind: 'all' })}
+                  title="Cancel all resting orders (backend may reject batch cancel — error shown inline)"
+                >
+                  Cancel All
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="text-center py-8 text-slate-500">
-              <ClipboardList className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>Order management coming soon</p>
-              <p className="text-sm mt-2">This tab will show resting, filled, and cancelled orders.</p>
-            </div>
+            {cancelError && (
+              <div className="mb-3 text-xs text-red-400 break-words" role="alert">
+                Error: {cancelError}
+              </div>
+            )}
+            {ordersError ? (
+              <div className="text-center py-8 text-red-400" role="alert">{String(ordersError)}</div>
+            ) : orders.length === 0 ? (
+              <div className="text-center py-8 text-slate-500">
+                <ClipboardList className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                <p>No open orders</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-500 text-xs uppercase">
+                      <th className="text-left p-3">Order</th>
+                      <th className="text-left p-3">Side</th>
+                      <th className="text-right p-3">Size</th>
+                      <th className="text-right p-3">Price</th>
+                      <th className="text-right p-3">Filled/Remaining</th>
+                      <th className="text-left p-3">Status</th>
+                      <th className="text-right p-3">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.map((o: OrderRow) => (
+                      <tr key={o.order_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        <td className="p-3">
+                          <div className="font-medium text-white">{o.ticker}</div>
+                          <div className="text-xs text-slate-500 font-mono">{o.order_id.slice(0, 18)}</div>
+                        </td>
+                        <td className="p-3">
+                          <Badge variant={o.side === 'yes' ? 'success' : 'danger'}>
+                            {(o.side ?? '?').toUpperCase()}
+                          </Badge>
+                        </td>
+                        <td className="p-3 text-right">{o.size ?? '—'}</td>
+                        <td className="p-3 text-right font-mono">
+                          {o.price != null ? `${Math.round(o.price * 100)}¢` : '—'}
+                        </td>
+                        <td className="p-3 text-right">
+                          {o.filled ?? 0}/{o.remaining ?? '—'}
+                        </td>
+                        <td className="p-3 text-xs text-slate-400">{o.status ?? '—'}</td>
+                        <td className="p-3 text-right">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={cancelBusy}
+                            onClick={() => setConfirmCancel({ kind: 'single', orderId: o.order_id, ticker: o.ticker })}
+                          >
+                            Cancel
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
+
+      <ConfirmModal
+        isOpen={confirmCancel !== null}
+        title={confirmCancel?.kind === 'all' ? 'Cancel All Orders' : 'Cancel Order'}
+        message={
+          confirmCancel?.kind === 'all'
+            ? `Cancel ALL ${orders.length} resting order(s)?`
+            : confirmCancel?.kind === 'single'
+              ? `Cancel order on ${confirmCancel.ticker}?`
+              : ''
+        }
+        confirmText="Cancel Order"
+        confirmVariant="danger"
+        onConfirm={() => {
+          const target = confirmCancel;
+          setConfirmCancel(null);
+          if (target?.kind === 'single') void runCancel({ kind: 'single', orderId: target.orderId });
+          else if (target?.kind === 'all') void runCancel({ kind: 'all' });
+        }}
+        onCancel={() => setConfirmCancel(null)}
+      />
     </div>
   );
 };

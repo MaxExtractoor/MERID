@@ -23,6 +23,7 @@ interface LiveNotification {
 
 export default function LiveNotifications() {
   const [notifications, setNotifications] = useState<LiveNotification[]>([]);
+  const [unavailable, setUnavailable] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
@@ -57,6 +58,9 @@ export default function LiveNotifications() {
       });
       if (!response.ok) {
         setIsConnected(false);
+        // Endpoint not mounted in the production app — hide the bell rather
+        // than show an always-empty feed that implies a working feature.
+        if (response.status === 404) setUnavailable(true);
         return;
       }
       const data = await response.json();
@@ -129,6 +133,8 @@ export default function LiveNotifications() {
     if (hours < 24) return `${hours}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
   };
+
+  if (unavailable) return null;
 
   return (
     <div className="relative">

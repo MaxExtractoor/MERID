@@ -141,6 +141,14 @@ export const StatusIndicator = React.memo(function StatusIndicator({
     <div
       className={`flex items-center gap-2 ${colors.bg} ${colors.border} border rounded-lg px-2.5 py-1.5 ${className}`}
       onClick={onClick}
+      onKeyDown={onClick
+        ? (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onClick();
+            }
+          }
+        : undefined}
       role={onClick ? 'button' : 'status'}
       tabIndex={onClick ? 0 : undefined}
     >

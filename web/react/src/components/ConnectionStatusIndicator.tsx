@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Wifi, WifiOff, AlertTriangle } from '../ui/icons';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
+import { API_BASE_URL, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 
 function authHeaders(headers?: HeadersInit): HeadersInit {
   const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -21,14 +21,23 @@ export default function ConnectionStatusIndicator() {
   const checkConnection = useCallback(async () => {
     const start = performance.now();
     try {
-      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SYSTEM_HEALTH}`, {
+      // /api/v1/system/health does not exist — unified-health is the real
+      // aggregate probe and reports overall_status per service.
+      const res = await fetch(`${API_BASE_URL}/api/v1/unified-health`, {
         signal: AbortSignal.timeout(5000),
         headers: authHeaders(),
       });
       const elapsed = Math.round(performance.now() - start);
       setLatency(elapsed);
       if (res.ok) {
-        setState(elapsed > 2000 ? 'degraded' : 'connected');
+        const body = await res.json().catch(() => ({})) as { overall_status?: string };
+        const status = (body.overall_status ?? 'ok').toLowerCase();
+        if (status === 'ok') {
+          setState(elapsed > 2000 ? 'degraded' : 'connected');
+        } else {
+          // 'degraded', 'initializing', or anything non-ok
+          setState('degraded');
+        }
       } else {
         setState('degraded');
       }

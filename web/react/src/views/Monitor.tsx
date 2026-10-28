@@ -15,29 +15,68 @@
  * TODO: Integrate fills from store, add PnL chart
  */
 
+import { useEffect } from 'react';
 import { useKalshiStore, selectPortfolio, selectSystem } from '../store';
 import { Briefcase, Activity, CheckCircle, XCircle, DollarSign, TrendingUp } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
+import { apiUrl } from '../config/apiBase';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
+// Authoritative equity/pnl series from GET /api/v1/kalshi/pnl-history.
+interface PnlHistoryPoint {
+  ts?: string | number;
+  equity?: number;
+  daily_pnl?: number;
+  cumulative_pnl?: number;
+}
+
+interface PnlHistoryResponse {
+  points?: PnlHistoryPoint[];
+  breaches?: unknown[];
+}
+
 const Monitor = () => {
+  const refreshAll = useKalshiStore(s => s.refreshAll);
   const portfolio = useKalshiStore(selectPortfolio);
   const system = useKalshiStore(selectSystem);
   const positions = portfolio.positions;
   const fills = portfolio.fills;
 
-  // Derived metrics
-  const totalExposure = positions.reduce((acc: number, p: any) => acc + Math.abs(p.quantity), 0);
-  const totalUnrealizedPnl = positions.reduce((acc: number, p: any) => acc + (p.unrealized_pnl_cents || 0), 0) / 100;
-  const totalRealizedPnl = fills.reduce((acc: number, f: any) => acc + (f.pnl_cents || 0), 0) / 100;
+  useEffect(() => {
+    void refreshAll();
+    const interval = setInterval(() => { void refreshAll(); }, 30_000);
+    return () => clearInterval(interval);
+  }, [refreshAll]);
 
-  // Generate PnL history data from fills
-  const pnlHistory = fills.slice(0, 20).map((fill: any, idx: number) => ({
-    time: new Date(fill.filled_at).toLocaleTimeString(),
-    pnl: (fill.pnl_cents / 100).toFixed(2),
-    cumulative: fills.slice(0, idx + 1).reduce((sum: number, f: any) => sum + (f.pnl_cents / 100), 0).toFixed(2)
-  })).reverse();
+  const { data: pnlHistoryData } = useApiQuery<PnlHistoryResponse>(
+    apiUrl('/api/v1/kalshi/pnl-history'),
+    { refetchInterval: 60_000, staleTime: 30_000 }
+  );
+
+  // Derived metrics
+  const totalExposure = positions.reduce((acc, p) => acc + Math.abs(p.quantity), 0);
+  const totalUnrealizedPnl = positions.reduce((acc, p) => acc + (p.unrealized_pnl_cents || 0), 0) / 100;
+  const totalRealizedPnl = fills.reduce((acc, f) => acc + (f.pnl_cents || 0), 0) / 100;
+
+  // Prefer backend pnl-history (authoritative). Only fall back to a fills-
+  // derived estimate — labelled as such — when the endpoint returns nothing.
+  const backendPoints = pnlHistoryData?.points ?? [];
+  const pnlHistory = backendPoints.length > 0
+    ? backendPoints.map((pt: PnlHistoryPoint) => ({
+        time: typeof pt.ts === 'number'
+          ? new Date(pt.ts * (pt.ts > 1e12 ? 1 : 1000)).toLocaleTimeString()
+          : new Date(String(pt.ts)).toLocaleTimeString(),
+        cumulative: Number(pt.cumulative_pnl ?? pt.equity ?? 0),
+        source: 'backend' as const,
+      }))
+    : fills.slice(0, 20).map((fill, idx: number) => ({
+        time: new Date(fill.filled_at).toLocaleTimeString(),
+        cumulative: fills.slice(0, idx + 1).reduce((sum, f) => sum + (f.pnl_cents / 100), 0),
+        source: 'derived' as const,
+      })).reverse();
+  const chartIsDerived = pnlHistory.length > 0 && pnlHistory[0].source === 'derived';
 
   return (
     <div className="space-y-6">
@@ -69,7 +108,12 @@ const Monitor = () => {
       {/* PnL Chart */}
       <Card>
         <CardHeader>
-          <CardTitle>PnL History</CardTitle>
+          <CardTitle>
+            PnL History
+            {chartIsDerived && (
+              <span className="ml-2 text-xs font-normal text-slate-500">(derived from fills — backend history unavailable)</span>
+            )}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {pnlHistory.length === 0 ? (
@@ -148,7 +192,7 @@ const Monitor = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.map((pos: any, idx: number) => (
+                  {positions.map((pos, idx: number) => (
                     <tr key={pos.ticker || idx} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                       <td className="p-3">
                         <div className="font-medium text-white">{pos.ticker}</div>
@@ -201,7 +245,7 @@ const Monitor = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {fills.slice(0, 10).map((fill: any) => (
+                  {fills.slice(0, 10).map((fill) => (
                     <tr key={fill.fill_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                       <td className="p-3 text-xs text-slate-400">
                         {new Date(fill.filled_at).toLocaleTimeString()}

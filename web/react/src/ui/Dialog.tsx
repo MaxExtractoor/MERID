@@ -63,13 +63,14 @@ export const Dialog: React.FC<DialogProps> = ({
     <div 
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={handleBackdropClick}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={title ? 'dialog-title' : undefined}
+      role="presentation"
     >
       <div
         ref={dialogRef}
         className={`bg-slate-900 rounded-xl border border-slate-700 shadow-2xl max-w-lg w-full mx-4 ${className}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? 'dialog-title' : undefined}
         tabIndex={-1}
       >
         {title && (

@@ -66,6 +66,14 @@ export const Badge = React.memo(function Badge({
         ${className}
       `}
       onClick={onClick}
+      onKeyDown={onClick
+        ? (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onClick();
+            }
+          }
+        : undefined}
       role={onClick ? 'button' : 'status'}
       tabIndex={onClick ? 0 : undefined}
     >

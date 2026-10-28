@@ -4,12 +4,6 @@
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import ToastProvider from '../ToastProvider';
-
-jest.mock('../../components/KalshiModeBadge', () => ({
-  __esModule: true,
-  default: () => <span data-testid="mode-badge">PAPER</span>,
-}));
-
 import KalshiTradeTicket from '../KalshiTradeTicket';
 
 const renderWithToast = (ui: React.ReactElement) => {

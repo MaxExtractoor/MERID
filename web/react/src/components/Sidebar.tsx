@@ -1,6 +1,6 @@
 import React from 'react';
-import { 
-  LayoutDashboard, 
+import {
+  LayoutDashboard,
   Terminal,
   Monitor,
   Gauge,
@@ -8,9 +8,10 @@ import {
   Crosshair,
   Briefcase,
   Settings as SettingsIcon,
+  Activity,
 } from '../ui/icons';
 import type { View } from '../types/views';
-import { useKalshiMode } from '../context/KalshiModeContext';
+import { useKalshiStore, selectSystem, selectConnected } from '../store';
 import { MODE_COLORS, resolveModeKey } from '../config/modeColors';
 
 interface SidebarProps {
@@ -22,6 +23,12 @@ interface SidebarProps {
 }
 
 /* ── Canonical Sidebar Groups ─────────────────────────────────────────── */
+
+const agents = [{ label: 'Agents', stage: 'AGENTS', color: 'emerald', accent: 'from-emerald-500 to-emerald-600', items: [
+  { name: 'Agent Wall', href: 'agent-wall', icon: Grid },
+  { name: 'Mission Control', href: 'mission-control', icon: Activity },
+  { name: 'Agent Detail', href: 'agent-detail', icon: Crosshair },
+]}] as const;
 
 const tradingCore = [{ label: 'Trading', stage: 'TRADE', color: 'emerald', accent: 'from-emerald-500 to-emerald-600', items: [
   { name: 'Dashboard', href: 'dashboard', icon: LayoutDashboard },
@@ -48,7 +55,7 @@ const system = [{ label: 'System', stage: 'SYSTEM', color: 'slate', accent: 'fro
   { name: 'Settings', href: 'settings', icon: SettingsIcon },
 ]}] as const;
 
-const SECTIONS = [tradingCore, swarmIntelligence, analytics, operatorSection, system];
+const SECTIONS = [agents, tradingCore, swarmIntelligence, analytics, operatorSection, system];
 
 // Color mapping for stage accents
 const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; hover: string }> = {
@@ -63,9 +70,9 @@ const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; h
   slate: { text: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30', hover: 'hover:bg-slate-500/20' },
 };
 
-// Views that show live/paper mode indicator (consolidated)
+// Views that show live/paper mode indicator (consolidated to real view ids)
 const MODE_INDICATOR_VIEWS = new Set<View>([
-  'discover', 'execute', 'promote',
+  'trade', 'monitor', 'grid',
 ]);
 
 interface NavItemProps {
@@ -178,7 +185,17 @@ function StageSection({ stage, current, onChange, collapsed, isLive }: StageSect
 }
 
 function Sidebar({ current, onChange, className, collapsed = false, onToggleCollapse }: SidebarProps) {
-  const { data: modeData, isLive } = useKalshiMode();
+  // Live runtime state from the store (populated by /api/v1/live-runtime-state).
+  // Never assume PAPER — only positive LIVE_ENTRIES_ENABLED evidence marks live.
+  const system = useKalshiStore(selectSystem);
+  const connected = useKalshiStore(selectConnected);
+  const liveState = system.live?.state ?? null;
+  const isLive = liveState === 'LIVE_ENTRIES_ENABLED';
+  const statusInfo: { label: string; cls: string; dot: string } = !connected || liveState === null
+    ? { label: 'STATE UNKNOWN', cls: 'bg-slate-500/10 border border-slate-500/30', dot: 'bg-slate-400' }
+    : isLive
+      ? { label: 'LIVE — ENTRIES ENABLED', cls: 'bg-red-500/10 border border-red-500/30', dot: 'bg-red-400' }
+      : { label: 'LIVE — ENTRIES HALTED', cls: 'bg-amber-500/10 border border-amber-500/30', dot: 'bg-amber-400' };
 
   return (
     <div className={`flex flex-col h-full bg-slate-900 border-r border-slate-800 transition-all duration-200 ${collapsed ? 'w-16' : 'w-64'} ${className}`}>
@@ -211,22 +228,29 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
                 current={current}
                 onChange={onChange}
                 collapsed={collapsed}
-                isLive={modeData ? isLive : undefined}
+                isLive={liveState !== null ? isLive : undefined}
               />
             ))}
           </div>
         ))}
       </nav>
       
-      {/* Bottom Status */}
+      {/* Bottom Status — truthful live-runtime-state */}
       {!collapsed && (
         <div className="p-3 border-t border-slate-800">
-          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${isLive ? 'bg-red-500/10 border border-red-500/30' : 'bg-emerald-500/10 border border-emerald-500/30'}`}>
-            <div className={`w-2 h-2 rounded-full animate-pulse ${isLive ? 'bg-red-400' : 'bg-emerald-400'}`} />
-            <span className={`text-xs font-medium ${isLive ? 'text-red-400' : 'text-emerald-400'}`}>
-              {isLive ? 'LIVE MODE' : 'PAPER MODE'}
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${statusInfo.cls}`}>
+            <div className={`w-2 h-2 rounded-full animate-pulse ${statusInfo.dot}`} />
+            <span className={`text-xs font-medium ${
+              isLive ? 'text-red-400' : liveState === null || !connected ? 'text-slate-400' : 'text-amber-400'
+            }`}>
+              {statusInfo.label}
             </span>
           </div>
+          {liveState !== null && (
+            <div className="mt-1 px-3 text-[10px] text-slate-500 truncate" title={system.live?.reason}>
+              {liveState}
+            </div>
+          )}
         </div>
       )}
     </div>

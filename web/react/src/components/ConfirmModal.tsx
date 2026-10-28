@@ -37,8 +37,6 @@ function ConfirmModalComponent({
   'aria-label': ariaLabel,
   children,
 }: ConfirmModalProps) {
-  if (!isOpen) return null;
-
   const [checkedIds, setCheckedIds] = React.useState<string[]>([]);
 
   React.useEffect(() => {
@@ -46,6 +44,19 @@ function ConfirmModalComponent({
       setCheckedIds([]);
     }
   }, [isOpen]);
+
+  // Escape key dismisses the modal — bound to window so no JSX keyboard
+  // listener is needed on the non-interactive overlay element.
+  React.useEffect(() => {
+    if (!isOpen) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onCancel]);
+
+  if (!isOpen) return null;
 
   const handleChecklistChange = (itemId: string, checked: boolean) => {
     const newChecked = checked
@@ -58,8 +69,9 @@ function ConfirmModalComponent({
   const isChecklistComplete = checklistItems.length === 0 || checkedIds.length === checklistItems.length;
   const effectiveConfirmDisabled = confirmDisabled || !isChecklistComplete;
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    // Only dismiss when the click lands on the overlay itself, not the dialog content.
+    if (e.target === e.currentTarget) {
       onCancel();
     }
   };
@@ -67,15 +79,14 @@ function ConfirmModalComponent({
   return (
     <div
       className="confirm-modal-overlay"
-      onClick={onCancel}
-      role="dialog"
-      aria-modal="true"
-      aria-label={ariaLabel || title}
-      onKeyDown={handleKeyDown}
+      onClick={handleOverlayClick}
+      role="presentation"
     >
       <div
         className="confirm-modal-content"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel || title}
       >
         <h3 className="confirm-modal-title">{title}</h3>
         <p className="confirm-modal-message">{message}</p>
@@ -110,7 +121,6 @@ function ConfirmModalComponent({
             disabled={effectiveConfirmDisabled}
             onClick={onConfirm}
             aria-label={confirmText}
-            autoFocus={checklistItems.length === 0}
           >
             {confirmText}
           </button>

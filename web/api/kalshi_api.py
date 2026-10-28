@@ -2653,6 +2653,25 @@ async def get_balance() -> Dict[str, Any]:
     """
     # Use v2 bankroll service - single source of truth
     service = await get_bankroll_service()
+    if service is None:
+        # Defensive: service is wired during app startup; a bare/unstarted
+        # process must fail with explicit state, not AttributeError.
+        return {
+            "state": "ERROR",
+            "units": "dollars",
+            "usd": None,
+            "available": None,
+            "locked": 0,
+            "balance_cents": 0,
+            "portfolio_cents": 0,
+            "total_value_cents": 0,
+            "max_position_usd": None,
+            "trading_shard": None,
+            "shard_balances_usd": None,
+            "trading_shard_balance_usd": None,
+            "error": "bankroll service not initialized (app startup incomplete)",
+            "alert": True,
+        }
     
     # Get cached summary with module attribution for logging
     summary = await service.get_summary(caller_module="kalshi_api_balance")
@@ -2697,6 +2716,34 @@ async def get_balance() -> Dict[str, Any]:
     elif summary.state == BalanceState.UNKNOWN:
         response["error"] = "Bankroll never fetched - initial load in progress"
     
+    # Per-shard collateral breakdown + resolved trading shard.
+    # Kalshi collateralizes orders on the exchange shard hosting the market
+    # (crypto 15m markets: shard 2).  Aggregate cash must not be presented as
+    # spendable trading-shard collateral, so both are reported explicitly.
+    response["trading_shard"] = None
+    response["shard_balances_usd"] = None
+    response["trading_shard_balance_usd"] = None
+    try:
+        from merid.event_venues.kalshi.shard_funding import (
+            get_shard_balances_cached,
+            resolve_trading_shard,
+        )
+        trading_shard = resolve_trading_shard(_get_catalog())
+        response["trading_shard"] = trading_shard
+        client = _get_client()
+        if client is not None:
+            shards = await get_shard_balances_cached(client)
+            if shards:
+                response["shard_balances_usd"] = {
+                    str(int(k)): float(v) for k, v in shards.items()
+                }
+                ts_bal = shards.get(trading_shard)
+                response["trading_shard_balance_usd"] = (
+                    float(ts_bal) if ts_bal is not None else 0.0
+                )
+    except Exception as exc:
+        logger.debug("[balance endpoint] shard balance read failed: %s", exc)
+
     # Legacy fields for backward compatibility
     response["locked"] = 0  # v2 doesn't track locked separately (it's part of equity)
     response["available"] = response["usd"]
@@ -8913,29 +8960,6 @@ async def get_p0_guardrails_status() -> Dict[str, Any]:
         logger.debug(f"Silent error: {e}")
 
     return result
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Missing Endpoint Stubs (501 Not Implemented)
-# ═══════════════════════════════════════════════════════════════════════════
-# These endpoints are declared in web/react/src/config/constants.ts but have
-# no backend implementation yet. They return 501 to avoid 404 confusion for
-# frontend developers and to provide a clear signal about implementation gaps.
-
-
-
-
-@router.get("/sentiment/lane-snapshot")
-async def get_sentiment_lane_snapshot() -> Dict[str, Any]:
-    """Lane snapshot from BTC15m lane — 501 Not Implemented.
-
-    Stub endpoint. Planned for future lane-based sentiment streaming.
-    Track progress in engineering backlog.
-    """
-    raise HTTPException(
-        status_code=501,
-        detail="Sentiment lane snapshot endpoint not yet implemented. Track progress in backlog."
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

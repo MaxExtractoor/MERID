@@ -5,6 +5,11 @@ import { useKeyboardShortcuts, KeyboardShortcut } from "./hooks/useKeyboardShort
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 
+// Agent-centric views (primary operator surface)
+const AgentWall = lazy(() => import("./views/AgentWall"));
+const AgentDetail = lazy(() => import("./views/AgentDetail"));
+const MissionControl = lazy(() => import("./views/MissionControl"));
+
 // 8-View Architecture - Only these views are functional
 const Dashboard = lazy(() => import("./views/Dashboard"));
 const Trade = lazy(() => import("./views/Trade"));
@@ -35,8 +40,12 @@ import ToastProvider from "./components/ToastProvider";
 
 import type { View } from "./types/views";
 
+import { ASSETS, type AssetSymbol } from "./agents/types";
+
 // 8-View Architecture - Clean mapping
 const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>>> = {
+  "agent-wall": AgentWall,
+  "mission-control": MissionControl,
   dashboard: Dashboard,
   trade: Trade,
   monitor: Monitor,
@@ -66,10 +75,39 @@ function FillToastWatcher() {
 }
 
 // Zero-lag view renderer with memoization
-const ViewRenderer = React.memo(({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) => {
+const ViewRenderer = React.memo(({ view, onNavigate, agentAsset, onAssetChange }: {
+  view: View;
+  onNavigate: (v: View) => void;
+  agentAsset: AssetSymbol;
+  onAssetChange: (a: AssetSymbol) => void;
+}) => {
   // Legacy Kalshi deep-link views
   if (view === "kalshi-dashboard") return <KalshiDashboardView />;
   if (view === "kalshi-portfolio") return <KalshiPortfolioView />;
+
+  // Per-asset detail page gets its asset prop + a switcher row
+  if (view === "agent-detail") {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          {ASSETS.map((a) => (
+            <button
+              key={a}
+              onClick={() => onAssetChange(a)}
+              className={`px-3 py-1 rounded-md text-sm font-semibold transition-colors ${
+                a === agentAsset
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  : 'bg-slate-800/60 text-slate-400 border border-slate-700/50 hover:text-slate-200'
+              }`}
+            >
+              {a}
+            </button>
+          ))}
+        </div>
+        <AgentDetail asset={agentAsset} />
+      </div>
+    );
+  }
 
   const Component = VIEW_COMPONENTS[view];
 
@@ -80,22 +118,23 @@ const ViewRenderer = React.memo(({ view, onNavigate }: { view: View; onNavigate:
           <h2 className="text-xl font-semibold text-slate-300 mb-2">View Not Found</h2>
           <p className="text-slate-500">The view &quot;{view}&quot; is not yet implemented.</p>
           <button
-            onClick={() => onNavigate('dashboard')}
+            onClick={() => onNavigate('agent-wall')}
             className="mt-4 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
           >
-            Return to Dashboard
+            Return to Agent Wall
           </button>
         </div>
       </div>
     );
   }
-  
+
   return <Component />;
 });
 ViewRenderer.displayName = 'ViewRenderer';
 
 export default function App() {
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setView] = useState<View>("agent-wall");
+  const [agentAsset, setAgentAsset] = useState<AssetSymbol>('BTC');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('merid-sidebar-collapsed') === 'true'; } catch { return false; }
@@ -117,6 +156,7 @@ export default function App() {
 
   // Keyboard shortcuts for navigation
   const shortcuts: KeyboardShortcut[] = [
+    { key: '0', description: 'Navigate to Agent Wall', action: () => handleNavigate('agent-wall') },
     { key: '1', description: 'Navigate to Dashboard', action: () => handleNavigate('dashboard') },
     { key: '2', description: 'Navigate to Trade', action: () => handleNavigate('trade') },
     { key: '3', description: 'Navigate to Monitor', action: () => handleNavigate('monitor') },
@@ -192,12 +232,17 @@ export default function App() {
           
           {/* Per-view error boundaries — one crash doesn't take down the whole dashboard */}
           <main className="flex-1 overflow-auto p-4 lg:p-6">
-            <KalshiErrorBoundary 
+            <KalshiErrorBoundary
               viewName={view}
-              onGoHome={() => setView('overview')}
+              onGoHome={() => setView('agent-wall')}
             >
               <Suspense fallback={<KalshiLoadingSkeleton />}>
-                <ViewRenderer view={view} onNavigate={handleNavigate} />
+                <ViewRenderer
+                  view={view}
+                  onNavigate={handleNavigate}
+                  agentAsset={agentAsset}
+                  onAssetChange={setAgentAsset}
+                />
               </Suspense>
             </KalshiErrorBoundary>
           </main>
