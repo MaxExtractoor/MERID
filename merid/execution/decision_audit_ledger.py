@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS decision_audit_heartbeats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_heartbeats_tick ON decision_audit_heartbeats(tick, created_at);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_created ON decision_audit_heartbeats(created_at);
 """
 
 # Canonical entry range used by the live strategy (10c-95c since 2026-09-24;
@@ -1476,38 +1477,52 @@ class DecisionAuditLedger:
         if not _is_enabled() or not decision_id:
             return None
         self._ensure_db()
-        try:
-            if isinstance(event_ts_utc, datetime):
-                ts = event_ts_utc.timestamp()
-            elif event_ts_utc is None:
-                ts = time.time()
-            else:
-                ts = float(event_ts_utc)
-            with self._lock, self._conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                return self._append_decision_event_locked(
-                    conn,
-                    decision_id=decision_id,
-                    event_type=event_type,
-                    stage=stage,
-                    event_ts=ts,
-                    reason_code=reason_code,
-                    reason_detail=reason_detail,
-                    trace_id=trace_id,
-                    run_id=run_id,
-                    ticker=ticker,
-                    asset=asset,
-                    candidate_id=candidate_id,
-                    seq=seq,
+        if isinstance(event_ts_utc, datetime):
+            ts = event_ts_utc.timestamp()
+        elif event_ts_utc is None:
+            ts = time.time()
+        else:
+            ts = float(event_ts_utc)
+        _result: Dict[str, Any] = {}
+
+        def _write() -> None:
+            try:
+                with self._lock, self._conn() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    _result["event_id"] = self._append_decision_event_locked(
+                        conn,
+                        decision_id=decision_id,
+                        event_type=event_type,
+                        stage=stage,
+                        event_ts=ts,
+                        reason_code=reason_code,
+                        reason_detail=reason_detail,
+                        trace_id=trace_id,
+                        run_id=run_id,
+                        ticker=ticker,
+                        asset=asset,
+                        candidate_id=candidate_id,
+                        seq=seq,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[DECISION-AUDIT-LEDGER] append_decision_event failed for %s/%s: %s",
+                    decision_id,
+                    event_type,
+                    exc,
                 )
-        except Exception as exc:
-            logger.warning(
-                "[DECISION-AUDIT-LEDGER] append_decision_event failed for %s/%s: %s",
-                decision_id,
-                event_type,
-                exc,
-            )
-            return None
+
+        if _is_test_context():
+            _write()
+            return _result.get("event_id")
+        # Event-loop callers (agent-grid signal paths) must never block on
+        # self._lock: an hourly prune holds it across a long batched DELETE
+        # sweep and froze the trading loop for 60-100s at a time (faulthandler
+        # stall dumps, 2026-10-28). Queue the append on the serialized writer
+        # thread instead — FIFO ordering and crash-tail durability are the
+        # same guarantee every other queued audit write already has.
+        self._submit_write(_write)
+        return None
 
     def mark_outcome_unresolved(
         self,
@@ -3585,9 +3600,14 @@ class DecisionAuditLedger:
         )
         total = 0
         try:
-            with self._lock:
-                conn = self._conn()
-                for _ in range(max_batches):
+            for _ in range(max_batches):
+                # Lock per batch, not for the whole sweep: holding self._lock
+                # across max_batches x batch deletes froze every writer — and,
+                # before decision-event appends were queued, the event loop —
+                # for the full prune duration (60-100s observed in stall
+                # dumps). One batch still runs inside a single transaction.
+                with self._lock:
+                    conn = self._conn()
                     ids = [r[0] for r in conn.execute(
                         "SELECT decision_id FROM strategy_decisions "
                         "WHERE decision_ts < ? ORDER BY decision_ts LIMIT ?",
@@ -3605,6 +3625,9 @@ class DecisionAuditLedger:
                             "DELETE FROM strategy_decisions "
                             f"WHERE decision_id IN ({ph})", ids)
                     total += len(ids)
+                time.sleep(0)
+            with self._lock:
+                conn = self._conn()
                 conn.execute(
                     "DELETE FROM decision_audit_heartbeats "
                     "WHERE created_at < ?", (cutoff,))
