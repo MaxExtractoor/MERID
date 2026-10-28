@@ -1530,17 +1530,23 @@ class KalshiMarketStateStore:
         self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, reason)
 
         dropped = 0
-        with self._ticker_locks_lock:
-            queue = self._delta_queues.get(ticker)
-            queue_lock = self._delta_queue_locks.get(ticker)
-        if queue is not None:
-            if queue_lock is not None:
-                with queue_lock:
+        # Only drain on the FIRST WS-leg invalidation. Deltas queued after that
+        # are the post-invalidation buffer needed for sequence continuity once
+        # the healing snapshot lands; clearing them on every repeated stale
+        # event during a burst guarantees a post-snapshot gap and livelocks
+        # the resync loop.
+        if was_ws_trusted:
+            with self._ticker_locks_lock:
+                queue = self._delta_queues.get(ticker)
+                queue_lock = self._delta_queue_locks.get(ticker)
+            if queue is not None:
+                if queue_lock is not None:
+                    with queue_lock:
+                        dropped = len(queue)
+                        queue.clear()
+                else:
                     dropped = len(queue)
                     queue.clear()
-            else:
-                dropped = len(queue)
-                queue.clear()
         if was_ws_trusted or dropped:
             logger.error(
                 "[BOOK-UNTRUSTED] ticker=%s reason=%s dropped_queued=%d diag=%s "
@@ -1584,17 +1590,23 @@ class KalshiMarketStateStore:
         self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, reason)
 
         dropped = 0
-        with self._ticker_locks_lock:
-            queue = self._delta_queues.get(ticker)
-            queue_lock = self._delta_queue_locks.get(ticker)
-        if queue is not None:
-            if queue_lock is not None:
-                with queue_lock:
+        # Only drain on the FIRST invalidation of a trusted book. Deltas queued
+        # after that are the post-invalidation buffer needed for sequence
+        # continuity once the snapshot lands; clearing them on every repeated
+        # stale event during a burst guarantees a post-snapshot sequence gap
+        # and livelocks the resync loop.
+        if was_trusted:
+            with self._ticker_locks_lock:
+                queue = self._delta_queues.get(ticker)
+                queue_lock = self._delta_queue_locks.get(ticker)
+            if queue is not None:
+                if queue_lock is not None:
+                    with queue_lock:
+                        dropped = len(queue)
+                        queue.clear()
+                else:
                     dropped = len(queue)
                     queue.clear()
-            else:
-                dropped = len(queue)
-                queue.clear()
         if was_trusted or dropped:
             # Rate-limit: during a sustained stale-burst the same book is
             # re-invalidated per incoming delta (hundreds/sec).  Emitting an
