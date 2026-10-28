@@ -6282,16 +6282,27 @@ def _compute_trade_decision_impl(
         # as settlement_lane_price_cap).  An explicit per-asset override
         # (e.g. MERID_..._NO_XRP=1) still applies in-lane: that veto came
         # from realized asset-specific losses, not a price-band argument.
+        # 2026-10-27 (NO-side mirror): a lane-scoped override
+        # MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET} is
+        # consulted before the normal-path per-asset cap — the bounded
+        # exception that restores the YES-side in-lane domain for NO
+        # converged favorites on BTC/ETH/DOGE/SOL.  XRP-NO has no override:
+        # its audited cap=1 veto stays binding.
         _lane_px_cap = float(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS)
         for _cap_side, _cap_px in (
             ("yes", yes_price_cents),
             ("no", no_price_cents),
         ):
             _asset_key = (
-                "MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_"
+                "MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_"
                 f"{_cap_side.upper()}_{str(asset).upper()}"
             )
             _asset_raw = os.environ.get(_asset_key)
+            if _asset_raw in (None, ""):
+                _asset_raw = os.environ.get(
+                    "MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_"
+                    f"{_cap_side.upper()}_{str(asset).upper()}"
+                )
             _cap_c = _lane_px_cap
             if _asset_raw not in (None, ""):
                 try:

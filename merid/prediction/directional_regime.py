@@ -1843,10 +1843,27 @@ def _moneyness_max_entry_price_cents(
     globals (NO=50, YES=75) are superseded per-asset where measured and
     would otherwise veto the lane's entire audited 76-98c domain — the
     lane's own cohort evidence came from prices above them.
+
+    2026-10-27 (NO-side mirror): ``MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_
+    {SIDE}_{ASSET}`` is a lane-scoped cap consulted before the per-asset
+    moneyness cap.  The audited NO caps (79/89/75/75/1) measured the
+    <90c normal-path pockets; they never measured the >=90c maker band,
+    yet they vetoed the entire NO side of a lane whose admission
+    evidence — the >=90c converged-favorite cohort — is side-agnostic.
+    Setting the override to the band ceiling restores the YES-side
+    semantics (no audited cap inside the lane) without touching the
+    normal-path or settlement-lane caps.  Unset assets keep their
+    per-asset veto (XRP-NO stays capped, mirroring XRP-YES@89).
     """
     side = (held_side or "").strip().lower()
     if side not in ("yes", "no") or not asset:
         return None
+    lane_cap = _env_float(
+        f"MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{side.upper()}_{asset.upper()}",
+        None,
+    )
+    if lane_cap is not None:
+        return float(lane_cap)
     per_asset = _env_float(
         f"MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{side.upper()}_{asset.upper()}",
         None,

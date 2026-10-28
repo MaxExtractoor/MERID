@@ -583,6 +583,25 @@ _ENV_OVERRIDES.update({
     )
 })
 _ENV_OVERRIDES.update({
+    # 2026-10-27: lane-scoped per-asset moneyness overrides — consulted
+    # before MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{SIDE}_{ASSET} inside
+    # their own bounded lane only (NO-side mirror for converged favorites;
+    # normal-path caps untouched).
+    name: _EnvOverride(
+        name=name, type="decimal",
+        minimum=Decimal("0"), maximum=Decimal("99"),
+    )
+    for name in (
+        f"{_lane}_{_side}_{_asset}"
+        for _lane in (
+            "MERID_PINNED_FAV_MONEYNESS_CAP_CENTS",
+            "MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS",
+        )
+        for _side in ("YES", "NO")
+        for _asset in ("BTC", "ETH", "DOGE", "SOL", "XRP")
+    )
+})
+_ENV_OVERRIDES.update({
     name: _EnvOverride(name=name, type="str")
     for name in (
         # Comma-separated lane names exempt from the sticky-calibration veto.

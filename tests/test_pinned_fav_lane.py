@@ -255,6 +255,91 @@ def test_no_side_mirror(monkeypatch):
     assert d.indicators.get("no_pinned_fav_qualifies") is True
 
 
+# ------------------------------------------- NO-side mirror cap override ----
+#
+# 2026-10-27: ``MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}`` is the
+# lane-scoped cap.  The audited per-asset NO caps (79/89/75/75/1) measured
+# the <90c normal-path pockets — they were never measured on the >=90c
+# maker band but vetoed the entire NO side of the lane, leaving 90-98c
+# entries structurally YES-only.  The override restores the YES-side
+# in-lane semantics for explicitly un-capped assets without touching the
+# normal-path or settlement-lane caps.
+
+def test_no_side_lane_cap_veto_without_override(monkeypatch):
+    """With the audited cap live and no lane override, NO@93 is the exact
+    veto the 2026-10-27 YES-skew audit measured: the in-band side dies as
+    pinned_fav_moneyness_cap and the normal path is reserved by the band."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_ETH", "89")
+    monkeypatch.delenv("MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_NO_ETH",
+                       raising=False)
+    blk = dr.pinned_fav_block(
+        side_price_cents=93.0, net_ev_cents=5.0, tte_seconds=600.0,
+        held_side="no", asset="ETH",
+    )
+    assert blk == "pinned_fav_moneyness_cap"
+    d = _decision(
+        spot_price=99.0,
+        yes_bid_cents=7.0, yes_ask_cents=9.0,
+        no_bid_cents=91.0, no_ask_cents=93.0,
+    )
+    assert d.selected_outcome is None
+    assert d.indicators.get("no_block") == "pinned_fav_moneyness_cap"
+    assert d.indicators.get("no_pinned_fav_qualifies") is False
+
+
+def test_no_side_lane_cap_override_mirrors_yes(tmp_path, monkeypatch):
+    """The lane-scoped override admits the NO favorite exactly like YES:
+    same band, same strict gate, same lane stamp — the audited <90c cap
+    no longer reaches into a domain it never measured."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_ETH", "89")
+    monkeypatch.setenv("MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_NO_ETH", "98")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision(
+        spot_price=99.0,              # spot well below strike: p_no ~0.99
+        yes_bid_cents=7.0, yes_ask_cents=9.0,
+        no_bid_cents=91.0, no_ask_cents=93.0,
+    )
+    assert d.selected_outcome == "no", (
+        d.indicators.get("no_block"), d.no_trade_reason,
+        d.indicators.get("no_admission_reason"),
+        d.indicators.get("evidence_no"),
+    )
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("entry_lane") == "pinned_fav"
+    assert d.indicators.get("no_pinned_fav_qualifies") is True
+
+
+def test_lane_cap_override_is_lane_scoped(monkeypatch):
+    """The override must not leak into the normal path or the settlement
+    lane: both keep consulting the audited per-asset cap."""
+    monkeypatch.setenv("MERID_MONEYNESS_GATE_ENABLED", "1")
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_ETH", "89")
+    monkeypatch.setenv("MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_NO_ETH", "98")
+    # Normal-path gate still vetoes the audited domain.
+    assert (
+        dr.entry_price_cap_block_reason(95.0, side="no", asset="ETH")
+        == "entry_price_cap_95c_gt_89c"
+    )
+    # Lane resolver sees the override instead.
+    assert dr._moneyness_max_entry_price_cents("no", "ETH") == 98.0
+    # Unset assets keep the audited veto (XRP mirror of XRP-YES@89).
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_XRP", "1")
+    assert (
+        dr.pinned_fav_block(
+            side_price_cents=93.0, net_ev_cents=5.0, tte_seconds=600.0,
+            held_side="no", asset="XRP",
+        )
+        == "pinned_fav_moneyness_cap"
+    )
+
+
 def _refused_cells():
     """Scored-level refusal shaped like the live DOGE@92c observation:
     the matched price cell is sparse-but-winning while the cross-price

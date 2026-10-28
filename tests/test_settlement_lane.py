@@ -41,6 +41,7 @@ def _make_state(
     observed_value: float = 101.5,
     latest: float = 101.5,
     strike: float = 100.0,
+    asset: str = "BTC",
     missing_slots: Optional[List[int]] = None,
 ):
     """Build an in-window SettlementState.
@@ -71,8 +72,8 @@ def _make_state(
         )
 
     return build_settlement_state(
-        ticker="KXBTC15M-TEST",
-        asset="BTC",
+        ticker=f"KX{asset}15M-TEST",
+        asset=asset,
         strike_price=strike,
         expiry_ts=expiry,
         now_ts=now,
@@ -94,6 +95,9 @@ def _make_lane_decision(
     *,
     dist: SettlementDistribution,
     tte_s: float,
+    asset: str = "BTC",
+    spot_price: float = 101.5,
+    strike_price: float = 100.0,
     yes_bid: float = 48.0,
     yes_ask: float = 52.0,
     no_bid: float = 48.0,
@@ -103,10 +107,10 @@ def _make_lane_decision(
     return compute_trade_decision(
         run_id="test_run",
         decision_id="test_decision",
-        ticker="KXBTC15M-TEST",
-        asset="BTC",
-        spot_price=101.5,
-        strike_price=100.0,
+        ticker=f"KX{asset}15M-TEST",
+        asset=asset,
+        spot_price=spot_price,
+        strike_price=strike_price,
         seconds_to_expiry=tte_s,
         yes_bid_cents=yes_bid,
         yes_ask_cents=yes_ask,
@@ -481,3 +485,83 @@ def test_anchor_not_released_pre_window(monkeypatch):
     d = _make_lane_decision(dist=dist, tte_s=200.0, min_edge=99.0)
     base_w = 0.5 + (0.9 - 0.5) * (1.0 - 200.0 / 900.0)
     assert float(d.indicators["market_anchor_weight"]) == pytest.approx(base_w)
+
+
+# ---------------------------------------------------------------------------
+# Lane-scoped moneyness-cap mirror (2026-10-27): inside the lane the cap
+# resolver min's MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS with the audited
+# per-asset MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_{SIDE}_{ASSET} — which
+# vetoed every NO converged favorite >=80c while YES ran free to the lane
+# bound.  A lane-scoped MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_...
+# override restores the YES-side domain for BTC/ETH/DOGE/SOL NO only;
+# XRP-NO keeps its cap=1 veto.  Tests use an 87c NO ask: below the
+# pinned-fav maker floor (90), so the per-asset cap is the sole binder.
+# ---------------------------------------------------------------------------
+
+
+def _no_favored_dist(**kw):
+    # Banked samples ~1.5% below strike -> p_no_raw ~0.99 (favored side no).
+    dist = _make_dist(tte_s=15.0, observed_value=98.5, latest=98.5, **kw)
+    assert dist.p_yes_raw < 0.5
+    return dist
+
+
+def test_lane_per_asset_cap_blocks_no_favorite(monkeypatch):
+    monkeypatch.delenv(
+        "MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_NO_BTC", raising=False
+    )
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_BTC", "75")
+    d = _make_lane_decision(
+        dist=_no_favored_dist(), tte_s=45.0, spot_price=98.5,
+        yes_ask=15.0, yes_bid=13.0, no_ask=87.0, no_bid=85.0,
+    )
+    assert d.selected_outcome is None
+    reason = str(d.no_trade_reason)
+    assert reason.startswith("entry_price_cap_") and reason.endswith("_lane"), (
+        reason
+    )
+
+
+def test_lane_scoped_cap_override_mirrors_no_side(monkeypatch):
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_BTC", "75")
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_NO_BTC", "99")
+    d = _make_lane_decision(
+        dist=_no_favored_dist(), tte_s=45.0, spot_price=98.5,
+        yes_ask=15.0, yes_bid=13.0, no_ask=87.0, no_bid=85.0,
+    )
+    assert d.selected_outcome == "no", d.no_trade_reason
+    assert d.indicators.get("decision_lane") == "settlement_convergence"
+    assert d.indicators.get("settlement_lane_favored_side") == "no"
+
+
+def test_lane_cap_override_is_asset_scoped(monkeypatch):
+    # An override keyed to a different asset must not unblock this candidate.
+    monkeypatch.delenv(
+        "MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_NO_BTC", raising=False
+    )
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_BTC", "75")
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_NO_ETH", "99")
+    d = _make_lane_decision(
+        dist=_no_favored_dist(), tte_s=45.0, spot_price=98.5,
+        yes_ask=15.0, yes_bid=13.0, no_ask=87.0, no_bid=85.0,
+    )
+    assert d.selected_outcome is None
+    reason = str(d.no_trade_reason)
+    assert reason.startswith("entry_price_cap_") and reason.endswith("_lane"), (
+        reason
+    )
+
+
+def test_lane_override_unset_keeps_xrp_no_vetoed(monkeypatch):
+    # XRP-NO's audited cap=1 veto stays binding — no lane-scoped override
+    # exists for it (mirrors the pinned-fav exception set).
+    monkeypatch.delenv(
+        "MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_NO_XRP", raising=False
+    )
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_XRP", "1")
+    d = _make_lane_decision(
+        dist=_no_favored_dist(asset="XRP"), tte_s=45.0, asset="XRP",
+        spot_price=98.5,
+        yes_ask=15.0, yes_bid=13.0, no_ask=87.0, no_bid=85.0,
+    )
+    assert d.selected_outcome is None
