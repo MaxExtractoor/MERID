@@ -9778,7 +9778,6 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
             hang_dump_s = float(
                 os.getenv("MERID_GRID_CYCLE_HANG_DUMP_S", "150.0") or 150.0
             )
-            import faulthandler
 
             # 2026-09-30: serialize strategy cycles — never start tick N while a
             # previous run_cycle task is still alive.  Orphaned tasks keep
@@ -9810,15 +9809,19 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 ),
                 name=f"agent_grid_run_cycle_{tick}",
             )
+            _cycle_dump_timer = None
             if hang_dump_s > 0:
                 # Dump to the dedicated forensics file when available so the
                 # stacks cannot interleave with normal logging output.
+                # StackDumpTimer, not dump_traceback_later: the C-level timer
+                # walks frame chains without the GIL and crashed production
+                # (0xc0000005 in python311.dll) by dereferencing recycled
+                # frames on busy threads.
                 _fh_out = getattr(
                     sys.modules.get("web.main_15m_lean"), "_faulthandler_file", None
                 ) or sys.stderr
-                faulthandler.dump_traceback_later(
-                    hang_dump_s, exit=False, file=_fh_out
-                )
+                from merid.utils.stack_dump_timer import StackDumpTimer
+                _cycle_dump_timer = StackDumpTimer(hang_dump_s, file=_fh_out).start()
             orphans = getattr(self, "_grid_orphan_tasks", None)
             if orphans is None:
                 orphans = self._grid_orphan_tasks = set()
@@ -9866,7 +9869,8 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     {cycle_task}, timeout=cycle_timeout_s
                 )
             finally:
-                faulthandler.cancel_dump_traceback_later()
+                if _cycle_dump_timer is not None:
+                    _cycle_dump_timer.cancel()
 
             if cycle_task not in done_set:
                 self._cycle_timeout_total = getattr(self, "_cycle_timeout_total", 0) + 1

@@ -3354,12 +3354,19 @@ async def _run_full_startup_in_lifespan(app):
 
     # Event-loop freeze watchdog: a synchronous block inside any coroutine
     # below starves asyncio (wait_for timeouts cannot fire on a frozen loop).
-    # faulthandler's timer runs on a C-level watchdog thread, so it dumps all
-    # thread stacks even if the loop is dead. Cancelled on success. Writes to
-    # the dedicated dump file opened at module import so concurrent logging
+    # Do NOT use faulthandler.dump_traceback_later here: its C-level watchdog
+    # walks every thread's frame chain without the GIL and races with frame
+    # alloc/free on busy threads — that race produced the recurring 0xc0000005
+    # python311.dll crashes since 2026-10-14. StackDumpTimer dumps from a
+    # Python daemon thread holding the GIL instead (a truly hard-locked
+    # interpreter skips the dump rather than crashing). Writes to the
+    # dedicated dump file opened at module import so concurrent logging
     # cannot interleave into the stacks.
     import faulthandler
-    faulthandler.dump_traceback_later(120.0, exit=False, repeat=True, file=_faulthandler_file)
+    from merid.utils.stack_dump_timer import StackDumpTimer
+    _startup_dump_timer = StackDumpTimer(
+        120.0, file=_faulthandler_file, repeat=True
+    ).start()
     
     logger.info("[STARTUP-STACK] ENTRY - Initializing P2.x in lifespan")
     
@@ -3753,7 +3760,7 @@ async def _run_full_startup_in_lifespan(app):
     except Exception as e:
         logger.exception("[STARTUP-STACK] FAILED: %r", e)
     finally:
-        faulthandler.cancel_dump_traceback_later()
+        _startup_dump_timer.cancel()
         _trading_thread_alive = False
         logger.info("[STARTUP-STACK] EXIT - Full startup terminated")
         # Runtime stack sampler: the loop is chronically starved in sub-80s

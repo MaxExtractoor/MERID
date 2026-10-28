@@ -385,12 +385,15 @@ $env:MERID_GRID_CYCLE_HANG_DUMP_S = "80"
 Write-Host "[start_15m] MERID_GRID_CYCLE_HANG_DUMP_S=$($env:MERID_GRID_CYCLE_HANG_DUMP_S) - stall dumps at 80s" -ForegroundColor Cyan
 
 # 4c. Periodic faulthandler stack sampler — DISABLED 2026-10-13: correlates
-# with three python311.dll 0xc0000005 crashes today (WER event 1000, dump
-# file write timestamp = crash second). dump_traceback(all_threads) is only
-# safe from CPython's watchdog thread; a plain thread calling it every 20s
-# under heavy thread churn is the classic access-violation vector. The
-# observability gain is not worth killing the process. The 80s cycle-hang
-# watchdog (dump_traceback_later) stays armed — it only fires on real hangs.
+# with three python311.dll 0xc0000005 crashes that day (WER event 1000, dump
+# file write timestamp = crash second). CORRECTION 2026-10-28: the unsafe
+# mechanism was dump_traceback_later, not a plain Python thread — its C
+# watchdog walks every thread's frame chain WITHOUT the GIL and dereferences
+# recycled frames on busy threads (stable fault offset, crashes persisted
+# 10/14-10/28 after this sampler was off). All dump_traceback_later call
+# sites are now replaced by merid.utils.stack_dump_timer.StackDumpTimer,
+# which issues faulthandler.dump_traceback from a GIL-holding Python thread.
+# This env-gated sampler stays off anyway — belt and suspenders.
 $env:MERID_FH_PERIODIC_DUMP_S = "0"
 Write-Host "[start_15m] MERID_FH_PERIODIC_DUMP_S=$($env:MERID_FH_PERIODIC_DUMP_S) - periodic stack sampler DISABLED (crash risk)" -ForegroundColor Cyan
 
