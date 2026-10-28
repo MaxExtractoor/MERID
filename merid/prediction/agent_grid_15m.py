@@ -8369,7 +8369,16 @@ class LeanAgent15m:
             )
             return None
 
-        seconds_to_expiry = float(getattr(market_state, "seconds_to_expiry", 0.0) or (minutes_to_expiry * 60.0))
+        # Prefer the per-pass ``minutes_to_expiry`` (computed from close_time
+        # each selection cycle); ``market_state.seconds_to_expiry`` is a
+        # cached field that only refreshes on REST applies / throttled
+        # recompute-on-read, so it can lag the caller's fresh value.  The
+        # cached field remains the fallback when the caller supplies none.
+        seconds_to_expiry = float(
+            (minutes_to_expiry * 60.0)
+            if minutes_to_expiry
+            else (getattr(market_state, "seconds_to_expiry", 0.0) or 0.0)
+        )
         if seconds_to_expiry <= 0:
             logger.warning("[TRADE-DECISION] asset=%s invalid seconds_to_expiry=%.1f", asset, seconds_to_expiry)
             self._record_signal_rejection(

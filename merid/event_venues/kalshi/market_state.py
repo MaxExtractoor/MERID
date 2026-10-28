@@ -82,6 +82,7 @@ import time
 import asyncio
 import math
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -805,6 +806,23 @@ class KalshiMarketStateStore:
         # Event-driven adaptive batching: wake worker immediately on new deltas.
         self._batch_worker_event = threading.Event()
 
+        # 2026-10-28: parallel per-ticker drain workers.  The single
+        # round-robin batch worker serialized every ticker behind each
+        # other's queue/orderbook lock waits (up to 2s apiece) and batch
+        # applies — one contended ticker stalled the whole book pipeline,
+        # backed the bridge/ws-client queues up, and produced the uniform
+        # multi-ticker stale-delta drops + sequence-gap bursts seen live.
+        # Per-ticker drains preserve same-ticker ordering (deque +
+        # ticker_lock) while isolating a slow ticker to its own worker.
+        self._drain_workers = int(os.getenv("KALSHI_BOOK_DRAIN_WORKERS", "8"))
+        self._drain_executor = ThreadPoolExecutor(
+            max_workers=self._drain_workers,
+            thread_name_prefix="kalshi-book-drain",
+        )
+        self._ticker_drain_inflight: Dict[str, bool] = {}
+        self._drain_inflight_lock = threading.Lock()
+        self._book_lock_wait_s = float(os.getenv("KALSHI_BOOK_LOCK_WAIT_S", "2.0"))
+
         # DIAGNOSTIC: Update counter for tracking MD updates
         self._update_count = 0
 
@@ -1164,165 +1182,23 @@ class KalshiMarketStateStore:
                         if not self._batch_worker_running:
                             break
 
-                        # CRITICAL FIX (2026-08-24): Resolve lock-order inversion between the
-                        # batch worker and the enqueue forwarder. The worker was acquiring
-                        # queue_lock then _ticker_locks_lock, while the forwarder acquires
-                        # _ticker_locks_lock then queue_lock. This produced constant 0.1s
-                        # queue-lock timeouts at high message cadence. Both paths now
-                        # acquire _ticker_locks_lock first to look up the queue/lock, then
-                        # acquire queue_lock; the worker releases _ticker_locks_lock before
-                        # waiting on queue_lock so a forwarder can still append.
-                        with self._ticker_locks_lock:
-                            if ticker not in self._delta_queues:
-                                self._delta_queues[ticker] = deque()
-                            if ticker not in self._delta_queue_locks:
-                                self._delta_queue_locks[ticker] = threading.Lock()
-                            queue = self._delta_queues[ticker]
-                            queue_lock = self._delta_queue_locks[ticker]
-
-                        lock_start = time.monotonic()
-                        if not queue_lock.acquire(blocking=True, timeout=2.0):
-                            logger.warning(
-                                "[BATCH-WORKER] Queue lock acquisition timeout for ticker=%s - contention detected",
-                                ticker
-                            )
-                            with self._ticker_locks_lock:
-                                self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
-                            continue
-
-                        batch: List[Dict[str, Any]] = []
+                        # 2026-10-28: submit a drain task per ticker instead of
+                        # draining inline on this thread.  The single-writer
+                        # round-robin made every ticker wait behind the slowest
+                        # one's lock acquisition timeouts and batch applies;
+                        # per-ticker drains keep deque+ticker_lock ordering but
+                        # isolate a contended ticker to its own worker.
+                        with self._drain_inflight_lock:
+                            if self._ticker_drain_inflight.get(ticker):
+                                continue
+                            self._ticker_drain_inflight[ticker] = True
                         try:
-                            if not queue:
-                                continue
-
-                            # Check for overflow (>= because the enqueue path caps
-                            # the queue at exactly _MAX_PER_TICKER_QUEUE; a plain >
-                            # comparison is unreachable).
-                            if len(queue) >= self._MAX_PER_TICKER_QUEUE:
-                                self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
-                                _now_ovl = time.monotonic()
-                                if _now_ovl - self._last_overflow_log_ts.get(ticker, 0.0) >= 1.0:
-                                    suppressed = self._overflow_log_suppressed.get(ticker, 0)
-                                    self._last_overflow_log_ts[ticker] = _now_ovl
-                                    self._overflow_log_suppressed[ticker] = 0
-                                    logger.error(
-                                        f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
-                                        f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
-                                        f"marking SUSPECT suppressed={suppressed}"
-                                    )
-                                else:
-                                    self._overflow_log_suppressed[ticker] = (
-                                        self._overflow_log_suppressed.get(ticker, 0) + 1
-                                    )
-                                # Mark as SUSPECT and trigger REST bootstrap
-                                state = self._states.get(ticker)
-                                if state:
-                                    state.book_consistency = "SUSPECT"
-                                    # A queue overflow is a full-book rebuild case:
-                                    # require an authoritative FULL_SNAPSHOT (REST
-                                    # orderbook or clean WS snapshot) rather than a
-                                    # live delta, which cannot arrive contiguously
-                                    # while the queue is saturated.
-                                    state.recovery_required_source = "FULL_SNAPSHOT"
-                                    self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
-                                    self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
-                                    self._maybe_trigger_book_recovery(ticker, "queue_overflow_worker")
-                                queue.clear()
-                                continue
-
-                            # Pop a batch while holding the queue lock.
-                            batch_size = min(500, len(queue))
-                            batch = [queue.popleft() for _ in range(batch_size)]
-                        finally:
-                            queue_lock.release()
-                            lock_wait_ms = (time.monotonic() - lock_start) * 1000
-                            with self._ticker_locks_lock:
-                                self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
-                                self._last_lock_wait_ms[ticker] = lock_wait_ms
-
-                        if not batch:
-                            continue
-
-                        # Queue-residence freshness gate: the oldest message in
-                        # the batch gives the worst-case wait.  A breach means
-                        # the stream is execution-useless even though it is
-                        # sequence-contiguous — invalidate, drain, and resync
-                        # rather than applying historical deltas.
-                        _oldest_enq = batch[0].get("_t_delta_enq_ns") if isinstance(batch[0], dict) else None
-                        if _oldest_enq:
-                            _wait_ms = (time.monotonic_ns() - float(_oldest_enq)) / 1e6
-                            _qstate = self._states.get(ticker)
-                            if _qstate is not None:
-                                _qstate.ws_last_queue_wait_ms = _wait_ms
-                                _qstate.ws_queue_depth = len(batch)
-                            _set_book_metric(_book_queue_wait_ms, ticker, _wait_ms)
-                            if _wait_ms > _BOOK_MAX_QUEUE_WAIT_MS:
-                                self._mark_book_untrusted_and_resync(
-                                    ticker,
-                                    "BOOK_DELTA_QUEUE_LAG",
-                                    queue_wait_ms=round(_wait_ms, 1),
-                                    depth=len(batch),
-                                )
-                                continue
-
-                        # Apply the batch under the orderbook ticker lock.
-                        ticker_lock = self._get_ticker_lock(ticker)
-                        lock_start = time.monotonic()
-                        if not ticker_lock.acquire(blocking=True, timeout=2.0):
-                            logger.warning(
-                                "[BATCH-WORKER] Orderbook lock acquisition timeout for ticker=%s - contention detected",
-                                ticker
+                            self._drain_executor.submit(
+                                self._drain_ticker_delta_batch, ticker
                             )
-                            with self._ticker_locks_lock:
-                                self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
-                            continue
-
-                        try:
-                            batch_count = 0
-                            batch_start = time.monotonic()
-                            # Coalesce contiguous same-(side, price) delta_fp messages
-                            # before applying.  This reduces orderbook churn and CPU
-                            # under burst conditions while preserving sequence
-                            # contiguity and gap detection.
-                            coalesced = self._coalesce_deltas(ticker, batch)
-                            applied_batch = coalesced if coalesced is not None else batch
-                            for msg in applied_batch:
-                                try:
-                                    self._apply_delta_internal(ticker, msg)
-                                    batch_count += 1
-                                except Exception as e:
-                                    logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
-
-                            if batch_count > 0:
-                                batch_duration_ms = (time.monotonic() - batch_start) * 1000
-                                with self._ticker_locks_lock:
-                                    self._last_batch_duration_ms[ticker] = batch_duration_ms
-                                logger.debug(
-                                    "[BATCH-WORKER] Processed %d deltas for %s in %.1fms",
-                                    batch_count, ticker, batch_duration_ms
-                                )
-                        finally:
-                            ticker_lock.release()
-                            lock_wait_ms = (time.monotonic() - lock_start) * 1000
-                            with self._ticker_locks_lock:
-                                self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
-                                self._last_lock_wait_ms[ticker] = lock_wait_ms
-
-                        # 2026-10-05: notify subscribers once per applied batch,
-                        # after the ticker orderbook lock is released.  This is
-                        # the hard-lock fast path — a positioned ticker seeing a
-                        # >= lock-threshold executable bid must evaluate
-                        # immediately, not wait for the 5s monitor poll.
-                        if batch_count > 0:
-                            _notify_state = self._states.get(ticker)
-                            if _notify_state is not None:
-                                try:
-                                    self._notify_subscribers(ticker, _notify_state)
-                                except Exception as _ns_exc:
-                                    logger.debug(
-                                        "[BATCH-WORKER] subscriber notify failed for %s: %s",
-                                        ticker, _ns_exc
-                                    )
+                        except Exception:
+                            with self._drain_inflight_lock:
+                                self._ticker_drain_inflight[ticker] = False
 
                     # Event-driven adaptive batching: block until the next delta
                     # arrives or the batch interval elapses. This replaces the fixed
@@ -1336,7 +1212,11 @@ class KalshiMarketStateStore:
 
             logger.info("[BATCH-WORKER] Batch worker thread stopped")
 
-        self._batch_worker_thread = threading.Thread(target=_batch_worker_loop, name="kalshi_batch_worker", daemon=False)
+        # daemon=True: the loop is safe to abandon at interpreter exit (all
+        # work lives in the per-ticker deques; drain tasks are bounded).  A
+        # non-daemon scheduler hung process exit whenever a store was dropped
+        # without _stop_batch_worker() — observed pytest hangs 2026-10-28.
+        self._batch_worker_thread = threading.Thread(target=_batch_worker_loop, name="kalshi_batch_worker", daemon=True)
         self._batch_worker_thread.start()
         logger.info("[BATCH-WORKER] Batch worker thread started, _batch_worker_running=%s", self._batch_worker_running)
 
@@ -1346,6 +1226,188 @@ class KalshiMarketStateStore:
         if self._batch_worker_thread and self._batch_worker_thread.is_alive():
             self._batch_worker_thread.join(timeout=2.0)
             logger.info("[BATCH-WORKER] Batch worker thread stopped")
+        # 2026-10-28: stop the per-ticker drain pool too — in-flight drains
+        # finish on their own but no new ones should be scheduled.
+        try:
+            self._drain_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    def _drain_ticker_delta_batch(self, ticker: str) -> None:
+        """Drain one batch of queued deltas for a single ticker.
+
+        2026-10-28: extracted from ``_batch_worker_loop`` and submitted to the
+        per-ticker drain executor so a ticker stuck on queue/orderbook lock
+        contention no longer head-of-line-blocks every other ticker's stream.
+        Same-ticker apply ordering is preserved by the deque + ticker_lock.
+        """
+        try:
+            # CRITICAL FIX (2026-08-24): Resolve lock-order inversion between the
+            # batch worker and the enqueue forwarder. The worker was acquiring
+            # queue_lock then _ticker_locks_lock, while the forwarder acquires
+            # _ticker_locks_lock then queue_lock. This produced constant 0.1s
+            # queue-lock timeouts at high message cadence. Both paths now
+            # acquire _ticker_locks_lock first to look up the queue/lock, then
+            # acquire queue_lock; the worker releases _ticker_locks_lock before
+            # waiting on queue_lock so a forwarder can still append.
+            with self._ticker_locks_lock:
+                if ticker not in self._delta_queues:
+                    self._delta_queues[ticker] = deque()
+                if ticker not in self._delta_queue_locks:
+                    self._delta_queue_locks[ticker] = threading.Lock()
+                queue = self._delta_queues[ticker]
+                queue_lock = self._delta_queue_locks[ticker]
+
+            lock_start = time.monotonic()
+            if not queue_lock.acquire(blocking=True, timeout=self._book_lock_wait_s):
+                logger.warning(
+                    "[BATCH-WORKER] Queue lock acquisition timeout for ticker=%s - contention detected",
+                    ticker
+                )
+                with self._ticker_locks_lock:
+                    self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
+                return
+
+            batch: List[Dict[str, Any]] = []
+            try:
+                if not queue:
+                    return
+
+                # Check for overflow (>= because the enqueue path caps
+                # the queue at exactly _MAX_PER_TICKER_QUEUE; a plain >
+                # comparison is unreachable).
+                if len(queue) >= self._MAX_PER_TICKER_QUEUE:
+                    self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
+                    _now_ovl = time.monotonic()
+                    if _now_ovl - self._last_overflow_log_ts.get(ticker, 0.0) >= 1.0:
+                        suppressed = self._overflow_log_suppressed.get(ticker, 0)
+                        self._last_overflow_log_ts[ticker] = _now_ovl
+                        self._overflow_log_suppressed[ticker] = 0
+                        logger.error(
+                            f"[BOOK-OVERFLOW] ticker={ticker} queue_len={len(queue)} "
+                            f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count.get(ticker, 0)} "
+                            f"marking SUSPECT suppressed={suppressed}"
+                        )
+                    else:
+                        self._overflow_log_suppressed[ticker] = (
+                            self._overflow_log_suppressed.get(ticker, 0) + 1
+                        )
+                    # Mark as SUSPECT and trigger REST bootstrap
+                    state = self._states.get(ticker)
+                    if state:
+                        state.book_consistency = "SUSPECT"
+                        # A queue overflow is a full-book rebuild case:
+                        # require an authoritative FULL_SNAPSHOT (REST
+                        # orderbook or clean WS snapshot) rather than a
+                        # live delta, which cannot arrive contiguously
+                        # while the queue is saturated.
+                        state.recovery_required_source = "FULL_SNAPSHOT"
+                        self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
+                        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
+                        self._maybe_trigger_book_recovery(ticker, "queue_overflow_worker")
+                    queue.clear()
+                    return
+
+                # Pop a batch while holding the queue lock.
+                batch_size = min(500, len(queue))
+                batch = [queue.popleft() for _ in range(batch_size)]
+            finally:
+                queue_lock.release()
+                lock_wait_ms = (time.monotonic() - lock_start) * 1000
+                with self._ticker_locks_lock:
+                    self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
+                    self._last_lock_wait_ms[ticker] = lock_wait_ms
+
+            if not batch:
+                return
+
+            # Queue-residence freshness gate: the oldest message in
+            # the batch gives the worst-case wait.  A breach means
+            # the stream is execution-useless even though it is
+            # sequence-contiguous — invalidate, drain, and resync
+            # rather than applying historical deltas.
+            _oldest_enq = batch[0].get("_t_delta_enq_ns") if isinstance(batch[0], dict) else None
+            if _oldest_enq:
+                _wait_ms = (time.monotonic_ns() - float(_oldest_enq)) / 1e6
+                _qstate = self._states.get(ticker)
+                if _qstate is not None:
+                    _qstate.ws_last_queue_wait_ms = _wait_ms
+                    _qstate.ws_queue_depth = len(batch)
+                _set_book_metric(_book_queue_wait_ms, ticker, _wait_ms)
+                if _wait_ms > _BOOK_MAX_QUEUE_WAIT_MS:
+                    self._mark_book_untrusted_and_resync(
+                        ticker,
+                        "BOOK_DELTA_QUEUE_LAG",
+                        queue_wait_ms=round(_wait_ms, 1),
+                        depth=len(batch),
+                    )
+                    return
+
+            # Apply the batch under the orderbook ticker lock.
+            ticker_lock = self._get_ticker_lock(ticker)
+            lock_start = time.monotonic()
+            if not ticker_lock.acquire(blocking=True, timeout=self._book_lock_wait_s):
+                logger.warning(
+                    "[BATCH-WORKER] Orderbook lock acquisition timeout for ticker=%s - contention detected",
+                    ticker
+                )
+                with self._ticker_locks_lock:
+                    self._lock_contention_count[ticker] = self._lock_contention_count.get(ticker, 0) + 1
+                return
+
+            batch_count = 0
+            try:
+                batch_start = time.monotonic()
+                # Coalesce contiguous same-(side, price) delta_fp messages
+                # before applying.  This reduces orderbook churn and CPU
+                # under burst conditions while preserving sequence
+                # contiguity and gap detection.
+                coalesced = self._coalesce_deltas(ticker, batch)
+                applied_batch = coalesced if coalesced is not None else batch
+                for msg in applied_batch:
+                    try:
+                        self._apply_delta_internal(ticker, msg)
+                        batch_count += 1
+                    except Exception as e:
+                        logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
+
+                if batch_count > 0:
+                    batch_duration_ms = (time.monotonic() - batch_start) * 1000
+                    with self._ticker_locks_lock:
+                        self._last_batch_duration_ms[ticker] = batch_duration_ms
+                    logger.debug(
+                        "[BATCH-WORKER] Processed %d deltas for %s in %.1fms",
+                        batch_count, ticker, batch_duration_ms
+                    )
+            finally:
+                ticker_lock.release()
+                lock_wait_ms = (time.monotonic() - lock_start) * 1000
+                with self._ticker_locks_lock:
+                    self._lock_wait_time_ms[ticker] = self._lock_wait_time_ms.get(ticker, 0.0) + lock_wait_ms
+                    self._last_lock_wait_ms[ticker] = lock_wait_ms
+
+            # 2026-10-05: notify subscribers once per applied batch,
+            # after the ticker orderbook lock is released.  This is
+            # the hard-lock fast path — a positioned ticker seeing a
+            # >= lock-threshold executable bid must evaluate
+            # immediately, not wait for the 5s monitor poll.
+            if batch_count > 0:
+                _notify_state = self._states.get(ticker)
+                if _notify_state is not None:
+                    try:
+                        self._notify_subscribers(ticker, _notify_state)
+                    except Exception as _ns_exc:
+                        logger.debug(
+                            "[BATCH-WORKER] subscriber notify failed for %s: %s",
+                            ticker, _ns_exc
+                        )
+        finally:
+            # Release the in-flight slot and re-wake the scheduler — a
+            # ticker with leftover queued work is resubmitted on the next
+            # sweep without waiting for the batch interval.
+            with self._drain_inflight_lock:
+                self._ticker_drain_inflight[ticker] = False
+            self._batch_worker_event.set()
 
     def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Dict[str, float]]:
         """Return ``(event_age_ms, upstream_wait_ms)`` for a book event.
@@ -2097,7 +2159,10 @@ class KalshiMarketStateStore:
             state.ws_last_event_age_ms = _ev_age_ms
             _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
 
-        self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via="bridge_queue")
+        self._sync_book_fields(
+            state, self._ob.get_book(ticker), ticker, via="bridge_queue",
+            channel="orderbook_delta",
+        )
         self._sync_unified_book(ticker, state)
 
         state.data_source = "WS_ORDERBOOK_DELTA_LIVE"
@@ -3250,7 +3315,10 @@ class KalshiMarketStateStore:
 
                     book = self._ob.get_book(ticker)
                     if book and book.initialized:
-                        self._sync_book_fields(state, book, ticker, via="rest_bootstrap")
+                        self._sync_book_fields(
+                            state, book, ticker, via="rest_bootstrap",
+                            channel="rest_bootstrap",
+                        )
                         self._sync_unified_book(ticker, state)
 
                         # Validate the REST snapshot itself
@@ -3674,7 +3742,10 @@ class KalshiMarketStateStore:
                 source = self._resolve_book_source(via, "orderbook_snapshot")
                 state.data_source = source
 
-                self._sync_book_fields(state, self._ob.get_book(ticker), ticker, via)
+                self._sync_book_fields(
+                    state, self._ob.get_book(ticker), ticker, via,
+                    channel="orderbook_snapshot",
+                )
                 self._sync_unified_book(ticker, state)
 
                 # A clean, authoritative snapshot can lift a circuit breaker;
@@ -4158,7 +4229,29 @@ class KalshiMarketStateStore:
         Dict get is atomic in CPython.
         """
         result = self._states.get(ticker)
-        if result is None:
+        if result is not None:
+            # 2026-10-28: ``seconds_to_expiry`` was only refreshed on REST
+            # applies (~30s cadence), so gating consumers (decision TTE
+            # banding, router TIF resolution, position monitor) ran on a
+            # value tens of seconds stale while market-selection computed
+            # fresh TTE per pass.  Recompute on read, throttled to 1 Hz per
+            # ticker, so no consumer sees a value staler than ~1s.  The
+            # recompute is idempotent and writes a single float, safe under
+            # the lock-free read path.
+            _now_mono = time.monotonic()
+            if _now_mono - getattr(result, "_tte_recomputed_mono", 0.0) >= 1.0 and (
+                result.expiration_time or result.expected_expiration_time
+            ):
+                # Only recompute when authoritative expiry metadata exists —
+                # a state with none (e.g. manually-seeded) has nothing to
+                # recompute from and the normalizer would fail-fast mark it
+                # expired.
+                try:
+                    result._tte_recomputed_mono = _now_mono
+                    _recompute_seconds_to_expiry(result)
+                except Exception:
+                    pass
+        else:
             # 2026-08-11: A miss is normal during startup/rolloff before the state
             # store has processed a ticker.  Log at INFO; callers must handle None.
             logger.info(
@@ -4178,7 +4271,16 @@ class KalshiMarketStateStore:
         BUG-FIX (2026-05-12): No lock - rely on Python GIL for atomic dict reads.
         Dict get is atomic in CPython.
         """
-        return self._unified.get(ticker)
+        u = self._unified.get(ticker)
+        if u is not None:
+            # Keep the unified copy's TTE in step with the underlying state:
+            # ``u.seconds_to_expiry`` is otherwise only synced on REST
+            # applies, so it drifts stale between applies the same way the
+            # raw state field did before recompute-on-read (see ``get``).
+            state = self.get(ticker)
+            if state is not None and state.seconds_to_expiry is not None:
+                u.seconds_to_expiry = state.seconds_to_expiry
+        return u
 
     def get_all(self) -> Dict[str, KalshiMarketState]:
         """Return a shallow copy of the full state registry.
@@ -6467,7 +6569,8 @@ class KalshiMarketStateStore:
             logger.error("[DUALITY-RESYNC] Failed to schedule REST re-sync for %s: %s", ticker, e)
 
     def _sync_book_fields(
-        self, state: KalshiMarketState, ob: LocalOrderbook, ticker: str, via: str = "unknown"
+        self, state: KalshiMarketState, ob: LocalOrderbook, ticker: str, via: str = "unknown",
+        channel: Optional[str] = None,
     ) -> None:
         """Copy the book-owned fields from a ``LocalOrderbook`` into *state*.
 
@@ -6768,10 +6871,35 @@ class KalshiMarketStateStore:
                     _streak = 0
                     _parity_held_s = 0.0
                     self._ws_parity_since.pop(ticker, None)
+                # 2026-10-28 (snapshot reclaim): an orderbook_snapshot is a
+                # complete authoritative book rebuild, not a single delta —
+                # the promote streak exists to prove a *delta stream* is
+                # trustworthy, but a snapshot already attests a full book.
+                # It reclaims ownership immediately when the REST reference
+                # is stale (aged out, no longer attestable) or when the
+                # snapshot is in parity with it.  A fresh REST quote still
+                # wins over a divergent snapshot (the REST-PREFERRED-BBO
+                # contract above).
+                _snapshot_reclaim = (
+                    channel == "orderbook_snapshot"
+                    and ws_two_sided
+                    and state.data_quality == "GOOD"
+                    and (
+                        rest_age_s > rest_pref_max_age_s
+                        or _parity_delta
+                    )
+                )
+                # NB: ``state.quote_owner`` here is the provisional pre-
+                # attestation verdict (snapshot_complete / live_sequence_
+                # confirmed are stamped later in the apply), so the snapshot
+                # branch keys on the book state itself.
                 _ws_reclaimed = (
-                    state.quote_owner == "WS_FRESH_VERIFIED"
-                    and _streak >= _WS_PROMOTE_STREAK
-                    and _parity_held_s >= _WS_PROMOTE_MIN_S
+                    _snapshot_reclaim
+                    or (
+                        state.quote_owner == "WS_FRESH_VERIFIED"
+                        and _streak >= _WS_PROMOTE_STREAK
+                        and _parity_held_s >= _WS_PROMOTE_MIN_S
+                    )
                 )
                 # Keep the streak value in the map even on promotion so the
                 # transition record can show what the promote was built on;

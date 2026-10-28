@@ -7834,9 +7834,9 @@ def _compute_trade_decision_impl(
                 indicators["fade_gate_outcome"] = "allowed_by_cohort"
             else:
                 logger.info(
-                    "[TRADE-DECISION] asset=%s ticker=%s FADE GATE blocked %s entry: "
+                    "[TRADE-DECISION] asset=%s ticker=%s route=%s FADE GATE blocked %s entry: "
                     "market lean %.1fc opposes trade side (historical fade cohort toxic)",
-                    asset, ticker, selected_outcome.upper(), _mkt_lean_c,
+                    asset, ticker, route, selected_outcome.upper(), _mkt_lean_c,
                 )
                 no_trade_reason = f"market_fade_blocked_{selected_outcome}"
                 log_rejected_candidate(

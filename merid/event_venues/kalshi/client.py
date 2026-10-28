@@ -956,6 +956,27 @@ class KalshiVenueClient(EventVenueClient):
             or os.environ.get("MERID_KALSHI_ACCOUNT_ID")
             or ""
         ).strip()
+        # 2026-10-28: member_id is only returned by the password-login
+        # endpoint; RSA-signed requests never expose it.  Under RSA the
+        # account-bound identity anchor is the API key ID itself — pin it
+        # via MERID_KALSHI_EXPECTED_API_KEY_ID so a drifted or wrong-account
+        # credential fails closed at startup instead of only logging.
+        expected_key = (
+            os.environ.get("MERID_KALSHI_EXPECTED_API_KEY_ID") or ""
+        ).strip()
+        if expected_key:
+            api_key = getattr(self.config, "api_key_id", None) or getattr(
+                self.config, "api_key", None
+            )
+            if api_key and api_key != expected_key:
+                logger.critical(
+                    "[ACCOUNT-IDENTITY-MISMATCH] configured api_key_id does not "
+                    "match MERID_KALSHI_EXPECTED_API_KEY_ID — refusing to continue",
+                )
+                raise RuntimeError(
+                    "kalshi account identity mismatch: configured API key does "
+                    "not match MERID_KALSHI_EXPECTED_API_KEY_ID"
+                )
         if not expected:
             if self._member_id:
                 logger.info(
@@ -963,10 +984,15 @@ class KalshiVenueClient(EventVenueClient):
                     "set MERID_KALSHI_EXPECTED_MEMBER_ID to enforce)",
                     self._member_id,
                 )
+            elif expected_key:
+                logger.info(
+                    "[ACCOUNT-IDENTITY] member_id not exposed by this auth path "
+                    "(RSA); identity enforced via MERID_KALSHI_EXPECTED_API_KEY_ID"
+                )
             else:
                 logger.info(
                     "[ACCOUNT-IDENTITY] member_id not exposed by this auth path "
-                    "(RSA); set MERID_KALSHI_EXPECTED_MEMBER_ID to enforce identity"
+                    "(RSA); set MERID_KALSHI_EXPECTED_API_KEY_ID to enforce identity"
                 )
             return
         if self._member_id and self._member_id != expected:
@@ -980,10 +1006,17 @@ class KalshiVenueClient(EventVenueClient):
                 "match the configured intended live account"
             )
         if not self._member_id:
-            logger.warning(
-                "[ACCOUNT-IDENTITY] MERID_KALSHI_EXPECTED_MEMBER_ID configured but "
-                "member_id is not exposed by this auth path; identity unverified"
-            )
+            if expected_key:
+                logger.info(
+                    "[ACCOUNT-IDENTITY] member_id not exposed by this auth path "
+                    "(RSA); identity enforced via MERID_KALSHI_EXPECTED_API_KEY_ID"
+                )
+            else:
+                logger.warning(
+                    "[ACCOUNT-IDENTITY] MERID_KALSHI_EXPECTED_MEMBER_ID configured but "
+                    "member_id is not exposed by this auth path; identity unverified — "
+                    "set MERID_KALSHI_EXPECTED_API_KEY_ID to enforce under RSA"
+                )
 
     async def _authenticate_rsa(self) -> None:
         """Load RSA private key for per-request signing.

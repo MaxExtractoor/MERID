@@ -379,6 +379,12 @@ class DecisionAuditLedger:
         self._lock = threading.Lock()
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
+        # 2026-10-28: dedicated persistent read connection.  WAL-mode readers
+        # get a consistent snapshot without touching the writer's lock —
+        # previously single-SELECT readers serialized behind ``self._lock``
+        # and each multi-hundred-ms scan inflated audit_write_exec_ms.
+        self._read_conn: Optional[sqlite3.Connection] = None
+        self._read_conn_lock = threading.Lock()
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_wal_checkpoint = 0.0
         self._last_prune = 0.0
@@ -576,7 +582,18 @@ class DecisionAuditLedger:
         if self._closed:
             return True
         self._closed = True
-        return self.drain_write_queue(timeout_s)
+        flushed = self.drain_write_queue(timeout_s)
+        # Release the dedicated read connection so the DB file handle frees
+        # (Windows keeps the file locked while a connection is open).
+        if self._read_conn is not None:
+            with self._read_conn_lock:
+                try:
+                    if self._read_conn is not None:
+                        self._read_conn.close()
+                except Exception:
+                    pass
+                self._read_conn = None
+        return flushed
 
     def _submit_write(self, fn: Callable[[], None], *, priority: str = "normal") -> None:
         """Run a ledger write on the dedicated writer thread.
@@ -699,6 +716,28 @@ class DecisionAuditLedger:
             )
             self._shared_conn = conn
         return self._shared_conn
+
+    def _read(self) -> sqlite3.Connection:
+        """Lazily-opened persistent read connection (WAL snapshot isolation).
+
+        Independent SELECTs run without ``self._lock`` — sqlite3's serialized
+        threading mode makes each execute atomic, and WAL lets a reader run
+        concurrently with the single writer.  Multi-statement read
+        transactions that need one consistent snapshot should still take a
+        lock and their own connection.
+        """
+        if self._read_conn is None:
+            with self._read_conn_lock:
+                if self._read_conn is None:
+                    conn = sqlite3.connect(
+                        str(self.db_path), timeout=30, check_same_thread=False
+                    )
+                    conn.isolation_level = None
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA busy_timeout = 5000")
+                    conn.execute("PRAGMA query_only = ON")
+                    self._read_conn = conn
+        return self._read_conn
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Idempotent migrations for the point-in-time audit ledger."""
@@ -2365,21 +2404,25 @@ class DecisionAuditLedger:
 
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT d.decision_id, d.close_ts, d.asset, d.run_id, d.candidate_id,
-                           d.selected_side, d.ticker,
-                           o.fill_id, o.actual_fill_price_cents,
-                           o.realized_net_pnl_cents
-                    FROM strategy_decisions d
-                    JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
-                    WHERE d.ticker = ?
-                      AND o.outcome_status = 'PENDING'
-                      AND ABS(d.close_ts - ?) <= 900.0
-                    """,
-                    (ticker, close_ts),
-                ).fetchall()
+            # 2026-10-28: pure read on the dedicated read connection — WAL
+            # snapshot isolation needs neither the write lock nor the shared
+            # write conn; holding them serialized the audit writer behind
+            # this per-ticker scan.
+            conn = self._read()
+            rows = conn.execute(
+                """
+                SELECT d.decision_id, d.close_ts, d.asset, d.run_id, d.candidate_id,
+                       d.selected_side, d.ticker,
+                       o.fill_id, o.actual_fill_price_cents,
+                       o.realized_net_pnl_cents
+                FROM strategy_decisions d
+                JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
+                WHERE d.ticker = ?
+                  AND o.outcome_status = 'PENDING'
+                  AND ABS(d.close_ts - ?) <= 900.0
+                """,
+                (ticker, close_ts),
+            ).fetchall()
 
             # Phase A (no lock): fills-DB reads for settlement attribution.
             # _resolve_entry_fill / _capital_realized open their own read-only
@@ -3374,24 +3417,24 @@ class DecisionAuditLedger:
         cutoff = now_ts - grace_s
         floor = now_ts - lookback_s
         try:
-            with self._lock, self._conn() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
-                    FROM strategy_decisions d
-                    JOIN strategy_decision_outcomes o
-                      ON d.decision_id = o.decision_id
-                    WHERE o.outcome_status = 'PENDING'
-                      AND d.close_ts < ?
-                      AND d.close_ts > ?
-                      AND d.ticker IS NOT NULL
-                      AND d.ticker != ''
-                    GROUP BY d.ticker
-                    ORDER BY close_ts DESC
-                    LIMIT ?
-                    """,
-                    (cutoff, floor, limit),
-                ).fetchall()
+            # 2026-10-28: pure read on the dedicated read connection.
+            rows = self._read().execute(
+                """
+                SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
+                FROM strategy_decisions d
+                JOIN strategy_decision_outcomes o
+                  ON d.decision_id = o.decision_id
+                WHERE o.outcome_status = 'PENDING'
+                  AND d.close_ts < ?
+                  AND d.close_ts > ?
+                  AND d.ticker IS NOT NULL
+                  AND d.ticker != ''
+                GROUP BY d.ticker
+                ORDER BY close_ts DESC
+                LIMIT ?
+                """,
+                (cutoff, floor, limit),
+            ).fetchall()
             return [(r["ticker"], float(r["close_ts"])) for r in rows]
         except Exception as exc:
             logger.warning(
