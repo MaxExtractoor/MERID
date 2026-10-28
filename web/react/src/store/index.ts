@@ -2,13 +2,15 @@
  * Kalshi Store — Single Source of Truth for 15m Stack
  * 
  * Architecture:
- * - Single Zustand store with 4 slices: portfolio, risk, grid, system
+ * - Single Zustand store with 3 slices: portfolio, risk, system
  * - REST polling only (no WS router exists on the live backend)
  * - All UI state derived from store, no local state duplication
- * 
+ * - Agent-fleet telemetry is owned by useAgentWall (agents/api.ts) — the
+ *   store deliberately does NOT duplicate grid/agent probes.
+ *
  * Guardrails:
  * - UI never recomputes PnL, risk, or balances — only renders what backend provides
- * - Interface freeze: PortfolioData, RiskData, GridData, SystemData are contracts
+ * - Interface freeze: PortfolioData, RiskData, SystemData are contracts
  * - Fault isolation: every refreshAll() fetch is independently settled — one
  *   failing endpoint must never zero out the rest of the store
  */
@@ -17,12 +19,9 @@ import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import {
   AGENT_ENDPOINTS,
-  fetchAgentsWall,
-  fetchGridSummary,
   fetchLiveRuntimeState,
   getJson,
 } from '../agents/api';
-import type { AssetAgent } from '../agents/types';
 
 // ── Types (contracts with backend) ─────────────────────────────────────────────
 
@@ -117,47 +116,6 @@ export interface RiskData extends SliceHealth {
   sharpe_ratio: number;
   profit_factor: number;
   alerts: RiskAlert[];
-  timestamp: string;
-}
-
-export interface AgentSummary {
-  name: string;
-  asset: string;
-  timeframe: string;
-  running: boolean;
-  cycles: number;
-  orders: number;
-  fills: number;
-  series_tickers: string[];
-  // Extended fields from the agent-wall contract (optional — absent when the
-  // grid endpoint is down and only summary data arrived).
-  state?: string;
-  enabled?: boolean;
-  position_count?: number;
-  last_signal_age_s?: number;
-  rejected_reason?: string;
-  current_task?: string;
-}
-
-export interface DeploymentStatus {
-  mode: 'paper' | 'shadow' | 'live';
-  auto_promoter_enabled: boolean;
-  last_transition: string;
-}
-
-export interface PerformanceMetrics {
-  sharpe_ratio: number;
-  sortino_ratio: number;
-  calmar_ratio: number;
-  win_rate: number;
-  profit_factor: number;
-}
-
-export interface GridData extends SliceHealth {
-  running: boolean;
-  agents: AgentSummary[];
-  deployment: DeploymentStatus;
-  performance: PerformanceMetrics;
   timestamp: string;
 }
 
@@ -312,25 +270,6 @@ const mapTickToLog = (t: ServerTick, idx: number): LogEntry => {
   };
 };
 
-const toAgentSummary = (a: AssetAgent): AgentSummary => ({
-  name: a.name,
-  asset: a.asset,
-  timeframe: '15m',
-  running: a.enabled && a.state !== 'HALTED',
-  cycles: num(a.raw?.cycles_run ?? a.raw?.cycles),
-  orders: 0,
-  fills: num(a.pnl?.fills_24h),
-  series_tickers: a.market?.ticker ? [a.market.ticker] : [],
-  state: a.state,
-  enabled: a.enabled,
-  position_count: a.position ? 1 : num(a.raw?.position_count),
-  last_signal_age_s: a.heartbeat?.last_eval_ms != null
-    ? Math.round(num(a.heartbeat.last_eval_ms) / 1000)
-    : undefined,
-  rejected_reason: a.last_decision?.rejection_reason,
-  current_task: a.current_task,
-});
-
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** Settle one fetch — never throws. Returns [value, error]. */
@@ -348,17 +287,15 @@ interface KalshiStore {
   // Slices
   portfolio: PortfolioData;
   risk: RiskData;
-  grid: GridData;
   system: SystemData;
-  
+
   // Connection state
   connected: boolean;
   lastUpdate: number;
-  
+
   // Actions
   updatePortfolio: (data: Partial<PortfolioData>) => void;
   updateRisk: (data: Partial<RiskData>) => void;
-  updateGrid: (data: Partial<GridData>) => void;
   updateSystem: (data: Partial<SystemData>) => void;
   setConnected: (connected: boolean) => void;
   refreshAll: () => Promise<void>;
@@ -401,24 +338,6 @@ const initialRisk: RiskData = {
   timestamp: new Date().toISOString(),
 };
 
-const initialGrid: GridData = {
-  running: false,
-  agents: [],
-  deployment: {
-    mode: 'paper',
-    auto_promoter_enabled: false,
-    last_transition: '',
-  },
-  performance: {
-    sharpe_ratio: 0,
-    sortino_ratio: 0,
-    calmar_ratio: 0,
-    win_rate: 0,
-    profit_factor: 0,
-  },
-  timestamp: new Date().toISOString(),
-};
-
 const initialSystem: SystemData = {
   health: {
     ok: false,
@@ -439,27 +358,21 @@ export const useKalshiStore = create<KalshiStore>()(
     // Initial state
     portfolio: initialPortfolio,
     risk: initialRisk,
-    grid: initialGrid,
     system: initialSystem,
     connected: false,
     lastUpdate: 0,
-    
+
     // Actions
     updatePortfolio: (data) => set((state) => ({
       portfolio: { ...state.portfolio, ...data },
       lastUpdate: Date.now(),
     })),
-    
+
     updateRisk: (data) => set((state) => ({
       risk: { ...state.risk, ...data },
       lastUpdate: Date.now(),
     })),
-    
-    updateGrid: (data) => set((state) => ({
-      grid: { ...state.grid, ...data },
-      lastUpdate: Date.now(),
-    })),
-    
+
     updateSystem: (data) => set((state) => ({
       system: { ...state.system, ...data },
       lastUpdate: Date.now(),
@@ -487,8 +400,6 @@ export const useKalshiStore = create<KalshiStore>()(
         [killRes, killErr],
         [healthRes, healthErr],
         [liveRes, liveErr],
-        [gridRes, gridErr],
-        [wallRes, wallErr],
         [tickRes, tickErr],
       ] = await Promise.all([
         probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.BALANCE)),
@@ -500,8 +411,6 @@ export const useKalshiStore = create<KalshiStore>()(
         probe(() => getJson<{ kill_switch?: boolean; status?: string }>(AGENT_ENDPOINTS.KILL_SWITCH)),
         probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.UNIFIED_HEALTH)),
         probe(() => fetchLiveRuntimeState()),
-        probe(() => fetchGridSummary()),
-        probe(() => fetchAgentsWall()),
         probe(() => getJson<{ ticks?: ServerTick[] }>(`${AGENT_ENDPOINTS.TICK_LOG}?limit=50`)),
       ]);
 
@@ -573,29 +482,6 @@ export const useKalshiStore = create<KalshiStore>()(
         get().updateRisk({ error: riskErr ?? killErr });
       }
 
-      // ── Grid slice (kalshi-grid summary + agent wall) ──
-      const liveState = liveRes?.state ? String(liveRes.state) : null;
-      const liveMode: DeploymentStatus['mode'] = liveState?.startsWith('LIVE_') ? 'live' : 'paper';
-      if (gridRes || wallRes) {
-        const summaryObj = (gridRes as Record<string, any> | null)?.summary ?? gridRes;
-        const agents: AgentSummary[] = wallRes ? wallRes.map(toAgentSummary) : get().grid.agents;
-        const runningCount = agents.filter(a => a.running).length;
-        get().updateGrid({
-          running: Boolean(gridRes?.running ?? (summaryObj as Record<string, any> | undefined)?.running ?? runningCount > 0),
-          agents,
-          deployment: {
-            mode: liveMode,
-            auto_promoter_enabled: false,
-            last_transition: liveRes?.updated_ts ?? '',
-          },
-          timestamp: new Date().toISOString(),
-          lastOk: now,
-          error: gridErr ?? wallErr,
-        });
-      } else if (gridErr ?? wallErr) {
-        get().updateGrid({ error: gridErr ?? wallErr });
-      }
-
       // ── System slice (unified-health + live-runtime-state + tick log) ──
       if (healthRes || liveRes || tickRes) {
         const services: Record<string, ServiceHealth> = {};
@@ -628,7 +514,7 @@ export const useKalshiStore = create<KalshiStore>()(
           },
           // 'live' only on positive LIVE_* evidence from the runtime-state
           // endpoint; anything else keeps the safe 'paper' default.
-          mode: liveState?.startsWith('LIVE_') ? 'live' : get().system.mode,
+          mode: String(liveRes?.state ?? '').startsWith('LIVE_') ? 'live' : get().system.mode,
           live,
           startup_completed: healthRes?.startup_completed === true || get().system.startup_completed,
           logs: ticks ? ticks.map(mapTickToLog) : get().system.logs,
@@ -643,7 +529,7 @@ export const useKalshiStore = create<KalshiStore>()(
       // ── Connection: ANY core fetch succeeding means the backend is up ──
       const anyOk = [
         balance, pnl, positionsRes, ordersRes, fillsRes,
-        riskRes, killRes, healthRes, liveRes, gridRes, wallRes, tickRes,
+        riskRes, killRes, healthRes, liveRes, tickRes,
       ].some(v => v !== null);
       get().setConnected(anyOk);
     },
@@ -654,7 +540,6 @@ export const useKalshiStore = create<KalshiStore>()(
 
 export const selectPortfolio = (state: KalshiStore) => state.portfolio;
 export const selectRisk = (state: KalshiStore) => state.risk;
-export const selectGrid = (state: KalshiStore) => state.grid;
 export const selectSystem = (state: KalshiStore) => state.system;
 export const selectConnected = (state: KalshiStore) => state.connected;
 export const selectMode = (state: KalshiStore) => state.system.mode;

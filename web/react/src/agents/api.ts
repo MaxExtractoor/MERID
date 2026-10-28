@@ -56,6 +56,29 @@ export async function postJson<T>(path: string, body?: unknown, timeoutMs = 10_0
   }
 }
 
+export async function delJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(apiUrl(path), {
+      method: 'DELETE',
+      headers: authHeaders(),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.json() as { detail?: string };
+        detail = body?.detail ? ` — ${body.detail}` : '';
+      } catch { /* non-JSON error body */ }
+      throw new Error(`${res.status} ${res.statusText} @ ${path}${detail}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Raw server shapes (defensive — backend may omit fields)             */
 /* ------------------------------------------------------------------ */

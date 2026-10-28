@@ -1,8 +1,6 @@
 import React from 'react';
 import {
-  LayoutDashboard,
   Terminal,
-  Monitor,
   Gauge,
   Grid,
   Crosshair,
@@ -22,7 +20,7 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
 }
 
-/* ── Canonical Sidebar Groups ─────────────────────────────────────────── */
+/* ── Canonical Sidebar Groups — 7 views, one job each ─────────────────── */
 
 const agents = [{ label: 'Agents', stage: 'AGENTS', color: 'emerald', accent: 'from-emerald-500 to-emerald-600', items: [
   { name: 'Agent Wall', href: 'agent-wall', icon: Grid },
@@ -30,32 +28,17 @@ const agents = [{ label: 'Agents', stage: 'AGENTS', color: 'emerald', accent: 'f
   { name: 'Agent Detail', href: 'agent-detail', icon: Crosshair },
 ]}] as const;
 
-const tradingCore = [{ label: 'Trading', stage: 'TRADE', color: 'emerald', accent: 'from-emerald-500 to-emerald-600', items: [
-  { name: 'Dashboard', href: 'dashboard', icon: LayoutDashboard },
-  { name: 'Markets', href: 'kalshi-dashboard', icon: LayoutDashboard },
-  { name: 'Portfolio', href: 'kalshi-portfolio', icon: Briefcase },
-  { name: 'Trade', href: 'trade', icon: Monitor },
-]}] as const;
-
-const swarmIntelligence = [{ label: 'Swarm Intelligence', stage: 'SWARM', color: 'cyan', accent: 'from-cyan-500 to-cyan-600', items: [
-  { name: 'Grid', href: 'grid', icon: Grid },
-]}] as const;
-
-const analytics = [{ label: 'Analytics', stage: 'ANALYTICS', color: 'purple', accent: 'from-purple-500 to-purple-600', items: [
+const tradingCore = [{ label: 'Trading', stage: 'TRADE', color: 'cyan', accent: 'from-cyan-500 to-cyan-600', items: [
+  { name: 'Terminal', href: 'terminal', icon: Terminal },
+  { name: 'Portfolio', href: 'portfolio', icon: Briefcase },
   { name: 'Risk', href: 'risk', icon: Gauge },
-  { name: 'Calibration', href: 'calibration', icon: Crosshair },
-]}] as const;
-
-const operatorSection = [{ label: 'Operator', stage: 'OPERATOR', color: 'orange', accent: 'from-orange-500 to-orange-600', items: [
-  { name: 'Monitor', href: 'monitor', icon: Briefcase },
 ]}] as const;
 
 const system = [{ label: 'System', stage: 'SYSTEM', color: 'slate', accent: 'from-slate-500 to-slate-600', items: [
-  { name: 'Logs', href: 'logs', icon: Terminal },
-  { name: 'Settings', href: 'settings', icon: SettingsIcon },
+  { name: 'System', href: 'system', icon: SettingsIcon },
 ]}] as const;
 
-const SECTIONS = [agents, tradingCore, swarmIntelligence, analytics, operatorSection, system];
+const SECTIONS = [agents, tradingCore, system];
 
 // Color mapping for stage accents
 const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; hover: string }> = {
@@ -72,7 +55,7 @@ const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; h
 
 // Views that show live/paper mode indicator (consolidated to real view ids)
 const MODE_INDICATOR_VIEWS = new Set<View>([
-  'trade', 'monitor', 'grid',
+  'terminal', 'portfolio',
 ]);
 
 interface NavItemProps {
@@ -212,7 +195,7 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
         {!collapsed && (
           <div className="flex flex-col">
             <span className="text-xl font-bold text-white">MERID</span>
-            <span className="text-[10px] text-slate-500 font-medium">8-View Architecture</span>
+            <span className="text-[10px] text-slate-500 font-medium">Kalshi 15m</span>
           </div>
         )}
       </div>

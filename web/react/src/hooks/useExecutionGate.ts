@@ -1,9 +1,8 @@
-import { useApiData } from './useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useKalshiStore, selectRisk, selectSystem, selectConnected } from '../store';
 
 export interface BlockReason {
   source: string;
-  severity: string;
+  severity: 'critical' | 'warning';
   message: string;
   details: string | null;
   hint: string | null;
@@ -11,33 +10,59 @@ export interface BlockReason {
 
 export type GateState = 'clear' | 'limited' | 'blocked';
 
-interface ExecutionGateData {
-  blocked: boolean;
-  safe_to_trade: boolean;
-  gate_state: GateState;
-  reasons: BlockReason[];
-  timestamp: number;
-}
-
 /**
- * Hook to check execution gate status for use in trading controls.
- * Returns { blocked, gateState, reasons, topHint } so controls can grey out + show tooltips.
+ * Execution gate derived from shared store state — no endpoint of its own
+ * (the old /api/v1/system/execution-gate never existed on the lean app).
+ *
+ * blocked  = a critical reason is active (live entries halted, kill switch)
+ * limited  = warning only (backend unreachable — controls may still render
+ *            but submissions will fail server-side)
+ * clear    = nothing blocking
  */
 export function useExecutionGate() {
-  const { data } = useApiData<ExecutionGateData>(
-    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
-  );
+  const risk = useKalshiStore(selectRisk);
+  const system = useKalshiStore(selectSystem);
+  const connected = useKalshiStore(selectConnected);
 
-  const reasons = data?.reasons ?? [];
-  const topHint = reasons.find(r => r.hint)?.hint ?? null;
+  const reasons: BlockReason[] = [];
+  if (system.live?.entry_halted) {
+    reasons.push({
+      source: 'runtime',
+      severity: 'critical',
+      message: 'Live entries halted',
+      details: system.live.reason ?? null,
+      hint: 'Release via the Risk view after investigating the cause',
+    });
+  }
+  if (risk.kill_switch_active) {
+    reasons.push({
+      source: 'kill_switch',
+      severity: 'critical',
+      message: 'Kill switch active',
+      details: risk.kill_switch_reason || null,
+      hint: 'Reset via the Risk view kill switch control',
+    });
+  }
+  if (!connected) {
+    reasons.push({
+      source: 'connection',
+      severity: 'warning',
+      message: 'Backend unreachable — data may be stale',
+      details: null,
+      hint: null,
+    });
+  }
+
+  const blocked = reasons.some((r) => r.severity === 'critical');
+  const gateState: GateState = blocked ? 'blocked' : reasons.length ? 'limited' : 'clear';
+  const topHint = reasons.find((r) => r.hint)?.hint ?? null;
 
   return {
-    blocked: data?.blocked ?? true,  // default blocked until first check
-    safeToTrade: data?.safe_to_trade ?? false,
-    gateState: (data?.gate_state ?? 'blocked') as GateState,
+    blocked,
+    safeToTrade: gateState === 'clear',
+    gateState,
     reasons,
-    blockSummary: reasons.map(r => r.message).join('; ') || 'Checking safety...',
+    blockSummary: reasons.map((r) => r.message).join('; ') || 'No blocks',
     topHint,
   };
 }

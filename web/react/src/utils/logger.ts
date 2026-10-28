@@ -3,15 +3,13 @@
  *
  * Provides `logUiError`, `logUiWarn`, and `logUiInfo` — thin wrappers
  * around `console.*` that emit a consistent JSON-shaped object so logs
- * are grep-able and piped to the backend `/api/v1/telemetry` endpoint
- * for aggregation and SLI tracking.
+ * are grep-able. (The `/api/v1/telemetry` beacon was removed — that
+ * endpoint does not exist on the lean backend.)
  *
  * Usage:
  *   import { logUiError, logUiWarn } from '../utils/logger';
  *   logUiError('TopBar', 'PnL fetch failed', err, { endpoint: '/portfolio' });
  */
-
-import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
 
 export type LogLevel = 'error' | 'warn' | 'info';
 
@@ -24,16 +22,6 @@ export interface UiLogEntry {
   context?: Record<string, unknown>;
   timestamp: string;
   correlation_id?: string;
-}
-
-/**
- * Enable/disable backend telemetry piping.
- * Set to false to silence beacon calls during tests or local dev.
- */
-let _telemetryEnabled = false;
-
-export function setTelemetryEnabled(enabled: boolean): void {
-  _telemetryEnabled = enabled;
 }
 
 /** Internal: build the structured entry and emit it. */
@@ -74,18 +62,6 @@ function emit(
       break;
     default:
       console.info(`${tag} ${message}`, entry);
-  }
-
-  // ── Backend telemetry ──────────────────────────────────────────
-  // Pipe errors and warnings to /api/v1/telemetry via sendBeacon
-  // (fire-and-forget, works even during page unload).
-  if (_telemetryEnabled && (level === 'error' || level === 'warn')) {
-    try {
-      const blob = new Blob([JSON.stringify(entry)], { type: 'application/json' });
-      navigator.sendBeacon?.(`${API_BASE_URL}${API_ENDPOINTS.TELEMETRY}`, blob);
-    } catch {
-      // sendBeacon unavailable or blocked — console output is still there
-    }
   }
 
   return entry;

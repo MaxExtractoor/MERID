@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, Monitor, Settings, Briefcase, Gauge, FileText, Crosshair, Globe, Grid, Activity } from '../ui/icons';
+import { Search, ArrowRight, Monitor, Settings, Briefcase, Gauge, Crosshair, Grid, Activity } from '../ui/icons';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
-import { useFeatureFlags } from '../config/featureFlags';
 
 interface CommandItem {
   id: View;
@@ -10,7 +9,6 @@ interface CommandItem {
   section: string;
   icon: React.ElementType;
   keywords: string[];
-  legacy?: boolean;
 }
 
 // Only views present in App.tsx VIEW_COMPONENTS — dead ids removed.
@@ -21,22 +19,12 @@ const COMMANDS: CommandItem[] = [
   { id: 'agent-detail', label: 'Agent Detail', section: 'Agents', icon: Crosshair, keywords: ['agent', 'detail', 'asset', 'book', 'depth', 'gates', 'funnel'] },
 
   // Trading
-  { id: 'dashboard', label: 'Dashboard', section: 'Trading', icon: LayoutDashboard, keywords: ['home', 'overview', 'summary', 'health', 'kill', 'switch', 'balance', 'pnl'] },
-  { id: 'trade', label: 'Trade', section: 'Trading', icon: Monitor, keywords: ['terminal', 'order', 'ticket', 'execute', 'markets', '15m', 'orderbook', 'positions', 'orders', 'cancel'] },
-  { id: 'monitor', label: 'Monitor', section: 'Trading', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'history', 'profit', 'loss', 'health'] },
-  { id: 'grid', label: 'Agent Grid', section: 'Trading', icon: Grid, keywords: ['grid', 'agents', 'btc', 'eth', 'sol', 'xrp', 'doge', 'swarm'] },
-
-  // Analytics
-  { id: 'risk', label: 'Risk', section: 'Analytics', icon: Gauge, keywords: ['risk', 'alerts', 'exposure', 'limits', 'drawdown', 'kill', 'halt', 'safety', 'emergency'] },
-  { id: 'calibration', label: 'Calibration', section: 'Analytics', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'cell', 'edge', 'accuracy'] },
-
-  // Legacy deep-link views (still mounted in VIEW_COMPONENTS)
-  { id: 'kalshi-dashboard', label: 'Kalshi Markets', section: 'Kalshi', icon: Globe, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
-  { id: 'kalshi-portfolio', label: 'Kalshi Portfolio', section: 'Kalshi', icon: Briefcase, keywords: ['kalshi', 'portfolio', 'positions', 'holdings'] },
+  { id: 'terminal', label: 'Terminal', section: 'Trading', icon: Monitor, keywords: ['trade', 'terminal', 'order', 'ticket', 'execute', 'markets', '15m', 'orderbook', 'positions', 'orders', 'cancel'] },
+  { id: 'portfolio', label: 'Portfolio', section: 'Trading', icon: Briefcase, keywords: ['monitor', 'portfolio', 'fills', 'pnl', 'equity', 'history', 'profit', 'loss', 'positions', 'orders'] },
+  { id: 'risk', label: 'Risk', section: 'Trading', icon: Gauge, keywords: ['risk', 'alerts', 'exposure', 'limits', 'drawdown', 'kill', 'halt', 'safety', 'emergency', 'dashboard', 'health'] },
 
   // System
-  { id: 'logs', label: 'Logs', section: 'System', icon: FileText, keywords: ['log', 'error', 'debug', 'tick'] },
-  { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme', 'state'] },
+  { id: 'system', label: 'System', section: 'System', icon: Settings, keywords: ['settings', 'config', 'calibration', 'brier', 'forecaster', 'cell', 'edge', 'accuracy', 'logs', 'log', 'error', 'debug', 'tick', 'health'] },
 ];
 
 interface CommandPaletteProps {
@@ -50,7 +38,6 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const { kalshiOnly } = useFeatureFlags();
 
   // Register open function with parent ref
   useEffect(() => {
@@ -81,15 +68,14 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
   }, [open]);
 
   const filtered = useMemo(() => {
-    const base = kalshiOnly ? COMMANDS.filter(c => !c.legacy) : COMMANDS;
-    if (!query.trim()) return base;
+    if (!query.trim()) return COMMANDS;
     const q = query.toLowerCase();
-    return base.filter(cmd =>
+    return COMMANDS.filter(cmd =>
       cmd.label.toLowerCase().includes(q) ||
       cmd.section.toLowerCase().includes(q) ||
       cmd.keywords.some(kw => kw.includes(q))
     );
-  }, [query, kalshiOnly]);
+  }, [query]);
 
   // Scroll selected item into view
   useEffect(() => {

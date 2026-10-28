@@ -16,8 +16,7 @@
  */
 
 import React from 'react';
-import { useApiQuery } from '../hooks/useTanStackQuery';
-import { apiUrl } from '../config/apiBase';
+import { usePoll } from '../hooks/usePoll';
 import { DEFAULTS } from '../config/constants';
 import { CheckCircle, AlertTriangle, XCircle, Clock } from '../ui/icons';
 
@@ -109,12 +108,9 @@ const StageCard: React.FC<{ name: string; stage: StageResult }> = ({ name, stage
 };
 
 const Kalshi15mAlignmentPanel: React.FC = () => {
-  const { data, isLoading, error, refetch } = useApiQuery<DataFlowResponse>(
-    apiUrl('/api/v1/data-flow-validation'),
-    {
-      refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST,
-      staleTime: 10_000,
-    }
+  const { data, loading: isLoading, error, refresh: refetch } = usePoll<DataFlowResponse>(
+    '/api/v1/data-flow-validation',
+    { ms: DEFAULTS.POLLING_INTERVALS.FAST },
   );
 
   if (isLoading && !data) {

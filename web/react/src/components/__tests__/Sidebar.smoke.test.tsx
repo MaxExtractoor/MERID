@@ -21,31 +21,20 @@ jest.mock('lucide-react', () => {
   });
 });
 
-// Mock KalshiModeContext
-jest.mock('../../context/KalshiModeContext', () => ({
-  useKalshiMode: () => ({ data: null, isLive: false }),
-}));
-
-// Expected nav items in the agent-centric Sidebar implementation
-// (see Sidebar.tsx: agents, tradingCore, swarmIntelligence, analytics, operatorSection, system)
+// Expected nav items in the consolidated 7-view Sidebar
+// (see Sidebar.tsx: agents, tradingCore, system)
 const EXPECTED_ITEMS: Array<{ name: string; href: string }> = [
   { name: 'Agent Wall', href: 'agent-wall' },
   { name: 'Mission Control', href: 'mission-control' },
   { name: 'Agent Detail', href: 'agent-detail' },
-  { name: 'Dashboard', href: 'dashboard' },
-  { name: 'Markets', href: 'kalshi-dashboard' },
-  { name: 'Portfolio', href: 'kalshi-portfolio' },
-  { name: 'Trade', href: 'trade' },
-  { name: 'Grid', href: 'grid' },
+  { name: 'Terminal', href: 'terminal' },
+  { name: 'Portfolio', href: 'portfolio' },
   { name: 'Risk', href: 'risk' },
-  { name: 'Calibration', href: 'calibration' },
-  { name: 'Monitor', href: 'monitor' },
-  { name: 'Logs', href: 'logs' },
-  { name: 'Settings', href: 'settings' },
+  { name: 'System', href: 'system' },
 ];
 
 const EXPECTED_SECTION_LABELS = [
-  'Agents', 'Trading', 'Swarm Intelligence', 'Analytics', 'Operator', 'System',
+  'Agents', 'Trading', 'System',
 ];
 
 describe('Sidebar Smoke Tests', () => {
@@ -56,7 +45,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it('renders all section headers', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} />);
     for (const label of EXPECTED_SECTION_LABELS) {
       const matches = screen.getAllByText(label);
       expect(matches.length).toBeGreaterThan(0);
@@ -64,7 +53,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it('renders all expected nav items by name', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} />);
     for (const item of EXPECTED_ITEMS) {
       const matches = screen.getAllByText(item.name);
       expect(matches.length).toBeGreaterThan(0);
@@ -72,7 +61,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it('renders navigation buttons for all items (+ collapse toggle)', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} />);
     const allButtons = screen.getAllByRole('button');
     // one nav button per item + one collapse/expand button at top
     expect(allButtons.length).toBeGreaterThanOrEqual(EXPECTED_ITEMS.length);
@@ -87,7 +76,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it.skip('does not highlight non-active items [SKIPPED - implementation changed]', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} />);
     const riskButton = screen.getByText('Risk').closest('button');
     expect(riskButton?.className).not.toMatch(/bg-red-500\/10/);
   });
@@ -97,7 +86,7 @@ describe('Sidebar Smoke Tests', () => {
     'clicking "%s"',
     (name, expectedHref) => {
       it(`fires onChange with "${expectedHref}"`, () => {
-        render(<Sidebar current="dashboard" onChange={mockOnChange} />);
+        render(<Sidebar current="agent-wall" onChange={mockOnChange} />);
         const matches = screen.getAllByText(name as string);
         const button = matches.map(el => el.closest('button')).find(Boolean);
         expect(button).toBeTruthy();
@@ -112,21 +101,21 @@ describe('Sidebar Collapsed Mode', () => {
   const mockOnChange = jest.fn();
 
   it('hides item names when collapsed', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} collapsed={true} />);
     for (const item of EXPECTED_ITEMS) {
       expect(screen.queryByText(item.name)).not.toBeInTheDocument();
     }
   });
 
   it('hides section headers when collapsed', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} collapsed={true} />);
     for (const label of EXPECTED_SECTION_LABELS) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
   });
 
   it.skip('shows tooltips when collapsed [SKIPPED - implementation changed]', () => {
-    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="agent-wall" onChange={mockOnChange} collapsed={true} />);
     const buttons = screen.getAllByRole('button');
     const navButtons = buttons.filter(b => b.title && !b.title.toLowerCase().includes('sidebar'));
     expect(navButtons.length).toBe(EXPECTED_ITEMS.length);

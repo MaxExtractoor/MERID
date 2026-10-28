@@ -1,11 +1,8 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Search, Menu, Sun, Moon, Settings } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
-import { useKalshiStore, selectSystem } from '../store';
+import { useKalshiStore, selectSystem, selectPortfolio } from '../store';
 import type { View } from '../types/views';
-import LiveNotifications from './LiveNotifications';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
 
 export interface TopBarProps {
@@ -14,29 +11,61 @@ export interface TopBarProps {
   onOpenSearch?: () => void;
 }
 
+/** Seconds until the next 15m market window boundary (:00/:15/:30/:45). */
+function secsToWindowClose(nowMs: number): number {
+  const next = Math.ceil(nowMs / 900_000) * 900_000;
+  return Math.max(0, Math.round((next - nowMs) / 1000));
+}
+
+function fmtClock(d: Date): string {
+  return d.toLocaleTimeString('en-US', { hour12: false });
+}
+
+function fmtCountdown(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** Live UTC clock + 15m window countdown chip. */
+const WindowClock: React.FC = () => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const secs = secsToWindowClose(now);
+  const urgent = secs <= 60;
+  return (
+    <div className="hidden lg:flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-800/60 border border-slate-700/50">
+      <span className="text-sm font-medium tabular-nums text-slate-300" title="Local time">
+        {fmtClock(new Date(now))}
+      </span>
+      <span className="text-slate-600">·</span>
+      <span
+        className={`text-sm font-bold tabular-nums ${urgent ? 'text-amber-400' : 'text-cyan-300'}`}
+        title="Time to 15m window close"
+      >
+        ⏱ {fmtCountdown(secs)}
+      </span>
+    </div>
+  );
+};
+
 function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
-
-  const { data: pnlData } = useApiData<{ daily_pnl_usd?: number }>(
-    API_ENDPOINTS.KALSHI_PNL,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
-  );
-  const { data: balData } = useApiData<{ total_value_cents?: number; balance_cents?: number; portfolio_cents?: number; available?: number }>(
-    API_ENDPOINTS.KALSHI_BALANCE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
-  );
-  // Honest live-entry state from the store — populated by the real
-  // /api/v1/live-runtime-state endpoint, not the legacy mode context.
   const system = useKalshiStore(selectSystem);
+  const portfolio = useKalshiStore(selectPortfolio);
+
+  // Honest live-entry state from the store — populated by the real
+  // /api/v1/live-runtime-state endpoint, not a legacy mode context.
   const liveState = system.live?.state ?? null;
   const isLive = liveState === 'LIVE_ENTRIES_ENABLED';
   const entriesHalted = liveState === 'LIVE_ENTRIES_HALTED';
 
-  const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
+  const dailyPnl = portfolio.daily_pnl ?? 0;
   const pnlPositive = dailyPnl >= 0;
-  // Use total_value_cents (cash + portfolio) for balance display, fallback to available for backward compatibility
-  const balanceCents = balData?.total_value_cents ?? (balData?.available ?? 0) * 100;
-  const balanceUsd = balanceCents / 100;
+  const balanceUsd = (portfolio.portfolio_value ?? portfolio.cash ?? 0);
 
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">
@@ -66,7 +95,7 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
 
         {/* Environment badge — truthful live runtime state */}
         <div className="flex items-center gap-3">
-          <span className={`px-3 py-1 text-xs font-bold rounded-full shadow-lg animate-pulse-slow ${
+          <span className={`px-3 py-1 text-xs font-bold rounded-full shadow-lg ${
             isLive
               ? 'text-red-400 bg-gradient-to-r from-red-500/20 to-rose-500/20 border border-red-400/50 shadow-red-500/30'
               : entriesHalted
@@ -78,24 +107,25 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
             }`}></span>
             {isLive ? 'LIVE' : entriesHalted ? 'ENTRIES HALTED' : 'STATE UNKNOWN'}
           </span>
-          
+
           {/* Kalshi Balance + Daily P&L */}
           <div className={`hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r rounded-lg shadow-lg ${
             pnlPositive
               ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
               : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
           }`}>
-            {balData != null && (
-              <span className="text-slate-300 text-sm font-medium">
-                {balanceUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
-              </span>
-            )}
-            {balData != null && <span className="text-slate-600">·</span>}
+            <span className="text-slate-300 text-sm font-medium tabular-nums">
+              {balanceUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+            </span>
+            <span className="text-slate-600">·</span>
             <span className="text-slate-300 text-sm font-medium">P&L:</span>
-            <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
-              {pnlPositive ? '+' : ''}{(dailyPnl ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+            <span className={`font-bold text-lg tabular-nums ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+              {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
             </span>
           </div>
+
+          {/* Live clock + 15m window countdown */}
+          <WindowClock />
         </div>
       </div>
 
@@ -118,9 +148,6 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
 
       {/* Right side */}
       <div className="flex items-center gap-2">
-        {/* (WebSocketIndicator removed — no WS router exists; backend
-            connectivity is shown by ConnectionStatusIndicator below.) */}
-
         {/* Theme toggle */}
         <button type="button"
           onClick={toggleTheme}
@@ -137,15 +164,12 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
         {/* Connection Status */}
         <ConnectionStatusIndicator />
 
-        {/* Notifications */}
-        <LiveNotifications />
-
         {/* Settings */}
         <button type="button"
-          onClick={() => onNavigate?.('settings')}
+          onClick={() => onNavigate?.('system')}
           className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105"
-          title="Settings"
-          aria-label="Settings"
+          title="System"
+          aria-label="System"
         >
           <Settings className="w-5 h-5 text-slate-300" />
         </button>

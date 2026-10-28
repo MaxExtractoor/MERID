@@ -2,16 +2,6 @@
 
 import { API_BASE } from './apiBase';
 
-// Environment-based URLs - fallback for non-Vite environments (Jest)
-const getEnv = (key: string, fallback: string): string => {
-  try {
-    const meta = (globalThis as any).import?.meta;
-    return meta?.env?.[key] ?? fallback;
-  } catch {
-    return fallback;
-  }
-};
-
 // Canonical API base — same-origin relative by default (Vite dev proxy /api->:8011),
 // VITE_API_BASE override for non-proxied deployments. Never hardcode a host.
 export const API_BASE_URL = API_BASE;
@@ -26,7 +16,8 @@ if (!API_BASE_URL && typeof window !== 'undefined') {
   } catch { /* non-Vite environment */ }
 }
 
-export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', 'ws://localhost:8011/ws/risk');
+// WS_PORTFOLIO_URL removed — the only consumer (useKalshiRiskStream) pointed
+// at a dead WS router and was deleted. All realtime state is polled via REST.
 
 // API Endpoints
 //
@@ -52,17 +43,9 @@ export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', 'ws://localhost:
 // consumer — do not re-add speculative entries.
 export const API_ENDPOINTS = {
   // ── System ────────────────────────────────────────────────────
-  SYSTEM_HEALTH: "/api/v1/system/health",
-  SYSTEM_EXECUTION_GATE: "/api/v1/system/execution-gate",
-  TELEMETRY: "/api/v1/telemetry",
-
-  // ── Notifications ─────────────────────────────────────────────
-  NOTIFICATIONS: "/api/v1/notifications",
-  NOTIFICATIONS_READ_ALL: "/api/v1/notifications/read-all",
-  NOTIFICATION_READ: (id: string) => `/api/v1/notifications/${id}/read`,
-
-  // ── Kalshi Agent Grid ─────────────────────────────────────────
-  KALSHI_GRID_MODE: "/api/v1/kalshi-grid/mode",
+  // /api/v1/health is the real liveness probe on the lean app
+  // (there is no /api/v1/system/*).
+  SYSTEM_HEALTH: "/api/v1/health",
 
   // ── Kalshi ────────────────────────────────────────────────────
   KALSHI_MARKETS: "/api/v1/kalshi/markets",
@@ -72,6 +55,12 @@ export const API_ENDPOINTS = {
   KALSHI_BALANCE: "/api/v1/kalshi/balance",
   KALSHI_PNL: "/api/v1/kalshi/pnl",
 } as const;
+
+// Deliberately NOT defined (dead routes — do not re-add):
+//   /api/v1/system/execution-gate (gate state is derived in useExecutionGate
+//     from live-runtime-state + kill-switch in the store)
+//   /api/v1/telemetry, /api/v1/notifications/* (no notification producer)
+//   /api/v1/kalshi-grid/mode (mode comes from live-runtime-state)
 
 // Auth
 export const AUTH_TOKEN_KEY = "merid-access";

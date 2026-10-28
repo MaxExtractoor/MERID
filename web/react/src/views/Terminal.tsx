@@ -1,27 +1,31 @@
 /**
  * Trade — Order Entry and Position Management
- * 
- * Purpose: Consolidated trading view for order entry and position management
- * 
- * Content:
- * - Market discovery (15m crypto markets only)
- * - Order entry (trade ticket)
- * - Orders management (resting + cancel, backed by /api/v1/kalshi/orders)
- * - Positions summary (exposure, unrealized PnL)
- * 
- * Data: Markets/positions/orders — all from verified backend endpoints.
+ *
+ * - Market discovery (15m crypto markets only — KX*15M tickers), polled
+ *   through usePoll(AGENT_ENDPOINTS.MARKETS).
+ * - Order entry via KalshiTradeTicket. Execution gate reads the store's
+ *   live runtime state inside the ticket (mode passed down from
+ *   store.system); the dead /api/v1/system/execution-gate route is never
+ *   called.
+ * - Orders management: real resting orders polled through usePoll
+ *   (AGENT_ENDPOINTS.ORDERS). Cancel -> DELETE /orders/{id}; cancel-all ->
+ *   DELETE /orders (backend may refuse batch cancel — the guard error is
+ *   surfaced honestly). All mutations: useRef in-flight guard +
+ *   ConfirmModal + authoritative refetch.
+ * - Positions summary from store.portfolio.
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { useKalshiStore, selectPortfolio, selectSystem } from '../store';
+import { useRef, useState } from 'react';
+import { useKalshiStore, selectPortfolio, selectRisk, selectSystem } from '../store';
 import { Monitor, Search, Briefcase, ClipboardList } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui';
-import { apiUrl } from '../config/apiBase';
-import { useApiQuery } from '../hooks/useTanStackQuery';
+import { usePoll } from '../hooks/usePoll';
+import { AGENT_ENDPOINTS, delJson } from '../agents/api';
 import { ConfirmModal } from '../components/ConfirmModal';
 import KalshiTradeTicket from '../components/KalshiTradeTicket';
+import { cx, numOr } from '../agents/format';
 
 // Real market row shape from GET /api/v1/kalshi/markets (verified in kalshi_api.py).
 interface MarketOutcome {
@@ -46,16 +50,30 @@ interface KalshiMarket {
   outcomes?: MarketOutcome[];
 }
 
+// GET /api/v1/kalshi/orders row: price arrives in dollars (0-1).
+interface ServerOrder {
+  order_id?: string;
+  ticker?: string;
+  side?: string;
+  size?: number | string;
+  price?: number | string;
+  price_cents?: number | string;
+  filled?: number | string;
+  remaining?: number | string | null;
+  status?: string;
+  created_at?: string | null;
+  synthetic?: boolean;
+}
+
 interface OrderRow {
   order_id: string;
   ticker: string;
-  side?: string;
-  size?: number;
-  price?: number;      // dollars (0-1)
-  filled?: number;
-  remaining?: number | null;
-  status?: string;
-  created_at?: string | null;
+  side: string;
+  size: number;
+  price_cents: number | null;
+  filled: number;
+  remaining: number | null;
+  status: string;
 }
 
 const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
@@ -74,23 +92,56 @@ const is15mCrypto = (m: KalshiMarket): boolean => {
 const outcomePrice = (m: KalshiMarket, name: 'yes' | 'no'): number => {
   const o = m.outcomes?.find(x => (x.name ?? x.id ?? '').toLowerCase() === name);
   const p = o?.price;
-  return typeof p === 'number' && Number.isFinite(p) ? p : name === 'yes' ? 0.5 : 0.5;
+  return typeof p === 'number' && Number.isFinite(p) ? p : 0.5;
+};
+
+const mapMarkets = (raw: unknown): KalshiMarket[] => {
+  const arr = (raw as { markets?: KalshiMarket[] } | null)?.markets;
+  return Array.isArray(arr) ? arr.filter((m) => m && typeof m === 'object' && m.ticker) : [];
+};
+
+const mapOrders = (raw: unknown): OrderRow[] => {
+  const arr = (raw as { orders?: ServerOrder[] } | null)?.orders;
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((o) => o && typeof o === 'object' && o.order_id && o.synthetic !== true)
+    .map((o) => {
+      const priceDollars = numOr(o.price);
+      const priceCents = numOr(o.price_cents) ?? (priceDollars != null ? Math.round(priceDollars * 100) : null);
+      return {
+        order_id: String(o.order_id),
+        ticker: String(o.ticker ?? ''),
+        side: String(o.side ?? ''),
+        size: numOr(o.size) ?? 0,
+        price_cents: priceCents,
+        filled: numOr(o.filled) ?? 0,
+        remaining: numOr(o.remaining) ?? null,
+        status: String(o.status ?? ''),
+      };
+    });
 };
 
 const Trade = () => {
   const portfolio = useKalshiStore(selectPortfolio);
+  const risk = useKalshiStore(selectRisk);
   const system = useKalshiStore(selectSystem);
   const refreshAll = useKalshiStore(s => s.refreshAll);
   const positions = portfolio.positions;
   const [selectedMarket, setSelectedMarket] = useState<KalshiMarket | null>(null);
   const [activeTab, setActiveTab] = useState<'markets' | 'positions' | 'orders'>('markets');
 
-  // Store refresh — positions/orders/system come from refreshAll probes.
-  useEffect(() => {
-    void refreshAll();
-    const interval = setInterval(() => { void refreshAll(); }, 30_000);
-    return () => clearInterval(interval);
-  }, [refreshAll]);
+  // Markets catalog — usePoll keeps last-good data on failure.
+  const marketsPoll = usePoll<KalshiMarket[]>(
+    `${AGENT_ENDPOINTS.MARKETS}?limit=500`,
+    { ms: 30_000, map: mapMarkets },
+  );
+
+  // Resting orders — dedicated 15s poll so cancels refetch promptly.
+  const ordersPoll = usePoll<OrderRow[]>(
+    AGENT_ENDPOINTS.ORDERS,
+    { ms: 15_000, map: mapOrders },
+  );
+  const orders = ordersPoll.data ?? [];
 
   // Order-management state (guarded mutations).
   const cancelRef = useRef(false);
@@ -100,44 +151,20 @@ const Trade = () => {
     { kind: 'single'; orderId: string; ticker: string } | { kind: 'all' } | null
   >(null);
 
-  // Fetch Kalshi market catalog for 15m crypto using TanStack Query
-  const { data: marketsData, isLoading, error } = useApiQuery<{ markets: KalshiMarket[] }>(
-    apiUrl('/api/v1/kalshi/markets'),
-    {
-      refetchInterval: 30_000, // Refresh every 30 seconds
-      staleTime: 10_000,
-    }
-  );
-
-  // Orders — real resting/working orders from the venue.
-  const {
-    data: ordersData,
-    error: ordersError,
-    refetch: refetchOrders,
-  } = useApiQuery<{ count: number; orders: OrderRow[] }>(
-    apiUrl('/api/v1/kalshi/orders'),
-    { refetchInterval: 15_000, staleTime: 5_000 }
-  );
-  const orders = ordersData?.orders ?? [];
-
   const runCancel = async (target: { kind: 'single'; orderId: string } | { kind: 'all' }) => {
     if (cancelRef.current) return;
     cancelRef.current = true;
     setCancelBusy(true);
     setCancelError(null);
     try {
-      const url = target.kind === 'single'
-        ? apiUrl(`/api/v1/kalshi/orders/${encodeURIComponent(target.orderId)}`)
-        : apiUrl('/api/v1/kalshi/orders');
-      const res = await fetch(url, { method: 'DELETE' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        const detail = (body as { detail?: unknown }).detail;
-        throw new Error(
-          typeof detail === 'string' ? detail : `Cancel failed (HTTP ${res.status})`
-        );
+      if (target.kind === 'single') {
+        await delJson(`${AGENT_ENDPOINTS.ORDERS}/${encodeURIComponent(target.orderId)}`);
+      } else {
+        // Batch cancel — the backend may refuse (BATCH_CANCEL guard); the
+        // error is surfaced inline rather than hidden.
+        await delJson(AGENT_ENDPOINTS.ORDERS);
       }
-      await refetchOrders();
+      ordersPoll.refresh();
       await refreshAll();
     } catch (e) {
       setCancelError(e instanceof Error ? e.message : String(e));
@@ -148,7 +175,11 @@ const Trade = () => {
   };
 
   // Filter for 15m crypto markets (BTC, ETH, SOL, XRP, DOGE)
-  const markets = (marketsData?.markets ?? []).filter((m: KalshiMarket) => is15mCrypto(m) && m.active !== false);
+  const markets = (marketsPoll.data ?? []).filter((m) => is15mCrypto(m) && m.active !== false);
+
+  // Execution-gate state for the header chip (ticket also reads it internally).
+  const liveState = system.live?.state ?? 'UNKNOWN';
+  const entriesEnabled = system.live?.state === 'LIVE_ENTRIES_ENABLED' && !risk.kill_switch_active;
 
   const expiryLabel = (m: KalshiMarket): string => {
     if (m.minutes_to_expiry != null) return `${Math.round(m.minutes_to_expiry)}m`;
@@ -167,11 +198,19 @@ const Trade = () => {
             <p className="text-sm text-slate-400">Order entry and position management</p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          {risk.kill_switch_active && (
+            <Badge variant="danger">KILL SWITCH</Badge>
+          )}
+          <Badge variant={entriesEnabled ? 'success' : 'warning'}>
+            {liveState}
+          </Badge>
+        </div>
       </div>
 
       {/* Tabs */}
       <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit" role="tablist" aria-label="Trade view tabs">
-        <button 
+        <button
           onClick={() => setActiveTab('markets')}
           role="tab"
           aria-selected={activeTab === 'markets'}
@@ -183,7 +222,7 @@ const Trade = () => {
           <Search className="w-4 h-4" aria-hidden="true" />
           Markets
         </button>
-        <button 
+        <button
           onClick={() => setActiveTab('positions')}
           role="tab"
           aria-selected={activeTab === 'positions'}
@@ -195,7 +234,7 @@ const Trade = () => {
           <Briefcase className="w-4 h-4" aria-hidden="true" />
           Positions
         </button>
-        <button 
+        <button
           onClick={() => setActiveTab('orders')}
           role="tab"
           aria-selected={activeTab === 'orders'}
@@ -214,13 +253,24 @@ const Trade = () => {
         <>
           <Card>
             <CardHeader>
-              <CardTitle>15m Crypto Markets (BTC, ETH, SOL, XRP, DOGE)</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle>15m Crypto Markets (BTC, ETH, SOL, XRP, DOGE)</CardTitle>
+                {marketsPoll.error && (
+                  <span
+                    className="text-[9px] font-semibold text-red-400"
+                    title={marketsPoll.error}
+                    role="alert"
+                  >
+                    markets source error{marketsPoll.lastOk ? ' — showing last good' : ''}
+                  </span>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
-              {isLoading ? (
+              {marketsPoll.loading && !marketsPoll.data ? (
                 <div className="text-center py-8 text-slate-500" role="status" aria-live="polite">Loading markets...</div>
-              ) : error ? (
-                <div className="text-center py-8 text-red-400" role="alert">{String(error)}</div>
+              ) : marketsPoll.error && !marketsPoll.data ? (
+                <div className="text-center py-8 text-red-400" role="alert">{marketsPoll.error}</div>
               ) : markets.length === 0 ? (
                 <div className="text-center py-8 text-slate-500">
                   <Search className="w-12 h-12 mx-auto mb-3 opacity-50" aria-hidden="true" />
@@ -246,10 +296,10 @@ const Trade = () => {
                             <div className="font-medium text-white">{market.ticker}</div>
                             <div className="text-xs text-slate-500">{market.question}</div>
                           </td>
-                          <td className="p-3 text-right font-mono text-green-400">{(outcomePrice(market, 'yes') * 100).toFixed(0)}¢</td>
-                          <td className="p-3 text-right font-mono text-red-400">{(outcomePrice(market, 'no') * 100).toFixed(0)}¢</td>
-                          <td className="p-3 text-right">{market.volume ?? '—'}</td>
-                          <td className="p-3 text-right text-xs text-slate-400">
+                          <td className="p-3 text-right font-mono tabular-nums text-emerald-400">{(outcomePrice(market, 'yes') * 100).toFixed(0)}¢</td>
+                          <td className="p-3 text-right font-mono tabular-nums text-red-400">{(outcomePrice(market, 'no') * 100).toFixed(0)}¢</td>
+                          <td className="p-3 text-right tabular-nums">{market.volume ?? '—'}</td>
+                          <td className="p-3 text-right text-xs text-slate-400 tabular-nums">
                             {expiryLabel(market)}
                           </td>
                           <td className="p-3 text-right">
@@ -276,12 +326,17 @@ const Trade = () => {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle>Trade: {selectedMarket.ticker}</CardTitle>
-                  <button
-                    onClick={() => setSelectedMarket(null)}
-                    className="text-slate-400 hover:text-white text-sm"
-                  >
-                    Close
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <Badge variant={entriesEnabled ? 'success' : 'warning'} size="sm">
+                      {entriesEnabled ? 'entries enabled' : 'entries gated'}
+                    </Badge>
+                    <button
+                      onClick={() => setSelectedMarket(null)}
+                      className="text-slate-400 hover:text-white text-sm"
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
@@ -296,10 +351,10 @@ const Trade = () => {
                     ask: o.ask ?? null,
                   }))}
                   mode={system.mode}
-                  lastUpdated={marketsData ? Date.now() : undefined}
+                  lastUpdated={marketsPoll.lastOk}
                   onOrderPlaced={() => {
                     void refreshAll();
-                    void refetchOrders();
+                    ordersPoll.refresh();
                   }}
                 />
               </CardContent>
@@ -344,12 +399,13 @@ const Trade = () => {
                             {pos.side.toUpperCase()}
                           </Badge>
                         </td>
-                        <td className="p-3 text-right">{pos.quantity}</td>
-                        <td className="p-3 text-right font-mono">¢{pos.avg_entry_price_cents}</td>
+                        <td className="p-3 text-right tabular-nums">{pos.quantity}</td>
+                        <td className="p-3 text-right font-mono tabular-nums">¢{pos.avg_entry_price_cents}</td>
                         <td
-                          className={`p-3 text-right font-mono ${
-                            pos.unrealized_pnl_cents >= 0 ? 'text-green-400' : 'text-red-400'
-                          }`}
+                          className={cx(
+                            'p-3 text-right font-mono tabular-nums',
+                            pos.unrealized_pnl_cents >= 0 ? 'text-emerald-400' : 'text-red-400',
+                          )}
                         >
                           ${(pos.unrealized_pnl_cents / 100).toFixed(2)}
                         </td>
@@ -388,8 +444,8 @@ const Trade = () => {
                 Error: {cancelError}
               </div>
             )}
-            {ordersError ? (
-              <div className="text-center py-8 text-red-400" role="alert">{String(ordersError)}</div>
+            {ordersPoll.error && !ordersPoll.data ? (
+              <div className="text-center py-8 text-red-400" role="alert">{ordersPoll.error}</div>
             ) : orders.length === 0 ? (
               <div className="text-center py-8 text-slate-500">
                 <ClipboardList className="w-12 h-12 mx-auto mb-3 opacity-50" />
@@ -418,17 +474,17 @@ const Trade = () => {
                         </td>
                         <td className="p-3">
                           <Badge variant={o.side === 'yes' ? 'success' : 'danger'}>
-                            {(o.side ?? '?').toUpperCase()}
+                            {(o.side || '?').toUpperCase()}
                           </Badge>
                         </td>
-                        <td className="p-3 text-right">{o.size ?? '—'}</td>
-                        <td className="p-3 text-right font-mono">
-                          {o.price != null ? `${Math.round(o.price * 100)}¢` : '—'}
+                        <td className="p-3 text-right tabular-nums">{o.size}</td>
+                        <td className="p-3 text-right font-mono tabular-nums">
+                          {o.price_cents != null ? `${o.price_cents}¢` : '—'}
                         </td>
-                        <td className="p-3 text-right">
-                          {o.filled ?? 0}/{o.remaining ?? '—'}
+                        <td className="p-3 text-right tabular-nums">
+                          {o.filled}/{o.remaining ?? '—'}
                         </td>
-                        <td className="p-3 text-xs text-slate-400">{o.status ?? '—'}</td>
+                        <td className="p-3 text-xs text-slate-400">{o.status || '—'}</td>
                         <td className="p-3 text-right">
                           <Button
                             size="sm"

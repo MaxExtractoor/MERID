@@ -4,7 +4,6 @@ import '@testing-library/jest-dom';
 // Mirrors the pruned src/config/constants.ts — keep in sync with its exports.
 jest.mock('./config/constants', () => ({
   API_BASE_URL: 'http://127.0.0.1:8011',
-  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8011/ws/risk',
   AUTH_TOKEN_KEY: 'merid-access',
   CHART_COLORS: {
     GREEN: '#22c55e',
@@ -17,13 +16,7 @@ jest.mock('./config/constants', () => ({
     GRAY: '#6b7280',
   },
   API_ENDPOINTS: {
-    SYSTEM_HEALTH: '/api/v1/system/health',
-    SYSTEM_EXECUTION_GATE: '/api/v1/system/execution-gate',
-    TELEMETRY: '/api/v1/telemetry',
-    NOTIFICATIONS: '/api/v1/notifications',
-    NOTIFICATIONS_READ_ALL: '/api/v1/notifications/read-all',
-    NOTIFICATION_READ: (id: string) => `/api/v1/notifications/${id}/read`,
-    KALSHI_GRID_MODE: '/api/v1/kalshi-grid/mode',
+    SYSTEM_HEALTH: '/api/v1/health',
     KALSHI_MARKETS: '/api/v1/kalshi/markets',
     KALSHI_POSITIONS: '/api/v1/kalshi/positions',
     KALSHI_ORDERS: '/api/v1/kalshi/orders',

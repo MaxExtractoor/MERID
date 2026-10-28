@@ -13,8 +13,7 @@
  */
 
 import React from 'react';
-import { useApiQuery } from '../hooks/useTanStackQuery';
-import { apiUrl } from '../config/apiBase';
+import { usePoll } from '../hooks/usePoll';
 import { DEFAULTS } from '../config/constants';
 import { CheckCircle, AlertTriangle, XCircle, Clock, Wifi, WifiOff } from '../ui/icons';
 
@@ -109,16 +108,16 @@ const MarketHealthCard: React.FC<{ market: MarketHealth }> = ({ market }) => {
 };
 
 const Kalshi15mHealthPanel: React.FC = () => {
-  const kalshiHealth = useApiQuery<KalshiHealthResponse>(
-    apiUrl('/api/v1/kalshi/internal/kalshi_health'),
-    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST, staleTime: 10_000 }
+  const kalshiHealth = usePoll<KalshiHealthResponse>(
+    '/api/v1/kalshi/internal/kalshi_health',
+    { ms: DEFAULTS.POLLING_INTERVALS.FAST },
   );
-  const unifiedHealth = useApiQuery<UnifiedHealthResponse>(
-    apiUrl('/api/v1/unified-health'),
-    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST, staleTime: 10_000 }
+  const unifiedHealth = usePoll<UnifiedHealthResponse>(
+    '/api/v1/unified-health',
+    { ms: DEFAULTS.POLLING_INTERVALS.FAST },
   );
 
-  const isLoading = (kalshiHealth.isLoading || unifiedHealth.isLoading) && !kalshiHealth.data;
+  const isLoading = (kalshiHealth.loading || unifiedHealth.loading) && !kalshiHealth.data;
   const error = kalshiHealth.error ?? unifiedHealth.error;
   const data = kalshiHealth.data;
   const unified = unifiedHealth.data;
@@ -144,7 +143,7 @@ const Kalshi15mHealthPanel: React.FC = () => {
         <p className="text-sm text-slate-400 mb-3">{String(error)}</p>
         <button
           type="button"
-          onClick={() => { void kalshiHealth.refetch(); void unifiedHealth.refetch(); }}
+          onClick={() => { void kalshiHealth.refresh(); void unifiedHealth.refresh(); }}
           className="text-sm text-blue-400 hover:text-blue-300"
         >
           Retry

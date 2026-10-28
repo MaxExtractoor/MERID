@@ -2,7 +2,8 @@
  * MissionControl — distance-readable wallboard for the five 15m agents:
  * giant verdict banner, HealthOrb row, LaneMatrix (click opens the
  * AgentDetailDrawer), the most recent decision's GateFunnel, a compact
- * DecisionFeed rail, and a trading-shard collateral tile.
+ * DecisionFeed rail, a trading-shard collateral tile, and the 15m
+ * observability panels (venue health + pipeline alignment).
  */
 
 import { useCallback, useMemo, useState } from 'react';
@@ -11,6 +12,8 @@ import type { AssetAgent } from '../agents/types';
 import {
   AgentDetailDrawer, DecisionFeed, GateFunnel, HealthOrb, LaneMatrix, SystemRibbon,
 } from '../components/agents';
+import Kalshi15mHealthPanel from '../components/Kalshi15mHealthPanel';
+import Kalshi15mAlignmentPanel from '../components/Kalshi15mAlignmentPanel';
 import { Skeleton } from '../ui';
 import { cx, fmtAgeMs, fmtCentsAsUsd, numOr, parseTsMs } from '../agents/format';
 import { useNow } from '../agents/hooks';
@@ -173,6 +176,12 @@ export default function MissionControl() {
             <DecisionFeed events={feed.slice(0, 24)} height={380} compact hideFilters />
           </section>
         </div>
+      </div>
+
+      {/* 15m observability: venue health + end-to-end pipeline alignment */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <Kalshi15mHealthPanel />
+        <Kalshi15mAlignmentPanel />
       </div>
 
       <AgentDetailDrawer

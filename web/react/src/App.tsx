@@ -1,28 +1,18 @@
-import React, { useState, useRef, useCallback, lazy, Suspense } from "react";
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import React, { useState, useRef, useCallback, useEffect, lazy, Suspense } from "react";
 import { useFillToast } from "./hooks/useFillToast";
+import { useKalshiStore } from "./store";
 import { useKeyboardShortcuts, KeyboardShortcut } from "./hooks/useKeyboardShortcuts";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 
-// Agent-centric views (primary operator surface)
+// Consolidated 7-view architecture — every key in types/views.ts maps here
 const AgentWall = lazy(() => import("./views/AgentWall"));
 const AgentDetail = lazy(() => import("./views/AgentDetail"));
 const MissionControl = lazy(() => import("./views/MissionControl"));
-
-// 8-View Architecture - Only these views are functional
-const Dashboard = lazy(() => import("./views/Dashboard"));
-const Trade = lazy(() => import("./views/Trade"));
-const Monitor = lazy(() => import("./views/Monitor"));
-const Grid = lazy(() => import("./views/Grid"));
+const Terminal = lazy(() => import("./views/Terminal"));
+const Portfolio = lazy(() => import("./views/Portfolio"));
 const Risk = lazy(() => import("./views/Risk"));
-const Calibration = lazy(() => import("./views/Calibration"));
-const Logs = lazy(() => import("./views/Logs"));
-const Settings = lazy(() => import("./views/Settings"));
-
-// Legacy Kalshi views retained for deep links
-const KalshiDashboardView = lazy(() => import("./views/KalshiDashboardView"));
-const KalshiPortfolioView = lazy(() => import("./views/KalshiPortfolioView"));
+const System = lazy(() => import("./views/System"));
 
 // Optimized UI Components
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -30,8 +20,6 @@ import KalshiErrorBoundary from "./components/KalshiErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import KalshiLoadingSkeleton from "./components/KalshiLoadingSkeleton";
-import { KalshiModeProvider } from "./context/KalshiModeContext";
-import { NetworkProvider } from "./hooks/useNetworkStatusProvider";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
 import { ExecutionBlockedBanner } from "./components/ExecutionBlockedBanner";
 import { GateChangeToast } from "./components/GateChangeToast";
@@ -42,35 +30,33 @@ import type { View } from "./types/views";
 
 import { ASSETS, type AssetSymbol } from "./agents/types";
 
-// 8-View Architecture - Clean mapping
+// 7-View Architecture - Clean mapping
 const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>>> = {
   "agent-wall": AgentWall,
   "mission-control": MissionControl,
-  dashboard: Dashboard,
-  trade: Trade,
-  monitor: Monitor,
-  grid: Grid,
+  terminal: Terminal,
+  portfolio: Portfolio,
   risk: Risk,
-  calibration: Calibration,
-  logs: Logs,
-  settings: Settings,
-  "kalshi-dashboard": KalshiDashboardView,
-  "kalshi-portfolio": KalshiPortfolioView,
+  system: System,
 };
-
-// Configure TanStack Query
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000, // 30 seconds
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-  },
-});
 
 function FillToastWatcher() {
   useFillToast();
+  return null;
+}
+
+/**
+ * Single store poller — the ONLY place refreshAll() runs on an interval.
+ * Views must consume the store, never mount their own refreshAll loop
+ * (previously every view ran a private 30s × 12-endpoint probe fan-out).
+ */
+function StorePoller() {
+  const refreshAll = useKalshiStore((s) => s.refreshAll);
+  useEffect(() => {
+    void refreshAll();
+    const id = window.setInterval(() => { void refreshAll(); }, 15_000);
+    return () => window.clearInterval(id);
+  }, [refreshAll]);
   return null;
 }
 
@@ -81,10 +67,6 @@ const ViewRenderer = React.memo(({ view, onNavigate, agentAsset, onAssetChange }
   agentAsset: AssetSymbol;
   onAssetChange: (a: AssetSymbol) => void;
 }) => {
-  // Legacy Kalshi deep-link views
-  if (view === "kalshi-dashboard") return <KalshiDashboardView />;
-  if (view === "kalshi-portfolio") return <KalshiPortfolioView />;
-
   // Per-asset detail page gets its asset prop + a switcher row
   if (view === "agent-detail") {
     return (
@@ -157,24 +139,19 @@ export default function App() {
   // Keyboard shortcuts for navigation
   const shortcuts: KeyboardShortcut[] = [
     { key: '0', description: 'Navigate to Agent Wall', action: () => handleNavigate('agent-wall') },
-    { key: '1', description: 'Navigate to Dashboard', action: () => handleNavigate('dashboard') },
-    { key: '2', description: 'Navigate to Trade', action: () => handleNavigate('trade') },
-    { key: '3', description: 'Navigate to Monitor', action: () => handleNavigate('monitor') },
-    { key: '4', description: 'Navigate to Grid', action: () => handleNavigate('grid') },
+    { key: '1', description: 'Navigate to Mission Control', action: () => handleNavigate('mission-control') },
+    { key: '2', description: 'Navigate to Agent Detail', action: () => handleNavigate('agent-detail') },
+    { key: '3', description: 'Navigate to Terminal', action: () => handleNavigate('terminal') },
+    { key: '4', description: 'Navigate to Portfolio', action: () => handleNavigate('portfolio') },
     { key: '5', description: 'Navigate to Risk', action: () => handleNavigate('risk') },
-    { key: '6', description: 'Navigate to Calibration', action: () => handleNavigate('calibration') },
-    { key: '7', description: 'Navigate to Logs', action: () => handleNavigate('logs') },
-    { key: '8', description: 'Navigate to Settings', action: () => handleNavigate('settings') },
+    { key: '6', description: 'Navigate to System', action: () => handleNavigate('system') },
     { key: 'k', ctrl: true, description: 'Open command palette', action: () => openPaletteRef.current?.() },
   ];
 
   useKeyboardShortcuts(shortcuts);
 
   return (
-    <QueryClientProvider client={queryClient}>
     <ThemeProvider>
-    <NetworkProvider>
-    <KalshiModeProvider>
     <ToastProvider>
       <div className="flex h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         {/* Optimized background - single layer */}
@@ -248,12 +225,10 @@ export default function App() {
           </main>
         </div>
       </div>
+      <StorePoller />
       <FillToastWatcher />
       <GateChangeToast />
     </ToastProvider>
-    </KalshiModeProvider>
-    </NetworkProvider>
     </ThemeProvider>
-    </QueryClientProvider>
   );
 }

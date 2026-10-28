@@ -1,44 +1,28 @@
 import { ShieldOff, AlertOctagon, Wifi, DollarSign, FileWarning } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useExecutionGate } from '../hooks/useExecutionGate';
 import { HelpPopover } from './HelpPopover';
-
-interface BannerBlockReason {
-  source: string;
-  severity: string;
-  message: string;
-  details: string | null;
-}
-
-interface ExecutionGateData {
-  blocked: boolean;
-  safe_to_trade: boolean;
-  reasons: BannerBlockReason[];
-  timestamp: number;
-}
 
 const SOURCE_ICONS: Record<string, typeof ShieldOff> = {
   kill_switch: AlertOctagon,
   reconciliation: FileWarning,
   price_feed: Wifi,
   pnl_consistency: DollarSign,
+  runtime: AlertOctagon,
+  connection: Wifi,
 };
 
 /**
  * Prominent banner shown when execution is blocked.
- * Polls the unified execution gate endpoint and displays
- * all active block reasons with severity-appropriate styling.
+ * Gate state is derived from the shared store (live runtime state +
+ * kill switch + connectivity), not a dedicated endpoint.
  */
 export function ExecutionBlockedBanner() {
-  const { data } = useApiData<ExecutionGateData>(
-    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
-  );
+  const { blocked, reasons } = useExecutionGate();
 
-  if (!data || !data.blocked) return null;
+  if (!blocked) return null;
 
-  const criticalReasons = data.reasons.filter(r => r.severity === 'critical');
-  const warningReasons = data.reasons.filter(r => r.severity === 'warning');
+  const criticalReasons = reasons.filter(r => r.severity === 'critical');
+  const warningReasons = reasons.filter(r => r.severity === 'warning');
 
   return (
     <div className="bg-red-950/95 border-b-2 border-red-600/70 px-4 py-3 space-y-2">

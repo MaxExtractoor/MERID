@@ -29,7 +29,6 @@
   "dependencies": {
     "@formkit/auto-animate": "^0.10.0",
     "@number-flow/react": "^0.6.2",
-    "@tanstack/react-query": "^5.101.2",
     "echarts": "^6.1.0",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^0.263.1",
