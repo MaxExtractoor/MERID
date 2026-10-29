@@ -669,3 +669,64 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
   always convert via `100 - leg`.
 - `client_order_id` prefixes: `merid_*` = entry, `stopcand_sc-*` =
   stop-candidate/arbiter exit, `exit_*` = guard-path exit.
+
+## 2026-10-29 execution-safety fixes (post-restart loss review)
+
+Root cause of the day''s -552c loss: a `pinned_fav` post-only bid at the
+92c `MAKER_LO` floor was rejected `post only cross`, then the maker->taker
+IOC conversion (`order_router._convert_to_ioc`) swept the repriced book
+and filled 4@91.5 + 2@91.6 � *below* the floor the lane exists to defend �
+and the market settled NO.  The lane had no immutable `ExecutionPolicy`;
+`resolve_bounded_lane_execution_policy` covered only cell/provisional lanes.
+
+Contract changes now in force:
+
+- **`pinned_fav` immutable maker contract**: `resolve_bounded_lane_execution_policy`
+  returns `required_post_only=True`, `required_liquidity_role="maker"`,
+  `allow_taker_fallback=False`, `max_reprice_attempts=1`,
+  `max_order_lifetime_s=300` (fill-quality tracker TTL) for every
+  `decision_lane=="pinned_fav"` intent �
+  unconditionally (a non-post-only pinned_fav intent fails closed at
+  `PRE_WIRE_POST_ONLY_UNAVAILABLE`).  Stamped at intent construction in
+  `loop_15m.py` like every other bounded lane.
+- **No maker->taker on policy-vetoed entries**: `_convert_to_ioc` declines
+  entry conversion when `execution_policy.allow_taker_fallback is False`
+  (`[MAKER->TAKER-POLICY-VETO]`).  A `post only cross` on the lane now
+  means skip/requote-passive � never an IOC into the falling ask.
+  Reduce-only exits keep their authorized one-shot conversion unchanged.
+- **Lane-band floor on passive repricing**: `_post_only_strict_passivity`
+  rejects a buy reprice that would land below `_lane_entry_band_cents`
+  (`post_only_passivity_below_lane_band`).  The ask repricing to <=92c is
+  the pin breaking; resting at 91 is the adverse fill.
+- **Reachability gate**: `p_selected` is the Bachelier z-distance
+  `Phi(|cfb_rti-strike| / sigma*sqrt(T))` � the same "index far enough
+  from strike" filter external research maps to z>=1 (their +9.6c vs -1c
+  per-fill split).  `MERID_PINNED_FAV_MAKER_MIN_P` raised 0.85 -> 0.90
+  (~z>=1.04 -> ~z>=1.28), still admitting the observed winning cohort
+  (p_sel 0.91-0.98) while vetoing the thinnest-reachability tail.
+- **Lane sizing cap**: `MERID_PINNED_FAV_MAX_CONTRACTS` (default = generic
+  bounded cap) set to 2.  Deep-favorite binaries lose the whole stake on
+  a pin break � 6 @ ~91.6c was ~38% of bankroll; cap bounds a single
+  settlement tail to ~$1.9 (~13%) consistent with half-Kelly at current
+  shard cash.
+- **Terminal-market exit suppression**: `exit_arbiter._arbitrate_locked`
+  returns `market_terminal` and declines all proposals once the market is
+  provably past close+`MERID_EXIT_MARKET_DEAD_AFTER_S` � previously ~46
+  `never_transmitted` model_exit attempts in ~80s on a settled market.
+  Unresolved attempts still reconcile via `market_terminal_inferred`;
+  resolved rows are marked `market_settled`/FLAT.
+- **Launcher forensics**: `start_15m.ps1` redirects the uvicorn child''s
+  stdout/stderr to `logs/server_console_<ts>.{out,err}.log` and appends a
+  `logs/server_lifecycle.jsonl` row (pid, exit code, stderr tail) on exit �
+  the 10/29 crash-loop died five times post-RSA-auth with no artifact
+  because output went to the console window only.  In-app
+  `faulthandler_dump.log` and the 80s hang dump are unchanged;
+  `dump_traceback_later` stays banned (3.11 access violations).
+
+Deliberately unchanged: `model_exit` profit-takes at 97-99c (the
+audit-derived exit envelope measured high-price sells *saving* vs terminal
+reversals � local evidence beats the external hold-to-settle result, and
+`exit_counterfactuals.jsonl` keeps measuring the fork); `emergency`/
+`HARD_STOP`/`LOSS_CAP` mandatory-risk triggers stay mechanical per the
+structured-authorization contract (revisit only with a settled
+counterfactual audit of the 00:27 stop-out class).

@@ -705,6 +705,27 @@ class ExitArbiter:
                 ],
             )
 
+        # 3.5) Terminal market — a market provably past close+margin cannot
+        #    host a fillable order (the venue cancels the book at close and
+        #    settles).  Suppress fresh proposals here: the previous behavior
+        #    minted ~46 never_transmitted model_exit attempts in ~80s on a
+        #    settled market (live 2026-10-29 KXBTC15M-26OCT291230-30), each
+        #    cycle hitting the wire guard and reconciling back to
+        #    RETRY_ELIGIBLE.  Resolved-but-active rows close out as settled;
+        #    unresolved attempts already returned at step 3 and still
+        #    reconcile through the dedicated path (market_terminal_inferred).
+        if _market_is_terminal_id(market_id):
+            if attempt is not None and attempt.state != AttemptState.FLAT:
+                self.mark_flat(position_key, "market_settled")
+            return ArbiterResult(
+                status="market_terminal", floor_cents=floor,
+                floor_source=floor_source,
+                high_watermark_cents=watermark,
+                executable_value_cents=exec_liq, book_note=book_note,
+                not_selected=[
+                    (p.proposal_id, "market_terminal") for p in proposals],
+            )
+
         # 4) Validate proposals.  ``marketable`` = the trigger limit can
         #    fill on the current book (sell limit <= executable bid value).
         book_liq = exec_liq  # None when book unusable

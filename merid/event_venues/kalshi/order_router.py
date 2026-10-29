@@ -3435,8 +3435,29 @@ def resolve_bounded_lane_execution_policy(
         "threshold_cell",
         "current_build_provisional",
         "empirical_marginal_maker",
+        "pinned_fav",
     ):
         return None
+    # 2026-10-29: pinned_fav is an immutable maker lane — the contract is
+    # unconditional, not posture-mirroring.  The lane's audited edge is the
+    # resting bid inside MAKER_LO..MAKER_HI; letting a crossed post-only
+    # downgrade to taker buys the falling ask below the band floor (live
+    # 2026-10-29: ETH-YES post-only@92 -> IOC sweep filled 91.5/91.6c under
+    # the 92c MAKER_LO floor, settled NO, -552c).  A non-post-only
+    # pinned_fav intent therefore still carries the maker contract and
+    # fails closed at the PRE_WIRE_POST_ONLY_UNAVAILABLE gate.
+    if decision_lane == "pinned_fav":
+        # max_order_lifetime_s feeds the fill-quality tracker's record TTL
+        # (+30s) — pinned_fav bids may legitimately rest through the maker
+        # TTE window, so keep coverage across the plausible rest horizon.
+        return ExecutionPolicy(
+            lane="pinned_fav",
+            required_post_only=True,
+            required_liquidity_role="maker",
+            allow_taker_fallback=False,
+            max_reprice_attempts=1,
+            max_order_lifetime_s=300,
+        )
     if not post_only:
         return ExecutionPolicy(
             lane=str(decision_lane),
@@ -5109,6 +5130,25 @@ def _post_only_strict_passivity(
                 f"post_only_passivity_over_budget:new_px={new_px}:"
                 f"cap={cap}:ask={ask_cents}"
             )
+        # 2026-10-29: bounded-lane floor — the reprice must not drift below
+        # the admission band.  A crossed maker quote repricing to ask-1
+        # below the lane floor buys the same toxic pocket the floor exists
+        # to exclude (pinned_fav MAKER_LO=92: the ask repricing to <=92 is
+        # the pin breaking; the passive fill at 91 is the adverse fill).
+        if not _is_exit_order(intent):
+            try:
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents,
+                )
+                _band = _lane_entry_band_cents(
+                    getattr(intent, "decision_lane", None))
+            except Exception:
+                _band = None
+            if _band is not None and new_px < int(_band[0]):
+                return None, (
+                    f"post_only_passivity_below_lane_band:new_px={new_px}:"
+                    f"band_lo={int(_band[0])}:ask={ask_cents}"
+                )
         return new_px, None
     if action == "sell":
         if bid_cents <= 0 or price > bid_cents:
@@ -17444,6 +17484,35 @@ async def _route_live(
                 return False
             _act = (getattr(intent, "action", "") or "").lower()
             _exit = _is_exit_order(intent)
+            # 2026-10-29: the immutable execution contract governs.  A
+            # maker-lane entry whose policy forbids taker fallback may
+            # never convert — a crossed post-only declines the entry
+            # instead of sweeping the repriced book below the lane floor
+            # (live: ETH-YES@92 -> 91.5/91.6c IOC fills under the 92c
+            # MAKER_LO floor, settled NO, -552c).  Reduce-only exits keep
+            # their authorized conversion below.
+            if not _exit:
+                _pol = getattr(intent, "execution_policy", None)
+                if (
+                    (
+                        _pol is not None
+                        and getattr(_pol, "allow_taker_fallback", True)
+                        is False
+                    )
+                    # Lane-identity fallback (mirrors _intent_requires_post_only):
+                    # an unstamped pinned_fav intent still carries the
+                    # immutable maker contract.
+                    or getattr(intent, "decision_lane", None) == "pinned_fav"
+                ):
+                    logger.warning(
+                        "[MAKER->TAKER-POLICY-VETO] intent_id=%s ticker=%s "
+                        "lane=%s — execution policy forbids taker fallback; "
+                        "post-only-cross declines the entry",
+                        intent.intent_id, intent.ticker,
+                        getattr(_pol, "lane", "")
+                        or getattr(intent, "decision_lane", ""),
+                    )
+                    return False
             _cap = None
             if _exit:
                 # 2026-10-24: reduce-only exits convert too.  A crossed

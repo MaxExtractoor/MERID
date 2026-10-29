@@ -10649,6 +10649,23 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     _lane_cap = min(_lane_cap, _wq_lc.quota_max_contracts())
                 except Exception:
                     pass
+            if candidate.get("decision_lane") == "pinned_fav":
+                # 2026-10-29: pinned-fav entries carry the largest single-fill
+                # tail in the book — a deep-favorite binary loses the whole
+                # stake when the pin breaks (live: 6 @ ~91.6c -> -552c, ~38%
+                # of bankroll on one settlement).  Half-Kelly on the lane's
+                # calibrated p at 92-98c supports ~1-2 contracts at the
+                # current shard cash, so the lane caps independently of the
+                # generic bounded-lane raise via
+                # MERID_PINNED_FAV_MAX_CONTRACTS (unset = generic cap).
+                try:
+                    _pf_env = os.environ.get(
+                        "MERID_PINNED_FAV_MAX_CONTRACTS", "")
+                    if _pf_env:
+                        _lane_cap = min(
+                            _lane_cap, max(0.01, float(_pf_env)))
+                except Exception:
+                    pass
             if count > _lane_cap:
                 logger.warning(
                     "[15M-LOOP] CELL-LANE count=%s exceeds lane cap=%s, capping. ticker=%s lane=%s",

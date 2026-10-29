@@ -454,11 +454,43 @@ $python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.
 # Launch via Start-Process -PassThru so the serving PID is recorded in the
 # fingerprint trail (previously the blocking call gave us no PID until exit).
 $uvicornArgs = @("-m","uvicorn","web.main_15m_lean:app","--host","$ServerHost","--port","$Port","--log-level","info")
-$proc = Start-Process -FilePath $python -ArgumentList $uvicornArgs -NoNewWindow -PassThru
+# 2026-10-29: durable console capture — the 10/29 crash-loop died silently
+# five times ~30-60s after RSA auth with no artifact anywhere: -NoNewWindow
+# sent all child output to the console window only, so interpreter-level
+# failures (import/DLL crashes, deaths before faulthandler.enable, external
+# kills) left nothing.  Redirect stdout/stderr to timestamped files under
+# logs\ so every launch attempt is auditable.  PYTHONUNBUFFERED=1 above
+# keeps these files current; in-app faulthandler_dump.log still handles
+# Python-level fatal signals inside the lifespan.
+$consoleStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$stdoutLog = Join-Path "logs" "server_console_${consoleStamp}.out.log"
+$stderrLog = Join-Path "logs" "server_console_${consoleStamp}.err.log"
+$proc = Start-Process -FilePath $python -ArgumentList $uvicornArgs -NoNewWindow -PassThru `
+    -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 Write-Host "[start_15m] uvicorn launched: pid=$($proc.Id) exe=$((Resolve-Path $python -ErrorAction SilentlyContinue).Path) at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Green
+Write-Host "[start_15m] child streams -> $stdoutLog | $stderrLog" -ForegroundColor Green
 $proc.WaitForExit()
 # 2026-09-23: capture the exit path — the server has died silently twice with
 # no traceback.  If uvicorn exits cleanly we get its code here; if this line
 # never appears in the console log, the process was terminated externally.
 $exitCode = $proc.ExitCode
 Write-Host "[start_15m] uvicorn process exited: LASTEXITCODE=$exitCode at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Red
+# 2026-10-29: durable lifecycle record — survives the console itself dying.
+# One JSONL row per server exit: pid, exit code, captured stream paths, and
+# the stderr tail so a crash-loop leaves diagnosis on disk.
+try {
+    $stderrTail = (Get-Content $stderrLog -Tail 5 -ErrorAction SilentlyContinue) -join " | "
+    $lifecycle = [ordered]@{
+        ts         = (Get-Date).ToUniversalTime().ToString("o")
+        event      = "server_process_exit"
+        pid        = $proc.Id
+        exit_code  = $exitCode
+        stdout_log = $stdoutLog
+        stderr_log = $stderrLog
+        stderr_tail = $stderrTail
+        run_id     = $env:MERID_RUN_ID
+    }
+    Add-Content -Path (Join-Path "logs" "server_lifecycle.jsonl") -Value ($lifecycle | ConvertTo-Json -Compress)
+} catch {
+    Write-Host "[start_15m] lifecycle record write failed: $_" -ForegroundColor Yellow
+}
