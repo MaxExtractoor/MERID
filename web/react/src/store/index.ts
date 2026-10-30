@@ -73,6 +73,8 @@ export interface PortfolioData extends SliceHealth {
   positions: Position[];
   orders: KalshiOrder[];
   fills: Fill[];
+  /** meta.reconciliation_status.status from /kalshi/fills — 'ok' | 'degraded' | 'broken'. */
+  fills_reconciliation: string | null;
   timestamp: string;
 }
 
@@ -311,6 +313,7 @@ const initialPortfolio: PortfolioData = {
   positions: [],
   orders: [],
   fills: [],
+  fills_reconciliation: null,
   timestamp: new Date().toISOString(),
 };
 
@@ -402,14 +405,14 @@ export const useKalshiStore = create<KalshiStore>()(
         [liveRes, liveErr],
         [tickRes, tickErr],
       ] = await Promise.all([
-        probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.BALANCE)),
-        probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.PNL)),
+        probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.BALANCE)),
+        probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.PNL)),
         probe(() => getJson<{ positions?: ServerPosition[] }>(AGENT_ENDPOINTS.POSITIONS)),
         probe(() => getJson<{ orders?: ServerOrder[] }>(AGENT_ENDPOINTS.ORDERS)),
-        probe(() => getJson<{ fills?: ServerFill[] }>(`${AGENT_ENDPOINTS.FILLS}?since_hours=24&limit=100`)),
-        probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.RISK)),
+        probe(() => getJson<{ fills?: ServerFill[]; meta?: { reconciliation_status?: { status?: string } } }>(`${AGENT_ENDPOINTS.FILLS}?since_hours=24&limit=100`)),
+        probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.RISK)),
         probe(() => getJson<{ kill_switch?: boolean; status?: string }>(AGENT_ENDPOINTS.KILL_SWITCH)),
-        probe(() => getJson<Record<string, any>>(AGENT_ENDPOINTS.UNIFIED_HEALTH)),
+        probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.UNIFIED_HEALTH)),
         probe(() => fetchLiveRuntimeState()),
         probe(() => getJson<{ ticks?: ServerTick[] }>(`${AGENT_ENDPOINTS.TICK_LOG}?limit=50`)),
       ]);
@@ -426,6 +429,7 @@ export const useKalshiStore = create<KalshiStore>()(
           positions: positionsRes?.positions ? positionsRes.positions.map(mapPosition) : get().portfolio.positions,
           orders: ordersRes?.orders ? ordersRes.orders.map(mapOrder) : get().portfolio.orders,
           fills: fillsRes?.fills ? fillsRes.fills.map(mapFill) : get().portfolio.fills,
+          fills_reconciliation: fillsRes?.meta?.reconciliation_status?.status ?? get().portfolio.fills_reconciliation,
           timestamp: new Date().toISOString(),
           lastOk: now,
           error: portfolioErr,
@@ -438,7 +442,7 @@ export const useKalshiStore = create<KalshiStore>()(
       if (riskRes || killRes) {
         const breachesRaw: unknown = riskRes?.recent_breaches;
         const breaches = Array.isArray(breachesRaw) ? breachesRaw : [];
-        const alerts: RiskAlert[] = breaches.map((b: Record<string, any>, i: number) => {
+        const alerts: RiskAlert[] = breaches.map((b: Record<string, unknown>, i: number) => {
           const check = String(b?.check ?? b?.type ?? '');
           const reason = String(b?.reason ?? b?.message ?? check ?? 'risk breach');
           const lc = `${check} ${reason}`.toLowerCase();
@@ -461,11 +465,11 @@ export const useKalshiStore = create<KalshiStore>()(
           total_notional: riskRes ? num(riskRes.total_notional_usd) : get().risk.total_notional,
           // Dedicated kill-switch GET is authoritative for the toggle state;
           // /risk carries the risk_controller view of the same flag.
-          kill_switch_active: killRes?.kill_switch ?? riskRes?.kill_switch_active ?? get().risk.kill_switch_active,
+          kill_switch_active: killRes?.kill_switch ?? (riskRes?.kill_switch_active as boolean | undefined) ?? get().risk.kill_switch_active,
           kill_switch_reason: killRes?.kill_switch
-            ? (riskRes?.kill_switch_reason ?? '')
-            : (riskRes?.kill_switch_reason ?? get().risk.kill_switch_reason),
-          limits: riskRes?.limits ?? get().risk.limits,
+            ? (riskRes?.kill_switch_reason as string | undefined ?? '')
+            : (riskRes?.kill_switch_reason as string | undefined ?? get().risk.kill_switch_reason),
+          limits: (riskRes?.limits as RiskLimits | undefined) ?? get().risk.limits,
           open_market_count: riskRes ? num(riskRes.open_market_count) : get().risk.open_market_count,
           daily_trades: riskRes ? num(riskRes.daily_trades) : get().risk.daily_trades,
           realized_pnl: riskRes ? num(riskRes.realized_pnl_usd) : get().risk.realized_pnl,
@@ -474,7 +478,7 @@ export const useKalshiStore = create<KalshiStore>()(
           sharpe_ratio: riskRes ? num(riskRes.sharpe_ratio) : get().risk.sharpe_ratio,
           profit_factor: riskRes ? num(riskRes.profit_factor) : get().risk.profit_factor,
           alerts: riskRes ? alerts : get().risk.alerts,
-          timestamp: riskRes?.timestamp ?? new Date().toISOString(),
+          timestamp: (riskRes?.timestamp as string | undefined) ?? new Date().toISOString(),
           lastOk: now,
           error: riskErr ?? killErr,
         });
@@ -485,7 +489,7 @@ export const useKalshiStore = create<KalshiStore>()(
       // ── System slice (unified-health + live-runtime-state + tick log) ──
       if (healthRes || liveRes || tickRes) {
         const services: Record<string, ServiceHealth> = {};
-        const svcObj = healthRes?.services as Record<string, any> | undefined;
+        const svcObj = healthRes?.services as Record<string, { ready?: boolean; error?: string; status?: string }> | undefined;
         if (svcObj) {
           Object.entries(svcObj).forEach(([name, svc]) => {
             const ready = svc?.ready === true;

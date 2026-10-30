@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Search, Menu, Sun, Moon, Settings } from '../ui/icons';
-import { useTheme } from '../theme';
+import { Search, Menu, Settings } from '../ui/icons';
 import { useKalshiStore, selectSystem, selectPortfolio } from '../store';
 import type { View } from '../types/views';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
@@ -53,7 +52,6 @@ const WindowClock: React.FC = () => {
 };
 
 function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
-  const { theme, toggleTheme } = useTheme();
   const system = useKalshiStore(selectSystem);
   const portfolio = useKalshiStore(selectPortfolio);
 
@@ -63,9 +61,12 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
   const isLive = liveState === 'LIVE_ENTRIES_ENABLED';
   const entriesHalted = liveState === 'LIVE_ENTRIES_HALTED';
 
-  const dailyPnl = portfolio.daily_pnl ?? 0;
+  // Truthful display: until the first authoritative portfolio fetch lands
+  // (lastOk set by refreshAll), show n/a — "$0.00" is a real-looking lie.
+  const hasData = portfolio.lastOk != null;
+  const dailyPnl = portfolio.daily_pnl;
   const pnlPositive = dailyPnl >= 0;
-  const balanceUsd = (portfolio.portfolio_value ?? portfolio.cash ?? 0);
+  const balanceUsd = portfolio.portfolio_value || portfolio.cash || null;
 
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">
@@ -115,12 +116,16 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
               : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
           }`}>
             <span className="text-slate-300 text-sm font-medium tabular-nums">
-              {balanceUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+              {hasData && balanceUsd != null
+                ? balanceUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+                : 'n/a'}
             </span>
             <span className="text-slate-600">·</span>
             <span className="text-slate-300 text-sm font-medium">P&L:</span>
-            <span className={`font-bold text-lg tabular-nums ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
-              {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+            <span className={`font-bold text-lg tabular-nums ${!hasData ? 'text-slate-400' : pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+              {hasData
+                ? `${pnlPositive ? '+' : ''}${dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`
+                : 'n/a'}
             </span>
           </div>
 
@@ -148,19 +153,9 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
 
       {/* Right side */}
       <div className="flex items-center gap-2">
-        {/* Theme toggle */}
-        <button type="button"
-          onClick={toggleTheme}
-          className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105"
-          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        >
-          {theme === 'dark' ? (
-            <Sun className="w-5 h-5 text-yellow-400" />
-          ) : (
-            <Moon className="w-5 h-5 text-slate-600" />
-          )}
-        </button>
-
+        {/* No theme toggle — every surface hardcodes slate-dark styling, so a
+            light-mode switch renders an unreadable dark-on-white hybrid. The
+            console is dark-only until a real light theme exists. */}
         {/* Connection Status */}
         <ConnectionStatusIndicator />
 
@@ -184,4 +179,5 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
 }
 
 TopBar.displayName = 'TopBar';
-export default React.memo(TopBar);
+const MemoizedTopBar = React.memo(TopBar);
+export default MemoizedTopBar;

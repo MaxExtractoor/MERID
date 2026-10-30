@@ -1,13 +1,24 @@
+import { useEffect, useState } from 'react';
 import { WifiOff, CloudOff, AlertTriangle } from '../ui/icons';
 import { useNetworkStatus } from '../hooks/useNetworkStatus';
 import './OfflineIndicator.css';
 
+const RECONNECTED_NOTICE_MS = 5000;
+
 export function OfflineIndicator() {
   const { isOnline, wasOffline, lastOnline } = useNetworkStatus();
+  // "Connection restored" was rendered forever — wasOffline/lastOnline never
+  // reset, so the notice stayed mounted. Show it for a fixed window instead.
+  const [showRestored, setShowRestored] = useState(false);
+  useEffect(() => {
+    if (!(isOnline && wasOffline)) return undefined;
+    setShowRestored(true);
+    const t = setTimeout(() => setShowRestored(false), RECONNECTED_NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [isOnline, wasOffline]);
 
   if (isOnline) {
-    // Show reconnection notice briefly
-    if (wasOffline && lastOnline) {
+    if (showRestored && lastOnline) {
       return (
         <div className="offline-indicator offline-indicator--reconnected">
           <WifiOff size={16} />

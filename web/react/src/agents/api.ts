@@ -8,18 +8,17 @@
  */
 
 import { apiUrl } from '../config/apiBase';
+import { ensureSession, getSessionId, clearSessionIf, isSessionScopedPath } from './session';
 import type {
   AssetAgent, AssetSymbol, AgentState, BalanceInfo, CycleDecision,
   DecisionEvent, GridSummary, LaneInfo, LaneId, LiveRuntimeState,
   MarketState, RejectionWaterfallStage,
 } from './types';
 import { ASSETS, LANES, MONEYNESS_BANDS } from './types';
-
-const TOKEN_KEY = 'merid-access';
+import { numOr, parseTsMs } from './format';
 
 export function authHeaders(extra?: HeadersInit): HeadersInit {
-  let token: string | null = null;
-  try { token = localStorage.getItem(TOKEN_KEY); } catch { /* noop */ }
+  const token = getSessionId();
   return {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
@@ -27,12 +26,42 @@ export function authHeaders(extra?: HeadersInit): HeadersInit {
   };
 }
 
+/**
+ * Shared fetch. Paths on the session-gated router (/api/v1/kalshi/*) mint an
+ * operator session on first call and, on a 401 (e.g. backend restart wiped
+ * the in-memory sessions), clear the stale token, re-mint once, and retry.
+ * All other routes are unauthenticated and pass straight through.
+ */
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const scoped = isSessionScopedPath(path);
+  if (scoped) await ensureSession();
+  const sent = getSessionId();
+  let res = await fetch(apiUrl(path), { ...init, headers: authHeaders(init.headers) });
+  if (res.status === 401 && scoped) {
+    // Only clear if the stored token is still the one that failed — a
+    // concurrent retry may have already minted a fresh session.
+    clearSessionIf(sent);
+    await ensureSession(true);
+    res = await fetch(apiUrl(path), { ...init, headers: authHeaders(init.headers) });
+  }
+  return res;
+}
+
+async function errorDetail(res: Response, path: string): Promise<Error> {
+  let detail = '';
+  try {
+    const body = await res.json() as { detail?: string };
+    detail = body?.detail ? ` — ${body.detail}` : '';
+  } catch { /* non-JSON error body */ }
+  return new Error(`${res.status} ${res.statusText} @ ${path}${detail}`);
+}
+
 export async function getJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(apiUrl(path), { headers: authHeaders(), signal: ctrl.signal });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ ${path}`);
+    const res = await authedFetch(path, { signal: ctrl.signal });
+    if (!res.ok) throw await errorDetail(res, path);
     return (await res.json()) as T;
   } finally {
     clearTimeout(t);
@@ -43,13 +72,12 @@ export async function postJson<T>(path: string, body?: unknown, timeoutMs = 10_0
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(apiUrl(path), {
+    const res = await authedFetch(path, {
       method: 'POST',
-      headers: authHeaders(),
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ ${path}`);
+    if (!res.ok) throw await errorDetail(res, path);
     return (await res.json()) as T;
   } finally {
     clearTimeout(t);
@@ -60,19 +88,8 @@ export async function delJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(apiUrl(path), {
-      method: 'DELETE',
-      headers: authHeaders(),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const body = await res.json() as { detail?: string };
-        detail = body?.detail ? ` — ${body.detail}` : '';
-      } catch { /* non-JSON error body */ }
-      throw new Error(`${res.status} ${res.statusText} @ ${path}${detail}`);
-    }
+    const res = await authedFetch(path, { method: 'DELETE', signal: ctrl.signal });
+    if (!res.ok) throw await errorDetail(res, path);
     return (await res.json()) as T;
   } finally {
     clearTimeout(t);
@@ -97,6 +114,10 @@ export interface ServerAgent {
   is_zombie?: boolean;
   has_signal?: boolean;
   rejected_reason?: string;
+  /** Gate-level detail behind rejected_reason (e.g. STALE:age>t, NOT-LIVE-SEQUENCE-CONFIRMED). */
+  rejected_detail?: string;
+  /** Live entry-TTE cutoff (seconds) — new entries vetoed below this. */
+  entry_cutoff_secs?: number;
   trend_aligned?: boolean;
   heartbeat?: { last_eval_ms?: number; book_age_ms?: number; watermark_ms?: number; spot_age_ms?: number };
   market?: AssetAgent['market'];
@@ -124,7 +145,6 @@ export const AGENT_ENDPOINTS = {
   DECISION_FEED: '/api/v1/kalshi-grid/decision-feed',
   LEGACY_AGENTS: '/api/v1/agents',                        // basic per-asset fallback
   MARKET_STATES: '/api/v1/kalshi/market-states',
-  INTERNAL_KALSHI_HEALTH: '/api/v1/kalshi/internal/kalshi_health',
   BALANCE: '/api/v1/kalshi/balance',
   POSITIONS: '/api/v1/kalshi/positions',
   ORDERS: '/api/v1/kalshi/orders',
@@ -138,7 +158,6 @@ export const AGENT_ENDPOINTS = {
   LIVE_RUNTIME_STATE: '/api/v1/live-runtime-state/',
   HALT: '/api/v1/live-runtime-state/halt',
   RELEASE: '/api/v1/live-runtime-state/release',
-  LOOP_STATUS: '/api/v1/loop-status',
   UNIFIED_HEALTH: '/api/v1/unified-health',
   SPOT_PRICES: '/api/v1/spot/prices',
   CALIBRATION_STATS: '/api/v1/kalshi/calibration/stats',
@@ -146,8 +165,6 @@ export const AGENT_ENDPOINTS = {
   MARKETS: '/api/v1/kalshi/markets',
   TICK_LOG: '/api/v1/loop/tick-log',
   ORDERBOOK: (ticker: string) => `/api/v1/kalshi/markets/${ticker}/orderbook`,
-  ORDERBOOK_STREAM: (ticker: string) => `/api/v1/kalshi/markets/${ticker}/orderbook/stream`,
-  MARKET_STATE: (ticker: string) => `/api/internal/v1/market-state/${ticker}`,
 } as const;
 
 /* ------------------------------------------------------------------ */
@@ -157,11 +174,51 @@ export const AGENT_ENDPOINTS = {
 export const fetchGridAgents = () => getJson<GridAgentsResponse>(AGENT_ENDPOINTS.GRID_AGENTS);
 export const fetchLegacyAgents = () => getJson<{ agents?: ServerAgent[] } | ServerAgent[]>(AGENT_ENDPOINTS.LEGACY_AGENTS);
 export const fetchGridSummary = () => getJson<GridSummary>(AGENT_ENDPOINTS.GRID_SUMMARY);
-export const fetchDecisionFeed = (limit = 60) =>
-  getJson<{ events?: DecisionEvent[] }>(`${AGENT_ENDPOINTS.DECISION_FEED}?limit=${limit}`);
+const FEED_KINDS: ReadonlySet<string> = new Set([
+  'enter', 'veto', 'skip', 'order', 'fill', 'guard', 'exit', 'settle', 'state',
+]);
+
+/**
+ * Normalize backend decision-feed events (verified kalshi_agent_grid_api
+ * /decision-feed): rows carry `kind` ∈ {fill,order,veto,skip,exit,settle,
+ * state,signal,scan,guard}, `state`, `reason`, `side`, `ticker`,
+ * `decision_lane`, `detail` — but no `summary`/`price_c`/`edge_c`. Build
+ * the UI fields honestly from what's emitted; unmapped kinds → 'state'.
+ */
+function toDecisionEvent(e: Record<string, unknown>): DecisionEvent {
+  const detail = (e.detail ?? e.meta ?? {}) as Record<string, unknown>;
+  const rawKind = String(e.kind ?? 'state');
+  const mapped = FEED_KINDS.has(rawKind);
+  const kind = (mapped ? rawKind : 'state') as DecisionEvent['kind'];
+  const side = e.side ?? detail.selected_side;
+  const ticker = e.ticker ?? detail.ticker;
+  const label = mapped ? null : rawKind.toUpperCase();
+  const summary = typeof e.summary === 'string' && e.summary
+    ? e.summary
+    : [label, e.state ? String(e.state) : null,
+       side ? String(side).toUpperCase() : null,
+       ticker ? String(ticker) : null].filter(Boolean).join(' ') || 'n/a';
+  return {
+    ...(e as unknown as DecisionEvent),
+    kind,
+    summary,
+    side: side === 'yes' || side === 'no' ? side : undefined,
+    price_c: numOr(e.price_c ?? detail.entry_price_cents ?? detail.selected_side_best_bid_cents),
+    edge_c: numOr(e.edge_c ?? detail.ev_net_cents),
+    counterfactual: e.counterfactual === true || detail.counterfactual === true || undefined,
+    lane: (e.lane ?? e.decision_lane ?? detail.decision_lane ?? detail.entry_lane) as string | undefined,
+    reason: (e.reason as string) ?? undefined,
+    meta: detail,
+  };
+}
+
+export const fetchDecisionFeed = async (limit = 60) => {
+  const res = await getJson<{ events?: Array<Record<string, unknown>> }>(
+    `${AGENT_ENDPOINTS.DECISION_FEED}?limit=${limit}`);
+  return { events: (res?.events ?? []).map(toDecisionEvent) };
+};
 export const fetchMarketStates = () =>
   getJson<{ markets?: MarketState[] } | MarketState[] | Record<string, MarketState>>(AGENT_ENDPOINTS.MARKET_STATES);
-export const fetchKalshiHealth = () => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.INTERNAL_KALSHI_HEALTH);
 /** Balance: normalize shard_balances_usd (USD dict) into shards[] (cents). */
 export const fetchBalance = async (): Promise<BalanceInfo> => {
   const raw = await getJson<BalanceInfo>(AGENT_ENDPOINTS.BALANCE);
@@ -177,8 +234,6 @@ export const fetchBalance = async (): Promise<BalanceInfo> => {
   return raw;
 };
 export const fetchLiveRuntimeState = () => getJson<LiveRuntimeState>(AGENT_ENDPOINTS.LIVE_RUNTIME_STATE);
-export const fetchLoopStatus = () => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.LOOP_STATUS);
-export const fetchUnifiedHealth = () => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.UNIFIED_HEALTH);
 export const fetchSpotPrices = () => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.SPOT_PRICES);
 
 /** Emergency halt — blocks new entries. Exits/cancels stay live. */
@@ -187,7 +242,7 @@ export const haltEntries = (reason = 'operator_halt') =>
 /** Release halt — requires the backend's release assertion to pass. */
 export const releaseEntries = () => postJson<Record<string, unknown>>(AGENT_ENDPOINTS.RELEASE, {});
 /** Kill switch takes `activate` as a QUERY param (verified: kalshi_api.py:4548). */
-export const setKillSwitch = (active: boolean, _reason?: string) =>
+export const setKillSwitch = (active: boolean) =>
   postJson<Record<string, unknown>>(`${AGENT_ENDPOINTS.KILL_SWITCH}?activate=${active}`);
 
 /* ------------------------------------------------------------------ */
@@ -208,7 +263,9 @@ function deriveState(s: ServerAgent): AgentState {
   const bookAge = s.heartbeat?.book_age_ms ?? s.market?.book_age_ms;
   if (bookAge != null && bookAge > 60_000) return 'STALE_FEED';
   if (s.position || (s.position_count ?? 0) > 0) return 'IN_POSITION';
-  if (s.has_signal && s.rejected_reason) return 'VETOED';
+  // Backend semantics: has_signal is FALSE precisely when rejection_reason
+  // exists — requiring it true here would veto-proof the fallback path.
+  if (s.rejected_reason || s.cycle_decision?.rejection_reason) return 'VETOED';
   return 'SCANNING';
 }
 
@@ -246,10 +303,44 @@ function normalizeLanes(s: ServerAgent): LaneInfo[] {
   return LANES.map((lane) => byLane.get(lane) ?? { lane, status: 'unknown' as const });
 }
 
+/**
+ * Normalize the raw `_cycle_decision` dict into the UI CycleDecision shape.
+ * Live keys (verified agent_grid_15m.py): `selected_side`, `rejection_reason`,
+ * `selected_side_best_bid_cents`, `selected_side_best_ask_cents`,
+ * `entry_price_cents`, `ev_net_cents`. Raw fields are spread through for
+ * drill-downs; only the canonical UI keys are renamed.
+ */
+function toCycleDecision(cd: CycleDecision | Record<string, unknown> | null | undefined): CycleDecision | null {
+  if (!cd || typeof cd !== 'object') return null;
+  const raw = cd as Record<string, unknown>;
+  const side = raw.side ?? raw.selected_side ?? raw.selected_outcome;
+  return {
+    ...(raw as CycleDecision),
+    side: side === 'yes' || side === 'no' ? side : undefined,
+    bid_c: numOr(raw.bid_c ?? raw.selected_side_best_bid_cents ?? raw.entry_price_cents),
+    ask_c: numOr(raw.ask_c ?? raw.selected_side_best_ask_cents),
+    net_edge_c: numOr(raw.net_edge_c ?? raw.ev_net_cents),
+    rejection_reason: (raw.rejection_reason as string) ?? undefined,
+    rejection_detail: (raw.rejection_detail ?? raw.entry_ready_reason) as string | undefined,
+  };
+}
+
 export function toAssetAgent(s: ServerAgent): AssetAgent | null {
   const asset = coerceAsset(s.name, s.asset);
   if (!asset) return null;
   const state = deriveState(s);
+  let cd = toCycleDecision(s.cycle_decision);
+  // Merge the serializer's resolved veto reason into last_decision: the
+  // backend merges cycle → _last_signal_rejection → waterfall.final_reason
+  // into top-level `rejected_reason`, but cycle_decision.rejection_reason
+  // itself is often empty on gate-path vetoes (e.g. hard_tte_cutoff) —
+  // without this, cards render "vetoed - reason n/a" despite a real reason.
+  if (cd) {
+    if (!cd.rejection_reason && s.rejected_reason) cd.rejection_reason = s.rejected_reason;
+    if (!cd.rejection_detail && s.rejected_detail) cd.rejection_detail = s.rejected_detail;
+  } else if (s.rejected_reason) {
+    cd = { rejection_reason: s.rejected_reason, rejection_detail: s.rejected_detail };
+  }
   return {
     asset,
     name: s.name ?? asset,
@@ -261,27 +352,64 @@ export function toAssetAgent(s: ServerAgent): AssetAgent | null {
     position: s.position ?? null,
     lanes: normalizeLanes(s),
     edge: s.edge,
-    last_decision: s.cycle_decision ?? null,
+    last_decision: cd,
+    entry_cutoff_secs: numOr(s.entry_cutoff_secs),
     veto_waterfall: s.rejection_waterfall,
     pnl: s.pnl,
     raw: s as unknown as Record<string, unknown>,
   };
 }
 
-/** Normalize a mixed market-states response into a flat list. */
-export function toMarketStateList(raw: unknown): MarketState[] {
-  if (Array.isArray(raw)) return raw as MarketState[];
-  const obj = raw as Record<string, unknown> | null;
-  if (obj && Array.isArray(obj.markets)) return obj.markets as MarketState[];
-  if (obj && typeof obj === 'object') {
-    return Object.entries(obj)
-      .filter(([, v]) => v && typeof v === 'object')
-      .map(([k, v]) => ({ ticker: k, ...(v as object) })) as MarketState[];
+/**
+ * Map a raw market-state row into the UI MarketState shape.
+ * Live row (verified kalshi_api.py): `{book_initialized, spread_cents,
+ * mid_cents, depth_10c, top_of_book_size, volume_24h, open_interest,
+ * seconds_to_expiry, expiration_time, last_updated, source}`.
+ * yes_bid/yes_ask are not published — left undefined (UI shows n/a).
+ */
+function toMarketState(r: Record<string, unknown>, ticker?: string): MarketState {
+  const lastUpdated = r.last_update_ts ?? r.last_updated;
+  let bookAge = numOr(r.book_age_ms);
+  if (bookAge == null) {
+    const ts = parseTsMs(lastUpdated);
+    if (ts != null) bookAge = Math.max(0, Date.now() - ts);
   }
-  return [];
+  return {
+    ticker: String(r.ticker ?? ticker ?? ''),
+    initialized: Boolean(r.initialized ?? r.book_initialized ?? false),
+    yes_bid_c: numOr(r.yes_bid_c ?? r.yes_bid),
+    yes_ask_c: numOr(r.yes_ask_c ?? r.yes_ask),
+    mid_c: numOr(r.mid_c ?? r.mid_cents),
+    spread_c: numOr(r.spread_c ?? r.spread_cents),
+    depth_contracts: numOr(r.depth_contracts),
+    volume: numOr(r.volume ?? r.volume_24h),
+    open_interest: numOr(r.open_interest),
+    secs_to_expiry: numOr(r.secs_to_expiry ?? r.seconds_to_expiry),
+    last_update_ts: lastUpdated != null ? String(lastUpdated) : undefined,
+    book_age_ms: bookAge,
+  };
 }
 
-/** Compose the wall: prefer the rich grid endpoint, fall back to /api/v1/agents. */
+/** Normalize a mixed market-states response into a flat list.
+ *  Live shape (verified): `{count, states: {TICKER: row, ...}, timestamp}`. */
+export function toMarketStateList(raw: unknown): MarketState[] {
+  if (Array.isArray(raw)) return raw.map((r) => toMarketState(r as Record<string, unknown>));
+  const obj = raw as Record<string, unknown> | null;
+  if (!obj || typeof obj !== 'object') return [];
+  const states = obj.markets ?? obj.states;
+  if (Array.isArray(states)) return states.map((r) => toMarketState(r as Record<string, unknown>));
+  if (states && typeof states === 'object') {
+    return Object.entries(states as Record<string, unknown>)
+      .filter(([, v]) => v && typeof v === 'object')
+      .map(([ticker, v]) => toMarketState(v as Record<string, unknown>, ticker));
+  }
+  return Object.entries(obj)
+    .filter(([, v]) => v && typeof v === 'object')
+    .map(([ticker, v]) => toMarketState(v as Record<string, unknown>, ticker));
+}
+
+/** Compose the wall: prefer the rich grid endpoint, fall back to /api/v1/agents.
+ *  Legacy shape (verified): `{agents_by_asset: {BTC: {...}, ...}}`. */
 export async function fetchAgentsWall(): Promise<AssetAgent[]> {
   let servers: ServerAgent[] = [];
   try {
@@ -290,7 +418,12 @@ export async function fetchAgentsWall(): Promise<AssetAgent[]> {
   } catch {
     try {
       const legacy = await fetchLegacyAgents();
-      servers = Array.isArray(legacy) ? legacy : legacy.agents ?? [];
+      if (Array.isArray(legacy)) {
+        servers = legacy;
+      } else {
+        const l = legacy as { agents?: ServerAgent[]; agents_by_asset?: Record<string, ServerAgent> };
+        servers = l.agents ?? (l.agents_by_asset ? Object.values(l.agents_by_asset) : []);
+      }
     } catch {
       servers = [];
     }

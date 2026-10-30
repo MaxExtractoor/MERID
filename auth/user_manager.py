@@ -110,6 +110,12 @@ class UserManager:
             referrer = self._users[referred_by_user_id]
             referrer.total_referrals += 1
         
+        # First account in this process is the operator: the deployment is a
+        # single-operator console with no separate admin bootstrap, and
+        # role-gated endpoints (e.g. kill-switch POST) require operator/admin.
+        # Accounts minted afterwards keep the default "viewer" role.
+        role = "admin" if not self._users else "viewer"
+
         # Create user
         user = User(
             user_id=user_id,
@@ -118,9 +124,10 @@ class UserManager:
             wallet_address=wallet_address,
             twitter_handle=twitter_handle,
             referral_code=referral_code,
-            referred_by=referred_by_user_id
+            referred_by=referred_by_user_id,
+            role=role,
         )
-        
+
         # Store user
         self._users[user_id] = user
         

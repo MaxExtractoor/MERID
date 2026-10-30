@@ -10,6 +10,8 @@ import { cx, reasonLabel } from '../../agents/format';
 
 interface VetoChipProps {
   reason?: string | null;
+  /** Gate-level sub-reason (e.g. STALE:age=75s>t60s) — shown on hover. */
+  detail?: string | null;
   counterfactual?: boolean;
   size?: 'sm' | 'md';
   className?: string;
@@ -17,11 +19,14 @@ interface VetoChipProps {
 
 export const VetoChip = memo(function VetoChip({
   reason,
+  detail,
   counterfactual = false,
   size = 'sm',
   className = '',
 }: VetoChipProps) {
   const tone = vetoTone(reason);
+  const title = `${counterfactual ? 'counterfactual veto' : 'veto'}: ${reason ?? 'no reason recorded'}` +
+    (detail ? `\n${detail}` : '');
   return (
     <span
       className={cx(
@@ -31,7 +36,7 @@ export const VetoChip = memo(function VetoChip({
         counterfactual && 'border-dashed italic opacity-85',
         className,
       )}
-      title={`${counterfactual ? 'counterfactual veto' : 'veto'}: ${reason ?? 'no reason recorded'}`}
+      title={title}
     >
       {counterfactual && <span className="font-bold not-italic">CF</span>}
       <span className="truncate">{reason ? reasonLabel(reason) : 'no reason'}</span>

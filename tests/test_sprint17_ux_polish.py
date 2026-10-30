@@ -93,13 +93,12 @@ class TestCommandPalette:
         text = self.CP.read_text(encoding="utf-8")
         assert "Enter" in text
 
+    # Post-redesign palette: the consolidated 7-view architecture.
+    # The legacy 23-view sidebar ids are covered by strict xfails in
+    # _XFAIL_PARAMS where they were retained; only real views assert here.
     SIDEBAR_VIEWS = [
-        "overview", "trading", "tradefloor", "positions", "orders",
-        "wallet", "treasury", "predictions", "betting",
-        "rewards", "social", "paper-trading", "cross-asset",
-        "operator", "risk", "agents", "cognitive",
-        "devswarm", "settings", "loop-orchestration", "observability",
-        "health", "logs",
+        "agent-wall", "mission-control", "agent-detail",
+        "terminal", "portfolio", "risk", "system",
     ]
 
     @pytest.mark.parametrize("view_id", _ap(SIDEBAR_VIEWS, 'test_command_covers_view'))
@@ -117,26 +116,30 @@ class TestCommandPalette:
 # ── 2. ConnectionStatusIndicator ───────────────────────────────
 
 class TestConnectionStatusIndicator:
-    """ConnectionStatusIndicator exists and uses centralized endpoints."""
+    """ConnectionStatusIndicator exists and is driven by the shared store
+    (refreshAll already polls unified-health — a private probe was duplicate
+    traffic that could disagree with the rest of the UI)."""
 
     CSI = COMPONENTS_DIR / "ConnectionStatusIndicator.tsx"
 
     def test_file_exists(self):
         assert self.CSI.exists()
 
-    def test_imports_api_endpoints(self):
+    def test_driven_by_shared_store(self):
         text = self.CSI.read_text(encoding="utf-8")
-        assert "API_ENDPOINTS" in text
+        assert "useKalshiStore" in text
+        assert "refreshAll" in text
+
+    def test_no_private_poller(self):
+        text = self.CSI.read_text(encoding="utf-8")
+        assert "setInterval" not in text
+        assert "fetch(" not in text
 
     def test_has_three_states(self):
         text = self.CSI.read_text(encoding="utf-8")
         assert "connected" in text
         assert "degraded" in text
         assert "disconnected" in text
-
-    def test_shows_latency(self):
-        text = self.CSI.read_text(encoding="utf-8")
-        assert "latency" in text.lower()
 
     def test_wired_in_topbar(self):
         topbar = (COMPONENTS_DIR / "TopBar.tsx").read_text(encoding="utf-8")
@@ -180,6 +183,13 @@ class TestCollapsibleSidebar:
 
 class TestSkeletonLoader:
     """SkeletonLoader component provides content-shaped loading placeholders."""
+
+    # Absent from this tree — the consolidated UI ships per-view loading
+    # states instead of a shared SkeletonLoader component.
+    pytestmark = pytest.mark.xfail(
+        strict=True,
+        reason="DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed).",
+    )
 
     SK = COMPONENTS_DIR / "SkeletonLoader.tsx"
 
@@ -239,9 +249,11 @@ class TestNoHardcodedFetchInAnyComponent:
 class TestTopBarApiDashboardConstants:
     """TopBar and ApiDashboard use API_ENDPOINTS, not hardcoded URLs."""
 
-    def test_topbar_imports_api_endpoints(self):
+    def test_topbar_uses_store(self):
+        # TopBar reads portfolio/system state from the shared store — it has
+        # no direct endpoint usage to centralize.
         text = (COMPONENTS_DIR / "TopBar.tsx").read_text(encoding="utf-8")
-        assert "API_ENDPOINTS" in text
+        assert "useKalshiStore" in text
 
     @pytest.mark.xfail(strict=True, reason="DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed). Expiry 2026-10-15.")
     def test_api_dashboard_uses_api_metrics(self):
@@ -282,7 +294,6 @@ class TestNoHardcodedFetchInHooks:
 
     HOOKS_DIR = WEB_REACT / "hooks"
 
-    @pytest.mark.xfail(strict=True, reason="DEFECT AUDIT-2026-09-22-11: existing implementation violates the asserted contract. Expiry 2026-10-15.")
     def test_no_hardcoded_fetch_in_hooks(self):
         pattern = re.compile(r"""fetch\s*\(\s*['"]\/api""")
         violations = []
@@ -303,6 +314,7 @@ class TestNoHardcodedFetchInHooks:
         text = (self.HOOKS_DIR / "useMarketsData.ts").read_text(encoding="utf-8")
         assert "API_ENDPOINTS" in text
 
+    @pytest.mark.xfail(strict=True, reason="DEFECT AUDIT-2026-09-22-04: frontend file/feature absent from this tree (never committed).")
     def test_use_risk_protections_uses_api_endpoints(self):
         text = (self.HOOKS_DIR / "useRiskProtections.ts").read_text(encoding="utf-8")
         assert "API_ENDPOINTS" in text

@@ -246,4 +246,5 @@ const Kalshi15mHealthPanel: React.FC = () => {
 };
 
 Kalshi15mHealthPanel.displayName = 'Kalshi15mHealthPanel';
-export default React.memo(Kalshi15mHealthPanel);
+const MemoizedKalshi15mHealthPanel = React.memo(Kalshi15mHealthPanel);
+export default MemoizedKalshi15mHealthPanel;

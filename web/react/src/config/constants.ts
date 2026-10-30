@@ -9,7 +9,7 @@ export const API_BASE_URL = API_BASE;
 // T-034: Warn if API_BASE_URL is empty in production
 if (!API_BASE_URL && typeof window !== 'undefined') {
   try {
-    const meta = (globalThis as any).import?.meta;
+    const meta = (globalThis as { import?: { meta?: { env?: { PROD?: boolean } } } }).import?.meta;
     if (meta?.env?.PROD) {
       console.error("CRITICAL: VITE_API_BASE not set in production! All API calls will use relative URLs.");
     }

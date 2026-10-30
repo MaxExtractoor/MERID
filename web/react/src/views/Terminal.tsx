@@ -22,7 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui';
 import { usePoll } from '../hooks/usePoll';
-import { AGENT_ENDPOINTS, delJson } from '../agents/api';
+import { AGENT_ENDPOINTS, delJson, fetchAgentsWall } from '../agents/api';
 import { ConfirmModal } from '../components/ConfirmModal';
 import KalshiTradeTicket from '../components/KalshiTradeTicket';
 import { cx, numOr } from '../agents/format';
@@ -128,6 +128,11 @@ const Trade = () => {
   const refreshAll = useKalshiStore(s => s.refreshAll);
   const positions = portfolio.positions;
   const [selectedMarket, setSelectedMarket] = useState<KalshiMarket | null>(null);
+
+  // Wall pipeline (5s): gives the ticket the live per-agent TTE cutoff and
+  // current veto reason for the selected market — pre-submit context the
+  // order router would otherwise surface only as a rejection.
+  const wallPoll = usePoll(fetchAgentsWall, { ms: 5_000 });
   const [activeTab, setActiveTab] = useState<'markets' | 'positions' | 'orders'>('markets');
 
   // Markets catalog — usePoll keeps last-good data on failure.
@@ -340,8 +345,19 @@ const Trade = () => {
                 </div>
               </CardHeader>
               <CardContent>
+                {(() => {
+                  const t = selectedMarket.ticker.toUpperCase();
+                  const sel = (wallPoll.data ?? []).find(a => a.market?.ticker === selectedMarket.ticker)
+                    ?? (wallPoll.data ?? []).find(a => t.includes(a.asset));
+                  const vetoR = sel?.last_decision?.rejection_reason;
+                  const vetoD = sel?.last_decision?.rejection_detail;
+                  return (
                 <KalshiTradeTicket
                   ticker={selectedMarket.ticker}
+                  entryCutoffSecs={sel?.entry_cutoff_secs}
+                  secsToClose={sel?.market?.secs_to_close}
+                  marketVetoReason={vetoR}
+                  marketVetoDetail={vetoD}
                   question={selectedMarket.question}
                   outcomes={(selectedMarket.outcomes ?? []).map(o => ({
                     id: o.id ?? o.name ?? '',
@@ -357,6 +373,8 @@ const Trade = () => {
                     ordersPoll.refresh();
                   }}
                 />
+                  );
+                })()}
               </CardContent>
             </Card>
           )}

@@ -1,5 +1,13 @@
 # UI Wiring & Interaction Flow Audit Report
 
+> **⚠ STALE — superseded 2026-11.** This document predates the seven-view
+> redesign (Agent Wall / Mission Control / Agent Detail / Terminal /
+> Portfolio / Risk / System). It references files that no longer exist
+> (`KalshiTerminalView.tsx`, `useApiData.ts`, mode contexts, etc.). Several
+> findings were re-verified and fixed in the current source — see the
+> session's current audit for live status. Kept for historical reference
+> only; do NOT treat as the current implementation contract.
+
 **Scope:** MERID React frontend — all views, hooks, shared components  
 **Date:** 2026-06-XX  
 **Status:** Audit complete — no code changes made  

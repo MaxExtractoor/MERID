@@ -8,8 +8,8 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useToast } from '../components/ToastProvider';
-import { API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
-import { apiUrl } from '../config/apiBase';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { getJson } from '../agents/api';
 
 interface KalshiFill {
   fill_id: string;
@@ -55,15 +55,9 @@ export function useFillToast() {
 
   const poll = useCallback(async () => {
     try {
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      const res = await fetch(`${apiUrl(API_ENDPOINTS.KALSHI_FILLS)}?since_hours=24&limit=100`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
-        },
-      });
-      if (!res.ok) return;
-      const data = await res.json() as { fills?: KalshiFill[]; meta?: FillsMeta; warning?: string };
+      const data = await getJson<{ fills?: KalshiFill[]; meta?: FillsMeta; warning?: string }>(
+        `${API_ENDPOINTS.KALSHI_FILLS}?since_hours=24&limit=100`,
+      );
       const fills: KalshiFill[] = data.fills ?? [];
       const meta = data.meta ?? null;
 

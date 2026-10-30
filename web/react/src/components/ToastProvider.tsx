@@ -1,3 +1,6 @@
+/* eslint-disable react-refresh/only-export-components -- context + provider +
+   useToast colocation is the standard React pattern; splitting the hook into
+   its own file would orphan the context object. */
 /**
  * ToastProvider — zero-dependency toast notification system.
  *
@@ -79,8 +82,18 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
     const item: ToastItem = { id, ...options };
 
     setToasts(prev => {
-      const next = [...prev, item];
-      return next.length > MAX_TOASTS ? next.slice(-MAX_TOASTS) : next;
+      if (prev.length < MAX_TOASTS) return [...prev, item];
+      // Trimmed toasts never render, but their timers stayed mapped until
+      // they fired — clear them now so the map can't grow unbounded.
+      const dropped = prev.slice(0, prev.length - MAX_TOASTS + 1);
+      for (const t of dropped) {
+        const timer = timersRef.current.get(t.id);
+        if (timer) {
+          clearTimeout(timer);
+          timersRef.current.delete(t.id);
+        }
+      }
+      return [...prev.slice(dropped.length), item];
     });
 
     const duration = options.durationMs ?? DEFAULT_DURATION;

@@ -28,7 +28,6 @@ echarts.use([
   CanvasRenderer,
 ]);
 
-export { echarts };
 export type { EChartsCoreOption };
 
 interface EChartProps {

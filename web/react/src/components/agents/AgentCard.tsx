@@ -78,8 +78,12 @@ const LaneChip = memo(function LaneChip({ lane, onClick }: LaneChipProps) {
 
 /* ------------------------------------------------------------------ */
 
-/** Horizontal 0-900s window track: fill = elapsed, marker = now. */
-function WindowTrack({ secsToClose, priceC }: { secsToClose?: number; priceC?: number }) {
+/**
+ * Horizontal 0-900s window track: fill = elapsed, marker = now.
+ * `cutoffSecs` = live entry-TTE floor — a tick marks the no-entry boundary
+ * and the fill/mark go amber once the window is inside it.
+ */
+function WindowTrack({ secsToClose, priceC, cutoffSecs }: { secsToClose?: number; priceC?: number; cutoffSecs?: number }) {
   const live = useLiveCountdown(secsToClose);
   if (live == null) {
     return (
@@ -91,24 +95,39 @@ function WindowTrack({ secsToClose, priceC }: { secsToClose?: number; priceC?: n
   }
   const frac = clamp(1 - live / 900, 0, 1);
   const urgent = live < 60;
+  const hasCut = cutoffSecs != null && cutoffSecs > 0;
+  const closed = hasCut && live < (cutoffSecs as number);
+  const cutFrac = hasCut ? clamp(1 - (cutoffSecs as number) / 900, 0, 1) : null;
   return (
-    <div className="flex items-center gap-2" title={`window closes in ${fmtMMSS(live)}`}>
+    <div className="flex items-center gap-2" title={closed ? `entries closed — TTE cutoff ${fmtMMSS(cutoffSecs as number)}` : `window closes in ${fmtMMSS(live)}`}>
       <div className="relative h-1 flex-1 rounded bg-slate-800">
         <div
           className={cx('absolute inset-y-0 left-0 rounded transition-[width] duration-1000 ease-linear motion-reduce:transition-none',
-            urgent ? 'bg-red-500/70' : 'bg-blue-500/60')}
+            urgent ? 'bg-red-500/70' : closed ? 'bg-amber-500/50' : 'bg-blue-500/60')}
           style={{ width: `${frac * 100}%` }}
         />
+        {cutFrac != null && (
+          <div
+            className="absolute top-[-3px] bottom-[-3px] w-px bg-amber-400/80"
+            style={{ left: `${cutFrac * 100}%` }}
+            aria-hidden="true"
+          />
+        )}
         <div
           className={cx('absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 rounded-full border',
-            urgent ? 'bg-red-400 border-red-200' : 'bg-blue-300 border-blue-100')}
+            urgent ? 'bg-red-400 border-red-200' : closed ? 'bg-amber-300 border-amber-100' : 'bg-blue-300 border-blue-100')}
           style={{ left: `${frac * 100}%` }}
           aria-hidden="true"
         />
       </div>
-      <span className={cx('tabular-nums text-[10px] font-semibold w-8 text-right', urgent ? 'text-red-400' : 'text-slate-300')}>
+      <span className={cx('tabular-nums text-[10px] font-semibold w-8 text-right',
+        urgent ? 'text-red-400' : closed ? 'text-amber-400' : 'text-slate-300')}
+        title={closed ? 'entry cutoff passed' : undefined}>
         {fmtMMSS(live)}
       </span>
+      {closed && (
+        <span className="text-[8px] font-bold uppercase tracking-wider text-amber-400/90">cutoff</span>
+      )}
       {priceC != null && (
         <span className="tabular-nums text-[10px] text-slate-500 w-8 text-right" title="contract mid">
           {fmtCents(priceC)}
@@ -160,29 +179,30 @@ export const AgentCard = memo(function AgentCard({
   const dimmed = agent.state === 'HALTED' || agent.state === 'STALE_FEED';
 
   return (
+    // Whole-card click is mouse-only convenience; the keyboard/AT path is
+    // the real header button below (keeps lane chips valid, keeps child
+    // tooltips reachable — a stretched-link overlay swallowed them before).
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
     <article
       className={cx(
         'card group relative p-3 space-y-2 min-w-0',
         dimmed && 'opacity-70',
-        onSelect && 'hover:border-slate-500/70',
+        onSelect && 'cursor-pointer hover:border-slate-500/70',
         className,
       )}
+      onClick={onSelect ? () => onSelect(agent) : undefined}
       aria-label={`${agent.asset} agent card, ${agent.state}`}
     >
-      {/* stretched-link overlay: whole-card click without nesting buttons.
-          Sits above non-interactive content; interactive children use z-20. */}
-      {onSelect && (
-        <button
-          type="button"
-          className="absolute inset-0 rounded-xl cursor-pointer focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500/60 z-10"
-          aria-label={`open ${agent.asset} detail`}
-          onClick={() => onSelect(agent)}
-          tabIndex={0}
-        />
-      )}
       {/* header */}
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
+        <button
+          type="button"
+          disabled={!onSelect}
+          onClick={(e) => { e.stopPropagation(); onSelect?.(agent); }}
+          aria-label={onSelect ? `open ${agent.asset} detail` : undefined}
+          className={cx('flex items-center gap-2 min-w-0 rounded text-left',
+            onSelect && 'focus:outline-none focus:ring-2 focus:ring-blue-500/60')}
+        >
           <AssetBadge asset={agent.asset} size="md" />
           <div className="min-w-0">
             <div className="font-bold text-slate-100 text-sm leading-4 truncate">{agent.asset}</div>
@@ -193,7 +213,7 @@ export const AgentCard = memo(function AgentCard({
               </div>
             )}
           </div>
-        </div>
+        </button>
         <StatePill state={agent.state} size="sm" />
       </div>
 
@@ -209,8 +229,9 @@ export const AgentCard = memo(function AgentCard({
         <HeartbeatChip label="WM" ageMs={agent.heartbeat.watermark_ms} />
       </div>
 
-      {/* lane chips — raised above the stretched-link overlay */}
-      <div className="relative z-20 flex items-center gap-1 flex-wrap">
+      {/* lane chips — stopPropagation inside LaneChip keeps these from
+          triggering the card-level select. */}
+      <div className="flex items-center gap-1 flex-wrap">
         {agent.lanes.filter((l) => LANES.includes(l.lane)).map((l) => (
           <LaneChip
             key={l.lane}
@@ -221,7 +242,7 @@ export const AgentCard = memo(function AgentCard({
       </div>
 
       {/* window track */}
-      <WindowTrack secsToClose={m?.secs_to_close} priceC={priceC ?? undefined} />
+      <WindowTrack secsToClose={m?.secs_to_close} priceC={priceC ?? undefined} cutoffSecs={agent.entry_cutoff_secs} />
 
       {/* moneyness context */}
       <MoneynessGauge asset={agent.asset} priceC={priceC ?? undefined} compact />
@@ -238,7 +259,7 @@ export const AgentCard = memo(function AgentCard({
       ) : agent.last_decision?.rejection_reason ? (
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-[9px] uppercase tracking-wider text-slate-600 shrink-0">last veto</span>
-          <VetoChip reason={agent.last_decision.rejection_reason} />
+          <VetoChip reason={agent.last_decision.rejection_reason} detail={agent.last_decision.rejection_detail} />
         </div>
       ) : agent.state === 'VETOED' ? (
         <div className="text-[10px] text-amber-400/80">vetoed — reason n/a</div>

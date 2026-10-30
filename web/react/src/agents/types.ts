@@ -51,11 +51,14 @@ export interface MoneynessBand {
 }
 
 export const MONEYNESS_BANDS: Record<AssetSymbol, MoneynessBand> = {
-  BTC:  { noMaxC: 79, noBlockedPocket: [51, 64], pinnedFavFloorC: 90 },
-  ETH:  { noMaxC: 89, noBlockedPocket: [51, 64], pinnedFavFloorC: 90 },
-  SOL:  { noMaxC: 75, noBlockedPocket: null,     pinnedFavFloorC: 90 },
-  XRP:  { noMaxC: 1,  noBlockedPocket: null,     pinnedFavFloorC: 90 },
-  DOGE: { noMaxC: 75, noBlockedPocket: null,     pinnedFavFloorC: 90 },
+  // pinnedFavFloorC mirrors MERID_PINNED_FAV_MAKER_LO=92 (2026-10-28): the
+  // 90-91c floor pocket itself was falsified at maker fills — keep this in
+  // sync with the live env value or the gauge lies about the maker zone.
+  BTC:  { noMaxC: 79, noBlockedPocket: [51, 64], pinnedFavFloorC: 92 },
+  ETH:  { noMaxC: 89, noBlockedPocket: [51, 64], pinnedFavFloorC: 92 },
+  SOL:  { noMaxC: 75, noBlockedPocket: null,     pinnedFavFloorC: 92 },
+  XRP:  { noMaxC: 1,  noBlockedPocket: null,     pinnedFavFloorC: 92 },
+  DOGE: { noMaxC: 75, noBlockedPocket: null,     pinnedFavFloorC: 92 },
 };
 
 /** One gate step in a decision trace. */
@@ -86,6 +89,8 @@ export interface CycleDecision {
   data_quality?: string;
   regime?: string;
   rejection_reason?: string;
+  /** Gate-level detail behind rejection_reason (e.g. STALE:age>t, NOT-LIVE-SEQUENCE-CONFIRMED). */
+  rejection_detail?: string;
   policy_version?: string;
   ts?: string;
   gates?: GateStep[];
@@ -151,6 +156,8 @@ export interface AssetAgent {
     calibrated?: boolean;
   };
   last_decision?: CycleDecision | null;
+  /** Live entry-TTE cutoff (seconds): new entries vetoed when secs_to_close < this. */
+  entry_cutoff_secs?: number;
   veto_waterfall?: RejectionWaterfallStage[];
   pnl?: {
     realized_c?: number;
@@ -171,7 +178,8 @@ export interface GridSummary {
 }
 
 export type DecisionEventKind =
-  | 'enter' | 'veto' | 'skip' | 'order' | 'fill' | 'guard' | 'exit' | 'settle';
+  | 'enter' | 'veto' | 'skip' | 'order' | 'fill' | 'guard' | 'exit' | 'settle'
+  | 'state'; // lifecycle/signal/scan rows from the backend feed
 
 export interface DecisionEvent {
   ts: string;

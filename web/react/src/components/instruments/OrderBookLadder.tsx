@@ -112,11 +112,11 @@ export const OrderBookLadder = memo(function OrderBookLadder({
 }: OrderBookLadderProps) {
   const rows = useMemo<LadderRowData[]>(() => {
     const cleanBids = (bids ?? [])
-      .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size))
+      .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size) && l.price > 0 && l.size > 0)
       .sort((a, b) => b.price - a.price)
       .slice(0, maxLevels);
     const cleanAsks = (asks ?? [])
-      .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size))
+      .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size) && l.price > 0 && l.size > 0)
       .sort((a, b) => a.price - b.price)
       .slice(0, maxLevels);
     const maxSize = Math.max(1, ...cleanBids.map((l) => l.size), ...cleanAsks.map((l) => l.size));

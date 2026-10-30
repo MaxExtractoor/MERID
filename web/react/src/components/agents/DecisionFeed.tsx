@@ -28,12 +28,13 @@ const KIND_ICON: Record<DecisionEventKind, (cls: string) => JSX.Element> = {
   skip: (cls) => <Minus className={cls} />,
   order: (cls) => <FileText className={cls} />,
   exit: (cls) => <ArrowDownRight className={cls} />,
+  state: (cls) => <span className={cx('inline-block rounded-full bg-slate-500', cls)} style={{ width: 5, height: 5 }} />,
 };
 
-const KIND_ORDER: DecisionEventKind[] = ['enter', 'veto', 'guard', 'fill', 'exit', 'settle', 'order', 'skip'];
+const KIND_ORDER: DecisionEventKind[] = ['enter', 'veto', 'guard', 'fill', 'exit', 'settle', 'order', 'skip', 'state'];
 
 interface FeedRowProps {
-  event: DecisionEvent;
+  event: DecisionEvent & { _n?: number };
   compact?: boolean;
 }
 
@@ -47,7 +48,7 @@ const FeedRow = memo(function FeedRow({ event, compact = false }: FeedRowProps) 
         compact ? 'py-1' : 'py-1.5',
         cf && 'border-dashed opacity-80',
       )}
-      title={cf ? 'counterfactual — would have traded if not vetoed' : undefined}
+      title={cf ? 'counterfactual — would have traded if not vetoed' : (event.meta?.entry_ready_reason as string) ?? undefined}
     >
       <span className="tabular-nums text-slate-500 w-16 shrink-0">{fmtClock(event.ts)}</span>
       <span className={cx('shrink-0 w-4 flex justify-center', meta.text)}>
@@ -77,6 +78,14 @@ const FeedRow = memo(function FeedRow({ event, compact = false }: FeedRowProps) 
       {cf && (
         <span className="shrink-0 rounded border border-dashed border-amber-500/50 px-1 py-px text-[8px] font-bold text-amber-400">
           CF
+        </span>
+      )}
+      {event._n != null && event._n > 1 && (
+        <span
+          className="shrink-0 rounded bg-slate-700/70 px-1 py-px text-[8px] font-bold tabular-nums text-slate-300"
+          title={`${event._n} identical events in a row — latest shown`}
+        >
+          ×{event._n}
         </span>
       )}
     </div>
@@ -119,6 +128,32 @@ export const DecisionFeed = memo(function DecisionFeed({
       return true;
     });
   }, [events, kindFilter, assetFilter]);
+
+  /**
+   * Collapse consecutive identical rows (kind+asset+ticker+reason+summary+cf)
+   * into one row with an ×N count — a mid-window readiness flap otherwise
+   * emits an identical veto row per evaluation cycle. Newest row shown.
+   */
+  const collapsed = useMemo<(DecisionEvent & { _n?: number })[]>(() => {
+    const out: (DecisionEvent & { _n?: number })[] = [];
+    for (const e of filtered) {
+      const last = out[out.length - 1];
+      if (
+        last &&
+        last.kind === e.kind &&
+        last.asset === e.asset &&
+        last.ticker === e.ticker &&
+        last.reason === e.reason &&
+        last.summary === e.summary &&
+        last.counterfactual === e.counterfactual
+      ) {
+        last._n = (last._n ?? 1) + 1;
+        continue;
+      }
+      out.push({ ...e });
+    }
+    return out;
+  }, [filtered]);
 
   return (
     <div className={cx('flex flex-col min-w-0', className)}>
@@ -175,8 +210,8 @@ export const DecisionFeed = memo(function DecisionFeed({
               {a}
             </button>
           ))}
-          <span className="ml-auto tabular-nums text-[9px] text-slate-600">
-            {filtered.length}/{events.length}
+          <span className="ml-auto tabular-nums text-[9px] text-slate-600" title="rows / filtered / total">
+            {collapsed.length}/{filtered.length}/{events.length}
           </span>
         </div>
       )}
@@ -188,13 +223,13 @@ export const DecisionFeed = memo(function DecisionFeed({
       ) : filtered.length > 50 ? (
         <Virtuoso
           style={{ height }}
-          data={filtered}
+          data={collapsed}
           overscan={12}
           itemContent={(_, e) => <FeedRow event={e} compact={compact} />}
         />
       ) : (
         <div className="overflow-y-auto rounded-md" style={{ maxHeight: height }}>
-          {filtered.map((e, i) => (
+          {collapsed.map((e, i) => (
             <FeedRow key={`${e.ts}-${i}`} event={e} compact={compact} />
           ))}
         </div>

@@ -39,11 +39,14 @@ function ConfirmModalComponent({
 }: ConfirmModalProps) {
   const [checkedIds, setCheckedIds] = React.useState<string[]>([]);
 
-  React.useEffect(() => {
-    if (isOpen) {
-      setCheckedIds([]);
-    }
-  }, [isOpen]);
+  // Reset checklist synchronously on open — the previous useEffect reset
+  // fired AFTER the first open render, so a reopened modal briefly flashed
+  // stale checked state with the confirm button enabled.
+  const [wasOpen, setWasOpen] = React.useState(isOpen);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    if (isOpen) setCheckedIds([]);
+  }
 
   // Escape key dismisses the modal — bound to window so no JSX keyboard
   // listener is needed on the non-interactive overlay element.

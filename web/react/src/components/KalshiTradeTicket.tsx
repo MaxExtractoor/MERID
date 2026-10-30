@@ -16,24 +16,12 @@ import {
   DollarSign, AlertTriangle, CheckCircle, Info,
   ArrowRight, Loader2, RefreshCw, WifiOff, Clock,
 } from '../ui/icons';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { getJson, postJson } from '../agents/api';
+import { reasonLabel } from '../agents/format';
 import { useKalshiStore } from '../store';
 import { logUxEvent } from '../utils/uxTelemetry';
-// LEGACY REMOVAL: SentimentBundleCard removed - social sentiment not used in 15m stack
-import { useFillToast } from '../hooks/useFillToast';
-
-// AbortSignal.timeout polyfill for Safari <16.5, Firefox <127
-function abortSignalTimeout(ms: number): AbortSignal {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  // Clean up timer if signal is already aborted externally
-  if (controller.signal.aborted) {
-    clearTimeout(id);
-  } else {
-    controller.signal.addEventListener('abort', () => clearTimeout(id), { once: true });
-  }
-  return controller.signal;
-}
+import { ConfirmModal } from './ConfirmModal';
 
 interface Outcome {
   id: string;
@@ -63,15 +51,25 @@ interface TradeTicketProps {
   lastUpdated?: string | number;
   enhanced?: boolean;
   balance?: { available: number; total: number };
+  /** Live entry-TTE cutoff (s) on this market's agent, when known. */
+  entryCutoffSecs?: number;
+  /** Live seconds-to-close on this market's agent, when known. */
+  secsToClose?: number;
+  /** Current veto/gate reason on this market's agent (e.g. SKIP_MARKET_NOT_READY). */
+  marketVetoReason?: string;
+  /** Gate-level sub-reason (e.g. STALE:age=75s>t60s, NOT-LIVE-SEQUENCE-CONFIRMED). */
+  marketVetoDetail?: string;
 }
 
 type Side = 'yes' | 'no';
 type SizeMode = 'contracts' | 'dollars';
 
-// UI DISPLAY ONLY - Simplified 7% fee rate for display purposes
-// Backend uses canonical tiered fee calculation: merid/event_venues/kalshi/fees.py
-// Tiered rates: 1-99 contracts (7%), 100-999 (5%), 1000+ (3%) with parabolic formula
-const KALSHI_FEE_RATE = 0.07;
+// Official Kalshi taker-fee schedule (verified 2026-11): fees are charged on
+// expected earnings — fees = round_up(0.07 x C x P x (1-P)), rounded UP to the
+// centicent ($0.0001). P is the own-side contract price in dollars. The same
+// parabolic form applies to YES and NO sides because P is always the price
+// actually paid. Backend enforces the identical kalshi_fee_cents_exact.
+const KALSHI_TAKER_FEE_RATE = 0.07;
 
 const ProgressBar = memo(function ProgressBar({ pct, color }: { pct: number; color: string }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -83,11 +81,13 @@ const ProgressBar = memo(function ProgressBar({ pct, color }: { pct: number; col
   return <div ref={ref} className={`h-full rounded-full transition-all progress-bar-var ${color}`} />;
 });
 
-function kalshiFee(priceCents: number, contracts: number, side: Side): number {
-  const profit = side === 'yes'
-    ? (100 - priceCents) * contracts / 100
-    : priceCents * contracts / 100;
-  return Math.max(0, profit * KALSHI_FEE_RATE);
+/** Estimated taker fee in USD — ceil to the centicent ($0.0001), per the
+ *  published schedule. A limit order that rests may pay the maker rate
+ *  (~50% lower) instead, so this is the conservative estimate. */
+function kalshiFee(priceCents: number, contracts: number): number {
+  const p = priceCents / 100;
+  const raw = KALSHI_TAKER_FEE_RATE * contracts * p * (1 - p);
+  return Math.ceil(raw * 10000) / 10000;
 }
 
 type TradeErrorType = 'validation' | 'network' | 'api' | 'insufficient_balance' | 'market_closed';
@@ -99,7 +99,7 @@ interface TradeError {
 
 const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   ticker,
-  question: _question,
+  question,
   outcomes,
   onOrderPlaced,
   suggestedSize,
@@ -112,6 +112,10 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   lastUpdated,
   enhanced = false,
   balance,
+  entryCutoffSecs,
+  secsToClose,
+  marketVetoReason,
+  marketVetoDetail,
 }) => {
   // Execution gate — /api/v1/system/execution-gate does not exist on the
   // backend. Gate on the real live-runtime-state instead: any state other
@@ -120,10 +124,16 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const liveRuntime = useKalshiStore(s => s.system.live);
   const executionBlocked = mode === 'live' && liveRuntime?.state !== 'LIVE_ENTRIES_ENABLED';
 
-  // Fills integrity check — prevent order submission when data integrity is broken
-  const { reconciliationStatus } = useFillToast();
-  const fillsIntegrityBroken = reconciliationStatus === 'broken';
-  const fillsIntegrityDegraded = reconciliationStatus === 'degraded';
+  // Fills integrity — meta.reconciliation_status captured by the store's
+  // shared fills probe (a second useFillToast() here would double-poll the
+  // endpoint AND double-fire every fill toast).
+  const fillsRecon = useKalshiStore(s => s.portfolio.fills_reconciliation);
+  const fillsIntegrityBroken = fillsRecon === 'broken';
+  const fillsIntegrityDegraded = fillsRecon === 'degraded';
+
+  // Connectivity from the shared store — no private health poller.
+  const storeConnected = useKalshiStore(s => s.connected);
+  const storeLastUpdate = useKalshiStore(s => s.lastUpdate);
 
   const [side, setSide] = useState<Side>(suggestedSide ?? 'yes');
   const [sizeMode, setSizeMode] = useState<SizeMode>('contracts');
@@ -140,9 +150,15 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [tradeError, setTradeError] = useState<TradeError | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>(initialGroupId || '');
-  const [networkStatus, setNetworkStatus] = useState<'online' | 'offline' | 'slow'>('online');
   const retryCountRef = useRef(0);
-  const submitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Live-order confirmation: one ConfirmModal ack per order INTENT. Params
+  // changing invalidates the ack; retries of the same intent don't re-ask.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const liveConfirmRef = useRef(false);
+  // When a submit's outcome is uncertain (network drop/timeout) the guard
+  // stays latched until reconciliation proves the order never landed — the
+  // operator can override only by explicitly acknowledging manual checks.
+  const [uncertainSubmit, setUncertainSubmit] = useState(false);
 
   const yesOutcome = outcomes.find(o => (o.name ?? '').toLowerCase() === 'yes') ?? outcomes[0];
   const noOutcome = outcomes.find(o => (o.name ?? '').toLowerCase() === 'no') ?? outcomes[1];
@@ -162,109 +178,74 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const cost = (priceCents / 100) * effectiveContracts;
   const maxPayout = effectiveContracts; // $1 per contract
   const maxProfit = maxPayout - cost;
-  const fee = kalshiFee(priceCents, effectiveContracts, side);
+  const fee = kalshiFee(priceCents, effectiveContracts);
   const netProfit = maxProfit - fee;
   const impliedProb = priceCents;
-  const edgePct = activeOutcome?.price
-    ? ((side === 'yes' ? 1 - activeOutcome.price : activeOutcome.price) - (1 - priceCents / 100)) * 100
-    : 0;
+  // "vs market": how far the limit price sits from the live own-side quote.
+  // Negative = cheaper than market (maker advantage), positive = paying
+  // through. Only meaningful for limit orders — a market order IS the quote.
+  const marketC = activeOutcome?.price != null ? Math.round(activeOutcome.price * 100) : null;
+  const vsMarketC = useLimit && marketC != null ? priceCents - marketC : null;
 
   const spread = useMemo(() => {
     if (!activeOutcome?.bid || !activeOutcome?.ask) return null;
     return Math.round((activeOutcome.ask - activeOutcome.bid) * 100);
   }, [activeOutcome]);
 
-  // Network status monitoring (enhanced mode)
+  // A new order intent (different params) invalidates the live-order ack.
   useEffect(() => {
-    if (!enhanced) return;
-    const checkNetworkStatus = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/health`, { 
-          method: 'HEAD',
-          signal: abortSignalTimeout(3000)
-        });
-        setNetworkStatus(response.ok ? 'online' : 'slow');
-      } catch {
-        setNetworkStatus('offline');
-      }
-    };
-    checkNetworkStatus();
-    const interval = setInterval(checkNetworkStatus, 30000);
-    return () => clearInterval(interval);
-  }, [enhanced]);
+    liveConfirmRef.current = false;
+  }, [ticker, side, effectiveContracts, priceCents, mode]);
 
   const validate = useCallback((): string | null => {
     if (effectiveContracts <= 0) return 'Size must be at least 1 contract';
     if (priceCents <= 0 || priceCents >= 100) return 'Price must be between 1¢ and 99¢';
     if (useLimit && limitPrice == null) return 'Enter a limit price';
-    // Use total_value_cents (cash + portfolio) for balance check, fallback to available for backward compatibility
-    const balanceCents = (balance as any)?.total_value_cents ?? (balance?.available ?? 0) * 100;
-    if (enhanced && balance && balanceCents < cost * 100) return 'Insufficient balance';
+    // Spendable = available cash only — portfolio value cannot collateralize a
+    // new order, and Kalshi reserves cost + fee per contract.
+    if (enhanced && balance && balance.available < cost + fee) return 'Insufficient balance';
     return null;
-  }, [effectiveContracts, priceCents, useLimit, limitPrice, enhanced, balance, cost]);
+  }, [effectiveContracts, priceCents, useLimit, limitPrice, enhanced, balance, cost, fee]);
 
-  const handleSubmit = useCallback(async () => {
-    // Synchronous submit guard to prevent double-submit
-    if (submitGuardRef.current) {
-      return;
+  /** After an uncertain submit (network drop/timeout), reconcile against the
+   *  authoritative order + fill ledgers before allowing any retry. Returns
+   *  'landed' when a matching resting order or fill is found, 'absent' when
+   *  the order provably never arrived (retry is safe), 'unknown' when the
+   *  ledgers themselves can't be read (retry is unsafe — stay latched). */
+  const reconcileSubmission = useCallback(async (): Promise<'landed' | 'absent' | 'unknown'> => {
+    const freshMs = 150_000; // a match created within 150s is this submit
+    const isFresh = (ts?: string | null) => {
+      if (!ts) return false;
+      const t = Date.parse(ts);
+      return Number.isFinite(t) && Date.now() - t < freshMs;
+    };
+    try {
+      const [ordersRes, fillsRes] = await Promise.all([
+        getJson<{ orders?: Array<{ ticker?: string; side?: string; created_at?: string | null }> }>(
+          API_ENDPOINTS.KALSHI_ORDERS,
+        ),
+        getJson<{ fills?: Array<{ ticker?: string; side?: string; timestamp?: string; filled_at?: string }> }>(
+          `${API_ENDPOINTS.KALSHI_FILLS}?since_hours=1&limit=50`,
+        ),
+      ]);
+      const match = (row: { ticker?: string; side?: string }) =>
+        row.ticker === ticker && String(row.side ?? '').toLowerCase() === side;
+      const landed =
+        (ordersRes.orders ?? []).some((o) => match(o) && isFresh(o.created_at)) ||
+        (fillsRes.fills ?? []).some((f) => match(f) && isFresh(f.timestamp ?? f.filled_at));
+      return landed ? 'landed' : 'absent';
+    } catch {
+      return 'unknown';
     }
-    submitGuardRef.current = true;
+  }, [ticker, side]);
 
-    const err = validate();
-    if (err) {
-      submitGuardRef.current = false;
-      if (enhanced) {
-        setTradeError({ type: 'validation', message: err, recoverable: true });
-      } else {
-        setError(err);
-      }
-      return;
-    }
-
-    // T-035: Block trading on stale data (>30s since last price update)
-    if (lastUpdated) {
-      const dataAge = Date.now() - new Date(lastUpdated).getTime();
-      if (dataAge > 30_000) {
-        submitGuardRef.current = false;
-        const staleMsg = 'Market data is stale (>30s). Refresh before trading.';
-        if (enhanced) {
-          setTradeError({ type: 'market_closed', message: staleMsg, recoverable: true });
-        } else {
-          setError(staleMsg);
-        }
-        return;
-      }
-    }
-
-    // Require explicit confirmation for live orders
-    if (mode === 'live' && !enhanced) {
-      const confirmed = window.confirm(
-        `⚠️ LIVE ORDER — real money at risk\n\n` +
-        `Buy ${effectiveContracts} ${side?.toUpperCase?.() ?? '?'} on ${ticker}\n` +
-        `Price: ${priceCents}¢  ·  Cost: $${(cost ?? 0).toFixed(2)}\n` +
-        `Max loss: $${(cost ?? 0).toFixed(2)}  ·  Net profit if win: $${(netProfit ?? 0).toFixed(2)}\n\n` +
-        `Continue?`
-      );
-      if (!confirmed) {
-        submitGuardRef.current = false;
-        return;
-      }
-    }
-
+  /** The actual POST — call only after the live ack (or directly in paper). */
+  const executeOrder = useCallback(async () => {
     setSubmitting(true);
     setError(null);
     setTradeError(null);
     setSuccess(null);
-
-    // Set submission timeout for enhanced mode
-    if (enhanced) {
-      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
-      submitTimeoutRef.current = setTimeout(() => {
-        setTradeError({ type: 'network', message: 'Order submission timed out.', recoverable: true });
-        setSubmitting(false);
-        submitGuardRef.current = false;
-      }, 15000);
-    }
+    setUncertainSubmit(false);
 
     try {
       const params = new URLSearchParams({
@@ -277,26 +258,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         mode,
         ...(selectedGroupId ? { order_group_id: selectedGroupId } : {}),
       });
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS}?${params}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
-        },
-        ...(enhanced ? { signal: abortSignalTimeout(12000) } : {}),
-      });
+      await postJson<unknown>(`${API_ENDPOINTS.KALSHI_ORDERS}?${params}`);
 
-      if (submitTimeoutRef.current) {
-        clearTimeout(submitTimeoutRef.current);
-        submitTimeoutRef.current = null;
-      }
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || `Order failed (${res.status})`);
-      }
-      const msg = `Order placed: ${effectiveContracts} ${side?.toUpperCase?.() ?? '?'} @ ${priceCents}¢`;
+      const msg = `Order placed: ${effectiveContracts} ${side.toUpperCase()} @ ${priceCents}¢`;
       setSuccess(msg);
       retryCountRef.current = 0;
       logUxEvent('trade_ticket_order', mode, {
@@ -309,22 +273,99 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       onOrderPlaced?.();
       submitGuardRef.current = false;
     } catch (e) {
-      submitGuardRef.current = false;
       const errorMessage = e instanceof Error ? e.message : 'Order submission failed';
-      if (enhanced) {
-        setTradeError({
-          type: errorMessage.includes('network') || errorMessage.includes('timeout') ? 'network' : 'api',
-          message: errorMessage,
-          recoverable: retryCountRef.current < 2,
-        });
-        retryCountRef.current += 1;
+      // The request may still have landed exchange-side — reconcile the
+      // ledgers before deciding whether a retry is safe. Never release the
+      // guard on a timeout alone (the old 15s timer did, enabling dups).
+      const outcome = await reconcileSubmission();
+      if (outcome === 'landed') {
+        setSuccess(`Order confirmed via orders/fills: ${effectiveContracts} ${side.toUpperCase()} @ ${priceCents}¢ — submit response was lost`);
+        retryCountRef.current = 0;
+        onOrderPlaced?.();
+        submitGuardRef.current = false;
+      } else if (outcome === 'absent') {
+        // No matching resting order or fill — the order never arrived; this
+        // intent is safe to retry.
+        submitGuardRef.current = false;
+        if (enhanced) {
+          setTradeError({
+            type: errorMessage.includes('network') || errorMessage.includes('timeout') ? 'network' : 'api',
+            message: errorMessage,
+            recoverable: retryCountRef.current < 2,
+          });
+          retryCountRef.current += 1;
+        } else {
+          setError(errorMessage);
+        }
       } else {
-        setError(errorMessage);
+        // Ledgers unreadable — outcome genuinely unknown. Latch the guard;
+        // the operator must verify Open Orders and explicitly re-arm.
+        setUncertainSubmit(true);
+        setTradeError({
+          type: 'network',
+          message: `Outcome unknown (${errorMessage}) — check Open Orders before retrying; a blind retry may duplicate a live order.`,
+          recoverable: false,
+        });
       }
     } finally {
       setSubmitting(false);
     }
-  }, [validate, ticker, side, effectiveContracts, priceCents, cost, netProfit, useLimit, mode, onOrderPlaced, selectedGroupId, lastUpdated, enhanced]);
+  }, [ticker, side, effectiveContracts, priceCents, useLimit, mode, selectedGroupId, onOrderPlaced, enhanced, reconcileSubmission]);
+
+  const handleSubmit = useCallback(async () => {
+    if (submitGuardRef.current) return;
+
+    const err = validate();
+    if (err) {
+      if (enhanced) {
+        setTradeError({ type: 'validation', message: err, recoverable: true });
+      } else {
+        setError(err);
+      }
+      return;
+    }
+
+    // T-035: Block trading on stale data (>30s since last price update)
+    if (lastUpdated) {
+      const dataAge = Date.now() - new Date(lastUpdated).getTime();
+      if (dataAge > 30_000) {
+        const staleMsg = 'Market data is stale (>30s). Refresh before trading.';
+        if (enhanced) {
+          setTradeError({ type: 'market_closed', message: staleMsg, recoverable: true });
+        } else {
+          setError(staleMsg);
+        }
+        return;
+      }
+    }
+
+    // Live orders confirm via ConfirmModal (consistent with kill-switch /
+    // cancel flows); the ack persists for this intent until params change.
+    if (mode === 'live' && !liveConfirmRef.current) {
+      setConfirmOpen(true);
+      return;
+    }
+
+    submitGuardRef.current = true;
+    void executeOrder();
+  }, [validate, mode, lastUpdated, enhanced, executeOrder]);
+
+  const handleLiveConfirm = useCallback(() => {
+    setConfirmOpen(false);
+    liveConfirmRef.current = true;
+    if (!submitGuardRef.current) {
+      submitGuardRef.current = true;
+      void executeOrder();
+    }
+  }, [executeOrder]);
+
+  /** Operator override after an uncertain submit — only reachable after the
+   *  UI has told them to check Open Orders first. */
+  const handleVerifyAndRearm = useCallback(() => {
+    setUncertainSubmit(false);
+    setTradeError(null);
+    submitGuardRef.current = false;
+  }, []);
 
   useEffect(() => {
     if (!success) return;
@@ -332,12 +373,10 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     return () => clearTimeout(t);
   }, [success]);
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
-    };
-  }, []);
+  // Connectivity derived from the shared store — no private health poller.
+  const networkStatus = !storeConnected
+    ? 'offline'
+    : (storeLastUpdate > 0 && Date.now() - storeLastUpdate > 45_000 ? 'slow' : 'online');
 
   const NetworkStatusIndicator = () => (
     <div className="flex items-center gap-1 text-xs">
@@ -357,6 +396,10 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       </div>
 
       {/* LEGACY REMOVAL: SentimentBundleCard removed - social sentiment not used in 15m stack */}
+
+      {question && (
+        <p className="text-xs text-gray-400 truncate" title={question}>{question}</p>
+      )}
 
       {/* YES/NO Toggle */}
       <div className="flex rounded-lg overflow-hidden border border-slate-700">
@@ -542,13 +585,17 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         </div>
       </div>
 
-      {/* Edge display */}
-      {edgePct !== 0 && (
+      {/* vs-market display — how far the limit price sits from the live
+          quote, NOT an edge estimate (edge requires a model probability). */}
+      {vsMarketC != null && (
         <div className="flex items-center gap-2 text-xs">
           <Info className="w-3.5 h-3.5 text-gray-500" />
-          <span className="text-gray-400">Edge:</span>
-          <span className={`font-mono ${edgePct > 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {edgePct > 0 ? '+' : ''}{(edgePct ?? 0).toFixed(1)}%
+          <span className="text-gray-400">vs market:</span>
+          <span className={`font-mono ${vsMarketC <= 0 ? 'text-green-400' : 'text-amber-400'}`}>
+            {vsMarketC > 0 ? '+' : ''}{vsMarketC}¢
+          </span>
+          <span className="text-gray-600 text-[10px]">
+            {vsMarketC <= 0 ? 'below ask — likely maker' : 'paying through market'}
           </span>
         </div>
       )}
@@ -609,6 +656,29 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         </div>
       )}
 
+      {/* Pre-submit market context from the live wall agent (5s poll):
+          - TTE cutoff: agent-side entry floor — warning only, the manual
+            order routes through the router's readiness gate, not the agent's.
+          - Readiness veto: the router applies the same is_market_entry_ready
+            gate, so a manual order is likely to be rejected while it holds. */}
+      {entryCutoffSecs != null && secsToClose != null && secsToClose < entryCutoffSecs && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs"
+          title={`New agent entries vetoed below ${Math.round(entryCutoffSecs)}s to expiry`}>
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span>TTE cutoff passed ({Math.round(entryCutoffSecs)}s) — agent entries vetoed this window</span>
+        </div>
+      )}
+      {marketVetoReason && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs"
+          title={marketVetoDetail ?? marketVetoReason}>
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span className="min-w-0">
+            Gate: <span className="font-semibold">{reasonLabel(marketVetoReason)}</span>
+            {marketVetoDetail && <span className="block truncate text-[10px] text-cyan-400/70 font-mono">{marketVetoDetail}</span>}
+          </span>
+        </div>
+      )}
+
       {/* Submit */}
       <button
         type="button"
@@ -625,7 +695,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           <Loader2 className="w-4 h-4 animate-spin" />
         ) : (
           <>
-            Buy {effectiveContracts} {side?.toUpperCase?.() ?? '?'}
+            Buy {effectiveContracts} {side.toUpperCase()}
             <ArrowRight className="w-4 h-4" />
             <span className="font-mono">${(cost ?? 0).toFixed(2)}</span>
           </>
@@ -653,6 +723,29 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       <p className={`text-[10px] text-center ${mode === 'live' ? 'text-green-500 font-semibold' : 'text-gray-600'}`}>
         {mode === 'live' ? 'LIVE — real money at risk' : 'Paper trading mode. Orders are simulated.'}
       </p>
+
+      {/* Uncertain-submit re-arm — only after the operator has checked Open
+          Orders (a blind retry could duplicate a live order). */}
+      {uncertainSubmit && (
+        <button
+          type="button"
+          onClick={handleVerifyAndRearm}
+          className="w-full py-1.5 rounded-lg text-xs font-medium bg-slate-700 hover:bg-slate-600 text-gray-300"
+        >
+          I verified Open Orders — re-enable submit
+        </button>
+      )}
+
+      <ConfirmModal
+        isOpen={confirmOpen}
+        title="Confirm LIVE order"
+        message={`Buy ${effectiveContracts} ${side.toUpperCase()} on ${ticker} @ ${priceCents}¢ — cost $${cost.toFixed(2)}, max loss $${cost.toFixed(2)}, net profit if win $${netProfit.toFixed(2)}. Real money at risk.`}
+        confirmText="Place live order"
+        confirmVariant="danger"
+        checklistItems={[{ id: 'ack', label: 'I understand this is a real-money live order' }]}
+        onConfirm={handleLiveConfirm}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 };

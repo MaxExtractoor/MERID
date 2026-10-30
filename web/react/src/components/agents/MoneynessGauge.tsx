@@ -1,10 +1,12 @@
 /**
- * MoneynessGauge — 0–100¢ entry-price landscape for one asset.
+ * MoneynessGauge — 0–100¢ own-side entry-price landscape for one asset.
  *
- * Renders the audited MONEYNESS_BANDS contract truthfully:
- *   green  = allowed NO-side band (1c .. noMaxC)
- *   red    = blocked regions (noBlockedPocket + above noMaxC)
- *   indigo = pinned-fav maker zone (>= pinnedFavFloorC, favorites lane)
+ * The track is always the price of the side being evaluated:
+ *   green  = allowed NO-side band (1c .. noMaxC) — applies when side=no
+ *   red    = blocked regions (noBlockedPocket + above noMaxC) — side=no
+ *   indigo = pinned-fav lane maker zone (>= pinnedFavFloorC) — own-side
+ *            price; a lane-scoped rule that can overlap the normal-path
+ *            NO bands (e.g. NO@95c is normal-path-blocked but lane-allowed).
  * The live contract price is a marker on the track. All regions carry
  * title tooltips describing the underlying band rule.
  */
@@ -58,8 +60,10 @@ export const MoneynessGauge = memo(function MoneynessGauge({
     if (band.noMaxC < 100) {
       z.push({ lo: band.noMaxC, hi: 100, color: 'rgba(239,68,68,0.22)', label: `NO blocked >${band.noMaxC}c` });
     }
-    // Pinned-fav maker zone overlay (favorites lane, YES>=floor).
-    z.push({ lo: band.pinnedFavFloorC, hi: 100, color: 'rgba(59,130,246,0.35)', label: `pinned-fav maker zone >=${band.pinnedFavFloorC}c` });
+    // Pinned-fav lane maker zone overlay — own-side price, lane-scoped rule;
+    // it deliberately overlaps the normal-path NO bands (lane cap wins
+    // inside the lane).
+    z.push({ lo: band.pinnedFavFloorC, hi: 100, color: 'rgba(59,130,246,0.35)', label: `pinned-fav lane: own-side >=${band.pinnedFavFloorC}c (overrides normal-path bands)` });
     return z;
   }, [band]);
 
@@ -73,7 +77,7 @@ export const MoneynessGauge = memo(function MoneynessGauge({
         className="relative w-full rounded border border-slate-700/60 bg-slate-900/80 overflow-visible"
         style={{ height: compact ? 10 : 14 }}
         role="img"
-        aria-label={`${asset} moneyness bands: NO cap ${band.noMaxC}c${band.noBlockedPocket ? `, blocked pocket ${band.noBlockedPocket[0]}-${band.noBlockedPocket[1]}c` : ''}, pinned-fav >=${band.pinnedFavFloorC}c${price != null ? `, price ${price}c` : ''}`}
+        aria-label={`${asset} own-side moneyness bands: NO cap ${band.noMaxC}c${band.noBlockedPocket ? `, blocked pocket ${band.noBlockedPocket[0]}-${band.noBlockedPocket[1]}c` : ''}, pinned-fav lane >=${band.pinnedFavFloorC}c${price != null ? `, price ${price}c` : ''}`}
       >
         {/* base zones */}
         {zones.slice(0, -1).map((z) => (

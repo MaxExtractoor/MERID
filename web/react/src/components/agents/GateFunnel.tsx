@@ -78,8 +78,10 @@ function deriveNodes(decision: CycleDecision | null | undefined): { nodes: GateN
   const action = (decision.action ?? '').toLowerCase();
   const isEnter = /enter|order|fill|buy/.test(action) && !/veto|reject|skip/.test(action);
   if (isEnter) {
+    // All-pass is INFERRED from the action, not a real per-gate trace — it
+    // must carry the 'derived' label or the UI claims evidence it lacks.
     nodes.forEach((n) => { n.status = 'pass'; });
-    return { nodes, derived: false };
+    return { nodes, derived: true };
   }
   const reason = decision.rejection_reason ?? '';
   const failIdx = reason ? canonicalGateIndex(reason) : -1;
@@ -184,7 +186,9 @@ export const GateFunnel = memo(function GateFunnel({ decision, width = 620, clas
           {failDetail ? `veto: ${failDetail}` : decision ? 'flow complete' : 'no decision data'}
         </span>
         {derived && (
-          <span className="text-slate-600 italic">last known veto stage — derived</span>
+          <span className="text-slate-600 italic">
+            {failDetail ? 'last known veto stage — derived' : 'inferred from action — derived'}
+          </span>
         )}
       </div>
     </div>

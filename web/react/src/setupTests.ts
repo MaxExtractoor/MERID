@@ -100,9 +100,10 @@ Object.defineProperty(global, 'WebSocket', {
   },
 });
 
-// Mock localStorage
+// Mock localStorage — seeded with an operator session token so tests exercise
+// the authed path (production always has a session once the app boots).
 const localStorageMock = {
-  getItem: jest.fn(),
+  getItem: jest.fn((key: string) => (key === 'merid-access' ? 'test-session' : null)),
   setItem: jest.fn(),
   removeItem: jest.fn(),
   clear: jest.fn(),

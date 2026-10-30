@@ -35,14 +35,18 @@ export const LaneMatrix = memo(function LaneMatrix({
 
   return (
     <div className={cx('w-full', className)} role="grid" aria-label="lane status matrix">
-      {/* header */}
+      {/* header — real columnheader roles inside a row; gridcell must wrap
+          the button, not replace it (role on a <button> hides its
+          clickability from assistive tech). */}
       <div className="grid gap-1" style={{ gridTemplateColumns: `64px repeat(${LANES.length}, minmax(0,1fr))` }}>
-        <div />
-        {LANES.map((lane) => (
-          <div key={lane} className={`text-center ${cellText} font-bold tracking-wider text-slate-500 pb-1`}>
-            {LANE_LABELS[lane]}
-          </div>
-        ))}
+        <div className="contents" role="row">
+          <div role="columnheader" />
+          {LANES.map((lane) => (
+            <div key={lane} role="columnheader" className={`text-center ${cellText} font-bold tracking-wider text-slate-500 pb-1`}>
+              {LANE_LABELS[lane]}
+            </div>
+          ))}
+        </div>
         {sorted.map((agent) => {
           const dimmed = agent.state === 'HALTED' || agent.state === 'STALE_FEED' || !agent.enabled;
           return (
@@ -58,25 +62,24 @@ export const LaneMatrix = memo(function LaneMatrix({
                 const meta = LANE_META[info.status] ?? LANE_META.unknown;
                 const title = `${agent.asset} ${LANE_LABELS[lane]}: ${info.status}${info.reason ? ` — ${info.reason}` : ''}${info.last_order_ts ? ` · last order ${info.last_order_ts}` : ''}`;
                 return (
-                  <button
-                    key={lane}
-                    type="button"
-                    role="gridcell"
-                    disabled={!onSelect}
-                    onClick={onSelect ? () => onSelect(agent, lane) : undefined}
-                    title={title}
-                    aria-label={title}
-                    className={cx(
-                      'rounded border font-bold tracking-wide transition-colors',
-                      cellH, cellText, meta.cell,
-                      dimmed && 'opacity-40 saturate-50',
-                      onSelect
-                        ? 'cursor-pointer hover:brightness-125 focus:outline-none focus:ring-2 focus:ring-blue-500/60'
-                        : 'cursor-default',
-                    )}
-                  >
-                    {info.status === 'unknown' ? 'n/a' : info.status.toUpperCase()}
-                  </button>
+                  <div key={lane} role="gridcell" className={cx('min-w-0', dimmed && 'opacity-40 saturate-50')}>
+                    <button
+                      type="button"
+                      disabled={!onSelect}
+                      onClick={onSelect ? () => onSelect(agent, lane) : undefined}
+                      title={title}
+                      aria-label={title}
+                      className={cx(
+                        'w-full rounded border font-bold tracking-wide transition-colors',
+                        cellH, cellText, meta.cell,
+                        onSelect
+                          ? 'cursor-pointer hover:brightness-125 focus:outline-none focus:ring-2 focus:ring-blue-500/60'
+                          : 'cursor-default',
+                      )}
+                    >
+                      {info.status === 'unknown' ? 'n/a' : info.status.toUpperCase()}
+                    </button>
+                  </div>
                 );
               })}
             </div>

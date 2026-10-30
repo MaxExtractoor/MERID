@@ -38,24 +38,47 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Register open function with parent ref
   useEffect(() => {
     onOpen?.(() => setOpen(true));
   }, [onOpen]);
 
-  // Ctrl+K / Cmd+K to open
+  // Ctrl+K / Cmd+K toggles — sole owner (App used to register a second
+  // Ctrl+K that could only re-open, so the palette could never close).
+  // Escape closes; Tab is trapped inside the dialog while open.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         setOpen(prev => !prev);
+        return;
       }
-      if (e.key === 'Escape') setOpen(false);
+      if (!open) return;
+      if (e.key === 'Escape') { setOpen(false); return; }
+      if (e.key === 'Tab') {
+        const dlg = dialogRef.current;
+        if (!dlg) return;
+        const focusables = dlg.querySelectorAll<HTMLElement>(
+          'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || !dlg.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !dlg.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [open]);
 
   // Focus input when opened
   useEffect(() => {
@@ -116,11 +139,18 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
 
   return (
     <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setOpen(false)} role="button" tabIndex={0} aria-label="Close" onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(false); } }} />
+      {/* Backdrop — mouse-only dismiss (Escape covers keyboard users); a
+          focusable role=button here would be an empty tab stop. */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setOpen(false)} aria-hidden="true" />
 
       {/* Palette */}
-      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl shadow-black/50 overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        className="relative w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl shadow-black/50 overflow-hidden"
+      >
         {/* Search input */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-700/60">
           <Search className="w-5 h-5 text-slate-400 shrink-0" />

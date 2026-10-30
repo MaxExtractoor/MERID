@@ -36,8 +36,13 @@ export const PositionBar = memo(function PositionBar({ position, capCenti, class
           {pnlC != null ? fmtSignedCents(pnlC) : 'pnl n/a'}
         </span>
       </div>
-      <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden" role="progressbar"
-        aria-valuenow={pct ?? 0} aria-valuemin={0} aria-valuemax={100}
+      {/* Only claim role=progressbar when a real cap exists — a valueless
+          bar with aria-valuenow=0 falsely reports 0% utilization. */}
+      <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden"
+        role={pct != null ? 'progressbar' : undefined}
+        aria-valuenow={pct != null ? Math.round(pct) : undefined}
+        aria-valuemin={pct != null ? 0 : undefined}
+        aria-valuemax={pct != null ? 100 : undefined}
         aria-label={pct != null ? `position utilization ${pct.toFixed(0)} percent` : 'position size, cap unknown'}
         title={pct != null ? `${pct.toFixed(0)}% of cap` : `notional ${fmtCentsAsUsd((contracts ?? 0) * (numOr(position.avg_price_c) ?? 0))}`}>
         <div

@@ -206,6 +206,12 @@
     animation: flash-red 0.3s ease-out;
   }
 
+  /* Agent detail drawer slide-in (was a per-mount <style> injection) */
+  @keyframes drawer-in {
+    from { transform: translateX(24px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+
   /* Dynamic-width progress bar via CSS custom property (replaces inline style) */
   .progress-bar-var {
     width: var(--bar-width, 50%);

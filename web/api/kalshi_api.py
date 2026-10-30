@@ -1043,9 +1043,11 @@ async def get_orderbook(ticker: str) -> Dict[str, Any]:
     yes_asks = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in no_bids]
     no_asks = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in yes_bids]
 
-    # Calculate spread and midpoint from best bid/ask
-    best_bid = yes_bids[0]["price"] if yes_bids else None
-    best_ask = yes_asks[0]["price"] if yes_asks else None
+    # Calculate spread and midpoint from best bid/ask.
+    # _to_levels sorts ASCENDING, so best bid = highest price = [-1]; the
+    # derived yes_asks list is DESCENDING, so best ask = lowest price = [-1].
+    best_bid = yes_bids[-1]["price"] if yes_bids else None
+    best_ask = yes_asks[-1]["price"] if yes_asks else None
     spread = (best_ask - best_bid) if best_bid is not None and best_ask is not None else None
     midpoint = round((best_bid + best_ask) / 2, 4) if best_bid is not None and best_ask is not None else None
     spread_cents = round(spread * 100, 1) if spread is not None else None
@@ -4551,9 +4553,11 @@ async def toggle_kill_switch(activate: bool = True, session: dict = Depends(get_
     
     Auth: Uses router-level get_current_session (supports MERID_SINGLE_USER_OPERATOR bypass).
     """
-    # Verify admin/operator role from session (works with single-user bypass)
+    # Verify admin/operator role from session (works with single-user bypass).
+    # session["user"] is a User dataclass for real sessions but a plain dict
+    # for the bypass paths — handle both.
     user = session.get("user") or {}
-    role = user.get("role", "viewer")
+    role = user.get("role", "viewer") if isinstance(user, dict) else getattr(user, "role", "viewer")
     if role not in ("operator", "admin"):
         raise HTTPException(status_code=403, detail="Requires operator or admin role")
     
@@ -9023,15 +9027,23 @@ async def get_risk_envelope_api() -> Dict[str, Any]:
             get_kalshi_crypto_15m_risk_envelope,
             safe_update_envelope_equity,
         )
-        
+
         envelope = get_kalshi_crypto_15m_risk_envelope()
-        
-        # Update envelope with current equity
-        safe_update_envelope_equity(envelope)
-        
+
+        # Update envelope with current equity. Equity refresh needs portfolio
+        # services that may not be initialized yet — degrade to last-known
+        # envelope values instead of 500ing.
+        equity_fresh = True
+        try:
+            safe_update_envelope_equity(envelope)
+        except Exception as eq_exc:
+            equity_fresh = False
+            logger.warning(f"[RISK-ENVELOPE-API] equity refresh unavailable: {eq_exc}")
+
         return {
             "profile": profile,
             "envelope_enabled": True,
+            "equity_fresh": equity_fresh,
             "drawdown": {
                 "peak_equity_usd": envelope.peak_equity_usd,
                 "current_equity_usd": envelope.current_equity_usd,
@@ -9055,7 +9067,12 @@ async def get_risk_envelope_api() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[RISK-ENVELOPE-API] Failed to get risk envelope: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get risk envelope: {str(e)}")
+        return {
+            "profile": profile,
+            "envelope_enabled": True,
+            "available": False,
+            "error": str(e),
+        }
 
 
 @router.get("/risk/diff")

@@ -207,4 +207,5 @@ const Kalshi15mAlignmentPanel: React.FC = () => {
 };
 
 Kalshi15mAlignmentPanel.displayName = 'Kalshi15mAlignmentPanel';
-export default React.memo(Kalshi15mAlignmentPanel);
+const MemoizedKalshi15mAlignmentPanel = React.memo(Kalshi15mAlignmentPanel);
+export default MemoizedKalshi15mAlignmentPanel;

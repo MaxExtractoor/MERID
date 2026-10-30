@@ -633,6 +633,23 @@ def _server_agent(
     if not rejection_reason:
         rejection_reason = wf.get("final_reason") or None
 
+    # Sub-reason detail: gate-level codes like SKIP_MARKET_NOT_READY carry
+    # the underlying readiness verdict (STALE:age>t, NOT-LIVE-SEQUENCE-
+    # CONFIRMED, RESYNC-IN-PROGRESS, METADATA-INVALID) in the rejection
+    # context — surface it so the UI shows *why* the market wasn't ready.
+    rejected_detail = None
+    if rejection_reason:
+        _lsr = getattr(agent, "_last_signal_rejection", None) or {}
+        _ctx = _lsr.get("context") if isinstance(_lsr, dict) else None
+        if isinstance(_ctx, dict):
+            rejected_detail = (
+                _ctx.get("entry_ready_reason")
+                or _ctx.get("gate_reason")
+                or _ctx.get("detail")
+            )
+        if not rejected_detail:
+            rejected_detail = cycle.get("entry_ready_reason")
+
     # has_signal: True only when the cycle recorded an actual selection.
     if cycle.get("rejection_reason"):
         has_signal: Optional[bool] = False
@@ -685,6 +702,19 @@ def _server_agent(
     session_risk = getattr(agent, "_session_risk_usd", None)
     session_risk_cap = getattr(agent, "_session_risk_cap_usd", None)
 
+    # Entry-TTE cutoff (seconds): the live floor below which new entries are
+    # vetoed (`hard_tte_cutoff`). Mode-aware via the agent's signal mode —
+    # settlement lane relaxes the floor when enabled. None when unresolvable.
+    entry_cutoff_secs: Optional[float] = None
+    try:
+        from merid.prediction.agent_grid_15m import _effective_min_entry_tte_seconds
+        mode_fn = getattr(agent, "_resolve_runtime_signal_mode", None)
+        entry_cutoff_secs = float(
+            _effective_min_entry_tte_seconds(mode_fn() if callable(mode_fn) else "")
+        )
+    except Exception:
+        entry_cutoff_secs = None
+
     return {
         "id": name,
         "name": name,
@@ -702,6 +732,8 @@ def _server_agent(
         "risk_budget_used": _f(session_risk),
         "risk_budget_cap_usd": _f(session_risk_cap),
         "rejected_reason": rejection_reason,
+        "rejected_detail": rejected_detail,
+        "entry_cutoff_secs": entry_cutoff_secs,
         "heartbeat": _heartbeat_block(agent, loop, market, state),
         "market": market,
         "position": position_for_ticker,

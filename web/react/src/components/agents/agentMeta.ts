@@ -109,6 +109,7 @@ export const KIND_META: Record<DecisionEventKind, KindMeta> = {
   guard: { label: 'GUARD', text: 'text-amber-400', chip: 'bg-amber-500/15 text-amber-300 border-amber-500/40' },
   exit: { label: 'EXIT', text: 'text-orange-400', chip: 'bg-orange-500/15 text-orange-300 border-orange-500/40' },
   settle: { label: 'SETTLE', text: 'text-emerald-300', chip: 'bg-emerald-500/10 text-emerald-300 border-emerald-600/40' },
+  state: { label: 'STATE', text: 'text-slate-400', chip: 'bg-slate-500/10 text-slate-400 border-slate-600/40' },
 };
 
 /* ------------------------------------------------------------------ */
@@ -149,8 +150,8 @@ export function vetoTone(reason: string | undefined | null): VetoTone {
   if (/halt|kill|circuit|breaker|guard|blocked|forbidden/.test(r)) return 'danger';
   if (/ev|edge|expect|threshold/.test(r)) return 'warning';
   if (/slot|exposure|limit|size|qty/.test(r)) return 'warning';
-  if (/stale|fresh|age|watermark|feed|book/.test(r)) return 'info';
-  if (/final|window|close|expiry|settle/.test(r)) return 'info';
+  if (/stale|fresh|age|watermark|feed|book|ready|sequence|resync|snapshot|metadata/.test(r)) return 'info';
+  if (/final|window|close|expiry|settle|cutoff|tte|terminal/.test(r)) return 'info';
   return 'neutral';
 }
 

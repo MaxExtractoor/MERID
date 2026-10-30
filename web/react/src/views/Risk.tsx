@@ -39,6 +39,8 @@ type ActionKind = 'activate' | 'reset' | 'halt' | 'release';
 interface RiskEnvelope {
   profile?: string;
   envelope_enabled?: boolean;
+  available?: boolean;
+  error?: string;
   message?: string;
   drawdown?: {
     peak_equity_usd?: number;
@@ -203,9 +205,9 @@ const EnvelopePanel = memo(function EnvelopePanel() {
           <div className="text-center py-4 text-red-400 text-xs" role="alert">
             Risk envelope unavailable: {poll.error}
           </div>
-        ) : env?.envelope_enabled !== true ? (
+        ) : env?.envelope_enabled !== true || env?.available === false ? (
           <div className="text-center py-4 text-slate-500">
-            {env?.message ?? 'Risk envelope not reported by backend'}
+            {env?.error ?? env?.message ?? 'Risk envelope not reported by backend'}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3">

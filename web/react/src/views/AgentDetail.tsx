@@ -47,24 +47,41 @@ function toLevels(raw: unknown): BookLevel[] {
   if (!Array.isArray(raw)) return [];
   const out: BookLevel[] = [];
   for (const l of raw) {
+    let p: number | undefined;
+    let s: number | undefined;
     if (Array.isArray(l) && l.length >= 2) {
-      const p = numOr(l[0]);
-      const s = numOr(l[1]);
-      if (p != null && s != null) out.push({ price: levelToCents(p), size: s });
+      p = numOr(l[0]);
+      s = numOr(l[1]);
     } else if (l && typeof l === 'object') {
       const o = l as Record<string, unknown>;
-      const p = numOr(o.price ?? o.price_c ?? o.p);
-      const s = numOr(o.quantity ?? o.size ?? o.contracts ?? o.count);
-      if (p != null && s != null) out.push({ price: levelToCents(p), size: s });
+      p = numOr(o.price ?? o.price_c ?? o.p);
+      s = numOr(o.quantity ?? o.size ?? o.contracts ?? o.count);
+    }
+    // Drop ghost levels: a 0c price or empty size is not a real resting order.
+    if (p != null && p > 0 && s != null && s > 0) {
+      out.push({ price: levelToCents(p), size: s });
     }
   }
   return out;
 }
 
 function normalizeBook(raw: unknown): NormalizedBook {
-  const obj = (raw ?? {}) as Record<string, unknown>;
-  const bids = toLevels(obj.yes_bids ?? obj.bids);
-  const asks = toLevels(obj.yes_asks ?? obj.asks);
+  let obj = (raw ?? {}) as Record<string, unknown>;
+  // Canonical Kalshi shape: { orderbook: { orderbook_fp: { yes_dollars,
+  // no_dollars } } } — fixed-point dollar string tuples, bids only.
+  const fp = (obj.orderbook_fp ??
+    (obj.orderbook as Record<string, unknown> | undefined)?.orderbook_fp) as
+    Record<string, unknown> | undefined;
+  if (fp) obj = { ...obj, ...fp };
+  const bids = toLevels(obj.yes_bids ?? obj.yes_dollars ?? obj.bids);
+  let asks = toLevels(obj.yes_asks ?? obj.asks);
+  if (asks.length === 0) {
+    // Kalshi semantics: the exchange only serves per-side BIDS. YES ask at
+    // price p is a NO bid at (1-p). Derive it when the payload only carries
+    // the no-side ladder (e.g. a raw orderbook passthrough).
+    const noBids = toLevels(obj.no_bids ?? obj.no_dollars);
+    asks = noBids.map((l) => ({ price: 100 - l.price, size: l.size }));
+  }
   const spread = numOr(obj.spread_cents ?? obj.spread_c);
   const mid = numOr(obj.midpoint ?? obj.mid_c);
   return {
@@ -82,9 +99,12 @@ type ChartMode = 'spot' | 'mid';
 
 interface AgentDetailProps {
   asset?: AssetSymbol | string;
+  /** Deterministic exit path — the app is state-routed (no pushState), so
+   *  window.history.back() would leave the SPA entirely or no-op. */
+  onBack?: () => void;
 }
 
-export default function AgentDetail({ asset }: AgentDetailProps) {
+export default function AgentDetail({ asset, onBack }: AgentDetailProps) {
   const { agents, feed, spotPrices, lastUpdate, loading } = useAgentWall({ pollMs: 5000 });
   const symbol = (asset ?? '').toUpperCase();
   const agent = agents.find((a) => a.asset === symbol) ?? null;
@@ -182,12 +202,8 @@ export default function AgentDetail({ asset }: AgentDetailProps) {
   const strike = mode === 'spot' ? numOr(agent?.market?.strike) : undefined;
 
   const goBack = useCallback(() => {
-    try {
-      window.history.back();
-    } catch {
-      /* no-op */
-    }
-  }, []);
+    onBack?.();
+  }, [onBack]);
 
   /* ---------------- render ---------------- */
 
@@ -215,6 +231,15 @@ export default function AgentDetail({ asset }: AgentDetailProps) {
             ? 'the agent may be halted or the backend is unreachable'
             : `expected one of: ${ASSETS.join(', ')}`}
         </div>
+        {onBack && (
+          <button
+            type="button"
+            onClick={goBack}
+            className="mt-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm rounded-lg transition-colors"
+          >
+            Back to Agent Wall
+          </button>
+        )}
       </div>
     );
   }

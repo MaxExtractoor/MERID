@@ -18,6 +18,7 @@ import { StatePill } from './StatePill';
 import { MoneynessGauge } from './MoneynessGauge';
 import { GateFunnel } from './GateFunnel';
 import { PositionBar } from './PositionBar';
+import { VetoChip } from './VetoChip';
 import { LANE_META, freshnessTextClass } from './agentMeta';
 import { X } from '../../ui/icons';
 
@@ -107,8 +108,6 @@ export const AgentDetailDrawer = memo(function AgentDetailDrawer({
           'motion-safe:animate-[drawer-in_160ms_ease-out]',
         )}
       >
-        <style>{'@keyframes drawer-in { from { transform: translateX(24px); opacity: 0 } to { transform: translateX(0); opacity: 1 } }'}</style>
-
         {/* header */}
         <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/95 backdrop-blur px-4 py-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -149,7 +148,14 @@ export const AgentDetailDrawer = memo(function AgentDetailDrawer({
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 space-y-1">
               <div className="flex items-center justify-between text-[10px] text-slate-500">
                 <span className="truncate max-w-[70%]" title={m?.ticker}>{m?.ticker ?? 'ticker n/a'}</span>
-                <span className="tabular-nums">{m?.secs_to_close != null ? `${Math.round(m.secs_to_close)}s to close` : 'window n/a'}</span>
+                <span className="tabular-nums">
+                  {m?.secs_to_close != null ? `${Math.round(m.secs_to_close)}s to close` : 'window n/a'}
+                  {agent.entry_cutoff_secs != null && m?.secs_to_close != null && m.secs_to_close < agent.entry_cutoff_secs && (
+                    <span className="ml-1 rounded border border-amber-500/50 px-1 text-[8px] font-bold text-amber-400" title={`entries vetoed below ${Math.round(agent.entry_cutoff_secs)}s TTE`}>
+                      cutoff
+                    </span>
+                  )}
+                </span>
               </div>
               <div className="flex items-baseline gap-3 tabular-nums">
                 <span className="text-lg font-bold text-slate-100">{priceC != null ? fmtCents(priceC) : 'n/a'}</span>
@@ -246,6 +252,21 @@ export const AgentDetailDrawer = memo(function AgentDetailDrawer({
               </div>
             )}
           </section>
+
+          {/* last veto: reason + gate-level detail (e.g. STALE:age=75s>t60s) */}
+          {(d?.rejection_reason || d?.rejection_detail) && (
+            <section aria-label="last veto">
+              <h3 className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-1.5">last veto</h3>
+              <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2">
+                <VetoChip reason={d?.rejection_reason} detail={d?.rejection_detail} size="md" />
+                {d?.rejection_detail && (
+                  <div className="mt-1.5 font-mono text-[9px] leading-4 text-slate-400 break-all">
+                    {d.rejection_detail}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
 
           {/* veto waterfall */}
           {agent.veto_waterfall && agent.veto_waterfall.length > 0 && (

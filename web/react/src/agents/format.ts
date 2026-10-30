@@ -197,14 +197,18 @@ export interface SpotInfo {
 
 /**
  * Coerce the `/api/v1/spot/prices` payload into a per-asset map.
- * Backend shape (verified): `{ available, prices: { BTC: {price, ts, source, age_seconds} } }`.
+ * Backend shape (verified): `{assets: {BTC: {price, source, timestamp, confidence}}}`.
  * Tolerates a flat `{ BTC: 97000 }` map too.
  */
 export function toSpotMap(raw: unknown): Partial<Record<AssetSymbol, SpotInfo>> {
   const out: Partial<Record<AssetSymbol, SpotInfo>> = {};
   if (!raw || typeof raw !== 'object') return out;
   const obj = raw as Record<string, unknown>;
-  const prices = (obj.prices && typeof obj.prices === 'object' ? obj.prices : obj) as Record<string, unknown>;
+  const prices = (
+    obj.prices && typeof obj.prices === 'object' ? obj.prices
+      : obj.assets && typeof obj.assets === 'object' ? obj.assets
+        : obj
+  ) as Record<string, unknown>;
   for (const asset of ASSETS) {
     const entry = prices[asset];
     if (isFiniteNum(entry)) {
@@ -215,9 +219,16 @@ export function toSpotMap(raw: unknown): Partial<Record<AssetSymbol, SpotInfo>> 
       const e = entry as Record<string, unknown>;
       const price = numOr(e.price ?? e.spot ?? e.last);
       if (price != null) {
+        let ageS = numOr(e.age_seconds ?? e.age_s ?? e.ageSecs);
+        if (ageS == null) {
+          const tsMs = numOr(e.timestamp) ?? Date.parse(String(e.timestamp ?? ''));
+          if (tsMs != null && Number.isFinite(tsMs)) {
+            ageS = Math.max(0, (Date.now() - (tsMs < 1e12 ? tsMs * 1000 : tsMs)) / 1000);
+          }
+        }
         out[asset] = {
           price,
-          ageS: numOr(e.age_seconds ?? e.age_s ?? e.ageSecs),
+          ageS,
           source: typeof e.source === 'string' ? e.source : undefined,
         };
       }

@@ -31,7 +31,7 @@ import type { View } from "./types/views";
 import { ASSETS, type AssetSymbol } from "./agents/types";
 
 // 7-View Architecture - Clean mapping
-const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>>> = {
+const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType>> = {
   "agent-wall": AgentWall,
   "mission-control": MissionControl,
   terminal: Terminal,
@@ -86,7 +86,7 @@ const ViewRenderer = React.memo(({ view, onNavigate, agentAsset, onAssetChange }
             </button>
           ))}
         </div>
-        <AgentDetail asset={agentAsset} />
+        <AgentDetail asset={agentAsset} onBack={() => onNavigate('agent-wall')} />
       </div>
     );
   }
@@ -145,7 +145,8 @@ export default function App() {
     { key: '4', description: 'Navigate to Portfolio', action: () => handleNavigate('portfolio') },
     { key: '5', description: 'Navigate to Risk', action: () => handleNavigate('risk') },
     { key: '6', description: 'Navigate to System', action: () => handleNavigate('system') },
-    { key: 'k', ctrl: true, description: 'Open command palette', action: () => openPaletteRef.current?.() },
+    // NOTE: Ctrl+K is owned by CommandPalette itself — a second registration
+    // here could only re-open it, so the toggle could never close.
   ];
 
   useKeyboardShortcuts(shortcuts);

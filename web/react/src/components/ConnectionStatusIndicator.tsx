@@ -1,61 +1,33 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Wifi, WifiOff, AlertTriangle } from '../ui/icons';
-import { API_BASE_URL, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
-
-function authHeaders(headers?: HeadersInit): HeadersInit {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
-    ...(headers ?? {}),
-  };
-}
+import { useKalshiStore } from '../store';
 
 type ConnectionState = 'connected' | 'degraded' | 'disconnected';
 
+/**
+ * Connectivity indicator driven by the shared store — refreshAll() already
+ * polls /unified-health every 15s, so a second private poller here was pure
+ * duplicate traffic (and could disagree with the rest of the UI).
+ *
+ *   connected    — store connected AND unified-health overall_status ok
+ *   degraded     — store connected but health non-ok / missing
+ *   disconnected — every core fetch failed this cycle
+ */
 export default function ConnectionStatusIndicator() {
-  const [state, setState] = useState<ConnectionState>('connected');
-  const [latency, setLatency] = useState<number | null>(null);
+  const connected = useKalshiStore(s => s.connected);
+  const healthOk = useKalshiStore(s => s.system.health.ok);
+  const refreshAll = useKalshiStore(s => s.refreshAll);
   const [showTooltip, setShowTooltip] = useState(false);
 
-  const checkConnection = useCallback(async () => {
-    const start = performance.now();
-    try {
-      // /api/v1/system/health does not exist — unified-health is the real
-      // aggregate probe and reports overall_status per service.
-      const res = await fetch(`${API_BASE_URL}/api/v1/unified-health`, {
-        signal: AbortSignal.timeout(5000),
-        headers: authHeaders(),
-      });
-      const elapsed = Math.round(performance.now() - start);
-      setLatency(elapsed);
-      if (res.ok) {
-        const body = await res.json().catch(() => ({})) as { overall_status?: string };
-        const status = (body.overall_status ?? 'ok').toLowerCase();
-        if (status === 'ok') {
-          setState(elapsed > 2000 ? 'degraded' : 'connected');
-        } else {
-          // 'degraded', 'initializing', or anything non-ok
-          setState('degraded');
-        }
-      } else {
-        setState('degraded');
-      }
-    } catch {
-      setState('disconnected');
-      setLatency(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    checkConnection();
-    const interval = setInterval(checkConnection, DEFAULTS.POLLING_INTERVALS.SLOW);
-    return () => clearInterval(interval);
-  }, [checkConnection]);
+  const state: ConnectionState = !connected
+    ? 'disconnected'
+    : healthOk
+      ? 'connected'
+      : 'degraded';
 
   const config = {
     connected: { icon: Wifi, color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', label: 'Connected' },
-    degraded: { icon: AlertTriangle, color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', label: 'Slow' },
+    degraded: { icon: AlertTriangle, color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', label: 'Degraded' },
     disconnected: { icon: WifiOff, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: 'Offline' },
   }[state];
 
@@ -68,10 +40,10 @@ export default function ConnectionStatusIndicator() {
       onMouseLeave={() => setShowTooltip(false)}
     >
       <button type="button"
-        onClick={checkConnection}
+        onClick={() => void refreshAll()}
         className={`p-2 rounded-lg ${config.bg} border ${config.border} transition-all hover:scale-105`}
         title={`API: ${config.label}`}
-       aria-label="Icon">
+        aria-label={`Connection status: ${config.label}. Activate to refresh.`}>
         <Icon className={`w-4 h-4 ${config.color}`} />
       </button>
 
@@ -83,11 +55,13 @@ export default function ConnectionStatusIndicator() {
             }`} />
             <span className="text-xs font-medium text-white">{config.label}</span>
           </div>
-          {latency !== null && (
-            <p className="text-[10px] text-slate-400">
-              Latency: <span className={`font-mono ${latency > 1000 ? 'text-yellow-400' : 'text-slate-300'}`}>{latency}ms</span>
-            </p>
-          )}
+          <p className="text-[10px] text-slate-400">
+            {state === 'disconnected'
+              ? 'All backend probes failed this cycle.'
+              : state === 'degraded'
+                ? 'Backend reachable but unified-health is not ok.'
+                : 'Unified-health reports ok.'}
+          </p>
           <p className="text-[10px] text-slate-500 mt-1">Click to refresh</p>
         </div>
       )}

@@ -166,7 +166,7 @@ describe('KalshiTradeTicket', () => {
       fireEvent.click(screen.getByRole('button', { name: /Buy 1 YES/i }));
 
       await waitFor(() => {
-        expect(screen.getByText('Insufficient balance')).toBeInTheDocument();
+        expect(screen.getByText(/Insufficient balance/)).toBeInTheDocument();
       });
     });
 
