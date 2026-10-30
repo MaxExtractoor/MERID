@@ -3966,6 +3966,70 @@ def _is_safety_exit_reason(intent: OrderIntent) -> bool:
     )
 
 
+def _exit_has_verified_position(intent: OrderIntent) -> bool:
+    """Return True when the position cache verifies live exposure on the
+    exit's ticker, so a reduce-only exit may proceed without the parent
+    entry-fill link.
+
+    2026-10-30: ``MERID_REQUIRE_EXIT_PARENTAGE=1`` blocked 16 exit
+    submissions on KXSOL15M-26OCT292315-15 over ~2.3min because the entry
+    fill was still awaiting http_poller ingestion — the position existed
+    at the exchange but could not be exited.  A ``reduce_only`` IOC exit
+    is already capped by the exchange at the member's actual position, so
+    the parent fill link is bookkeeping (attribution), not safety.  This
+    check only relaxes the gate when the intent is a real reduce-only
+    IOC exit AND the cache reports nonzero exposure for the ticker; any
+    ambiguity still fails closed on the parentage requirement.
+    """
+    _raw = os.environ.get("MERID_EXIT_PARENTAGE_EXCHANGE_POSITION_OK")
+    if _raw is not None and _raw.strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    try:
+        if not getattr(intent, "reduce_only", False):
+            return False
+        tif = str(getattr(intent, "time_in_force", "") or "").lower()
+        if tif not in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill"):
+            return False
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        cache = get_position_cache()
+        cached = cache.get_position(intent.ticker) if cache else None
+        if cached is None:
+            return False
+        # Freshness bound: the cache's last REST sync proves the exposure is
+        # current, not a residual record.  When REST sync has been dead past
+        # the bound the evidence is stale -> fail closed on parentage.
+        try:
+            _max_age_s = float(
+                os.environ.get("MERID_EXIT_PARENTAGE_POS_MAX_AGE_S", "900") or 900
+            )
+        except (TypeError, ValueError):
+            _max_age_s = 900.0
+        if _max_age_s > 0:
+            from datetime import datetime, timezone
+            _last_sync = getattr(cache, "_last_sync", None)
+            if _last_sync is not None:
+                _sync_age = (datetime.now(timezone.utc) - _last_sync).total_seconds()
+                if _sync_age > _max_age_s:
+                    return False
+        for attr in ("quantity_cc", "contracts", "size_cc"):
+            qty = getattr(cached, attr, None)
+            if qty is None:
+                continue
+            try:
+                if abs(float(qty)) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        try:
+            return abs(float(cached._yes_exposure())) > 0
+        except Exception:
+            return False
+    except Exception:
+        # Fail closed: no evidence -> keep the parentage requirement.
+        return False
+
+
 def _validate_order_identity(intent: OrderIntent, t0: float) -> Optional[OrderResult]:
     """Fail-closed identity and circuit-breaker check for every order.
 
@@ -4077,7 +4141,13 @@ def _validate_order_identity(intent: OrderIntent, t0: float) -> Optional[OrderRe
     if is_exit and not getattr(intent, "parent_entry_fill_id", None):
         if os.environ.get("MERID_REQUIRE_EXIT_PARENTAGE", "").strip() == "1" and not intent.is_manual_emergency_close:
             if not _is_safety_exit_reason(intent):
-                missing.append("parent_entry_fill_id")
+                if _exit_has_verified_position(intent):
+                    # Record the deferred-link decision for audit instead of
+                    # blocking: the exchange reduce_only cap enforces the
+                    # position bound; attribution backfills on fill ingestion.
+                    intent.parentage_status = "EXCHANGE_POSITION_VERIFIED"
+                else:
+                    missing.append("parent_entry_fill_id")
 
     if missing:
         latency_ms = (_time.monotonic() - t0) * 1000
@@ -15707,6 +15777,30 @@ async def _route_live(
                     from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
                     _gate_fee_cents = kalshi_fee_cents_exact(_gate_price / 100.0, _gate_count_fp, "taker")
                     _need = (Decimal(_gate_price) * _gate_count_fp + _gate_fee_cents) / 100
+                    # 2026-10-30: global stake-at-risk cap.  A binary entry's
+                    # maximum loss is its premium (price x count); cap it as a
+                    # fraction of trading-shard cash so the same tail exposure
+                    # is bounded identically across every lane — a 6x NO@78
+                    # maker_bid favorite risked ~38% of a $12 shard on one
+                    # settlement while the pinned_fav 2-lot cap only bound its
+                    # own lane (KXSOL15M-1715, -$4.68).  ``=0`` disables.
+                    _stake_pct_s = os.getenv("MERID_MAX_STAKE_PCT_SHARD_CASH", "0.35")
+                    _stake_pct = float(_stake_pct_s) if _stake_pct_s else 0.35
+                    if _stake_pct > 0 and _shard_cash > 0:
+                        _stake = (Decimal(_gate_price) * _gate_count_fp) / 100
+                        _stake_cap = (_shard_cash * Decimal(str(_stake_pct))).quantize(
+                            Decimal("0.0001")
+                        )
+                        if _stake > _stake_cap:
+                            latency = (_time.monotonic() - t0) * 1000
+                            _reason = (
+                                f"stake_at_risk_cap:pct={_stake_pct:.2f}"
+                                f":stake=${_stake:.4f}:cap=${_stake_cap}"
+                                f":shard_cash=${_shard_cash:.4f}:shard={_resolved_exchange_index}"
+                            )
+                            logger.warning("[order-router] %s ticker=%s intent_id=%s", _reason, _wire_ticker, intent.intent_id)
+                            _release_gate_record(intent, _reason)
+                            return OrderResult(status="rejected", mode=mode, reason=_reason, latency_ms=round(latency, 2))
                     if _shard_cash < _need:
                         latency = (_time.monotonic() - t0) * 1000
                         _funding = last_result()
@@ -21853,6 +21947,11 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
 
             if result and result.has_execution:
                 _fill = result.fill or {}
+                # 2026-10-30: when the submit response carries no venue fill id
+                # (resting maker fills arrive later via poller/WS), the stored
+                # identifier is the exchange order_id — settlement attribution
+                # resolves it against kalshi_fills.order_id, never a fill_id
+                # fabricated here.
                 _fill_id = (
                     _fill.get("fill_id")
                     or result.order_id

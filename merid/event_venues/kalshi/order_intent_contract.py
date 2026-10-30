@@ -597,7 +597,11 @@ class CanonicalOrderIntent:
     parent_entry_intent_id: str | None = None
     parent_entry_signal_id: str | None = None
     parent_decision_id: str | None = None
-    parentage_status: str = "UNKNOWN"  # CANONICAL_FILL | ORDER_LINKED | SIGNAL_ONLY | UNKNOWN
+    # CANONICAL_FILL | ORDER_LINKED | SIGNAL_ONLY | UNKNOWN |
+    # EXCHANGE_POSITION_VERIFIED (2026-10-30: exit authorized on verified
+    # live exposure while the entry-fill link was still awaiting ingestion;
+    # the parent fill backfills when the fill lands).
+    parentage_status: str = "UNKNOWN"
     # 2026-08-19: Decision/economic provenance required for audit and fill-adjusted edge.
     run_id: str | None = None
     p_yes: float | None = None

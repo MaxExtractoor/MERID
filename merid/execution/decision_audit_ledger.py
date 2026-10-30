@@ -1889,7 +1889,7 @@ class DecisionAuditLedger:
                 rows = [
                     dict(r)
                     for r in fconn.execute(
-                        "SELECT fill_id, created_time, execution_outcome_side, "
+                        "SELECT fill_id, order_id, created_time, execution_outcome_side, "
                         "execution_action, execution_price_cents, quantity_cc, "
                         "fee_cost FROM kalshi_fills WHERE market_ticker = ? "
                         "AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY') "
@@ -5182,6 +5182,13 @@ def compute_capital_realized_pnl(
         + residual qty x held-side settlement value
         - entry price x qty - entry fee
 
+    ``target_fill_id`` is the identifier stored on the outcome row.  2026-10-30:
+    when the order submit response carried no venue fill id, the router
+    stamped the exchange ``order_id`` there instead (e.g. KXXRP15M-0915), so
+    matching accepts either a fill's ``fill_id`` or its ``order_id``.  An
+    order matched this way may comprise several partial fills — every lot
+    belonging to the matched identifier is part of the target.
+
     Returns None when the target lot is absent or its residual cannot be
     valued (no settlement yet).
     """
@@ -5194,7 +5201,7 @@ def compute_capital_realized_pnl(
         key=lambda f: (str(f.get("created_time") or ""), str(f.get("fill_id") or "")),
     )
     lots: List[Dict[str, Any]] = []
-    target: Optional[Dict[str, Any]] = None
+    targets: List[Dict[str, Any]] = []
     for f in ordered:
         side = (f.get("execution_outcome_side") or "").lower()
         sign = _fill_yes_delta_sign(side, f.get("execution_action"))
@@ -5212,8 +5219,11 @@ def compute_capital_realized_pnl(
                 "exit_qty": 0.0, "exit_value": 0.0, "exit_fee": 0.0,
             }
             lots.append(lot)
-            if str(f.get("fill_id")) == str(target_fill_id):
-                target = lot
+            if (
+                str(f.get("fill_id")) == str(target_fill_id)
+                or str(f.get("order_id") or "") == str(target_fill_id)
+            ):
+                targets.append(lot)
             continue
         remaining = qty
         for lot in lots:
@@ -5227,23 +5237,21 @@ def compute_capital_realized_pnl(
             lot["exit_qty"] += take
             lot["exit_value"] += take * held_px
             lot["exit_fee"] += fee_c * take / qty
-    if target is None:
+    if not targets:
         return None
-    residual = max(0.0, target["open"])
+    residual = sum(max(0.0, t["open"]) for t in targets)
+    exit_qty = sum(t["exit_qty"] for t in targets)
+    exit_value = sum(t["exit_value"] for t in targets)
+    exit_fee = sum(t["exit_fee"] for t in targets)
+    entry_cost = sum(t["px"] * t["qty"] + t["fee"] for t in targets)
     settle_leg = 0.0
     if residual > 1e-9:
         if settle_value_yes_cents is None:
             return None
         sv = float(settle_value_yes_cents)
         settle_leg = sv if held == "yes" else 100.0 - sv
-    pnl = (
-        target["exit_value"]
-        - target["exit_fee"]
-        + residual * settle_leg
-        - target["px"] * target["qty"]
-        - target["fee"]
-    )
-    if target["exit_qty"] <= 1e-9:
+    pnl = exit_value - exit_fee + residual * settle_leg - entry_cost
+    if exit_qty <= 1e-9:
         attribution = "held_to_settlement"
     elif residual <= 1e-9:
         attribution = "exited"
@@ -5251,11 +5259,9 @@ def compute_capital_realized_pnl(
         attribution = "partial"
     return {
         "realized_pnl_cents": pnl,
-        "exited_qty": target["exit_qty"],
+        "exited_qty": exit_qty,
         "held_qty": residual,
-        "exit_vwap_cents": (
-            target["exit_value"] / target["exit_qty"] if target["exit_qty"] > 1e-9 else None
-        ),
+        "exit_vwap_cents": (exit_value / exit_qty if exit_qty > 1e-9 else None),
         "attribution": attribution,
     }
 

@@ -279,13 +279,37 @@ class LiveRuntimeState:
                 account_id = getattr(_inst, "_member_id", None) if _inst else None
             except Exception:
                 pass
+        # 2026-10-30: under RSA-signed auth the exchange never returns
+        # member_id (client._assert_account_identity notes it is
+        # password-login only).  The account-bound identity anchor is the API
+        # key ID — record it so the release record is never "unavailable".
+        if not account_id:
+            try:
+                _key_id = (
+                    os.environ.get("MERID_KALSHI_EXPECTED_API_KEY_ID")
+                    or os.environ.get("MERID_KALSHI_EXPECTED_MEMBER_ID")
+                    or os.environ.get("MERID_KALSHI_ACCOUNT_ID")
+                    or ""
+                ).strip()
+                if _key_id:
+                    account_id = f"credential:{_key_id}"
+            except Exception:
+                pass
         fields["kalshi_account_id"] = account_id or "unavailable"
 
-        # venue_environment — the resolved Kalshi environment.
+        # venue_environment — the resolved Kalshi environment.  The env var
+        # (e.g. MERID_KALSHI_ENV=prod) must participate in the primary chain,
+        # not just the exception path: ``resolve_live_config`` succeeds but
+        # exposes no ``kalshi_env`` attribute.
         try:
             from merid.config.live_config import resolve_live_config
             _lc = resolve_live_config()
-            fields["venue_environment"] = getattr(_lc, "kalshi_env", None) or getattr(_lc, "env", None) or "unknown"
+            fields["venue_environment"] = (
+                getattr(_lc, "kalshi_env", None)
+                or getattr(_lc, "env", None)
+                or os.environ.get("MERID_KALSHI_ENV")
+                or "unknown"
+            )
         except Exception:
             fields["venue_environment"] = os.environ.get("MERID_KALSHI_ENV", "unknown")
 
@@ -324,15 +348,36 @@ class LiveRuntimeState:
         fields["fill_watermark"] = str(watermark) if watermark else "unavailable"
 
         # model_release_id / tail_calibration_artifact_hash — the approved
-        # model/calibration release bound to this run.
-        fields["model_release_id"] = (
+        # model/calibration release bound to this run.  2026-10-30: fall back
+        # to the canonical version stamps — ``current_model_version`` resolves
+        # the live model identity ("bachelier_twap" = the contract-approved
+        # model) and ``current_calibration_version`` content-hashes the tail
+        # artifact on disk (sha256[:12], self-maintaining), so the release
+        # record is never "unversioned" while env pins stay unset.
+        _model_release = (
             os.environ.get("MERID_MODEL_RELEASE_ID")
             or os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_ID")
-            or "unversioned"
+            or ""
         )
-        fields["tail_calibration_artifact_hash"] = (
-            os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH") or "unversioned"
-        )
+        if not _model_release:
+            try:
+                from merid.prediction.current_build_provisional import (
+                    current_model_version,
+                )
+                _model_release = current_model_version()
+            except Exception:
+                _model_release = ""
+        fields["model_release_id"] = _model_release or "unversioned"
+        _calib_hash = os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH") or ""
+        if not _calib_hash:
+            try:
+                from merid.prediction.current_build_provisional import (
+                    current_calibration_version,
+                )
+                _calib_hash = current_calibration_version()
+            except Exception:
+                _calib_hash = ""
+        fields["tail_calibration_artifact_hash"] = _calib_hash or "unversioned"
         return fields
 
     def _emit_startup_telemetry(
@@ -415,6 +460,13 @@ class LiveRuntimeState:
                 self._release_assertion = None
 
             self._run_id = run_id or str(uuid.uuid4())
+            # 2026-10-30: publish the canonical process run_id.  OrderIntent
+            # fields, decision-ledger fallbacks, and exit intents all read
+            # ``MERID_RUN_ID`` from the environment, but nothing ever set it —
+            # intents carried the literal "unset" and run-scoped ledger
+            # queries returned empty.  Export it once here so every intent,
+            # order attempt, and decision row stamps the true process run.
+            os.environ["MERID_RUN_ID"] = self._run_id
             self._process_id = new_pid
             self._deployment_sha = deployment_sha
             self._config_hash = config_hash

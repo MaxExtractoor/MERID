@@ -261,7 +261,7 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
     )
     conn.commit()
 
-    asyncio.run(FillsPoller._sweep_expired_market_attempts(SimpleNamespace()))
+    FillsPoller._sweep_expired_market_attempts(SimpleNamespace())
 
     statuses = {
         r["order_attempt_id"]: r["status"]
@@ -283,7 +283,7 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
     assert ex_states["xa-2"] == ExitOrderAttemptState.TERMINAL_UNFILLED.value
 
     # Idempotent: a second sweep changes nothing.
-    asyncio.run(FillsPoller._sweep_expired_market_attempts(SimpleNamespace()))
+    FillsPoller._sweep_expired_market_attempts(SimpleNamespace())
     statuses2 = {
         r["order_attempt_id"]: r["status"]
         for r in conn.execute(

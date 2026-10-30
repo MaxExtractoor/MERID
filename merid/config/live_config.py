@@ -580,6 +580,24 @@ _ENV_OVERRIDES.update({
         # r60 threshold (bp) shared by the quota lane and the always-on
         # basket_direction registry stamp in agent_grid_15m.
         ("MERID_WINDOW_QUOTA_DIR_R60_BP", "float", 0, 100),
+        # 2026-10-30: allow reduce-only IOC exits to proceed without the
+        # parent entry-fill link when the position cache verifies nonzero
+        # exposure (exchange reduce_only caps the delta; the link is
+        # attribution, not safety).  0 restores the strict gate.
+        ("MERID_EXIT_PARENTAGE_EXCHANGE_POSITION_OK", "int", 0, 1),
+        # 2026-10-30: global stake-at-risk cap — a binary entry's max loss is
+        # price x count; bound it to this fraction of trading-shard cash across
+        # all lanes (0 disables; default 0.35 set at the read site).
+        ("MERID_MAX_STAKE_PCT_SHARD_CASH", "float", 0, 1),
+        # 2026-10-30: session-wide book-degradation ladder.  Sustained
+        # continuous untrusted state on >= MIN_TICKERS books for HALT_S
+        # seconds halts entries via live_runtime_state (HALT_S<=0 disables).
+        ("MERID_BOOK_UNTRUSTED_HALT_S", "float", 0, 86400),
+        ("MERID_BOOK_UNTRUSTED_HALT_MIN_TICKERS", "int", 1, 50),
+        ("MERID_BOOK_UNTRUSTED_EVAL_S", "float", 1, 600),
+        # 2026-10-30: subscribe the private order_group_updates channel at
+        # bridge connect (real-time order lifecycle; 0 disables).
+        ("MERID_WS_ORDER_GROUP_UPDATES", "int", 0, 1),
     )
 })
 _ENV_OVERRIDES.update({
@@ -1702,6 +1720,30 @@ def resolve_live_config(
         # AGENTS.md: emit the resolved runtime configuration at startup,
         # excluding secrets, so the release record can be audited against the
         # expected live environment.
+        def _model_release_id() -> str:
+            v = os.environ.get("MERID_MODEL_RELEASE_ID")
+            if v:
+                return v
+            try:
+                from merid.prediction.current_build_provisional import (
+                    current_model_version,
+                )
+                return current_model_version() or "unversioned"
+            except Exception:
+                return "unversioned"
+
+        def _calibration_artifact_hash() -> str:
+            v = os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH")
+            if v:
+                return v
+            try:
+                from merid.prediction.current_build_provisional import (
+                    current_calibration_version,
+                )
+                return current_calibration_version() or "unversioned"
+            except Exception:
+                return "unversioned"
+
         try:
             _rc = {
                 "runtime_profile": os.environ.get("MERID_PM_PROFILE", "baseline"),
@@ -1714,8 +1756,12 @@ def resolve_live_config(
                 "replay_mode": os.environ.get("MERID_REPLAY_MODE", "0"),
                 "exit_firewall_mode": os.environ.get("MERID_EXIT_FIREWALL_MODE", "unknown"),
                 "require_exit_parentage": os.environ.get("MERID_REQUIRE_EXIT_PARENTAGE", "unknown"),
-                "model_release_id": os.environ.get("MERID_MODEL_RELEASE_ID", "unversioned"),
-                "tail_calibration_artifact_hash": os.environ.get("MERID_TAIL_CALIBRATION_ARTIFACT_HASH", "unversioned"),
+                # 2026-10-30: fall back to the canonical version stamps so
+                # the resolved-config log line matches the release record —
+                # model identity ("bachelier_twap") and the sha256[:12]
+                # content hash of the live tail artifact.
+                "model_release_id": _model_release_id(),
+                "tail_calibration_artifact_hash": _calibration_artifact_hash(),
                 "trading_shard": os.environ.get("MERID_KALSHI_TRADING_SHARD", "auto"),
                 "auto_fund_trading_shard": os.environ.get("MERID_AUTO_FUND_TRADING_SHARD", "1"),
             }

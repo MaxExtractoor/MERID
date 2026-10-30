@@ -2309,6 +2309,19 @@ class KalshiWebSocketBridge:
                     await self._ws_call(self._ws.subscribe_fills, batch)
                     await asyncio.sleep(_stagger_delay)
 
+                # Subscribe order_group_updates (real-time order lifecycle:
+                # status/fill_count per order group).  Without it, order
+                # attempts only resolve post-facto via the expired-market
+                # sweep and fills_poller.  ``_order_group_updates_enabled``
+                # makes the reconnect path replay it automatically.
+                if os.getenv("MERID_WS_ORDER_GROUP_UPDATES", "1").strip().lower() in ("1", "true", "yes", "on"):
+                    try:
+                        logger.info("[WS-SUBSCRIPTION] sent: order_group_updates (global private channel)")
+                        await self._ws_call(self._ws.subscribe_order_group_updates)
+                    except Exception as _ogu_exc:
+                        # Non-fatal: lifecycle still tracked via REST pollers.
+                        logger.warning("[WS-SUBSCRIPTION] order_group_updates subscribe failed (non-fatal): %s", _ogu_exc)
+
                 # Subscribe trades (MEDIUM priority - drop if backpressure)
                 if not _shed_quotes:
                     for i in range(0, len(ut), ch):
@@ -4483,6 +4496,27 @@ class KalshiWebSocketBridge:
                 "orderbook_snapshot", "orderbook_delta",
             ):
                 self._apply_orderbook_on_drain(event)
+                continue
+
+            # 2026-10-30: critical events (fill/order/position/balance) must not
+            # queue behind a 100-deep batch of ticker/trade events.  During a
+            # sustained orderbook flood the thread queue never goes Empty, so
+            # the batch can sit unflushed for seconds — observed live: entry
+            # fills discovered 3.5min late via REST poller while the WS fill
+            # message waited, blocking reduce-only exits on
+            # parent_entry_fill_id.  Flush any pending batch first so venue
+            # order is preserved, then hand the critical event its own wakeup.
+            if self._is_critical_event(event):
+                if batch:
+                    try:
+                        loop.call_soon_threadsafe(self._drain_put_batch, batch)
+                    except Exception as e:
+                        logger.error("[WS-DRAIN-THREAD] call_soon_threadsafe error: %s", e)
+                    batch = []
+                try:
+                    loop.call_soon_threadsafe(self._drain_put_batch, [event])
+                except Exception as e:
+                    logger.error("[WS-DRAIN-THREAD] call_soon_threadsafe error: %s", e)
                 continue
 
             batch.append(event)

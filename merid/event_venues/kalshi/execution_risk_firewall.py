@@ -417,7 +417,22 @@ class ExecutionRiskFirewall:
         # 10. Parent entry linkage.
         parent = self._resolve_parent_entry_fill_id(canonical, original_intent, pos)
         if _env_bool("MERID_REQUIRE_EXIT_PARENTAGE", False) and not parent:
-            if not self._is_safety_or_manual_exit(original_intent, canonical, pos):
+            # 2026-10-30: a reduce-only exit on a freshly-verified nonzero
+            # exchange position is capped by the venue at the member's
+            # actual holding — the parent fill link is attribution, not
+            # safety.  Blocking discretionary exits while the entry fill
+            # awaited poller ingestion left a live position unprotected
+            # (16x missing_order_identity rejects on KXSOL15M-26OCT292315
+            #  over ~2.3min).  ``MERID_EXIT_PARENTAGE_EXCHANGE_POSITION_OK=0``
+            # restores the strict gate.
+            _pos_verified = (
+                _env_bool("MERID_EXIT_PARENTAGE_EXCHANGE_POSITION_OK", True)
+                and bool(getattr(canonical, "reduce_only", False))
+                and int(getattr(pos, "position_cc", 0) or 0) != 0
+            )
+            if not _pos_verified and not self._is_safety_or_manual_exit(
+                original_intent, canonical, pos
+            ):
                 return self._rejected("missing_parent_entry_fill_id", canonical)
 
         # 11. Approve with a clamped worst-case limit and deterministic client order id.

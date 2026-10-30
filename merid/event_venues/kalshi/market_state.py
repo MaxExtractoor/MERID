@@ -328,6 +328,21 @@ _RECOVERY_TRIGGER_MIN_INTERVAL_S = float(os.getenv("KALSHI_RECOVERY_TRIGGER_MIN_
 # dedup slot is released — prevents a stuck coroutine from starving resync.
 _RECOVERY_INFLIGHT_STUCK_S = float(os.getenv("KALSHI_RECOVERY_INFLIGHT_STUCK_S", "45.0"))
 
+# ── Session-wide book-degradation ladder (2026-10-30) ────────────────────────
+# A single untrusted ticker blocks only its own entries via per-ticker gates.
+# When >= ``MERID_BOOK_UNTRUSTED_HALT_MIN_TICKERS`` books have remained
+# *continuously* untrusted for ``MERID_BOOK_UNTRUSTED_HALT_S`` seconds, the
+# shared WS/REST upstream is degraded — the operator contract requires
+# ``LIVE_ENTRIES_HALTED`` ("required WebSocket subscriptions fail, become
+# stale").  Entries halt; reduce-only exits stay available
+# (``can_submit_exit`` covers the halted state).  ``_HALT_S <= 0`` disables.
+_BOOK_UNTRUSTED_HALT_S = float(os.getenv("MERID_BOOK_UNTRUSTED_HALT_S", "300"))
+_BOOK_UNTRUSTED_HALT_MIN_TICKERS = int(os.getenv("MERID_BOOK_UNTRUSTED_HALT_MIN_TICKERS", "2"))
+# Evaluation is throttled — the mark path fires hundreds of times/sec during a
+# lag burst; the dict scan + potential state transition only needs seconds-scale
+# cadence.
+_BOOK_UNTRUSTED_EVAL_S = float(os.getenv("MERID_BOOK_UNTRUSTED_EVAL_S", "30"))
+
 # ── Bridge-lag freshness budgets ────────────────────────────────────────────
 # A sequence-contiguous delta stream can still be execution-useless when
 # events sat in an internal queue.  These bounds are enforced at enqueue and
@@ -774,6 +789,12 @@ class KalshiMarketStateStore:
         self._last_seq_gap_log_ts: Dict[str, float] = {}
         self._last_untrusted_log_ts: Dict[str, float] = {}
         self._untrusted_log_suppressed: Dict[str, int] = {}
+        # 2026-10-30: session-wide degradation ladder.  monotonic timestamp of
+        # each ticker's first (continuous) untrusted mark; cleared when the
+        # book re-attests a live WS sequence.  Feeds
+        # ``_maybe_escalate_session_book_untrusted``.
+        self._untrusted_since: Dict[str, float] = {}
+        self._last_degradation_eval_ts: float = 0.0
         self._last_enqueue_reject_log_ts: Dict[str, float] = {}
         self._enqueue_reject_suppressed: Dict[str, int] = {}
         self._last_overflow_log_ts: Dict[str, float] = {}
@@ -1131,6 +1152,7 @@ class KalshiMarketStateStore:
             # confirmed for new-entry gating prevents the strategy from being
             # permanently blocked when the market is quiet and only snapshots flow.
             state.live_sequence_confirmed = True
+            self._untrusted_since.pop(state.ticker, None)
         elif prior_quality == "INVALID" or prior_transition == "CIRCUIT_BREAKER":
             # REST and other non-live snapshots still require a subsequent
             # contiguous WS delta before new capital can be committed.  This
@@ -1584,6 +1606,8 @@ class KalshiMarketStateStore:
         state.invalidation_cause = reason
         state.executable = False
         state.recovery_required_source = "FULL_SNAPSHOT"
+        self._untrusted_since.setdefault(ticker, time.monotonic())
+        self._maybe_escalate_session_book_untrusted()
         self._note_book_state(ticker, state, reason)
         self._set_snapshot_complete(ticker, False, reason)
         self._set_book_health(ticker, BookHealth.INVALID, reason)
@@ -1640,6 +1664,61 @@ class KalshiMarketStateStore:
             self._mark_book_untrusted_and_resync(ticker, reason, **diag)
         except Exception as e:
             logger.error("[BOOK-UNTRUSTED] failed for %s (%s): %s", ticker, reason, e)
+
+    def _maybe_escalate_session_book_untrusted(self) -> None:
+        """Escalate sustained session-wide book degradation to an entries halt.
+
+        Per-ticker untrusted state already blocks that ticker's entries
+        through the ordinary market-readiness gates.  When
+        >=``MERID_BOOK_UNTRUSTED_HALT_MIN_TICKERS`` books stay *continuously*
+        untrusted for ``MERID_BOOK_UNTRUSTED_HALT_S`` seconds, the shared
+        upstream (WS feed / drain path / REST bootstrap) is degraded — the
+        operator contract's halt condition "required WebSocket subscriptions
+        fail, become stale, or lose required provenance" applies, so entries
+        halt while reduce-only exits remain available.  Observed 2026-10-30:
+        ~325k BOOK_UPSTREAM_LAG events over ~15h silently vetoed all entries
+        with no runtime halt.
+
+        Resume is deliberately NOT handled here — recovery goes through the
+        existing runtime-state recovery flow (reconciliation + trusted
+        watermark checks), never a direct application-level resume.
+        """
+        if _BOOK_UNTRUSTED_HALT_S <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_degradation_eval_ts < _BOOK_UNTRUSTED_EVAL_S:
+            return
+        self._last_degradation_eval_ts = now
+        horizon = now - _BOOK_UNTRUSTED_HALT_S
+        sustained = {
+            ticker: round(now - since, 1)
+            for ticker, since in self._untrusted_since.items()
+            if since <= horizon
+        }
+        if len(sustained) < _BOOK_UNTRUSTED_HALT_MIN_TICKERS:
+            return
+        try:
+            from merid.observability.live_runtime_state import (
+                get_live_runtime_state,
+            )
+            live_state = get_live_runtime_state()
+            # Do not clobber an existing halt reason or fire before entries
+            # were ever enabled for this process.
+            if not live_state.live_entries_enabled():
+                return
+            logger.critical(
+                "[BOOK-UNTRUSTED-SUSTAINED] halting entries: %d tickers "
+                "continuously untrusted >%ss: %s",
+                len(sustained), int(_BOOK_UNTRUSTED_HALT_S), sustained,
+            )
+            live_state.halt_entries(
+                reason="book_untrusted_sustained",
+                reason_codes=["BOOK_FEED_DEGRADED", "DATA_QUALITY", "RUNTIME_HALT"],
+            )
+        except Exception as exc:
+            logger.error(
+                "[BOOK-UNTRUSTED-SUSTAINED] escalation failed: %s", exc
+            )
 
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
         """Enqueue a delta message for batch processing.

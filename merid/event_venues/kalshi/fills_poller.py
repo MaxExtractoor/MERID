@@ -514,8 +514,15 @@ class FillsPoller:
             except asyncio.TimeoutError:
                 pass
     
-    async def _sweep_expired_market_attempts(self) -> None:
+    def _sweep_expired_market_attempts(self) -> None:
         """Terminalize non-terminal order/exit attempts on expired markets.
+
+        Synchronous by design: callers must dispatch this via
+        ``asyncio.to_thread`` — the body performs a year-lookback
+        ``OrderAttemptStore.get_unresolved`` scan plus per-attempt
+        ``update_status`` writes on a shared SQLite connection, none of
+        which may run on the event-loop thread (observed 2026-10-30:
+        faulthandler sample caught this sweep stalling the loop).
 
         A resting order on an expired market is auto-canceled by the exchange
         and can never produce a new fill, so a ``PERSISTED``/``SUBMITTING``/
@@ -748,7 +755,7 @@ class FillsPoller:
             # Resting orders are auto-canceled by the exchange at market close,
             # so a stale ACKNOWLEDGED attempt on an expired ticker is dead
             # bookkeeping that retains reservation state forever.
-            await self._sweep_expired_market_attempts()
+            await asyncio.to_thread(self._sweep_expired_market_attempts)
 
             # Get positions from Kalshi through the normalized execution port.
             # Use the fail-closed adapter so missing identity/quantity fields do not
