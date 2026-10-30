@@ -800,6 +800,20 @@ class KalshiMarketStateStore:
         self._last_overflow_log_ts: Dict[str, float] = {}
         self._overflow_log_suppressed: Dict[str, int] = {}
         self._last_pending_full_log_ts: Dict[str, float] = {}
+        # 2026-10-30: per-subscription (sid) sequence tracking.  Kalshi's WS
+        # ``seq`` is scoped to the *subscription*: every ticker multiplexed on
+        # one orderbook_delta subscription shares a single counter, so stream
+        # contiguity can only be validated in arrival order per sid — the
+        # per-ticker dequeue path reorders cross-ticker arrivals.  A real gap
+        # invalidates every book on that sid; the per-ticker dequeue check is
+        # then only a monotonicity guard (sibling tickers consume the
+        # intermediate seqs, so a per-ticker ``last_seq+1`` check manufactures
+        # false INVALID_SEQUENCE_GAP invalidations).
+        self._sid_last_seq: Dict[Any, int] = {}
+        self._sid_tickers: Dict[Any, set] = {}
+        self._ticker_sid: Dict[str, Any] = {}
+        self._sid_seq_lock = threading.Lock()
+        self._last_sid_gap_log_ts: Dict[Any, float] = {}
         # 2026-10-04: owner-latch hysteresis.  REST ownership is released back
         # to WS only after ``MERID_WS_PROMOTE_STREAK`` consecutive deltas arrive
         # in-parity with the REST BBO over ``MERID_WS_PROMOTE_MIN_S`` seconds —
@@ -2178,6 +2192,10 @@ class KalshiMarketStateStore:
         # the in-memory book is missing levels and cannot be trusted for execution.
         ob = self._ob.get_book(ticker)
         is_valid, expected, msg_seq = self._validate_delta_sequence(ticker, msg, ob)
+        if is_valid == "stale":
+            # Replay at/below the last applied seq on a sid-scoped stream —
+            # already reflected in the book; skip silently, no invalidation.
+            return
         if not is_valid:
             state = self._get_or_create(ticker)
             if self._rest_owned_book_preserved(
@@ -3720,6 +3738,36 @@ class KalshiMarketStateStore:
         if channel == "orderbook_delta":
             # DIAGNOSTIC: Log delta enqueue
             payload = msg.get("msg", msg)
+
+            # 2026-10-30: Kalshi ``seq`` is scoped to the subscription (sid),
+            # not the ticker — every ticker multiplexed on one orderbook_delta
+            # subscription shares a single counter.  The per-ticker queue
+            # drains reorder cross-ticker arrivals, so sid contiguity can only
+            # be validated here, in arrival order.  Stamp the sequencing
+            # identity onto the queued payload so the dequeue-side validator
+            # can distinguish a stale replay from interleaved sibling deltas.
+            _sid = msg.get("sid")
+            _seq = payload.get("seq")
+            if _seq is None:
+                _seq = msg.get("seq")
+            if _seq is None:
+                _seq = msg.get("sequence")
+            if isinstance(payload, dict):
+                if _sid is not None:
+                    payload["_sid"] = _sid
+                if _seq is not None:
+                    payload.setdefault("seq", _seq)
+            try:
+                _seq_int = int(_seq) if _seq is not None else None
+            except (TypeError, ValueError):
+                _seq_int = None
+            _sid_check = self._check_sid_delta_sequence(_sid, _seq_int, ticker)
+            if _sid_check < 0:
+                return None  # duplicate/replayed frame on the shared sid stream
+            if _sid_check > 0:
+                self._handle_sid_sequence_gap(_sid, _seq_int, _sid_check, ticker)
+                return None
+
             logger.debug(
                 "[OB-APPLY] ticker=%s channel=%s enqueuing_delta=True batch_worker_running=%s",
                 ticker, channel, self._batch_worker_running
@@ -3776,6 +3824,24 @@ class KalshiMarketStateStore:
             ticker_lock = self._get_ticker_lock(ticker)
             with ticker_lock:
                 payload = msg.get("msg", msg)
+
+                # 2026-10-30: WS snapshots carry (sid, seq) on the same
+                # subscription stream as deltas.  A snapshot is authoritative
+                # full state — heal the sid cursor to its seq so subsequent
+                # deltas validate, and seed the sid->ticker map.
+                if via == "bridge_queue":
+                    _s_sid = msg.get("sid")
+                    _s_seq = msg.get("seq") or msg.get("sequence")
+                    if _s_sid is not None and _s_seq is not None:
+                        try:
+                            _s_seq = int(_s_seq)
+                        except (TypeError, ValueError):
+                            _s_seq = None
+                        if _s_seq is not None:
+                            with self._sid_seq_lock:
+                                self._sid_tickers.setdefault(_s_sid, set()).add(ticker)
+                                self._ticker_sid[ticker] = _s_sid
+                                self._sid_last_seq[_s_sid] = _s_seq
 
                 # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
                 # Check if snapshot has any orderbook data
@@ -4518,6 +4584,13 @@ class KalshiMarketStateStore:
         commitment is gated until a fresh snapshot + contiguous WS delta sequence
         has been observed.
         """
+        # Kalshi allocates fresh sids per subscription on reconnect (and may
+        # reuse small sid values); stale cursors would mislabel the new
+        # stream's low seqs as replays and drop them.
+        with self._sid_seq_lock:
+            self._sid_last_seq.clear()
+            self._sid_tickers.clear()
+            self._ticker_sid.clear()
         with self._lock:
             count = 0
             for ticker, state in self._states.items():
@@ -6274,18 +6347,78 @@ class KalshiMarketStateStore:
         except Exception as e:
             logger.error("[SNAPSHOT-TIMEOUT] Failed to schedule snapshot recovery for %s: %s", ticker, e)
 
+    def _check_sid_delta_sequence(self, sid: Any, seq: Optional[int], ticker: str) -> int:
+        """Validate a WS delta against the per-subscription (sid) seq stream.
+
+        Kalshi's ``seq`` counts messages on one subscription; every market
+        multiplexed on that subscription shares the counter.  This must be
+        called in arrival order (enqueue time), before per-ticker queues
+        reorder cross-ticker arrivals.
+
+        Returns 0 when the frame is contiguous (or cannot be validated),
+        -1 when it is a duplicate/replay, and >0 = the number of dropped
+        frames when a real gap is detected.
+        """
+        if sid is None or seq is None:
+            return 0
+        with self._sid_seq_lock:
+            self._sid_tickers.setdefault(sid, set()).add(ticker)
+            self._ticker_sid[ticker] = sid
+            last = self._sid_last_seq.get(sid)
+            if last is None:
+                self._sid_last_seq[sid] = seq
+                return 0
+            if seq <= last:
+                return -1
+            gap = seq - last - 1
+            self._sid_last_seq[sid] = seq
+            return gap
+
+    def _handle_sid_sequence_gap(self, sid: Any, seq: int, gap: int, ticker: str) -> None:
+        """Handle a dropped frame on a shared orderbook subscription.
+
+        Any ticker multiplexed on that sid may be missing book updates, so
+        every book on the subscription is invalidated and rebuilt through
+        the standard throttled snapshot-resync path (REST-owned effective
+        books are preserved by ``_rest_owned_book_preserved`` — only the WS
+        leg is marked unverified there).
+        """
+        with self._sid_seq_lock:
+            tickers = set(self._sid_tickers.get(sid, ()))
+        tickers.add(ticker)
+        _now = time.monotonic()
+        if _now - self._last_sid_gap_log_ts.get(sid, 0.0) >= 1.0:
+            self._last_sid_gap_log_ts[sid] = _now
+            logger.error(
+                "[WS-SID-SEQUENCE-GAP] sid=%s gap=%d seq=%s tickers=%s - "
+                "invalidating all books sharing the subscription",
+                sid, gap, seq, sorted(tickers),
+            )
+        for t in tickers:
+            try:
+                self._mark_book_untrusted_and_resync(
+                    t, "ws_sid_sequence_gap", sid=sid, seq=seq, gap=gap
+                )
+            except Exception:
+                logger.exception(
+                    "[WS-SID-SEQUENCE-GAP] invalidation failed for ticker=%s", t
+                )
+
     def _validate_delta_sequence(
         self,
         ticker: str,
         msg: Dict[str, Any],
         ob: Any,
-    ) -> Tuple[bool, Optional[int], Optional[int]]:
+    ) -> Tuple[Any, Optional[int], Optional[int]]:
         """Lightweight sequence-gap validator for a single WS orderbook delta.
 
-        Returns (is_valid, expected_seq, got_seq).  is_valid is True when the
-        message is contiguous with ``ob.last_seq`` (or when no sequence check
-        can be performed, e.g. no prior sequence).  This is intentionally stateless
-        with respect to ``KalshiMarketState``; callers handle invalidation and resync.
+        Returns (is_valid, expected_seq, got_seq).  ``is_valid`` is True when
+        the message is contiguous with ``ob.last_seq`` (or when no sequence
+        check can be performed, e.g. no prior sequence), ``"stale"`` when the
+        message is a replay at/below the last applied seq on a sid-scoped
+        stream (caller skips apply without invalidating), and False on a
+        real regression.  This is intentionally stateless with respect to
+        ``KalshiMarketState``; callers handle invalidation and resync.
         """
         if not ob or not ob.initialized or ob.last_seq is None:
             return True, None, None
@@ -6300,6 +6433,18 @@ class KalshiMarketStateStore:
             return True, None, None
 
         expected = ob.last_seq + 1
+        _sid = msg.get("_sid") or msg.get("sid")
+        if _sid is not None:
+            # The seq belongs to the shared sid stream, not this ticker —
+            # sibling tickers consume the intermediate seqs.  Enqueue-time
+            # per-sid tracking (_check_sid_delta_sequence) already enforced
+            # stream contiguity, so here only monotonicity matters: a seq at
+            # or below the last applied seq is a stale replay to skip, not a
+            # gap.  A per-ticker ``== expected`` check would invalidate the
+            # book on nearly every interleaved delta.
+            if msg_seq <= ob.last_seq:
+                return "stale", expected, msg_seq
+            return True, expected, msg_seq
         if msg_seq != expected:
             return False, expected, msg_seq
 

@@ -120,6 +120,30 @@ def _kalshi_ws_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def _orderbook_update_interval_ms() -> int:
+    """Server-side conflation interval for orderbook_delta subscriptions.
+
+    Kalshi supports ``update_interval_ms`` of 100 or 1000ms (0/omitted =
+    real-time).  Conflation collapses intermediate per-level updates into
+    one message per interval, which is the documented remedy when the
+    consumer cannot keep up with the raw stream (observed 2026-10-30:
+    ~1100 deltas/s -> upstream-lag invalidation storms).  Configured via
+    ``MERID_KALSHI_OB_UPDATE_INTERVAL_MS``; invalid values clamp to the
+    nearest supported interval, unparsable/negative falls back to 0.
+    """
+    try:
+        v = int(os.getenv("MERID_KALSHI_OB_UPDATE_INTERVAL_MS", "0"))
+    except (TypeError, ValueError):
+        return 0
+    if v <= 0:
+        return 0
+    if v < 100:
+        return 100
+    if v < 1000:
+        return 100
+    return 1000
+
+
 def _infer_kalshi_trade_action(msg: Dict[str, Any], price_dollars: Decimal) -> str:
     """Infer trade side from fill/trade payload or price heuristic.
 
@@ -1077,6 +1101,9 @@ class KalshiWebSocket(EventVenueStream):
             "market_tickers": [market_id],
             "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
         }
+        _ob_interval_ms = _orderbook_update_interval_ms()
+        if _ob_interval_ms > 0:
+            params["update_interval_ms"] = _ob_interval_ms
         if event_ticker:
             params["event_ticker"] = event_ticker
         if outcome_id:
@@ -1116,16 +1143,20 @@ class KalshiWebSocket(EventVenueStream):
         uniq = sorted(set(market_ids))
         n_chunks = (len(uniq) + chunk_size - 1) // chunk_size
         logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Processing %d tickers in %d chunks", len(uniq), n_chunks)
+        _ob_interval_ms = _orderbook_update_interval_ms()
         for i in range(0, len(uniq), chunk_size):
             chunk = uniq[i : i + chunk_size]
+            _params: Dict[str, Any] = {
+                "channels": ["orderbook_delta"],
+                "market_tickers": chunk,
+                "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
+            }
+            if _ob_interval_ms > 0:
+                _params["update_interval_ms"] = _ob_interval_ms
             message = {
                 "id": self._next_sub_id(),
                 "cmd": "subscribe",
-                "params": {
-                    "channels": ["orderbook_delta"],
-                    "market_tickers": chunk,
-                    "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
-                },
+                "params": _params,
             }
             payload = json.dumps(message)
             logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
