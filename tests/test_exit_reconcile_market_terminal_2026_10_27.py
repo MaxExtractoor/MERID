@@ -45,6 +45,7 @@ import pytest
 from merid.position_management.exit_arbiter import (
     AttemptState,
     ExitArbiter,
+    ExitAttempt,
     ExitAttemptStore,
     ExitBook,
     ExitProposal,
@@ -105,6 +106,38 @@ def _mint(tmp_path, ticker: str, *, gen: str = GEN,
     return arb
 
 
+def _mint_wedged(tmp_path, ticker: str, *, gen: str = GEN,
+                 coid: str = "exit_mktterm1") -> ExitArbiter:
+    """Persist a pre-existing unresolved attempt on a terminal market.
+
+    These tests exercise reconcile of attempts that were minted while the
+    market was live and stayed unresolved as the market expired — the
+    2026-10-27 live-wedge shape.  Since 2026-10-29 ``arbitrate`` refuses
+    to mint on a terminal market (the step-3.5 gate that stopped the
+    ~46-attempt never_transmitted wedge loop), the attempt row is written
+    to the store directly rather than through the now-gated mint path."""
+    arb = _arbiter(tmp_path)
+    pkey = f"{ticker}|{gen}"
+    attempt = ExitAttempt(
+        attempt_id="a#wedged1",
+        position_key=pkey,
+        generation_id=gen,
+        state=AttemptState.SUBMITTING,
+        proposal_kind=ProposalKind.MODEL_EXIT.value,
+        proposal_id="p1",
+        limit_cents=55,
+        qty_cc=300,
+        client_order_id=coid,
+        order_id=None,  # coid-only, like the live wedges
+        created_ts=time.time() - 86400.0,
+        updated_ts=time.time() - 86400.0,
+        history=[{"ts": time.time() - 86400.0, "from": "IDLE",
+                  "to": "SUBMITTING", "note": "arbitrate:submitted"}],
+    )
+    arb.attempt_store.save_active(attempt)
+    return arb
+
+
 class _Ok:
     def __init__(self, data):
         self.success = True
@@ -144,7 +177,7 @@ class TestMarketTerminalInference:
         """coid-bound resting-limit attempt on a settled market resolves
         market_terminal_inferred then closes out — a settled market can
         never mint a replacement."""
-        arb = _mint(tmp_path, EXPIRED_TICKER)
+        arb = _mint_wedged(tmp_path, EXPIRED_TICKER)
         arb.begin_reconcile(PKEY_EXPIRED)
 
         out = asyncio.run(reconcile_attempt(
@@ -190,7 +223,7 @@ class TestMarketTerminalInference:
         """A coid lookup that surfaces the order resolves via real
         evidence — terminal inference is only the fallback.  The settled
         market then closes the record out the same way."""
-        arb = _mint(tmp_path, EXPIRED_TICKER)
+        arb = _mint_wedged(tmp_path, EXPIRED_TICKER)
         arb.begin_reconcile(PKEY_EXPIRED)
 
         order = SimpleNamespace(status="canceled", filled_size=0)
@@ -220,6 +253,28 @@ class TestMarketTerminalInference:
         assert not _market_is_terminal("KXBTC15M-RECON-IOC")
         assert not _market_is_terminal(None)
         assert not _market_is_terminal("")
+
+    def test_arbitrate_refuses_fresh_mint_on_terminal_market(self, tmp_path):
+        """Negative control for the 2026-10-29 step-3.5 gate: arbitrate
+        must refuse to mint a new attempt on a provably terminal market —
+        the mint loop is what produced the ~46 never_transmitted wedges
+        on live KXBTC15M-26OCT291230-30."""
+        arb = _arbiter(tmp_path)
+        result = arb.arbitrate(
+            market_id=EXPIRED_TICKER,
+            generation_id=GEN,
+            held_side="yes",
+            remaining_cc=300,
+            breakeven_floor_cents=36,
+            book=ExitBook(
+                held_side="yes", liquidation_cents=60, qty_cc=500,
+                age_ms=50),
+            proposals=[ExitProposal(
+                kind=ProposalKind.MODEL_EXIT.value, proposal_id="p1",
+                limit_cents=55, qty_cc=300, reason="test")],
+        )
+        assert result.status == "market_terminal"
+        assert arb.attempt_store.get_active(PKEY_EXPIRED) is None
 
 
 class TestLoadTimeSettledMarketSweep:
@@ -301,21 +356,8 @@ class TestReconcileOrdering:
 
 class TestActiveHistoryCap:
     def test_history_bounded_with_tombstone(self, tmp_path):
-        store = ExitAttemptStore(tmp_path / "exit_attempts.json")
-        arb = ExitArbiter(
-            state_store=PositionExitStateStore(
-                tmp_path / "exit_state.json"),
-            attempt_store=store)
-        result = arb.arbitrate(
-            market_id=EXPIRED_TICKER, generation_id=GEN, held_side="yes",
-            remaining_cc=300, breakeven_floor_cents=36,
-            book=ExitBook(
-                held_side="yes", liquidation_cents=60, qty_cc=500,
-                age_ms=50),
-            proposals=[ExitProposal(
-                kind=ProposalKind.MODEL_EXIT.value, proposal_id="p1",
-                limit_cents=55, qty_cc=300, reason="test")])
-        assert result.status == "submitted"
+        arb = _mint_wedged(tmp_path, EXPIRED_TICKER)
+        store = arb.attempt_store
 
         attempt = store.get_active(PKEY_EXPIRED)
         for i in range(store._MAX_ACTIVE_HISTORY + 200):
