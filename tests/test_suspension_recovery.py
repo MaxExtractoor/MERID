@@ -49,6 +49,31 @@ def lanes(tmp_path, monkeypatch):
     # assertions below (unlisted cells can never auto-release).  Tests that
     # exercise the allowlist set it explicitly themselves.
     monkeypatch.delenv("MERID_RECOVERY_ALLOWLIST", raising=False)
+    # Hermetic timing/budget policy: the developer .env tunes every one of
+    # these knobs for live, which made the lifecycle assertions below
+    # machine-dependent.  Pin each exercised knob to its documented default
+    # so the tests verify the mechanism, not the ambient configuration.
+    for _name, _val in {
+        "MERID_CBP_RECOVERY_MECH_MIN_S": str(6.0 * 3600.0),
+        "MERID_CBP_RECOVERY_EQ_MIN_S": str(24.0 * 3600.0),
+        "MERID_CBP_RECOVERY_ECON_MIN_S": str(24.0 * 3600.0),
+        "MERID_CBP_RECOVERY_CONTRACT_MIN_S": str(24.0 * 3600.0),
+        "MERID_CBP_PROBATION_RESET_COOLDOWN_S": str(24.0 * 3600.0),
+        "MERID_CBP_PROBATION_EQ_COOLDOWN_S": str(6.0 * 3600.0),
+        "MERID_CBP_PROBATION_CONTRACT_COOLDOWN_S": str(24.0 * 3600.0),
+        "MERID_CBP_PROBATION_MECH_PAUSE_S": str(1.0 * 3600.0),
+        "MERID_CBP_PROBATION_MAX_SUBMISSIONS": "1",
+        "MERID_CBP_PROBATION_MAX_FILLS": "1",
+        "MERID_CBP_PROBATION_LOSS_BUDGET_CENTS": "50",
+        "MERID_CBP_PROBATION_PASS_OBS": "2",
+        "MERID_THRESHOLD_CELL_SUSPEND_EXEC_FAILURES": "2",
+        "MERID_THRESHOLD_CELL_PROBATION_MIN_SUSPEND_S": "3600",
+        "MERID_THRESHOLD_CELL_PROBATION_MAX_SUBMISSIONS": "1",
+        "MERID_THRESHOLD_CELL_PROBATION_MAX_FILLS": "1",
+        "MERID_THRESHOLD_CELL_PROBATION_LOSS_BUDGET_CENTS": "50",
+        "MERID_THRESHOLD_CELL_PROBATION_PASS_OBS": "2",
+    }.items():
+        monkeypatch.setenv(_name, _val)
     cbp._STATE_CACHE = None
     cbp._STATE_CACHE_PATH = None
     tc._STATE_CACHE = None
@@ -58,6 +83,32 @@ def lanes(tmp_path, monkeypatch):
     cbp._STATE_CACHE_PATH = None
     tc._STATE_CACHE = None
     tc._STATE_CACHE_PATH = None
+
+
+@pytest.fixture()
+def evidence_env(tmp_path, monkeypatch):
+    """Hermetic evidence-policy economics for the artifact tests below.
+
+    The developer .env tunes the sparse uplift, enables bounded lanes
+    (pinned-fav / drift / cheap-NO) whose negative floors substitute for
+    the generic uplift inside their price bands, and may exhaust or move
+    the shared escape budget — any of which flips the allowed/code
+    verdicts asserted here.  Pin the exercised knobs to documented
+    defaults and give the escape counter a hermetic state file."""
+    monkeypatch.setenv("MERID_EVIDENCE_SPARSE_UPLIFT_C", "2.0")
+    monkeypatch.setenv("MERID_EVIDENCE_CELL_POLICY", "1")
+    monkeypatch.setenv("MERID_EVIDENCE_ESCAPE_LANE", "1")
+    monkeypatch.setenv("MERID_EVIDENCE_ESCAPE_DAILY_MAX", "12")
+    monkeypatch.setenv(
+        "MERID_EVIDENCE_ESCAPE_STATE_PATH",
+        str(tmp_path / "escape_fills.json"),
+    )
+    # Bounded-lane floor substitution off: the empty-evidence bound must
+    # be the generic sparse uplift, not a lane's negative floor.
+    monkeypatch.delenv("MERID_PINNED_FAV_ENABLED", raising=False)
+    monkeypatch.delenv("MERID_DRIFT_LANE_ENABLED", raising=False)
+    monkeypatch.delenv("MERID_CHEAP_NO_LANE_ENABLED", raising=False)
+    yield
 
 
 def _seed_cell(module, path_key, cell_id, *, state, reason, age_s, lanes,
@@ -135,11 +186,18 @@ def test_router_reason_with_postonly_parenthetical_is_mechanical(lanes):
 
 # ── 2. Operational failures are not economic losses ─────────────────────────
 
-def test_router_rejects_are_execution_class_not_losses(lanes):
-    """Two consecutive router rejects suspend with class=mechanical and write
-    NO outcome rows — the reject is never double-counted as a losing trade."""
+def test_router_rejects_are_execution_class_not_losses(lanes, monkeypatch):
+    """N consecutive router rejects suspend with class=mechanical and write
+    NO outcome rows — the reject is never double-counted as a losing trade.
+
+    The streak threshold is env-tunable (MERID_CBP_ROUTER_CONSEC_SUSPEND;
+    live default raised 2 -> 3 on 2026-10-14 for degraded-WS reject
+    bursts).  Pin it to 2 to exercise the exact boundary."""
+    monkeypatch.setenv("MERID_CBP_ROUTER_CONSEC_SUSPEND", "2")
     cid = "cbp_btc_no_60_70_t300_600"
     cbp.record_provisional_router_reject(cid)
+    # Below the streak bound: still provisional.
+    assert cbp.get_cell_state(cid) != cbp.CELL_STATE_SUSPENDED
     cbp.record_provisional_router_reject(cid)
     assert cbp.get_cell_state(cid) == cbp.CELL_STATE_SUSPENDED
     rec = (cbp._load_state()["cell_states"])[cid]
@@ -344,7 +402,7 @@ def test_hard_block_never_soft_overridden(lanes):
 
 # ── 6. Missing / stale artifact policy ──────────────────────────────────────
 
-def test_missing_artifact_never_production_qualifies():
+def test_missing_artifact_never_production_qualifies(evidence_env):
     """Missing artifact -> insufficient evidence or a bounded escape pass;
     SUFFICIENT (production) is unreachable."""
     d = ep.evaluate_missing_artifact(
@@ -360,7 +418,7 @@ def test_missing_artifact_never_production_qualifies():
     assert d2.escape_required is True
 
 
-def test_stale_artifact_pass_is_escape_only():
+def test_stale_artifact_pass_is_escape_only(evidence_env):
     """A stale artifact can produce a pass, but it must ride the escape lane
     (escape_required=True) — never a clean SUFFICIENT production verdict."""
     stale = {
@@ -381,7 +439,7 @@ def test_stale_artifact_pass_is_escape_only():
         assert d.code == "CELL_EVIDENCE_PASS"  # flagged via escape, not production
 
 
-def test_artifact_missing_never_hard_blocks():
+def test_artifact_missing_never_hard_blocks(evidence_env):
     """Missing evidence must not manufacture a toxic-cell veto either."""
     d = ep.evaluate_missing_artifact(
         "BTC", "yes", 40.0, 300.0, 0.02, 0.005, -50.0,
