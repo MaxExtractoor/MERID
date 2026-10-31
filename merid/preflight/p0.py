@@ -216,7 +216,16 @@ async def run_p0_preflight_checks(
         for f in fills:
             ex_by_order.setdefault(f.get("order_id"), []).append(f)
 
-        in_by_id = {f.fill_id: f for f in internal_fills}
+        # Settlement-proceeds records (fill_source == "settlement") are
+        # ledger-native cash movements booked from /portfolio/settlements —
+        # not trades, so the exchange /portfolio/fills feed can never return
+        # them.  Comparing them against the external fill set is a guaranteed
+        # false divergence; exclude them from the identity comparison.
+        in_by_id = {
+            f.fill_id: f
+            for f in internal_fills
+            if getattr(f, "fill_source", None) != "settlement"
+        }
 
         only_exchange = ex_ids - set(in_by_id)
         only_internal = set(in_by_id) - ex_ids
