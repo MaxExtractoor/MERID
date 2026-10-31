@@ -638,6 +638,10 @@ class OrderManager:
                         order_type="market",
                         outcome_id=tracked.outcome,
                         reduce_only=True,
+                        # Kalshi's order endpoint only accepts reduce_only
+                        # with immediate_or_cancel; an emergency flatten is a
+                        # risk-reduction exit so IOC is the correct TIF.
+                        time_in_force="IOC",
                     )
                     flatten_placed = await self._client.place_order(flatten_order)
                 if flatten_placed is not None:

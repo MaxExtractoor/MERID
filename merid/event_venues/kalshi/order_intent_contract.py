@@ -654,6 +654,12 @@ class CanonicalOrderIntent:
     # into the firewall approval so a post-approval shard change is rejected.
     exchange_index: int | None = None
 
+    # Contract-semantics fingerprint bound to this intent at approval time
+    # (merid.event_venues.kalshi.contract_fingerprint).  A material rules/
+    # payout change must invalidate affected approvals, not reinterpret them.
+    contract_semantics_hash: str | None = None
+    execution_metadata_version: str | None = None
+
     def yes_delta(self) -> int:
         """Signed-YES centi-contract delta for this order."""
         return yes_delta(self.action, self.contract, self.qty_cc)
@@ -1194,6 +1200,30 @@ def normalize_order(
             or getattr(intent, "agent_id", None)
         )
 
+    # Contract-semantics fingerprint: prefer explicit producer-supplied
+    # values; otherwise compute from any market-metadata payload the intent
+    # carries (``market_meta`` / ``raw_market`` / ``market_dict``).  Missing
+    # metadata leaves the fields None — unverified, never a false match.
+    _sem_hash = getattr(intent, "contract_semantics_hash", None)
+    _exec_ver = getattr(intent, "execution_metadata_version", None)
+    if _sem_hash is None or _exec_ver is None:
+        try:
+            from merid.event_venues.kalshi.contract_fingerprint import (
+                compute_contract_fingerprints,
+            )
+            _meta = (
+                getattr(intent, "market_meta", None)
+                or getattr(intent, "raw_market", None)
+                or getattr(intent, "market_dict", None)
+            )
+            _c_sem, _c_exec = compute_contract_fingerprints(_meta)
+            if _sem_hash is None:
+                _sem_hash = _c_sem
+            if _exec_ver is None:
+                _exec_ver = _c_exec
+        except Exception:
+            pass
+
     return CanonicalOrderIntent(
         market_ticker=market_ticker,
         contract=contract,  # type: ignore[arg-type]
@@ -1221,6 +1251,8 @@ def normalize_order(
         time_to_expiry_seconds=getattr(intent, "time_to_expiry_seconds", None),
         settlement_input_price=getattr(intent, "settlement_input_price", None),
         cf_rti_basis=getattr(intent, "cf_rti_basis", None),
+        contract_semantics_hash=_sem_hash,
+        execution_metadata_version=_exec_ver,
         is_counter_trend=bool(getattr(intent, "is_counter_trend", False)),
         thesis_side=getattr(intent, "thesis_side", None),
         parent_entry_fill_id=getattr(intent, "parent_entry_fill_id", None),
@@ -1317,6 +1349,22 @@ def validate_canonical_intent(
         raise OrderIntentValidationError(f"invalid_price:price_cents={i.limit_cents}")
     if i.qty_cc <= 0:
         raise OrderIntentValidationError("non_positive_size")
+
+    # Kalshi order-endpoint capability: reduce_only=true requires
+    # time_in_force=immediate_or_cancel — the exchange cannot express resting
+    # reduce-only protection.  A resting exit is a separate policy that relies
+    # on internal inventory controls; it must not claim exchange-level
+    # reduce-only.  Reject the incompatible combination at construction-time
+    # validation rather than letting it reach serialization or silently
+    # changing its execution policy.
+    _tif_norm = str(getattr(i, "time_in_force", "") or "").strip().lower()
+    if getattr(i, "reduce_only", False) and _tif_norm not in (
+        "ioc",
+        "immediate_or_cancel",
+    ):
+        raise OrderIntentValidationError(
+            f"reduce_only_requires_ioc:tif={_tif_norm or 'unset'}"
+        )
 
     # New-entry invariants: hard TTE cutoff, positive EV, and extreme-price margin.
     if i.purpose == "open":

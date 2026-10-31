@@ -1871,7 +1871,13 @@ class RestingOrderMonitor:
                 agent_id="merid.position_management.position_monitor",
                 aggressiveness=state.current_aggressiveness,
                 entry_or_exit="exit",
-                reduce_only=True,
+                # Kalshi's order endpoint only accepts reduce_only with
+                # immediate_or_cancel.  A resting (GTC) exit cannot carry
+                # exchange-level reduce-only protection — its inventory bound
+                # is the internal expected-position/arbiter controls — so the
+                # wire flag must be False here rather than emit a combination
+                # the endpoint rejects.
+                reduce_only=False,
                 exit_reason=state.exit_reason,
                 exit_policy_id=state.exit_policy_id,
                 **retry_kwargs,

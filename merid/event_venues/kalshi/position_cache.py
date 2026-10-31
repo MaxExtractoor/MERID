@@ -7737,7 +7737,11 @@ class KalshiPositionCache:
             # Bracket orders are exit orders and must bypass entry guards
             entry_or_exit="exit",
             exit_reason="BRACKET_TAKE_PROFIT",
-            reduce_only=True,
+            # Resting (GTC) bracket exits cannot carry reduce_only on the
+            # Kalshi order endpoint (reduce_only requires IOC).  The bracket
+            # exit's inventory bound is the internal pre/post-position
+            # contract fields below, not the exchange flag.
+            reduce_only=False,
             # CRITICAL FIX (2026-08-07): Bracket exit intents must carry position-delta
             # contract fields. _route_live enforces pre_position_size>0 for every exit,
             # and bracket orders close the full position so expected_post_position_size=0.

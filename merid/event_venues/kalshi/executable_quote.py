@@ -91,6 +91,13 @@ class ExecutableQuote:
     # Walked ladder ((price_cents, size) held-side, best-first) for audit
     levels: Tuple[Tuple[int, int], ...] = ()
 
+    # Own-liquidity overlay (self-trade-prevention aware depth simulation)
+    stp_policy: str = "taker_at_cross"         # self-trade prevention simulated
+    own_liquidity_blocked: int = 0             # own contracts on the walked ladder
+    external_depth_contracts: int = 0          # fillable depth excluding own
+    own_book_anomaly: bool = False             # own qty > public level (desync)
+    own_unattributable: int = 0                # own orders with unresolved level
+
 
 @dataclass(frozen=True)
 class QuoteUnavailable:
@@ -158,6 +165,177 @@ def _as_size(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _normalize_own_order(o: Any) -> Tuple[Optional[str], Optional[str], Optional[int], int]:
+    """Normalize a registry order record to (action, outcome, price_cents, qty).
+
+    ``action`` is "buy"/"sell" in economic terms; ``outcome`` is "yes"/"no".
+    Returns (None, ...) entries for unparseable records — callers must treat
+    missing fields as *unattributable* (conservative: never silently drop own
+    liquidity from the overlay when the record is ambiguous).
+    """
+    side = str(getattr(o, "side", "") or "").lower()
+    outcome = str(getattr(o, "outcome_id", "") or "").lower()
+    raw = getattr(o, "raw_data", None) or {}
+
+    # Prefer canonical provenance when present (e.g. "buy_yes"/"sell_no",
+    # kalshi_side field) — V2 book-side labels ("bid"/"ask") are YES-space.
+    kside = str(raw.get("kalshi_side") or raw.get("action") or "").lower()
+    if kside.startswith("buy_") or kside.startswith("sell_"):
+        try:
+            action, outcome = kside.split("_", 1)
+        except ValueError:
+            action, outcome = None, None
+    elif side in ("bid", "ask"):
+        # V2 book side: bid = buy YES exposure; ask = sell YES exposure.
+        action = "buy" if side == "bid" else "sell"
+        outcome = "yes"
+    elif side in ("buy", "sell"):
+        action = side
+    else:
+        action = None
+
+    if outcome not in ("yes", "no"):
+        outcome = outcome if outcome in ("yes", "no") else None
+
+    price_cents: Optional[int] = None
+    price = getattr(o, "price", None)
+    if price is not None:
+        try:
+            price_cents = int(round(float(price) * 100))
+        except (TypeError, ValueError):
+            price_cents = None
+    if price_cents is not None and not (0 < price_cents < 100):
+        price_cents = None
+
+    qty = 0
+    rem = getattr(o, "remaining_size", None)
+    try:
+        if rem is not None:
+            qty = int(rem)
+        else:
+            qty = max(0, int(getattr(o, "size", 0) or 0) - int(getattr(o, "filled_size", 0) or 0))
+    except (TypeError, ValueError):
+        qty = 0
+
+    return action, outcome, price_cents, qty
+
+
+def _own_qty_by_level(
+    ticker: str,
+    held_side: str,
+    purpose: str,
+    own_orders: Optional[List[Any]] = None,
+) -> Tuple[dict, int]:
+    """Map ladder price (held-side space) -> own resting quantity.
+
+    For ENTRY we walk the held-side ask ladder: level ``a`` is occupied by
+    own (sell, held_side) orders priced ``a`` and own (buy, opposite) orders
+    priced ``100 - a`` (a buy-NO@43 is economically a YES-ask@57).
+
+    For EXIT/MARK we walk the held-side bid ladder: level ``p`` holds own
+    (buy, held_side) orders priced ``p``.
+
+    Returns (own_qty_map, unattributable_count).  ``unattributable_count``
+    counts own resting orders on this ticker whose level could not be
+    resolved — depth simulation must flag rather than assume them away.
+    """
+    if own_orders is None:
+        try:
+            from merid.event_venues.kalshi.live_open_order_registry import (
+                get_live_open_order_registry,
+            )
+            own_orders = get_live_open_order_registry().snapshot()
+        except Exception:
+            own_orders = []
+
+    _TERMINAL = {"filled", "cancelled", "canceled", "expired", "closed", "rejected"}
+    own: dict = {}
+    unattributable = 0
+    opposite = "no" if held_side == "yes" else "yes"
+    for o in own_orders:
+        try:
+            if getattr(o, "market_id", None) != ticker:
+                continue
+            if str(getattr(o, "status", "") or "").lower() in _TERMINAL:
+                continue
+            action, outcome, price_cents, qty = _normalize_own_order(o)
+            if qty <= 0:
+                continue
+            if action is None or price_cents is None or outcome not in ("yes", "no"):
+                unattributable += 1
+                continue
+            if purpose == QuotePurpose.ENTRY:
+                # Ask-side presence in held-side space.
+                if action == "sell" and outcome == held_side:
+                    level_price = price_cents
+                elif action == "buy" and outcome == opposite:
+                    level_price = 100 - price_cents
+                else:
+                    continue
+            else:
+                # Bid-side presence in held-side space.
+                if action == "buy" and outcome == held_side:
+                    level_price = price_cents
+                else:
+                    continue
+            own[level_price] = own.get(level_price, 0) + qty
+        except Exception:
+            unattributable += 1
+    return own, unattributable
+
+
+def _vwap_with_ownership(
+    levels: List[Tuple[int, int]],
+    own_qty_map: dict,
+    quantity: int,
+    stp: str = "taker_at_cross",
+) -> Tuple[Optional[float], int, int, int, bool]:
+    """Ownership-aware depth walk.
+
+    Simulates the configured self-trade-prevention policy:
+
+    - ``taker_at_cross``: matching stops at the first level carrying own
+      quantity; earlier external fills remain.  Queue position inside a
+      mixed-ownership level is unknowable, so the conservative bound is to
+      take *no* fills at the own-touching level.
+    - ``maker``: the own resting order is canceled and matching continues;
+      external liquidity is ``size - own``.
+
+    Returns ``(vwap_cents, contracts_covered, top_external_size,
+    own_blocked_contracts, own_book_anomaly)``.  ``own_book_anomaly`` is True
+    when own quantity exceeds a public level's size — a registry/public-book
+    desync the caller should surface, not silently clip.
+    """
+    if quantity <= 0:
+        return None, 0, (levels[0][1] if levels else 0), 0, False
+    total_cost = 0
+    covered = 0
+    own_blocked = 0
+    anomaly = False
+    top_external = 0
+    for i, (price, size) in enumerate(levels):
+        own = int(own_qty_map.get(price, 0) or 0)
+        external = size - own
+        if external < 0:
+            anomaly = True
+            external = 0
+        if i == 0:
+            top_external = external
+        if own > 0:
+            own_blocked += own
+            if stp == "taker_at_cross":
+                break
+        take = min(external, quantity - covered)
+        if take > 0:
+            total_cost += price * take
+            covered += take
+        if covered >= quantity:
+            break
+    if covered <= 0:
+        return None, 0, top_external, own_blocked, anomaly
+    return total_cost / covered, covered, top_external, own_blocked, anomaly
 
 
 def _vwap(levels: List[Tuple[int, int]], quantity: int) -> Tuple[Optional[float], int, int]:
@@ -256,6 +434,8 @@ def resolve_executable_quote(
     purpose: str = QuotePurpose.EXIT,
     required_freshness_ms: Optional[float] = None,
     state: Optional[KalshiMarketState] = None,
+    self_trade_prevention: str = "taker_at_cross",
+    own_orders: Optional[List[Any]] = None,
 ) -> Any:
     """Resolve the canonical executable quote for ``held_side`` on ``ticker``.
 
@@ -411,8 +591,36 @@ def resolve_executable_quote(
             top_size = 0
         trade_levels = [(ask_cents, top_size or 1)]
 
-    vwap, covered, top_size = _vwap(trade_levels, quantity)
-    total_depth = sum(s for _, s in trade_levels)
+    # ── Own-liquidity overlay ────────────────────────────────────────────
+    # The public ladder includes our own resting orders.  Simulate the
+    # configured self-trade-prevention policy so the reported depth/VWAP is
+    # externally fillable liquidity, not phantom size we would self-match:
+    # taker_at_cross stops at the first own-touching level; maker skips own
+    # quantity and continues.  A registry/public-book race (own qty larger
+    # than the level) is surfaced as own_book_anomaly, never clipped silent.
+    own_qty_map, own_unattributable = _own_qty_by_level(
+        ticker, held_side, purpose, own_orders
+    )
+    (
+        vwap,
+        covered,
+        top_size,
+        own_blocked,
+        own_book_anomaly,
+    ) = _vwap_with_ownership(
+        trade_levels, own_qty_map, quantity, stp=self_trade_prevention
+    )
+    total_depth = sum(
+        max(0, s - int(own_qty_map.get(p, 0) or 0)) for p, s in trade_levels
+    )
+    if own_book_anomaly or own_unattributable:
+        logger.warning(
+            "[EXECUTABLE-QUOTE-OWN-DESYNC] ticker=%s held=%s purpose=%s "
+            "anomaly=%s unattributable=%d own_blocked=%d - own-order overlay "
+            "disagrees with public depth",
+            ticker, held_side, purpose, own_book_anomaly,
+            own_unattributable, own_blocked,
+        )
 
     # Missing leg marking: for an exit quote whose ask side is absent, derive
     # it reciprocally for telemetry only (not executable).
@@ -432,7 +640,15 @@ def resolve_executable_quote(
         best_level_size=top_size,
         vwap_cents=vwap,
         available_depth=total_depth,
-        depth_sufficient=covered >= quantity,
+        # Depth evidence is incomplete when the own overlay could not
+        # fully attribute own resting quantity (own>public desync or
+        # unresolvable orders): the walked estimate may include our own
+        # liquidity and cannot authorize depth-dependent execution.
+        depth_sufficient=(
+            covered >= quantity
+            and not own_book_anomaly
+            and own_unattributable == 0
+        ),
         quantity=quantity,
         derived_from_reciprocal=derived,
         corrected_to_rest=corrected_to_rest,
@@ -445,6 +661,11 @@ def resolve_executable_quote(
         snapshot_monotonic_ts=last_book_ts,
         seconds_to_expiry=getattr(state, "seconds_to_expiry", None),
         levels=tuple(trade_levels[:10]),
+        stp_policy=self_trade_prevention,
+        own_liquidity_blocked=own_blocked,
+        external_depth_contracts=total_depth,
+        own_book_anomaly=own_book_anomaly,
+        own_unattributable=own_unattributable,
     )
 
 

@@ -193,16 +193,16 @@ class MakerTakerPolicyEngine:
             RoleDecision with recommended role and execution params
         """
         # Import here to avoid circular dependency
-        from merid.event_venues.kalshi.parabolic_fees import (
-            kalshi_taker_fee_cents_parabolic,
-            kalshi_maker_fee_cents,
-        )
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
 
         price_dollars = price_cents / 100.0
 
-        # Calculate fees for both roles
-        taker_fee_cents = kalshi_taker_fee_cents_parabolic(price_dollars, contracts)
-        maker_fee_cents = kalshi_maker_fee_cents(price_dollars, contracts)
+        # Calculate fees for both roles.  The canonical 0.01c-precision
+        # estimate is required here: whole-cent helpers over-charge
+        # sub-1-contract orders by up to ~1c and invert the maker/taker
+        # comparison on fractional sizes.
+        taker_fee_cents = float(kalshi_fee_cents_exact(price_dollars, contracts, "taker"))
+        maker_fee_cents = float(kalshi_fee_cents_exact(price_dollars, contracts, "maker"))
 
         # Convert fees to percentage of notional
         notional_cents = price_cents * contracts
@@ -226,7 +226,7 @@ class MakerTakerPolicyEngine:
                 post_only=True,
                 reason=f"NEUTRAL_MM: Maker-only mode. Edge={edge_pct:.2f}%, net_of_maker_fee={edge_net_of_maker:.3f}%, threshold={self.aggressive_maker_threshold_pct:.2f}%",
                 threshold_pct=self.aggressive_maker_threshold_pct,
-                fee_cents_estimate=maker_fee_cents,
+                fee_cents_estimate=int(math.ceil(maker_fee_cents)),
                 edge_net_of_fees_pct=edge_net_of_maker,
             )
 
@@ -248,7 +248,7 @@ class MakerTakerPolicyEngine:
                         f"Edge {edge_pct:.2f}% net of taker fee {edge_net_of_taker:.3f}%"
                     ),
                     threshold_pct=self.aggressive_threshold_pct,
-                    fee_cents_estimate=taker_fee_cents,
+                    fee_cents_estimate=int(math.ceil(taker_fee_cents)),
                     edge_net_of_fees_pct=edge_net_of_taker,
                 )
             elif crosses_spread and edge_net_of_taker >= self.aggressive_threshold_pct:
@@ -263,7 +263,7 @@ class MakerTakerPolicyEngine:
                         f"threshold {self.aggressive_threshold_pct:.2f}%"
                     ),
                     threshold_pct=self.aggressive_threshold_pct,
-                    fee_cents_estimate=taker_fee_cents,
+                    fee_cents_estimate=int(math.ceil(taker_fee_cents)),
                     edge_net_of_fees_pct=edge_net_of_taker,
                 )
             else:
@@ -283,7 +283,7 @@ class MakerTakerPolicyEngine:
                         f"Net of maker fee: {edge_net_of_maker:.3f}% (threshold={self.aggressive_maker_threshold_pct:.2f}%)"
                     ),
                     threshold_pct=self.aggressive_maker_threshold_pct,
-                    fee_cents_estimate=maker_fee_cents,
+                    fee_cents_estimate=int(math.ceil(maker_fee_cents)),
                     edge_net_of_fees_pct=edge_net_of_maker,
                 )
 
@@ -302,7 +302,7 @@ class MakerTakerPolicyEngine:
                         f"net of taker fee {edge_net_of_taker:.3f}% >= {self.arb_min_edge_pct:.2f}%"
                     ),
                     threshold_pct=self.arb_min_edge_pct,
-                    fee_cents_estimate=taker_fee_cents,
+                    fee_cents_estimate=int(math.ceil(taker_fee_cents)),
                     edge_net_of_fees_pct=edge_net_of_taker,
                 )
             else:
@@ -320,7 +320,7 @@ class MakerTakerPolicyEngine:
                         f"Using maker. Net: {edge_net_of_maker:.3f}% (threshold={self.aggressive_maker_threshold_pct:.2f}%)"
                     ),
                     threshold_pct=self.aggressive_maker_threshold_pct,
-                    fee_cents_estimate=maker_fee_cents,
+                    fee_cents_estimate=int(math.ceil(maker_fee_cents)),
                     edge_net_of_fees_pct=edge_net_of_maker,
                 )
 
@@ -334,7 +334,7 @@ class MakerTakerPolicyEngine:
                 post_only=True,
                 reason=f"Unknown mode {mode}, defaulting to safe maker-only",
                 threshold_pct=0.0,
-                fee_cents_estimate=maker_fee_cents,
+                fee_cents_estimate=int(math.ceil(maker_fee_cents)),
                 edge_net_of_fees_pct=edge_pct - maker_fee_pct,
             )
 
@@ -364,10 +364,14 @@ class MakerTakerPolicyEngine:
         Returns:
             RoleDecision with TAKER role if PnL >= threshold, else standard logic
         """
-        # Calculate fees
-        from merid.event_venues.kalshi.parabolic_fees import kalshi_taker_fee_cents_parabolic
+        # Calculate fees.  Canonical 0.01c-precision estimate and correct
+        # units: the fee API takes price_dollars, so price_cents must be
+        # divided by 100 (previously passed raw, clamping to P=0.99).
+        from merid.event_venues.kalshi.parabolic_fees import kalshi_fee_cents_exact
         notional_cents = price_cents * contracts
-        taker_fee_cents = kalshi_taker_fee_cents_parabolic(price_cents, contracts)
+        taker_fee_cents = float(
+            kalshi_fee_cents_exact(price_cents / 100.0, contracts, "taker")
+        )
         taker_fee_pct = (taker_fee_cents / notional_cents) * 100 if notional_cents > 0 else 0
 
         # Check if we should force taker due to high PnL
@@ -387,7 +391,7 @@ class MakerTakerPolicyEngine:
                     f"threshold={force_taker_threshold_pct:.1f}% — ensuring exit fill"
                 ),
                 threshold_pct=force_taker_threshold_pct,
-                fee_cents_estimate=taker_fee_cents,
+                fee_cents_estimate=int(math.ceil(taker_fee_cents)),
                 edge_net_of_fees_pct=unrealized_pnl_pct - taker_fee_pct,
             )
 

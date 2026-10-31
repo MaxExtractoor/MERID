@@ -155,6 +155,38 @@ def merid_time_in_force_to_kalshi_api(tif: Optional[str]) -> str:
     return "good_till_canceled"
 
 
+# Kalshi order-endpoint capability matrix (Create Order V2 documented
+# constraints; applied to both the V1-legacy and V2 payload builders):
+#   * reduce_only=true requires time_in_force=immediate_or_cancel — the
+#     exchange cannot express resting reduce-only protection.
+#   * immediate_or_cancel / fill_or_kill reject expiration_time — they never
+#     rest, so an expiry is meaningless.
+#   * expiration_time is only valid on good_till_canceled.
+#   * post_only rejects immediate_or_cancel / fill_or_kill (guarded at the
+#     call sites as well).
+def validate_kalshi_wire_compat(kalshi_order: Dict[str, Any]) -> Optional[str]:
+    """Return a machine-readable rejection reason when a serialized order
+    violates the endpoint capability matrix, else ``None``.
+
+    This is a fail-closed assertion on the *final payload*; it never mutates
+    the order or relaxes policy.  Callers must reject on a non-None return.
+    """
+    tif = str(kalshi_order.get("time_in_force") or "")
+    if kalshi_order.get("reduce_only") and tif != "immediate_or_cancel":
+        return f"reduce_only_requires_ioc:tif={tif or 'unset'}"
+    if (
+        kalshi_order.get("expiration_time") is not None
+        or kalshi_order.get("expiration_ts") is not None
+    ) and tif in ("immediate_or_cancel", "fill_or_kill"):
+        return f"tif_with_expiration:tif={tif}"
+    if kalshi_order.get("post_only") and tif in (
+        "immediate_or_cancel",
+        "fill_or_kill",
+    ):
+        return f"post_only_incompatible_with_tif:tif={tif}"
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Order Group Status Enum
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2769,22 +2801,22 @@ class KalshiVenueClient(EventVenueClient):
             kalshi_order["post_only"] = True
 
         # CRITICAL GUARD: Kalshi V2 rejects post_only=True with time_in_force in
-        # {immediate_or_cancel, fill_or_kill} with "Post_only_but_execution_type_can't_rest".
-        # This is a fail-closed last-line-of-defense; the order router should never
-        # emit such a combination, but if it does we abort the wire call cleanly.
-        if kalshi_order.get("post_only") and kalshi_order.get("time_in_force") in (
-            "immediate_or_cancel",
-            "fill_or_kill",
-        ):
+        # {immediate_or_cancel, fill_or_kill} with "Post_only_but_execution_type_can't_rest",
+        # and reduce_only=True with any resting TIF.  This is a fail-closed
+        # last-line-of-defense; the order router should never emit such a
+        # combination, but if it does we abort the wire call cleanly rather
+        # than send a request the endpoint must reject.
+        _wire_incompat = validate_kalshi_wire_compat(kalshi_order)
+        if _wire_incompat is not None:
             logger.critical(
-                "[CLIENT-POST-ONLY-TIF-INVARIANT] ticker=%s client_order_id=%s "
-                "post_only=True with time_in_force=%s is not supported by Kalshi; rejecting",
+                "[CLIENT-WIRE-COMPAT-INVARIANT] ticker=%s client_order_id=%s "
+                "incompatible order combination: %s; rejecting",
                 ticker,
                 kalshi_order.get("client_order_id", "N/A"),
-                kalshi_order["time_in_force"],
+                _wire_incompat,
             )
             return OperationResult.fail(
-                "post_only_incompatible_with_tif",
+                _wire_incompat,
                 latency_ms=0.0,
                 retries=0,
             )
@@ -3141,6 +3173,24 @@ class KalshiVenueClient(EventVenueClient):
             kalshi_order["reduce_only"] = True
         if getattr(order, "expiration_ts", None) is not None:
             kalshi_order["expiration_ts"] = int(order.expiration_ts)
+
+        # Endpoint capability matrix (same assert as the V2 builder): reject
+        # reduce_only+resting-TIF, IOC+expiration, and post_only+IOC locally
+        # instead of sending a request the venue must refuse.
+        _wire_incompat = validate_kalshi_wire_compat(kalshi_order)
+        if _wire_incompat is not None:
+            logger.critical(
+                "[KALSHI-V1-WIRE-COMPAT] ticker=%s client_order_id=%s "
+                "incompatible order combination: %s; rejecting",
+                ticker,
+                kalshi_order.get("client_order_id", "N/A"),
+                _wire_incompat,
+            )
+            return OperationResult.fail(
+                _wire_incompat,
+                latency_ms=0.0,
+                retries=0,
+            )
 
         if order.price is not None:
             # CRITICAL: V1 uses side-appropriate *_price_dollars fields. The

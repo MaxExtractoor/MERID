@@ -333,8 +333,19 @@ def _finalize_attempt_store_for_result(
             # canceled/filled order).  Without this branch an ACKNOWLEDGED
             # record stayed non-terminal forever — every retry rebound the
             # dead client_order_id and 409'd in a loop (ETH SELL_NO, ~427×).
-            # The in-memory ACKED state is superseded by the venue verdict.
-            target = "REJECTED"
+            # The in-memory ACKED state is superseded by the venue verdict —
+            # but ONLY by a venue verdict: a bare local "rejected" result
+            # (submission_attempted=False, certainty=pre_submit) cannot prove
+            # an acknowledged order dead, so it must not regress the record.
+            _venue_reject_evidence = bool(
+                getattr(result, "submission_attempted", False)
+            ) or (
+                getattr(result, "submission_certainty", None) == "rejected"
+            )
+            if record.status == "ACKNOWLEDGED" and not _venue_reject_evidence:
+                target = None
+            else:
+                target = "REJECTED"
         elif record.status == "PERSISTED":
             # Never reached the pre-submit marker: no exchange request was sent
             # for this attempt, so REJECTED is the accurate terminal state.

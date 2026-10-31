@@ -2275,7 +2275,7 @@ class KalshiMarketStateStore:
                 if _now_gap - self._last_seq_gap_log_ts.get(ticker, 0.0) >= 1.0:
                     self._last_seq_gap_log_ts[ticker] = _now_gap
                     logger.warning(
-                        "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%d - "
+                        "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%r - "
                         "ws leg invalid under rest-owned effective book; resync scheduled",
                         ticker, expected, msg_seq
                     )
@@ -2294,7 +2294,7 @@ class KalshiMarketStateStore:
                 f"expected_seq={expected} got_seq={msg_seq}",
             )
             logger.warning(
-                "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%d - "
+                "[WS-SEQUENCE-GAP] ticker=%s expected_seq=%d got_seq=%r - "
                 "invalidating book and scheduling resync",
                 ticker, expected, msg_seq
             )
@@ -6556,12 +6556,18 @@ class KalshiMarketStateStore:
 
         msg_seq = msg.get("seq_first") or msg.get("seq")
         if msg_seq is None:
-            return True, None, None
+            # Kalshi's feed contract delivers a contiguous subscription-scoped
+            # seq on every orderbook delta, including conflated streams.  A
+            # delta that reaches this path without one is malformed (parser,
+            # schema, or feed mismatch); with an established baseline we
+            # cannot prove the local book is complete, so treat it like a gap
+            # and invalidate rather than silently apply it.
+            return False, ob.last_seq + 1, None
 
         try:
             msg_seq = int(msg_seq)
         except Exception:
-            return True, None, None
+            return False, ob.last_seq + 1, msg_seq
 
         expected = ob.last_seq + 1
         _sid = msg.get("_sid") or msg.get("sid")

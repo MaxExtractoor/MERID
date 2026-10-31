@@ -80,22 +80,41 @@ def _validate_price(price_dollars: float) -> float:
     return price_dollars
 
 
-def kalshi_fee_cents_exact(
+# ============================================================================
+# Canonical fee interface (Kalshi documented fee-rounding mechanics)
+# ============================================================================
+#
+# Kalshi's documented fee pipeline has three distinct operations:
+#
+#   1. model fee      : ``rate * C * P * (1-P)`` rounded UP to $0.000001 (6dp)
+#   2. balance align  : the charged amount aligns to the account's balance
+#                       precision — $0.0001 for direct members, $0.01 for
+#                       non-direct members — via a signed-revenue accumulator
+#   3. reconciliation : the accumulator spans ALL fills of one order (taker
+#                       and maker together) with rebates for accumulated
+#                       residuals, so correctness is judged at cumulative
+#                       order scope, not per-fill rounding equality.
+#
+# Accordingly this module exposes three explicitly named functions —
+# ``model_trade_fee_dollars``, ``estimate_order_fee_bound_cents`` and
+# ``reconcile_order_fees_dollars`` — instead of one "exact" function being
+# reused for three different jobs.
+
+MODEL_FEE_PRECISION_DOLLARS = Decimal("0.000001")
+BALANCE_PRECISION_DIRECT_MEMBER_DOLLARS = Decimal("0.0001")
+BALANCE_PRECISION_NON_DIRECT_MEMBER_DOLLARS = Decimal("0.01")
+
+
+def model_trade_fee_dollars(
     price_dollars: float,
     contracts,
     role: Literal["taker", "maker"] = "taker",
     *,
     schedule: Optional["KalshiFeeSchedule"] = None,
 ) -> Decimal:
-    """Exact venue fee in cents (Decimal, 0.01c resolution) for fractional orders.
-
-    Verified against Kalshi V2 fill records (2026-09-14): the venue charges
-    ``rate * C * P * (1 - P)`` rounded UP to $0.0001 (0.01 cents), e.g. 1
-    contract at 47c -> $0.0175 (exact 0.017437) and 1 contract at 1.1c ->
-    $0.0008 (exact 0.000762).  It is NOT rounded up to a whole cent, so the
-    integer helpers above over-charge sub-1-contract orders by up to ~1c and
-    must not be used for live sizing / net-of-cost gates.  Returns 0 for
-    non-positive counts.
+    """Documented model trade fee in dollars: ``rate * C * P * (1-P)`` ceiled
+    to $0.000001 (6 decimal places).  This is the pre-balance-alignment fee
+    the venue publishes per fill.  Returns 0 for non-positive counts.
     """
     try:
         c = Decimal(str(contracts))
@@ -108,8 +127,121 @@ def kalshi_fee_cents_exact(
     sched = schedule or get_active_fee_schedule()
     p = Decimal(str(_validate_price(price_dollars)))
     rate = Decimal(str(sched.maker_rate if role == "maker" else sched.taker_rate))
-    fee_dollars = (rate * c * p * (Decimal("1") - p)).quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
+    return (rate * c * p * (Decimal("1") - p)).quantize(
+        MODEL_FEE_PRECISION_DOLLARS, rounding=ROUND_CEILING
+    )
+
+
+def estimate_order_fee_bound_cents(
+    price_dollars: float,
+    contracts,
+    role: Literal["taker", "maker"] = "taker",
+    *,
+    schedule: Optional["KalshiFeeSchedule"] = None,
+    direct_member: bool = True,
+) -> Decimal:
+    """Conservative fee bound in cents for entry gating / sizing.
+
+    Model fee (6dp ceil) bounded upward at the account's balance-alignment
+    precision.  The order-level accumulator may charge slightly *less* on
+    real multi-fill orders, so this is a valid conservative bound — not a
+    claim of exact per-fill charge.
+    """
+    model = model_trade_fee_dollars(
+        price_dollars, contracts, role, schedule=schedule
+    )
+    if model <= 0:
+        return Decimal("0")
+    precision = (
+        BALANCE_PRECISION_DIRECT_MEMBER_DOLLARS
+        if direct_member
+        else BALANCE_PRECISION_NON_DIRECT_MEMBER_DOLLARS
+    )
+    fee_dollars = model.quantize(precision, rounding=ROUND_CEILING)
     return fee_dollars * Decimal("100")
+
+
+def reconcile_order_fees_dollars(
+    actual_fill_fees_dollars,
+    model_fill_fees_dollars=None,
+    *,
+    direct_member: bool = True,
+) -> dict:
+    """Order-level fee reconciliation per Kalshi's accumulator model.
+
+    Args:
+        actual_fill_fees_dollars: iterable of per-fill charged fees (the
+            venue ``fee_cost`` values), in dollars.
+        model_fill_fees_dollars: optional iterable of per-fill model fees
+            (from ``model_trade_fee_dollars``) for the same fills, in
+            dollars.  When omitted only the actual cumulative fee is
+            reported.
+        direct_member: account balance precision selector.
+
+    Returns:
+        dict with ``actual_total``, ``model_total``, ``discrepancy``,
+        ``tolerance`` (one balance-precision unit per fill — the documented
+        accumulator/rebate scope), and ``within_documented_scope``.
+
+    Per-fill rounding deltas are expected under the accumulator; a
+    discrepancy beyond ``tolerance`` at cumulative order scope is the real
+    anomaly signal.
+    """
+    try:
+        actual_total = sum(Decimal(str(f)) for f in actual_fill_fees_dollars)
+    except Exception:
+        actual_total = Decimal("0")
+    n_fills = 0
+    try:
+        n_fills = len(list(actual_fill_fees_dollars))
+    except Exception:
+        pass
+    model_total = None
+    if model_fill_fees_dollars is not None:
+        try:
+            model_total = sum(Decimal(str(f)) for f in model_fill_fees_dollars)
+        except Exception:
+            model_total = None
+    precision = (
+        BALANCE_PRECISION_DIRECT_MEMBER_DOLLARS
+        if direct_member
+        else BALANCE_PRECISION_NON_DIRECT_MEMBER_DOLLARS
+    )
+    tolerance = precision * max(n_fills, 1)
+    discrepancy = (actual_total - model_total) if model_total is not None else None
+    within = (
+        abs(discrepancy) <= tolerance if discrepancy is not None else True
+    )
+    return {
+        "actual_total": actual_total,
+        "model_total": model_total,
+        "discrepancy": discrepancy,
+        "tolerance": tolerance,
+        "fill_count": n_fills,
+        "within_documented_scope": within,
+    }
+
+
+def kalshi_fee_cents_exact(
+    price_dollars: float,
+    contracts,
+    role: Literal["taker", "maker"] = "taker",
+    *,
+    schedule: Optional["KalshiFeeSchedule"] = None,
+) -> Decimal:
+    """Entry-gating fee estimate in cents (Decimal, 0.01c resolution).
+
+    Numerically identical to ``estimate_order_fee_bound_cents`` for a direct
+    member: model fee ceiled to 6dp, then bounded at the $0.0001 balance
+    precision.  Verified against Kalshi V2 fill records (2026-09-14): 1
+    contract at 47c -> $0.0175, at 1.1c -> $0.0008.  It is NOT rounded up to
+    a whole cent, so the integer helpers below over-charge sub-1-contract
+    orders by up to ~1c and must not be used for live sizing / net-of-cost
+    gates.  Returns 0 for non-positive counts.
+    """
+    return estimate_order_fee_bound_cents(
+        price_dollars, contracts, role, schedule=schedule
+    )
 
 
 def kalshi_taker_fee_cents_parabolic(
@@ -222,8 +354,15 @@ def kalshi_fee_cents_parabolic(
 ) -> int:
     """Unified parabolic fee calculator for both maker and taker roles.
 
-    This is the canonical fee function that should be used everywhere.
     Legacy kalshi_fee_cents() (tiered schedule) is deprecated.
+
+    DEPRECATED FOR LIVE GATING: returns whole-cent ceiling fees, which
+    over-charge sub-1-contract orders by up to ~1c and would reject every
+    fractional order if used as a gate.  Live approval, sizing, repricing,
+    and submission paths must use ``kalshi_fee_cents_exact`` /
+    ``estimate_order_fee_bound_cents`` (0.01c precision) instead; this
+    helper remains only as a conservative upper bound for display and
+    coarse telemetry.
 
     Args:
         price_dollars: Contract price in dollars (e.g., 0.55 for 55¢)
@@ -240,9 +379,9 @@ def kalshi_fee_cents_parabolic(
 
 def estimate_fee_for_sizing(
     price_cents: int,
-    contracts: int,
+    contracts,
     assume_taker: bool = True,
-) -> int:
+) -> float:
     """Estimate fee for position sizing calculations.
 
     Converts price_cents to dollars and calls parabolic fee function.
@@ -254,14 +393,17 @@ def estimate_fee_for_sizing(
         assume_taker: If True, use taker fee; otherwise use maker fee
 
     Returns:
-        Estimated fee in cents
+        Estimated fee in cents (fractional; sub-cent precision).  Previously
+        routed through the whole-cent integer helper, which rejects
+        sub-1-contract orders economically — now uses the canonical bound
+        estimate so fractional sizing sees the real fee.
     """
     if price_cents <= 0 or price_cents >= 100:
         return 0
 
     price_dollars = price_cents / 100.0
     role: Literal["taker", "maker"] = "taker" if assume_taker else "maker"
-    return kalshi_fee_cents_parabolic(price_dollars, contracts, role)
+    return float(kalshi_fee_cents_exact(price_dollars, contracts, role))
 
 
 def fee_per_contract_cents(

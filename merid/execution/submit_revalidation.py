@@ -49,6 +49,7 @@ SUBMIT_DEPTH_INSUFFICIENT = "submit_depth_insufficient"
 SUBMIT_RISK_CHANGED = "submit_risk_changed"
 SUBMIT_MARKET_NOT_TRADABLE = "submit_market_not_tradable"
 SUBMIT_REAPPROVAL_REQUIRED = "submit_reapproval_required"
+SUBMIT_DEPTH_UNRELIABLE = "submit_depth_unreliable"
 
 
 def _env_ms(name: str, default: int) -> int:
@@ -61,11 +62,21 @@ def _env_ms(name: str, default: int) -> int:
 @dataclass
 class AcquisitionBook:
     """Held-side ask depth: (price_cents, qty_cc) ascending by price,
-    plus provenance.  Built from market-state (or injected in tests)."""
+    plus provenance.  Built from market-state (or injected in tests).
+
+    ``own_levels`` maps held-side ask price -> own resting qty in cc, from
+    the ownership overlay: an own sell@a or own buy-opposite@(100-a) sits on
+    this ladder.  ``own_evidence_complete`` is False when own-order
+    attribution could not be performed (missing ticker / registry failure) —
+    depth-dependent decisions must not treat an unresolved overlay as an
+    empty one."""
     levels: List[Tuple[int, int]]          # (price_cents, qty_cc) asc
     book_age_ms: Optional[int] = None
     book_sequence: Optional[int] = None
     receipt_ts_utc: Optional[float] = None
+    own_levels: dict = field(default_factory=dict)
+    own_unattributable: int = 0
+    own_evidence_complete: bool = True
 
 
 @dataclass
@@ -84,6 +95,9 @@ class SubmitRevalidationInput:
     market_trading: bool = True
     resize_allowed: bool = False            # strategy policy
     post_only: bool = False                 # resting (maker) limit order
+    # self-trade-prevention policy the order will serialize; the depth
+    # simulator must use the same policy or it is pricing a different trade.
+    self_trade_prevention: str = "taker_at_cross"
     # freshness thresholds (lenient pending measured distributions)
     max_prob_age_ms: int = field(
         default_factory=lambda: _env_ms(
@@ -126,6 +140,49 @@ def _walk_book(levels: List[Tuple[int, int]], limit_cents: int,
         eligible += take
         cost += Decimal(price) * Decimal(take) / Decimal(100)
     return eligible, cost
+
+
+def _walk_book_owned(
+    levels: List[Tuple[int, int]],
+    own_levels: dict,
+    limit_cents: int,
+    want_cc: int,
+    stp: str = "taker_at_cross",
+) -> Tuple[int, Decimal, bool]:
+    """Self-trade-prevention-aware variant of ``_walk_book``.
+
+    ``own_levels`` maps price_cents -> own resting qty_cc on this ladder
+    (public sizes already include it).  Policies:
+
+    - ``taker_at_cross``: matching halts before the first own-touching
+      level — queue position inside a mixed level is unknowable, so the
+      conservative bound takes no fills at that level.
+    - ``maker``: own resting orders are canceled and skipped; external
+      depth continues.
+
+    Returns ``(eligible_cc, expected_cost_cents, own_book_anomaly)``.
+    ``own_book_anomaly`` is True when own qty exceeds a level's public
+    size — a registry/public-book desync; the depth estimate must not
+    authorize execution from that estimate.
+    """
+    eligible = 0
+    cost = Decimal("0")
+    anomaly = False
+    for price, qty in sorted(levels, key=lambda l: l[0]):
+        if price > limit_cents or eligible >= want_cc:
+            break
+        own = int((own_levels or {}).get(price, 0) or 0)
+        external = qty - own
+        if external < 0:
+            anomaly = True
+            external = 0
+        if own > 0 and stp == "taker_at_cross":
+            break
+        take = min(external, want_cc - eligible)
+        if take > 0:
+            eligible += take
+            cost += Decimal(price) * Decimal(take) / Decimal(100)
+    return eligible, cost, anomaly
 
 
 def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
@@ -214,8 +271,27 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
         d.expected_cost_cents = expected_cost
         d.permitted_qty_cc = permitted_cc
     else:
-        eligible_cc, expected_cost = _walk_book(
-            book.levels, effective_limit, inp.qty_cc)
+        # Depth-dependent decision: the own-liquidity overlay must be
+        # resolved before the walk.  An incomplete overlay (ticker
+        # unresolved, unattributable own orders) is not an empty one —
+        # refuse to authorize from a depth estimate that may include our
+        # own resting quantity.
+        if not getattr(book, "own_evidence_complete", True):
+            d.outcome = SUBMIT_DEPTH_UNRELIABLE
+            d.reason = "own_overlay_incomplete"
+            return d
+        if getattr(book, "own_unattributable", 0):
+            d.outcome = SUBMIT_DEPTH_UNRELIABLE
+            d.reason = f"own_unattributable={book.own_unattributable}"
+            return d
+        eligible_cc, expected_cost, own_anomaly = _walk_book_owned(
+            book.levels, getattr(book, "own_levels", None) or {},
+            effective_limit, inp.qty_cc,
+            stp=inp.self_trade_prevention)
+        if own_anomaly:
+            d.outcome = SUBMIT_DEPTH_UNRELIABLE
+            d.reason = "own_gt_public_level"
+            return d
         d.eligible_qty_cc = eligible_cc
         d.expected_cost_cents = expected_cost
         if eligible_cc <= 0:
@@ -231,8 +307,12 @@ def revalidate_entry(inp: SubmitRevalidationInput) -> SubmitDecision:
                 return d
             permitted_cc = eligible_cc
             # resized order: recompute expected cost for the permitted qty
-            _, expected_cost = _walk_book(
-                book.levels, effective_limit, permitted_cc)
+            # with the same ownership overlay — the non-own walk would
+            # re-credit our own resting quantity as external fills.
+            _, expected_cost, _ = _walk_book_owned(
+                book.levels, getattr(book, "own_levels", None) or {},
+                effective_limit, permitted_cc,
+                stp=inp.self_trade_prevention)
             d.expected_cost_cents = expected_cost
         d.permitted_qty_cc = permitted_cc
 
@@ -280,14 +360,24 @@ def _held_side_of(intent) -> Optional[str]:
 
 
 def acquisition_book_from_state(state, held_side: str,
-                                want_levels: int = 10) -> Optional[AcquisitionBook]:
+                                want_levels: int = 10,
+                                ticker=None,
+                                own_orders=None) -> Optional[AcquisitionBook]:
     """Build held-side ask depth from KalshiMarketState.
 
     Kalshi's YES-centric book: held=YES acquires against no_bids
     (yes_ask = 100 - no_bid); held=NO acquires against yes_bids.
+
+    ``ticker`` identifies the market for the own-liquidity overlay; when
+    omitted the state's ``ticker`` is used.  Without a resolvable ticker
+    own-order attribution cannot run and ``own_evidence_complete`` is
+    False — ``revalidate_entry`` then refuses depth-dependent taker
+    submissions rather than assuming an empty own book.
     """
     if state is None:
         return None
+    if ticker is None:
+        ticker = getattr(state, "ticker", None)
     held = held_side.lower()
     bids = (getattr(state, "no_bids", None) if held == "yes"
             else getattr(state, "yes_bids", None)) or []
@@ -336,8 +426,30 @@ def acquisition_book_from_state(state, held_side: str,
             age_ms = max(0, int((time.time() - ts_f) * 1000))
     seq = getattr(state, "ws_last_seq", None) or getattr(
         state, "book_sequence", None)
+    own_cc: dict = {}
+    own_unattr = 0
+    own_complete = True
+    if ticker:
+        try:
+            from merid.event_venues.kalshi.executable_quote import (
+                QuotePurpose,
+                _own_qty_by_level,
+            )
+            _own_map, _own_unattr = _own_qty_by_level(
+                str(ticker), held, QuotePurpose.ENTRY,
+                own_orders=own_orders)
+            own_cc = {p: int(q) * 100 for p, q in _own_map.items() if q}
+            own_unattr = _own_unattr
+        except Exception:
+            # Registry failure is not an empty overlay — fail closed.
+            own_complete = False
+    else:
+        own_complete = False
     return AcquisitionBook(levels=sorted(levels, key=lambda l: l[0]),
-                           book_age_ms=age_ms, book_sequence=seq)
+                           book_age_ms=age_ms, book_sequence=seq,
+                           own_levels=own_cc,
+                           own_unattributable=own_unattr,
+                           own_evidence_complete=own_complete)
 
 
 def input_from_intent(
@@ -404,8 +516,23 @@ def input_from_intent(
                 "MERID_SUBMIT_REQUIRED_EDGE_CENTS", "1.5"))
         except Exception:
             req_edge_dec = Decimal("1.5")
-    book = acquisition_book_from_state(state, held) if state is not None \
-        else None
+    # The depth simulator must use the same self-trade-prevention policy
+    # the router serializes; anything else prices a different trade.
+    # Reuse the canonical wire resolver — it honors an explicit field,
+    # else maps liquidity_role, else defaults taker_at_cross.
+    try:
+        from merid.event_venues.kalshi.order_router import (
+            _resolve_self_trade_prevention_type,
+        )
+        stp = _resolve_self_trade_prevention_type(intent)
+    except Exception:
+        stp = str(getattr(intent, "self_trade_prevention_type", None)
+                  or "taker_at_cross").lower()
+    if stp not in ("taker_at_cross", "maker"):
+        stp = "taker_at_cross"
+    book = acquisition_book_from_state(
+        state, held, ticker=getattr(intent, "ticker", None)) \
+        if state is not None else None
     return SubmitRevalidationInput(
         candidate_id=str(getattr(intent, "intent_id", None)
                          or getattr(intent, "client_order_id", None) or ""),
@@ -428,4 +555,5 @@ def input_from_intent(
         post_only=bool(getattr(intent, "post_only", False))
         or str(getattr(intent, "execution_mode", "") or "").lower()
         in ("maker", "passive_quote"),
+        self_trade_prevention=stp,
     )

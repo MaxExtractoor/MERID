@@ -618,6 +618,10 @@ class CryptoHedgeEngine:
                 rationale=f"hedge:{ho.hedge_reason}:{ho.asset}:{ho.timeframe}",
                 entry_or_exit="exit" if _is_exit else "entry",
                 reduce_only=True if _is_exit else None,
+                # Kalshi reduce_only requires immediate_or_cancel; a hedge
+                # exit is risk reduction, so IOC preserves the exchange-level
+                # reduce-only protection the endpoint can actually express.
+                time_in_force="ioc" if _is_exit else "gtc",
                 exit_reason=ho.hedge_reason if _is_exit else None,
                 exit_policy_id=ho.client_tag if _is_exit else None,
                 # CRITICAL FIX (2026-07-29): Pass alpha-hedge pairing metadata

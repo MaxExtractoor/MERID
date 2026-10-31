@@ -7805,6 +7805,9 @@ class PositionMonitor:
             purpose=QuotePurpose.EXIT,
             required_freshness_ms=None,
             state=state,
+            # IOC protective exits serialize taker_at_cross; simulate the
+            # same STP policy the wire will carry.
+            self_trade_prevention="taker_at_cross",
         )
         return getattr(_raw, "best_bid_cents", None) or getattr(
             _raw, "observed_bid_cents", None
@@ -7837,6 +7840,9 @@ class PositionMonitor:
             purpose=QuotePurpose.EXIT,
             required_freshness_ms=EXIT_PRICE_MAX_AGE_MS,
             state=state,
+            # This snapshot drives IOC protective exits, which serialize
+            # taker_at_cross — simulate the serialized STP, not a default.
+            self_trade_prevention="taker_at_cross",
         )
         if isinstance(quote, QuoteUnavailable):
             logger.warning(
