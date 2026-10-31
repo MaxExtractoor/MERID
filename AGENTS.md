@@ -108,7 +108,7 @@ the next server restart must automatically execute the live startup sequence bel
    - Use Bachelier-only with TWAP-appropriate volatility unless another model has a documented approved release.
    - Disable hybrid Bachelier-plus-delta signals—velocity, MACD, RSI, OBI, FVG, and regime—unless explicitly validated and approved.
    - Apply held-side tail calibration per the loaded artifact's scope. With `MERID_CALIBRATION_CAP_FULL_RANGE` (default on) the YES curve caps at every held price; a fitted non-dual NO curve (`no_curve_is_dual=false`, e.g. `tail_pava:n10220`) is applied the same way, while a provisional dual NO curve remains a cheap-tail stop-gap gated by `MERID_TAIL_CALIBRATION_NO_DUAL_RAW_FLOOR`/`_TRANSITION`. `MERID_TAIL_CALIBRATION_PRICE_FLOOR` (default 0.35) bounds the tail region whenever full-range is off.
-   - NO-side entries are enabled — governed by measured per-asset moneyness bands, not a blanket tail block. Global `MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO=50` with audited overrides: BTC-NO max 79c (51-64c pocket blocked), ETH-NO max 89c (51-64c blocked), DOGE/SOL-NO max 75c, XRP-NO max 1c (hard-blocked: audited -9.54 USD, unpriceable down-moves). Deep NO tails >=80c additionally face the tail-LCB gate (`MERID_TAIL_LCB_MIN_PRICE_CENTS=80`). Band changes require the same settled-fill + veto-counterfactual audit evidence that produced the current split. These per-asset caps also bind inside bounded sub-lanes: the pinned-fav lane enforces them via `pinned_fav_moneyness_cap` (`MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS`, default on; `MERID_PRICE_CAP_EXCEPT_BTC_NO` remains the only explicit exception for +EV BTC-NO probes). The global side baselines do not bind in-lane — the lane's audited domain sits above them by design. 2026-10-27 (NO-side mirror): `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}` is a lane-scoped cap consulted before the per-asset moneyness cap; `.env` sets it to 98 for BTC/ETH/DOGE/SOL NO, restoring the YES-side in-lane semantics (the audited <90c caps never measured the >=90c maker band and had made the lane YES-only). The settlement-convergence lane carries the same mirror: `MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}` (99 for BTC/ETH/DOGE/SOL NO in `.env`) is consulted before the per-asset cap inside the lane's own cap resolver, so NO converged favorites are not vetoed by the audited normal-path caps there either. 2026-10-30 (operator-directed XRP probe): the pinned-fav lane now also carries `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_YES_XRP=98` and `_NO_XRP=98` — a bounded evidence probe inside the maker band (2-contract submissions, maker-only, p>=0.90, EV floors, shared 480/day budget). The normal-path XRP caps (YES@89 / NO@1) and the settlement-lane XRP exclusion are unchanged pending the probes settled fills. Normal-path caps are unchanged. The pinned-fav maker band is floored at `MERID_PINNED_FAV_MAKER_LO=92` (2026-10-28): the 90-91c floor pocket itself was the toxic zone at maker fills — post-floor cohort ran 73% win / -1405c over 82 contracts including every post-floor loss, while px>=92 ran 100% / +611c over 103; a resting bid at the band floor fills exactly when the market reprices down through it (prior raise: 82/76->90 on 2026-10-24 after the 76-89c favorite pocket was falsified at ~50% settle vs ~80-89% breakeven).
+   - NO-side entries are enabled — governed by measured per-asset moneyness bands, not a blanket tail block. Global `MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO=50` with audited overrides: BTC-NO max 79c (51-64c pocket blocked), ETH-NO max 89c (51-64c blocked), DOGE/SOL-NO max 75c, XRP-NO max 1c (hard-blocked: audited -9.54 USD, unpriceable down-moves). Deep NO tails >=80c additionally face the tail-LCB gate (`MERID_TAIL_LCB_MIN_PRICE_CENTS=80`). Band changes require the same settled-fill + veto-counterfactual audit evidence that produced the current split. These per-asset caps also bind inside bounded sub-lanes: the pinned-fav lane enforces them via `pinned_fav_moneyness_cap` (`MERID_PINNED_FAV_HONOR_MONEYNESS_CAPS`, default on; `MERID_PRICE_CAP_EXCEPT_BTC_NO` remains the only explicit exception for +EV BTC-NO probes). The global side baselines do not bind in-lane — the lane's audited domain sits above them by design. 2026-10-27 (NO-side mirror): `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}` is a lane-scoped cap consulted before the per-asset moneyness cap; `.env` sets it to 98 for BTC/ETH/DOGE/SOL NO, restoring the YES-side in-lane semantics (the audited <90c caps never measured the >=90c maker band and had made the lane YES-only). The settlement-convergence lane carries the same mirror: `MERID_SETTLEMENT_LANE_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}` (99 for BTC/ETH/DOGE/SOL NO in `.env`) is consulted before the per-asset cap inside the lane's own cap resolver, so NO converged favorites are not vetoed by the audited normal-path caps there either. 2026-10-30 (operator-directed XRP probe): the pinned-fav lane now also carries `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_YES_XRP=98` and `_NO_XRP=98` — a bounded evidence probe inside the maker band (2-contract submissions, maker-only, p>=0.90, EV floors, shared 480/day budget). The normal-path XRP caps (YES@89 / NO@1) and the settlement-lane XRP exclusion are unchanged pending the probes settled fills. Normal-path caps are unchanged. The pinned-fav maker band floor history: `MERID_PINNED_FAV_MAKER_LO=92` (2026-10-28) after the 90-91c pocket proved toxic — post-floor cohort ran 73% win / -1405c over 82 contracts including every post-floor loss, while px>=92 ran 100% / +611c over 103 (prior raise: 82/76->90 on 2026-10-24). **2026-10-31 containment: floor raised 92 -> 94 and ETH quarantined (lane caps YES_ETH=0, NO_ETH=0) — see the 2026-10-31 containment section for the current effective band.**
    - Require the corrected full fee and execution-cost model for every entry decision.
 
 15. If every preflight step succeeds, persist an immutable startup release record and set:
@@ -537,10 +537,13 @@ BTC/ETH/SOL/XRP/DOGE under current-build economics. Its contract:
   rides `TradeDecision.adverse_selection_reserve` into the gate, the audit
   `adverse_selection_haircut_cents` column, the order-decision ledger, and
   agent telemetry � previously all hardcoded to zero.
-- **Entry rest bound (2026-10-01):** all entry lanes bound resting life at
-  `MERID_ENTRY_MAX_REST_S`=45s (cbp binds its own policy value); exits keep
-  the 180s `OrderIntent` default.  Unbounded resting life let stale orders
-  fill into repriced books (ETH NO@34 fill at 150s, fill-time edge -23.5c).
+- **Entry rest bound (2026-10-01, value corrected 2026-10-31):** all entry
+  lanes bound resting life at `MERID_ENTRY_MAX_REST_S`=15s per the approved
+  operator setting (documented here as 45s since 10-01; `.env` and the
+  resolved runtime value are 15 — the env wins and is the approved value).
+  Exits keep the 180s `OrderIntent` default.  Unbounded resting life let
+  stale orders fill into repriced books (ETH NO@34 fill at 150s, fill-time
+  edge -23.5c).
 - **Promotion review trigger (2026-10-01):** `promotion_review_report`
   now fires automatically once per (build, cell) when both review
   thresholds are met (attempts >= `MERID_PROVISIONAL_REVIEW_MIN_ATTEMPTS`
@@ -608,7 +611,9 @@ lower bounds > 0). YES-side cells fail OOS and are excluded.
   `scripts/live_evidence_refresh.py` runs it on a query_only connection;
   scheduled task `MERID live evidence refresh` runs every 12h.
 - **Bounded-lane sizing**: `MERID_BOUNDED_LANE_MAX_CONTRACTS` (default 1)
-  caps BOUNDED_POST_ONLY_LANES per-order contracts; set to 3 in .env.
+  caps BOUNDED_POST_ONLY_LANES per-order contracts; set to 6 in .env —
+  lane-specific caps subordinate it where present (pinned-fav enforces 2,
+  see the 2026-10-31 containment section).
 - **15m market audit**: `scripts/kalshi_15m_audit.py --days N` replays
   settlement (60s TWAP from archived CF-RTI snapshots), feature
   monotonicity vs signed ATR distance (ATR_15m = rolling median
@@ -708,7 +713,16 @@ Contract changes now in force:
   bounded cap) set to 2.  Deep-favorite binaries lose the whole stake on
   a pin break � 6 @ ~91.6c was ~38% of bankroll; cap bounds a single
   settlement tail to ~$1.9 (~13%) consistent with half-Kelly at current
-  shard cash.
+  shard cash.  The cap is authoritative over risk-scaled sizing:
+  `MERID_PER_TRADE_LOSS_BUDGET_CENTS`=600 with
+  `MERID_RISK_SCALED_SIZING_ENABLED`=1 proposes ~6 contracts inside the
+  94-98c band (600/94 ~= 6.4), and the lane cap binds the final
+  constructed quantity — the P0 `pinned_fav_policy_resolution` echo
+  prints the interaction on every preflight.  Scope is per-order at
+  construction, effectively per-market via the one-position-per-ticker
+  gate; cross-market exposure is not bounded by this cap — independent
+  tickers may each hold a 2-contract position under the global
+  `MERID_FIXED_EXPOSURE_CAP_USD` slot allocator.
 - **Terminal-market exit suppression**: `exit_arbiter._arbitrate_locked`
   returns `market_terminal` and declines all proposals once the market is
   provably past close+`MERID_EXIT_MARKET_DEAD_AFTER_S` � previously ~46
@@ -730,3 +744,62 @@ reversals � local evidence beats the external hold-to-settle result, and
 `HARD_STOP`/`LOSS_CAP` mandatory-risk triggers stay mechanical per the
 structured-authorization contract (revisit only with a settled
 counterfactual audit of the 00:27 stop-out class).
+
+## 2026-10-31 pinned-fav containment (post-audit, operator-approved)
+
+Findings basis: `MERID_PINNED_FAV_AUDIT_2026-10-31.md` + canonical replay
+export `data/pinned_fav_wins_replay_2026-10-31.json`.  The pinned-fav live
+era was net-negative (~-$4.83); losses clustered at the 92-93c floor and in
+6-contract orders.  Policy is containment, not promotion: nothing below was
+validated as profitable.
+
+- **Band 94-98c**: `MERID_PINNED_FAV_MAKER_LO`/`PRICE_LO` raised 92 -> 94.
+  The 92-93 pocket showed ~-$7.05 tail economics plus a 39%-vs-23% fill-
+  rate asymmetry consistent with adverse selection (a resting floor bid
+  fills when the ask reprices down through it).  Emit (`pinned_fav_band_
+  match`), gate (`pinned_fav_block`), the loop clamp in `loop_15m.py`, and
+  the wire passivity floor (`_lane_entry_band_cents` -> `order_router.py`)
+  all resolve the same env helpers, so this is a single-source change —
+  not a fifth override.
+- **ETH quarantine**: `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_YES_ETH=0` and
+  `_NO_ETH=0` veto both sides via the lane-scoped cap resolver with a
+  distinct `pinned_fav_moneyness_cap` reason (measurable, not a silent
+  block).  ETH >=94c was +$1.38/11 markets in the era — suspended for thin
+  evidence, not proven toxic.  Shadow observation continues.
+- **Retained 94-98 ex-ETH lane**: monitored reference lane only — 33
+  markets, +$3.29 in the replay slice, zero losses.  Thin sample; it is a
+  restricted baseline for continued evidence collection, **not** a
+  validated profitable strategy.
+- **Cap 2 authoritative over loss-budget sizing**: documented in the lane
+  cap bullet above — loss-budget proposes ~6 in-band, cap binds final qty.
+- **Entry rest**: `MERID_ENTRY_MAX_REST_S`=15 resolved (see corrected rest
+  bound bullet).
+- **Sizing-era uncertainty**: fills were uniformly 6-contract through
+  ~2026-10-29 16h UTC and uniformly 2-contract from ~19h onward —
+  *observed* timing; the specific config change that caused it is not
+  proven.  The `.env` comment "raised 2->6 on 10-31" is misdated (the 2-ct
+  regime predates it by ~40h).  Treat as an operating-regime boundary when
+  comparing cohorts, not a proven causal fix.
+- **Restart + verification requirement**: production restarts go through
+  `start_15m.ps1` only (duplicate-launch guard on port 8011; no shutdown
+  endpoint exists — kill the listener, let the launcher write
+  `logs/server_lifecycle.jsonl`, relaunch).  Before shutdown, reconcile
+  open orders/positions and cancel resting orders incompatible with the
+  policy — do not assume restart cancels them (15m GTC lifetime bounds the
+  exposure).  Post-restart, verify on the *real* process — not a config
+  probe — that the `pinned_fav_policy_resolution` P0 line reports band
+  94-98, ETH caps YES 0 / NO 0, `max_contracts=2.0`, the loss-budget
+  subordination line, plus SHA/run_id/config hash.  Verify the first
+  constructed order's `count_fp=2.0`, not just the env var.  On any check
+  failure: halt new submissions; do not revert to the old exposure.
+- **Settlement pseudo-fill exclusion**: ledger-native payout legs
+  (`fill_source="settlement"`, `fill_id` prefix `settlement:`,
+  `ingestion_source="settlement_rest"`) are excluded from fill-identity
+  reconciliation — they are cash movements, never trades.  Regression
+  suite: `tests/event_venues/kalshi/test_kalshi_p0_fill_identity_
+  reconciliation.py` (7 cases incl. genuine-extra-execution fail-closed).
+- **Shadow-only research leads** (no live change): late-window/TTE
+  preference, `edge_bias_correction` as admission signal, claimed-EV
+  inversion vs outcomes (reserve decomposition), floor fill-rate
+  asymmetry matched-duration/markout analysis.  `p0.py` is not in
+  `LIVE_MONEY_PATH_FILES` — a noted protection gap for follow-up.
