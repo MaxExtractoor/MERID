@@ -1101,6 +1101,12 @@ class KalshiWebSocket(EventVenueStream):
         """
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
+        if market_id in self._orderbook_tickers:
+            logger.debug(
+                "[WS-SUBSCRIBE-ORDERBOOK] %s already subscribed — no-op",
+                market_id,
+            )
+            return
 
         params: Dict[str, Any] = {
             "channels": ["orderbook_delta"],
@@ -1121,9 +1127,13 @@ class KalshiWebSocket(EventVenueStream):
             "params": params,
         }
 
-        await self._ws.send(json.dumps(message))
-        self._subscriptions.add(f"orderbook:{market_id}")
         self._orderbook_tickers.add(market_id)
+        try:
+            await self._ws.send(json.dumps(message))
+        except Exception:
+            self._orderbook_tickers.discard(market_id)
+            raise
+        self._subscriptions.add(f"orderbook:{market_id}")
         logger.info(f"Subscribed to Kalshi orderbook_delta for {market_id}" +
                    (f" (event={event_ticker})" if event_ticker else ""))
 
@@ -1147,36 +1157,54 @@ class KalshiWebSocket(EventVenueStream):
             return
 
         uniq = sorted(set(market_ids))
-        n_chunks = (len(uniq) + chunk_size - 1) // chunk_size
-        logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Processing %d tickers in %d chunks", len(uniq), n_chunks)
+        # 2026-10-31: a repeated ``subscribe`` for an already-subscribed market
+        # only adds it to the same sid (no fresh snapshot) and wastes a command
+        # — observed 4 identical 2-ticker subscribes in 11s at a window roll.
+        # Claim pending tickers up-front so a racing batch call sees them as
+        # claimed; roll back the claim if the send actually fails.
+        new_tickers = [m for m in uniq if m not in self._orderbook_tickers]
+        if not new_tickers:
+            logger.debug(
+                "[WS-SUBSCRIBE-ORDERBOOKS-BATCH] all %d markets already subscribed — no-op",
+                len(uniq),
+            )
+            return
+        claimed = set(new_tickers)
+        self._orderbook_tickers.update(claimed)
+        n_chunks = (len(new_tickers) + chunk_size - 1) // chunk_size
+        logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Processing %d new tickers (%d already subscribed) in %d chunks", len(new_tickers), len(uniq) - len(new_tickers), n_chunks)
         _ob_interval_ms = _orderbook_update_interval_ms()
-        for i in range(0, len(uniq), chunk_size):
-            chunk = uniq[i : i + chunk_size]
-            _params: Dict[str, Any] = {
-                "channels": ["orderbook_delta"],
-                "market_tickers": chunk,
-                "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
-            }
-            if _ob_interval_ms > 0:
-                _params["update_interval_ms"] = _ob_interval_ms
-            message = {
-                "id": self._next_sub_id(),
-                "cmd": "subscribe",
-                "params": _params,
-            }
-            payload = json.dumps(message)
-            logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
-            logger.info("[WS-SUBSCRIPTION-SENT] chunk=%d markets=%s", len(chunk), chunk)
-            await self._ws.send(payload)
-            logger.info("[WS-SUBSCRIPTION-SENT-DONE] chunk=%d sent successfully", len(chunk))
-            for mid in chunk:
-                self._subscriptions.add(f"orderbook:{mid}")
-                self._orderbook_tickers.add(mid)
+        try:
+            for i in range(0, len(new_tickers), chunk_size):
+                chunk = new_tickers[i : i + chunk_size]
+                _params: Dict[str, Any] = {
+                    "channels": ["orderbook_delta"],
+                    "market_tickers": chunk,
+                    "use_yes_price": False,  # NO-leg pricing: Kalshi sends side=no price_dollars in NO-space, matching LocalOrderbook no_levels
+                }
+                if _ob_interval_ms > 0:
+                    _params["update_interval_ms"] = _ob_interval_ms
+                message = {
+                    "id": self._next_sub_id(),
+                    "cmd": "subscribe",
+                    "params": _params,
+                }
+                payload = json.dumps(message)
+                logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
+                logger.info("[WS-SUBSCRIPTION-SENT] chunk=%d markets=%s", len(chunk), chunk)
+                await self._ws.send(payload)
+                logger.info("[WS-SUBSCRIPTION-SENT-DONE] chunk=%d sent successfully", len(chunk))
+                for mid in chunk:
+                    self._subscriptions.add(f"orderbook:{mid}")
+        except Exception:
+            # Send failed — release the claim so the next batch retries them.
+            self._orderbook_tickers.difference_update(claimed)
+            raise
 
         logger.info(
             "Subscribed to Kalshi orderbook_delta for %d unique tickers in %d WS message(s) "
             "(chunk_size=%d)",
-            len(uniq),
+            len(new_tickers),
             n_chunks,
             chunk_size,
         )
@@ -1200,8 +1228,9 @@ class KalshiWebSocket(EventVenueStream):
             store = get_kalshi_market_state_store()
             client = get_kalshi_client()
             
-            # Fetch orderbooks via REST for all subscribed tickers
-            for ticker in uniq:
+            # Fetch orderbooks via REST for the newly subscribed tickers —
+            # already-subscribed books are kept live by the delta stream.
+            for ticker in new_tickers:
                 try:
                     orderbook = await asyncio.wait_for(client.get_orderbook(ticker), timeout=5.0)
                     if orderbook:
@@ -3130,7 +3159,13 @@ class KalshiWebSocket(EventVenueStream):
                         for i in range(0, len(ft), ch):
                             await self.subscribe_fills(market_ids=ft[i : i + ch])
                 if self._orderbook_tickers:
-                    await self.subscribe_orderbooks_batch(list(self._orderbook_tickers))
+                    # The fresh socket holds no subscriptions — the tickers set
+                    # only records *intent* for replay.  Clear the subscribed
+                    # claim first so the batch dedup does not treat the replay
+                    # as an already-subscribed no-op.
+                    _replay = list(self._orderbook_tickers)
+                    self._orderbook_tickers.clear()
+                    await self.subscribe_orderbooks_batch(_replay)
                 if self._order_group_updates_enabled:
                     await self.subscribe_order_group_updates()
 

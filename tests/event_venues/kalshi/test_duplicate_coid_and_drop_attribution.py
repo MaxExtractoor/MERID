@@ -89,6 +89,21 @@ class TestDroppedFrameAttribution:
         assert len(called) == 2
 
 
+class TestRecoverySourceMapping:
+    def test_ws_resync_snapshot_is_authoritative(self, store):
+        """The WS-triggered REST resync path fetches a full REST orderbook —
+        it must map to REST_FULL_ORDERBOOK so an INVALID book can recover
+        (previously resolved UNKNOWN and was rejected by the attest gate)."""
+        assert (
+            store._resolve_book_source("ws_resync", "orderbook_snapshot")
+            == "REST_FULL_ORDERBOOK"
+        )
+
+    def test_unknown_via_still_rejected(self, store):
+        assert store._resolve_book_source("quote_fallback", "x") == "WS_QUOTE"
+        assert store._resolve_book_source("mystery_via", "x") == "UNKNOWN"
+
+
 def _make_monitor():
     """Bare PositionMonitor carrying only the attributes the flight paths use."""
     import threading

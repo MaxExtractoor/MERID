@@ -1051,7 +1051,7 @@ class KalshiMarketStateStore:
         to set ``LIVE_SEQUENCE_CONFIRMED`` for new-entry gating.
         Contiguous deltas are the only source that confirms live sequence.
         """
-        if via in ("rest_bootstrap", "ws_fallback", "subscribe_fallback", "rest_polling", "ws_subscribe_bootstrap"):
+        if via in ("rest_bootstrap", "ws_fallback", "subscribe_fallback", "rest_polling", "ws_subscribe_bootstrap", "ws_resync"):
             return "REST_FULL_ORDERBOOK"
         if via == "bridge_queue":
             if channel == "orderbook_snapshot":
