@@ -77,6 +77,19 @@ _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     ("both_sides_out_of_canonical", "price_band"),
     ("price_out_of_canonical_range", "price_band"),
     ("ev_gate_rejected", "ev_gate"),
+    # 2026-10-31: coverage for reasons that were emitted but never
+    # attributed to a canonical gate — they previously vanished from the
+    # gate-funnel accounting entirely.
+    ("skip_market_not_ready", "data_state"),
+    ("pinned_fav_maker_only", "route_policy"),
+    ("pinned_fav", "route_policy"),
+    ("post_only", "route_policy"),
+    ("window_plan_contract_cap", "capacity"),
+    ("knapsack_cap", "capacity"),
+    ("settlement_distribution_unavailable", "data_state"),
+    ("router_rejected", "router"),
+    ("entry_trap_veto", "entry_trap"),
+    ("net_edge_non_positive", "ev_gate"),
 )
 
 

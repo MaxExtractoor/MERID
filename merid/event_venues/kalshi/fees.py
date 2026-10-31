@@ -1,12 +1,20 @@
 """Kalshi Fee Calculator — Unified fee computation module.
 
-Provides tiered fee calculation for Kalshi binary contracts based on
-contract count and price. Uses the canonical Kalshi fee schedule:
-- < 100 contracts: 7%
-- 100-999 contracts: 5%
-- 1000+ contracts: 3%
+Provides fee calculation for Kalshi binary contracts using the canonical
+published schedule (verified against the July 2026 fee schedule PDF and
+live V2 fill records — see AGENTS.md):
 
-Fee formula: fee_cents = ceil(rate * contracts * price_cents * (1 - price_cents / 100))
+    fee_dollars = ceil(rate * C * P * (1 - P) -> $0.0001)
+
+with a flat taker ``rate=0.07`` (maker ``rate=0.0175`` on series that
+declare maker fees).  The per-fill fee audit compares the venue's
+reported fee against this model and remains the drift detector.
+
+Historical note: an earlier version of this module modeled volume tiers
+(7%/5%/3%) and a whole-cent ceiling.  Kalshi's schedule has no volume
+tiers — the only multiplier is the per-market ``M`` (default 1).  The
+tier table is retained inertly for reference but is no longer used:
+callers always get the canonical flat schedule.
 
 Usage::
 
@@ -129,36 +137,28 @@ def calculate_kalshi_fee_cents(
         return 0
     if not isinstance(price_cents, (int, float, Decimal)):
         raise TypeError(f"price_cents must be int, float, or Decimal, got {type(price_cents)}")
-    
+
     # Additional validation for extreme prices
     if price_cents < 1 or price_cents > 99:
         # Log warning but still calculate (could be valid edge case)
         logger.warning(f"fees.py: Extreme price_cents={price_cents} - verifying calculation accuracy")
-    
-    if use_decimal:
-        # High precision calculation with Decimal
-        p = Decimal(str(price_cents)) / Decimal("100")
-        rate = _get_rate_for_contracts(contracts)
-        
-        # rate * C * P * (1-P)
-        raw = rate * Decimal(contracts) * p * (Decimal("1") - p)
-        
-        # Convert to cents and round up
-        fee_cents = (raw * Decimal("100")).quantize(
-            Decimal("1"), 
-            rounding=ROUND_CEILING
-        )
-        
-        return max(int(fee_cents), MIN_FEE_CENTS)
-    else:
-        # Float calculation (faster, slightly less precise)
-        p = float(price_cents) / 100.0
-        rate = float(_get_rate_for_contracts(contracts))
-        
-        raw = rate * contracts * p * (1.0 - p)
-        fee_cents = math.ceil(raw * 100)
-        
-        return max(fee_cents, MIN_FEE_CENTS)
+
+    # Canonical flat taker rate (Kalshi 2026): 0.07 * C * P * (1-P).
+    # The retired tier table (7%/5%/3%) modeled volume discounts that do
+    # not exist in the published schedule — orders >=100 contracts were
+    # under-charged ~28%.  This function returns *integer cents* by
+    # contract (whole-cent ceiling, MIN_FEE_CENTS floor) so it remains a
+    # conservative upper-bound estimate for exit-profitability and
+    # net-edge floors; callers needing exact accounting must use
+    # merid.event_venues.kalshi.parabolic_fees.kalshi_fee_cents_exact
+    # ($0.0001 quantum) instead.
+    rate = Decimal("0.07")
+    p = Decimal(str(price_cents)) / Decimal("100")
+    raw = rate * Decimal(str(contracts)) * p * (Decimal("1") - p)
+    fee_cents = (raw * Decimal("100")).quantize(
+        Decimal("1"), rounding=ROUND_CEILING
+    )
+    return max(int(fee_cents), MIN_FEE_CENTS)
 
 
 def calculate_kalshi_fee_per_contract_cents(
