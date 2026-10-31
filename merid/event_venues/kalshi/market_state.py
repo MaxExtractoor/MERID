@@ -1167,6 +1167,7 @@ class KalshiMarketStateStore:
             # permanently blocked when the market is quiet and only snapshots flow.
             state.live_sequence_confirmed = True
             self._untrusted_since.pop(state.ticker, None)
+            self._maybe_recover_session_book_untrusted()
         elif prior_quality == "INVALID" or prior_transition == "CIRCUIT_BREAKER":
             # REST and other non-live snapshots still require a subsequent
             # contiguous WS delta before new capital can be committed.  This
@@ -1704,12 +1705,28 @@ class KalshiMarketStateStore:
             return
         self._last_degradation_eval_ts = now
         horizon = now - _BOOK_UNTRUSTED_HALT_S
-        sustained = {
-            ticker: round(now - since, 1)
-            for ticker, since in self._untrusted_since.items()
-            if since <= horizon
-        }
+        sustained = {}
+        for ticker, since in list(self._untrusted_since.items()):
+            state = self._states.get(ticker)
+            if state is not None:
+                _recompute_seconds_to_expiry(state)
+                tte = getattr(state, "seconds_to_expiry", None)
+            else:
+                tte = None
+            if state is None or (tte is not None and tte <= 0):
+                # A pruned or closed market can never emit a WS attestation,
+                # so an untrusted entry there can never resolve by design.
+                # Counting it would guarantee a halt ~_HALT_S after every
+                # window close that left a book untrusted (observed
+                # 2026-10-30: halts at :05/:20/:35 past each 15m close).
+                self._untrusted_since.pop(ticker, None)
+                continue
+            if since <= horizon:
+                sustained[ticker] = round(now - since, 1)
         if len(sustained) < _BOOK_UNTRUSTED_HALT_MIN_TICKERS:
+            # Dead entries may have just emptied the tracker; if a prior
+            # sustained-halt is latched, every remaining book is resolved.
+            self._maybe_recover_session_book_untrusted()
             return
         try:
             from merid.observability.live_runtime_state import (
@@ -1732,6 +1749,58 @@ class KalshiMarketStateStore:
         except Exception as exc:
             logger.error(
                 "[BOOK-UNTRUSTED-SUSTAINED] escalation failed: %s", exc
+            )
+
+    def _maybe_recover_session_book_untrusted(self) -> None:
+        """Recover a ``book_untrusted_sustained`` halt once every book re-attests.
+
+        ``_untrusted_since`` holds an entry only while a live book lacks a
+        post-invalidation WS attestation.  When the map is empty every tracked
+        book either has a fresh contiguous WS delta/clean snapshot (the only
+        events that pop an entry) or died with its market — the degraded-feed
+        condition that tripped the halt is resolved.  Follows the contract
+        path LIVE_ENTRIES_HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED
+        via ``complete_preflight``, the same mechanism the WS-reconnect
+        recovery uses; per-decision entry gates still independently require
+        fresh verified quotes before any order submits.
+        """
+        if self._untrusted_since:
+            return
+        try:
+            from merid.observability.live_runtime_state import (
+                get_live_runtime_state,
+            )
+            live_state = get_live_runtime_state()
+            if live_state.live_entries_enabled():
+                return
+            if live_state.state != "LIVE_ENTRIES_HALTED":
+                return
+            reason_codes = set(getattr(live_state, "_reason_codes", []) or [])
+            if "BOOK_FEED_DEGRADED" not in reason_codes:
+                return
+            from merid.config.auto_execution import is_auto_execution_enabled
+            from merid.config.observe_only import is_observe_only
+            live_state.transition(
+                "RECOVERY_RUNNING",
+                "book_untrusted_sustained_resolved",
+                reason_codes=["BOOK_FEED_RECOVERED"],
+            )
+            auto_enable = is_auto_execution_enabled() and not is_observe_only()
+            live_state.complete_preflight(
+                auto_enable=auto_enable,
+                preflight_context={
+                    "recovery": "book_untrusted_sustained_resolved",
+                    "auto_execution_enabled": auto_enable,
+                },
+            )
+            logger.critical(
+                "[BOOK-UNTRUSTED-RECOVERED] live entries state=%s after all "
+                "books re-attested",
+                live_state.state,
+            )
+        except Exception as exc:
+            logger.error(
+                "[BOOK-UNTRUSTED-RECOVERED] recovery attempt failed: %s", exc
             )
 
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
@@ -4555,6 +4624,11 @@ class KalshiMarketStateStore:
                 self._ticker_locks.pop(ticker, None)
                 self._delta_queues.pop(ticker, None)
                 self._needs_resync.pop(ticker, None)
+                # A removed book can never re-attest; its entry would
+                # otherwise count toward the sustained-untrusted halt ladder
+                # forever (and _last_untrusted_log_ts grows unboundedly).
+                self._untrusted_since.pop(ticker, None)
+                self._last_untrusted_log_ts.pop(ticker, None)
                 logger.info(f"[MARKET-STATE-CLEANUP] Removed stale state for ticker={ticker}")
 
             if deletable:
@@ -4640,6 +4714,10 @@ class KalshiMarketStateStore:
                 del self._states[ticker]
                 if ticker in self._subscribers:
                     del self._subscribers[ticker]
+                # Dead tickers must not linger in the sustained-untrusted
+                # halt ladder — a pruned book can never re-attest.
+                self._untrusted_since.pop(ticker, None)
+                self._last_untrusted_log_ts.pop(ticker, None)
                 pruned_count += 1
                 logger.info(
                     f"[MARKET-STATE-PRUNE] Pruned expired ticker={ticker} age={age:.0f}s "

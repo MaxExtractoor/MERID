@@ -2747,7 +2747,8 @@ class KalshiWebSocketBridge:
             if live_state.state != "LIVE_ENTRIES_HALTED":
                 return
             reason_codes = set(getattr(live_state, "_reason_codes", []) or [])
-            if "WS_DATA_PLANE_DEAD" not in reason_codes and "STALE_MARKET_DATA" not in reason_codes:
+            recoverable = {"WS_DATA_PLANE_DEAD", "STALE_MARKET_DATA", "BOOK_FEED_DEGRADED"}
+            if not reason_codes & recoverable:
                 return
             if not self._ws_data_plane_alive():
                 return
