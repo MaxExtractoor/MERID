@@ -103,15 +103,31 @@ def test_exit_attempt_lifecycle_and_concurrency(tmp_path):
     )
     assert stale is None
 
-    # An invalid FSM transition should return None.
+    # A genuinely invalid FSM transition still returns None: a
+    # NOT_ACCEPTED_CONFIRMED order was never venue-live, so it cannot rest.
     invalid = store.transition_exit_attempt(
         attempt.attempt_id,
-        ExitOrderAttemptState.FILLED.value,
+        ExitOrderAttemptState.RESTING.value,
         actor="reconciler",
         reason="should_fail",
         expected_state_version=4,
     )
     assert invalid is None
+
+    # NOT_ACCEPTED_CONFIRMED -> FILLED is a deliberate edge, not a bug: the
+    # not-accepted verdict comes from a REST lookup that can lag an
+    # already-resting order, and an authoritative exchange fill must be
+    # recordable over the local terminal verdict (incident 2026-10-18).
+    late_fill = store.transition_exit_attempt(
+        attempt.attempt_id,
+        ExitOrderAttemptState.FILLED.value,
+        actor="reconciler",
+        reason="authoritative_late_fill",
+        expected_state_version=4,
+    )
+    assert late_fill is not None
+    assert late_fill.state == ExitOrderAttemptState.FILLED.value
+    assert late_fill.state_version == 5
 
 
 def test_superseded_attempt_releases_client_order_id(tmp_path):

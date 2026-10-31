@@ -168,11 +168,31 @@ def test_terminal_records_are_never_downgraded(store):
 
 
 def test_acknowledged_record_not_regressed_by_rejection(store):
+    """A bare local "rejected" result carries no venue evidence
+    (submission_attempted=False, certainty=pre_submit) — it cannot prove an
+    acknowledged order dead and must not regress the record."""
     rec = _persist(store, "ACKNOWLEDGED")
     _finalize_attempt_store_for_result(
         _intent_for(rec), _result("rejected", reason="late_reject")
     )
     assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "ACKNOWLEDGED"
+
+
+def test_acknowledged_record_terminalized_by_venue_reject(store):
+    """A venue-proved-terminal reject DOES supersede a stale ACK — this is
+    the dead-coid 409-loop fix (duplicate_order_terminal, ETH SELL_NO
+    ~427x).  Venue evidence = submission_attempted + certainty=rejected."""
+    rec = _persist(store, "ACKNOWLEDGED")
+    _finalize_attempt_store_for_result(
+        _intent_for(rec),
+        _result(
+            "rejected",
+            reason="duplicate_order_terminal:canceled",
+            submission_attempted=True,
+            submission_certainty="rejected",
+        ),
+    )
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
 
 
 def test_no_attempt_id_is_noop(store):
