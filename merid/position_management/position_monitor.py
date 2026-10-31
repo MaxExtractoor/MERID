@@ -2731,6 +2731,18 @@ class PositionMonitor:
         """
         with self._lock:
             existing = self._exit_intent_in_flight.get(position_id, {})
+            # 2026-10-31: a terminal flight record must NOT lend its idempotency
+            # key to the next obligation.  The carry-forward below was written
+            # for re-marks of the same in-flight submission, but a reconciled
+            # record retains its (now-dead) client_order_id — every new
+            # decision then re-armed with the dead key, the exchange 409'd the
+            # resubmit, the reconcile cleared state but kept the coid, and the
+            # next decision inherited it again (observed: ETH SELL_NO exit
+            # resubmitting exit_9cc1e39e… against a canceled order ~427×).
+            if existing.get("state") in (
+                "RECONCILED", "FILLED", "CANCELED", "REJECTED", "EXPIRED",
+            ):
+                existing = {}
             # Re-marks for the SAME in-flight client_order_id must not refresh
             # the dispatch timestamp — the timeout measures the age of the
             # obligation, not the last monitor poll.  Observed live

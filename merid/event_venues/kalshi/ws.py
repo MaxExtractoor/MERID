@@ -803,6 +803,10 @@ class KalshiWebSocket(EventVenueStream):
             # P0-1 WS UPSTREAM: Add WS-CONNECTED log for connection lifecycle
             self._connection_generation += 1
             self._session_id = f"kalshi-ws-{self._connection_generation:04d}-{_time.monotonic():.3f}"
+            # New connection = new subscription/seq space; pending dropped-frame
+            # attributions from the old sid space must not leak into it.
+            self._dropped_delta_frames = {}
+            self._stale_delta_drop = {}
             logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket gen=%d sid=%s", self._connection_generation, self._session_id)
             # P0-1 WS UPSTREAM: Log ping configuration (ping_interval=30s, ping_timeout=60s)
             logger.info("[WS-KEEPALIVE-CONFIG] ping_interval=30s ping_timeout=60s")
@@ -828,6 +832,8 @@ class KalshiWebSocket(EventVenueStream):
                 # P0-1 WS UPSTREAM: Add WS-CONNECTED log for connection lifecycle
                 self._connection_generation += 1
                 self._session_id = f"kalshi-ws-{self._connection_generation:04d}-{_time.monotonic():.3f}"
+                self._dropped_delta_frames = {}
+                self._stale_delta_drop = {}
                 logger.info("[WS-CONNECTED] Successfully connected to Kalshi WebSocket (extra_headers fallback) gen=%d sid=%s", self._connection_generation, self._session_id)
                 # P0-1 WS UPSTREAM: Log ping configuration (ping_interval=30s, ping_timeout=60s)
                 logger.info("[WS-KEEPALIVE-CONFIG] ping_interval=30s ping_timeout=60s")
@@ -2378,11 +2384,58 @@ class KalshiWebSocket(EventVenueStream):
                                         "delta ticker=%s res_ms=%.0f",
                                         _tk, _res_ms,
                                     )
+                                    # 2026-10-31: record the dropped
+                                    # (seq -> ticker) pair on its sid.  The
+                                    # next forwarded delta on that sid
+                                    # carries the list downstream so
+                                    # market_state can invalidate only the
+                                    # tickers that actually lost frames —
+                                    # a shed load frame previously showed up
+                                    # as an unexplained sid sequence gap and
+                                    # invalidated every book multiplexed on
+                                    # the subscription (the main
+                                    # book_untrusted storm source).
+                                    _dd_sid = data.get("sid")
+                                    _dd_seq = data.get("seq")
+                                    if _dd_sid is not None and _dd_seq is not None:
+                                        _dr = getattr(
+                                            self, "_dropped_delta_frames", None
+                                        )
+                                        if _dr is None:
+                                            _dr = self._dropped_delta_frames = {}
+                                        _lst = _dr.get(_dd_sid)
+                                        if _lst != "overflow":
+                                            if _lst is None:
+                                                _lst = _dr[_dd_sid] = []
+                                            if len(_lst) < 1024:
+                                                try:
+                                                    _lst.append(
+                                                        (int(_dd_seq), _tk)
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    pass
+                                            else:
+                                                # Cannot prove coverage —
+                                                # downstream must treat any
+                                                # gap as unexplained.
+                                                _dr[_dd_sid] = "overflow"
                                     try:
                                         item_queue.task_done()
                                     except Exception:
                                         pass
                                     continue
+
+                    # Attach any pending dropped-frame attributions for this
+                    # sid to the next forwarded orderbook delta.
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") == "orderbook_delta"
+                    ):
+                        _dr = getattr(self, "_dropped_delta_frames", None)
+                        if _dr:
+                            _pend = _dr.pop(data.get("sid"), None)
+                            if _pend:
+                                data["_dropped_delta_frames"] = _pend
 
                     try:
                         event = self._parse_message(data)

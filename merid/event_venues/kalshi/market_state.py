@@ -3834,7 +3834,13 @@ class KalshiMarketStateStore:
             if _sid_check < 0:
                 return None  # duplicate/replayed frame on the shared sid stream
             if _sid_check > 0:
-                self._handle_sid_sequence_gap(_sid, _seq_int, _sid_check, ticker)
+                self._handle_sid_sequence_gap(
+                    _sid,
+                    _seq_int,
+                    _sid_check,
+                    ticker,
+                    dropped=msg.get("_dropped_delta_frames"),
+                )
                 return None
 
             logger.debug(
@@ -6452,7 +6458,14 @@ class KalshiMarketStateStore:
             self._sid_last_seq[sid] = seq
             return gap
 
-    def _handle_sid_sequence_gap(self, sid: Any, seq: int, gap: int, ticker: str) -> None:
+    def _handle_sid_sequence_gap(
+        self,
+        sid: Any,
+        seq: int,
+        gap: int,
+        ticker: str,
+        dropped: Any = None,
+    ) -> None:
         """Handle a dropped frame on a shared orderbook subscription.
 
         Any ticker multiplexed on that sid may be missing book updates, so
@@ -6460,7 +6473,47 @@ class KalshiMarketStateStore:
         the standard throttled snapshot-resync path (REST-owned effective
         books are preserved by ``_rest_owned_book_preserved`` — only the WS
         leg is marked unverified there).
+
+        2026-10-31: ``dropped`` optionally carries the ws.py stale-shed
+        attribution ``[(seq, ticker), ...]`` — frames the local consumer
+        deliberately superseded.  When every missing seq is accounted for,
+        only the tickers that actually lost frames are invalidated; sibling
+        books keep their verified state.  ``"overflow"`` or a partially
+        covered range falls back to full-sid invalidation (fail closed).
         """
+        missing = set(range(seq - gap, seq))
+        attributed: Optional[set] = None
+        if isinstance(dropped, (list, tuple)) and dropped:
+            dropped_map = {}
+            try:
+                for item in dropped:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        dropped_map[int(item[0])] = item[1]
+            except (TypeError, ValueError):
+                dropped_map = {}
+            if dropped_map and missing.issubset(dropped_map.keys()):
+                attributed = {dropped_map[s] for s in missing}
+        if attributed:
+            _now = time.monotonic()
+            if _now - self._last_sid_gap_log_ts.get(sid, 0.0) >= 1.0:
+                self._last_sid_gap_log_ts[sid] = _now
+                logger.warning(
+                    "[WS-SID-SEQUENCE-GAP] sid=%s gap=%d seq=%s attributed to "
+                    "ws stale-drop — invalidating only affected tickers=%s",
+                    sid, gap, seq, sorted(attributed),
+                )
+            for t in attributed:
+                try:
+                    self._mark_book_untrusted_and_resync(
+                        t, "ws_delta_dropped_stale", sid=sid, seq=seq, gap=gap
+                    )
+                except Exception:
+                    logger.exception(
+                        "[WS-SID-SEQUENCE-GAP] attributed invalidation failed "
+                        "for ticker=%s", t
+                    )
+            return
+
         with self._sid_seq_lock:
             tickers = set(self._sid_tickers.get(sid, ()))
         tickers.add(ticker)

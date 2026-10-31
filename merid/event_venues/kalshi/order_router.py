@@ -321,6 +321,20 @@ def _finalize_attempt_store_for_result(
             # lookup cannot find is a venue-side conflict, not a rejection.
             if record.status in ("PERSISTED", "SUBMITTING", "SUBMISSION_UNKNOWN"):
                 target = "REJECTED"
+        elif (
+            result_status == "rejected"
+            or (
+                result is not None
+                and getattr(result, "submission_certainty", None) == "rejected"
+            )
+        ):
+            # The venue authoritatively rejected or proved the order terminal
+            # (e.g. duplicate_order_terminal: a resubmitted coid resolved to a
+            # canceled/filled order).  Without this branch an ACKNOWLEDGED
+            # record stayed non-terminal forever — every retry rebound the
+            # dead client_order_id and 409'd in a loop (ETH SELL_NO, ~427×).
+            # The in-memory ACKED state is superseded by the venue verdict.
+            target = "REJECTED"
         elif record.status == "PERSISTED":
             # Never reached the pre-submit marker: no exchange request was sent
             # for this attempt, so REJECTED is the accurate terminal state.

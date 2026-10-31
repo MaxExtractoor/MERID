@@ -264,15 +264,33 @@ def finalize_order_identity(
             record_intent_id = record.intent_id
             caller_intent_id = getattr(intent, "intent_id", None)
             if record_intent_id and caller_intent_id and record_intent_id == caller_intent_id:
-                logger.info(
-                    "[ORDER-IDENTITY] Reusing client_order_id=%s order_attempt_id=%s for same intent_id=%s",
-                    existing_coid,
-                    record.order_attempt_id,
-                    caller_intent_id,
-                )
-                intent.order_attempt_id = record.order_attempt_id
-                return intent
-            if record.fingerprint == fingerprint:
+                if record.status in ("FILLED", "REJECTED", "CANCELED"):
+                    # The stored attempt is terminal — its client_order_id is
+                    # permanently consumed by the venue (a resubmit 409s with
+                    # order_already_exists).  The same economic intent must
+                    # mint a fresh idempotency key, never rebind the dead one.
+                    logger.info(
+                        "[ORDER-IDENTITY] Stored attempt for intent_id=%s is terminal "
+                        "(status=%s); minting fresh client_order_id instead of "
+                        "reusing %s",
+                        caller_intent_id,
+                        record.status,
+                        existing_coid,
+                    )
+                    existing_coid = None
+                else:
+                    logger.info(
+                        "[ORDER-IDENTITY] Reusing client_order_id=%s order_attempt_id=%s for same intent_id=%s",
+                        existing_coid,
+                        record.order_attempt_id,
+                        caller_intent_id,
+                    )
+                    intent.order_attempt_id = record.order_attempt_id
+                    return intent
+            if (
+                record.fingerprint == fingerprint
+                and record.status not in ("FILLED", "REJECTED", "CANCELED")
+            ):
                 logger.info(
                     "[ORDER-IDENTITY] Recovering order_attempt_id=%s from legacy client_order_id=%s",
                     record.order_attempt_id,
@@ -281,7 +299,8 @@ def finalize_order_identity(
                 intent.order_attempt_id = record.order_attempt_id
                 return intent
             # The coid already belongs to a different order (different intent_id
-            # and different economic fingerprint). Do not reuse it.
+            # and different economic fingerprint), or its attempt is terminal
+            # and the key is permanently consumed. Do not reuse it.
             logger.warning(
                 "[ORDER-IDENTITY] coid=%s belongs to a different order; "
                 "minting a new idempotency key instead of reusing a mismatched attempt",

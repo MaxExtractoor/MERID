@@ -349,6 +349,35 @@ class _HotDiagnosticThrottleFilter(logging.Filter):
         ("[STRIP-DIAG]", 30.0),
         ("[COLLECT-SAMPLE-TICKERS]", 30.0),
         ("[CF-RTI-ADAPTER] stream_observation_accepted", 30.0),
+        # 2026-10-31: the overnight err.log hit 628MB / 2.79M lines (~55/s)
+        # with drain lag >1h — the queue was starving the WS consumer itself.
+        # These per-evaluation diagnostics dominated the volume and carry
+        # no per-occurrence audit value (rejection reasons persist in the
+        # decision-rejections DB); sample each (logger, template, arg0) key.
+        ("[UNIFIED-SPOT]", 30.0),
+        ("[UNIFIED-SPOT-OHLC-INVARIANT]", 60.0),
+        ("[EXPIRY-FALLBACK]", 60.0),
+        ("[NORMALIZE-15M-TICKER]", 60.0),
+        ("[NORMALIZE-15M-INVARIANT-FAIL]", 60.0),
+        ("[BOOK-UNTRUSTED]", 30.0),
+        ("[BOOK-STATE-TRANSITION]", 30.0),
+        ("[WS-GET-SNAPSHOT]", 60.0),
+        ("[WS-REFRESH]", 60.0),
+        ("[CAP-SHADOW]", 60.0),
+        ("[POSITION-LIMIT]", 60.0),
+        ("[SNAPSHOT-FILTER-DEBUG]", 60.0),
+        ("[COLLECT-ENTRY]", 30.0),
+        ("[COLLECT-ASSET]", 30.0),
+        ("[COLLECT-COOLDOWN]", 60.0),
+        ("[COLLECT-MARKET-STORE]", 60.0),
+        ("[COLLECT-ALL-TICKERS]", 60.0),
+        ("[COLLECT-SERIES-PREFIX]", 60.0),
+        ("[COLLECT-MATCHING-TICKERS]", 60.0),
+        ("[AGENT-GRID-INDICATOR-AGENT]", 60.0),
+        ("[AGENT-GRID-RUN-CYCLE-AGENT]", 60.0),
+        ("[AGENT-GRID-RUN-CYCLE-NO-CANDIDATE]", 60.0),
+        ("[MARKET-SELECTION]", 60.0),
+        ("[SIGNAL-GENERATION-REJECT]", 30.0),
     )
 
     def __init__(self) -> None:

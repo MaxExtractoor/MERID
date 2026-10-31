@@ -2682,7 +2682,7 @@ async def get_balance() -> Dict[str, Any]:
     portfolio_cents = await service.get_portfolio_value_cents()
     
     logger.info("[balance endpoint] Using v2 bankroll data: equity=%s available=%s portfolio=%s source=%s state=%s as_of=%s",
-               summary.equity_usd, summary.available_cash_usd, portfolio_cents / 100.0,
+               summary.equity_usd, summary.available_cash_usd, portfolio_cents / 100,
                summary.source, summary.state.value, summary.as_of)
     
     # Build response with explicit state
