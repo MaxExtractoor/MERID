@@ -377,6 +377,28 @@ async def run_p0_preflight_checks(
             if _mc_env
             else "generic_bounded_lane_cap"
         )
+        # Sizing interaction (2026-10-31 containment spec): risk-scaled
+        # sizing proposes contracts = loss_budget_cents / entry_price, which
+        # inside the 94-98c band is ~6 contracts; the lane cap then binds the
+        # final constructed quantity.  Resolved through the sizer's own
+        # helpers so the printed budget IS the enforced budget.
+        _sizing = "sizing=n/a"
+        try:
+            from merid.prediction import trade_decision as _td_p0
+
+            _rs_on = _td_p0._risk_scaled_sizing_enabled()
+            _budget_c = _td_p0._per_trade_loss_budget_cents()
+            _lo_c = _dr_p0._pinned_fav_lo()
+            _propose_cc = (
+                int(_budget_c * 100.0 / _lo_c) if _rs_on and _lo_c > 0 else None
+            )
+            _sizing = (
+                "risk_scaled=%s loss_budget_cents=%g -> proposal~%gcc@%gc; "
+                "pinned_fav_cap=%s binds final qty"
+                % (_rs_on, _budget_c, _propose_cc, _lo_c, _eff_cap)
+            )
+        except Exception as _se:
+            _sizing = "sizing_resolve_error=%s" % _se
         _caps = " ".join(
             "%s-%s=%s"
             % (
@@ -396,7 +418,7 @@ async def run_p0_preflight_checks(
                 "pinned_fav_policy_resolution",
                 True,
                 "enabled=%s maker=%s band=%g-%g src=%s tte=%g-%g min_p=%s "
-                "min_ev=%s daily_max=%s max_contracts=%s src=%s caps{%s}"
+                "min_ev=%s daily_max=%s max_contracts=%s src=%s %s caps{%s}"
                 % (
                     _dr_p0.pinned_fav_enabled(),
                     _maker,
@@ -410,6 +432,7 @@ async def run_p0_preflight_checks(
                     _dr_p0.pinned_fav_daily_max(),
                     _eff_cap,
                     _cap_src,
+                    _sizing,
                     _caps,
                 ),
             )
