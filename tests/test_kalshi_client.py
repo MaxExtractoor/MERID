@@ -586,6 +586,9 @@ class TestOrderOperations:
             price=Decimal("0.81"),
             order_type="limit",
             reduce_only=True,
+            # Kalshi reduce_only requires an IOC-compatible TIF on the
+            # wire; the serializer rejects the combination otherwise.
+            time_in_force="immediate_or_cancel",
         )
 
         await client.place_order_result(order)

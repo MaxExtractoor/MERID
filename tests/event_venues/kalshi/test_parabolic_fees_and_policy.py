@@ -116,11 +116,12 @@ class TestParabolicFeeFormulas:
         assert taker_fee > maker_fee  # Taker fee is higher
 
     def test_estimate_fee_for_sizing(self):
-        """Test sizing helper that works with cents."""
-        # price_cents=55 -> price_dollars=0.55
+        """Sizing helper returns the canonical fractional bound, not the
+        whole-cent integer ceil — sub-cent precision is required so
+        fractional orders see the real fee (0.07*10*0.55*0.45=$0.17325
+        -> $0.1733 bound -> 17.33c)."""
         fee = estimate_fee_for_sizing(price_cents=55, contracts=10, assume_taker=True)
-        expected = kalshi_taker_fee_cents_parabolic(0.55, 10)
-        assert fee == expected
+        assert float(fee) == pytest.approx(17.33)
 
     def test_fee_per_contract_cents(self):
         """Test per-contract fee calculation."""

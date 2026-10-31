@@ -113,10 +113,18 @@ class TestDequeueValidator:
         )
         assert ok2 is True
 
-    def test_no_seq_or_uninitialized_is_permissive(self, store):
+    def test_missing_seq_on_initialized_book_invalidates(self, store):
+        # Kalshi delivers a contiguous seq on every orderbook delta,
+        # including conflated streams — a tracked initialized book that
+        # receives a seq-less delta is malformed, so the book must be
+        # invalidated rather than silently applied.
         assert store._validate_delta_sequence(
             "KXBTC15M-A", {"_sid": 4}, _FakeBook(last_seq=100)
-        ) == (True, None, None)
+        ) == (False, 101, None)
+
+    def test_no_seq_baseline_remains_permissive(self, store):
+        # No established seq baseline -> no contiguity claim to evaluate;
+        # executability stays governed by the bootstrap/init gates.
         assert store._validate_delta_sequence(
             "KXBTC15M-A", {"_sid": 4, "seq": 5}, _FakeBook(last_seq=None)
         ) == (True, None, None)

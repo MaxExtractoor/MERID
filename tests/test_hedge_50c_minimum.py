@@ -79,6 +79,9 @@ class TestHedgeEngine50cMinimum(unittest.TestCase):
         mock_config.slice_value_cents = Mock(return_value=10000)
         mock_config.get_timeframe_rule = Mock(return_value=TimeframeHedgeRule())
         mock_config.max_net_exposure_cents = Mock(return_value=5000)
+        # HedgeConfig.auto_exit is an instance-level attribute the spec'd
+        # mock cannot see; supply it explicitly (no flip reduction here).
+        mock_config.auto_exit = Mock(reduce_on_exposure_flip=False)
 
         # Create mock market catalog with market at 5c (below minimum)
         mock_catalog = Mock()
@@ -116,6 +119,8 @@ class TestHedgeEngine50cMinimum(unittest.TestCase):
         mock_config.slice_value_cents = Mock(return_value=10000)
         mock_config.get_timeframe_rule = Mock(return_value=TimeframeHedgeRule())
         mock_config.max_net_exposure_cents = Mock(return_value=5000)
+        # See above: auto_exit is instance-level on HedgeConfig.
+        mock_config.auto_exit = Mock(reduce_on_exposure_flip=False)
 
         # Create mock market catalog with market at 50c (minimum acceptable)
         mock_catalog = Mock()

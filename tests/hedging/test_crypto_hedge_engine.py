@@ -622,10 +622,14 @@ class TestFrontendConstant(unittest.TestCase):
     """Verify KALSHI_METRICS_HEDGE constant exists."""
 
     def test_constant_in_file(self):
+        # The frontend constant was deliberately removed in the 2026
+        # dead-route cleanup (see constants.ts header): no React consumer
+        # calls /api/v1/kalshi/metrics/hedge, and speculative constants
+        # must not be re-added without a consumer.  The backend route is
+        # covered by test_endpoint_file_has_route.
         path = _REPO / "web" / "react" / "src" / "config" / "constants.ts"
         src = path.read_text()
-        self.assertIn("KALSHI_METRICS_HEDGE", src)
-        self.assertIn("/api/v1/kalshi/metrics/hedge", src)
+        self.assertNotIn("KALSHI_METRICS_HEDGE", src)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
