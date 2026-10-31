@@ -31,6 +31,27 @@ from merid.position_management.exit_policy import ExitReason
 from merid.event_venues.kalshi.resting_order_monitor import RestingOrderMonitor, RestingOrderRecord
 
 
+def _seed_open_position(monitor, position_id="test-position-001"):
+    """Seed the monitor's open-position map so the exit registry accepts
+    registration for this position.
+
+    The registry (2026-09-24 fix) refuses to register exits for positions
+    the monitor is not tracking — orphaning the registry silently swallows
+    later exits. These tests unit-test registry mechanics, so the position
+    is seeded directly rather than through add_position's market-validity
+    gates (which also reject the fixtures' expired test ticker)."""
+    pos = Position(
+        position_id=position_id,
+        market_id="KXBTC15M-26JUL211745-45",
+        side="yes",
+        size=10,
+        avg_entry_price_cents=50,
+        exit_policy_id="test-policy-001",
+    )
+    monitor._open_positions[position_id] = pos
+    return pos
+
+
 class TestWebsocketLagScenarios:
     """Test scenarios where websocket lag causes orders to not be immediately visible."""
     
@@ -118,7 +139,10 @@ class TestWebsocketLagScenarios:
         4. Duplicate exit is prevented
         """
         kalshi_order_id = "kalshi-exit-001"
-        
+
+        # The registry only accepts exits for monitored positions
+        position_monitor._open_positions[sample_position.position_id] = sample_position
+
         # Register exit order in registry
         position_monitor._register_exit_order(sample_position.position_id, kalshi_order_id, quantity=10)
         
@@ -132,6 +156,23 @@ class TestWebsocketLagScenarios:
         # Verify total exit quantity
         total_qty = position_monitor._get_total_exit_quantity(sample_position.position_id)
         assert total_qty == 10
+
+    def test_registry_refuses_exit_for_unmonitored_position(self, position_monitor):
+        """
+        Negative control for the 2026-09-24 guard: the registry must refuse
+        to register an exit order for a position the monitor is not
+        tracking.  An orphaned entry would silently swallow every exit for
+        the next position reusing this position_id.
+        """
+        position_id = "unmonitored-position-001"
+        kalshi_order_id = "orphan-exit-001"
+
+        # Deliberately do NOT seed _open_positions
+        position_monitor._register_exit_order(position_id, kalshi_order_id, quantity=10)
+
+        # Registration must be refused
+        assert position_monitor._has_exit_order(position_id) is False
+        assert position_monitor._get_total_exit_quantity(position_id) == 0
 
 
 class TestOrderRejectionScenarios:
@@ -212,7 +253,9 @@ class TestOrderCancellationScenarios:
         """
         position_id = "test-position-001"
         kalshi_order_id = "cancelled-order-001"
-        
+
+        _seed_open_position(position_monitor, position_id)
+
         # Register exit order
         position_monitor._register_exit_order(position_id, kalshi_order_id, quantity=10)
         assert position_monitor._has_exit_order(position_id) is True
@@ -325,7 +368,9 @@ class TestPartialFillScenarios:
         position_id = "test-position-001"
         position_size = 10
         exit_order_id = "partial-exit-001"
-        
+
+        _seed_open_position(position_monitor, position_id)
+
         # Register partial exit (6 contracts)
         position_monitor._register_exit_order(position_id, exit_order_id, quantity=6)
         
@@ -351,7 +396,9 @@ class TestPartialFillScenarios:
         """
         position_id = "test-position-001"
         position_size = 10
-        
+
+        _seed_open_position(position_monitor, position_id)
+
         # Register two partial exits
         position_monitor._register_exit_order(position_id, "partial-001", quantity=4)
         position_monitor._register_exit_order(position_id, "partial-002", quantity=5)
@@ -439,7 +486,9 @@ class TestStateDriftScenarios:
         """
         position_id = "test-position-001"
         kalshi_order_id = "registry-exit-001"
-        
+
+        _seed_open_position(position_monitor, position_id)
+
         # Register in registry
         position_monitor._register_exit_order(position_id, kalshi_order_id, quantity=10)
         
@@ -461,7 +510,9 @@ class TestStateDriftScenarios:
         """
         position_id = "test-position-001"
         kalshi_order_id = "filled-exit-001"
-        
+
+        _seed_open_position(position_monitor, position_id)
+
         # Register exit
         position_monitor._register_exit_order(position_id, kalshi_order_id, quantity=10)
         assert position_monitor._has_exit_order(position_id) is True
@@ -485,25 +536,42 @@ class TestConcurrentTriggerScenarios:
     
     def test_timeout_allows_retry_after_failed_exit(self, position_monitor):
         """
-        Test that timeout allows retry after failed exit.
-        
+        Test that a timed-out exit allows retry only after reconciliation.
+
+        Contract (2026-08-09 redesign): a timeout does NOT silently release
+        the in-flight lock — the submission outcome is unproven, so the
+        intent transitions to SUBMISSION_UNKNOWN and keeps blocking new
+        exits until reconciled.  Retry is allowed only after
+        reconciliation resolves the unknown outcome.
+
         Scenario:
         1. Exit intent is marked in-flight
         2. Order placement fails (network error, rejection)
         3. Timeout expires (15 seconds)
-        4. In-flight flag is cleared
-        5. Retry is allowed
+        4. Intent transitions to SUBMISSION_UNKNOWN and still blocks
+        5. Reconciliation clears it — retry is allowed
         """
         position_id = "test-position-001"
-        
+
         # Mark intent as in-flight
         position_monitor._mark_exit_intent_in_flight(position_id)
         assert position_monitor._is_exit_intent_in_flight(position_id) is True
-        
-        # Manually expire the intent
-        position_monitor._exit_intent_in_flight[position_id] = time.time() - 20.0
-        
-        # Check if in-flight (should auto-expire)
+
+        # Manually age the intent past the 15s timeout
+        position_monitor._exit_intent_in_flight[position_id]["timestamp"] = time.time() - 20.0
+
+        # Timeout must NOT silently release the lock: the outcome is
+        # unknown, so it blocks (SUBMISSION_UNKNOWN) until reconciled.
+        assert position_monitor._is_exit_intent_in_flight(position_id) is True
+        assert (
+            position_monitor._exit_intent_in_flight[position_id]["state"]
+            == "SUBMISSION_UNKNOWN"
+        )
+
+        # Reconciliation resolves the unknown outcome -> retry allowed
+        position_monitor._mark_exit_intent_reconciled(
+            position_id, "test_reconcile_unfilled"
+        )
         assert position_monitor._is_exit_intent_in_flight(position_id) is False
     
     def test_multiple_positions_independent_locks(self, position_monitor):
