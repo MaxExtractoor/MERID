@@ -344,4 +344,77 @@ async def run_p0_preflight_checks(
     except Exception as e:
         results.append(_check("threshold_cell_band_containment", False, str(e)))
 
+    # 8. Resolved pinned-fav policy echo (2026-10-31 audit directive).  The
+    # effective lane configuration is printed verbatim on every preflight so
+    # a documented limit can never again lose silently to an unnoticed env
+    # override.  Values are resolved through the same helpers the
+    # emit/gate/clamp/wire enforcement points call — the printed band IS the
+    # enforced band.  Resolution failure fails closed: a policy that cannot
+    # be read should not silently pass.
+    try:
+        import os as _os
+
+        from merid.prediction import directional_regime as _dr_p0
+
+        _maker = _dr_p0.pinned_fav_maker_mode()
+        _band_src = (
+            "env:MERID_PINNED_FAV_MAKER_LO/HI"
+            if _maker
+            else "env:MERID_PINNED_FAV_PRICE_LO/HI"
+        )
+        _mc_env = (_os.environ.get("MERID_PINNED_FAV_MAX_CONTRACTS") or "").strip()
+        _gen_cap = None
+        try:
+            from merid.prediction.agent_grid_15m import _bounded_lane_max_contracts
+
+            _gen_cap = float(_bounded_lane_max_contracts())
+        except Exception:
+            pass
+        _eff_caps = [c for c in (_gen_cap, float(_mc_env) if _mc_env else None) if c]
+        _eff_cap = min(_eff_caps) if _eff_caps else None
+        _cap_src = (
+            f"env:MERID_PINNED_FAV_MAX_CONTRACTS={_mc_env}"
+            if _mc_env
+            else "generic_bounded_lane_cap"
+        )
+        _caps = " ".join(
+            "%s-%s=%s"
+            % (
+                a,
+                s,
+                (
+                    "none"
+                    if _dr_p0._moneyness_max_entry_price_cents(s, a) is None
+                    else "%g" % _dr_p0._moneyness_max_entry_price_cents(s, a)
+                ),
+            )
+            for a in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            for s in ("yes", "no")
+        )
+        results.append(
+            _check(
+                "pinned_fav_policy_resolution",
+                True,
+                "enabled=%s maker=%s band=%g-%g src=%s tte=%g-%g min_p=%s "
+                "min_ev=%s daily_max=%s max_contracts=%s src=%s caps{%s}"
+                % (
+                    _dr_p0.pinned_fav_enabled(),
+                    _maker,
+                    _dr_p0._pinned_fav_lo(),
+                    _dr_p0._pinned_fav_hi(),
+                    _band_src,
+                    _dr_p0._pinned_fav_min_tte(),
+                    _dr_p0._pinned_fav_max_tte(),
+                    _dr_p0._pinned_fav_maker_min_p() if _maker else "n/a",
+                    _dr_p0._pinned_fav_min_ev_cents(),
+                    _dr_p0.pinned_fav_daily_max(),
+                    _eff_cap,
+                    _cap_src,
+                    _caps,
+                ),
+            )
+        )
+    except Exception as e:
+        results.append(_check("pinned_fav_policy_resolution", False, str(e)))
+
     return results
