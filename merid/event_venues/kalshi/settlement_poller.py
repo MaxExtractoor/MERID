@@ -1932,6 +1932,37 @@ class SettlementToGradingBridge:
             ledger = get_fills_ledger()
             outcome = "yes" if settlement.outcome_str == "YES" else "no"
             ledger.on_market_settlement(settlement.market_id, outcome)
+            # 2026-10-31: book the settlement payout as a durable proceeds row —
+            # the exchange's /portfolio/settlements payload is authoritative for
+            # held counts + revenue, and without this leg every expired position
+            # books its entry cost with no payout in proceeds-based PnL.
+            try:
+                _yes_c = float(
+                    settlement.yes_count_fp
+                    if settlement.yes_count_fp is not None
+                    else (settlement.yes_count or 0)
+                )
+                _no_c = float(
+                    settlement.no_count_fp
+                    if settlement.no_count_fp is not None
+                    else (settlement.no_count or 0)
+                )
+                _rev = (
+                    float(settlement.exchange_revenue_cents) / 100.0
+                    if settlement.exchange_revenue_cents is not None
+                    else None
+                )
+                if _yes_c > 0 or _no_c > 0:
+                    ledger.record_settlement_proceeds(
+                        settlement.market_id,
+                        outcome,
+                        yes_count=_yes_c,
+                        no_count=_no_c,
+                        revenue_dollars=_rev,
+                        settlement_time=settlement.settlement_time,
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to record settlement proceeds: {exc}")
         except Exception as exc:
             logger.warning(f"Failed to notify fills_ledger of settlement: {exc}")
 

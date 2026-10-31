@@ -7261,6 +7261,256 @@ class KalshiFillsLedger:
             return None
         return total, residual_yes_cc
 
+    def record_settlement_proceeds(
+        self,
+        market_ticker: str,
+        outcome: str,
+        *,
+        yes_count: float = 0.0,
+        no_count: float = 0.0,
+        revenue_dollars: Optional[float] = None,
+        settlement_time: Optional[Any] = None,
+    ) -> int:
+        """Book the exchange settlement payout as a durable cash-flow row.
+
+        ``/portfolio/settlements`` is venue-authoritative: each held contract
+        pays $1.00 to the winning side, $0 to the loser.  That payout is a
+        real cash movement but NOT a trade, so it never appears in the fills
+        feed — leaving ``summary()``'s proceeds-based realized-PnL to book
+        every expired position's entry cost with no offsetting payout
+        (observed 2026-10-31: top-bar showed -$21.24 of pure entry costs on
+        a day whose expired positions had paid out ~$20+).
+
+        One row is written per held side (fill_id ``settlement:{ticker}:{side}``,
+        INSERT OR IGNORE so poller re-delivery is idempotent).  Its
+        ``canonical_yes_delta_cc`` zeroes the residual signed-YES exposure so
+        ``_market_fill_totals``/position reconstruction stay consistent, and
+        ``created_time`` is stamped settled_time+1s so the pre-settlement
+        residual reconstruction (``asof_ts``) remains uncorrupted.
+        """
+        import json as _json
+        import sqlite3 as _sq
+
+        outcome = (outcome or "").strip().lower()
+        if outcome not in ("yes", "no"):
+            return 0
+        legs = (
+            ("yes", float(yes_count or 0.0)),
+            ("no", float(no_count or 0.0)),
+        )
+        held = [(s, c) for s, c in legs if c > 0]
+        if not held:
+            return 0
+
+        try:
+            if isinstance(settlement_time, str) and settlement_time:
+                settle_ts = datetime.fromisoformat(
+                    settlement_time.replace("Z", "+00:00")
+                )
+            elif isinstance(settlement_time, (int, float)):
+                settle_ts = datetime.fromtimestamp(settlement_time, tz=timezone.utc)
+            elif isinstance(settlement_time, datetime):
+                settle_ts = settlement_time
+            else:
+                settle_ts = datetime.now(timezone.utc)
+            if settle_ts.tzinfo is None:
+                settle_ts = settle_ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            settle_ts = datetime.now(timezone.utc)
+        # +1s so pre-settlement residual reconstruction (asof<=settled_time)
+        # still sees the pre-settle exposure this row zeroes out.
+        row_ts = settle_ts + timedelta(seconds=1)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        written = 0
+        conn = None
+        last_exc: Optional[Exception] = None
+        # The live ledger's batch writer can hold the SQLite write lock for
+        # >10s under load; the poller's settlement callback may not re-fire
+        # for this market, so retry across several lock windows rather than
+        # dropping the payout leg.
+        for _attempt in range(6):
+            try:
+                conn = _sq.connect(self._db_path, timeout=15)
+                conn.execute("PRAGMA busy_timeout=15000")
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    if conn is not None:
+                        conn.close()
+                except Exception:
+                    pass
+                conn = None
+                time.sleep(2.0 + _attempt)
+        if conn is None:
+            logger.warning(
+                "[SETTLEMENT-PROCEEDS] %s could not open fills db: %s",
+                market_ticker, last_exc,
+            )
+            return 0
+        def _leg(side: str, contracts: float) -> tuple:
+            won = side == outcome
+            payout = contracts * (1.0 if won else 0.0)
+            qty_cc = int(round(contracts * 100))
+            return (
+                f"settlement:{market_ticker}:{side}",
+                won,
+                payout,
+                qty_cc,
+                -qty_cc if side == "yes" else qty_cc,
+                100 if won else 0,
+                (payout / contracts) if side == "yes" else None,
+                (payout / contracts) if side == "no" else None,
+            )
+
+        write_ok = False
+        for _attempt in range(6):
+            try:
+                for side, contracts in held:
+                    (fill_id, _won, payout, _q, yes_delta_cc, price_c,
+                     yes_px, no_px) = _leg(side, contracts)
+                    raw = {
+                        "kind": "settlement",
+                        "market_ticker": market_ticker,
+                        "outcome": outcome,
+                        "held_side": side,
+                        "held_contracts": contracts,
+                        "payout_dollars": payout,
+                        "exchange_revenue_dollars": revenue_dollars,
+                        "settlement_time": (
+                            settlement_time
+                            if isinstance(settlement_time, str)
+                            else row_ts.isoformat()
+                        ),
+                    }
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO kalshi_fills (
+                            fill_id, trade_id, order_id, market_ticker, side, action,
+                            count_fp, quantity_cc, yes_price_dollars, no_price_dollars, fee_cost,
+                            proceeds_dollars,
+                            execution_outcome_side, execution_action, execution_price_cents,
+                            canonical_position_side, canonical_position_action,
+                            canonical_leg_price_cents, canonical_yes_delta_cc,
+                            ledger_schema_version, canonicalization_version, canonicalization_state,
+                            client_order_id, client_tag, liquidity_role, subaccount_number, created_time,
+                            created_at,
+                            ingestion_source, ingested_at, agent_id, intent_id,
+                            reconciled, raw_payload, decision_trace_id, fill_source,
+                            hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
+                            is_exit, reduce_only, entry_or_exit,
+                            policy_epoch
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            fill_id, fill_id, None, market_ticker, side, "sell",
+                            str(Decimal(str(contracts))), _q,
+                            yes_px, no_px, 0.0,
+                            payout,
+                            side, "sell", price_c,
+                            side, "sell", price_c, yes_delta_cc,
+                            4, "v1", "settlement",
+                            fill_id, fill_id, "settlement", None, row_ts.isoformat(),
+                            row_ts.isoformat(),
+                            "settlement_rest", now_iso, None, None,
+                            1, _json.dumps(raw), None, "settlement",
+                            None, 0, None,
+                            1, 1, "exit",
+                            os.environ.get("MERID_POLICY_EPOCH", "post_drawdown_2026-10-01"),
+                        ),
+                    )
+                    if cur.rowcount > 0:
+                        written += 1
+                conn.commit()
+                write_ok = True
+                break
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                if _attempt < 5:
+                    time.sleep(2.0 + _attempt)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        if not write_ok:
+            logger.warning(
+                "[SETTLEMENT-PROCEEDS] %s write failed after retries: %s",
+                market_ticker, last_exc,
+            )
+            return written
+
+        # Register in-memory whether the row was just written or pre-dates
+        # this call, so summary() sees the payout leg in-process.
+        for side, contracts in held:
+            (fill_id, _won, payout, qty_cc, yes_delta_cc, price_c,
+             yes_px, no_px) = _leg(side, contracts)
+            if fill_id in self._fills:
+                continue
+            try:
+                raw = {
+                    "kind": "settlement",
+                    "market_ticker": market_ticker,
+                    "outcome": outcome,
+                    "held_side": side,
+                    "held_contracts": contracts,
+                    "payout_dollars": payout,
+                    "exchange_revenue_dollars": revenue_dollars,
+                }
+                self._fills[fill_id] = KalshiFill(
+                    fill_id=fill_id,
+                    trade_id=fill_id,
+                    order_id=None,
+                    market_ticker=market_ticker,
+                    side=side,
+                    action="sell",
+                    count_fp=Decimal(str(contracts)),
+                    quantity_cc=qty_cc,
+                    yes_price_dollars=(
+                        Decimal(str(yes_px)) if yes_px is not None else None
+                    ),
+                    no_price_dollars=(
+                        Decimal(str(no_px)) if no_px is not None else None
+                    ),
+                    fee_cost=Decimal("0"),
+                    proceeds_dollars=Decimal(str(payout)),
+                    execution_outcome_side=side,
+                    execution_action="sell",
+                    execution_price_cents=price_c,
+                    canonical_position_side=side,
+                    canonical_position_action="sell",
+                    canonical_leg_price_cents=price_c,
+                    canonical_yes_delta_cc=yes_delta_cc,
+                    client_order_id=fill_id,
+                    client_tag=fill_id,
+                    liquidity_role="settlement",
+                    created_time=row_ts,
+                    ingestion_source="settlement_rest",
+                    reconciled=True,
+                    raw_payload=raw,
+                    fill_source="settlement",
+                    is_exit=True,
+                    reduce_only=True,
+                    entry_or_exit="exit",
+                )
+                self._fills_by_market.setdefault(market_ticker, []).append(fill_id)
+                self._processed_fill_ids.add(fill_id)
+            except Exception as exc:
+                logger.debug(
+                    "[SETTLEMENT-PROCEEDS] in-memory register failed %s: %s",
+                    fill_id, exc,
+                )
+        if written:
+            logger.info(
+                "[SETTLEMENT-PROCEEDS] %s outcome=%s booked %d payout leg(s) "
+                "(exchange_revenue=%s)",
+                market_ticker, outcome, written, revenue_dollars,
+            )
+        return written
+
     def get_market_fee_total_dollars(
         self,
         market_ticker: str,
