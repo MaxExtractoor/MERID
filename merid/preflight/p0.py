@@ -225,6 +225,8 @@ async def run_p0_preflight_checks(
             f.fill_id: f
             for f in internal_fills
             if getattr(f, "fill_source", None) != "settlement"
+            and not str(getattr(f, "fill_id", "") or "").startswith("settlement:")
+            and getattr(f, "ingestion_source", None) != "settlement_rest"
         }
 
         only_exchange = ex_ids - set(in_by_id)

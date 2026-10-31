@@ -10686,6 +10686,11 @@ class KalshiFillsLedger:
                         ledger_schema_version=_row_ledger_schema_version,
                         canonicalization_version=_row_canonicalization_version,
                         canonicalization_state=_row_canonicalization_state,
+                        fill_source=(
+                            row["fill_source"]
+                            if "fill_source" in row.keys()
+                            else ""
+                        ),
                         unmatched=_is_untrusted,
                         unmatched_reason="untrusted_legacy" if _is_untrusted else None,
                     )
