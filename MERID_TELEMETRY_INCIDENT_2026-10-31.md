@@ -62,6 +62,23 @@ Scope: production server (port 8011), telemetry persistence path, event-loop sta
 
 **Deployed:** restart 20:28:56, SHA `c636943f`, run `20261101002835_2976_af5f58b1`, `LIVE_ENTRIES_ENABLED`, all P0 checks PASS.
 
+**Readiness enforcement (`dca277ed`, `37d54901`, deployed 20:46).**
+`settlement_write_health()` is consumed by the `loop_15m` entry gate —
+`not ok` blocks new entries only (reconciliation/cancel/exits continue):
+- `settlement_unresolved_age:NNs` — any in-flight op pending past
+  `MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S` (default 300s, provisional).
+  Age clock starts at **operation admission** (task creation), covering
+  executor-queue wait + worker run + caller await; queued ops accrue
+  unresolved time and count in `pending_unresolved`.
+- `settlement_write_failed:{tickers}` — outstanding durable write
+  failure tracked **per market**; clears only via a same-market commit,
+  so an unrelated settlement's success cannot hide an outstanding
+  accounting failure.
+
+**Validation:** `test_settlement_offloop.py` — 14 cases incl. the
+cross-operation overlap (A fails → B commits → still blocked on A → A's
+own commit recovers) and queued-op age coverage. 14/14 + 7/7 recon.
+
 ## Still open
 
 - [ ] Queue-age + consumer-heartbeat metrics independent of the saturated paths.
