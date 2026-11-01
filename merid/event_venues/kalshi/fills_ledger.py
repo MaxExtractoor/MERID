@@ -7408,12 +7408,25 @@ class KalshiFillsLedger:
                         market_ticker, outcome_norm, legs, row_ts, now_iso,
                         revenue_dollars, settle_time_str,
                     )
-                except SettlementProceedsWriteError:
+                except SettlementProceedsWriteError as exc:
                     stats["failed"] += 1
                     stats["last_failure_mono"] = time.monotonic()
+                    failed = getattr(self, "_settlement_failed", None)
+                    if failed is None:
+                        self._settlement_failed = failed = {}
+                    failed[market_ticker] = {
+                        "at_mono": time.monotonic(),
+                        "error": str(exc),
+                    }
                     raise
                 stats["committed"] += 1
                 stats["last_commit_mono"] = time.monotonic()
+                failed = getattr(self, "_settlement_failed", None)
+                if failed is not None:
+                    # Resolution is per durable operation: a commit for THIS
+                    # market clears only its own outstanding failure — an
+                    # unrelated market's success cannot hide it.
+                    failed.pop(market_ticker, None)
                 self._register_settlement_legs(
                     market_ticker, legs, row_ts, now_iso, revenue_dollars,
                     outcome_norm, written,
@@ -7441,16 +7454,26 @@ class KalshiFillsLedger:
     def settlement_write_health(self) -> Dict[str, Any]:
         """Readiness signal for settlement-proceeds persistence.
 
-        Not healthy when (a) an in-flight op has been unresolved longer
-        than ``MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S`` (default 300s), or
-        (b) the most recent durable outcome is a failure — a failed write
-        blocks entries until a later write commits.  Counters alone are
-        observability; this is the enforcement surface the entry gate
-        consumes.
+        Not healthy when (a) any in-flight op has been pending longer than
+        ``MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S`` (default 300s), or (b) a
+        durable write failure is outstanding for any market — cleared only
+        by a commit for THAT market, never by an unrelated market's
+        success.
+
+        Age semantics: the clock starts at operation admission (task
+        creation), so it covers executor-queue wait behind the single
+        worker, worker execution, and the caller's await — a queued op
+        accrues unresolved age the whole time.  The 300s value is a
+        provisional operational threshold pending observed settlement
+        latency under contention.
+
+        Counters alone are observability; this is the enforcement surface
+        the entry gate consumes.
         """
         now = time.monotonic()
         inflight = getattr(self, "_settlement_inflight", None) or {}
         stats = dict(getattr(self, "_settlement_write_stats", None) or {})
+        failed = dict(getattr(self, "_settlement_failed", None) or {})
         max_age_s = float(
             os.environ.get("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "300")
             or 300
@@ -7463,11 +7486,10 @@ class KalshiFillsLedger:
                 created = getattr(t, "_merid_created_mono", None)
                 if created is not None:
                     oldest_age = max(oldest_age, now - created)
-        last_failure = stats.get("last_failure_mono", 0.0) or 0.0
-        last_commit = stats.get("last_commit_mono", 0.0) or 0.0
         base = {
             "pending_unresolved": pending,
             "oldest_unresolved_age_s": oldest_age,
+            "failed_markets": sorted(failed),
             "stats": stats,
         }
         if oldest_age > max_age_s:
@@ -7476,10 +7498,10 @@ class KalshiFillsLedger:
                 "reason": f"settlement_unresolved_age:{oldest_age:.0f}s",
                 **base,
             }
-        if last_failure > last_commit:
+        if failed:
             return {
                 "ok": False,
-                "reason": "settlement_write_failed",
+                "reason": "settlement_write_failed:" + ",".join(sorted(failed)),
                 **base,
             }
         return {"ok": True, "reason": None, **base}

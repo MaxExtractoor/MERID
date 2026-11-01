@@ -281,7 +281,8 @@ async def test_health_blocked_by_failure_then_cleared(ledger, monkeypatch):
         )
     health = ledger.settlement_write_health()
     assert health["ok"] is False
-    assert health["reason"] == "settlement_write_failed"
+    assert health["reason"].startswith("settlement_write_failed")
+    assert TICKER in health["failed_markets"]
 
     # A subsequent committed write clears the failure state — entries
     # resume only after durable accounting is demonstrated healthy again.
@@ -326,6 +327,91 @@ async def test_health_blocked_by_old_unresolved(ledger, monkeypatch):
         gate.set()
     await task
     # Once the op drains, health recovers without manual intervention.
+    assert ledger.settlement_write_health()["ok"] is True
+
+
+async def test_unrelated_commit_does_not_clear_failed_market(
+    ledger, monkeypatch
+):
+    """The exact overlap sequence: A fails -> entries blocked -> B commits
+    -> health must stay blocked on A until A's own write resolves it."""
+    await ledger.ensure_loaded()
+    tick_a = "KXBTC15M-26031-1800"
+    tick_b = "KXETH15M-26031-1815"
+    real = ledger._settlement_proceeds_db_write
+
+    def fail_a(*a, **k):
+        if a[0] == tick_a:
+            raise SettlementProceedsWriteError("simulated write exhaustion")
+        return real(*a, **k)
+
+    monkeypatch.setattr(ledger, "_settlement_proceeds_db_write", fail_a)
+    with pytest.raises(SettlementProceedsWriteError):
+        await ledger.record_settlement_proceeds_async(
+            tick_a, "yes", yes_count=2.0, timeout_s=30
+        )
+    assert ledger.settlement_write_health()["ok"] is False
+
+    # B commits successfully — the gate must NOT report healthy: A's
+    # accounting failure is still outstanding.
+    written_b = await ledger.record_settlement_proceeds_async(
+        tick_b, "yes", yes_count=2.0, timeout_s=30
+    )
+    assert written_b == 1
+    health = ledger.settlement_write_health()
+    assert health["ok"] is False
+    assert tick_a in health["failed_markets"]
+    assert tick_b not in health["failed_markets"]
+
+    # Only A's own commit resolves A's failure.
+    monkeypatch.undo()
+    written_a = await ledger.record_settlement_proceeds_async(
+        tick_a, "yes", yes_count=2.0, timeout_s=30
+    )
+    assert written_a == 1
+    assert ledger.settlement_write_health()["ok"] is True
+
+
+async def test_unresolved_age_covers_ops_queued_behind_worker(
+    ledger, monkeypatch
+):
+    """Age starts at admission, so an op waiting behind the single worker
+    accrues unresolved time — it cannot hide 'queued' from the gate."""
+    gate = threading.Event()
+    started = threading.Event()
+
+    def blocked(*a, **k):
+        started.set()
+        gate.wait(10)
+        return 0
+
+    monkeypatch.setattr(ledger, "_settlement_proceeds_db_write", blocked)
+    monkeypatch.setenv("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "0.2")
+    try:
+        t1 = asyncio.ensure_future(
+            ledger.record_settlement_proceeds_async(
+                TICKER, "yes", yes_count=2.0, timeout_s=30
+            )
+        )
+        deadline = time.time() + 5
+        while not started.is_set() and time.time() < deadline:
+            await asyncio.sleep(0.02)
+        assert started.is_set()
+        # Second market queues behind the occupied single worker.
+        t2 = asyncio.ensure_future(
+            ledger.record_settlement_proceeds_async(
+                "KXETH15M-26031-1815", "yes", yes_count=2.0, timeout_s=30
+            )
+        )
+        await asyncio.sleep(0.35)
+        health = ledger.settlement_write_health()
+        assert health["ok"] is False
+        # BOTH the running and the queued op are counted pending.
+        assert health["pending_unresolved"] == 2
+        assert health["oldest_unresolved_age_s"] >= 0.2
+    finally:
+        gate.set()
+    await asyncio.gather(t1, t2)
     assert ledger.settlement_write_health()["ok"] is True
 
 
