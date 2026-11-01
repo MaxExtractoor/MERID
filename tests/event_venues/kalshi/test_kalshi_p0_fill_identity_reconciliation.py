@@ -507,6 +507,19 @@ async def test_failed_positions_query_cannot_pass_as_flat(harness) -> None:
 
 
 @pytest.mark.asyncio
+async def test_incomplete_ledger_restore_cannot_pass_as_flat(harness, monkeypatch) -> None:
+    async def incomplete():
+        harness.ledger._load_complete = False
+        harness.ledger._last_load_error = "restore incomplete"
+        return 0
+
+    monkeypatch.setattr(harness.ledger, "ensure_loaded", incomplete)
+    ok, detail = await harness.run()
+    assert not ok
+    assert "restore incomplete" in detail
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("wrong_field,wrong_value", [
     ("quantity_cc", 124),
     ("thesis_side", "no"),

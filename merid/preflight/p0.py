@@ -361,11 +361,16 @@ async def run_p0_preflight_checks(
         # Prefer ensure_loaded(): it shares the single in-flight restore task
         # with the poller instead of running a second full load_from_db pass.
         _load = getattr(ledger, "ensure_loaded", None) or getattr(ledger, "load_from_db", None)
-        if _load is not None:
-            try:
-                await _load()
-            except Exception as load_err:
-                raise RuntimeError(f"fills ledger load failed: {load_err}") from load_err
+        if _load is None:
+            raise RuntimeError("fills ledger has no durable restore")
+        try:
+            await _load()
+        except Exception as load_err:
+            raise RuntimeError(f"fills ledger load failed: {load_err}") from load_err
+        if not getattr(ledger, "_load_complete", False):
+            raise RuntimeError(
+                f"fills ledger restore incomplete: {getattr(ledger, '_last_load_error', None)}"
+            )
 
         # REST is authoritative for exchange fills. Reconcile it into the
         # durable ledger before comparing identities so a fill received while

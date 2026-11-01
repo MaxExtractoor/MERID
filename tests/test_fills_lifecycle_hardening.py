@@ -110,6 +110,7 @@ class TestRestoreIngestRace:
         async def slow_load():
             calls.append(1)
             await gate.wait()
+            ledger._load_complete = True
             return 5
 
         monkeypatch.setattr(ledger, "load_from_db", slow_load)
@@ -133,9 +134,15 @@ class TestRestoreIngestRace:
             load_calls.append(1)
             await restore_gate.wait()
             order["restore_done"] = True
+            ledger._load_complete = True
             return 3
 
         monkeypatch.setattr(ledger, "load_from_db", slow_load)
+
+        async def no_exchange_lookup(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(ledger, "_maybe_halt_on_unmatched_fill", no_exchange_lookup)
 
         restore_task = asyncio.create_task(ledger.ensure_loaded())
         await asyncio.sleep(0)
@@ -170,6 +177,7 @@ class TestRestoreIngestRace:
             attempts.append(1)
             if len(attempts) == 1:
                 raise RuntimeError("simulated restore failure")
+            ledger._load_complete = True
             return 2
 
         monkeypatch.setattr(ledger, "load_from_db", flaky_load)
@@ -178,6 +186,36 @@ class TestRestoreIngestRace:
         # The failed task is cleared — the next call retries.
         assert await ledger.ensure_loaded() == 2
         assert len(attempts) == 2
+
+
+class TestRestoreCompleteness:
+    @pytest.mark.asyncio
+    async def test_empty_restore_is_complete_and_not_repeated(self, ledger, monkeypatch):
+        assert await ledger.ensure_loaded() == 0
+        assert ledger._load_complete
+
+        async def unexpected_reload():
+            raise AssertionError("complete empty restore must not repeat")
+
+        monkeypatch.setattr(ledger, "load_from_db", unexpected_reload)
+        assert await ledger.ensure_loaded() == 0
+
+    @pytest.mark.asyncio
+    async def test_restore_limit_is_reported_as_incomplete(self, ledger, monkeypatch):
+        import merid.event_venues.kalshi.fills_ledger as ledger_module
+
+        monkeypatch.setattr(ledger_module, "_FILLS_RESTORE_MAX_ROWS", 2)
+        await ledger._init_db()
+        with sqlite3.connect(ledger._db_path) as conn:
+            conn.executemany(
+                "INSERT INTO kalshi_fills (fill_id, market_ticker, created_time) VALUES (?, ?, ?)",
+                [(f"venue_{i}", "KXBTC15M-TEST", datetime.now(timezone.utc).isoformat())
+                 for i in range(3)],
+            )
+        assert await ledger.ensure_loaded() == 0
+        assert not ledger._load_complete
+        assert "complete history was not loaded" in ledger._last_load_error
+        assert not ledger._fills
 
 
 class TestLateRestoredProvisional:

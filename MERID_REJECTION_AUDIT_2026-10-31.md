@@ -767,6 +767,8 @@ A related persistence gap remains: the SQLite fills schema does not retain
 `confirmed_by_rest`; restoration currently reconstructs some of those flags
 incorrectly or defaults them. The new P0 projection therefore fails closed
 for active restored fills with unproven live provenance, rather than
-fabricating it. The current ledger has 1,781 retained rows; restore also has a
-10,000-row limit whose completeness is not independently reported. Neither
-these checks nor the logged settled positions resolve the 198 order attempts.
+fabricating it. The current ledger has 1,781 retained rows. Restore now
+reports failures and detects its 10,000-row cap; P0 fails closed if restore
+is incomplete. A scalable complete restore remains to be implemented before
+the cap is reached. Neither these checks nor the logged settled positions
+resolve the 198 order attempts.

@@ -311,6 +311,7 @@ _FILLS_DB_RETRY_DELAY_MAX: float = float(os.getenv("MERID_FILLS_DB_RETRY_DELAY_M
 _FILLS_WRITER_QUEUE_TIMEOUT: float = float(os.getenv("MERID_FILLS_WRITER_QUEUE_TIMEOUT", "0.5"))
 _FILLS_WRITER_ERROR_SLEEP: float = float(os.getenv("MERID_FILLS_WRITER_ERROR_SLEEP", "0.05"))
 _FILLS_SHUTDOWN_TIMEOUT: float = float(os.getenv("MERID_FILLS_SHUTDOWN_TIMEOUT", "5.0"))
+_FILLS_RESTORE_MAX_ROWS = 10000
 
 # Test fixture fill ID prefixes — never from real Kalshi API
 _TEST_FILL_PREFIXES = (
@@ -1569,6 +1570,8 @@ class KalshiFillsLedger:
 
         # Load persisted fills on startup
         self._loaded_count = 0
+        self._load_complete = False
+        self._last_load_error: Optional[str] = None
         # In-flight DB restore task shared by ensure_loaded() and the poller's
         # background restore so concurrent callers await ONE load instead of
         # racing two interleaved load_from_db() passes over self._fills.
@@ -3195,7 +3198,7 @@ class KalshiFillsLedger:
         interleaving writes into self._fills and its secondary indexes.
         A failed task is cleared so the next caller retries cleanly.
         """
-        if self._loaded_count > 0:
+        if self._load_complete:
             return self._loaded_count
         task = self._load_task
         if task is None or task.done():
@@ -10777,6 +10780,8 @@ class KalshiFillsLedger:
         import time as _time
         _rst: Dict[str, float] = {}
         _rt0 = _time.monotonic()
+        self._load_complete = False
+        self._last_load_error = None
         try:
             import aiosqlite
 
@@ -10789,9 +10794,15 @@ class KalshiFillsLedger:
                 await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT * FROM kalshi_fills ORDER BY created_time DESC LIMIT 10000"
+                    "SELECT * FROM kalshi_fills ORDER BY created_time DESC LIMIT ?",
+                    (_FILLS_RESTORE_MAX_ROWS + 1,),
                 ) as cursor:
                     rows = await cursor.fetchall()
+                if len(rows) > _FILLS_RESTORE_MAX_ROWS:
+                    raise RuntimeError(
+                        f"fills restore exceeds {_FILLS_RESTORE_MAX_ROWS} rows; "
+                        "complete history was not loaded"
+                    )
                 _rst["query_s"] = round(_time.monotonic() - _rq, 3)
                 _rd = _time.monotonic()
 
@@ -11067,8 +11078,10 @@ class KalshiFillsLedger:
                     loaded, _rst,
                 )
 
+                self._load_complete = True
                 return loaded
         except Exception as e:
+            self._last_load_error = str(e)
             logger.warning(
                 "No existing fills DB or load error: %s — restore_stages=%s",
                 e, _rst, exc_info=True,
