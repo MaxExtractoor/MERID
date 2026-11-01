@@ -446,8 +446,8 @@ class TestRestPagination:
         assert calls[2]["cursor"] == "cur_b"
 
     @pytest.mark.asyncio
-    async def test_empty_page_with_cursor_terminates(self):
-        """An empty page carrying a cursor must not loop forever."""
+    async def test_empty_page_with_cursor_continues(self):
+        """A continuation cursor is not proof that a short page is terminal."""
         from merid.event_venues.kalshi.client import KalshiVenueClient
         from merid.resilience.result import OperationResult
 
@@ -460,13 +460,118 @@ class TestRestPagination:
                 return OperationResult.ok(
                     {"fills": [{"fill_id": "f1"}], "cursor": "cur_x"}
                 )
-            return OperationResult.ok({"fills": [], "cursor": "cur_y"})
+            if len(calls) == 2:
+                return OperationResult.ok({"fills": [], "cursor": "cur_y"})
+            return OperationResult.ok({"fills": [{"fill_id": "f2"}], "cursor": None})
 
         client._request_with_resilience = fake_request
         result = await client.get_fills(limit=200)
         assert result.success
-        assert [f["fill_id"] for f in result.data] == ["f1"]
-        assert len(calls) == 2
+        assert [f["fill_id"] for f in result.data] == ["f1", "f2"]
+        assert len(calls) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("since_ts", [1793457600, 1793457600123])
+    async def test_since_timestamp_is_sent_in_seconds(self, since_ts):
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.resilience.result import OperationResult
+
+        client = object.__new__(KalshiVenueClient)
+        calls = []
+
+        async def fake_request(method, path, params=None, operation_name=None):
+            calls.append(params)
+            return OperationResult.ok({"fills": [], "cursor": None})
+
+        client._request_with_resilience = fake_request
+        result = await client.get_fills(since_ts=since_ts)
+        assert result.success
+        assert calls[0]["min_ts"] == 1793457600
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_is_not_complete(self):
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.resilience.result import OperationResult
+
+        client = object.__new__(KalshiVenueClient)
+        calls = []
+
+        async def fake_request(method, path, params=None, operation_name=None):
+            calls.append(params)
+            if len(calls) == 1:
+                return OperationResult.ok({"fills": [{"fill_id": "f1"}], "cursor": "next"})
+            return OperationResult.fail(RuntimeError("page failed"))
+
+        client._request_with_resilience = fake_request
+        result = await client.get_fills()
+        assert not result.success
+        assert result.metadata["truncated"]
+        assert result.data == [{"fill_id": "f1"}]
+
+    @pytest.mark.asyncio
+    async def test_repeated_cursor_fails_closed(self):
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.resilience.result import OperationResult
+
+        client = object.__new__(KalshiVenueClient)
+
+        async def fake_request(method, path, params=None, operation_name=None):
+            return OperationResult.ok({"fills": [], "cursor": "same"})
+
+        client._request_with_resilience = fake_request
+        result = await client.get_fills()
+        assert not result.success
+        assert result.metadata["truncated"]
+        assert result.error.error_code == "REPEATED_CURSOR"
+
+    @pytest.mark.asyncio
+    async def test_port_propagates_failed_fills_lookup(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from merid.event_venues.kalshi.venue_client_port import KalshiVenueClientExecutionPort
+        from merid.resilience.result import OperationResult
+
+        client = SimpleNamespace(get_fills=AsyncMock(
+            return_value=OperationResult.fail(RuntimeError("offline")),
+        ))
+        port = KalshiVenueClientExecutionPort(client)
+        with pytest.raises(RuntimeError, match="fills lookup failed"):
+            await port.get_fills()
+
+    @pytest.mark.asyncio
+    async def test_open_orders_queries_resting_status(self):
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.resilience.result import OperationResult
+
+        client = object.__new__(KalshiVenueClient)
+        calls = []
+
+        async def fake_request(method, path, params=None, operation_name=None):
+            calls.append(params)
+            return OperationResult.ok({"orders": [], "cursor": None})
+
+        client._request_with_resilience = fake_request
+        result = await client.get_open_orders_result()
+        assert result.success
+        assert calls[0]["status"] == "resting"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation,method", [
+        ("get_open_orders", "get_open_orders_result"),
+        ("get_positions", "get_positions_result"),
+    ])
+    async def test_port_does_not_treat_failed_account_lookup_as_flat(self, operation, method):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from merid.event_venues.kalshi.venue_client_port import KalshiVenueClientExecutionPort
+        from merid.resilience.result import OperationResult
+
+        client = SimpleNamespace(**{method: AsyncMock(
+            return_value=OperationResult.fail(RuntimeError("offline")),
+        )})
+        port = KalshiVenueClientExecutionPort(client)
+        with pytest.raises(RuntimeError, match="lookup failed"):
+            await getattr(port, operation)()
 
 
 # ── Execution-mode contract ────────────────────────────────────────────────

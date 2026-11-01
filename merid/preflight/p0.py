@@ -30,6 +30,50 @@ def _check(label: str, ok: bool, detail: str = "") -> Tuple[bool, str]:
     return ok, msg
 
 
+def _complete_snapshot(result: Any, label: str) -> List[Any]:
+    """Reject failed or partial venue snapshots instead of assuming flat."""
+    if hasattr(result, "success"):
+        if not result.success or (getattr(result, "metadata", None) or {}).get("truncated"):
+            raise RuntimeError(f"{label} incomplete: {getattr(result, 'error', None)}")
+        result = getattr(result, "data", None)
+    if not isinstance(result, list):
+        raise RuntimeError(f"{label} did not return a complete list")
+    return result
+
+
+async def _position_snapshot(client: Any) -> List[Any]:
+    get_result = getattr(client, "get_positions_result", None)
+    result = await get_result() if callable(get_result) else await client.get_positions()
+    return _complete_snapshot(result, "positions")
+
+
+async def _open_order_snapshot(client: Any) -> List[Any]:
+    get_result = getattr(client, "get_open_orders_result", None)
+    result = await get_result() if callable(get_result) else await client.get_open_orders()
+    return _complete_snapshot(result, "open orders")
+
+
+def _rti_observations_fresh(
+    observations: Dict[str, Any], assets: List[str], max_age_ms: int, now_ms: int
+) -> Tuple[bool, str]:
+    missing = [asset for asset in assets if observations.get(asset) is None]
+    if missing:
+        return False, f"missing_assets={missing}"
+    ages: List[int] = []
+    for asset in assets:
+        obs = observations[asset]
+        if not getattr(obs, "execution_eligible", False):
+            return False, f"asset={asset} execution_ineligible"
+        timestamp = getattr(obs, "observed_ts_ms", None)
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not timestamp:
+            return False, f"asset={asset} invalid_observed_timestamp"
+        age = now_ms - timestamp
+        if not 0 <= age <= max_age_ms:
+            return False, f"asset={asset} age_ms={age}"
+        ages.append(int(age))
+    return bool(assets), f"assets={len(assets)} max_age_ms={max(ages, default=0)}"
+
+
 def _check_uncertain_submissions() -> Tuple[bool, str]:
     """Fail closed on durable unknown submissions, regardless of their age."""
     try:
@@ -98,7 +142,7 @@ async def run_p0_preflight_checks(
     # 2. Balance and positions.
     try:
         balance = await client.get_balance()
-        positions = await client.get_positions()
+        positions = await _position_snapshot(client)
         results.append(
             _check(
                 "kalshi_balance_fetch",
@@ -158,14 +202,14 @@ async def run_p0_preflight_checks(
 
     # 5. Direct exchange reconciliation and cancel-all capability.
     try:
-        open_orders = await client.get_open_orders()
-        positions = await client.get_positions()
+        open_orders = await _open_order_snapshot(client)
+        positions = await _position_snapshot(client)
         # P0: request only recent fills (last 24h) to avoid unbounded
         # pagination and partial-data warnings on accounts with long history.
         since_ts = int((time.time() - 86400) * 1000)
         since_dt = datetime.fromtimestamp(since_ts / 1000, tz=timezone.utc)
         fills_result = await client.get_fills(limit=100, since_ts=since_ts)
-        fills = fills_result.unwrap_or([]) if hasattr(fills_result, "unwrap_or") else list(fills_result)
+        fills = _complete_snapshot(fills_result, "fills")
 
         cache = get_position_cache()
         ledger = get_fills_ledger()
@@ -178,7 +222,7 @@ async def run_p0_preflight_checks(
             try:
                 await _load()
             except Exception as load_err:
-                logger.warning("[P0-PREFLIGHT] fills_ledger load failed: %s", load_err)
+                raise RuntimeError(f"fills ledger load failed: {load_err}") from load_err
 
         # REST is authoritative for exchange fills. Reconcile it into the
         # durable ledger before comparing identities so a fill received while
@@ -194,10 +238,7 @@ async def run_p0_preflight_checks(
                     len(ingested_ids),
                 )
             except Exception as ingest_err:
-                logger.warning(
-                    "[P0-PREFLIGHT] REST fills ingest failed before reconciliation: %s",
-                    ingest_err,
-                )
+                raise RuntimeError(f"REST fills ingest failed: {ingest_err}") from ingest_err
 
         # Load the position cache from the exchange so internal state is fresh.
         # sync_from_rest is the canonical exchange->cache path; with force and
@@ -243,7 +284,7 @@ async def run_p0_preflight_checks(
                     cleanup_stale=True,
                 )
             except Exception as load_err:
-                logger.warning("[P0-PREFLIGHT] position_cache sync_from_rest failed: %s", load_err)
+                raise RuntimeError(f"position cache sync failed: {load_err}") from load_err
 
         # KalshiPositionCache exposes positions via get_all_positions(), not a
         # ``positions`` attribute — the old hasattr check always read [] and
@@ -335,25 +376,19 @@ async def run_p0_preflight_checks(
 
         assets = required_assets or ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         observations: Dict[str, Any] = {}
-        deadline = time.time() + max_wait_rti
-        while time.time() < deadline and len(observations) < len(assets):
+        deadline = time.monotonic() + max_wait_rti
+        rti_ok = False
+        while time.monotonic() < deadline:
             for asset in assets:
-                if asset not in observations:
-                    obs = rti_adapter(asset)
-                    if obs is not None:
-                        observations[asset] = obs
-            await __import__("asyncio").sleep(0.2)
-
-        if observations:
-            execution_ok = all(getattr(o, "execution_eligible", False) for o in observations.values())
-            ages = [getattr(o, "observed_ts_ms", 0) for o in observations.values()]
-            now_ms = int(time.time() * 1000)
-            max_age = max((now_ms - a for a in ages if a), default=0)
-            rti_ok = execution_ok and max_age <= rti_max_age_ms
-            rti_detail = f"assets={len(observations)} max_age_ms={max_age}"
-        else:
+                observations[asset] = rti_adapter(asset)
+            rti_ok, rti_detail = _rti_observations_fresh(
+                observations, assets, rti_max_age_ms, int(time.time() * 1000)
+            )
+            if rti_ok:
+                break
+            await asyncio.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        if not observations:
             rti_detail = "no RTI observations received"
-            rti_ok = False
         results.append(_check("rti_stream_fresh", rti_ok, rti_detail))
     except Exception as e:
         results.append(_check("rti_stream_fresh", False, f"{e} {rti_detail}".strip()))

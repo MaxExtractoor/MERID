@@ -216,8 +216,10 @@ class KalshiVenueClientExecutionPort:
 
     async def get_open_orders(self, ticker: Optional[str] = None) -> List[Order]:
         result = await self._client.get_open_orders_result(ticker)
-        if not result.success or result.data is None:
-            return []
+        if not result.success:
+            raise RuntimeError(f"Kalshi open orders lookup failed: {result.error}")
+        if result.data is None:
+            raise RuntimeError("Kalshi open orders lookup returned no result")
         return [_placed_order_to_order(o) for o in result.data]
 
     # ------------------------------------------------------------------
@@ -226,8 +228,10 @@ class KalshiVenueClientExecutionPort:
 
     async def get_positions(self) -> PositionsResponse:
         result = await self._client.get_positions_result()
-        if not result.success or result.data is None:
-            return PositionsResponse(positions=[], cursor=None)
+        if not result.success:
+            raise RuntimeError(f"Kalshi positions lookup failed: {result.error}")
+        if result.data is None:
+            raise RuntimeError("Kalshi positions lookup returned no result")
         return PositionsResponse(
             positions=[_venue_position_to_position(p) for p in result.data],
             cursor=result.metadata.get("cursor"),
@@ -263,8 +267,10 @@ class KalshiVenueClientExecutionPort:
         result = await self._client.get_fills(
             limit=limit, since_ts=since_ts, ticker=market_id, order_id=order_id
         )
-        if not result.success or result.data is None:
-            return FillsResponse(fills=[], cursor=None)
+        if not result.success:
+            raise RuntimeError(f"Kalshi fills lookup failed: {result.error}")
+        if result.data is None:
+            raise RuntimeError("Kalshi fills lookup returned no result")
         raw_fills = _aggregate_v2_fills(result.data)
         return FillsResponse(
             fills=[_venue_trade_to_fill(t) for t in raw_fills],

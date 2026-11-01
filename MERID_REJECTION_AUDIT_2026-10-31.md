@@ -693,3 +693,51 @@ settlement filters, cursor behavior, and distinct live/archive cutoffs.
 https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html
 describes durable outbox and idempotent-consumer requirements; the existing
 in-memory pending-publish set does not meet that guarantee.
+
+### Further account-evidence and fill-poll findings
+
+Read-only cross-checks of `logs/order_decisions.jsonl` found ticker-bearing
+events for all 30 old `SUBMITTING` attempts; none of the 168
+`SUBMISSION_UNKNOWN` attempts matched by the durable IDs in this file.
+These are local intent/firewall events, not venue acknowledgements. Several
+client IDs appear in repeated attempts, so a local rejection of one event
+does not establish that every submission with that identity was unsent.
+No durable order statuses were changed.
+
+Paginated historical order and bounded historical fill scans independently
+confirmed the two prior matches, each one YES contract on exchange shard 2:
+
+- BTC `exit_5a7092fcb267f1326e9e`: fill
+  `0721670d-cfd9-bfbe-2f37-87af3d30d1e5` at $0.2900 plus $0.0145 fee.
+- SOL `merid_e841ff42c62e49e6aea7`: fill
+  `07212c5c-9af1-93ab-887d-9ca0776b2c3b` at $0.0580 plus $0.0039 fee.
+
+An unbounded historical-fills request using `order_id` reached the page
+limit; no conclusion was drawn from that incomplete request. The confirmed
+fill matches above use the documented time bounds and client-side order-ID
+matching, with complete pagination.
+
+The resilient live fills client had sent millisecond `since_ts` values as
+Kalshi's `min_ts`, which is documented in Unix seconds. The fills poller,
+canonical reconciler, and uncertain-order recovery all supply milliseconds;
+their empty results therefore cannot be assumed complete historical evidence.
+The shared client now converts milliseconds at the HTTP boundary, follows
+all cursors, and reports failed, malformed, repeated-cursor, and page-limited
+scans as incomplete. The execution port propagates failed fills, positions,
+and open-order lookups instead of translating them to empty snapshots; open
+orders now query Kalshi's documented `resting` status. P0 uses explicit
+snapshot results, rejects failed ledger load/ingest/cache sync, and requires
+fresh valid RTI observations for every requested asset.
+
+The focused client, port, P0, submission-recovery and canonical-snapshot
+suite passes 80 tests. Ten canonical-snapshot tests initially failed because
+their static August tickers had expired; the fixture now also isolates the
+settlement-pending quarantine, without changing production expiry policy.
+The daemon logging monitor emitted closed-stream warnings during test exit.
+
+The WS reconnect and book-recovery paths can currently call
+`complete_preflight` without the fresh reconciliation, trusted fill
+watermark, and durable recovery proof required by the runtime contract. That
+unsafe auto-resume path remains open and must be addressed before restarting.
+P0's position reconciliation also still compares position counts rather
+than independently proving signed quantity and side; further work is needed.

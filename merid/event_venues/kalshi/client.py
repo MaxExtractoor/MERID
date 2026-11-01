@@ -24,7 +24,7 @@ try:
 except Exception:
     UNIFIED_SIZING_AVAILABLE = False
 
-from typing import Any, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar
 
 import uuid
 
@@ -4588,7 +4588,7 @@ class KalshiVenueClient(EventVenueClient):
         max_pages = 10  # Safety limit to prevent runaway pagination
 
         for page in range(max_pages):
-            params: Dict[str, Any] = {"status": "open", "limit": 100}
+            params: Dict[str, Any] = {"status": "resting", "limit": 100}
             if market_id:
                 params["ticker"] = market_id
             if cursor:
@@ -5143,7 +5143,7 @@ class KalshiVenueClient(EventVenueClient):
 
         Args:
             limit: Maximum fills per page
-            since_ts: Optional minimum timestamp filter
+            since_ts: Optional minimum timestamp in Unix seconds or milliseconds
             ticker: Optional market ticker filter
             order_id: Optional order ID filter
 
@@ -5156,13 +5156,17 @@ class KalshiVenueClient(EventVenueClient):
         total_retries = 0
         max_pages = 50  # P0-4 FIX: Prevent unbounded pagination
         page = 0
+        seen_cursors: Set[str] = set()
 
         while page < max_pages:
             params: Dict[str, Any] = {"limit": min(limit, 200)}
             if cursor:
                 params["cursor"] = cursor
-            if since_ts:
-                params["min_ts"] = since_ts
+            if since_ts is not None:
+                # Internal callers historically use milliseconds, while the
+                # Kalshi REST API expects Unix seconds.
+                ts = int(since_ts)
+                params["min_ts"] = ts // 1000 if ts >= 100_000_000_000 else ts
             if ticker:
                 params["ticker"] = ticker
             if order_id:
@@ -5174,47 +5178,66 @@ class KalshiVenueClient(EventVenueClient):
 
             total_latency += result.latency_ms or 0
             total_retries += result.retries or 0
-
-            if not result.success:
-                if all_fills:
-                    logger.warning(f"get_fills: Partial failure, returning {len(all_fills)} fills")
-                    break
-                return OperationResult.fail(
-                    result.error,
-                    latency_ms=total_latency,
-                    retries=total_retries,
-                )
-
-            data = result.data or {}
-            fills = data.get("fills", [])
-            all_fills.extend(fills)
-
-            # Defensive: some API paths return an empty page with a cursor,
-            # which causes unbounded pagination.  Treat an empty page as the end.
-            cursor = data.get("cursor")
-            if not fills:
-                # Empty page is terminal — clear the carried cursor so the
-                # truncation check below does not misreport MAX_PAGES.
-                cursor = None
-                break
-            if not cursor:
-                break
             page += 1
 
-        if cursor:
-            logger.warning(f"get_fills: Hit max_pages limit ({max_pages}), returning partial data")
-            return OperationResult.fail(
-                PaginationIncomplete("MAX_PAGES"),
-                latency_ms=total_latency,
-                retries=total_retries,
-                data=all_fills,
-                metadata={"truncated": True, "pages_fetched": page + 1, "records_fetched": len(all_fills)},
-            )
+            if not result.success:
+                error = result.error or RuntimeError("fills request failed")
+                return OperationResult(
+                    success=False,
+                    data=all_fills,
+                    error=error,
+                    error_message=str(error),
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                    metadata={"truncated": True, "pages_fetched": page, "records_fetched": len(all_fills)},
+                )
 
-        return OperationResult.ok(
-            all_fills,
+            data = result.data
+            if not isinstance(data, dict) or not isinstance(data.get("fills"), list):
+                error = ValueError("fills response missing fills list")
+                return OperationResult(
+                    success=False,
+                    data=all_fills,
+                    error=error,
+                    error_message=str(error),
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                    metadata={"truncated": True, "pages_fetched": page, "records_fetched": len(all_fills)},
+                )
+            fills = data["fills"]
+            all_fills.extend(fills)
+
+            cursor = data.get("cursor")
+            if not cursor:
+                return OperationResult.ok(
+                    all_fills,
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                    pages_fetched=page,
+                    records_fetched=len(all_fills),
+                )
+            if cursor in seen_cursors:
+                error = PaginationIncomplete("REPEATED_CURSOR")
+                return OperationResult(
+                    success=False,
+                    data=all_fills,
+                    error=error,
+                    error_message=str(error),
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                    metadata={"truncated": True, "pages_fetched": page, "records_fetched": len(all_fills)},
+                )
+            seen_cursors.add(cursor)
+
+        error = PaginationIncomplete("MAX_PAGES")
+        return OperationResult(
+            success=False,
+            data=all_fills,
+            error=error,
+            error_message=str(error),
             latency_ms=total_latency,
             retries=total_retries,
+            metadata={"truncated": True, "pages_fetched": page, "records_fetched": len(all_fills)},
         )
 
     async def compute_portfolio_risk(

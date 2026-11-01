@@ -45,7 +45,13 @@ def _reset_singletons():
     hard-coded test tickers (which are intentionally static) are not filtered
     out as expired.
     """
-    with patch("merid.event_venues.kalshi.canonical_portfolio_reconciler._is_expired_market", return_value=False):
+    with patch(
+        "merid.event_venues.kalshi.canonical_portfolio_reconciler._is_expired_market",
+        return_value=False,
+    ), patch(
+        "merid.event_venues.kalshi.canonical_portfolio_reconciler._is_settlement_pending_market",
+        return_value=False,
+    ):
         store = get_canonical_portfolio_store()
         store._current = None
         store._version = 0

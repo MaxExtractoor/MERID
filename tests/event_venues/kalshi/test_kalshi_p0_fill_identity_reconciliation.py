@@ -229,8 +229,11 @@ def harness(tmp_path, monkeypatch):
         _funded,
     )
 
-    async def run(rest_fills=None, positions=None, open_orders=None, use_ledger=None):
-        client = _FakeClient(fills=rest_fills, positions=positions, open_orders=open_orders)
+    async def run(rest_fills=None, positions=None, open_orders=None, use_ledger=None,
+                  client_override=None):
+        client = client_override or _FakeClient(
+            fills=rest_fills, positions=positions, open_orders=open_orders,
+        )
         if use_ledger is not None:
             monkeypatch.setattr(
                 "merid.event_venues.kalshi.fills_ledger.get_fills_ledger",
@@ -470,3 +473,29 @@ async def test_case7_unexplained_extra_execution_fails_closed(harness) -> None:
     # to the rogue row, not collateral noise.
     assert "missing_external=0" in detail
     assert "extra_internal=1" in detail
+
+
+@pytest.mark.asyncio
+async def test_failed_fills_query_cannot_pass_as_flat(harness) -> None:
+    from merid.resilience.result import OperationResult
+
+    class FailingClient(_FakeClient):
+        async def get_fills(self, limit=100, since_ts=None):
+            return OperationResult.fail(RuntimeError("fills unavailable"))
+
+    ok, detail = await harness.run(client_override=FailingClient())
+    assert not ok
+    assert "fills incomplete" in detail
+
+
+@pytest.mark.asyncio
+async def test_failed_positions_query_cannot_pass_as_flat(harness) -> None:
+    from merid.resilience.result import OperationResult
+
+    class FailingClient(_FakeClient):
+        async def get_positions_result(self):
+            return OperationResult.fail(RuntimeError("positions unavailable"))
+
+    ok, detail = await harness.run(client_override=FailingClient())
+    assert not ok
+    assert "positions incomplete" in detail
