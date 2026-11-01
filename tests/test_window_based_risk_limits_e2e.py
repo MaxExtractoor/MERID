@@ -12,6 +12,7 @@ from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
     get_kalshi_crypto_15m_risk_envelope,
     _WINDOW_TRACKING_STATE,
     _WINDOW_TRACKING_LOCK,
+    _reset_shared_window_state_for_testing,
 )
 
 
@@ -20,10 +21,7 @@ class TestWindowBasedRiskLimitsE2E:
     
     def setup_method(self):
         """Reset window state before each test."""
-        with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["window_start_ts"] = 0.0
-            _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _reset_shared_window_state_for_testing()
     
     def test_window_limit_with_exit_policy_e2e(self):
         """End-to-end test: window limit enforcement with exit policy validation.
@@ -171,7 +169,7 @@ class TestWindowBasedRiskLimitsE2E:
         envelope = get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd=1000.0)
         
         # Test check_window_limit assertions
-        with pytest.raises(AssertionError, match="Order notional must be positive"):
+        with pytest.raises(AssertionError, match="Order notional must be non-negative"):
             envelope.check_window_limit(
                 agent_id="BTC_15M",
                 order_notional_usd=-5.0,  # Invalid: negative
@@ -185,12 +183,9 @@ class TestWindowBasedRiskLimitsE2E:
                 current_ts=time.time()
             )
         
-        # Test record_order_execution assertions
-        with pytest.raises(AssertionError, match="Order notional must be positive"):
-            envelope.record_order_execution(
-                agent_id="BTC_15M",
-                order_notional_usd=0.0  # Invalid: zero
-            )
+        # Zero-fill orders do not consume exposure.
+        envelope.record_order_execution(agent_id="BTC_15M", order_notional_usd=0.0)
+        assert envelope.total_window_exposure_usd == 0.0
         
         with pytest.raises(AssertionError, match="Agent ID must be provided"):
             envelope.record_order_execution(

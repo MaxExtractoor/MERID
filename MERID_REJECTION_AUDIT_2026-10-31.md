@@ -799,6 +799,9 @@ The 15-minute loop also cleared every slot at rollover regardless of position
 count and cleared cache/ledger positions when the cache appeared empty. The
 order router similarly cleared slots after an allocation rejection based on
 an empty asset cache. Those implicit resets are removed. The separate risk
-envelope still rolls its own per-window exposure counters and can correct
-exposure from the position cache; its treatment of unresolved orders and
-cross-window reservations needs independent reconciliation before live use.
+envelope now retains executed and resting exposure across its window rollover
+and blocks on cache-only exposure drift rather than rewriting the ledger.
+Individual releases cannot deduct another agent's reservation. However,
+same-agent duplicate releases still require order-level durable identities,
+and full reservation reconstruction and independent reconciliation remain
+open before live use.

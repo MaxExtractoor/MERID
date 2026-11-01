@@ -23,6 +23,7 @@ Usage:
 import pytest
 import time
 import os
+from decimal import Decimal
 
 
 class TestAbsoluteDollarInvariant:
@@ -48,6 +49,7 @@ class TestAbsoluteDollarInvariant:
             max_cycle_risk_pct=0.03,
             daily_loss_enabled=False,
             max_daily_loss_usd=float('inf'),
+            drawdown_halt_enabled=True,
             drawdown_halt_pct=0.15,
             drawdown_unwind_pct=0.10,
             peak_equity_usd=bankroll,
@@ -83,8 +85,8 @@ class TestAbsoluteDollarInvariant:
         # Reset window state
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import _WINDOW_TRACKING_STATE, _WINDOW_TRACKING_LOCK
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
         
         # Place order for $0.50 (should be allowed)
         allowed, reason = risk_envelope.check_window_limit(
@@ -112,8 +114,8 @@ class TestAbsoluteDollarInvariant:
         
         # Reset state
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
 
     def test_ioc_no_fill_budget_consumption(self, risk_envelope):
         """Test that IOC no-fill orders do not consume budget.
@@ -128,8 +130,8 @@ class TestAbsoluteDollarInvariant:
         # Reset window state
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import _WINDOW_TRACKING_STATE, _WINDOW_TRACKING_LOCK
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
         
         # Place order for $0.50 (should be allowed)
         allowed, reason = risk_envelope.check_window_limit(
@@ -161,8 +163,8 @@ class TestAbsoluteDollarInvariant:
         
         # Reset state
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
 
     def test_retry_multiplication_prevention(self, risk_envelope):
         """Test that retries cannot multiply effective allocation.
@@ -178,8 +180,8 @@ class TestAbsoluteDollarInvariant:
         # Reset window state
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import _WINDOW_TRACKING_STATE, _WINDOW_TRACKING_LOCK
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
         
         # Simulate retry attempts: check window limit multiple times for same order
         # This should not consume budget - only actual execution does
@@ -209,8 +211,8 @@ class TestAbsoluteDollarInvariant:
         
         # Reset state
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
 
     def test_per_agent_and_total_venue_caps_fail_closed(self, risk_envelope):
         """Test that per-agent and total-venue caps fail closed when exceeded.
@@ -224,8 +226,8 @@ class TestAbsoluteDollarInvariant:
         # Reset window state
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import _WINDOW_TRACKING_STATE, _WINDOW_TRACKING_LOCK
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
         
         # Place orders up to $1.00 cap
         risk_envelope.record_order_execution("BTC_15M", 0.40, asset="BTC")
@@ -253,8 +255,8 @@ class TestAbsoluteDollarInvariant:
         
         # Reset state
         with _WINDOW_TRACKING_LOCK:
-            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
-            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = Decimal("0")
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = Decimal("0")
 
 
 if __name__ == "__main__":
