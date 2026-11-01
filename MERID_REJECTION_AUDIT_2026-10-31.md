@@ -829,3 +829,10 @@ pending reservation despite a durable unknown attempt. It now retains the
 canonical record for reconciliation in those cases; a proven pre-submit
 rejection can still release its own record. The key-only force-removal fallback
 was removed because it can race a different order's reservation.
+
+The canonical portfolio recovery loop previously erased old local intents
+from an empty open-order snapshot and rewrote or deleted cached positions
+before building the next snapshot. Recovery now publishes the mismatch
+immediately and retries fresh snapshots without invoking those mutation
+helpers. A persistent discrepancy remains quarantined. This does not provide
+the separate verified runtime auto-recovery coordinator.

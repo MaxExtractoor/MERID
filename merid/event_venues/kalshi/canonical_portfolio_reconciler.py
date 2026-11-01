@@ -299,7 +299,9 @@ class CanonicalPortfolioReconciler:
                     )
                     snap = await asyncio.wait_for(self.build_snapshot(), timeout=timeout)
                     if snap is not None and not snap.is_authoritative and snap.pagination_complete:
-                        # 2026-08-24: Bounded self-healing.
+                        # Withdraw the prior authoritative view before waiting
+                        # for bounded reconciliation retries.
+                        self._store.publish(snap)
                         snap = await self._recover_authority(snap)
                     if snap is not None:
                         self._store.publish(snap)
@@ -1132,73 +1134,20 @@ class CanonicalPortfolioReconciler:
         Implements a simple state machine:
             MISMATCH_DETECTED -> RECONCILING -> RECOVERED | QUARANTINED
 
-        On each retry we refetch the authoritative exchange snapshot, terminalize
-        any local PENDING intents that cannot possibly have a live exchange order,
-        and rebuild the snapshot.  If the snapshot is still non-authoritative after
-        all retries, the recovery state is set to QUARANTINED and the final snapshot
-        is returned.
+        Retry fresh snapshots without rewriting cache positions or reservations.
+        A missing open order or position cannot establish a submission outcome.
+        If the snapshots remain non-authoritative, quarantine the discrepancy.
         """
         self._recovery_state = "MISMATCH_DETECTED"
         delays = [0.25, 1.0, 3.0]
         self._last_mismatch_reason = _reason_str(initial.reconciliation_reason)
         recovery_started_at = time.monotonic()
 
-        exchange_oids = list(initial.working_orders_by_id.keys())
-        client_oids = [
-            o.client_order_id
-            for o in initial.working_orders_by_id.values()
-            if o.client_order_id
-        ]
-
-        # Extract the mismatching tickers from the initial snapshot.
-        mismatch_tickers = [
-            m.split(":", 1)[0]
-            for m in (initial.mismatches or ())
-            if ":" in m
-        ]
-
         for attempt, delay in enumerate(delays, start=1):
             self._mismatch_reconcile_attempt += 1
             self._recovery_state = "RECONCILING"
             try:
                 await asyncio.sleep(delay)
-
-                # Attempt to clean up impossible local state and rebuild affected
-                # cache before refetching exchange data.
-                self._terminalize_impossible_local_intents(
-                    mismatch_tickers,
-                    exchange_oids,
-                    client_oids,
-                )
-                working_order_dicts = [
-                    {
-                        "order_id": o.order_id,
-                        "client_order_id": o.client_order_id,
-                        "market_id": o.ticker,
-                        "ticker": o.ticker,
-                        "side": o.side,
-                        "action": o.action,
-                        "contracts": int(o.remaining_quantity_fp),
-                        "quantity_fp": o.remaining_quantity_fp,
-                        "price_cents": o.price_cents,
-                        "status": o.status,
-                    }
-                    for o in (initial.working_orders_by_id or {}).values()
-                ]
-
-                # Refresh the authoritative exchange snapshot before rebuilding the
-                # cache.  The cache is always rebuilt to the exchange view first; the
-                # ledger is consulted only when the exchange is unavailable.
-                client = self._get_client()
-                if client is None:
-                    exchange_positions = None
-                else:
-                    exchange_positions, _ = await self._fetch_exchange_positions()
-                await self._rebuild_affected_cache_and_reservations(
-                    mismatch_tickers,
-                    working_order_dicts,
-                    exchange_positions=exchange_positions,
-                )
 
                 snapshot = await self.build_snapshot()
                 if snapshot.is_authoritative:
