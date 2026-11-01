@@ -3365,9 +3365,19 @@ async def _run_full_startup_in_lifespan(app):
     # dedicated dump file opened at module import so concurrent logging
     # cannot interleave into the stacks.
     import faulthandler
-    from merid.utils.stack_dump_timer import StackDumpTimer
+    from merid.utils.stack_dump_timer import StackDumpTimer, get_dump_budget
+    # 2026-10-31: this watchdog stays armed for the whole process lifetime
+    # (cancelled only when the lifespan coroutine exits) — unbounded, it
+    # produced ~13k dumps/347MB on the hot DB volume.  Permit-bounded:
+    # captures honour the shared stall/cooldown/byte budget so diagnostics
+    # cannot amplify the I/O contention they measure.
     _startup_dump_timer = StackDumpTimer(
-        120.0, file=_faulthandler_file, repeat=True
+        120.0,
+        file=_faulthandler_file,
+        repeat=True,
+        permit=get_dump_budget(
+            getattr(_faulthandler_file, "name", None)
+        ).try_acquire,
     ).start()
     
     logger.info("[STARTUP-STACK] ENTRY - Initializing P2.x in lifespan")

@@ -1401,6 +1401,38 @@ class OrderIntent:
         return min(100.0, (self.filled_count / self.count) * 100)
 
 
+class SettlementProceedsWriteError(RuntimeError):
+    """Settlement-proceeds DB write exhausted its retry budget.
+
+    Raised by ``_settlement_proceeds_db_write`` so the async caller can
+    propagate an explicit failure state instead of a silent zero-write.
+    """
+
+
+_SETTLEMENT_DB_EXECUTOR = None
+
+
+def _settlement_db_executor():
+    """Dedicated bounded executor for settlement-proceeds DB writes.
+
+    2026-10-31 stall incident: ``record_settlement_proceeds`` ran sqlite
+    connect/insert/commit plus retry ``time.sleep`` synchronously on the
+    uvicorn event loop; under contention a single settlement blocked the
+    loop for tens of seconds (cycle-hang dumps captured it sleeping in
+    retry backoff).  All settlement DB work now runs on this single-worker
+    executor — serialised, off the loop, one in-flight op per market via
+    the caller's inflight map.
+    """
+    global _SETTLEMENT_DB_EXECUTOR
+    if _SETTLEMENT_DB_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _SETTLEMENT_DB_EXECUTOR = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="settlement-db"
+        )
+    return _SETTLEMENT_DB_EXECUTOR
+
+
 class KalshiFillsLedger:
     """Canonical ledger for all Kalshi fills — dual ingestion, persistent storage.
 
@@ -7288,19 +7320,147 @@ class KalshiFillsLedger:
         ``created_time`` is stamped settled_time+1s so the pre-settlement
         residual reconstruction (``asof_ts``) remains uncorrupted.
         """
-        import json as _json
-        import sqlite3 as _sq
-
-        outcome = (outcome or "").strip().lower()
-        if outcome not in ("yes", "no"):
+        planned = self._settlement_proceeds_plan(
+            market_ticker,
+            outcome,
+            yes_count=yes_count,
+            no_count=no_count,
+            settlement_time=settlement_time,
+        )
+        if planned is None:
             return 0
-        legs = (
+        legs, row_ts, now_iso, outcome_norm, settle_time_str = planned
+        try:
+            written = self._settlement_proceeds_db_write(
+                market_ticker, outcome_norm, legs, row_ts, now_iso,
+                revenue_dollars, settle_time_str,
+            )
+        except SettlementProceedsWriteError as exc:
+            logger.warning(
+                "[SETTLEMENT-PROCEEDS] %s write failed after retries: %s",
+                market_ticker, exc,
+            )
+            return 0
+        self._register_settlement_legs(
+            market_ticker, legs, row_ts, now_iso, revenue_dollars,
+            outcome_norm, written,
+        )
+        return written
+
+    async def record_settlement_proceeds_async(
+        self,
+        market_ticker: str,
+        outcome: str,
+        *,
+        yes_count: float = 0.0,
+        no_count: float = 0.0,
+        revenue_dollars: Optional[float] = None,
+        settlement_time: Optional[Any] = None,
+        timeout_s: Optional[float] = None,
+    ) -> int:
+        """Event-loop-safe variant of ``record_settlement_proceeds``.
+
+        The blocking DB write runs on the dedicated single-worker
+        settlement executor — the asyncio thread never sleeps inside
+        sqlite retry backoff (2026-10-31 stall incident: the loop was
+        captured inside ``time.sleep`` between locked-write retries).
+
+        Lifecycle: queued -> running -> committed | failed | unresolved.
+        In-flight writes for the same market are coalesced onto one op —
+        ``INSERT OR IGNORE`` under the durable ``settlement:{ticker}:{side}``
+        fill_id makes redelivery idempotent — and in-memory registration
+        always runs on the calling loop thread inside the same task, so a
+        caller timeout leaves the op tracked rather than duplicated.
+        """
+        planned = self._settlement_proceeds_plan(
+            market_ticker,
+            outcome,
+            yes_count=yes_count,
+            no_count=no_count,
+            settlement_time=settlement_time,
+        )
+        if planned is None:
+            return 0
+        legs, row_ts, now_iso, outcome_norm, settle_time_str = planned
+        if timeout_s is None:
+            timeout_s = float(
+                os.environ.get("MERID_SETTLEMENT_WRITE_TIMEOUT_S", "90") or 90
+            )
+        inflight = getattr(self, "_settlement_inflight", None)
+        if inflight is None:
+            self._settlement_inflight = inflight = {}
+        stats = getattr(self, "_settlement_write_stats", None)
+        if stats is None:
+            self._settlement_write_stats = stats = {
+                "committed": 0, "failed": 0, "unresolved": 0, "coalesced": 0,
+            }
+        task = inflight.get(market_ticker)
+        if task is not None and not task.done():
+            stats["coalesced"] += 1
+        else:
+            loop = asyncio.get_running_loop()
+
+            async def _run() -> int:
+                written = await loop.run_in_executor(
+                    _settlement_db_executor(),
+                    self._settlement_proceeds_db_write,
+                    market_ticker, outcome_norm, legs, row_ts, now_iso,
+                    revenue_dollars, settle_time_str,
+                )
+                self._register_settlement_legs(
+                    market_ticker, legs, row_ts, now_iso, revenue_dollars,
+                    outcome_norm, written,
+                )
+                return written
+
+            task = asyncio.ensure_future(_run())
+            inflight[market_ticker] = task
+            task.add_done_callback(
+                lambda _t, k=market_ticker: inflight.pop(k, None)
+            )
+        try:
+            written = await asyncio.wait_for(asyncio.shield(task), timeout_s)
+            stats["committed"] += 1
+            return written
+        except asyncio.TimeoutError:
+            stats["unresolved"] += 1
+            logger.warning(
+                "[SETTLEMENT-PROCEEDS] %s write exceeded %.0fs; outcome "
+                "unresolved — worker continues; durable identity "
+                "settlement:%s:* reconciles, no blind retry",
+                market_ticker, timeout_s, market_ticker,
+            )
+            raise
+        except SettlementProceedsWriteError:
+            stats["failed"] += 1
+            raise
+
+    def _settlement_proceeds_plan(
+        self,
+        market_ticker: str,
+        outcome: str,
+        *,
+        yes_count: float = 0.0,
+        no_count: float = 0.0,
+        settlement_time: Optional[Any] = None,
+    ):
+        """Pure compute for a settlement-proceeds booking — no I/O.
+
+        Returns ``(legs, row_ts, now_iso, outcome_norm, settle_time_str)``
+        where each leg is ``(side, contracts, fill_id, won, payout,
+        qty_cc, yes_delta_cc, price_c, yes_px, no_px)``, or ``None`` when
+        there is nothing to book.  Safe to run on the event loop.
+        """
+        outcome_norm = (outcome or "").strip().lower()
+        if outcome_norm not in ("yes", "no"):
+            return None
+        legs_in = (
             ("yes", float(yes_count or 0.0)),
             ("no", float(no_count or 0.0)),
         )
-        held = [(s, c) for s, c in legs if c > 0]
+        held = [(s, c) for s, c in legs_in if c > 0]
         if not held:
-            return 0
+            return None
 
         try:
             if isinstance(settlement_time, str) and settlement_time:
@@ -7322,13 +7482,56 @@ class KalshiFillsLedger:
         row_ts = settle_ts + timedelta(seconds=1)
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        written = 0
+        settle_time_str = (
+            settlement_time
+            if isinstance(settlement_time, str) and settlement_time
+            else row_ts.isoformat()
+        )
+        legs = []
+        for side, contracts in held:
+            won = side == outcome_norm
+            payout = contracts * (1.0 if won else 0.0)
+            qty_cc = int(round(contracts * 100))
+            legs.append(
+                (
+                    side,
+                    contracts,
+                    f"settlement:{market_ticker}:{side}",
+                    won,
+                    payout,
+                    qty_cc,
+                    -qty_cc if side == "yes" else qty_cc,
+                    100 if won else 0,
+                    (payout / contracts) if side == "yes" else None,
+                    (payout / contracts) if side == "no" else None,
+                )
+            )
+        return (legs, row_ts, now_iso, outcome_norm, settle_time_str)
+
+    def _settlement_proceeds_db_write(
+        self,
+        market_ticker: str,
+        outcome: str,
+        legs: list,
+        row_ts,
+        now_iso: str,
+        revenue_dollars: Optional[float],
+        settle_time_str: str,
+    ) -> int:
+        """BLOCKING: open the fills DB, INSERT OR IGNORE each leg, commit.
+
+        Retried across several lock windows — the live ledger's batch
+        writer can hold the SQLite write lock >10s under load and the
+        poller's settlement callback may not re-fire.  Must never run on
+        the event loop: the connect/insert/commit plus ``time.sleep``
+        backoff can block for tens of seconds.  Raises
+        ``SettlementProceedsWriteError`` after the retry budget is spent.
+        """
+        import json as _json
+        import sqlite3 as _sq
+
         conn = None
         last_exc: Optional[Exception] = None
-        # The live ledger's batch writer can hold the SQLite write lock for
-        # >10s under load; the poller's settlement callback may not re-fire
-        # for this market, so retry across several lock windows rather than
-        # dropping the payout leg.
         for _attempt in range(6):
             try:
                 conn = _sq.connect(self._db_path, timeout=15)
@@ -7345,32 +7548,15 @@ class KalshiFillsLedger:
                 conn = None
                 time.sleep(2.0 + _attempt)
         if conn is None:
-            logger.warning(
-                "[SETTLEMENT-PROCEEDS] %s could not open fills db: %s",
-                market_ticker, last_exc,
+            raise SettlementProceedsWriteError(
+                f"{market_ticker}: could not open fills db: {last_exc!r}"
             )
-            return 0
-        def _leg(side: str, contracts: float) -> tuple:
-            won = side == outcome
-            payout = contracts * (1.0 if won else 0.0)
-            qty_cc = int(round(contracts * 100))
-            return (
-                f"settlement:{market_ticker}:{side}",
-                won,
-                payout,
-                qty_cc,
-                -qty_cc if side == "yes" else qty_cc,
-                100 if won else 0,
-                (payout / contracts) if side == "yes" else None,
-                (payout / contracts) if side == "no" else None,
-            )
-
+        written = 0
         write_ok = False
         for _attempt in range(6):
             try:
-                for side, contracts in held:
-                    (fill_id, _won, payout, _q, yes_delta_cc, price_c,
-                     yes_px, no_px) = _leg(side, contracts)
+                for (side, contracts, fill_id, _won, payout, _q,
+                     yes_delta_cc, price_c, yes_px, no_px) in legs:
                     raw = {
                         "kind": "settlement",
                         "market_ticker": market_ticker,
@@ -7379,11 +7565,7 @@ class KalshiFillsLedger:
                         "held_contracts": contracts,
                         "payout_dollars": payout,
                         "exchange_revenue_dollars": revenue_dollars,
-                        "settlement_time": (
-                            settlement_time
-                            if isinstance(settlement_time, str)
-                            else row_ts.isoformat()
-                        ),
+                        "settlement_time": settle_time_str,
                     }
                     cur = conn.execute(
                         """INSERT OR IGNORE INTO kalshi_fills (
@@ -7438,17 +7620,28 @@ class KalshiFillsLedger:
         except Exception:
             pass
         if not write_ok:
-            logger.warning(
-                "[SETTLEMENT-PROCEEDS] %s write failed after retries: %s",
-                market_ticker, last_exc,
+            raise SettlementProceedsWriteError(
+                f"{market_ticker}: write failed after retries: {last_exc!r}"
             )
-            return written
+        return written
 
-        # Register in-memory whether the row was just written or pre-dates
-        # this call, so summary() sees the payout leg in-process.
-        for side, contracts in held:
-            (fill_id, _won, payout, qty_cc, yes_delta_cc, price_c,
-             yes_px, no_px) = _leg(side, contracts)
+    def _register_settlement_legs(
+        self,
+        market_ticker: str,
+        legs: list,
+        row_ts,
+        now_iso: str,
+        revenue_dollars: Optional[float],
+        outcome: str,
+        written: int,
+    ) -> None:
+        """Register booked legs in ``_fills`` — owning/loop thread only.
+
+        Must run on the thread that owns the in-memory caches (the asyncio
+        loop for the async path), never on the settlement worker.
+        """
+        for (side, contracts, fill_id, _won, payout, qty_cc,
+             yes_delta_cc, price_c, yes_px, no_px) in legs:
             if fill_id in self._fills:
                 continue
             try:
@@ -7513,7 +7706,6 @@ class KalshiFillsLedger:
                 "(exchange_revenue=%s)",
                 market_ticker, outcome, written, revenue_dollars,
             )
-        return written
 
     def get_market_fee_total_dollars(
         self,

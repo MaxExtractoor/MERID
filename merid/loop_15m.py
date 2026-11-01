@@ -9820,8 +9820,26 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 _fh_out = getattr(
                     sys.modules.get("web.main_15m_lean"), "_faulthandler_file", None
                 ) or sys.stderr
-                from merid.utils.stack_dump_timer import StackDumpTimer
-                _cycle_dump_timer = StackDumpTimer(hang_dump_s, file=_fh_out).start()
+                from merid.utils.stack_dump_timer import (
+                    StackDumpTimer,
+                    get_dump_budget,
+                )
+                # 2026-10-31: shared dump budget bounds capture volume —
+                # one capture at the stall threshold, small follow-up count,
+                # cooldown + byte cap; an unbounded repeat watchdog grew the
+                # dump file ~347MB on the hot database volume.
+                _fh_path = (
+                    getattr(_fh_out, "name", None)
+                    if _fh_out is not sys.stderr
+                    else None
+                )
+                _dump_budget = get_dump_budget(_fh_path)
+                self._hang_dump_budget = _dump_budget
+                _cycle_dump_timer = StackDumpTimer(
+                    hang_dump_s,
+                    file=_fh_out,
+                    permit=_dump_budget.try_acquire,
+                ).start()
             orphans = getattr(self, "_grid_orphan_tasks", None)
             if orphans is None:
                 orphans = self._grid_orphan_tasks = set()
@@ -9871,6 +9889,12 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
             finally:
                 if _cycle_dump_timer is not None:
                     _cycle_dump_timer.cancel()
+                    # asyncio.wait returning is demonstrated loop progress —
+                    # close the stall episode so a later stall earns fresh
+                    # captures under the dump budget.
+                    _budget = getattr(self, "_hang_dump_budget", None)
+                    if _budget is not None:
+                        _budget.note_progress()
 
             if cycle_task not in done_set:
                 self._cycle_timeout_total = getattr(self, "_cycle_timeout_total", 0) + 1

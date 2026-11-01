@@ -1953,7 +1953,13 @@ class SettlementToGradingBridge:
                     else None
                 )
                 if _yes_c > 0 or _no_c > 0:
-                    ledger.record_settlement_proceeds(
+                    # 2026-10-31 stall fix: the DB write runs on the bounded
+                    # settlement executor, not the event loop — a contended
+                    # sqlite retry loop previously blocked the loop for tens
+                    # of seconds. Awaited (not fire-and-forget): ack only
+                    # after commit; timeout leaves the op tracked as
+                    # unresolved rather than blindly retried.
+                    await ledger.record_settlement_proceeds_async(
                         settlement.market_id,
                         outcome,
                         yes_count=_yes_c,
