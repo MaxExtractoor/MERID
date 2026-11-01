@@ -317,6 +317,28 @@ applied-count, applied/s, and mean|max per stage: `wire_ms_corrected`,
 distribution.  This locates where the residual ~3.8s accumulates before
 any capacity/concurrency change; subscription ordering is untouched.
 
+**Residual lag located (00:00 rollover windows, `book_timing_rollup.jsonl`).**
+The ~3.8s is *not* book-apply or per-ticker queue backpressure.  Peak
+window (838 applied/s): `pq_wait_ms` mean **3185**/max 3860 —
+socket-recv → `_process_queue` dequeue inside `ws.py`'s `_msg_queue` —
+while `queue_residence` fell to 21ms, `ticker_queue_wait` 13ms,
+`apply_ms` ~0, `recv_to_now` ≈ `pq_wait` (≈100% of in-process lag), and
+`wire_ms_corrected` stayed ~135ms.  Sustained windows show pq_wait
+oscillating 0.4s↔1.8s tracking arrival rate (~650/s→~800/s): the single
+`kalshi-ws-processor` drain task (sequential `await` per message) plus
+recv-loop synchronous work on the same asyncio loop saturates near
+~700/s; bursts backlog `_msg_queue` (maxsize 131072, so nothing drops —
+it queues, which is why lag, not loss).  `freshness_status` was 100%
+`measured` throughout — the clock domain held through the burst.
+Implication for the capacity choice: the effective lever is the drain
+task's per-message cost and/or event-loop contention upstream of the
+bridge — not the per-ticker queue, book apply, or snapshot path.  The
+bypassed `_coalescing_buffer` (disabled "TEMPORARY FIX") is a candidate
+at exactly this hop.  Any concurrency change must preserve the single
+ordered drain per subscription.  Note: apply-path rollup rows emitted
+from multiple drain threads initially duplicated; serialized in
+`7d061001`.
+
 **Process-termination track — still unclassified.**  The silent-death
 signature (PID 8052, ~35s into import, no traceback/WER/faulthandler)
 is a distinct reliability incident, *not* assumed to share the
