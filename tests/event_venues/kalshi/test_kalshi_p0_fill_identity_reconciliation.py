@@ -31,7 +31,7 @@ import pytest
 
 from merid.event_venues.kalshi.fills_ledger import KalshiFill, KalshiFillsLedger
 from merid.event_venues.kalshi.types import BalanceState
-from merid.preflight.p0 import run_p0_preflight_checks
+from merid.preflight.p0 import run_p0_preflight_checks, _trusted_ledger_signed_exposure
 
 # Fill ids and tickers must look production-real: ``_is_test_fixture_fill``
 # (exact ids f1..f5, ``fill-*``/``test_*`` prefixes) and ``_is_test_ticker``
@@ -191,6 +191,11 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "merid.preflight.p0._check_uncertain_submissions",
         lambda: (True, "[PASS] uncertain_submission_recovery: isolated test"),
+    )
+    # This suite isolates fill-identity comparison. Signed ledger/exchange
+    # projection has its own focused tests below and in the P0 safety suite.
+    monkeypatch.setattr(
+        "merid.preflight.p0._trusted_ledger_signed_exposure", lambda view: {},
     )
     monkeypatch.setenv("MERID_ENV", "testing")
     monkeypatch.setenv("MERID_FILLS_DB_PATH", str(tmp_path / "fills.db"))
@@ -499,3 +504,110 @@ async def test_failed_positions_query_cannot_pass_as_flat(harness) -> None:
     ok, detail = await harness.run(client_override=FailingClient())
     assert not ok
     assert "positions incomplete" in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_field,wrong_value", [
+    ("quantity_cc", 124),
+    ("thesis_side", "no"),
+    ("market_id", "KXETH15M-26031-1800"),
+])
+async def test_same_count_different_position_fails(
+    harness, monkeypatch, wrong_field, wrong_value
+) -> None:
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    monkeypatch.setattr(
+        "merid.preflight.p0._trusted_ledger_signed_exposure",
+        lambda view: {TICKER: 123},
+    )
+    sync = harness.cache.sync_from_rest
+
+    async def incorrect_sync(*args, **kwargs):
+        await sync(*args, **kwargs)
+        harness.cache._positions[TICKER][wrong_field] = wrong_value
+
+    monkeypatch.setattr(harness.cache, "sync_from_rest", incorrect_sync)
+    position = SimpleNamespace(
+        market_id=TICKER,
+        outcome_id="yes",
+        size=Decimal("1.23"),
+        average_entry_price=Decimal("0.50"),
+    )
+    ok, detail = await harness.run(positions=[position])
+    assert not ok
+    assert "position_mismatches=" in detail
+
+
+@pytest.mark.asyncio
+async def test_matching_fractional_position_passes_cache_comparison(harness, monkeypatch) -> None:
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    monkeypatch.setattr(
+        "merid.preflight.p0._trusted_ledger_signed_exposure",
+        lambda view: {TICKER: -37},
+    )
+    position = SimpleNamespace(
+        market_id=TICKER,
+        outcome_id="no",
+        size=Decimal("0.37"),
+        average_entry_price=Decimal("0.50"),
+    )
+    ok, detail = await harness.run(positions=[position])
+    assert ok, detail
+    assert "position_mismatches=[]" in detail
+
+
+@pytest.mark.asyncio
+async def test_ledger_mismatch_fails_before_cache_sync(harness, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    sync = AsyncMock(wraps=harness.cache.sync_from_rest)
+    monkeypatch.setattr(harness.cache, "sync_from_rest", sync)
+    position = SimpleNamespace(
+        market_id=TICKER,
+        outcome_id="yes",
+        size=Decimal("1.23"),
+        average_entry_price=Decimal("0.50"),
+    )
+    ok, detail = await harness.run(positions=[position])
+    assert not ok
+    assert "ledger=0" in detail
+    sync.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchange_count,expected", [
+    ("1.23", True),
+    ("1.24", False),
+])
+async def test_real_ledger_projection_is_checked_before_cache_sync(
+    harness, monkeypatch, exchange_count, expected
+) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    monkeypatch.setattr(
+        "merid.preflight.p0._trusted_ledger_signed_exposure",
+        _trusted_ledger_signed_exposure,
+    )
+    fill = _internal_fill("kf_projection", "ord_projection", count_fp=Decimal("1.23"))
+    fill.client_order_id = "co_projection"
+    harness.ledger._fills[fill.fill_id] = fill
+    sync = AsyncMock(wraps=harness.cache.sync_from_rest)
+    monkeypatch.setattr(harness.cache, "sync_from_rest", sync)
+    position = SimpleNamespace(
+        market_id=TICKER,
+        outcome_id="yes",
+        size=Decimal(exchange_count),
+        average_entry_price=Decimal("0.50"),
+    )
+    ok, detail = await harness.run(
+        positions=[position],
+        rest_fills=[_rest_fill(fill.fill_id, fill.order_id, count_fp="1.23")],
+    )
+    assert ok is expected, detail
+    if expected:
+        sync.assert_awaited_once()
+    else:
+        assert "ledger=123" in detail
+        sync.assert_not_awaited()

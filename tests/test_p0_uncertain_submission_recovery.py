@@ -13,6 +13,8 @@ from merid.preflight.p0 import (
     _open_order_snapshot,
     _position_snapshot,
     _rti_observations_fresh,
+    _signed_yes_position_map,
+    _trusted_ledger_signed_exposure,
     run_p0_preflight_checks,
 )
 from merid.resilience.result import OperationResult
@@ -118,3 +120,101 @@ def test_rti_requires_all_assets_and_valid_current_timestamps():
     assert not _rti_observations_fresh({"BTC": good}, ["BTC", "ETH"], 2000, now)[0]
     for obs in (missing_time, future, stale):
         assert not _rti_observations_fresh({"BTC": obs}, ["BTC"], 2000, now)[0]
+
+
+def test_position_projection_preserves_ticker_side_and_fractional_quantity():
+    positions = [
+        SimpleNamespace(market_id="BTC", outcome_id="yes", size="1.23"),
+        SimpleNamespace(market_id="SOL", outcome_id="no", size="0.37"),
+    ]
+    assert _signed_yes_position_map(positions, exchange=True) == {"BTC": 123, "SOL": -37}
+    cache = [
+        {"market_id": "BTC", "side": "yes", "quantity_cc": 123},
+        {"market_id": "SOL", "side": "no", "quantity_cc": 37},
+    ]
+    assert _signed_yes_position_map(cache, exchange=False) == {"BTC": 123, "SOL": -37}
+
+
+@pytest.mark.parametrize("position,exchange", [
+    (SimpleNamespace(market_id="BTC", outcome_id="unknown", size="1"), True),
+    (SimpleNamespace(market_id="BTC", outcome_id="yes", size="0.001"), True),
+    (SimpleNamespace(market_id="BTC", outcome_id="yes", size="-1"), True),
+    (SimpleNamespace(market_id="BTC", outcome_id="yes", size=None), True),
+    ({"market_id": "BTC", "side": "yes", "quantity_cc": 0, "contracts": 1}, False),
+])
+def test_invalid_position_projection_fails_closed(position, exchange):
+    with pytest.raises((ValueError, ArithmeticError)):
+        _signed_yes_position_map([position], exchange=exchange)
+
+
+def _trusted_fill(**changes):
+    values = {
+        "market_ticker": "BTC",
+        "canonicalization_state": "TRUSTED_LIVE_V1",
+        "is_live": True,
+        "fill_id": "fill-1",
+        "order_id": "order-1",
+        "client_order_id": "client-1",
+        "quantity_cc": 123,
+        "canonical_yes_delta_cc": 123,
+        "canonical_position_action": "buy",
+        "canonical_position_side": "yes",
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _canonical_view(*, authoritative=(), provisional=(), excluded=()):
+    return SimpleNamespace(
+        authoritative=list(authoritative),
+        provisional=list(provisional),
+        excluded=list(excluded),
+    )
+
+
+def test_ledger_replay_uses_exact_trusted_signed_deltas(monkeypatch):
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    fills = [
+        _trusted_fill(),
+        _trusted_fill(fill_id="fill-2", quantity_cc=23, canonical_yes_delta_cc=-23,
+                      canonical_position_action="sell"),
+        _trusted_fill(fill_id="fill-3", market_ticker="SOL", quantity_cc=37,
+                      canonical_yes_delta_cc=-37, canonical_position_side="no"),
+    ]
+    assert _trusted_ledger_signed_exposure(_canonical_view(authoritative=fills)) == {
+        "BTC": 100, "SOL": -37,
+    }
+
+
+@pytest.mark.parametrize("changes", [
+    {"canonicalization_state": "UNTRUSTED_RAW"},
+    {"unmatched": True},
+    {"derived_id": True},
+    {"side_conflict": True},
+    {"order_id": None},
+    {"client_order_id": None, "intent_id": None},
+    {"quantity_cc": 0},
+    {"canonical_yes_delta_cc": -123},
+    {"is_live": False},
+])
+def test_ledger_replay_rejects_incomplete_or_untrusted_live_fill(monkeypatch, changes):
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    with pytest.raises(ValueError):
+        _trusted_ledger_signed_exposure(
+            _canonical_view(authoritative=[_trusted_fill(**changes)])
+        )
+
+
+def test_ledger_replay_preserves_quarantine_and_rejects_provisional(monkeypatch):
+    monkeypatch.setattr(
+        "merid.preflight.p0._reconciliation_quarantined",
+        lambda ticker: ticker == "CLOSED",
+    )
+    expired = _trusted_fill(market_ticker="CLOSED", canonicalization_state="UNTRUSTED_RAW")
+    assert _trusted_ledger_signed_exposure(_canonical_view(authoritative=[expired])) == {}
+    with pytest.raises(ValueError, match="provisional"):
+        _trusted_ledger_signed_exposure(_canonical_view(provisional=[_trusted_fill()]))
+    with pytest.raises(ValueError, match="duplicate"):
+        _trusted_ledger_signed_exposure(_canonical_view(excluded=[_trusted_fill()]))
+    router_duplicate = _trusted_fill(fill_id="live_router_order")
+    assert _trusted_ledger_signed_exposure(_canonical_view(excluded=[router_duplicate])) == {}

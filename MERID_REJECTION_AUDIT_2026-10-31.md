@@ -752,6 +752,21 @@ runtime state machine now rejects this unverified recovery, retains exits,
 and does not emit false preflight-success telemetry. This is a fail-closed
 interim safeguard, not a complete automatic recovery coordinator: entries
 remain halted until a new verified startup. Sixty-seven focused runtime,
-book, bridge, and unknown-submission tests passed. P0's position
-reconciliation still compares position counts rather than independently
-proving signed quantity and side; further work is needed.
+book, bridge, and unknown-submission tests passed.
+
+P0 now compares exact signed-YES centi-contracts per active ticker across
+the exchange, a trusted ledger-fill projection, and the cache. It rejects
+untrusted, unmatched, provisional, duplicate, and identity-incomplete live
+fills; it checks the independent ledger projection before syncing the cache.
+Expired and closed-but-unsettled markets use the canonical quarantine policy.
+Position-monitor, allocator, and reservation reconciliation are not yet
+proven by this change.
+
+A related persistence gap remains: the SQLite fills schema does not retain
+`is_live`, `unmatched`, `unmatched_reason`, `derived_id`, or
+`confirmed_by_rest`; restoration currently reconstructs some of those flags
+incorrectly or defaults them. The new P0 projection therefore fails closed
+for active restored fills with unproven live provenance, rather than
+fabricating it. The current ledger has 1,781 retained rows; restore also has a
+10,000-row limit whose completeness is not independently reported. Neither
+these checks nor the logged settled positions resolve the 198 order attempts.

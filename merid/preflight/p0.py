@@ -53,6 +53,149 @@ async def _open_order_snapshot(client: Any) -> List[Any]:
     return _complete_snapshot(result, "open orders")
 
 
+def _signed_yes_position_map(positions: List[Any], *, exchange: bool) -> Dict[str, int]:
+    """Project explicit outcomes and exact quantities into signed-YES cc."""
+    exposure: Dict[str, int] = {}
+
+    def field(position: Any, name: str) -> Any:
+        return position.get(name) if isinstance(position, dict) else getattr(position, name, None)
+
+    for position in positions:
+        ticker = field(position, "market_id") or field(position, "ticker")
+        if not isinstance(ticker, str) or not ticker.strip():
+            raise ValueError("position missing market identity")
+        ticker = ticker.strip().upper()
+
+        quantity_cc = None if exchange else field(position, "quantity_cc")
+        if quantity_cc is None:
+            quantity = field(position, "size") if exchange else (
+                field(position, "quantity_fp")
+                if field(position, "quantity_fp") is not None
+                else field(position, "contracts")
+            )
+            if quantity is None or isinstance(quantity, bool):
+                raise ValueError(f"{ticker} position missing quantity")
+            cc = Decimal(str(quantity)) * Decimal("100")
+        else:
+            if isinstance(quantity_cc, bool):
+                raise ValueError(f"{ticker} position has invalid quantity_cc")
+            cc = Decimal(str(quantity_cc))
+
+        if not cc.is_finite() or cc < 0 or cc != cc.to_integral_value():
+            raise ValueError(f"{ticker} position is not a nonnegative centi-contract quantity")
+        if cc == 0:
+            if not exchange and field(position, "contracts") is not None:
+                display = Decimal(str(field(position, "contracts")))
+                if not display.is_finite() or display != 0:
+                    raise ValueError(f"{ticker} position quantity fields conflict")
+            continue
+        side = (
+            field(position, "outcome_id") if exchange else (
+                field(position, "outcome")
+                or field(position, "thesis_side")
+                or field(position, "outcome_side")
+                or field(position, "side")
+            )
+        )
+        if not isinstance(side, str) or side.lower() not in ("yes", "no"):
+            raise ValueError(f"{ticker} position has unknown outcome side")
+        signed_cc = int(cc) if side.lower() == "yes" else -int(cc)
+        exposure[ticker] = exposure.get(ticker, 0) + signed_cc
+    return {ticker: cc for ticker, cc in exposure.items() if cc}
+
+
+def _reconciliation_quarantined(ticker: str) -> bool:
+    """Use the canonical closed/settlement-pending quarantine policy."""
+    from merid.event_venues.kalshi.canonical_portfolio_reconciler import (
+        _is_expired_market,
+        _is_settlement_pending_market,
+    )
+
+    return _is_expired_market(ticker) or _is_settlement_pending_market(ticker)
+
+
+def _trusted_ledger_signed_exposure(view: Any) -> Dict[str, int]:
+    """Derive active exposure from complete, trusted, deduplicated ledger fills."""
+    from merid.event_venues.kalshi.binary_price_space import fill_to_signed_yes_exposure
+
+    exposure: Dict[str, int] = {}
+
+    def active_live_fill(fill: Any) -> Optional[str]:
+        state = getattr(fill, "canonicalization_state", None)
+        if not getattr(fill, "is_live", False) and state == "TRUSTED_PAPER_V1":
+            return None
+        ticker = getattr(fill, "market_ticker", None)
+        if not isinstance(ticker, str) or not ticker.strip():
+            raise ValueError("ledger fill missing market ticker")
+        ticker = ticker.strip().upper()
+        if _reconciliation_quarantined(ticker):
+            return None
+        if not getattr(fill, "is_live", False):
+            raise ValueError(f"{ticker} ledger fill has unknown live provenance")
+        return ticker
+
+    for fill in view.provisional:
+        ticker = active_live_fill(fill)
+        if ticker:
+            raise ValueError(f"{ticker} has unresolved provisional fill")
+    for fill in view.excluded:
+        ticker = active_live_fill(fill)
+        if ticker and not (
+            str(getattr(fill, "fill_id", "")).startswith("live_router_")
+            or getattr(fill, "ingestion_source", "") == "order_router"
+        ):
+            raise ValueError(f"{ticker} has duplicate venue fill identity")
+
+    for fill in view.authoritative:
+        ticker = active_live_fill(fill)
+        if not ticker:
+            continue
+        if getattr(fill, "fill_source", "") == "settlement":
+            raise ValueError(f"{ticker} has settlement evidence for an active market")
+        if (
+            getattr(fill, "canonicalization_state", None)
+            not in {"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1"}
+            or getattr(fill, "unmatched", False)
+            or getattr(fill, "derived_id", False)
+            or getattr(fill, "side_conflict", False)
+            or getattr(fill, "exposure_mismatch", False)
+        ):
+            raise ValueError(f"{ticker} has an untrusted or unmatched ledger fill")
+        if not getattr(fill, "fill_id", None) or not getattr(fill, "order_id", None):
+            raise ValueError(f"{ticker} ledger fill lacks exchange identity")
+        if not (getattr(fill, "client_order_id", None) or getattr(fill, "intent_id", None)):
+            raise ValueError(f"{ticker} ledger fill lacks intent identity")
+        quantity = getattr(fill, "quantity_cc", None)
+        delta = getattr(fill, "canonical_yes_delta_cc", None)
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, int)
+            or quantity <= 0
+            or isinstance(delta, bool)
+            or not isinstance(delta, int)
+        ):
+            raise ValueError(f"{ticker} ledger fill lacks exact signed quantity")
+        expected = fill_to_signed_yes_exposure(
+            getattr(fill, "canonical_position_action", None),
+            getattr(fill, "canonical_position_side", None),
+            quantity,
+        )
+        if not expected or delta != expected:
+            raise ValueError(f"{ticker} ledger fill has inconsistent signed exposure")
+        exposure[ticker] = exposure.get(ticker, 0) + delta
+    return {ticker: cc for ticker, cc in exposure.items() if cc}
+
+
+def _position_mismatches(
+    exchange: Dict[str, int], other: Dict[str, int], label: str
+) -> List[str]:
+    return [
+        f"{ticker}:exchange={exchange.get(ticker, 0)}:{label}={other.get(ticker, 0)}"
+        for ticker in sorted(set(exchange) | set(other))
+        if exchange.get(ticker, 0) != other.get(ticker, 0)
+    ]
+
+
 def _rti_observations_fresh(
     observations: Dict[str, Any], assets: List[str], max_age_ms: int, now_ms: int
 ) -> Tuple[bool, str]:
@@ -240,6 +383,20 @@ async def run_p0_preflight_checks(
             except Exception as ingest_err:
                 raise RuntimeError(f"REST fills ingest failed: {ingest_err}") from ingest_err
 
+        # Reconstruct the active ledger independently before mutating the cache.
+        if not hasattr(ledger, "get_canonical_fills"):
+            raise RuntimeError("fills ledger does not expose canonical fills")
+        canonical_fills = await asyncio.to_thread(ledger.get_canonical_fills)
+        ledger_exposure = await asyncio.to_thread(_trusted_ledger_signed_exposure, canonical_fills)
+        exchange_exposure = {
+            ticker: cc
+            for ticker, cc in _signed_yes_position_map(positions, exchange=True).items()
+            if not _reconciliation_quarantined(ticker)
+        }
+        ledger_mismatches = _position_mismatches(exchange_exposure, ledger_exposure, "ledger")
+        if ledger_mismatches:
+            raise RuntimeError(f"position_mismatches={ledger_mismatches[:5]}")
+
         # Load the position cache from the exchange so internal state is fresh.
         # sync_from_rest is the canonical exchange->cache path; with force and
         # cleanup_stale the REST snapshot is authoritative (a cached position
@@ -292,9 +449,17 @@ async def run_p0_preflight_checks(
         if hasattr(cache, "get_all_positions"):
             internal_positions = list(cache.get_all_positions(validate_freshness=False).values())
         else:
-            internal_positions = []
+            raise RuntimeError("position cache does not expose positions")
+        cached_exposure = {
+            ticker: cc
+            for ticker, cc in _signed_yes_position_map(internal_positions, exchange=False).items()
+            if not _reconciliation_quarantined(ticker)
+        }
+        position_mismatches = _position_mismatches(exchange_exposure, cached_exposure, "cache")
         # Get all durable fills; we compare by identity, not by simple count.
-        internal_fills = ledger.get_fills() if hasattr(ledger, "get_fills") else []
+        internal_fills = (
+            canonical_fills.authoritative + canonical_fills.provisional + canonical_fills.excluded
+        )
 
         ex_ids = {f.get("fill_id") or f.get("trade_id") for f in fills}
         ex_by_order: Dict[str, List[Dict[str, Any]]] = {}
@@ -340,7 +505,7 @@ async def run_p0_preflight_checks(
             problematic_internal.append(fid)
 
         recon_ok = (
-            len(positions) == len(internal_positions)
+            not position_mismatches
             and len(open_orders) == 0
             and len(only_exchange) == 0
             and len(problematic_internal) == 0
@@ -351,6 +516,7 @@ async def run_p0_preflight_checks(
             f"internal_fills={len(internal_fills)} "
             f"extra_internal={len(only_internal)} allowed_extra={len(allowed_internal)} "
             f"missing_external={len(only_exchange)} "
+            f"position_mismatches={position_mismatches[:5]} "
             f"problematic_internal={problematic_internal[:5]}"
         )
         results.append(_check("exchange_reconciliation", recon_ok, recon_detail))
