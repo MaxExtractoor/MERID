@@ -1611,11 +1611,39 @@ class KalshiMarketStateStore:
                 return
             n = self._timing_rollup_n
             stage_bits = []
+            stages: Dict[str, Dict[str, float]] = {}
             for key in self._TIMING_ROLLUP_STAGES:
                 s = sums.get(key)
                 if s is None:
                     continue
+                stages[key] = {"mean_ms": round(s / n, 1), "max_ms": round(maxes[key], 1)}
                 stage_bits.append(f"{key}~{s / n:.0f}|max={maxes[key]:.0f}")
+            # Durable channel: the async log queue drops records under
+            # backpressure — exactly the rollover bursts this rollup exists
+            # to measure — so the aggregate is also appended to its own
+            # JSONL where a dropped INFO record cannot hide it.
+            try:
+                _rollup_row = {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "window_s": round(elapsed, 1),
+                    "applied": n,
+                    "applied_per_s": round(n / elapsed, 1),
+                    "stages": stages,
+                    "freshness_status": dict(self._timing_rollup_statuses),
+                }
+                _rollup_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "..", "..", "..", "logs",
+                )
+                os.makedirs(_rollup_dir, exist_ok=True)
+                with open(
+                    os.path.join(_rollup_dir, "book_timing_rollup.jsonl"),
+                    "a",
+                    encoding="utf-8",
+                ) as _rf:
+                    _rf.write(json.dumps(_rollup_row) + "\n")
+            except Exception:
+                pass
             logger.info(
                 "[BOOK-TIMING-ROLLUP] window_s=%.0f applied=%d rate=%.1f/s "
                 "stages(ms mean|max): %s freshness_status=%s",
