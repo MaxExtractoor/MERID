@@ -8608,15 +8608,24 @@ def _compute_trade_decision_impl(
     # min_required_edge override in agent_grid_15m.  min() never stamps
     # a bound stricter than the one the selected lane actually cleared.
     _mre_lane = indicators.get("decision_lane") if selected_outcome else None
-    if _mre_lane == "pinned_fav":
-        try:
-            from merid.prediction import directional_regime as _dr_mre
-            selected_threshold = min(
-                float(selected_threshold),
-                float(_dr_mre._pinned_fav_min_ev_cents()) / 100.0,
-            )
-        except Exception:
-            pass
+    # 2026-11-01 (cheap_no_settle 33>31): propagate the bound generically
+    # from the admission telemetry instead of per-lane exceptions — the
+    # effective_required_source pair is already stamped for every
+    # lane-admitted side (lane_floor:<lane>).  cheap_no_settle was absent
+    # from the explicit list above and its -10c floor never reached the
+    # intent, so submit revalidation capped at the +3.18c formula bound.
+    _sel_pfx_mre = str(selected_outcome or "").lower()
+    _eff_src_mre = str(
+        indicators.get(f"{_sel_pfx_mre}_effective_required_source") or "")
+    _eff_bound_mre: Optional[float] = None
+    try:
+        _eff_bound_mre = float(
+            indicators[f"{_sel_pfx_mre}_effective_required_edge_cents"])
+    except (KeyError, TypeError, ValueError):
+        _eff_bound_mre = None
+    if _eff_bound_mre is not None and _eff_src_mre.startswith("lane_floor:"):
+        selected_threshold = min(
+            float(selected_threshold), _eff_bound_mre / 100.0)
     elif _mre_lane == "settlement_convergence":
         try:
             selected_threshold = min(

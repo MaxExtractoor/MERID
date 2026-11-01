@@ -490,16 +490,35 @@ def input_from_intent(
     p_held_cents = p_dec * 100 if p_dec <= 1 else p_dec
     est_ts = (getattr(intent, "snapshot_ts", None)
               or getattr(intent, "decision_ts", None))
-    # fee at proposed limit via exact parabolic schedule
+    # fee at proposed limit via exact parabolic schedule.  The fee role
+    # must match the order's intended liquidity role — a post_only/maker
+    # intent pays the maker schedule on resting fills.  Charging taker
+    # here shrank the permitted price ~1.2c below the admission economics
+    # (ETH cheap_no_settle 33>31, 2026-11-01).
     try:
         from merid.event_venues.kalshi.parabolic_fees import (
             kalshi_fee_cents_exact,
         )
+        _liq = str(
+            getattr(intent, "liquidity_role", "")
+            or getattr(intent, "execution_mode", "") or "").lower()
+        _fee_role = (
+            "maker"
+            if bool(getattr(intent, "post_only", False)) or _liq == "maker"
+            else "taker"
+        )
         fee_per_contract = kalshi_fee_cents_exact(
-            Decimal(limit) / Decimal(100), Decimal(1), "taker")
+            Decimal(limit) / Decimal(100), Decimal(1), _fee_role)
     except Exception:
         fee_per_contract = Decimal("0")
     req_edge = getattr(intent, "min_required_edge", None)
+    if req_edge is None and str(
+            getattr(intent, "edge_bound_source", None) or ""
+    ).startswith("lane_floor:"):
+        # Broken contract: a lane-admitted intent that lost its stamped
+        # bound must fail closed — silently substituting the generic
+        # default re-prices an admission the lane never cleared.
+        return None
     try:
         req_edge_dec = Decimal(str(req_edge)) if req_edge is not None \
             else Decimal("0")

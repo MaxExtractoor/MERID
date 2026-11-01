@@ -11819,6 +11819,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 candidate.get("admission_owner")
                 or getattr(intent, "admission_owner", None)
             )
+            # 2026-11-01 (bound contract): carry which bound the admission
+            # actually enforced — lane_floor:<lane> vs route_bound —
+            # so submit revalidation can fail closed on a missing bound
+            # instead of silently substituting the generic default.
+            _sel_side_mre = str(
+                getattr(intent, "side", "") or ""
+            ).lower()
+            intent.edge_bound_source = (
+                candidate.get("effective_required_source")
+                or candidate.get("edge_bound_source")
+                or _dec_inds.get(
+                    f"{_sel_side_mre}_effective_required_source")
+            )
         except Exception:
             pass
 
