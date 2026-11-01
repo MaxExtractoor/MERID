@@ -119,7 +119,8 @@ class TestUpstreamCursorPersistenceBoundary:
         
         # First call has no cursor (starts from beginning)
         assert calls[0].get("cursor") is None
-        assert "settled_after" in calls[0]
+        assert "min_ts" in calls[0]
+        assert "max_ts" in calls[0]
 
 
 class TestUpstreamTickerNormalizationBoundary:

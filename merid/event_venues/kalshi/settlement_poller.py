@@ -48,6 +48,13 @@ def _kalshi_settlement_close_ts(settlement: "KalshiSettlement") -> Optional[floa
         return None
 
 
+def _settlement_query_ts(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
 # Event bus topic for settlement events (shared with subscribers)
 # NOTE: This is the canonical topic - both publisher (poller) and subscribers
 # (TradingAgent, etc.) must use this exact string.
@@ -905,9 +912,8 @@ class KalshiSettlementPoller:
     def _flush_graded_keys(self) -> None:
         """Append newly-graded dedupe keys to the durable watermark file.
 
-        Keys are appended only after their callbacks completed (callers add to
-        ``_graded_keys_dirty`` post-callback), so a crash mid-poll replays just
-        the unfinished tail — and every downstream side effect is idempotent.
+        Keys are appended only after their callbacks completed. A crash before
+        persistence can replay a callback, so consumers must be idempotent.
         """
         if not self._graded_keys_dirty:
             return
@@ -922,7 +928,8 @@ class KalshiSettlementPoller:
                     fh.write(f"{key}|{now_s}\n")
         except Exception as exc:
             logger.warning("[SETTLEMENT-POLLER] graded-keys persist failed: %s", exc)
-        finally:
+            self._last_error = f"graded_keys_persist_failed: {exc}"
+        else:
             self._graded_keys_dirty.clear()
     
     # Canonical identity for settlement tracking (asset, timeframe, ticker, market_id)
@@ -990,6 +997,8 @@ class KalshiSettlementPoller:
             try:
                 await self._poll_once()
                 self._last_poll_time = datetime.now(timezone.utc)
+                if not self._graded_keys_dirty:
+                    self._last_error = None
                 
             except Exception as exc:
                 self._last_error = str(exc)
@@ -1008,7 +1017,7 @@ class KalshiSettlementPoller:
         Contract guarantees:
         - Cursor-based pagination for resume on restart
         - Deduplication via (venue, market_id, settled_time) key
-        - Exactly-once grading: each valid settlement produces one grading event
+        - Callbacks may be retried; their side effects must be idempotent
         """
         self._poll_count += 1
 
@@ -1032,6 +1041,7 @@ class KalshiSettlementPoller:
         new_count = 0
         voided_count = 0
         new_settlements: List[KalshiSettlement] = []  # For event bus batch publish
+        failed_callbacks: List[str] = []
         
         for settlement in all_settlements:
             # Normalize ticker per Contract §1.2
@@ -1099,9 +1109,6 @@ class KalshiSettlementPoller:
             # Mark as seen to prevent replay
             self._graded_settlements.add(dedupe_key)
             self._settlement_cache[settlement.market_id] = settlement
-            self._settlement_count += 1
-            new_count += 1
-            new_settlements.append(settlement)  # Collect for event bus
 
             # Log settlement with key information.  ``market_outcome`` is the
             # contract's resolution (yes won / no won) — NOT the position's
@@ -1126,6 +1133,7 @@ class KalshiSettlementPoller:
             self._update_ungraded_backlog(settlement)
             
             # Notify callbacks (iterate over copy to avoid race with remove_callback)
+            callback_failed = False
             for callback in self._callbacks[:]:
                 try:
                     if asyncio.iscoroutinefunction(callback):
@@ -1134,10 +1142,21 @@ class KalshiSettlementPoller:
                         callback(settlement)
                 except Exception as exc:
                     logger.error(f"Settlement callback error: {exc}")
+                    callback_failed = True
+
+            if callback_failed:
+                # A callback may have partially completed. It must be
+                # idempotent on redelivery; never persist a success watermark.
+                self._graded_settlements.discard(dedupe_key)
+                failed_callbacks.append(dedupe_key)
+                continue
 
             # Persist the dedupe key only after this settlement's callbacks
-            # ran, so a mid-batch crash replays just the unfinished tail.
+            # succeeded, so a mid-batch crash replays the unfinished tail.
             self._graded_keys_dirty.append(dedupe_key)
+            self._settlement_count += 1
+            new_count += 1
+            new_settlements.append(settlement)
 
             # Cooperative yield: a large grading batch must not monopolize the
             # loop — WS orderbook deltas and order routing share this thread.
@@ -1155,6 +1174,10 @@ class KalshiSettlementPoller:
                 f"Settlement poll: {new_count} new, {voided_count} voided "
                 f"(total cached: {len(self._settlement_cache)}, "
                 f"ungraded backlog: {len(self._ungraded_backlog)})"
+            )
+        if failed_callbacks:
+            raise RuntimeError(
+                f"Settlement callbacks failed for {len(failed_callbacks)} settlement(s)"
             )
 
     async def _sweep_orphaned_decision_outcomes(self) -> None:
@@ -1308,8 +1331,8 @@ class KalshiSettlementPoller:
                 method="GET",
                 endpoint="/portfolio/settlements",
                 params={
-                    "settled_after": start_time,
-                    "settled_before": end_time,
+                    "min_ts": _settlement_query_ts(start_time),
+                    "max_ts": _settlement_query_ts(end_time),
                     "limit": limit,
                 }
             )
@@ -1374,8 +1397,7 @@ class KalshiSettlementPoller:
                     logger.warning(f"Settlement API timeout (attempt {attempt + 1}), retrying in {delay}s")
                     await asyncio.sleep(delay)
                 else:
-                    logger.warning("Settlement API timed out after all retries - returning empty result")
-                    return {}
+                    raise TimeoutError("Settlement API timed out after all retries")
             except Exception as exc:
                 if attempt < self.config.max_retries - 1:
                     delay = self.config.retry_delay_seconds * (2 ** attempt)
@@ -1397,7 +1419,7 @@ class KalshiSettlementPoller:
         Invariants (checked on every exit):
         - No gaps: cursor must advance each iteration
         - No duplicates: dedupe key must be unique within this fetch
-        - Clean exit: cursor=None or partial_page with explicit log marker
+        - Clean exit: cursor is empty and every page was fetched
         
         Args:
             start_time: ISO timestamp for lookback start
@@ -1409,16 +1431,14 @@ class KalshiSettlementPoller:
         all_settlements: List[KalshiSettlement] = []
         seen_keys: Set[SettlementDedupeKey] = set()
         cursor: Optional[str] = None
-        prev_cursor: Optional[str] = None
+        seen_cursors: Set[str] = set()
         page_count = 0
         
         while True:
             page_count += 1
-            prev_cursor = cursor
-            
             params = {
-                "settled_after": start_time,
-                "settled_before": end_time,
+                "min_ts": _settlement_query_ts(start_time),
+                "max_ts": _settlement_query_ts(end_time),
                 "limit": self.config.batch_size,
             }
             if cursor:
@@ -1430,10 +1450,14 @@ class KalshiSettlementPoller:
                     endpoint="/portfolio/settlements",
                     params=params,
                 )
+                if not isinstance(response, dict) or not isinstance(
+                    response.get("settlements"), list
+                ):
+                    raise RuntimeError("Settlement response missing settlements list")
                 
                 # Parse settlements from this page
                 page_settlements = []
-                for item in response.get("settlements", []):
+                for item in response["settlements"]:
                     page_settlements.append(KalshiSettlement.from_api(item))
                 
                 # INVARIANT CHECK: No duplicates within this fetch call
@@ -1450,8 +1474,7 @@ class KalshiSettlementPoller:
                         )
                         continue
                     seen_keys.add(key)
-                
-                all_settlements.extend(page_settlements)
+                    all_settlements.append(s)
                 
                 # Track total fetched for canary metric (end-to-end validation)
                 self._settlements_fetched_count += len(page_settlements)
@@ -1460,10 +1483,11 @@ class KalshiSettlementPoller:
                 cursor = response.get("cursor")
                 
                 # INVARIANT CHECK: No gaps (cursor continuity)
-                if cursor and cursor == prev_cursor:
-                    raise RuntimeError("[SETTLEMENT-GAP] Cursor stagnated — possible data loss")
+                if cursor and cursor in seen_cursors:
+                    raise RuntimeError("[SETTLEMENT-GAP] Cursor repeated — possible data loss")
                 
                 if cursor:
+                    seen_cursors.add(cursor)
                     self._last_cursor = cursor
                     self._cursor_history.append(cursor)
                     await self._save_cursor_state()  # Persist for restart resilience
@@ -1472,25 +1496,16 @@ class KalshiSettlementPoller:
                 if not cursor:
                     logger.info("[SETTLEMENT-INVARIANT] cursor=None — clean end of stream")
                     break
-                if len(page_settlements) < self.config.batch_size:
-                    logger.info("[SETTLEMENT-INVARIANT] partial_page — assuming end")
-                    break
-                
                 # Safety: limit total pages (configurable via max_pages)
                 if page_count >= self.config.max_pages:
-                    logger.error(
-                        f"[SETTLEMENT-PAGINATION-LIMIT] Reached max_pages={self.config.max_pages} "
-                        f"after fetching {len(all_settlements)} settlements. "
-                        f"Data may be incomplete - consider increasing max_pages or reducing lookback_hours. "
-                        f"cursor={cursor[:20] if cursor else 'None'}..."
+                    raise RuntimeError(
+                        f"[SETTLEMENT-PAGINATION-LIMIT] max_pages={self.config.max_pages} "
+                        f"after {len(all_settlements)} settlements; cursor remains"
                     )
-                    break
                     
             except Exception as exc:
-                # Circuit breaker OPEN or API errors are expected during outages
-                # Log as WARNING since this is protective behavior, not a system failure
                 logger.warning(f"Settlement pagination issue (will retry): {exc}")
-                break
+                raise
         
         return all_settlements
     
@@ -1499,22 +1514,7 @@ class KalshiSettlementPoller:
         # Create new settlement with normalized ticker
         normalized_ticker = normalize_kalshi_ticker(settlement.ticker)
         if normalized_ticker != settlement.ticker:
-            # Return new settlement with normalized ticker
-            return KalshiSettlement(
-                market_id=settlement.market_id,
-                ticker=normalized_ticker,
-                title=settlement.title,
-                category=settlement.category,
-                status=settlement.status,
-                settlement_price_cents=settlement.settlement_price_cents,
-                settlement_value=settlement.settlement_value,
-                expiry_time=settlement.expiry_time,
-                settlement_time=settlement.settlement_time,
-                position_count=settlement.position_count,
-                yes_count=settlement.yes_count,
-                no_count=settlement.no_count,
-                realized_pnl_cents=settlement.realized_pnl_cents,
-            )
+            return replace(settlement, ticker=normalized_ticker)
         return settlement
 
     def _hydrate_pnl_from_ledger(self, settlement: KalshiSettlement) -> KalshiSettlement:
@@ -1809,28 +1809,26 @@ class KalshiSettlementPoller:
                 )
                 events.append(event)
 
-            # Join the settlement to the durable decision audit ledger so every
-            # recorded decision gets its counterfactual PnL.  Fail-open.
-            try:
-                from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+                # Join each settlement, not just the last one in the batch.
+                try:
+                    from merid.execution.decision_audit_ledger import get_decision_audit_ledger
 
-                audit_ledger = get_decision_audit_ledger()
-                close_ts = _kalshi_settlement_close_ts(settlement)
-                if close_ts is not None:
-                    # Sync sqlite3 write — off the event loop.
-                    await asyncio.to_thread(
-                        audit_ledger.record_settlement,
-                        ticker=settlement.market_id,
-                        close_ts=close_ts,
-                        settled_yes=settlement.settlement_price_cents == 100,
-                        settlement_value_cents=settlement.settlement_price_cents or 0,
+                    audit_ledger = get_decision_audit_ledger()
+                    close_ts = _kalshi_settlement_close_ts(settlement)
+                    if close_ts is not None:
+                        await asyncio.to_thread(
+                            audit_ledger.record_settlement,
+                            ticker=settlement.market_id,
+                            close_ts=close_ts,
+                            settled_yes=settlement.settlement_price_cents == 100,
+                            settlement_value_cents=settlement.settlement_price_cents or 0,
+                        )
+                except Exception as audit_exc:
+                    logger.warning(
+                        "[SETTLEMENT-POLLER] decision audit join failed for %s: %s",
+                        settlement.market_id,
+                        audit_exc,
                     )
-            except Exception as audit_exc:
-                logger.warning(
-                    "[SETTLEMENT-POLLER] decision audit join failed for %s: %s",
-                    settlement.market_id,
-                    audit_exc,
-                )
 
             # Measure bus latency (just the publish calls)
             bus_start_time = _time.monotonic()
@@ -1969,8 +1967,10 @@ class SettlementToGradingBridge:
                     )
             except Exception as exc:
                 logger.warning(f"Failed to record settlement proceeds: {exc}")
+                raise
         except Exception as exc:
             logger.warning(f"Failed to notify fills_ledger of settlement: {exc}")
+            raise
 
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -1987,6 +1987,7 @@ class SettlementToGradingBridge:
             )
         except Exception as exc:
             logger.warning(f"Failed to notify position_cache of settlement: {exc}")
+            raise
 
         # Settlement-aligned exit counterfactuals (2026-09): resolve the
         # canonical market key (full ticker/market_id, never a series alias)
@@ -2033,6 +2034,7 @@ class SettlementToGradingBridge:
                 record_outcome(event, out_path=DEFAULT_OUT_PATH)
         except Exception as exc:
             logger.warning("[SETTLEMENT-POLLER] Failed to record settlement outcome: %s", exc)
+            raise
 
         # Notify grading callback
         if self.grading_callback:
@@ -2049,6 +2051,7 @@ class SettlementToGradingBridge:
                     )
             except Exception as exc:
                 logger.error(f"Grading callback error: {exc}")
+                raise
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────

@@ -16,10 +16,12 @@ These tests pin the fixed behavior:
 from __future__ import annotations
 
 import threading
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from merid.event_venues.kalshi import settlement_poller as settlement_module
 from merid.event_venues.kalshi.settlement_poller import (
     KalshiSettlement,
     KalshiSettlementPoller,
@@ -158,3 +160,176 @@ class TestSweepOffloadsSyncWork:
 
         assert len(seen_threads) == 1
         assert seen_threads[0] is not threading.main_thread()
+
+
+async def test_batch_audit_joins_every_settlement(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERID_SETTLEMENT_GRADED_PATH", str(tmp_path / "graded.jsonl"))
+    poller = KalshiSettlementPoller(MagicMock(), PollerConfig())
+    audit = MagicMock()
+    bus = MagicMock()
+    bus.publish = AsyncMock()
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: audit,
+    )
+    monkeypatch.setattr(settlement_module, "get_event_bus", lambda: bus)
+    batch = [
+        _settled("KXBTC15M-A", "2026-09-27T19:00:00Z"),
+        _settled("KXETH15M-B", "2026-09-27T19:15:00Z", result="no"),
+        _settled("KXSOL15M-C", "2026-09-27T19:30:00Z"),
+    ]
+
+    assert await poller._publish_settlements_to_bus(batch)
+    assert [call.kwargs["ticker"] for call in audit.record_settlement.call_args_list] == [
+        s.market_id for s in batch
+    ]
+    assert bus.publish.await_count == 3
+
+
+def test_normalization_preserves_fractional_settlement_evidence(monkeypatch, tmp_path):
+    poller = _make_poller(monkeypatch, tmp_path)
+    raw = {
+        "ticker": "KXBTC15M-26NOV010000-00",
+        "market_result": "yes",
+        "value": 100,
+        "settled_time": "2026-11-01T04:00:00Z",
+        "yes_count_fp": "0.25",
+        "no_count_fp": "0.00",
+        "revenue": 25,
+    }
+    original = KalshiSettlement.from_api(raw)
+    normalized = poller._normalize_settlement(original)
+    assert normalized.ticker != original.ticker
+    assert normalized.yes_count_fp == Decimal("0.25")
+    assert normalized.no_count_fp == Decimal("0.00")
+    assert normalized.raw_payload == raw
+    assert normalized.exchange_revenue_cents == original.exchange_revenue_cents
+
+
+async def test_pagination_follows_cursor_after_partial_page_and_deduplicates(
+    monkeypatch, tmp_path,
+):
+    poller = _make_poller(monkeypatch, tmp_path)
+    first = {"ticker": "KXBTC15M-A", "market_result": "yes", "value": 100,
+             "settled_time": "2026-11-01T04:00:00Z"}
+    second = {"ticker": "KXETH15M-B", "market_result": "no", "value": 0,
+              "settled_time": "2026-11-01T04:15:00Z"}
+    poller._api_call_with_retry = AsyncMock(side_effect=[
+        {"settlements": [first], "cursor": "next"},
+        {"settlements": [first, second], "cursor": ""},
+    ])
+    result = await poller._fetch_all_settlements(
+        "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z",
+    )
+    assert [s.market_id for s in result] == [first["ticker"], second["ticker"]]
+    calls = poller._api_call_with_retry.await_args_list
+    assert calls[0].kwargs["params"]["min_ts"] == 1793491200
+    assert calls[0].kwargs["params"]["max_ts"] == 1793577600
+    assert calls[1].kwargs["params"]["cursor"] == "next"
+
+
+@pytest.mark.parametrize("response", [
+    {},
+    {"settlements": [], "cursor": "next"},
+])
+async def test_incomplete_settlement_scan_raises(monkeypatch, tmp_path, response):
+    poller = _make_poller(monkeypatch, tmp_path)
+    poller.config.max_pages = 1
+    poller._api_call_with_retry = AsyncMock(return_value=response)
+    with pytest.raises(RuntimeError):
+        await poller._fetch_all_settlements(
+            "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z",
+        )
+
+
+async def test_settlement_api_timeout_is_not_an_empty_success(monkeypatch, tmp_path):
+    poller = _make_poller(monkeypatch, tmp_path)
+    poller.config.max_retries = 1
+    poller.client = MagicMock()
+    poller.client.request = AsyncMock(side_effect=TimeoutError())
+    with pytest.raises(TimeoutError):
+        await poller._api_call_with_retry("GET", "/portfolio/settlements")
+
+
+async def test_repeated_cursor_and_later_page_failure_are_not_clean_scans(
+    monkeypatch, tmp_path,
+):
+    poller = _make_poller(monkeypatch, tmp_path)
+    poller._api_call_with_retry = AsyncMock(side_effect=[
+        {"settlements": [], "cursor": "a"},
+        {"settlements": [], "cursor": "b"},
+        {"settlements": [], "cursor": "a"},
+    ])
+    with pytest.raises(RuntimeError, match="Cursor repeated"):
+        await poller._fetch_all_settlements(
+            "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z",
+        )
+
+    poller._api_call_with_retry = AsyncMock(side_effect=[
+        {"settlements": [], "cursor": "next"},
+        ConnectionError("page failed"),
+    ])
+    with pytest.raises(ConnectionError, match="page failed"):
+        await poller._fetch_all_settlements(
+            "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z",
+        )
+
+
+async def test_failed_callback_is_not_watermarked_and_retries(monkeypatch, tmp_path):
+    poller = _make_poller(monkeypatch, tmp_path)
+    settlement = _settled("KXBTC15M-A", "2026-11-01T04:00:00Z")
+    poller._fetch_all_settlements = AsyncMock(return_value=[settlement])
+    callback = AsyncMock(side_effect=[RuntimeError("failed"), None])
+    poller.add_callback(callback)
+
+    with pytest.raises(RuntimeError, match="Settlement callbacks failed"):
+        await poller._poll_once()
+
+    assert settlement.dedupe_key not in poller._graded_settlements
+    assert not (tmp_path / "graded.jsonl").exists()
+    poller._publish_settlements_to_bus.assert_not_awaited()
+
+    await poller._poll_once()
+    assert callback.await_count == 2
+    assert settlement.dedupe_key in poller._graded_settlements
+    assert settlement.dedupe_key in (tmp_path / "graded.jsonl").read_text()
+    poller._publish_settlements_to_bus.assert_awaited_once()
+
+
+def test_failed_watermark_write_keeps_keys_for_retry(monkeypatch, tmp_path):
+    poller = _make_poller(monkeypatch, tmp_path)
+    key = "kalshi:KXBTC15M-A:2026-11-01T04:00:00Z"
+    poller._graded_keys_dirty.append(key)
+    monkeypatch.setattr(poller, "_graded_keys_path", lambda: str(tmp_path))
+
+    poller._flush_graded_keys()
+    assert poller._graded_keys_dirty == [key]
+    assert poller._last_error.startswith("graded_keys_persist_failed:")
+
+    path = tmp_path / "retry.jsonl"
+    monkeypatch.setattr(poller, "_graded_keys_path", lambda: str(path))
+    poller._flush_graded_keys()
+    assert poller._graded_keys_dirty == []
+    assert key in path.read_text()
+
+
+async def test_proceeds_write_error_propagates_from_grading_bridge(monkeypatch, tmp_path):
+    poller = _make_poller(monkeypatch, tmp_path)
+    bridge = settlement_module.SettlementToGradingBridge(poller)
+    settlement = KalshiSettlement.from_api({
+        "ticker": "KXBTC15M-A",
+        "market_result": "yes",
+        "value": 100,
+        "settled_time": "2026-11-01T04:00:00Z",
+        "yes_count_fp": "0.25",
+    })
+    ledger = MagicMock()
+    ledger.record_settlement_proceeds_async = AsyncMock(
+        side_effect=RuntimeError("disk failure"),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.fills_ledger.get_fills_ledger", lambda: ledger,
+    )
+    with pytest.raises(RuntimeError, match="disk failure"):
+        await bridge._on_settlement(settlement)
+    ledger.record_settlement_proceeds_async.assert_awaited_once()

@@ -646,3 +646,50 @@ conditions remain unresolved. The current lifespan raises on a P0 failure,
 so restarting with the new guard would also terminate startup rather than
 keep protective services available. The clock-refresh fallback in `78f74205`
 remains committed but is not active in the running process.
+
+### Follow-up: stopped process and settlement recovery
+
+At approximately 14:56 UTC on 2026-11-01, PID 8144, its launcher, and its
+watchdog were no longer present; port 8011 was not listening. The last
+watchdog heartbeat was at 14:53:17 UTC. There was no subsequent launcher
+exit record, so the cause and exit status remain unknown. The persisted
+`LIVE_ENTRIES_ENABLED` state is stale and does not represent a running server.
+With explicit operator approval, read-only Kalshi checks at 14:58 UTC found
+zero resting orders, zero nonzero market positions, and 19 fills in the last
+24 hours, the latest at 00:57 UTC. Zero current positions does not resolve
+the historical attempts or establish settlement accounting completeness.
+
+Settlement-poller defects identified in the local follow-up:
+
+- Ticker normalization rebuilt a subset of the settlement record and lost
+  fractional exchange counts, raw payload, revenue, and reconciliation
+  fields. Normalization now preserves the original fields.
+- The account-settlement scan stopped on a short page despite a nonempty
+  cursor, and returned incomplete/error scans as successful results. It now
+  follows cursors until empty, deduplicates repeated records, and fails
+  visibly on pagination limits, repeated cursors, malformed pages, or timeouts.
+- The live API documents `min_ts`/`max_ts` in Unix seconds, not the previous
+  `settled_after`/`settled_before` parameters.
+- The batch audit join only processed the final settlement in each batch.
+  It now processes every valid settlement.
+- Callback failures were logged but still received a durable success
+  watermark. Failed callbacks now remain unwatermarked and can be retried;
+  the ledger, position-cache, outcome-export, and configured grading callback
+  errors propagate rather than appearing successful. Redelivery is at least
+  once and callback side effects must be idempotent.
+- Failed watermark writes retain their dirty keys for a later attempt.
+
+These changes do not establish a fully durable event-bus outbox or prove that
+previously watermarked callbacks completed; both remain open. Startup still
+cannot safely enable entries while the historical attempts remain unresolved,
+and a failed P0 startup currently exits rather than preserving the protective
+services. No restart or live order has been attempted in this follow-up.
+
+External references: Kalshi's
+https://docs.kalshi.com/api-reference/portfolio/get-settlements ,
+https://docs.kalshi.com/getting_started/pagination , and
+https://docs.kalshi.com/getting_started/historical_data document the current
+settlement filters, cursor behavior, and distinct live/archive cutoffs.
+https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html
+describes durable outbox and idempotent-consumer requirements; the existing
+in-memory pending-publish set does not meet that guarantee.
