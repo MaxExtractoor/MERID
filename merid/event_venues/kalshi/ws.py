@@ -2199,6 +2199,12 @@ class KalshiWebSocket(EventVenueStream):
         # scheduling gap between drain iterations, emitted as one
         # aggregate row per ~60s to logs/pq_drain_profile.jsonl.  ~4
         # monotonic_ns() reads per message; never logs per-message.
+        def _pq_prof_interval() -> float:
+            try:
+                return max(5.0, float(os.environ.get("MERID_PQ_PROF_INTERVAL_S", "60")))
+            except (TypeError, ValueError):
+                return 60.0
+
         _pq_prof = {
             "t0": _time.monotonic(),
             "items": 0,
@@ -2210,6 +2216,9 @@ class KalshiWebSocket(EventVenueStream):
             "gap_ms": 0.0, "gap_max": 0.0,
             "idle_ms": 0.0,
             "writer": None,
+            # Bounded emit cadence; env override for diagnostic runs only —
+            # lower values still emit one row per window, never per message.
+            "interval_s": _pq_prof_interval(),
         }
         _pq_last_iter_end_ns = _time.monotonic_ns()
 
@@ -2603,7 +2612,7 @@ class KalshiWebSocket(EventVenueStream):
 
                 _pq_last_iter_end_ns = _time.monotonic_ns()
                 _pq_elapsed = _time.monotonic() - _pq_prof["t0"]
-                if _pq_elapsed >= 60.0:
+                if _pq_elapsed >= _pq_prof["interval_s"]:
                     try:
                         if _pq_prof["writer"] is None:
                             from merid.utils.rollup_writer import BoundedJsonlWriter
@@ -2620,6 +2629,10 @@ class KalshiWebSocket(EventVenueStream):
                             "ts": _time.strftime(
                                 "%Y-%m-%dT%H:%M:%SZ", _time.gmtime()
                             ),
+                            # Diagnoses duplicate-producer anomalies: a second
+                            # drain task (restart overlap) would surface as a
+                            # different id rather than silent duplicate rows.
+                            "drain_task": hex(id(asyncio.current_task())),
                             "window_s": round(_pq_elapsed, 1),
                             "items": _pq_prof["items"],
                             "items_per_s": round(_pq_prof["items"] / _pq_elapsed, 1),
