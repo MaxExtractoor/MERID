@@ -389,3 +389,74 @@ outside the interactive session's process tree; the working hypothesis
 is an external/console-teardown kill of session-spawned process trees.
 PID 13096 (launcher) and its uvicorn child remain alive at report time —
 independent termination capture stays on the watch list.
+
+---
+
+## Drain workstream — capacity attribution and the migrated bottleneck (2026-11-01)
+
+**Method**: bounded stage profiler in `_process_queue` + recv-side frame cost +
+loop-lag chain + py-spy wall-clock attribution on the live process.  No feed
+semantics, ordering, threshold, or trading-path change was made for
+measurement; the only capacity change is transport-side (see below).
+
+**Stage attribution (live, 60s rows, `logs/pq_drain_profile.jsonl`)**
+
+| stage | measured cost | share of WS-loop |
+|---|---|---|
+| recv handler (stamp→enqueue: parse, stats, classify, seq-check, put) | `recv_ms_mean` 0.03–0.05 ms/frame | ~30–75 ms/s duty (~3–7%) |
+| shed predicate eval | 0.03–0.04 ms/item | — |
+| dispatch (parse + awaited bridge enqueue) | 0.04–0.08 ms/item | — |
+| whole-item body (unpack→handler done) | 0.06–0.12 ms/item | — |
+| **drain task total** | — | **~60–150 ms/s duty (~6–15%)** |
+| sched gap between iterations (starvation) | mean ~0.03 ms, max ~60 ms | ≈0 |
+
+The drain task is cheap and never starved more than ~60 ms between
+iterations — yet effective drain throughput capped ~1600–1700 items/s under
+burst (`nonempty_iter_share` 0.85–1.0 = standing backlog while duty stayed
+~15%).  Offline replay of the *same* `_process_queue` code drained 5000/s
+with pq_wait max 78 ms — the ceiling is **process-wide GIL contention**, not
+drain mechanics.
+
+**Dominant co-tenant (py-spy, live)**: ~70% of all wall samples sat inside
+`urllib3.connection.connect → ssl_wrap_socket` on `run_in_executor` threads —
+every public spot-API fetch in `data/unified_spot_service.py` used bare
+`requests.get()` → a **fresh TCP+TLS handshake per call**.  Process CPU
+≈1.7 cores.
+
+**Capacity patch applied (`a9c7e43e`)**: module-level `requests.Session`
+with pooled keep-alive for the five public-API fetch sites.  Transport-only;
+same endpoints/params/timeouts/parsing.  Result on the same live process:
+
+- process CPU **1.68 → 1.09 cores (−35%)**; `ssl_wrap_socket` **55% → 0%** of samples
+- next rollover (05:15): **`drops` 42,240/min → 0/min**, `nonempty_iter_share` ≤0.35,
+  `pq_wait` mean **2522 ms → 274–332 ms peak**, max **4187 → ~1450 ms**
+- queue-age now **recovers within the same minute** after the burst
+
+**Migrated bottleneck (honest residual)**: the backlog moved downstream —
+`queue_residence_ms` (bridge-enqueue → apply hop) rose to mean ~650–840 ms /
+max ~2.9 s at the 05:17–18 burst minute; `corr_venue_age` mean ~1.2 s stayed
+under the 3750 ms freshness bound (no false freshness).  Binding constraint
+is now the **forwarder → per-ticker-queue → apply chain at ~700–800/s** —
+the next hop in the user's measurement list (`publication → candidate
+consumption`), and a *separate* capacity decision; not patched here.
+
+**Instrumentation now live**: `pq_drain_profile.jsonl` rows (`ws_drain`,
+`ws_recv` kinds, `drain_task` id, `MERID_PQ_PROF_INTERVAL_S` knob);
+WS-loop lag chain re-enabled and populating (`avg_loop_lag_ms` ~10 ms,
+`max` ~750–925 ms — periodic stall events worth their own look);
+`MERID_WS_LOOP_DEBUG=1` + `MERID_WS_SLOW_CB_MS` give opt-in asyncio
+slow-callback naming for targeted diagnostic runs; py-spy available at
+`%LocalAppData%\Programs\Python\Python311\Scripts\py-spy.exe` for
+repeatable wall attribution.
+
+**Ordering/equivalence**: bounded dequeue batching (50/200 adaptive) +
+sequential per-item awaits already existed — the user's preferred pattern;
+nothing was reordered and no per-message tasks were spawned.  The bypassed
+`_coalescing_buffer` remains **unused**: Kalshi quantity deltas are
+incremental (apply-in-order); "latest-wins" aggregation would corrupt both
+the book and path-dependent features (trap-guard ask history).  Any future
+aggregation proposal must pass exact sequential-reference equivalence, not
+final-book equality.
+
+**Deployed vs committed**: production = `a9c7e43e` (verified via
+`deployment_sha` in `live_entries_enabled`); earlier `a600f6f7` was doc-only.
