@@ -2600,6 +2600,22 @@ class KalshiWebSocketBridge:
         def _ws_thread_main() -> None:
             loop = asyncio.new_event_loop()
             self._ws_loop = loop
+            # 2026-11-01 drain workstream: opt-in asyncio slow-callback
+            # diagnostics for targeted runs (off by default — debug mode adds
+            # per-callback bookkeeping).  MERID_WS_LOOP_DEBUG=1 enables;
+            # MERID_WS_SLOW_CB_MS sets the reporting threshold (default 30ms).
+            if os.environ.get("MERID_WS_LOOP_DEBUG", "") == "1":
+                loop.set_debug(True)
+                try:
+                    loop.slow_callback_duration = (
+                        float(os.environ.get("MERID_WS_SLOW_CB_MS", "30")) / 1000.0
+                    )
+                except (TypeError, ValueError):
+                    loop.slow_callback_duration = 0.03
+                logger.warning(
+                    "[WS-THREAD] asyncio debug enabled — slow_callback_duration=%.3fs",
+                    loop.slow_callback_duration,
+                )
             asyncio.set_event_loop(loop)
 
             async def _run_ws_io() -> None:

@@ -117,6 +117,14 @@ def get_fault_manager() -> _FaultManagerAdapter:
 CircuitState = MeridCircuitState
 
 
+def _pq_prof_interval() -> float:
+    """Drain/recv profiler emit cadence; env override for diagnostic runs."""
+    try:
+        return max(5.0, float(os.environ.get("MERID_PQ_PROF_INTERVAL_S", "60")))
+    except (TypeError, ValueError):
+        return 60.0
+
+
 def _kalshi_ws_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """Return the inner message body; Kalshi WS v2 nests payloads under ``msg``."""
     m = data.get("msg")
@@ -1597,9 +1605,11 @@ class KalshiWebSocket(EventVenueStream):
                 logger.error("[WS-PROCESSOR] Task crashed: %s", e, exc_info=True)
         
         self._processor_task.add_done_callback(_processor_done_cb)
-        # TEMPORARILY DISABLED: May be causing event loop hang
-        # Start periodic event-loop lag measurement
-        # self._start_lag_monitor()
+        # 2026-11-01 drain workstream: re-enabled — 200ms call_later lag
+        # sampling is the direct event-loop starvation measurement needed
+        # to distinguish drain-task cost from co-tenant scheduling delay.
+        # (Previously disabled on an unproven hang suspicion.)
+        self._start_lag_monitor()
         # Start queue pressure supervisor
         # self._start_supervisor()
 
@@ -1998,6 +2008,59 @@ class KalshiWebSocket(EventVenueStream):
                         if self._direct_enqueue_count <= 10:
                             logger.debug("[WS-DIRECT-ENQUEUE-BYPASS] #%d: type=%s queue_id=%s queue_size=%d",
                                        self._direct_enqueue_count, data.get('type'), id(self._ensure_msg_queue()), self._ensure_msg_queue().qsize())
+                        # 2026-11-01 drain workstream: recv-side per-frame
+                        # cost — time from the recv stamp to successful
+                        # enqueue (parse, stats, classify, seq check,
+                        # priority, queue put).  Bounded 60s aggregate to
+                        # pq_drain_profile.jsonl as kind="ws_recv" rows;
+                        # distinguishes recv-handler cost from queue
+                        # residence inside pq_wait.
+                        _rp = getattr(self, "_recv_prof", None)
+                        if _rp is None:
+                            _rp = self._recv_prof = {
+                                "t0": _time.monotonic(), "frames": 0,
+                                "ms": 0.0, "max": 0.0, "writer": None,
+                                "interval_s": _pq_prof_interval(),
+                            }
+
+                        def _rp_done() -> None:
+                            _lag = (_time.monotonic_ns() - _recv_ns) / 1e6
+                            _rp["ms"] += _lag
+                            if _lag > _rp["max"]:
+                                _rp["max"] = _lag
+                            _rp["frames"] += 1
+                            if _rp["frames"] % 128 == 0:
+                                _el = _time.monotonic() - _rp["t0"]
+                                if _el >= _rp["interval_s"]:
+                                    try:
+                                        if _rp["writer"] is None:
+                                            from merid.utils.rollup_writer import BoundedJsonlWriter
+                                            _rp["writer"] = BoundedJsonlWriter(
+                                                os.path.join(
+                                                    os.path.dirname(os.path.abspath(__file__)),
+                                                    "..", "..", "..", "logs",
+                                                    "pq_drain_profile.jsonl",
+                                                )
+                                            )
+                                        _rp["writer"].append({
+                                            "ts": _time.strftime(
+                                                "%Y-%m-%dT%H:%M:%SZ", _time.gmtime()
+                                            ),
+                                            "kind": "ws_recv",
+                                            "window_s": round(_el, 1),
+                                            "frames": _rp["frames"],
+                                            "frames_per_s": round(_rp["frames"] / _el, 1),
+                                            "recv_ms_mean": round(_rp["ms"] / max(_rp["frames"], 1), 3),
+                                            "recv_ms_max": round(_rp["max"], 1),
+                                            "recv_duty_ms_per_s": round(_rp["ms"] / _el, 1),
+                                        })
+                                    except Exception:
+                                        pass
+                                    _rp.update({
+                                        "t0": _time.monotonic(), "frames": 0,
+                                        "ms": 0.0, "max": 0.0,
+                                    })
+
                         if msg_priority <= self._CRITICAL_PRIORITY_MAX:
                             # Critical low-volume channels (fills, order/account
                             # events) get a dedicated lane so market-data floods
@@ -2013,8 +2076,10 @@ class KalshiWebSocket(EventVenueStream):
                                     "backpressure for critical msg type=%s",
                                     data.get("type"),
                                 )
+                            _rp_done()
                         else:
                             self._ensure_msg_queue().put_nowait((msg_priority, data))
+                            _rp_done()
                             
                             # P0 FIX: REMOVED direct callback invocation - this creates a parallel path that bypasses the bridge queue
                             # The callback is now ONLY called from _process_queue, ensuring single pipeline:
@@ -2199,12 +2264,6 @@ class KalshiWebSocket(EventVenueStream):
         # scheduling gap between drain iterations, emitted as one
         # aggregate row per ~60s to logs/pq_drain_profile.jsonl.  ~4
         # monotonic_ns() reads per message; never logs per-message.
-        def _pq_prof_interval() -> float:
-            try:
-                return max(5.0, float(os.environ.get("MERID_PQ_PROF_INTERVAL_S", "60")))
-            except (TypeError, ValueError):
-                return 60.0
-
         _pq_prof = {
             "t0": _time.monotonic(),
             "items": 0,
@@ -2215,6 +2274,7 @@ class KalshiWebSocket(EventVenueStream):
             "disp_ms": 0.0, "disp_max": 0.0,
             "gap_ms": 0.0, "gap_max": 0.0,
             "idle_ms": 0.0,
+            "body_ms": 0.0, "body_max": 0.0,
             "writer": None,
             # Bounded emit cadence; env override for diagnostic runs only —
             # lower values still emit one row per window, never per message.
@@ -2599,6 +2659,13 @@ class KalshiWebSocket(EventVenueStream):
                     _pq_prof["disp_ms"] += _dp
                     if _dp > _pq_prof["disp_max"]:
                         _pq_prof["disp_max"] = _dp
+                    # Whole-item body wall: unpack → shed/bookkeeping → parse →
+                    # awaited handler → task_done.  body − shed − disp exposes
+                    # per-item overhead the stage meters do not cover.
+                    _bd = (_time.monotonic_ns() - _pq_deq_ns) / 1e6
+                    _pq_prof["body_ms"] += _bd
+                    if _bd > _pq_prof["body_max"]:
+                        _pq_prof["body_max"] = _bd
                     _pq_prof["items"] += 1
                     messages_processed += 1
 
@@ -2633,6 +2700,7 @@ class KalshiWebSocket(EventVenueStream):
                             # drain task (restart overlap) would surface as a
                             # different id rather than silent duplicate rows.
                             "drain_task": hex(id(asyncio.current_task())),
+                            "kind": "ws_drain",
                             "window_s": round(_pq_elapsed, 1),
                             "items": _pq_prof["items"],
                             "items_per_s": round(_pq_prof["items"] / _pq_elapsed, 1),
@@ -2645,6 +2713,8 @@ class KalshiWebSocket(EventVenueStream):
                             "shed_eval_ms_max": round(_pq_prof["shed_max"], 1),
                             "dispatch_ms_mean": round(_pq_prof["disp_ms"] / _n, 3),
                             "dispatch_ms_max": round(_pq_prof["disp_max"], 1),
+                            "body_ms_mean": round(_pq_prof["body_ms"] / _n, 3),
+                            "body_ms_max": round(_pq_prof["body_max"], 1),
                             "sched_gap_ms_mean": round(_pq_prof["gap_ms"] / _g, 2),
                             "sched_gap_ms_max": round(_pq_prof["gap_max"], 1),
                             "idle_wait_ms_mean": round(
@@ -2663,6 +2733,7 @@ class KalshiWebSocket(EventVenueStream):
                         "shed_ms": 0.0, "shed_max": 0.0,
                         "disp_ms": 0.0, "disp_max": 0.0,
                         "gap_ms": 0.0, "gap_max": 0.0, "idle_ms": 0.0,
+                        "body_ms": 0.0, "body_max": 0.0,
                     })
                     
             except asyncio.CancelledError:
