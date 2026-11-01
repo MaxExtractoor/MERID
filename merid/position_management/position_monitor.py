@@ -2824,6 +2824,10 @@ class PositionMonitor:
             "order_cancelled_stale_price": ExitOrderAttemptState.CANCELED.value,
             "exchange_confirmed_flat": ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT.value,
             "not_accepted_confirmed": ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value,
+            # The canonical submission claim is the atomic pre-send barrier;
+            # INTENT_PERSISTED + an unclaimed canonical record proves the
+            # request never reached the wire.
+            "never_dispatched": ExitOrderAttemptState.TERMINAL_UNFILLED.value,
         }.get((reason or "").lower())
 
     def _mark_exit_intent_reconciled(
@@ -3267,6 +3271,54 @@ class PositionMonitor:
         ExitOrderAttempt is transitioned to RESOLVING_ON_EXCHANGE, then to a
         terminal state once exchange evidence is conclusive.
         """
+        # A durable attempt still in INTENT_PERSISTED whose canonical order
+        # record was never claimed provably never reached dispatch — the
+        # submission claim is the atomic pre-send barrier.  Release it so a
+        # crash between attempt creation and routing cannot wedge the
+        # position's exits forever behind an unprovable order lookup.  This
+        # must run before the RESOLVING_ON_EXCHANGE transition below, which
+        # would otherwise mask the INTENT_PERSISTED state it checks.
+        if client_order_id:
+            try:
+                from merid.event_venues.kalshi.order_attempt_store import (
+                    OrderAttemptStore,
+                )
+                _store = OrderAttemptStore()
+                _exit_rec = _store.get_exit_attempt_by_client_order_id(client_order_id)
+                _canon = _store.get_by_client_order_id(client_order_id)
+                # Age bound: a live worker between attempt creation and the
+                # submission claim presents the same shape.  Observed
+                # event-loop starvation can stretch that gap to ~60s; an
+                # attempt older than 300s cannot be mid-dispatch.
+                _aged = (
+                    _exit_rec is not None
+                    and getattr(_exit_rec, "created_at", None) is not None
+                    and _exit_rec.created_at <= time.time() - 300
+                )
+                if (
+                    _aged
+                    and _exit_rec.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+                    and (_canon is None or getattr(_canon, "status", None) == "PERSISTED")
+                ):
+                    logger.info(
+                        "[EXIT-INTENT-RECONCILE] Attempt for %s never reached dispatch "
+                        "(unclaimed canonical record); terminalizing as TERMINAL_UNFILLED",
+                        client_order_id[:8],
+                    )
+                    if not self._release_stale_exit_flags(
+                        position_id, "never_dispatched", client_order_id,
+                    ):
+                        logger.error(
+                            "[EXIT-INTENT-RECONCILE] Release failed for never-dispatched "
+                            "attempt %s; retaining lock", client_order_id[:8],
+                        )
+                    return
+            except Exception:
+                logger.exception(
+                    "[EXIT-INTENT-RECONCILE] never-dispatched check failed for %s",
+                    client_order_id[:8],
+                )
+
         if client_order_id:
             self._transition_exit_attempt(
                 client_order_id,

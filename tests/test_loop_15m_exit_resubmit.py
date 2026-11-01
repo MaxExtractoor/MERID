@@ -44,8 +44,15 @@ def position():
 
 
 @pytest.mark.asyncio
-async def test_post_send_not_submitted_retains_exit_lock(
-    self_mock, position, monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "not_submitted", "rejected", "missing_durable", "existing_attempt",
+        "identity_mismatch", "filled_store_failure", "filled_exit_failure",
+    ],
+)
+async def test_unproven_exit_outcome_retains_lock(
+    self_mock, position, monkeypatch, tmp_path, failure
 ):
     """An empty lookup after a request cannot justify another exit."""
 
@@ -64,14 +71,31 @@ async def test_post_send_not_submitted_retains_exit_lock(
     monkeypatch.setattr(
         "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore._instances", {}
     )
+    if failure == "missing_durable":
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore.create_exit_attempt",
+            MagicMock(side_effect=OSError("database unavailable")),
+        )
+    if failure == "existing_attempt":
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore.get_exit_attempt_by_client_order_id",
+            lambda self, coid: SimpleNamespace(
+                client_order_id=coid, attempt_id="exit-existing", state="SUBMITTING"
+            ),
+        )
 
     route_calls = []
+    if failure == "filled_store_failure":
+        self_mock._position_monitor._update_order_attempt_status.return_value = False
+    if failure == "filled_exit_failure":
+        self_mock._position_monitor._update_order_attempt_status.return_value = True
+        self_mock._position_monitor._mark_exit_intent_reconciled.return_value = False
 
     async def _fake_route(intent):
         route_calls.append((intent.client_order_id, intent.order_attempt_id))
-        if len(route_calls) == 1:
+        if failure not in ("filled_store_failure", "filled_exit_failure"):
             return OrderResult(
-                status="not_submitted",
+                status=failure,
                 mode=TradingMode.LIVE,
                 reason="not_submitted:authoritative_lookup_empty",
                 submission_attempted=True,
@@ -90,8 +114,8 @@ async def test_post_send_not_submitted_retains_exit_lock(
         )
 
     def _fake_finalize(intent):
-        intent.client_order_id = "coid-resubmit-01"
-        intent.client_tag = "coid-resubmit-01"
+        if failure == "identity_mismatch":
+            intent.client_order_id = "different-client-id"
         intent.order_attempt_id = "oa-resubmit-01"
 
     monkeypatch.setattr("merid.event_venues.kalshi.order_router.route_order_async", _fake_route)
@@ -121,12 +145,19 @@ async def test_post_send_not_submitted_retains_exit_lock(
 
     await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
 
-    assert len(route_calls) == 1
+    assert len(route_calls) == (
+        0 if failure in ("missing_durable", "existing_attempt", "identity_mismatch") else 1
+    )
     assert self_mock._rearm_position_after_failed_exit.called is False
     assert self_mock._position_monitor._mark_exit_intent_retryable.called is False
-    self_mock._position_monitor._mark_exit_intent_submission_unknown.assert_called_once()
-    assert self_mock._position_monitor._mark_exit_intent_submitted.called is False
-    assert self_mock._position_monitor._mark_exit_intent_in_flight.called is True
+    if failure in ("missing_durable", "identity_mismatch"):
+        self_mock._position_monitor._mark_exit_intent_reconciliation_required.assert_called_once()
+    elif failure in ("not_submitted", "rejected", "existing_attempt"):
+        self_mock._position_monitor._mark_exit_intent_submission_unknown.assert_called_once()
+    else:
+        self_mock._position_monitor._update_order_attempt_status.assert_called_once()
+    assert self_mock._position_monitor._mark_exit_intent_submitted.called is failure.startswith("filled_")
+    assert self_mock._position_monitor._mark_exit_intent_in_flight.called is (failure != "missing_durable")
     assert self_mock._position_monitor.remove_position.called is False
 
 

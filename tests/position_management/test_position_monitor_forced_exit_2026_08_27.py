@@ -177,6 +177,105 @@ async def test_reconcile_exit_intent_force_cancels_stale_open_order(monitor, mon
     assert position.exit_triggered is False
 
 
+def _isolated_attempt_store(tmp_path, monkeypatch):
+    from merid.event_venues.kalshi import order_attempt_store as attempts
+
+    monkeypatch.setattr(attempts, "DEFAULT_DB_PATH", str(tmp_path / "attempts.db"))
+    monkeypatch.setattr(attempts.OrderAttemptStore, "_instances", {})
+    return attempts.OrderAttemptStore()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_releases_never_dispatched_attempt(monitor, tmp_path, monkeypatch):
+    """An aged INTENT_PERSISTED attempt with an unclaimed canonical record
+    provably never reached the wire; reconcile must terminalize and release it
+    so a pre-dispatch crash cannot wedge the position's exits forever."""
+    import sqlite3
+    from merid.event_venues.kalshi.order_attempt_store import ExitOrderAttemptState
+
+    store = _isolated_attempt_store(tmp_path, monkeypatch)
+    position = _make_position()
+    monitor.add_position(position)
+    coid = "exit_co_never_sent"
+
+    rec = store.create_exit_attempt(
+        exit_intent_id="ei-1", position_key=position.position_id,
+        ticker=position.market_id, reason="take_profit",
+        client_order_id=coid, requested_quantity=100,
+    )
+    # Age the attempt past the 300s mid-dispatch bound.
+    conn = store._get_conn()
+    conn.execute(
+        "UPDATE exit_order_attempts SET created_at = ? WHERE attempt_id = ?",
+        (time.time() - 400, rec.attempt_id),
+    )
+    conn.commit()
+
+    monitor._position_to_client_order[position.position_id] = coid
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": 0.0,
+        "client_order_id": coid, "reason": ExitReason.TAKE_PROFIT.value,
+    }
+    position.exit_triggered = True
+    position.exit_reason = "take_profit"
+    position.exit_price_cents = 80
+
+    fake_client = MagicMock()
+    fake_client.get_order_by_client_id_result = AsyncMock(
+        return_value=OperationResult.ok(data=None)
+    )
+    with patch(
+        "merid.event_venues.kalshi.client.get_kalshi_client",
+        return_value=fake_client,
+    ):
+        await monitor._reconcile_exit_intent(position.position_id, coid)
+
+    updated = store.get_exit_attempt(rec.attempt_id)
+    assert updated.state == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+    assert monitor._is_exit_intent_in_flight(position.position_id) is False
+    assert position.exit_triggered is False
+    # The release is a local proof — no exchange call was needed or made.
+    fake_client.get_order_by_client_id_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_young_or_claimed_attempt(monitor, tmp_path, monkeypatch):
+    """A recently created INTENT_PERSISTED attempt could still be mid-dispatch;
+    reconcile must retain it rather than assert never-sent."""
+    from merid.event_venues.kalshi.order_attempt_store import ExitOrderAttemptState
+
+    store = _isolated_attempt_store(tmp_path, monkeypatch)
+    position = _make_position()
+    monitor.add_position(position)
+    coid = "exit_co_maybe_flying"
+
+    rec = store.create_exit_attempt(
+        exit_intent_id="ei-2", position_key=position.position_id,
+        ticker=position.market_id, reason="take_profit",
+        client_order_id=coid, requested_quantity=100,
+    )
+    monitor._position_to_client_order[position.position_id] = coid
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": 0.0,
+        "client_order_id": coid, "reason": ExitReason.TAKE_PROFIT.value,
+    }
+
+    fake_client = MagicMock()
+    fake_client.get_order_by_client_id_result = AsyncMock(
+        return_value=OperationResult.ok(data=None)
+    )
+    with patch(
+        "merid.event_venues.kalshi.client.get_kalshi_client",
+        return_value=fake_client,
+    ):
+        await monitor._reconcile_exit_intent(position.position_id, coid)
+
+    assert store.get_exit_attempt(rec.attempt_id).state == (
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value
+    )
+    assert monitor._is_exit_intent_in_flight(position.position_id) is True
+
+
 @pytest.mark.asyncio
 async def test_reconcile_exit_intent_keeps_live_same_price_order(monitor):
     """A forced reconcile must keep an existing open order at the same exit price."""

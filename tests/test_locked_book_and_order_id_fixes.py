@@ -89,11 +89,15 @@ class TestResolveExitOrderId:
         attempt = SimpleNamespace(exchange_order_id="ord-from-attempt")
         assert _resolve_exit_order_id(result, attempt, self._pos, self._intent) == "ord-from-attempt"
 
-    def test_monitor_registry_fallback(self):
+    def test_monitor_registry_is_not_identity_bound(self):
+        # The registry stores bare exchange order IDs with no client_order_id
+        # binding; an arbitrary registered order must not be attributed to this
+        # attempt. Resolution falls through to the fills ledger / None.
         monitor = SimpleNamespace()
         monitor._get_exit_orders_for_position = lambda pid: ["ord-1", "ord-2"]
         result = SimpleNamespace(order_id=None)
-        assert _resolve_exit_order_id(result, None, self._pos, self._intent, monitor) == "ord-2"
+        resolved = _resolve_exit_order_id(result, None, self._pos, self._intent, monitor)
+        assert resolved not in ("ord-1", "ord-2")
 
     def test_genuinely_missing_returns_none(self):
         result = SimpleNamespace(order_id=None)

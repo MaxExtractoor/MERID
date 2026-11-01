@@ -625,10 +625,8 @@ def test_finalize_rejects_when_snapshot_version_unchanged():
     assert reason == "NO_POST_ORDER_SNAPSHOT"
 
 
-def test_finalize_reduce_only_exit_on_full_fill_without_authoritative_snapshot():
-    """Reduce-only exits finalize on a confirmed full fill even when the
-    broader portfolio snapshot is not authoritative (deliberate 2026 contract:
-    exits must be able to close risk during a latched reconciliation break)."""
+def test_finalize_reduce_only_exit_requires_authoritative_snapshot():
+    """A fully filled reduce-only order does not prove the position is flat."""
     ticker = "KXBTC15M-26AUG192030-30"
     # Non-authoritative snapshot: pagination incomplete
     snapshot = _make_snapshot(version=0, wall_ns=500_000, pagination_complete=False)
@@ -650,8 +648,8 @@ def test_finalize_reduce_only_exit_on_full_fill_without_authoritative_snapshot()
         position_key=ticker,
         now_ns=3_000_000,
     )
-    assert allowed is True
-    assert reason == "REDUCE_ONLY_EXIT_FULLY_FILLED"
+    assert allowed is False
+    assert reason == "PORTFOLIO_NOT_AUTHORITATIVE"
 
 
 def test_finalize_reduce_only_rejects_partial_fill():

@@ -671,6 +671,8 @@ class OrderAttemptStore:
 
         conn = self._get_conn()
         with conn:
+            # Serialize the conflict check with the insert across processes.
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
                 f"""
                 SELECT attempt_id FROM exit_order_attempts

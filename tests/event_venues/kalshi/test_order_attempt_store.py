@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from merid.event_venues.kalshi.order_attempt_store import (
@@ -9,6 +12,26 @@ from merid.event_venues.kalshi.order_attempt_store import (
     ExitOrderAttemptState,
     OrderAttemptStore,
 )
+
+def test_concurrent_exit_creation_has_one_active_attempt(tmp_path):
+    store = OrderAttemptStore(str(tmp_path / "concurrent_exits.db"))
+    barrier = Barrier(8)
+
+    def create(index):
+        barrier.wait(timeout=10)
+        try:
+            return store.create_exit_attempt(
+                exit_intent_id=f"intent-{index}", position_key="same-position",
+                ticker="KXBTC15M", reason="risk", client_order_id=f"coid-{index}",
+                requested_quantity=100,
+            )
+        except ExitOrderAttemptConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(create, range(8)))
+    assert sum(record is not None for record in results) == 1
+    assert len(store.list_nonterminal_exit_attempts()) == 1
 
 
 def test_exit_attempt_lifecycle_and_concurrency(tmp_path):

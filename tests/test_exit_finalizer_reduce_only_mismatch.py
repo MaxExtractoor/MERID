@@ -1,4 +1,4 @@
-"""Reduce-only exit finalization must work when the broader portfolio is not authoritative."""
+"""Reduce-only order execution does not by itself prove the position is flat."""
 
 from __future__ import annotations
 
@@ -55,8 +55,8 @@ class _FakeOrderResult:
 
 
 @pytest.mark.parametrize("status", ["filled_live", "filled_paper", "filled_mock"])
-def test_reduce_only_full_exit_ignores_non_authoritative_snapshot(status):
-    """A full reduce-only fill finalizes even when portfolio is not authoritative."""
+def test_reduce_only_full_exit_requires_authoritative_snapshot(status):
+    """A full order fill does not prove the account position is flat."""
     attempt = ExitOrderAttempt(
         pre_submit_snapshot_version=1,
         submit_started_at_ns=1,
@@ -81,8 +81,30 @@ def test_reduce_only_full_exit_ignores_non_authoritative_snapshot(status):
         position_key="KXBTC15M-TEST",
         now_ns=2,
     )
-    assert allowed is True
-    assert "REDUCE_ONLY_EXIT_FULLY_FILLED" in reason
+    assert allowed is False
+    assert reason == "PORTFOLIO_NOT_AUTHORITATIVE"
+
+
+def test_fully_filled_partial_exit_does_not_remove_remaining_position():
+    snapshot = _FakeSnapshot(
+        is_authoritative=True, reconciliation_status="MATCHED",
+        version=2, captured_at_wall_ns=2,
+    )
+    snapshot.exchange_position_fp = lambda _: Decimal("1")
+    attempt = ExitOrderAttempt(
+        pre_submit_snapshot_version=1, submit_started_at_ns=1,
+        submitted_count_fp=Decimal("1"), reduce_only=True,
+    )
+    result = _FakeOrderResult(
+        status="filled_live", filled_count_fp=Decimal("1"),
+        remaining_count_fp=Decimal("0"),
+    )
+    allowed, reason = can_finalize_full_exit(
+        snapshot=snapshot, attempt=attempt, order_result=result,
+        position_key="KXBTC15M-TEST", now_ns=2,
+    )
+    assert allowed is False
+    assert reason == "EXCHANGE_POSITION_REMAINS"
 
 
 def test_non_reduce_still_requires_authoritative_snapshot():
