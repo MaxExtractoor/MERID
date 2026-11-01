@@ -1456,10 +1456,6 @@ class KalshiPositionCache:
         self._monitoring_interval_seconds: float = 5.0  # Check every 5 seconds
         self._initialized = True
 
-        # CRITICAL FIX: Reset stale window exposure if position cache is empty
-        # This prevents phantom exposure from blocking all trading after restart
-        self._reset_stale_window_exposure()
-
         # CRITICAL FIX: DO NOT register exit intent callback here
         # The production callback is registered in loop_15m.py with proper swing mode logic
         # Registering here would overwrite the production callback and break exit handling

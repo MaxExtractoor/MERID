@@ -96,31 +96,6 @@ try:
 except Exception as e:
     logger.warning(f"[SINGLETON-RESET] Failed to reset ws_bridge: {e}")
 
-# Reset window exposure tracking to prevent stale exposure from blocking orders
-# This handles the case where window exposure is non-zero but position cache shows zero open positions
-# Only reset if there's actually stale exposure (non-zero total exposure)
-try:
-    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
-        force_reset_window_exposure,
-        _WINDOW_TRACKING_STATE,
-        _WINDOW_TRACKING_LOCK
-    )
-    import threading
-
-    # Check if there's stale exposure before resetting
-    with _WINDOW_TRACKING_LOCK:
-        total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
-
-    if total_exposure > 0.0:
-        # Only reset if there's actual stale exposure
-        force_reset_window_exposure(reason="startup_stale_exposure")
-        logger.info("[SINGLETON-RESET] window exposure tracking reset (stale exposure detected)")
-    else:
-        # No stale exposure - no reset needed
-        logger.info("[SINGLETON-RESET] window exposure tracking clean (no stale exposure)")
-except Exception as e:
-    logger.warning(f"[SINGLETON-RESET] Failed to check/reset window exposure: {e}")
-
 # Do NOT reset market_catalog singleton during startup
 # The reset causes the singleton to be None when components try to use it
 # The catalog will be properly initialized and set as singleton in the startup function
@@ -3480,42 +3455,6 @@ async def _run_full_startup_in_lifespan(app):
             
             logger.info("[STARTUP-STACK] P2.3: AFTER Kalshi15mLoop create")
             
-            # CRITICAL: Reset KalshiRiskManager category_notional state to fix stale accumulation
-            # This prevents false "category notional exceeds cap" rejections when there are no actual positions
-            logger.info("[STARTUP-STACK] RISK-RESET: Resetting KalshiRiskManager category_notional state")
-            try:
-                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-                get_kalshi_risk().reset_category_notional()
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] RISK-RESET: Failed to reset category_notional: %s", e, exc_info=True)
-            
-            # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator at startup
-            # This prevents false "Insufficient exposure" rejections when there are no actual positions
-            # but phantom slots from previous sessions are still in memory
-            logger.info("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Clearing phantom slots from global slot allocator")
-            try:
-                from merid.event_venues.kalshi.position_cache import get_position_cache
-                from merid.risk.global_slot_allocator import get_global_slot_allocator
-                
-                position_cache = get_position_cache()
-                slot_allocator = get_global_slot_allocator()
-                
-                # Get current position count from cache
-                all_positions = position_cache.get_all_positions(validate_freshness=False)
-                open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
-                position_count = len(open_positions)
-                
-                logger.info(f"[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Current position_count={position_count}")
-                
-                # Only clear slots if there are no actual positions
-                if position_count == 0:
-                    slot_allocator.clear_slots_on_empty_positions(position_count=0)
-                    logger.info("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Cleared phantom slots (position_count=0)")
-                else:
-                    logger.info(f"[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Skipping clear (position_count={position_count} > 0)")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Failed to clear phantom slots: %s", e, exc_info=True)
-            
             # CRITICAL FIX (2026-07-26): Initialize dynamic threshold manager with profile data
             # This ensures regime-aware thresholds (spread/edge ratio, price range) are loaded from profile
             logger.info("[STARTUP-STACK] DYNAMIC-THRESHOLDS-INIT: Initializing dynamic threshold manager with profile data")
@@ -3534,16 +3473,6 @@ async def _run_full_startup_in_lifespan(app):
                 )
             except Exception as e:
                 logger.warning("[STARTUP-STACK] DYNAMIC-THRESHOLDS-INIT: Failed to initialize dynamic threshold manager: %s", e, exc_info=True)
-            
-            # CRITICAL FIX (2026-07-13): Reset window exposure at startup to clear stale exposure tracking
-            # This prevents false "window exposure exceeded" rejections from previous sessions
-            logger.info("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Resetting window exposure tracking")
-            try:
-                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
-                force_reset_window_exposure(reason="startup_phantom_cleanup")
-                logger.info("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Window exposure reset complete")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Failed to reset window exposure: %s", e, exc_info=True)
             
             # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
             # This fixes the hardcoded $50 correlation stack cap bug
@@ -4926,4 +4855,3 @@ app.add_middleware(
 # This prevents double-initialization when using string-form uvicorn.run()
 
 logger.debug("[MAIN-15M-LEAN] END OF FILE - File execution complete")
-

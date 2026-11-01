@@ -1325,30 +1325,6 @@ class Kalshi15mLoop:
                         self._asset_positions[asset] = Decimal('0.0')
                     logger.info("[15m-LOOP] Using default position tracking (all assets at 0.0): %s", list(self._asset_positions.keys()) if hasattr(self._asset_positions, 'keys') else str(self._asset_positions))
         
-        # CRITICAL FIX: Reset concurrent trade counter based on actual open positions
-        # The counter is incremented on order submission but never decremented, causing false blocking
-        # Reset to 0 since position cache shows 0 open positions
-        try:
-            from merid.event_venues.kalshi.position_cache import get_position_cache
-            position_cache = get_position_cache()
-            # Reset all active trade counters to 0
-            self._active_trades.clear()
-            logger.info("[15m-LOOP] Concurrent trade counter reset to 0 (was blocking trades with stale data)")
-        except Exception as e:
-            logger.warning("[15m-LOOP] Failed to reset concurrent trade counter: %s", e, exc_info=True)
-
-        # CRITICAL FIX: Reset slot allocator state to prevent phantom exposure blocking
-        # The slot allocator may have stale slots from previous sessions that weren't released
-        # This causes "Insufficient exposure" rejections even when position cache shows 0 positions
-        try:
-            from merid.risk.global_slot_allocator import get_global_slot_allocator
-            slot_allocator = get_global_slot_allocator()
-            position_count = len(all_positions) if 'all_positions' in locals() else 0
-            slot_allocator.clear_slots_on_empty_positions(position_count)
-            logger.info("[15m-LOOP] Slot allocator phantom slots cleared (position_count=%s)", position_count)
-        except Exception as e:
-            logger.warning("[15m-LOOP] Failed to clear phantom slots from slot allocator: %s", e, exc_info=True)
-
         # Catalog startup guard - prevents false negatives before first refresh
         self._catalog_ready = False
         

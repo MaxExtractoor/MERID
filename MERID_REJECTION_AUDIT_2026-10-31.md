@@ -785,3 +785,12 @@ empty. An unavailable drift check fails closed. A 404 market lookup does not
 mark settlement delivery complete. Sixty focused reconciliation, restore,
 and P0 tests pass; runtime auto-recovery and the startup protective-service
 ordering remain open.
+
+Startup and cache construction also contained unconditional or empty-cache
+resets of window exposure, category notional, and slot reservations. Those
+resets have been removed: an empty newly constructed cache does not prove
+that pending orders or risk reservations are absent. This preserves safety
+but does not itself reconstruct or reconcile the allocator. P0 currently
+completes before the protective trading stack is confirmed started, and
+failed P0 startup exits before that stack starts; both ordering defects
+remain open and the server remains down.
