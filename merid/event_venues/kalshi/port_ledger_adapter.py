@@ -28,13 +28,27 @@ def _coerce_decimal(value: Any, name: str) -> Decimal:
     if value is None:
         raise PortLedgerAdapterError(f"{name} is required", field=name, value=value)
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
         raise PortLedgerAdapterError(
             f"{name}={value!r} is not a valid decimal",
             field=name,
             value=value,
         ) from exc
+    if not result.is_finite():
+        raise PortLedgerAdapterError(f"{name} must be finite", field=name, value=value)
+    return result
+
+
+def _exact_centi_contracts(decimal_value: Decimal, name: str, value: Any) -> int:
+    cc = decimal_value * Decimal("100")
+    if cc != cc.to_integral_value():
+        raise PortLedgerAdapterError(
+            f"{name} must be an exact centi-contract quantity",
+            field=name,
+            value=value,
+        )
+    return int(cc)
 
 
 def _quantity_cc_from_count_fp(value: Any, name: str) -> int:
@@ -45,9 +59,7 @@ def _quantity_cc_from_count_fp(value: Any, name: str) -> int:
     Rounding is never applied. The result must be a positive integer.
     """
     decimal_value = _coerce_decimal(value, name)
-    # Multiply by 100 exactly, then drop the Decimal scale without rounding.
-    # `as_tuple().exponent` is -2 when the value is exact to two decimals.
-    quantity_cc = int(decimal_value * Decimal("100"))
+    quantity_cc = _exact_centi_contracts(decimal_value, name, value)
     if quantity_cc <= 0:
         raise PortLedgerAdapterError(
             f"{name} must be positive, got {quantity_cc} centi-contracts",
@@ -60,7 +72,7 @@ def _quantity_cc_from_count_fp(value: Any, name: str) -> int:
 def _coerce_non_negative_cc(value: Any, name: str) -> int:
     """Coerce a value to non-negative centi-contracts."""
     decimal_value = _coerce_decimal(value, name)
-    quantity_cc = int(decimal_value * Decimal("100"))
+    quantity_cc = _exact_centi_contracts(decimal_value, name, value)
     if quantity_cc < 0:
         raise PortLedgerAdapterError(
             f"{name} must be non-negative, got {quantity_cc} centi-contracts",
@@ -298,7 +310,7 @@ def port_position_to_ledger_dict(position: Position) -> Dict[str, Any]:
             )
 
     # Compute canonical quantity from the normalized, sign-correct size.
-    quantity_cc = int(size * Decimal("100"))
+    quantity_cc = _exact_centi_contracts(size, "position.size", position.size)
     # contracts is kept for legacy consumers as display whole contracts (floor), not canonical.
     contracts = int(size)
 

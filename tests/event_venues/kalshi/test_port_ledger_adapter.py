@@ -28,6 +28,20 @@ from merid.event_venues.kalshi.port_ledger_adapter import (
 class TestPortFillToLedgerDict:
     """Happy path and edge cases for fill conversion."""
 
+    @pytest.mark.parametrize("size", ["0.001", "1.234", "NaN", "Infinity"])
+    def test_non_grid_or_nonfinite_fill_quantity_is_rejected(self, size):
+        fill = Fill(
+            fill_id="venue-fill",
+            order_id="venue-order",
+            ticker="KXBTC15M-260801",
+            side="buy",
+            outcome="yes",
+            size=Decimal(size),
+            price_cents=50,
+        )
+        with pytest.raises(PortLedgerAdapterError):
+            port_fill_to_ledger_dict(fill)
+
     def test_happy_path_preserves_fields(self):
         ts = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
         fill = Fill(
@@ -218,6 +232,17 @@ class TestPortFillToLedgerDict:
 
 class TestPortPositionToLedgerDict:
     """Happy path and edge cases for position conversion."""
+
+    @pytest.mark.parametrize("size", ["0.001", "-1.234", "NaN", "Infinity"])
+    def test_non_grid_or_nonfinite_position_quantity_is_rejected(self, size):
+        position = Position(
+            ticker="KXBTC15M-260801",
+            outcome="yes",
+            size=Decimal(size),
+            average_entry_price_cents=50,
+        )
+        with pytest.raises(PortLedgerAdapterError):
+            port_position_to_ledger_dict(position)
 
     def test_happy_path_yes_position(self):
         position = Position(
