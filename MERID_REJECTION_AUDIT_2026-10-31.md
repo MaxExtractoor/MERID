@@ -822,3 +822,10 @@ exit record, including a migrated legacy JSON record, is not evidence of
 non-submission. The timeout and obligation sweep now retain these records and
 schedule reconciliation instead of marking them TERMINAL_UNFILLED and dropping
 their in-flight locks.
+
+Canonical entry cleanup also treated a missing result or a post-send
+`not_submitted` lookup miss as proof of rejection, potentially releasing a
+pending reservation despite a durable unknown attempt. It now retains the
+canonical record for reconciliation in those cases; a proven pre-submit
+rejection can still release its own record. The key-only force-removal fallback
+was removed because it can race a different order's reservation.

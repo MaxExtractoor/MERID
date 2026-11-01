@@ -13487,10 +13487,8 @@ def _terminalize_rejected_intent(
     and the pre-trade gate record so the ticker/side is not blocked by a stale
     PENDING record.
 
-    After release, this function enforces the invariant that no canonical record
-    for this intent remains PENDING with ``submitted=False`` and ``order_id=None``.
-    If the record is still present (e.g. client_order_id mismatch), it is
-    force-removed and a critical alert is emitted.
+    If the matching record cannot be released, retain it and alert. A key-only
+    force removal can race another order's reservation.
     """
     _release_canonical_entry_idempotency(intent)
     _release_gate_record(intent, result.reason or "post_route_terminal_reject")
@@ -13513,22 +13511,9 @@ def _terminalize_rejected_intent(
         except AssertionError as inv_err:
             logger.critical(
                 "[TERMINALIZE-INVARIANT] stale PENDING canonical record remains after "
-                "rejection; force-removing: ticker=%s coid=%s error=%s",
+                "rejection; retaining for reconciliation: ticker=%s coid=%s error=%s",
                 key[0], coid, inv_err,
             )
-            try:
-                from merid.event_venues.kalshi.order_intent_contract import (
-                    release_entry_idempotency_by_key,
-                )
-
-                release_entry_idempotency_by_key(
-                    market_ticker=key[0],
-                    contract=key[1],
-                )
-            except Exception as force_err:
-                logger.critical(
-                    "[TERMINALIZE-INVARIANT] force-removal of stale record failed: %s", force_err
-                )
         except Exception:
             pass
 
@@ -13552,7 +13537,7 @@ def _post_route_canonical_idempotency_cleanup(
     _finalize_attempt_store_for_result(intent, result)
 
     if result is None:
-        _release_canonical_entry_idempotency(intent)
+        _mark_canonical_entry_reconciliation_required(intent, reason="post_route_missing_result")
         return
 
     if result.has_execution or result.status in {
@@ -13575,19 +13560,17 @@ def _post_route_canonical_idempotency_cleanup(
         )
         return
 
-    # 2026-09-07: A reconcile that authoritatively proved the order is absent
-    # from the venue (``not_submitted`` / ``submission_certainty=not_submitted``)
-    # is a resolved terminal outcome, not an ambiguous one.  Without this branch
-    # the result fell into the uncertain-terminal check below (it deliberately
-    # reports ``exchange_request_sent=True, exchange_ack_received=False`` for the
-    # ORIGINAL submit) and left the canonical record ``reconciliation_required``
-    # for the rest of the window — blocking every re-entry on that
-    # (ticker, contract) even though the venue confirmed nothing was sent.
+    # A lookup miss is not evidence that a request already sent was rejected.
     if (
         result.status == "not_submitted"
         or getattr(result, "submission_certainty", None) == "not_submitted"
     ):
-        _terminalize_rejected_intent(intent, result)
+        if result.submission_attempted or result.exchange_request_sent:
+            _mark_canonical_entry_reconciliation_required(
+                intent, reason=result.reason or "post_route_unproven_non_submission"
+            )
+        else:
+            _terminalize_rejected_intent(intent, result)
         return
 
     # 2026-08-24: Required lifecycle invariant.  Any terminal no-execution
@@ -13608,8 +13591,7 @@ def _post_route_canonical_idempotency_cleanup(
         # ambiguous: the request may have reached the exchange.  Treat it as
         # reconciliation-required, not terminal.
         if (
-            result.submission_attempted
-            and result.exchange_request_sent
+            (result.submission_attempted or result.exchange_request_sent)
             and not result.exchange_ack_received
         ):
             _mark_canonical_entry_reconciliation_required(

@@ -655,6 +655,37 @@ class TestOrderRouterIdempotencyLifecycle:
         _post_route_canonical_idempotency_cleanup(intent, result)
         self._assert_record_blocks_retry(intent)
 
+    @pytest.mark.parametrize(
+        "result",
+        [
+            None,
+            OrderResult(
+                status="not_submitted", mode=TradingMode.LIVE,
+                submission_attempted=True, exchange_request_sent=True,
+                submission_certainty="not_submitted", reason="empty_lookup",
+            ),
+            OrderResult(
+                status="rejected", mode=TradingMode.LIVE,
+                submission_attempted=True, exchange_request_sent=False,
+                exchange_ack_received=False, reason="ambiguous_request",
+            ),
+        ],
+    )
+    def test_ambiguous_result_preserves_canonical_reservation(self, result):
+        intent = self._make_intent()
+        _post_route_canonical_idempotency_cleanup(intent, result)
+        self._assert_record_blocks_retry(intent)
+
+    def test_proven_pre_submit_not_submitted_allows_retry(self):
+        intent = self._make_intent()
+        result = OrderResult(
+            status="not_submitted", mode=TradingMode.LIVE,
+            submission_attempted=False, exchange_request_sent=False,
+            submission_certainty="not_submitted",
+        )
+        _post_route_canonical_idempotency_cleanup(intent, result)
+        self._assert_record_allows_retry(intent)
+
     def test_duplicate_unknown_marks_reconciliation(self):
         intent = self._make_intent()
         result = OrderResult(
@@ -696,6 +727,7 @@ class TestOrderRouterIdempotencyLifecycle:
 
     @pytest.mark.asyncio
     async def test_async_local_reject_releases_and_allows_retry(self, monkeypatch):
+        monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
         intent = self._make_intent()
         impl = AsyncMock(
             return_value=OrderResult(
@@ -714,7 +746,8 @@ class TestOrderRouterIdempotencyLifecycle:
         self._assert_record_allows_retry(intent)
 
     @pytest.mark.asyncio
-    async def test_async_exception_after_canonical_releases_record(self, monkeypatch):
+    async def test_async_exception_after_canonical_retains_record(self, monkeypatch):
+        monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
         intent = self._make_intent()
         monkeypatch.setattr(
             "merid.event_venues.kalshi.order_router._route_order_async_impl",
@@ -724,10 +757,11 @@ class TestOrderRouterIdempotencyLifecycle:
         with pytest.raises(RuntimeError, match="port exploded"):
             await route_order_async(intent)
 
-        self._assert_record_allows_retry(intent)
+        self._assert_record_blocks_retry(intent)
 
     @pytest.mark.asyncio
     async def test_async_submission_unknown_keeps_record_locked(self, monkeypatch):
+        monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
         intent = self._make_intent()
         impl = AsyncMock(
             return_value=OrderResult(
@@ -765,7 +799,7 @@ class TestOrderRouterIdempotencyLifecycle:
         assert result.status == "rejected"
         self._assert_record_allows_retry(intent)
 
-    def test_sync_exception_after_canonical_releases_record(self, monkeypatch):
+    def test_sync_exception_after_canonical_retains_record(self, monkeypatch):
         intent = self._make_intent()
 
         def _raise(_i):
@@ -778,4 +812,4 @@ class TestOrderRouterIdempotencyLifecycle:
         with pytest.raises(RuntimeError, match="sync port exploded"):
             route_order(intent)
 
-        self._assert_record_allows_retry(intent)
+        self._assert_record_blocks_retry(intent)
