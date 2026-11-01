@@ -321,3 +321,134 @@ def test_parse_venue_ts_ms_forms():
     assert parse_venue_ts_ms("2026-10-31T21:00:00Z") == pytest.approx(
         1793480400000.0
     )
+
+
+# ── end-to-end: unverified venue age must not become trading freshness ─────
+
+_TICKER = "KXBTC15M-T"
+
+
+def _store():
+    from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
+
+    store = KalshiMarketStateStore()
+    store._main_event_loop = None  # never schedule coroutines from tests
+    return store
+
+
+def _book(store, seq=100):
+    store._ob.apply_snapshot(
+        _TICKER,
+        {"ticker": _TICKER, "yes": [[0.48, 5]], "no": [[0.50, 4]], "seq": seq},
+    )
+    state = store._get_or_create(_TICKER)
+    state.snapshot_complete = True
+    state.data_quality = "GOOD"
+    state.book_consistency = "GOOD"
+    state.transition = "VALID"
+    state.executable = True
+    return state
+
+
+def _fresh_gate_prereqs(state):
+    """Satisfy every ws_fresh leg EXCEPT the event-age-verification leg."""
+    state.quote_owner = "WS_FRESH_VERIFIED"
+    state.last_ws_update_ts = time.monotonic()
+
+
+def test_unverified_venue_age_does_not_pass_freshness_gate():
+    """Boundary spec: unverifiable -> retained for reconstruction -> status
+    survives -> freshness gate does NOT pass on receipt age alone."""
+    from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
+
+    clk = get_venue_clock("kalshi")
+    clk.invalidate("force unverified")
+    store = _store()
+    _book(store)
+    now_w_ms = time.time() * 1000.0
+    msg = {
+        "side": "yes",
+        "price_dollars": 0.49,
+        "delta_fp": 3.0,
+        "seq": 101,
+        "ts": now_w_ms / 1000.0 - 0.9,   # venue ts present but unverifiable
+        "_t_bridge_recv_ns": time.monotonic_ns() - 30_000_000,
+        "_t_bridge_recv_wall_ms": now_w_ms - 30.0,
+    }
+    store._apply_delta_internal(_TICKER, msg)
+    state = store.get(_TICKER)
+    # Reconstruction preserved: the delta applied, book not invalidated.
+    assert state.data_quality == "GOOD"
+    assert state.executable is True
+    # Status survived through state.
+    assert state.ws_last_event_age_status == STATUS_UNVERIFIED_NO_OFFSET
+    assert "bridge_recv_wall(unverified_no_offset)" in (
+        state.ws_last_event_age_src or ""
+    )
+    # Freshness gate: recent RECEIPT (ws_age_ms ~0, event_age ~30ms) must
+    # not stand in for verified venue freshness.
+    _fresh_gate_prereqs(state)
+    gate = store.get_quote_gate_state(_TICKER)
+    assert gate["ws_event_age_verified"] is False
+    assert gate["ws_event_age_status"] == STATUS_UNVERIFIED_NO_OFFSET
+    assert gate["ws_fresh"] is False
+    assert gate["effective_fresh"] is False
+
+
+def test_measured_venue_age_passes_freshness_gate():
+    """Positive control: calibrated offset restores verified freshness."""
+    clk = get_venue_clock("kalshi")
+    try:
+        w0 = time.time()
+        m0 = time.monotonic()
+        clk.record_measurement(
+            -3.02, source="test", precision_seconds=1.0,
+            measured_at_wall=w0, measured_at_monotonic=m0,
+        )
+        store = _store()
+        _book(store)
+        now_w_ms = w0 * 1000.0
+        msg = {
+            "side": "yes",
+            "price_dollars": 0.49,
+            "delta_fp": 3.0,
+            "seq": 101,
+            "ts": _venue_ms(-3.02, now_w_ms, 900.0) / 1000.0,
+            "_t_bridge_recv_ns": int(m0 * 1e9) - 30_000_000,
+            "_t_bridge_recv_wall_ms": now_w_ms - 30.0,
+        }
+        store._apply_delta_internal(_TICKER, msg)
+        state = store.get(_TICKER)
+        assert state.ws_last_event_age_status == STATUS_MEASURED
+        assert state.ws_last_event_age_ms == pytest.approx(900.0, abs=50.0)
+        _fresh_gate_prereqs(state)
+        gate = store.get_quote_gate_state(_TICKER)
+        assert gate["ws_event_age_verified"] is True
+        assert gate["ws_fresh"] is True
+        assert gate["effective_fresh"] is True
+    finally:
+        clk.invalidate("test teardown")
+
+
+def test_no_venue_ts_uses_receipt_recency():
+    """A frame class with no venue ts has nothing to verify — local receipt
+    recency remains the honest freshness measure and may pass."""
+    clk = get_venue_clock("kalshi")
+    clk.invalidate("not needed for no-ts frames")
+    store = _store()
+    _book(store)
+    msg = {
+        "side": "yes",
+        "price_dollars": 0.49,
+        "delta_fp": 3.0,
+        "seq": 101,
+        "_t_bridge_recv_ns": time.monotonic_ns() - 30_000_000,
+        "_t_bridge_recv_wall_ms": time.time() * 1000.0 - 30.0,
+    }
+    store._apply_delta_internal(_TICKER, msg)
+    state = store.get(_TICKER)
+    assert state.ws_last_event_age_status == STATUS_NO_VENUE_TS
+    _fresh_gate_prereqs(state)
+    gate = store.get_quote_gate_state(_TICKER)
+    assert gate["ws_event_age_verified"] is True  # n/a: nothing to verify
+    assert gate["ws_fresh"] is True

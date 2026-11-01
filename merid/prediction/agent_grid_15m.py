@@ -8776,6 +8776,8 @@ class LeanAgent15m:
                 indicators["quote_owner"] = getattr(market_state, "quote_owner", None)
                 indicators["quote_degraded_mode"] = bool(getattr(market_state, "degraded_mode", False))
                 indicators["ws_last_event_age_ms"] = getattr(market_state, "ws_last_event_age_ms", None)
+                indicators["ws_last_event_age_status"] = getattr(market_state, "ws_last_event_age_status", None)
+                indicators["ws_last_event_age_src"] = getattr(market_state, "ws_last_event_age_src", None)
                 indicators["ws_last_queue_wait_ms"] = getattr(market_state, "ws_last_queue_wait_ms", None)
                 indicators["ws_rest_bid_diff_ticks"] = getattr(market_state, "ws_rest_bid_diff_ticks", None)
                 indicators["ws_rest_ask_diff_ticks"] = getattr(market_state, "ws_rest_ask_diff_ticks", None)

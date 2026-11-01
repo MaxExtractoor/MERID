@@ -250,16 +250,87 @@ offset the moment the host clock is corrected.
   `reason=corrected_venue_age res_ms=4000 res_bound_ms=4000
   raw_age_ms=6863 corr_age_ms=3779 age_bound_ms=3750 offset_s=-3.084
   off_age_s=159 freshness=measured` — 6863−3084=3779 confirmed live.
-- Peak-rollover window (23:04–23:08): 50 untrusted, 40 sid-gaps,
-  2 too-old, 1 overflow — but every drop is `corrected_venue_age`
-  *verified-stale* (true ~3.8s upstream lag during the rollover burst +
-  startup catch-up), not the manufactured ~730ms-bound storm.
-  Post-rollover quiet-window rates are the acceptance measurement.
+- Peak-rollover window (23:04–23:08, ~4min): 50 untrusted, 40 sid-gaps,
+  2 too-old, 1 overflow — every drop `corrected_venue_age` verified-stale
+  (true ~3.8s upstream lag during the rollover burst + startup catch-up).
+  Matched rollover comparison (pre-fix 02:15–02:20 vs post-fix
+  03:15–03:17): drops/min ~19→~2.5 (−87%), untrusted/min ~47→~12 (−74%),
+  sid-gaps/min ~91→~24 (−74%).  `book_trusted` decision failures
+  34%→7.3% of decisions (~41→~9/min).
+  **Reporting qualification**: the compared windows differ in duration
+  and may differ in message rate; per-minute rates are shown, and the
+  `[BOOK-TIMING-ROLLUP]` aggregate (below) now supplies applied/s and
+  per-stage denominators for drops-per-received-delta accounting.  The
+  accurate claim is: *no skew-induced false drops were observed in the
+  inspected post-fix window* — not that the manufactured component is
+  categorically gone.
 - Two pre-existing test issues fixed en route: an uncalibrated stale-ts
   test now records calibration explicitly, and the preserve-drain test
   sets `live_sequence_confirmed` to exercise the first-invalidation
   drain it documents (pre-existing failure since `8a2a2fbc`, not caused
   by this patch).
+
+### 2026-10-31 follow-up: boundary verification, policy record, instrumentation
+
+**Residence precedence — explicit policy revision.**  Prior behavior
+(2026-10-06, `5b7a7bbd` lineage): a verified-fresh venue timestamp could
+*override* a queue-residence breach and forward the frame.  Current
+behavior: monotonic residence is **authoritative** — a residence breach
+sheds regardless of venue freshness (`MERID_WS_DELTA_DROP_RES_MS=4000`,
+unchanged).  Rationale: residence is the skew-free overload bound; a
+queue already holding a frame >4s cannot deliver trustworthy downstream
+evidence even if the venue ts looks fresh.  Consequence is unchanged —
+the shed frame flows through attributed seq-invalidation + snapshot
+recovery.  Predicate correctness is not threshold optimality: the 4000ms
+bound is retained as-is and is not to be reverted merely to reduce
+rejection counts.  Coverage: `test_residence_bound_is_authoritative`,
+`test_missing_venue_ts_falls_back_to_residence` (unverifiable venue age
+still forwards — residence is the *only* shed predicate that can fire
+without a calibration).
+
+**Unverified-fallback boundary — verified and closed.**  Audit found the
+boundary violated: `get_quote_gate_state` read `ws_last_event_age_ms`
+without status, so a `bridge_recv_wall(unverified_*)` fallback (~30ms
+receipt age) satisfied the ≤2000ms `ws_entry_event_age_ms` leg and made
+`ws_fresh` true — a recently-received-but-unverifiable frame became
+"venue fresh."  Fix: the event-age leg now counts only when the applied
+frame's status is `measured` or `no_venue_ts` (frame classes with no ts
+have nothing to verify; receipt recency remains their honest measure);
+`unverified_*`/`anomaly_*` statuses make `ws_fresh` fail closed, and the
+gate exports `ws_event_age_verified`/`_status`/`_src`.  The REST-degrade
+fallback in `loop_15m` is unaffected — it trusts an independent fresh
+REST mirror under the explicit degraded-entry policy, never the WS
+receipt fallback.  E2E tests: `test_unverified_venue_age_does_not_pass_
+freshness_gate` (retained-for-reconstruction → status stamped → gate
+fails closed), `test_measured_venue_age_passes_freshness_gate`,
+`test_no_venue_ts_uses_receipt_recency`.  `agent_grid_15m` now freezes
+`ws_last_event_age_status`/`_src` into decision indicators for the
+audit chain.
+
+**Residual rollover backpressure — instrumentation, not capacity.**
+`[BOOK-TIMING-ROLLUP]` (bounded 60s aggregate on the apply path) reports
+applied-count, applied/s, and mean|max per stage: `wire_ms_corrected`,
+`corr_venue_age_ms`, `pq_wait_ms` (socket→WS-IO dequeue), `bridge_in_ms`
+(socket→bridge enqueue), `queue_residence_ms` (bridge recv→apply),
+`ticker_queue_wait_ms` (per-ticker queue wait), `apply_ms` (book apply),
+`recv_to_now_ms` (socket→apply total) — plus the freshness-status
+distribution.  This locates where the residual ~3.8s accumulates before
+any capacity/concurrency change; subscription ordering is untouched.
+
+**Process-termination track — still unclassified.**  The silent-death
+signature (PID 8052, ~35s into import, no traceback/WER/faulthandler)
+is a distinct reliability incident, *not* assumed to share the
+settlement-stall cause.  `watchdog_15m.ps1` now provides independent
+termination capture: WMI-detached, records process inventory (PID, PPID,
+executable, command line, launch method) at start, polls the server PID,
+and on disappearance writes a JSONL termination record (last-seen state,
+exit timestamp, WER lookup window) to `logs/process_watchdog.jsonl` —
+outside the application's own log path.  `Win32_Process.Create`
+surviving is consistent with a session-tree kill but remains a
+hypothesis; the watchdog supplies the evidence to classify the next
+event.  Single-instance enforcement is preserved: the watchdog observes
+only; the launched child still passes `start_15m.ps1` → lifespan
+single-instance guard.
 
 **5.2M "superseded" counter scope**: `_ent[0]` counts *dropped frames per
 ticker since process start* — cumulative, not per-incident.  The new

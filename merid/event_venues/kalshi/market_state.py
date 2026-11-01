@@ -895,6 +895,15 @@ class KalshiMarketStateStore:
         self._last_lock_wait_ms: Dict[str, float] = {}  # Last per-acquisition lock wait (ms)
         self._last_batch_duration_ms: Dict[str, float] = {}  # Last batch processing duration per ticker (ms)
 
+        # 2026-10-31: Bounded 60s rollup of per-stage ingestion latency so
+        # rollover backpressure can be decomposed (socket->dequeue->enqueue->
+        # apply) without per-event logging.  Fixed key set, reset each window.
+        self._timing_rollup_t0 = time.monotonic()
+        self._timing_rollup_n = 0
+        self._timing_rollup_sums: Dict[str, float] = {}
+        self._timing_rollup_maxes: Dict[str, float] = {}
+        self._timing_rollup_statuses: Dict[str, int] = {}
+
         # 2026-08-24: Snapshot timeout tracking.  Records when a ticker last
         # transitioned to ``snapshot_complete=False`` so we can resubscribe/request
         # a fresh snapshot instead of staying stuck in ``NO_SNAPSHOT`` forever.
@@ -1557,7 +1566,72 @@ class KalshiMarketStateStore:
                 hops["bridge_in_ms"] = round((float(recv_ns) - float(ws_recv_ns)) / 1e6, 1)
         except Exception:
             pass
+        if upstream_wait_ms is not None:
+            hops["queue_residence_ms"] = round(upstream_wait_ms, 1)
         return event_age_ms, upstream_wait_ms, hops
+
+    _TIMING_ROLLUP_STAGES = (
+        "wire_ms_corrected",
+        "corr_venue_age_ms",
+        "pq_wait_ms",
+        "bridge_in_ms",
+        "queue_residence_ms",
+        "ticker_queue_wait_ms",
+        "apply_ms",
+        "recv_to_now_ms",
+    )
+
+    def _timing_rollup_record(self, hops: Dict[str, Any]) -> None:
+        """Bounded per-stage latency rollup, emitted at most once per 60s.
+
+        Aggregates the hop diagnostics already computed for every applied
+        delta (socket receipt -> _process_queue dequeue -> bridge enqueue ->
+        per-ticker queue wait -> book apply -> publish-to-now) so a rollover
+        burst's ~seconds of lag can be attributed to a stage from logs alone.
+        Bounded: fixed stage key set + bounded freshness-status labels; the
+        window resets after each emission.  Diagnostic only — never gates.
+        """
+        try:
+            self._timing_rollup_n += 1
+            sums = self._timing_rollup_sums
+            maxes = self._timing_rollup_maxes
+            for key in self._TIMING_ROLLUP_STAGES:
+                v = hops.get(key)
+                if isinstance(v, (int, float)):
+                    v = float(v)
+                    sums[key] = sums.get(key, 0.0) + v
+                    if v > maxes.get(key, float("-inf")):
+                        maxes[key] = v
+            st = hops.get("venue_age_status")
+            if st:
+                sts = self._timing_rollup_statuses
+                sts[st] = sts.get(st, 0) + 1
+            elapsed = time.monotonic() - self._timing_rollup_t0
+            if elapsed < 60.0 or self._timing_rollup_n <= 0:
+                return
+            n = self._timing_rollup_n
+            stage_bits = []
+            for key in self._TIMING_ROLLUP_STAGES:
+                s = sums.get(key)
+                if s is None:
+                    continue
+                stage_bits.append(f"{key}~{s / n:.0f}|max={maxes[key]:.0f}")
+            logger.info(
+                "[BOOK-TIMING-ROLLUP] window_s=%.0f applied=%d rate=%.1f/s "
+                "stages(ms mean|max): %s freshness_status=%s",
+                elapsed,
+                n,
+                n / elapsed,
+                " ".join(stage_bits),
+                self._timing_rollup_statuses,
+            )
+            self._timing_rollup_t0 = time.monotonic()
+            self._timing_rollup_n = 0
+            self._timing_rollup_sums = {}
+            self._timing_rollup_maxes = {}
+            self._timing_rollup_statuses = {}
+        except Exception:
+            pass
 
     def _rest_owned_book_preserved(self, ticker: str, state: "KalshiMarketState", reason: str, **diag) -> bool:
         """REST-owned effective book preservation gate.
@@ -2126,6 +2200,8 @@ class KalshiMarketStateStore:
                         "ws_age_ms": _ws_age_ms,
                         "rest_age_ms": _rest_age_ms,
                         "ws_event_age_ms": getattr(state, "ws_last_event_age_ms", None),
+                        "ws_event_age_status": getattr(state, "ws_last_event_age_status", None),
+                        "ws_event_age_src": getattr(state, "ws_last_event_age_src", None),
                         "ws_promote_streak": self._ws_promote_streak.get(ticker, 0),
                         "ws_parity_ms": _parity_ms,
                         "executable": bool(getattr(state, "executable", False)),
@@ -2342,7 +2418,9 @@ class KalshiMarketStateStore:
                 self._set_book_health(ticker, BookHealth.SEQUENCE_VALIDATING, f"expected_seq={ob.last_seq + 1}")
 
         # Apply delta
+        _apply_t0_ns = time.monotonic_ns()
         self._ob.apply_delta(ticker, msg)
+        _apply_ms = (time.monotonic_ns() - _apply_t0_ns) / 1e6
 
         # Sync state
         state = self._get_or_create(ticker)
@@ -2367,6 +2445,10 @@ class KalshiMarketStateStore:
             _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
         state.ws_last_event_age_status = _hops.get("venue_age_status")
         state.ws_last_event_age_src = _hops.get("event_age_src")
+        if state.ws_last_queue_wait_ms is not None:
+            _hops["ticker_queue_wait_ms"] = round(state.ws_last_queue_wait_ms, 1)
+        _hops["apply_ms"] = round(_apply_ms, 2)
+        self._timing_rollup_record(_hops)
 
         self._sync_book_fields(
             state, self._ob.get_book(ticker), ticker, via="bridge_queue",
@@ -3290,9 +3372,24 @@ class KalshiMarketStateStore:
 
         owner = getattr(state, "quote_owner", "UNKNOWN") or "UNKNOWN"
         ws_event_age = getattr(state, "ws_last_event_age_ms", None)
+        ws_event_age_status = getattr(state, "ws_last_event_age_status", None)
+        # 2026-10-31 clock-domain boundary: the event-age leg counts only
+        # when the last applied frame's venue timestamp produced a measured
+        # corrected age (STATUS_MEASURED), or the frame class carries no
+        # venue timestamp to verify (STATUS_NO_VENUE_TS — receipt recency is
+        # the only age evidence that exists).  A bridge-receive fallback
+        # computed under an unverified/anomalous calibration is *receipt*
+        # evidence, not venue freshness — it must not satisfy this gate on
+        # its own (fail closed on unverifiable freshness).  A None status
+        # preserves legacy semantics for states that predate/bypass the
+        # instrumentation stamp.
+        ws_event_age_verified = ws_event_age_status in (
+            None, STATUS_MEASURED, STATUS_NO_VENUE_TS
+        )
         ws_fresh = bool(
             ws_age_ms is not None
             and ws_age_ms <= ws_ttl_ms
+            and ws_event_age_verified
             and (ws_event_age is None or ws_event_age <= ws_entry_event_age_ms)
         )
         rest_fresh = bool(rest_age_ms is not None and rest_age_ms <= rest_ttl_ms)
@@ -3312,6 +3409,9 @@ class KalshiMarketStateStore:
             "ws_age_ms": ws_age_ms,
             "rest_age_ms": rest_age_ms,
             "ws_fresh": ws_fresh,
+            "ws_event_age_verified": ws_event_age_verified,
+            "ws_event_age_status": ws_event_age_status,
+            "ws_event_age_src": getattr(state, "ws_last_event_age_src", None),
             "rest_fresh": rest_fresh,
             "effective_fresh": effective_fresh,
         })
