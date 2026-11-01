@@ -290,6 +290,25 @@ def test_failed_durable_transition_preserves_lock(monitor, monkeypatch):
     assert monitor._exit_intent_in_flight[pid]["state"] == "SUBMISSION_UNKNOWN"
 
 
+@pytest.mark.parametrize(
+    "flight,mapped,cleared",
+    [
+        ({"state": "EXECUTION_PENDING"}, None, True),
+        ({"state": "EXECUTION_PENDING", "client_order_id": "exit-1"}, None, False),
+        ({"state": "EXECUTION_PENDING", "attempt_id": "attempt-1"}, None, False),
+        ({"state": "SUBMISSION_UNKNOWN"}, None, False),
+        ({"state": "EXECUTION_PENDING"}, "exit-1", False),
+    ],
+)
+def test_pre_dispatch_clear_retains_identified_or_unknown_intents(monitor, flight, mapped, cleared):
+    pid = "position-pre-dispatch"
+    monitor._exit_intent_in_flight[pid] = flight
+    if mapped:
+        monitor._position_to_client_order[pid] = mapped
+    assert monitor._clear_exit_intent_if_unsubmitted(pid) is cleared
+    assert (pid not in monitor._exit_intent_in_flight) is cleared
+
+
 @pytest.mark.asyncio
 async def test_failed_generic_order_update_preserves_exit_lock(monitor, monkeypatch):
     position = _make_position()

@@ -3273,12 +3273,15 @@ async def _execute_exit_order(
     #     exit_price_cents: Exit price in cents
     #     contracts_to_close: Number of contracts to close (None = full exit)
 
-    # Local helper: clear the monitor's in-flight flag when this coroutine bails
-    # before a successful order submission, so the monitor can retry on the next
-    # poll instead of waiting for the 15s timeout.
+    # A pre-dispatch placeholder may be cleared, but an identified or unknown
+    # order needs evidence-based reconciliation.
     def _clear_in_flight() -> None:
         if self._position_monitor:
-            self._position_monitor._clear_exit_intent_in_flight(position.position_id)
+            if not self._position_monitor._clear_exit_intent_if_unsubmitted(position.position_id):
+                logger.warning(
+                    "[EXIT-ORDER] Retaining in-flight exit for reconciliation: position=%s",
+                    position.position_id[:8],
+                )
 
     # CRITICAL INVARIANT CHECKS: Exit orders can only execute on valid positions
     assert position.size > 0, f"EXIT-ORDER: No open position for {position.market_id} - size={position.size}"
@@ -5037,10 +5040,13 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
     # monitored; restore the optimistically-decremented size so the retry closes
     # the correct amount.
     try:
-        # 2026-08-11 CRITICAL FIX: always clear the in-flight flag before re-arming,
-        # whether full or partial, so the monitor can re-evaluate exit conditions.
         if self._position_monitor:
-            self._position_monitor._clear_exit_intent_in_flight(position.position_id)
+            if not self._position_monitor._clear_exit_intent_if_unsubmitted(position.position_id):
+                logger.error(
+                    "[EXIT-ORDER-RETRY] Retaining unresolved exit lock; no retry: position=%s market=%s",
+                    position.position_id[:8], position.market_id,
+                )
+                return
 
         retry_count = getattr(position, "exit_retry_count", 0)
         if not is_code_failure:
@@ -5124,8 +5130,6 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
                 # authoritative and holds the position; the monitor must retain it and the
                 # allocator must retain capacity. Alert and stop further retries but leave
                 # the position in the monitor for manual/rested settlement.
-                if self._position_monitor:
-                    self._position_monitor._clear_exit_intent_in_flight(position.position_id)
                 logger.critical(
                     "[EXIT-ORDER-BLOCKED] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
                     "EXCHANGE POSITION STILL OPEN; monitor and capacity retained; manual intervention required",
@@ -5157,9 +5161,6 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             # automatically reset when the position is re-added to the monitor
 
             if self._position_monitor:
-                # 2026-08-11 CRITICAL FIX: clear the in-flight flag so the next poll can
-                # re-evaluate the exit condition and attempt another order.
-                self._position_monitor._clear_exit_intent_in_flight(position.position_id)
                 # add_position is idempotent (skips if position_id already present)
                 self._position_monitor.add_position(position)
 

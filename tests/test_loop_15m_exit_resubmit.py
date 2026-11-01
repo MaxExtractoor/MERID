@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock
 
 from merid.event_venues.kalshi.order_router import OrderResult, TradingMode
-from merid.loop_15m import _execute_exit_order
+from merid.loop_15m import _execute_exit_order, _rearm_position_after_failed_exit
 from merid.position_management.exit_policy import ExitReason
 from merid.position_management.position import Position, PositionSide
 
@@ -135,3 +135,15 @@ async def test_duplicate_worker_does_not_clear_existing_lock(self_mock, position
     self_mock._position_monitor._get_position_lock.return_value.acquire.return_value = False
     await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
     self_mock._position_monitor._clear_exit_intent_in_flight.assert_not_called()
+
+
+def test_rearm_does_not_drop_unresolved_order(self_mock, position):
+    monitor = self_mock._position_monitor
+    monitor._clear_exit_intent_if_unsubmitted.return_value = False
+    original_size = position.size
+    _rearm_position_after_failed_exit(
+        self_mock, position, ExitReason.TAKE_PROFIT, contracts_to_close=1,
+    )
+    monitor._clear_exit_intent_in_flight.assert_not_called()
+    monitor.add_position.assert_not_called()
+    assert position.size == original_size

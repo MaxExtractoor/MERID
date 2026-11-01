@@ -3532,6 +3532,24 @@ class PositionMonitor:
             )
         self._save_exit_intent_in_flight()
 
+    def _clear_exit_intent_if_unsubmitted(self, position_id: str) -> bool:
+        """Clear only a pre-dispatch placeholder without a durable identity."""
+        with self._lock:
+            flight = self._exit_intent_in_flight.get(position_id)
+            if self._position_to_client_order.get(position_id):
+                return False
+            if flight is None:
+                return True
+            if (
+                flight.get("state") != "EXECUTION_PENDING"
+                or flight.get("client_order_id")
+                or flight.get("attempt_id")
+            ):
+                return False
+            del self._exit_intent_in_flight[position_id]
+        self._save_exit_intent_in_flight()
+        return True
+
     # ── Durable exit-intent persistence (2026-09-01) ───────────────────────────
 
     def _save_exit_intent_in_flight(self) -> None:

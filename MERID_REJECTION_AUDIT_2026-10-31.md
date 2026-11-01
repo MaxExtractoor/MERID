@@ -842,3 +842,5 @@ or an already registered/resting exit is encountered. A `not_submitted`
 result after a request was attempted no longer triggers a blind resubmit;
 it is retained as unknown for reconciliation. Other exit re-arm and
 finalizer paths still need an evidence-based review before live deployment.
+The generic re-arm path now refuses to clear an identified or unknown exit
+intent; only an identity-free execution-pending placeholder can be cleared.
