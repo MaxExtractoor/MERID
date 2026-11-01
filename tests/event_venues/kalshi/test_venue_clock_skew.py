@@ -424,15 +424,19 @@ def test_measured_venue_age_passes_freshness_gate():
         _fresh_gate_prereqs(state)
         gate = store.get_quote_gate_state(_TICKER)
         assert gate["ws_event_age_verified"] is True
+        assert gate["ws_event_age_basis"] == "measured_venue_age"
         assert gate["ws_fresh"] is True
         assert gate["effective_fresh"] is True
     finally:
         clk.invalidate("test teardown")
 
 
-def test_no_venue_ts_uses_receipt_recency():
-    """A frame class with no venue ts has nothing to verify — local receipt
-    recency remains the honest freshness measure and may pass."""
+def test_no_venue_ts_delta_is_malformed_not_verified():
+    """Kalshi's orderbook_delta schema always carries ts/ts_ms, so a delta
+    without one is malformed: retained for ordered reconstruction (seq
+    continuity preserved) but 'receipt-recent; venue age unavailable' —
+    the freshness gate must fail closed, never silently treat receipt
+    recency as verified event age."""
     clk = get_venue_clock("kalshi")
     clk.invalidate("not needed for no-ts frames")
     store = _store()
@@ -447,8 +451,14 @@ def test_no_venue_ts_uses_receipt_recency():
     }
     store._apply_delta_internal(_TICKER, msg)
     state = store.get(_TICKER)
+    # Reconstruction preserved: applied, book not invalidated.
+    assert state.data_quality == "GOOD"
+    assert state.executable is True
     assert state.ws_last_event_age_status == STATUS_NO_VENUE_TS
     _fresh_gate_prereqs(state)
     gate = store.get_quote_gate_state(_TICKER)
-    assert gate["ws_event_age_verified"] is True  # n/a: nothing to verify
-    assert gate["ws_fresh"] is True
+    # Malformed/unverifiable — NOT a verified-freshness exception.
+    assert gate["ws_event_age_verified"] is False
+    assert gate["ws_event_age_basis"] == "receipt_only_no_venue_ts"
+    assert gate["ws_fresh"] is False
+    assert gate["effective_fresh"] is False

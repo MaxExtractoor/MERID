@@ -906,6 +906,7 @@ class KalshiMarketStateStore:
         # Emit+reset must be atomic: per-ticker drain workers race the
         # window check and would otherwise each emit the same aggregates.
         self._timing_rollup_lock = threading.Lock()
+        self._timing_rollup_writer = None
 
         # 2026-08-24: Snapshot timeout tracking.  Records when a ticker last
         # transitioned to ``snapshot_complete=False`` so we can resubscribe/request
@@ -1639,9 +1640,18 @@ class KalshiMarketStateStore:
                 stage_bits.append(f"{key}~{s / n:.0f}|max={maxes[key]:.0f}")
             # Durable channel: the async log queue drops records under
             # backpressure — exactly the rollover bursts this rollup exists
-            # to measure — so the aggregate is also appended to its own
-            # JSONL where a dropped INFO record cannot hide it.
+            # to measure — so the aggregate is appended to its own bounded
+            # JSONL where a dropped INFO record cannot hide it.  Write
+            # failures are counted on the writer and surface in the row.
             try:
+                if self._timing_rollup_writer is None:
+                    from merid.utils.rollup_writer import BoundedJsonlWriter
+                    self._timing_rollup_writer = BoundedJsonlWriter(
+                        os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "..", "..", "..", "logs", "book_timing_rollup.jsonl",
+                        )
+                    )
                 _rollup_row = {
                     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "window_s": round(elapsed, 1),
@@ -1650,17 +1660,7 @@ class KalshiMarketStateStore:
                     "stages": stages,
                     "freshness_status": dict(self._timing_rollup_statuses),
                 }
-                _rollup_dir = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "..", "..", "..", "logs",
-                )
-                os.makedirs(_rollup_dir, exist_ok=True)
-                with open(
-                    os.path.join(_rollup_dir, "book_timing_rollup.jsonl"),
-                    "a",
-                    encoding="utf-8",
-                ) as _rf:
-                    _rf.write(json.dumps(_rollup_row) + "\n")
+                self._timing_rollup_writer.append(_rollup_row)
             except Exception:
                 pass
             logger.info(
@@ -3422,17 +3422,25 @@ class KalshiMarketStateStore:
         ws_event_age_status = getattr(state, "ws_last_event_age_status", None)
         # 2026-10-31 clock-domain boundary: the event-age leg counts only
         # when the last applied frame's venue timestamp produced a measured
-        # corrected age (STATUS_MEASURED), or the frame class carries no
-        # venue timestamp to verify (STATUS_NO_VENUE_TS — receipt recency is
-        # the only age evidence that exists).  A bridge-receive fallback
-        # computed under an unverified/anomalous calibration is *receipt*
-        # evidence, not venue freshness — it must not satisfy this gate on
-        # its own (fail closed on unverifiable freshness).  A None status
-        # preserves legacy semantics for states that predate/bypass the
-        # instrumentation stamp.
-        ws_event_age_verified = ws_event_age_status in (
-            None, STATUS_MEASURED, STATUS_NO_VENUE_TS
-        )
+        # corrected age (STATUS_MEASURED).  A bridge-receive fallback is
+        # *receipt* evidence, not venue freshness:
+        #   - unverified_*/anomaly_*: a venue ts existed but could not be
+        #     verified — fail closed;
+        #   - no_venue_ts: orderbook_delta's schema always carries ts/ts_ms,
+        #     so a delta without one is malformed — "receipt-recent; venue
+        #     age unavailable", also fail closed (basis kept explicit for
+        #     telemetry);
+        #   - None preserves legacy semantics for states that predate or
+        #     bypass the instrumentation stamp.
+        ws_event_age_verified = ws_event_age_status in (None, STATUS_MEASURED)
+        if ws_event_age_status is None:
+            ws_event_age_basis = "legacy_unstamped"
+        elif ws_event_age_status == STATUS_MEASURED:
+            ws_event_age_basis = "measured_venue_age"
+        elif ws_event_age_status == STATUS_NO_VENUE_TS:
+            ws_event_age_basis = "receipt_only_no_venue_ts"
+        else:
+            ws_event_age_basis = "unverified"
         ws_fresh = bool(
             ws_age_ms is not None
             and ws_age_ms <= ws_ttl_ms
@@ -3457,6 +3465,7 @@ class KalshiMarketStateStore:
             "rest_age_ms": rest_age_ms,
             "ws_fresh": ws_fresh,
             "ws_event_age_verified": ws_event_age_verified,
+            "ws_event_age_basis": ws_event_age_basis,
             "ws_event_age_status": ws_event_age_status,
             "ws_event_age_src": getattr(state, "ws_last_event_age_src", None),
             "rest_fresh": rest_fresh,
