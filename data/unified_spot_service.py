@@ -1,4 +1,4 @@
-"""Unified Spot Service - Single authoritative source for all spot price data.
+﻿"""Unified Spot Service - Single authoritative source for all spot price data.
 
 Consolidates LivePriceFeed, CryptoSpotService, and SpotComposite into one service.
 All spot price consumers (PM model, execution, filters, basis tracker) use this service.
@@ -52,6 +52,33 @@ from merid.data.price_precision import format_price as _format_price, parse_pric
 from merid.data.ingress_replay import is_replay_active, replay_time
 
 logger = get_logger("data.unified_spot_service")
+
+# =============================================================================
+# Shared HTTP session (2026-11-01)
+# =============================================================================
+# Live py-spy attribution: ~70% of process wall-samples were executor threads
+# inside urllib3 ssl_wrap_socket â€” every public-API fetch built a fresh
+# Session â†’ fresh TCP+TLS handshake per call.  A module-level Session pools
+# and reuses keep-alive connections, removing the per-request handshake from
+# the GIL budget shared with the market-data event loop.  Transport-only
+# change: same endpoints, params, timeouts, and response parsing.
+_SPOT_SESSION: Optional[requests.Session] = None
+_SPOT_SESSION_LOCK = threading.Lock()
+
+
+def _get_spot_session() -> requests.Session:
+    global _SPOT_SESSION
+    if _SPOT_SESSION is None:
+        with _SPOT_SESSION_LOCK:
+            if _SPOT_SESSION is None:
+                s = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=4, pool_maxsize=16,
+                )
+                s.mount("https://", adapter)
+                _SPOT_SESSION = s
+    return _SPOT_SESSION
+
 
 # =============================================================================
 # Retry Helper with Exponential Backoff
@@ -538,7 +565,7 @@ class UnifiedSpotService:
         loop = asyncio.get_running_loop()
         
         def fetch_sync():
-            response = requests.get(url, params=params, headers=headers, timeout=5.0)
+            response = _get_spot_session().get(url, params=params, headers=headers, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
             data = _load_json_decimal(response)
@@ -584,7 +611,7 @@ class UnifiedSpotService:
         loop = asyncio.get_running_loop()
         
         def fetch_sync():
-            response = requests.get(url, params=params, timeout=5.0)
+            response = _get_spot_session().get(url, params=params, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
             data = _load_json_decimal(response)
@@ -623,7 +650,7 @@ class UnifiedSpotService:
         loop = asyncio.get_running_loop()
         
         def fetch_sync():
-            response = requests.get(ticker_url, timeout=5.0)
+            response = _get_spot_session().get(ticker_url, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
             data = _load_json_decimal(response)
@@ -651,7 +678,7 @@ class UnifiedSpotService:
         loop = asyncio.get_running_loop()
         
         def fetch_sync():
-            response = requests.get(url, timeout=5.0)
+            response = _get_spot_session().get(url, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}")
             data = _load_json_decimal(response)
@@ -1138,7 +1165,7 @@ class UnifiedSpotService:
                 'granularity': 900,  # 15 minutes
                 'limit': 2
             }
-            response = requests.get(url, params=params, timeout=5.0)
+            response = _get_spot_session().get(url, params=params, timeout=5.0)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
             data = _load_json_decimal(response)
