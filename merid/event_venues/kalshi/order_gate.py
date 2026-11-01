@@ -831,12 +831,8 @@ class IdempotentOrderStore:
     # transitions to SUBMITTED is almost always the result of an upstream
     # crash between ``PreTradeGate.check`` and ``route_order_async`` (or an
     # unhandled exception inside the router *before* ``mark_submitted``).
-    # SUBMITTED without an ack past the longer TTL is a zombie that will
-    # later be resolved by the reconciler — we only mark it so operators can
-    # see it in the gate metrics.
-    # SUBMISSION_UNKNOWN records that are not resolved by the broker-reconcile
-    # poller within a couple of minutes are treated as genuinely lost; the
-    # slot must be freed or the same logical candidate can never be retried.
+    # Submitted and unknown records may have reached the venue. Only an
+    # authoritative reconciliation can release them.
     # 2026 FIX: Reduced ORPHAN_PENDING_TTL_S from 300s to 15s for 15m crypto trading
     # 15m markets move fast - 5 minutes is too long for orphan cleanup
     ORPHAN_PENDING_TTL_S: float = 15.0        # 15 seconds (was 5 minutes - too slow for 15m crypto)
@@ -849,7 +845,7 @@ class IdempotentOrderStore:
         submitted_ttl_s: Optional[float] = None,
         submission_unknown_ttl_s: Optional[float] = None,
     ) -> Dict[str, int]:
-        """Mark orphaned non-terminal records as REJECTED so they can be pruned.
+        """Mark orphaned pre-submission PENDING records as REJECTED.
 
         This is the GC complement to :meth:`prune_old`.  Without it, a PENDING
         record produced by an upstream caller that crashes *before* calling
@@ -857,24 +853,13 @@ class IdempotentOrderStore:
         (by design: in-flight orders must not be swept) but neither does
         anything else in the system.
 
-        The transition is lossy-but-safe: the record is marked REJECTED with
-        reason ``"orphaned_pending"`` / ``"orphaned_submitted"`` /
-        ``"orphaned_submission_unknown"``, its ``updated_at`` is bumped, and
-        the next ``prune_old`` pass will eventually delete it once the terminal
-        TTL elapses.  This keeps the slot free for a legitimate retry.
+        Submitted and unknown records remain reserved regardless of age.
+        Their TTL parameters are retained for backwards-compatible callers.
 
         Returns a small dict of counts for observability.
         """
         pending_cutoff = _time.time() - (
             pending_ttl_s if pending_ttl_s is not None else self.ORPHAN_PENDING_TTL_S
-        )
-        submitted_cutoff = _time.time() - (
-            submitted_ttl_s if submitted_ttl_s is not None else self.ORPHAN_SUBMITTED_TTL_S
-        )
-        submission_unknown_cutoff = _time.time() - (
-            submission_unknown_ttl_s
-            if submission_unknown_ttl_s is not None
-            else self.ORPHAN_SUBMISSION_UNKNOWN_TTL_S
         )
         result = {
             "orphaned_pending": 0,
@@ -888,17 +873,6 @@ class IdempotentOrderStore:
                     rec.status = OrderStatus.REJECTED
                     rec.updated_at = now
                     result["orphaned_pending"] += 1
-                elif rec.status == OrderStatus.SUBMITTED and rec.updated_at < submitted_cutoff:
-                    rec.status = OrderStatus.REJECTED
-                    rec.updated_at = now
-                    result["orphaned_submitted"] += 1
-                elif (
-                    rec.status == OrderStatus.SUBMISSION_UNKNOWN
-                    and rec.updated_at < submission_unknown_cutoff
-                ):
-                    rec.status = OrderStatus.REJECTED
-                    rec.updated_at = now
-                    result["orphaned_submission_unknown"] += 1
         return result
 
     def snapshot(self) -> List[OrderRecord]:

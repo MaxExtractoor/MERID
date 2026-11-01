@@ -371,6 +371,7 @@ def _base_intent(
         max_hold_seconds=600,
         order_expiration_ts=order_expiration_ts,
         decision_id=decision_id,
+        exchange_index=2,
     )
 
 
@@ -427,6 +428,39 @@ async def _route(intent: OrderIntent) -> OrderResult:
         prepared_state=_fresh_state(),
         plan_done=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_submission_claim_never_sends(client, attempt_store, monkeypatch):
+    ticker = "KXBTC15M-CLAIM-50000"
+    client.set_market(
+        ticker,
+        SimpleNamespace(best_bid=45, best_ask=55, volume=1000,
+                        open_interest=1000, active=True, resolved=False),
+    )
+    client.set_orderbook(
+        ticker, best_bid_cents=45, best_ask_cents=55,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    intent = _base_intent(
+        ticker=ticker, price_cents=50, tif="gtc", aggressiveness=0.0,
+        post_only=False, order_expiration_ts=int(time.time()) + 3600,
+    )
+    _reserve_gate(intent, monkeypatch)
+    finalize_order_identity(intent, store=attempt_store)
+    monkeypatch.setattr(attempt_store, "claim_for_submission", lambda _: False)
+    sent = []
+    original_create = client.create_order
+
+    async def record_create(request):
+        sent.append(request)
+        return await original_create(request)
+
+    monkeypatch.setattr(client, "create_order", record_create)
+    result = await _route(intent)
+    assert result.status == "submission_unknown"
+    assert result.reason == "order_attempt_submission_claim_failed"
+    assert not sent
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +539,8 @@ async def test_timeout_after_server_receipt(client, attempt_store, monkeypatch):
         lambda: _DedupCacheStub(coid),
     )
     result2 = await _route(retry)
-    assert result2.status in ("resting", "accepted_live", "submitted_live"), result2
+    assert result2.status == "submission_unknown", result2
+    assert result2.reason == "order_attempt_submission_claim_failed"
 
     # One venue order, one attempt, no filled exposure.
     assert len(client._client_to_order) == 1
@@ -590,8 +625,8 @@ def test_409_fingerprint_mismatch_mints_fresh_coid(attempt_store):
 
 
 @pytest.mark.asyncio
-async def test_409_idempotency_recovery(client, attempt_store, monkeypatch):
-    """A duplicate 409 response recovers the original venue order."""
+async def test_acknowledged_attempt_is_not_resubmitted(client, attempt_store, monkeypatch):
+    """A previously acknowledged attempt must not be sent again."""
     ticker = "KXBTC15M-409-50000"
     client.set_market(
         ticker,
@@ -628,7 +663,7 @@ async def test_409_idempotency_recovery(client, attempt_store, monkeypatch):
     assert result1.order_id is not None
     assert coid in client._client_to_order
 
-    # Patch the port so the second create_order returns a 409-style error.
+    # A retry must be stopped before reaching the port.
     original_create = client.create_order
     calls: List[CreateOrderRequest] = []
 
@@ -660,8 +695,9 @@ async def test_409_idempotency_recovery(client, attempt_store, monkeypatch):
         lambda: _DedupCacheStub(coid),
     )
     result2 = await _route(retry)
-    assert result2.status in ("resting", "accepted_live", "submitted_live"), result2
-    assert result2.order_id == result1.order_id
+    assert result2.status == "submission_unknown", result2
+    assert result2.reason == "order_attempt_submission_claim_failed"
+    assert calls == []
 
     # Still exactly one venue order.
     assert len(client._client_to_order) == 1
@@ -799,8 +835,7 @@ async def test_concurrent_routing_one_coid_one_submission(
     """Two async workers with the same intent/attempt race to route live.
 
     Only one canonical coid, one stored attempt, and at most one live
-    submission should exist.  The second worker must recover the first's
-    venue order, not submit a second one.
+    submission should exist. The second worker must not submit a second one.
     """
     ticker = "KXBTC15M-RACE-50000"
     client.set_market(
@@ -850,7 +885,8 @@ async def test_concurrent_routing_one_coid_one_submission(
 
     r1, r2 = await asyncio.gather(_route(base), _route(copy))
     assert all(
-        r.status in ("filled_live", "submitted_live", "resting") for r in (r1, r2)
+        r.status in ("filled_live", "submitted_live", "resting", "submission_unknown")
+        for r in (r1, r2)
     ), (r1, r2)
 
     # Exactly one venue order and one stored attempt.
@@ -1220,8 +1256,6 @@ async def test_cancel_fill_race_coherent_inventory(attempt_store):
     intent.client_tag = coid
     intent.decision_id = coid
     finalize_order_identity(intent, store=attempt_store)
-    attempt_store.update_status(intent.order_attempt_id, "ACKNOWLEDGED")
-
     # Initial submission places a resting order.
     result = await _route(intent)
     assert result.status in ("resting", "accepted_live", "submitted_live"), result

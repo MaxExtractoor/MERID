@@ -215,7 +215,7 @@ def _dedup_cache():
     return get_order_cache()
 
 
-def _mark_attempt_status(intent: "OrderIntent", status: str) -> None:
+def _mark_attempt_status(intent: "OrderIntent", status: str) -> bool:
     """Update the durable order-attempt status, if one exists.
 
     Idempotent: once an attempt reaches a terminal state (FILLED / REJECTED /
@@ -229,19 +229,25 @@ def _mark_attempt_status(intent: "OrderIntent", status: str) -> None:
         store = OrderAttemptStore()
         order_attempt_id = getattr(intent, "order_attempt_id", None)
         if not order_attempt_id:
-            return
+            return False
+
+        if status == "SUBMITTING":
+            return store.claim_for_submission(order_attempt_id)
 
         record = store.get_by_order_attempt_id(order_attempt_id)
         if record is None:
-            return
+            return False
 
         # Never overwrite a terminal record, and avoid no-op updates.
-        if record.status in _TERMINAL_ATTEMPT_STATUSES or record.status == status:
-            return
+        if record.status in _TERMINAL_ATTEMPT_STATUSES:
+            return False
+        if record.status == status:
+            return True
 
-        store.update_status(order_attempt_id, status)
+        return store.update_status(order_attempt_id, status)
     except Exception as status_err:
         logger.warning("[ORDER-ATTEMPT-STATUS] Failed to mark %s: %s", status, status_err)
+        return False
 
 
 def _finalize_attempt_store_for_result(
@@ -249,12 +255,10 @@ def _finalize_attempt_store_for_result(
 ) -> None:
     """Reconcile the durable ``order_attempts`` row with the route outcome.
 
-    ``PERSISTED`` is written at identity finalization and only transitions to
-    ``SUBMITTING`` at the marker immediately before ``port.create_order``.  A
-    record still in ``PERSISTED`` when routing terminates therefore provably
-    never reached the venue: it is terminalized as ``REJECTED`` so the audit
-    trail can distinguish pre-submit rejections (gate/idempotency/quote-mode
-    blocks) from orders that were actually sent.  A record still in
+    ``PERSISTED`` is written at identity finalization and normally transitions
+    to ``SUBMITTING`` immediately before ``port.create_order``. Because that
+    marker can fail, its absence alone does not prove a request was not sent.
+    A record still in
     ``SUBMITTING`` when routing ends without a resolved outcome is promoted to
     ``SUBMISSION_UNKNOWN`` so it stops masquerading as a live in-flight
     submission and continues to require venue recovery before retry.
@@ -311,16 +315,23 @@ def _finalize_attempt_store_for_result(
         ):
             if record.status in ("PERSISTED", "SUBMITTING"):
                 target = "ACKNOWLEDGED"
+        elif result is None or result_status == "submission_unknown" or (
+            getattr(result, "submission_certainty", None) == "unknown"
+        ):
+            if record.status in ("PERSISTED", "SUBMITTING"):
+                target = "SUBMISSION_UNKNOWN"
         elif result_status == "not_submitted" or (
             result is not None
             and getattr(result, "submission_certainty", None) == "not_submitted"
         ):
-            # The venue lookup authoritatively confirmed no order exists for
-            # this client_order_id — resolved terminal absence, not ambiguous.
-            # Keep ACKNOWLEDGED records untouched: an acked order that a later
-            # lookup cannot find is a venue-side conflict, not a rejection.
-            if record.status in ("PERSISTED", "SUBMITTING", "SUBMISSION_UNKNOWN"):
+            # An empty lookup cannot establish non-acceptance after a send.
+            if record.status == "PERSISTED" and not (
+                getattr(result, "submission_attempted", False)
+                or getattr(result, "exchange_request_sent", False)
+            ):
                 target = "REJECTED"
+            elif record.status in ("PERSISTED", "SUBMITTING"):
+                target = "SUBMISSION_UNKNOWN"
         elif (
             result_status == "rejected"
             or (
@@ -338,11 +349,16 @@ def _finalize_attempt_store_for_result(
             # (submission_attempted=False, certainty=pre_submit) cannot prove
             # an acknowledged order dead, so it must not regress the record.
             _venue_reject_evidence = bool(
-                getattr(result, "submission_attempted", False)
+                getattr(result, "exchange_ack_received", False)
             ) or (
                 getattr(result, "submission_certainty", None) == "rejected"
             )
-            if record.status == "ACKNOWLEDGED" and not _venue_reject_evidence:
+            if record.status == "PERSISTED" and not _venue_reject_evidence and (
+                getattr(result, "submission_attempted", False)
+                or getattr(result, "exchange_request_sent", False)
+            ):
+                target = "SUBMISSION_UNKNOWN"
+            elif record.status in ("SUBMITTING", "SUBMISSION_UNKNOWN", "ACKNOWLEDGED") and not _venue_reject_evidence:
                 target = None
             else:
                 target = "REJECTED"
@@ -4727,6 +4743,17 @@ def _apply_reconciled_order(
     )
 
 
+def _matches_client_identity(value: Any, client_order_id: str, client_tag: str) -> bool:
+    expected = {v for v in (client_order_id, client_tag) if v}
+    actual = {
+        v for v in (
+            getattr(value, "client_order_id", None),
+            getattr(value, "client_tag", None),
+        ) if v
+    }
+    return bool(expected & actual)
+
+
 def _resolve_from_broker_evidence(
     _order_data: Any,
     _open_orders: List[Any],
@@ -4740,18 +4767,20 @@ def _resolve_from_broker_evidence(
     the matching fills, summing their fixed-point size so fractional partial
     fills are not lost.
     """
+    if _order_data is not None and not _matches_client_identity(
+        _order_data, _client_order_id, _client_tag
+    ):
+        _order_data = None
     _order_id = getattr(_order_data, "order_id", None)
 
     _open_match = next(
         (o for o in _open_orders
-         if getattr(o, "client_order_id", "") == _client_order_id
-         or getattr(o, "client_tag", "") == _client_tag),
+         if _matches_client_identity(o, _client_order_id, _client_tag)),
         None,
     )
     _matching_fills = [
         f for f in _recent_fills
-        if getattr(f, "client_order_id", "") == _client_order_id
-        or getattr(f, "client_tag", "") == _client_tag
+        if _matches_client_identity(f, _client_order_id, _client_tag)
         or (getattr(f, "order_id", "") and getattr(f, "order_id", "") == (_order_id or ""))
     ]
 
@@ -4789,10 +4818,8 @@ async def _reconcile_submission_unknown(
 
     Runs ``port.get_order(client_order_id=...)`` and ``port.get_fills``
     concurrently. If the broker knows the order or has recorded a fill, resolve
-    it immediately and promote the state. If the lookup is authoritative and
-    empty, return ``rejected:not_submitted`` so the caller can safely resubmit
-    with the same ``client_order_id``. If the reconcile itself times out, return
-    ``None`` and the caller falls back to ``submission_unknown``.
+    it immediately and promote the state. An empty or failed lookup is
+    inconclusive, so return ``None`` and retain ``submission_unknown``.
     """
     _client_tag = intent.client_tag or ""
     _client_order_id = intent.client_order_id or _client_tag
@@ -4841,6 +4868,11 @@ async def _reconcile_submission_unknown(
         logger.debug("[SUBMISSION-RECONCILE-FAST] get_fills error: %s", _fills_resp)
         _fills_resp = None
 
+    if _order_data is not None and not _matches_client_identity(
+        _order_data, _client_order_id, _client_tag
+    ):
+        logger.warning("[SUBMISSION-RECONCILE-FAST] order identity mismatch for %s", _client_order_id)
+        _order_data = None
     if _order_data is not None:
         logger.info(
             "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_order_id=%s resolved by order",
@@ -4854,8 +4886,7 @@ async def _reconcile_submission_unknown(
 
     _matching_fills = [
         f for f in _recent_fills
-        if getattr(f, "client_order_id", None) == _client_order_id
-        or getattr(f, "client_tag", None) == _client_tag
+        if _matches_client_identity(f, _client_order_id, _client_tag)
     ]
 
     if _matching_fills:
@@ -4889,9 +4920,7 @@ async def _reconcile_submission_unknown(
             )
             if _resolved_order is None:
                 continue
-            _recovered_coid = getattr(_resolved_order, "client_order_id", None)
-            _recovered_tag = getattr(_resolved_order, "client_tag", None)
-            if _recovered_coid in (_client_order_id, _client_tag) or _recovered_tag in (_client_order_id, _client_tag):
+            if _matches_client_identity(_resolved_order, _client_order_id, _client_tag):
                 logger.info(
                     "[SUBMISSION-RECONCILE-FAST] intent_id=%s ticker=%s client_order_id=%s "
                     "resolved via fill order_id=%s",
@@ -4917,20 +4946,11 @@ async def _reconcile_submission_unknown(
                 _fill_order_id, _order_lookup_err,
             )
 
-    logger.info(
-        "[SUBMISSION-RECONCILE-FAST] client_order_id=%s ticker=%s not found; authoritative empty",
+    logger.warning(
+        "[SUBMISSION-RECONCILE-FAST] client_order_id=%s ticker=%s unresolved; retaining reservation",
         _client_order_id, _ticker,
     )
-    return OrderResult(
-        status="not_submitted",
-        mode=mode,
-        reason="not_submitted:authoritative_lookup_empty",
-        latency_ms=round(_latency, 2),
-        submission_attempted=True,
-        exchange_request_sent=True,
-        exchange_ack_received=False,
-        submission_certainty="not_submitted",
-    )
+    return None
 
 
 async def reconcile_submission_unknown_client_order_id(
@@ -4941,11 +4961,8 @@ async def reconcile_submission_unknown_client_order_id(
 ) -> Optional[OrderResult]:
     """Full background reconcile for a single ``client_order_id``.
 
-    Runs the complete three-query broker reconcile (``get_order``,
-    ``get_open_orders``, ``get_fills``) without the route timeout, then applies
-    the resolved state to the fills ledger, position cache, attempt store, and
-    pre-trade gate.  This is the primary recovery path for
-    ``SUBMISSION_UNKNOWN`` orders.
+    Looks up the order and recent fills, then applies positively identified
+    broker evidence. Empty or failed lookups leave the attempt unresolved.
     """
     t0 = _time.monotonic()
 
@@ -5011,6 +5028,12 @@ async def reconcile_submission_unknown_client_order_id(
         logger.debug("[SUBMISSION-RECONCILE-FULL] get_fills error: %s", _fills_resp)
         _fills_resp = None
 
+    if _order_data is not None and not _matches_client_identity(
+        _order_data, client_order_id, client_order_id
+    ):
+        logger.warning("[SUBMISSION-RECONCILE-FULL] order identity mismatch for %s", client_order_id)
+        _order_data = None
+
     _recent_fills: List[Any] = []
     if _fills_resp is not None:
         _recent_fills = getattr(_fills_resp, "fills", []) or []
@@ -5066,78 +5089,12 @@ async def reconcile_submission_unknown_client_order_id(
     if _resolved_order is not None:
         return _apply_reconciled_order(_resolved_order, intent, mode, _latency)
 
-    # 2026-09-07: Authoritative absence is a resolved terminal outcome.
-    # Release the canonical entry-idempotency record, the pre-trade gate
-    # record, and the durable attempt row so the (ticker, contract) is not
-    # blocked by a reconciliation_required marker for the rest of the window
-    # and the audit trail reflects that the venue confirmed nothing landed.
-    try:
-        from merid.event_venues.kalshi.order_intent_contract import (
-            release_entry_idempotency_by_client_order_id,
-        )
-
-        release_entry_idempotency_by_client_order_id(client_order_id)
-    except Exception as _rel_err:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] entry-idempotency release failed for %s: %s",
-            client_order_id, _rel_err,
-        )
-    try:
-        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
-
-        _ptg = get_pre_trade_gate()
-        _ptg.mark_rejected(client_order_id, "not_submitted:authoritative_lookup_empty")
-    except Exception as _gate_err:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] gate terminalization failed for %s: %s",
-            client_order_id, _gate_err,
-        )
-    try:
-        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
-
-        _attempt_rec = OrderAttemptStore().get_by_client_order_id(client_order_id)
-        if _attempt_rec is not None and _attempt_rec.status in (
-            "PERSISTED",
-            "SUBMITTING",
-            "SUBMISSION_UNKNOWN",
-        ):
-            _payload: Dict[str, Any] = {}
-            try:
-                _payload = json.loads(_attempt_rec.payload_json or "{}")
-                if not isinstance(_payload, dict):
-                    _payload = {}
-            except Exception:
-                _payload = {}
-            _payload.update(
-                {
-                    "terminalized_by": "submission_reconcile_full",
-                    "route_reason": "not_submitted:authoritative_lookup_empty",
-                }
-            )
-            OrderAttemptStore().update_status(
-                _attempt_rec.order_attempt_id, "REJECTED", payload=_payload
-            )
-    except Exception as _attempt_err:
-        logger.debug(
-            "[SUBMISSION-RECONCILE-FULL] attempt-store update failed for %s: %s",
-            client_order_id, _attempt_err,
-        )
-
-    logger.info(
-        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s not found; authoritative empty",
+    logger.warning(
+        "[SUBMISSION-RECONCILE-FULL] client_order_id=%s ticker=%s unresolved; retaining reservation",
         client_order_id,
         ticker,
     )
-    return OrderResult(
-        status="not_submitted",
-        mode=mode,
-        reason="not_submitted:authoritative_lookup_empty",
-        latency_ms=round(_latency, 2),
-        submission_attempted=True,
-        exchange_request_sent=True,
-        exchange_ack_received=False,
-        submission_certainty="not_submitted",
-    )
+    return None
 
 
 def _is_marketable_against_book(intent: OrderIntent, book_side: Dict[str, Any]) -> bool:
@@ -17499,7 +17456,19 @@ async def _route_live(
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.
         # Mark the durable attempt as SUBMITTING before the network call.
-        _mark_attempt_status(intent, "SUBMITTING")
+        if not _mark_attempt_status(intent, "SUBMITTING"):
+            logger.error(
+                "[ORDER-ATTEMPT-STATUS] submission claim failed for intent_id=%s; not sending",
+                intent.intent_id,
+            )
+            return OrderResult(
+                status="submission_unknown",
+                mode=mode,
+                reason="order_attempt_submission_claim_failed",
+                submission_attempted=False,
+                exchange_request_sent=False,
+                submission_certainty="unknown",
+            )
 
         placed_res = None
         _submit_timed_out = False

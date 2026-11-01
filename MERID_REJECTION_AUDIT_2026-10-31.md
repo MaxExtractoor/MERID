@@ -549,3 +549,100 @@ clock refresh's HEAD request received HTTP 404 while GET returned HTTP 200.
 The fallback to a separately timed GET was added and tested locally; a direct
 live sample succeeded. The fallback is not active in the running `ed37a86b`
 process and requires deployment and post-deploy verification.
+
+### Historical unknown-submission investigation
+
+On 2026-11-01, a read-only audit found 168 durable `SUBMISSION_UNKNOWN`
+attempts dated 2026-08-18 through 2026-08-27 and 30 `SUBMITTING` attempts
+dated 2026-08-26 through 2026-09-03. All have client-order and intent IDs.
+None of their intent IDs remains in the current durable intent index, and
+none of their client tags matches the expired-market sweep's ticker parser.
+Consequently that sweep cannot identify a ticker for these records. The
+poller's full submission-unknown reconciliation reads the in-memory
+pre-trade gate, not this durable historical set. Its separate stale-record
+prune can mark in-memory unknowns rejected after a TTL without an exchange
+confirmation; that is not evidence that the historical attempts were rejected.
+
+Kalshi's reported order-archive cutoff was 2026-10-18, and its historical
+fill cutoff was 2026-09-02. Searching only the current endpoints or the local
+fills ledger is insufficient: the local ledger's earliest fill was
+2026-09-14. A paginated historical-order search for 2026-08-17 through
+2026-09-06 returned 861 orders across five pages, with exactly two matching
+the 198 client-order IDs. Time-filter controls matched known archived orders
+and fills. The other 168 unknown and 28 submitting IDs had no matching order
+in that bounded archive search. That is not proof that they were never
+submitted, nor permission to rewrite their status.
+
+The two matching `SUBMITTING` attempts are confirmed executed orders:
+
+- BTC `KXBTC15M-26AUG282100-00`: order
+  `01a04b03-90c0-732f-aee2-2594130c954b`, client order
+  `exit_5a7092fcb267f1326e9e`, fill
+  `0721670d-cfd9-bfbe-2f37-87af3d30d1e5`, one contract on 2026-08-29.
+- SOL `KXSOL15M-26SEP010430-30`: order
+  `01a05c13-d230-7ac1-80d6-41bbd8373388`, client order
+  `merid_e841ff42c62e49e6aea7`, fill
+  `07212c5c-9af1-93ab-887d-9ca0776b2c3b`, one contract on 2026-09-01.
+
+Both exchange markets are finalized with result NO. Neither fill appears in
+the current fills database or its applied-fill-ID index; this does not prove
+they were never ingested because those stores do not cover the period. The
+trade-attribution database retains the SOL fill and settlement events for
+both markets, but their accounting has not been independently reconciled.
+
+One further submitting attempt, client order `exit_243de9e364daa57f35f7`,
+has a local pending-order attribution event for XRP market
+`KXXRP15M-26SEP031300-00` and order
+`01a06832-aa50-7dcd-a83d-5a59b6868e7a`. The ticker-filtered archive and
+current order lookup did not confirm that order; the ticker's archived entry
+and settlement are separate records. Its submission outcome remains unknown.
+Four submitting records share an intent with a different later canceled
+attempt; that does not establish the earlier attempts' individual outcomes.
+
+No attempt status, fill, position, or trading policy was changed during this
+investigation. At the operator's explicit direction, live entries remain
+enabled; the running build remains `ed37a86b`, without the committed
+`78f74205` clock-refresh fallback. Recovery and settlement-drain verification
+remain prerequisites for a further restart.
+
+The 14:11 UTC book-timing rollup recorded 57,090
+`unverified_offset_expired` and 464 `measured` statuses. The runtime state
+still reported `LIVE_ENTRIES_ENABLED` with PID 8144. WS-owned quotes must
+fail their freshness gate when venue age is unverified; a REST-owned quote
+may still be eligible under the existing degraded-entry policy. No entry
+halt or second restart was requested by the operator during this audit.
+
+### Recovery hardening and restart assessment
+
+The subsequent read-only exchange check at approximately 14:26 UTC returned
+no resting orders and no nonzero positions. Current canonical reconciliation
+logs remained matched, but those checks do not resolve the historical
+attempts or establish a drained settlement pipeline.
+
+Local changes now preserve submitted/unknown gate records across TTL cleanup,
+keep expired order attempts unresolved without terminal evidence, and require
+fully matched, trusted live fill quantities before the expired-exit sweep can
+mark an exit filled. Fast and background submission recovery no longer treat
+empty or failed order lookups as authoritative non-submission, and reject
+unmatched client identities rather than applying them to the wrong attempt.
+An atomic durable submission claim is now required before the exchange
+request; a failed or already-claimed attempt is not sent. Route cleanup also
+keeps ambiguous outcomes unknown when the pre-wire marker was missing.
+P0 now checks the durable attempt store read-only, without an age cutoff, for
+unknown and submitting orders and exits. Against the current production
+database this check fails with `order_attempts=198 exit_attempts=0`.
+
+The settlement poller logged seven new settlements and its graded-key file
+grew from 1129 to 1136 records. This confirms activity, not a drained or
+correctly published backlog: the running lean server does not mount the
+poller's status router. The ungraded-backlog count cannot independently prove
+missing grading because the production code does not call `mark_graded`.
+Further, callback exceptions are logged and swallowed before the dedupe key is
+persisted, so a graded key alone does not prove all callbacks succeeded.
+
+The operator requested a commit and restart after the remaining work. A
+restart is not safe while those submission outcomes and settlement-drain
+conditions remain unresolved. The current lifespan raises on a P0 failure,
+so restarting with the new guard would also terminate startup rather than
+keep protective services available. The clock-refresh fallback in `78f74205`
+remains committed but is not active in the running process.

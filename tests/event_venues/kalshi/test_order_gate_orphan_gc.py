@@ -9,9 +9,8 @@ unhandled exception inside the router dropped the call *before*
 forever.  Because PENDING records also block later duplicate checks, the
 leak would silently prevent legitimate retries of the same logical order.
 
-The complementary sweep (``prune_stale_pending``) mark-rejects any
-non-terminal record older than its TTL so the terminal prune can
-eventually sweep it.  The tests below freeze that contract.
+The complementary sweep only rejects stale pre-submission PENDING records.
+Submitted and unknown records remain reserved until confirmed by the venue.
 """
 
 from __future__ import annotations
@@ -70,26 +69,25 @@ class TestPruneStalePendingBasics:
         assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
         assert fresh.status == OrderStatus.PENDING
 
-    def test_submitted_older_than_long_ttl_is_marked_rejected(self):
+    def test_submitted_older_than_long_ttl_remains_unresolved(self):
         store = IdempotentOrderStore()
         zombie = _make_record("coid-zombie", OrderStatus.SUBMITTED, time.time() - 7200)
         store._orders["coid-zombie"] = zombie
 
         result = store.prune_stale_pending(submitted_ttl_s=3600)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 1, "orphaned_submission_unknown": 0}
-        assert zombie.status == OrderStatus.REJECTED
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
+        assert zombie.status == OrderStatus.SUBMITTED
 
-    def test_submission_unknown_older_than_reconcile_ttl_is_marked_rejected(self):
-        """A SUBMISSION_UNKNOWN record that outlives the broker-reconcile window is freed."""
+    def test_submission_unknown_older_than_reconcile_ttl_remains_unresolved(self):
         store = IdempotentOrderStore()
         lost = _make_record("coid-lost", OrderStatus.SUBMISSION_UNKNOWN, time.time() - 300)
         store._orders["coid-lost"] = lost
 
         result = store.prune_stale_pending(submission_unknown_ttl_s=60)
 
-        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 1}
-        assert lost.status == OrderStatus.REJECTED
+        assert result == {"orphaned_pending": 0, "orphaned_submitted": 0, "orphaned_submission_unknown": 0}
+        assert lost.status == OrderStatus.SUBMISSION_UNKNOWN
 
     def test_fresh_submission_unknown_is_left_alone(self):
         """A SUBMISSION_UNKNOWN record inside the reconcile window is still retried."""

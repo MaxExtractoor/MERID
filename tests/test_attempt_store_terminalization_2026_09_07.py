@@ -82,6 +82,13 @@ def _result(status: str, **kwargs) -> OrderResult:
     return OrderResult(status=status, mode=TradingMode.LIVE, **kwargs)
 
 
+def test_submission_claim_is_one_shot(store):
+    rec = _persist(store, "PERSISTED")
+    assert store.claim_for_submission(rec.order_attempt_id)
+    assert not store.claim_for_submission(rec.order_attempt_id)
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "SUBMITTING"
+
+
 def test_persisted_pre_submit_rejection_becomes_rejected(store):
     rec = _persist(store, "PERSISTED")
     _finalize_attempt_store_for_result(
@@ -97,14 +104,14 @@ def test_persisted_pre_submit_rejection_becomes_rejected(store):
     assert payload["route_reason"] == "insufficient_balance"
 
 
-def test_persisted_route_exception_becomes_rejected(store):
+def test_persisted_route_exception_becomes_submission_unknown(store):
     rec = _persist(store, "PERSISTED")
     _finalize_attempt_store_for_result(_intent_for(rec), None)
-    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "SUBMISSION_UNKNOWN"
 
 
-def test_persisted_submission_unknown_result_becomes_rejected(store):
-    """A route-timeout result on a PERSISTED attempt is provably not sent."""
+def test_persisted_submission_unknown_result_remains_unresolved(store):
+    """The pre-wire marker can fail, so PERSISTED alone does not prove absence."""
     rec = _persist(store, "PERSISTED")
     _finalize_attempt_store_for_result(
         _intent_for(rec),
@@ -115,7 +122,7 @@ def test_persisted_submission_unknown_result_becomes_rejected(store):
             submission_certainty="unknown",
         ),
     )
-    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "SUBMISSION_UNKNOWN"
 
 
 def test_submitting_route_timeout_becomes_submission_unknown(store):
@@ -201,7 +208,7 @@ def test_no_attempt_id_is_noop(store):
 
 
 # ---------------------------------------------------------------------------
-# not_submitted: venue lookup authoritatively confirmed the order never landed
+# Empty order lookups cannot prove that a sent request was not accepted.
 # ---------------------------------------------------------------------------
 
 
@@ -216,17 +223,17 @@ def _not_submitted_result() -> OrderResult:
     )
 
 
-def test_submitting_not_submitted_is_terminal_rejected(store):
-    """Venue-confirmed absence resolves the attempt — not SUBMISSION_UNKNOWN."""
+def test_submitting_empty_lookup_remains_unknown(store):
+    """An empty lookup after a send does not prove non-acceptance."""
     rec = _persist(store, "SUBMITTING")
     _finalize_attempt_store_for_result(_intent_for(rec), _not_submitted_result())
-    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "SUBMISSION_UNKNOWN"
 
 
-def test_submission_unknown_not_submitted_resolves_rejected(store):
+def test_submission_unknown_empty_lookup_stays_unknown(store):
     rec = _persist(store, "SUBMISSION_UNKNOWN")
     _finalize_attempt_store_for_result(_intent_for(rec), _not_submitted_result())
-    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "REJECTED"
+    assert store.get_by_order_attempt_id(rec.order_attempt_id).status == "SUBMISSION_UNKNOWN"
 
 
 def test_acknowledged_not_submitted_is_not_downgraded(store):

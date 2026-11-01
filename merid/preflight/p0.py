@@ -7,9 +7,13 @@ bankroll service, and an RTI stream.
 """
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
@@ -24,6 +28,40 @@ def _check(label: str, ok: bool, detail: str = "") -> Tuple[bool, str]:
         msg += f": {detail}"
     logger.info("[P0-PREFLIGHT] %s", msg)
     return ok, msg
+
+
+def _check_uncertain_submissions() -> Tuple[bool, str]:
+    """Fail closed on durable unknown submissions, regardless of their age."""
+    try:
+        from merid.event_venues.kalshi.order_attempt_store import (
+            DEFAULT_DB_PATH,
+            ExitOrderAttemptState,
+        )
+
+        path = Path(DEFAULT_DB_PATH).resolve()
+        if not path.is_file():
+            raise FileNotFoundError("order attempt store is missing")
+        uncertain_exit_states = (
+            ExitOrderAttemptState.SUBMITTING.value,
+            ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
+            ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
+        )
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)) as conn:
+            attempt_count = conn.execute(
+                "SELECT COUNT(*) FROM order_attempts "
+                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN')"
+            ).fetchone()[0]
+            exit_count = conn.execute(
+                "SELECT COUNT(*) FROM exit_order_attempts WHERE state IN (?, ?, ?)",
+                uncertain_exit_states,
+            ).fetchone()[0]
+        return _check(
+            "uncertain_submission_recovery",
+            not attempt_count and not exit_count,
+            f"order_attempts={attempt_count} exit_attempts={exit_count}",
+        )
+    except Exception as exc:
+        return _check("uncertain_submission_recovery", False, str(exc))
 
 
 async def run_p0_preflight_checks(
@@ -50,6 +88,12 @@ async def run_p0_preflight_checks(
 
     # 1. Client ready.
     results.append(_check("kalshi_client ready", client is not None))
+
+    # No funding or live entry enablement while durable submissions are unknown.
+    recovery = await asyncio.to_thread(_check_uncertain_submissions)
+    results.append(recovery)
+    if not recovery[0]:
+        return results
 
     # 2. Balance and positions.
     try:

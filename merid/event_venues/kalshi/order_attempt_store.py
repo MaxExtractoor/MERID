@@ -494,6 +494,24 @@ class OrderAttemptStore:
             )
             raise
 
+    def claim_for_submission(self, order_attempt_id: str) -> bool:
+        """Durably claim a fresh attempt once, before any exchange request."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE order_attempts SET status = 'SUBMITTING', updated_at = ? "
+                "WHERE order_attempt_id = ? AND status = 'PERSISTED'",
+                (self._now(), order_attempt_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            logger.exception("[ORDER-ATTEMPT-STORE] Failed to claim submission")
+            return False
+        finally:
+            if conn is not self._persistent_conn:
+                conn.close()
+
     def update_status(
         self,
         order_attempt_id: str,

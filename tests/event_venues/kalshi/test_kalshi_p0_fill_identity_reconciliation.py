@@ -188,6 +188,10 @@ def _run_check(results: List[Tuple[bool, str]], label: str) -> Tuple[bool, str]:
 def harness(tmp_path, monkeypatch):
     """Real KalshiFillsLedger on a temp DB + fakes for the rest of preflight."""
 
+    monkeypatch.setattr(
+        "merid.preflight.p0._check_uncertain_submissions",
+        lambda: (True, "[PASS] uncertain_submission_recovery: isolated test"),
+    )
     monkeypatch.setenv("MERID_ENV", "testing")
     monkeypatch.setenv("MERID_FILLS_DB_PATH", str(tmp_path / "fills.db"))
     monkeypatch.setenv(

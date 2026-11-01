@@ -199,10 +199,8 @@ def test_superseded_attempt_releases_client_order_id(tmp_path):
     assert final.state == ExitOrderAttemptState.FILLED.value
 
 
-def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypatch):
-    """The observed orphan: an ACKNOWLEDGED order attempt on an expired market
-    stayed unresolved forever because get_unresolved only looked back 300s.
-    """
+def test_expired_market_sweep_preserves_unproven_outcomes(tmp_path, monkeypatch):
+    """An expired market and an empty local ledger cannot prove cancellation."""
     import asyncio
     import time
     from types import SimpleNamespace
@@ -214,8 +212,25 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
 
     db_path = str(tmp_path / "oa_sweep.db")
     monkeypatch.setattr(oas, "DEFAULT_DB_PATH", db_path)
-    # No fills ledger -> no filled order ids; ticker resolves via client_tag.
-    monkeypatch.setattr(fl, "get_fills_ledger", lambda: None)
+    def _fill(order_id, quantity, **overrides):
+        fields = dict(
+            order_id=order_id, quantity_cc=quantity, fill_id=f"fill-{order_id}",
+            is_live=True, unmatched=False, canonicalization_state="TRUSTED_LIVE_V1",
+            fill_source="alpha", ingestion_source="websocket",
+        )
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    ledger = SimpleNamespace(get_canonical_fills=lambda: SimpleNamespace(
+        authoritative=[
+            _fill("order-x2", 50),
+            _fill("order-x4", 100),
+            _fill("order-x5", 100, canonicalization_state="UNTRUSTED_RAW"),
+            _fill("order-x6", 100, fill_id="settlement:order-x6", fill_source="settlement"),
+        ],
+        provisional=[_fill("order-x7", 100, fill_id="live_router_x7")],
+    ))
+    monkeypatch.setattr(fl, "get_fills_ledger", lambda: ledger)
 
     store = OrderAttemptStore(str(db_path))
     now = time.time()
@@ -255,9 +270,13 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
         "oa_live", "merid_live0001", f"15m_{live_ticker}_2c3d4e",
         "ACKNOWLEDGED", 7200,
     ))
+    for status in ("SUBMITTING", "SUBMISSION_UNKNOWN"):
+        store.persist_attempt(_attempt(
+            f"oa_{status}", f"coid_{status}", f"15m_{expired_ticker}_3c4d5e",
+            status, 7200,
+        ))
 
-    # Exit attempts: INTENT_PERSISTED on expired ticker -> CANCELED;
-    # PARTIALLY_FILLED with unconfirmed remainder -> TERMINAL_UNFILLED.
+    # An unconfirmed exit and a partial exit must also retain their states.
     ex1 = store.create_exit_attempt(
         exit_intent_id="xi-1", position_key="pos-1", ticker=expired_ticker,
         reason="SETTLEMENT_GUARD", client_order_id="co-x1",
@@ -270,11 +289,40 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
     )
     store.transition_exit_attempt("xa-2", "SUBMITTING", actor="test", reason="t")
     store.transition_exit_attempt("xa-2", "PARTIALLY_FILLED", actor="test", reason="t")
+    store.create_exit_attempt(
+        exit_intent_id="xi-3", position_key="pos-3", ticker=expired_ticker,
+        reason="SETTLEMENT_GUARD", client_order_id="co-x3",
+        requested_quantity=100, attempt_id="xa-3",
+    )
+    store.transition_exit_attempt("xa-3", "SUBMITTING", actor="test", reason="t")
+    store.transition_exit_attempt("xa-3", "SUBMISSION_UNKNOWN", actor="test", reason="t")
+    store.create_exit_attempt(
+        exit_intent_id="xi-4", position_key="pos-4", ticker=expired_ticker,
+        reason="SETTLEMENT_GUARD", client_order_id="co-x4",
+        requested_quantity=100, attempt_id="xa-4",
+    )
+    store.transition_exit_attempt("xa-4", "SUBMITTING", actor="test", reason="t")
+    store.transition_exit_attempt("xa-4", "PARTIALLY_FILLED", actor="test", reason="t")
+    for number in (5, 6, 7):
+        store.create_exit_attempt(
+            exit_intent_id=f"xi-{number}", position_key=f"pos-{number}",
+            ticker=expired_ticker, reason="SETTLEMENT_GUARD",
+            client_order_id=f"co-x{number}", requested_quantity=100,
+            attempt_id=f"xa-{number}",
+        )
+        store.transition_exit_attempt(f"xa-{number}", "SUBMITTING", actor="test", reason="t")
+        store.transition_exit_attempt(f"xa-{number}", "PARTIALLY_FILLED", actor="test", reason="t")
     conn = store._get_conn()
     conn.execute(
-        "UPDATE exit_order_attempts SET created_at = ?, confirmed_quantity = 50 WHERE attempt_id IN ('xa-1','xa-2')",
+        "UPDATE exit_order_attempts SET created_at = ?, confirmed_quantity = 50",
         (now - 7200,),
     )
+    conn.execute("UPDATE exit_order_attempts SET exchange_order_id='order-x2' WHERE attempt_id='xa-2'")
+    for number in (4, 5, 6, 7):
+        conn.execute(
+            "UPDATE exit_order_attempts SET exchange_order_id=?, confirmed_quantity=100 WHERE attempt_id=?",
+            (f"order-x{number}", f"xa-{number}"),
+        )
     conn.commit()
 
     FillsPoller._sweep_expired_market_attempts(SimpleNamespace())
@@ -285,9 +333,11 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
             "SELECT order_attempt_id, status FROM order_attempts"
         ).fetchall()
     }
-    assert statuses["oa_orphan"] == "CANCELED"
+    assert statuses["oa_orphan"] == "ACKNOWLEDGED"
     assert statuses["oa_young"] == "ACKNOWLEDGED"
     assert statuses["oa_live"] == "ACKNOWLEDGED"
+    assert statuses["oa_SUBMITTING"] == "SUBMITTING"
+    assert statuses["oa_SUBMISSION_UNKNOWN"] == "SUBMISSION_UNKNOWN"
 
     ex_states = {
         r["attempt_id"]: r["state"]
@@ -295,8 +345,12 @@ def test_expired_market_sweep_terminalizes_orphaned_attempts(tmp_path, monkeypat
             "SELECT attempt_id, state FROM exit_order_attempts"
         ).fetchall()
     }
-    assert ex_states["xa-1"] == ExitOrderAttemptState.CANCELED.value
-    assert ex_states["xa-2"] == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+    assert ex_states["xa-1"] == ExitOrderAttemptState.INTENT_PERSISTED.value
+    assert ex_states["xa-2"] == ExitOrderAttemptState.PARTIALLY_FILLED.value
+    assert ex_states["xa-3"] == ExitOrderAttemptState.SUBMISSION_UNKNOWN.value
+    assert ex_states["xa-4"] == ExitOrderAttemptState.FILLED.value
+    for number in (5, 6, 7):
+        assert ex_states[f"xa-{number}"] == ExitOrderAttemptState.PARTIALLY_FILLED.value
 
     # Idempotent: a second sweep changes nothing.
     FillsPoller._sweep_expired_market_attempts(SimpleNamespace())
