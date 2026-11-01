@@ -41,6 +41,44 @@ KALSHI_CONTRACT_PAR_VALUE_USD = Decimal("1.00")
 # uses for signed YES centi-contract accounting.
 CONTRACT_COUNT_QUANTUM = Decimal("0.01")
 
+
+def shard_stake_cap_usd(shard_cash: Decimal, stake_fraction: Decimal) -> Optional[Decimal]:
+    """Conservative premium cap; None means the configured cap is disabled."""
+    cash = Decimal(str(shard_cash))
+    fraction = Decimal(str(stake_fraction))
+    if not cash.is_finite() or cash < 0 or not fraction.is_finite():
+        raise ValueError("invalid shard cash or stake fraction")
+    if fraction <= 0:
+        return None
+    return (cash * fraction).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+
+
+def stake_sizing_evidence_is_positive(decision: object, side: str) -> bool:
+    """Require selected-side decision-time net EV before releasing a stake resize."""
+    try:
+        selected = str(getattr(decision, "selected_outcome", "") or "").lower()
+        indicators = getattr(decision, "indicators", None) or {}
+        ev = Decimal(str(indicators[f"{selected}_ev_net_cents"]))
+        probability = Decimal(str(getattr(decision, "p_selected", None)))
+        return (
+            selected in ("yes", "no")
+            and selected == str(side).lower()
+            and ev.is_finite() and ev > 0
+            and probability.is_finite() and 0 < probability <= 1
+        )
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+
+
+def stake_sizing_final_ev_is_positive(result: object) -> bool:
+    """A permissive lane floor must not turn a stake resize into negative EV."""
+    try:
+        ev = Decimal(str(getattr(result, "net_ev", None)))
+        return ev.is_finite() and ev > 0
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+
+
 # Profile integration
 try:
     from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
@@ -805,6 +843,7 @@ def compute_order_size(
     side: str = "yes",  # 2026-07-13: Side for Kelly calculation (yes/no)
     metadata: Optional[dict] = None,  # 2026-07-31: Metadata for sweet spot price adjustment tracking
     flb_position_multiplier: float = 1.0,  # 2026-08-01: FLB-aware position sizing multiplier
+    stake_cap_usd: Optional[Decimal] = None,
 ) -> Tuple[float, Decimal, dict]:
     """Compute order size under the fixed-exposure-cap model with Kelly filtering.
 
@@ -1072,6 +1111,14 @@ def compute_order_size(
     contract_count = min(target_contracts, max_contracts_cap, max_by_exposure, max_by_bankroll, max_by_cash_cost)
     if max_by_notional is not None:
         contract_count = min(contract_count, max_by_notional)
+    stake_cap_applied = False
+    if stake_cap_usd is not None:
+        stake_cap = Decimal(str(stake_cap_usd))
+        if not stake_cap.is_finite() or stake_cap < 0:
+            raise ValueError("invalid stake cap")
+        stake_max_count = stake_cap / contract_cost_usd
+        stake_cap_applied = stake_max_count < contract_count
+        contract_count = min(contract_count, stake_max_count)
 
     # Exact fee reserve: Kalshi charges rate*C*P*(1-P) rounded up to $0.0001
     # (verified against V2 fill records; NOT ceil'd to a whole cent).  Shrink
@@ -1251,6 +1298,8 @@ def compute_order_size(
         "consider_fee_impact": bool(consider_fee_impact),
         "fee_adjusted": fee_adjusted,
         "estimated_fee_cents": float(estimated_fee_cents) if estimated_fee_cents is not None else None,
+        "stake_cap_applied": stake_cap_applied,
+        "stake_cap_usd": str(stake_cap_usd) if stake_cap_usd is not None else None,
     }
     
     # Add Kelly information if model_prob was provided

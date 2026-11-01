@@ -10573,8 +10573,18 @@ class LeanAgent15m:
                             "[PINNED-FAV] asset=%s side=%s lane submissions today=%d",
                             asset, decision.selected_outcome, _n,
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.error(
+                        "[PINNED-FAV] budget persistence unavailable for %s: %s",
+                        asset, exc,
+                    )
+                    decision = replace(
+                        decision,
+                        selected_outcome=None,
+                        selected_action=None,
+                        selected_outcome_price=None,
+                        no_trade_reason="pinned_fav_budget_unavailable",
+                    )
             if (
                 _decision_lane == "window_quota"
                 and decision.selected_outcome is not None

@@ -356,10 +356,11 @@ def _fresh_gate_prereqs(state):
     state.last_ws_update_ts = time.monotonic()
 
 
-def test_unverified_venue_age_does_not_pass_freshness_gate():
+def test_unverified_venue_age_does_not_pass_freshness_gate(monkeypatch):
     """Boundary spec: unverifiable -> retained for reconstruction -> status
     survives -> freshness gate does NOT pass on receipt age alone."""
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
+    from merid.loop_15m import _entry_quote_owner_trusted
 
     clk = get_venue_clock("kalshi")
     clk.invalidate("force unverified")
@@ -388,11 +389,21 @@ def test_unverified_venue_age_does_not_pass_freshness_gate():
     # Freshness gate: recent RECEIPT (ws_age_ms ~0, event_age ~30ms) must
     # not stand in for verified venue freshness.
     _fresh_gate_prereqs(state)
+    state.last_rest_quote_update_ts = time.monotonic()
+    monkeypatch.setenv("MERID_REST_DEGRADED_ENTRY_ENABLED", "1")
     gate = store.get_quote_gate_state(_TICKER)
     assert gate["ws_event_age_verified"] is False
     assert gate["ws_event_age_status"] == STATUS_UNVERIFIED_NO_OFFSET
     assert gate["ws_fresh"] is False
     assert gate["effective_fresh"] is False
+    assert gate["rest_fresh"] is True
+    assert _entry_quote_owner_trusted(gate) is False
+
+    # A fresh REST quote is usable only when REST owns the effective book.
+    state.quote_owner = "REST_VERIFIED_DEGRADED"
+    gate = store.get_quote_gate_state(_TICKER)
+    assert gate["effective_fresh"] is True
+    assert _entry_quote_owner_trusted(gate) is True
 
 
 def test_measured_venue_age_passes_freshness_gate():

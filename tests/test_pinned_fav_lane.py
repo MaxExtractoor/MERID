@@ -138,7 +138,7 @@ def test_block_daily_cap(monkeypatch):
         dr.record_pinned_fav_submission(_p)
     assert dr.pinned_fav_fills_today(_p) == 3
     assert dr.pinned_fav_cap_remaining(_p) == 0
-    assert dr.pinned_fav_block(93.0, 5.0, 600.0) == "pinned_fav_daily_cap"
+    assert dr.pinned_fav_block(95.0, 5.0, 600.0) == "pinned_fav_daily_cap"
     # Counter resets on a new UTC day.
     import time as _t
     _tomorrow = _t.time() + 90000.0

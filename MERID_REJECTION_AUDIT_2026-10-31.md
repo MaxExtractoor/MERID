@@ -460,3 +460,83 @@ final-book equality.
 
 **Deployed vs committed**: production = `a9c7e43e` (verified via
 `deployment_sha` in `live_entries_enabled`); earlier `a600f6f7` was doc-only.
+
+### 2026-11-01 follow-up: no recent executions
+
+The local fill ledger's latest non-settlement execution at inspection was
+2026-11-01 00:57:52 UTC. The pinned-favorite UTC-day counter reached 480
+at approximately 08:34 UTC. It counts decision emissions before allocation
+and routing, not confirmed exchange submissions. It remains exhausted for
+the UTC day; do not reset it to induce trading.
+
+The order-attempt ledger contains 66 local `stake_at_risk_cap` rejections
+since UTC midnight: configured six-contract candidates exceeded the 35%
+shard-cash limit. All 66 record `submission_attempted=false`. Of these,
+63 have selected-side net EV in the decision ledger and all 63 are
+non-positive; the other three could not be joined to a recorded value.
+Shrinking those candidates or changing the budget does not establish
+positive executable edge and must not bypass the independent risk and EV
+gates. Recent decision telemetry is also dominated by no-positive-edge
+rejections. The effective live configuration at inspection uses a
+six-contract per-order and pinned-favorite cap, not the two-contract cap
+stated in the earlier handoff.
+
+Correction to the drain-workstream interpretation above: the sampled TLS
+stacks measure thread wall time, not GIL ownership or CPU consumption.
+The before/after windows and synthetic traffic were not controlled replay
+comparisons. They do not establish GIL contention, a causal effect of
+session reuse, zero false freshness, or a migrated capacity ceiling.
+Treat those explanations as hypotheses pending matched replay and
+independent profiling.
+
+### 2026-11-01 follow-up: sizing and daily budget
+
+The pinned-favorite counter is an emission budget, not an exchange-order or
+fill counter. Its UTC-day reset was already lazy: yesterday's count is ignored
+on the first read after midnight, and the next emission records the new date.
+The current day's 480 emissions have not been reset. Local changes serialize
+in-process updates, block on invalid or future-dated state, and suppress an
+emission when its counter cannot be persisted. Single-instance enforcement
+remains required; the counter is not a cross-process lock.
+
+Local sizing changes use a recent cache entry for the candidate's actual
+exchange shard, apply the existing shard-cash stake percentage, and round down
+on the centi-contract grid. The router's independent stake and collateral
+checks remain in place. A candidate made routable by the resize additionally
+requires positive recorded selected-side net EV and a positive final EV
+recheck; this is not evidence that the previously rejected candidates have
+positive edge. If the exact shard balance is unavailable or stale, no
+stake-based resize is attempted and the router still decides.
+
+These changes are not deployed or live-accepted. The 480/day budget can
+still be exhausted before midnight because it counts emissions rather than
+wire submissions; changing its accounting or limit is a separate risk-policy
+decision. Rollover-feed replay acceptance, host time synchronization, and the
+process-termination investigation remain open.
+
+At 13:17 UTC the live drain profile reported 41,120 drops in its 60-second
+window, and the book rollup reported `unverified_offset_expired` for all
+28,378 applied events. The first inspected expired-status rollup began at
+05:40 UTC. The code records the venue-clock calibration at WebSocket
+authentication and expires it after 1,800 seconds by default, but no periodic
+refresh was found. This explains the persistent unverified status; it does
+not by itself establish the cause of the drop burst. Host synchronization and
+live acceptance of calibration refresh remain open. The local refresh candidate
+uses the existing live REST Date clock, samples off the WS loop before expiry,
+and fails closed on request failure, cached responses, clock steps, delayed
+delivery, or an older sample. It has mocked offline tests only; network
+provenance, scheduling, and rollover behavior require live verification.
+
+A further entry-readiness boundary defect was found: the WS-owned quote branch
+could mark ownership trusted from a fresh REST mirror even when `ws_fresh` was
+false. That did not establish that the priced quote was REST-owned. The local
+fix requires the actual WS owner to pass `ws_fresh`; an independently fresh
+REST quote remains eligible only when REST owns the effective quote and the
+degraded-entry policy permits it. This safety fix is also not deployed.
+
+At approximately 13:33 UTC, authorized read-only exchange checks returned zero
+resting orders and zero nonzero positions, with no pagination cursor. The
+local unified-health response reported zero cached open positions, but the
+authenticated reconciliation endpoint returned HTTP 401 and settlement
+worker drain state was not available. No restart was attempted: zero orders
+and positions alone do not prove reconciliation and settlement readiness.

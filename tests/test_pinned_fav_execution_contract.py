@@ -74,33 +74,35 @@ def test_intent_requires_post_only_via_stamped_policy():
     assert _intent_requires_post_only(intent) is True
 
 
-def test_strict_passivity_reprice_cannot_drift_below_lane_band():
-    """ask repricing to <=92c must not reprice a pinned_fav buy to 91c —
-    the book repricing down through MAKER_LO is the pin breaking; the
-    passive fill at 91 is the adverse fill the floor exists to avoid."""
+def test_strict_passivity_reprice_cannot_drift_below_lane_band(monkeypatch):
+    """The current 94c floor must not be repriced to 93c."""
     from merid.event_venues.kalshi.order_router import (
         _post_only_strict_passivity,
     )
 
-    intent = _intent(price_cents=92)
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "94")
+    intent = _intent(price_cents=94)
     new_px, reason = _post_only_strict_passivity(
-        intent, {"bid_cents": 90, "ask_cents": 92}
+        intent, {"bid_cents": 92, "ask_cents": 94}
     )
     assert new_px is None
     assert reason is not None
     assert "below_lane_band" in reason
 
 
-def test_strict_passivity_in_band_reprice_still_allowed():
+def test_strict_passivity_in_band_reprice_still_allowed(monkeypatch):
     from merid.event_venues.kalshi.order_router import (
         _post_only_strict_passivity,
     )
 
-    intent = _intent(price_cents=94)
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "94")
+    intent = _intent(price_cents=96)
     new_px, reason = _post_only_strict_passivity(
-        intent, {"bid_cents": 92, "ask_cents": 94}
+        intent, {"bid_cents": 94, "ask_cents": 96}
     )
-    assert new_px == 93
+    assert new_px == 95
     assert reason is None
 
 

@@ -1989,20 +1989,41 @@ def pinned_fav_state_path() -> str:
     )
 
 
+_pinned_fav_counter_lock = threading.RLock()
+
+
+def _pinned_fav_count_for_day(path: str, day: str) -> int:
+    """Read the emission budget, rolling over only to a later UTC day."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return 0
+    stored_day = rec["date"]
+    if not isinstance(stored_day, str) or datetime.strptime(
+        stored_day, "%Y-%m-%d"
+    ).date().isoformat() != stored_day:
+        raise ValueError("invalid pinned-favorite budget date")
+    count = rec["count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("invalid pinned-favorite budget count")
+    if stored_day > day:
+        raise ValueError("pinned-favorite budget date is ahead of host UTC date")
+    return count if stored_day == day else 0
+
+
 def pinned_fav_fills_today(
     path: Optional[str] = None, now: Optional[float] = None
 ) -> int:
-    """Pinned-fav submissions recorded for the current UTC day."""
+    """Pinned-fav decision emissions for the current UTC day; fail closed."""
     now = time.time() if now is None else float(now)
     day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
-    try:
-        with open(path or pinned_fav_state_path(), "r", encoding="utf-8") as f:
-            rec = json.load(f)
-        if rec.get("date") == day:
-            return int(rec.get("count") or 0)
-    except Exception:
-        pass
-    return 0
+    with _pinned_fav_counter_lock:
+        try:
+            return _pinned_fav_count_for_day(path or pinned_fav_state_path(), day)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            logger.error("Pinned-favorite budget unavailable; failing closed: %s", exc)
+            return max(0, pinned_fav_daily_max())
 
 
 def pinned_fav_cap_remaining(
@@ -2014,22 +2035,26 @@ def pinned_fav_cap_remaining(
 def record_pinned_fav_submission(
     path: Optional[str] = None, now: Optional[float] = None
 ) -> int:
-    """Increment today's pinned-fav submission counter; returns new count.
+    """Increment today's pinned-fav decision-emission counter; returns new count.
 
-    Same durable one-line counter discipline as the escape lane: counting
-    submissions (not fills) is the stricter bound — a post-only probe that
-    never fills still consumes the slot.
+    Emissions, including those rejected downstream, consume the daily budget.
     """
     now = time.time() if now is None else float(now)
     p = path or pinned_fav_state_path()
     day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
-    count = pinned_fav_fills_today(p, now) + 1
-    try:
-        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"date": day, "count": count}))
-        os.replace(tmp, p)
-    except Exception:
-        pass
-    return count
+    with _pinned_fav_counter_lock:
+        count = _pinned_fav_count_for_day(p, day) + 1
+        directory = os.path.dirname(p) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, delete=False
+            ) as f:
+                tmp = f.name
+                json.dump({"date": day, "count": count}, f)
+            os.replace(tmp, p)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+        return count

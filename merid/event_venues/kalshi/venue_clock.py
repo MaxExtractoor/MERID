@@ -62,6 +62,7 @@ different clock domains need their own calibration.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -255,6 +256,27 @@ class VenueClockCalibration:
         with self._lock:
             self._m = None
         logger.warning("[VENUE-CLOCK] %s calibration cleared: %s", self.venue, reason)
+
+    def record_measurement_if_newer(self, measurement: ClockOffsetMeasurement) -> bool:
+        """Do not let a delayed refresh overwrite a newer authentication sample."""
+        with self._lock:
+            if self._m is not None and (
+                self._m.measured_at_monotonic >= measurement.measured_at_monotonic
+            ):
+                return False
+            self._m = measurement
+        logger.info(
+            "[VENUE-CLOCK] %s refreshed offset=%+.3fs src=%s precision=+/-%.2fs rtt=%s",
+            self.venue, measurement.server_minus_local_seconds, measurement.source,
+            measurement.precision_seconds, measurement.rtt_seconds,
+        )
+        return True
+
+    def refresh_after_seconds(self) -> float:
+        """Refresh comfortably before expiry, without increasing its threshold."""
+        if not math.isfinite(self._max_offset_age_s) or self._max_offset_age_s <= 0:
+            return 1.0
+        return max(1.0, min(600.0, self._max_offset_age_s / 2.0))
 
     def offset_state(
         self,

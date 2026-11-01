@@ -446,6 +446,16 @@ from merid.config.observe_only import is_observe_only
 from merid.config.live_config import get_resolved_live_config
 
 
+def _entry_quote_owner_trusted(qgate: Dict[str, Any]) -> bool:
+    """Trust only the actual effective quote's independently fresh source."""
+    owner = qgate.get("quote_owner", "NONE_UNTRUSTED")
+    if owner == "WS_FRESH_VERIFIED":
+        return bool(qgate.get("ws_fresh"))
+    if owner == "REST_VERIFIED_DEGRADED":
+        return bool(qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh"))
+    return False
+
+
 @dataclass(frozen=True)
 class EntryReadiness:
     """Per-contract readiness diagnosis for the 15m entry gate.
@@ -5673,26 +5683,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             # a fresh REST source; a WS-owned quote must itself be fresh.
             # NONE_UNTRUSTED (or any other owner) never permits entries.
             _q_owner = qgate.get("quote_owner", "NONE_UNTRUSTED")
-            if _q_owner == "WS_FRESH_VERIFIED":
-                quote_owner_trusted = bool(qgate.get("ws_fresh"))
-                if not quote_owner_trusted and bool(
-                    qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
-                ):
-                    # 2026-10-02: quiet-book flap fix.  The owner latch stays
-                    # WS_FRESH_VERIFIED even when no delta has arrived inside
-                    # the 1.5s entry budget — on an idle book that can hold
-                    # for many seconds, silently locking every entry while a
-                    # fresh REST mirror is available.  Degrade to REST
-                    # trust instead; quote_fresh/quote_coherent still gate the
-                    # priced quote itself, so a genuinely stale book remains
-                    # fail-closed.
-                    quote_owner_trusted = True
-            elif _q_owner == "REST_VERIFIED_DEGRADED":
-                quote_owner_trusted = bool(
-                    qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
-                )
-            else:
-                quote_owner_trusted = False
+            quote_owner_trusted = _entry_quote_owner_trusted(qgate)
             _ws_rest_div_c = None
             _bdiv = qgate.get("ws_rest_bid_diff_ticks")
             _adiv = qgate.get("ws_rest_ask_diff_ticks")
@@ -6882,7 +6873,7 @@ async def _run_loop(self) -> None:
                             
                             # Use dynamic position sizing if enabled
                             try:
-                                from merid.prediction.unified_sizing import compute_order_size
+                                from merid.prediction.unified_sizing import compute_order_size, shard_stake_cap_usd
                                 from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_async
                                 from decimal import Decimal
                                 
@@ -6951,6 +6942,24 @@ async def _run_loop(self) -> None:
                                 time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
                                 _fee_cents = candidate.get("fee_cents")
                                 _tte_seconds = candidate.get("time_to_expiry_seconds")
+                                # Only use fresh cash for the market's actual shard.
+                                # The router independently rechecks its own stake gate.
+                                _stake_cap_usd = None
+                                try:
+                                    from merid.event_venues.kalshi.shard_funding import fresh_cached_shard_cash
+                                    _shard = candidate.get("exchange_index")
+                                    if _shard is None and getattr(self, "_catalog", None):
+                                        _cm = self._catalog.get_market(ticker)
+                                        _shard = getattr(_cm, "exchange_index", None)
+                                    if _shard is not None and not isinstance(_shard, bool):
+                                        _cash = fresh_cached_shard_cash(int(_shard))
+                                        if _cash is not None:
+                                            _stake_cap_usd = shard_stake_cap_usd(
+                                                _cash,
+                                                Decimal(os.getenv("MERID_MAX_STAKE_PCT_SHARD_CASH", "0.35") or "0.35"),
+                                            )
+                                except (ValueError, TypeError, ArithmeticError) as _stake_err:
+                                    logger.warning("[15M-LOOP] stake sizing unavailable for %s: %s", ticker, _stake_err)
                                 count, notional, metadata = compute_order_size(
                                     bankroll_usd=Decimal(str(bankroll_usd)),
                                     price_cents=int(price_cents),
@@ -6961,6 +6970,7 @@ async def _run_loop(self) -> None:
                                     consider_fee_impact=True,
                                     estimated_fee_cents=int(_fee_cents) if _fee_cents is not None else None,
                                     tte_seconds=_tte_seconds,
+                                    stake_cap_usd=_stake_cap_usd,
                                     # 2026-10-18: bounded lanes (window_quota,
                                     # pinned_fav, cells, canaries) are admitted
                                     # under their own stamped floors at
@@ -6980,6 +6990,7 @@ async def _run_loop(self) -> None:
                                 )
                                 
                                 candidate["count"] = count
+                                candidate["_stake_cap_applied"] = bool(metadata.get("stake_cap_applied"))
 
                                 # FVG-influenced trades are scaled by MERID_FVG_SIZE_SCALE (default 0.5)
                                 # to reduce live exposure while the placebo matrix is being collected.
@@ -10743,6 +10754,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 )
                 count = approved_count
 
+        # A stake-sized candidate was previously rejected by the router.
+        # Do not turn that rejection into an order without positive
+        # decision-time executable economics and a final EV recheck.
+        if candidate.get("_stake_cap_applied"):
+            from merid.prediction.unified_sizing import (
+                stake_sizing_evidence_is_positive,
+                stake_sizing_final_ev_is_positive,
+            )
+            if (
+                not stake_sizing_evidence_is_positive(trade_decision, candidate.get("side", ""))
+                or price_cents is None or price_cents <= 0
+            ):
+                return self._mark_reject(
+                    candidate, "sizing", "stake_sizing_positive_ev_unavailable"
+                )
+
         # 2026-08-29: Re-gate the final submitted price and quantity with the
         # executable-cost EV gate.  The gate approved a decision-time snapshot;
         # if the actual submitted price or quantity has drifted, it must be
@@ -10821,6 +10848,12 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                         min_ev_to_tail_ratio=_lane_min_ev_tail,
                     )
                     ev_result = evaluate_executable_cost_ev(ev_input)
+                    if candidate.get("_stake_cap_applied") and not stake_sizing_final_ev_is_positive(ev_result):
+                        return self._mark_reject(
+                            candidate, "executable_cost_ev_gate",
+                            "stake_sizing_nonpositive_ev",
+                            observed=str(ev_result.net_ev), required=">0",
+                        )
                     if not ev_result.allowed:
                         self._rejection_counters["ev_gate_rejected"] += 1
                         candidate["_reject_detail"] = {
@@ -12985,4 +13018,3 @@ def get_kalshi_15m_loop(
         catalog=catalog,
         ws_bridge=ws_bridge,
     )
-

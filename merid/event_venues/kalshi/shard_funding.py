@@ -136,6 +136,22 @@ def last_result() -> Optional[ShardFundingResult]:
     return _last_result
 
 
+def fresh_cached_shard_cash(shard: int, max_age_s: float = 15.0) -> Optional[Decimal]:
+    """Return recent cash for the exact shard without performing network I/O."""
+    now = time.time()
+    age = now - _bal_cache_ts
+    if 0 <= age <= max_age_s and shard in _bal_cache:
+        return _bal_cache[shard]
+    age = now - _last_check_ts
+    if (
+        0 <= age <= max_age_s
+        and _last_result is not None
+        and shard in _last_result.shard_balances
+    ):
+        return _last_result.shard_balances[shard]
+    return None
+
+
 async def ensure_trading_shard_funded(
     client: Any,
     catalog: Any = None,

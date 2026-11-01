@@ -22,6 +22,7 @@ import time as _time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import websockets
 from merid.circuit_breaker import get_circuit_breaker, CircuitState as MeridCircuitState
@@ -299,6 +300,7 @@ class KalshiWebSocket(EventVenueStream):
         self._msg_queue: Optional[asyncio.Queue] = None
         self._msg_queue_guard = threading.Lock()
         self._processor_task: Optional[asyncio.Task] = None
+        self._clock_refresh_task: Optional[asyncio.Task] = None
         self._priority_msg_queue: Optional[asyncio.Queue] = None
 
         # ── Orderbook snapshot cache ───────────────────────────────────
@@ -964,6 +966,17 @@ class KalshiWebSocket(EventVenueStream):
         """Close WebSocket with hardened error handling for Windows I/O errors."""
         self._running = False
 
+        refresh_task = getattr(self, "_clock_refresh_task", None)
+        if refresh_task is not None:
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[VENUE-CLOCK] refresh task failed: %s", exc)
+            self._clock_refresh_task = None
+
         # Cancel supervisor first to prevent action during shutdown
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
@@ -1616,6 +1629,17 @@ class KalshiWebSocket(EventVenueStream):
         # SEV-0 FIX: Permanent self-healing main loop - never exits while process is running
         # This prevents the 476s blind periods by ensuring continuous reconnection attempts
         self._running = True
+        _ws_host = urlsplit(str(getattr(self.config, "ws_base_url", ""))).hostname
+        if (
+            not is_replay_active()
+            and _ws_host in ("external-api-ws.kalshi.com", "external-api.kalshi.com")
+            and (self._clock_refresh_task is None or self._clock_refresh_task.done())
+        ):
+            from merid.event_venues.kalshi.venue_clock_refresh import maintain_live_clock
+            self._clock_refresh_task = asyncio.create_task(
+                maintain_live_clock(get_venue_clock("kalshi"), lambda: self._running),
+                name="kalshi-venue-clock-refresh",
+            )
         while self._running:
             try:
                 logger.info("[WS-MAIN] Starting connection attempt...")
