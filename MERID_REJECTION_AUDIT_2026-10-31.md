@@ -235,11 +235,13 @@ honest opportunity absence rather than a contaminated evaluation.
 - Thresholds unchanged: res bound 4000ms, age bound
   `4000−250=3750ms`, upstream-wait 2500ms — no relaxation.
 
-**Host note**: `w32tm` service is stopped and this shell lacks elevation
-to start it — the +3.08s skew persists and is now *handled*, but an
-admin `Start-Service W32Time; w32tm /resync` remains worthwhile ops
-hygiene; the step-invalidation path will correctly void the stored
-offset the moment the host clock is corrected.
+**Host note (OPEN)**: `w32tm` service is stopped and this shell lacks
+elevation to start it — the skew persists (measured -2.63s on the latest
+calibration, drifting vs the earlier -3.08s) and is *handled*, but host
+synchronization is **open ops debt**, not closed: an administrator still
+needs `Start-Service W32Time; w32tm /resync` plus verification that the
+stored offset invalidates and a fresh measurement lands without a false
+freshness/stale-drop transition.  No freshness-threshold change needed.
 
 **Live verification** (run `20261101030426_10272_cbfb4b9b`,
 `LIVE_ENTRIES_ENABLED` 23:04:49):
@@ -294,18 +296,23 @@ without status, so a `bridge_recv_wall(unverified_*)` fallback (~30ms
 receipt age) satisfied the ≤2000ms `ws_entry_event_age_ms` leg and made
 `ws_fresh` true — a recently-received-but-unverifiable frame became
 "venue fresh."  Fix: the event-age leg now counts only when the applied
-frame's status is `measured` or `no_venue_ts` (frame classes with no ts
-have nothing to verify; receipt recency remains their honest measure);
-`unverified_*`/`anomaly_*` statuses make `ws_fresh` fail closed, and the
-gate exports `ws_event_age_verified`/`_status`/`_src`.  The REST-degrade
+frame's status is `measured`.  `unverified_*`/`anomaly_*` fail closed,
+and `no_venue_ts` is classified *receipt-recent; venue age unavailable* —
+Kalshi's `orderbook_delta` schema always carries `ts`/`ts_ms`, so a
+delta without one is malformed rather than a legitimate no-ts class;
+it is retained for ordered reconstruction but does not satisfy venue
+freshness.  The gate exports `ws_event_age_basis`
+(`measured_venue_age` / `receipt_only_no_venue_ts` / `unverified` /
+`legacy_unstamped`) so decision telemetry distinguishes the basis.  The REST-degrade
 fallback in `loop_15m` is unaffected — it trusts an independent fresh
 REST mirror under the explicit degraded-entry policy, never the WS
 receipt fallback.  E2E tests: `test_unverified_venue_age_does_not_pass_
 freshness_gate` (retained-for-reconstruction → status stamped → gate
 fails closed), `test_measured_venue_age_passes_freshness_gate`,
-`test_no_venue_ts_uses_receipt_recency`.  `agent_grid_15m` now freezes
-`ws_last_event_age_status`/`_src` into decision indicators for the
-audit chain.
+`test_no_venue_ts_delta_is_malformed_not_verified` (malformed no-ts
+delta retained for reconstruction, fails freshness closed).
+`agent_grid_15m` now freezes `ws_last_event_age_status`/`_src` into
+decision indicators for the audit chain.
 
 **Residual rollover backpressure — instrumentation, not capacity.**
 `[BOOK-TIMING-ROLLUP]` (bounded 60s aggregate on the apply path) reports
@@ -339,6 +346,16 @@ ordered drain per subscription.  Note: apply-path rollup rows emitted
 from multiple drain threads initially duplicated; serialized in
 `7d061001`.
 
+**Drain-path profiler (next measurement).**  `_process_queue` now emits
+a bounded 60s aggregate to `logs/pq_drain_profile.jsonl` splitting
+per-message cost (`shed_eval_ms`, `dispatch_ms`, `handler_duty_ms_per_s`)
+from scheduling starvation (`sched_gap_ms` while a backlog exists,
+`idle_wait_ms`, `nonempty_iter_share`) — distinguishing "per-message
+work too expensive" from "loop does not schedule it" before any
+drain-path change.  Both durable channels write through
+`merid/utils/rollup_writer.BoundedJsonlWriter` — bounded records,
+size-capped rotation, counted write failures, single-owner emission.
+
 **Process-termination track — still unclassified.**  The silent-death
 signature (PID 8052, ~35s into import, no traceback/WER/faulthandler)
 is a distinct reliability incident, *not* assumed to share the
@@ -347,12 +364,17 @@ termination capture: WMI-detached, records process inventory (PID, PPID,
 executable, command line, launch method) at start, polls the server PID,
 and on disappearance writes a JSONL termination record (last-seen state,
 exit timestamp, WER lookup window) to `logs/process_watchdog.jsonl` —
-outside the application's own log path.  `Win32_Process.Create`
-surviving is consistent with a session-tree kill but remains a
-hypothesis; the watchdog supplies the evidence to classify the next
-event.  Single-instance enforcement is preserved: the watchdog observes
-only; the launched child still passes `start_15m.ps1` → lifespan
-single-instance guard.
+outside the application's own log path.  Controlled kills it has
+recorded so far show `exit_code=null` — that is **exit status
+unavailable** (a killed process may not expose ExitCode through the
+limited handle); it does *not* establish an external force-kill, and
+the session-tree explanation remains a hypothesis.  Single-instance
+enforcement is preserved: the watchdog observes only; the launched
+child still passes `start_15m.ps1` → lifespan single-instance guard.
+
+**Deployed-vs-committed note**: production runs `7d061001` (code) —
+the later commit `a600f6f7` is a documentation-only change and is not
+expected to alter the deployment sha reported by the running process.
 
 **5.2M "superseded" counter scope**: `_ent[0]` counts *dropped frames per
 ticker since process start* — cumulative, not per-incident.  The new

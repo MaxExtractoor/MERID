@@ -2191,10 +2191,32 @@ class KalshiWebSocket(EventVenueStream):
         _BATCH_SIZE_HIGH_PRESSURE = 200
         _PRESSURE_THRESHOLD = 0.50
         _COOPERATIVE_YIELD_EVERY = 25
-        
+
+        # 2026-10-31: bounded drain-path profiler.  Rollover measurement
+        # localised residual lag to _msg_queue residence (~3.2s mean at
+        # ~840/s arrival) — this splits that into per-message cost
+        # (shed predicate, parse+dispatch await) versus event-loop
+        # scheduling gap between drain iterations, emitted as one
+        # aggregate row per ~60s to logs/pq_drain_profile.jsonl.  ~4
+        # monotonic_ns() reads per message; never logs per-message.
+        _pq_prof = {
+            "t0": _time.monotonic(),
+            "items": 0,
+            "iters": 0,
+            "nonempty_iters": 0,
+            "drops": 0,
+            "shed_ms": 0.0, "shed_max": 0.0,
+            "disp_ms": 0.0, "disp_max": 0.0,
+            "gap_ms": 0.0, "gap_max": 0.0,
+            "idle_ms": 0.0,
+            "writer": None,
+        }
+        _pq_last_iter_end_ns = _time.monotonic_ns()
+
         loop_iteration = 0
         while self._running:
             loop_iteration += 1
+            _pq_iter_start_ns = _time.monotonic_ns()
             # DIAGNOSTIC: Log every 10 iterations to confirm loop is running
             if loop_iteration % 10 == 1:
                 logger.debug("[WS-PROCESSOR] Loop iteration %d, queue_size=%d, running=%s", loop_iteration, self._ensure_msg_queue().qsize(), self._running)
@@ -2225,6 +2247,17 @@ class KalshiWebSocket(EventVenueStream):
                 queue_size = batch_queue.qsize()
                 queue_util = queue_size / batch_queue.maxsize
                 batch_size = _BATCH_SIZE_HIGH_PRESSURE if queue_util > _PRESSURE_THRESHOLD else _BATCH_SIZE_LOW_PRESSURE
+
+                # Drain profiler: scheduling gap between iterations while a
+                # backlog exists — the event-loop starvation component of
+                # pq_wait (an empty queue's gap is idle, not starvation).
+                _pq_prof["iters"] += 1
+                if queue_size > 0:
+                    _pq_prof["nonempty_iters"] += 1
+                    _gap_ms = (_pq_iter_start_ns - _pq_last_iter_end_ns) / 1e6
+                    _pq_prof["gap_ms"] += _gap_ms
+                    if _gap_ms > _pq_prof["gap_max"]:
+                        _pq_prof["gap_max"] = _gap_ms
                 
                 # PERFORMANCE FIX: Log queue pressure warnings and trigger backpressure
                 if queue_util > 0.90:  # 90% utilization is critical
@@ -2282,6 +2315,7 @@ class KalshiWebSocket(EventVenueStream):
                                 if i == 0:
                                     _get_main = asyncio.ensure_future(batch_queue.get())
                                     _get_prio = asyncio.ensure_future(priority_queue.get())
+                                    _idle_t0_ns = _time.monotonic_ns()
                                     _done, _pending = await asyncio.wait(
                                         (_get_main, _get_prio),
                                         timeout=1.0,
@@ -2302,6 +2336,9 @@ class KalshiWebSocket(EventVenueStream):
                                         ),
                                         key=lambda _rq: 0 if _rq[1] is priority_queue else 1,
                                     )
+                                    _pq_prof["idle_ms"] += (
+                                        _time.monotonic_ns() - _idle_t0_ns
+                                    ) / 1e6
                                     if not _results:
                                         break
                                     item, item_queue = _results[0]
@@ -2343,6 +2380,7 @@ class KalshiWebSocket(EventVenueStream):
                         isinstance(data, dict)
                         and data.get("type") == "orderbook_delta"
                     ):
+                        _shed_t0_ns = _time.monotonic_ns()
                         _ws_recv_ns0 = data.get("_t_ws_recv_ns")
                         if _ws_recv_ns0:
                             _res_ms = (_pq_deq_ns - float(_ws_recv_ns0)) / 1e6
@@ -2495,7 +2533,21 @@ class KalshiWebSocket(EventVenueStream):
                                         item_queue.task_done()
                                     except Exception:
                                         pass
+                                    _sh = (_time.monotonic_ns() - _shed_t0_ns) / 1e6
+                                    _pq_prof["shed_ms"] += _sh
+                                    if _sh > _pq_prof["shed_max"]:
+                                        _pq_prof["shed_max"] = _sh
+                                    _pq_prof["drops"] += 1
+                                    _pq_prof["items"] += 1
                                     continue
+
+                    # Shed-region cost ends here for the forward path —
+                    # covers predicate eval, drop bookkeeping, attribution.
+                    if isinstance(data, dict) and data.get("type") == "orderbook_delta":
+                        _sh = (_time.monotonic_ns() - _shed_t0_ns) / 1e6
+                        _pq_prof["shed_ms"] += _sh
+                        if _sh > _pq_prof["shed_max"]:
+                            _pq_prof["shed_max"] = _sh
 
                     # Attach any pending dropped-frame attributions for this
                     # sid to the next forwarded orderbook delta.
@@ -2509,6 +2561,7 @@ class KalshiWebSocket(EventVenueStream):
                             if _pend:
                                 data["_dropped_delta_frames"] = _pend
 
+                    _disp_t0_ns = _time.monotonic_ns()
                     try:
                         event = self._parse_message(data)
                         if event:
@@ -2533,6 +2586,11 @@ class KalshiWebSocket(EventVenueStream):
                             item_queue.task_done()
                         except Exception:
                             pass
+                    _dp = (_time.monotonic_ns() - _disp_t0_ns) / 1e6
+                    _pq_prof["disp_ms"] += _dp
+                    if _dp > _pq_prof["disp_max"]:
+                        _pq_prof["disp_max"] = _dp
+                    _pq_prof["items"] += 1
                     messages_processed += 1
 
                 # Yield control briefly if we did not fill the first slot of a batch.
@@ -2542,6 +2600,57 @@ class KalshiWebSocket(EventVenueStream):
                 # If we processed nothing in batch mode, yield control briefly
                 if messages_processed == 0 and batch_size > 1:
                     await asyncio.sleep(0.001)
+
+                _pq_last_iter_end_ns = _time.monotonic_ns()
+                _pq_elapsed = _time.monotonic() - _pq_prof["t0"]
+                if _pq_elapsed >= 60.0:
+                    try:
+                        if _pq_prof["writer"] is None:
+                            from merid.utils.rollup_writer import BoundedJsonlWriter
+                            _pq_prof["writer"] = BoundedJsonlWriter(
+                                os.path.join(
+                                    os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "..", "..", "logs",
+                                    "pq_drain_profile.jsonl",
+                                )
+                            )
+                        _n = max(_pq_prof["items"], 1)
+                        _g = max(_pq_prof["nonempty_iters"], 1)
+                        _pq_prof["writer"].append({
+                            "ts": _time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", _time.gmtime()
+                            ),
+                            "window_s": round(_pq_elapsed, 1),
+                            "items": _pq_prof["items"],
+                            "items_per_s": round(_pq_prof["items"] / _pq_elapsed, 1),
+                            "iters": _pq_prof["iters"],
+                            "nonempty_iter_share": round(
+                                _pq_prof["nonempty_iters"] / max(_pq_prof["iters"], 1), 3
+                            ),
+                            "drops": _pq_prof["drops"],
+                            "shed_eval_ms_mean": round(_pq_prof["shed_ms"] / _n, 3),
+                            "shed_eval_ms_max": round(_pq_prof["shed_max"], 1),
+                            "dispatch_ms_mean": round(_pq_prof["disp_ms"] / _n, 3),
+                            "dispatch_ms_max": round(_pq_prof["disp_max"], 1),
+                            "sched_gap_ms_mean": round(_pq_prof["gap_ms"] / _g, 2),
+                            "sched_gap_ms_max": round(_pq_prof["gap_max"], 1),
+                            "idle_wait_ms_mean": round(
+                                _pq_prof["idle_ms"] / max(_pq_prof["iters"], 1), 2
+                            ),
+                            "handler_duty_ms_per_s": round(
+                                (_pq_prof["disp_ms"] + _pq_prof["shed_ms"])
+                                / _pq_elapsed, 1
+                            ),
+                        })
+                    except Exception:
+                        pass
+                    _pq_prof.update({
+                        "t0": _time.monotonic(), "items": 0, "iters": 0,
+                        "nonempty_iters": 0, "drops": 0,
+                        "shed_ms": 0.0, "shed_max": 0.0,
+                        "disp_ms": 0.0, "disp_max": 0.0,
+                        "gap_ms": 0.0, "gap_max": 0.0, "idle_ms": 0.0,
+                    })
                     
             except asyncio.CancelledError:
                 break
