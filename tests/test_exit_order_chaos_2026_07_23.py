@@ -569,9 +569,11 @@ class TestConcurrentTriggerScenarios:
         )
 
         # Reconciliation resolves the unknown outcome -> retry allowed
-        position_monitor._mark_exit_intent_reconciled(
-            position_id, "test_reconcile_unfilled"
-        )
+        position_monitor._exit_intent_in_flight[position_id]["client_order_id"] = "exit-test"
+        with patch.object(position_monitor, "_transition_exit_attempt", return_value="attempt-1"):
+            position_monitor._mark_exit_intent_reconciled(
+                position_id, "not_accepted_confirmed"
+            )
         assert position_monitor._is_exit_intent_in_flight(position_id) is False
     
     def test_multiple_positions_independent_locks(self, position_monitor):

@@ -2,16 +2,15 @@
 Regression tests for 2026-08-27 forced exit / stale in-flight reconciliation.
 
 Covers the two critical patches:
-1. _reconcile_exit_intent can be called with force=True to clear a stale
-   SUBMISSION_UNKNOWN lock when the prior order is not live.
-2. _emit_exit_intent is async and will force-reconcile an in-flight lock for
-   safety exits (settlement guard, loss cap, etc.) before allowing a new exit.
+1. Empty or failed lookups preserve a SUBMISSION_UNKNOWN lock.
+2. Forced exits reconcile the prior order before allowing a new exit.
 """
 
 import asyncio
 import os
+import time
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -19,6 +18,7 @@ from merid.position_management.position import Position, PositionSide
 from merid.position_management.position_monitor import PositionMonitor
 from merid.position_management.exit_policy import ExitReason
 from merid.resilience.result import OperationResult
+from merid.event_venues.base import PlacedOrder
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def test_settlement_guard_env_override(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_emit_exit_intent_forces_reconcile_on_submission_unknown(monitor, monkeypatch):
-    """A SETTLEMENT_GUARD intent must clear a stale SUBMISSION_UNKNOWN lock and re-emit."""
+    """An empty lookup cannot authorize another exit, even for a forced exit."""
     # The 2026-10-14 profit_only_v1 breakeven floor suppresses below-entry
     # sells (exit 30c < entry 50c) before intent emission — orthogonal to the
     # stale-lock reconcile path under test.
@@ -114,30 +114,36 @@ async def test_emit_exit_intent_forces_reconcile_on_submission_unknown(monitor, 
             snapshot=None,
         )
 
-    assert len(callback_called) == 1
-    assert callback_called[0][2] == 30
-    assert callback_called[0][1] == ExitReason.SETTLEMENT_GUARD
-    # A new in-flight record should be present for the forced exit.
+    assert not callback_called
     assert monitor._is_exit_intent_in_flight(position.position_id) is True
     flight = monitor._exit_intent_in_flight[position.position_id]
-    assert flight["reason"] == ExitReason.SETTLEMENT_GUARD.value
-    assert flight["state"] == "EXECUTION_PENDING"
+    assert flight["reason"] == ExitReason.TAKE_PROFIT.value
+    assert flight["state"] == "SUBMISSION_UNKNOWN"
 
 
 @pytest.mark.asyncio
-async def test_reconcile_exit_intent_force_cancels_stale_open_order(monitor):
+async def test_reconcile_exit_intent_force_cancels_stale_open_order(monitor, monkeypatch):
     """A forced reconcile must cancel an existing open order at a stale price."""
     position = _make_position()
     monitor.add_position(position)
 
     client_order_id = "merid_test_stale_open"
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock(return_value="attempt-1"))
+    monkeypatch.setattr(monitor, "_update_order_attempt_status", Mock())
     monitor._position_to_client_order[position.position_id] = client_order_id
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": 0.0,
+        "client_order_id": client_order_id, "reason": ExitReason.TAKE_PROFIT.value,
+    }
 
     # Exchange reports an open order at 80c while the new settlement-guard exit is 30c.
     stale_order = MagicMock()
     stale_order.order_id = "ord_stale_123"
     stale_order.status = "open"
     stale_order.price = Decimal("0.80")
+    stale_order.filled_size = Decimal("0")
+    stale_order.market_id = position.market_id
+    stale_order.raw_data = {"client_order_id": client_order_id, "fill_count_fp": "0.00"}
 
     fake_client = MagicMock()
     fake_client.get_order_by_client_id_result = AsyncMock(
@@ -158,8 +164,15 @@ async def test_reconcile_exit_intent_force_cancels_stale_open_order(monitor):
             new_price_cents=30,
         )
 
-    # The stale open order should have been cancelled and the lock released.
+    # A cancel acknowledgement alone does not prove no fill raced the cancel.
     fake_client.cancel_order_result.assert_awaited_once()
+    assert monitor._is_exit_intent_in_flight(position.position_id) is True
+    stale_order.status = "canceled"
+    with patch(
+        "merid.event_venues.kalshi.client.get_kalshi_client",
+        return_value=fake_client,
+    ):
+        await monitor._reconcile_exit_intent(position.position_id, client_order_id)
     assert monitor._is_exit_intent_in_flight(position.position_id) is False
     assert position.exit_triggered is False
 
@@ -185,6 +198,8 @@ async def test_reconcile_exit_intent_keeps_live_same_price_order(monitor):
     live_order.order_id = "ord_live_456"
     live_order.status = "resting"
     live_order.price = Decimal("0.30")
+    live_order.market_id = position.market_id
+    live_order.raw_data = {"client_order_id": client_order_id}
 
     fake_client = MagicMock()
     fake_client.get_order_by_client_id_result = AsyncMock(
@@ -208,6 +223,86 @@ async def test_reconcile_exit_intent_keeps_live_same_price_order(monitor):
     # Same price means no cancel; the in-flight lock should remain live.
     fake_client.cancel_order_result.assert_not_awaited()
     assert monitor._is_exit_intent_in_flight(position.position_id) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["empty", "client_mismatch", "market_mismatch", "missing_fills", "partial", "executed"]
+)
+async def test_inconclusive_order_evidence_preserves_exit_lock(monitor, monkeypatch, case):
+    position = _make_position()
+    monitor.add_position(position)
+    coid = "exit_inconclusive"
+    monitor._position_to_client_order[position.position_id] = coid
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": time.time(), "client_order_id": coid,
+    }
+    raw = {"client_order_id": coid, "fill_count_fp": "0.00"}
+    market = position.market_id
+    status = "canceled"
+    if case == "client_mismatch":
+        raw["client_order_id"] = "other"
+    elif case == "market_mismatch":
+        market = "OTHER-MARKET"
+    elif case == "missing_fills":
+        del raw["fill_count_fp"]
+    elif case == "partial":
+        raw["fill_count_fp"] = "0.50"
+    elif case == "executed":
+        status = "executed"
+        raw["fill_count_fp"] = "1.00"
+    order = None if case == "empty" else PlacedOrder(
+        order_id="order-1", market_id=market, side="sell", size=Decimal("1"),
+        price=Decimal("0.50"), status=status, raw_data=raw,
+    )
+    client = MagicMock()
+    client.get_order_by_client_id_result = AsyncMock(return_value=OperationResult.ok(data=order))
+    client.cancel_order_result = AsyncMock()
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock())
+    update_status = Mock()
+    monkeypatch.setattr(monitor, "_update_order_attempt_status", update_status)
+
+    await monitor._reconcile_exit_intent(position.position_id, coid, force=True, new_price_cents=30)
+    assert monitor._exit_intent_in_flight[position.position_id]["state"] == "SUBMISSION_UNKNOWN"
+    update_status.assert_not_called()
+    client.cancel_order_result.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "reason", ["position_closed", "retry_unknown_submission", "expired_no_client_order_id", "partially_filled"]
+)
+def test_unproven_reason_cannot_terminalize_exit(monitor, monkeypatch, reason):
+    pid = "position-unresolved"
+    monitor._exit_intent_in_flight[pid] = {"state": "SUBMISSION_UNKNOWN", "client_order_id": "exit-1"}
+    transition = Mock()
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", transition)
+    assert monitor._mark_exit_intent_reconciled(pid, reason) is False
+    assert monitor._exit_intent_in_flight[pid]["state"] == "SUBMISSION_UNKNOWN"
+    transition.assert_not_called()
+
+
+def test_failed_durable_transition_preserves_lock(monitor, monkeypatch):
+    pid = "position-unresolved"
+    monitor._exit_intent_in_flight[pid] = {"state": "SUBMISSION_UNKNOWN", "client_order_id": "exit-1"}
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock(return_value=None))
+    assert monitor._mark_exit_intent_reconciled(pid, "order_canceled") is False
+    assert monitor._exit_intent_in_flight[pid]["state"] == "SUBMISSION_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_bypass_flag_does_not_skip_unknown_exit_lock(monitor):
+    position = _make_position()
+    monitor.add_position(position)
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": time.time(), "client_order_id": "exit-1",
+    }
+    monitor._exit_intent_callback = Mock()
+    await monitor._emit_exit_intent(
+        position, ExitReason.TAKE_PROFIT, 80, bypass_in_flight_check=True,
+    )
+    monitor._exit_intent_callback.assert_not_called()
+    assert monitor._exit_intent_in_flight[position.position_id]["state"] == "SUBMISSION_UNKNOWN"
 
 
 @pytest.mark.asyncio
@@ -250,33 +345,8 @@ async def test_reconcile_exit_intent_periodic_retry_counts(monitor):
         await asyncio.sleep(0)
 
 
-def test_cancel_durable_order_attempt_terminalizes_store(monitor):
-    """_cancel_durable_order_attempt must mark a stale SUBMISSION_UNKNOWN record CANCELLED."""
-    fake_store = MagicMock()
-    fake_record = MagicMock(
-        order_attempt_id="oa_test_cancel",
-        status="SUBMISSION_UNKNOWN",
-    )
-    fake_store.get_by_client_order_id = MagicMock(return_value=fake_record)
-    fake_store.update_status = MagicMock(return_value=True)
-
-    with patch(
-        "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore",
-        return_value=fake_store,
-    ):
-        monitor._cancel_durable_order_attempt(
-            "merid_test_cancel",
-            "test_cancel_reason",
-        )
-
-    fake_store.update_status.assert_called_once()
-    call_args = fake_store.update_status.call_args[0]
-    assert call_args[0] == "oa_test_cancel"
-    assert call_args[1] == "CANCELLED"
-
-
-def test_startup_cleanup_clears_expired_position_in_flight(monitor):
-    """_cleanup_stale_exit_in_flight_on_startup must remove expired positions and their locks."""
+def test_startup_cleanup_preserves_expired_unknown_intent(monitor):
+    """Expiry does not establish the outcome of a submitted order."""
     position = _make_position()
     monitor.add_position(position)
 
@@ -309,8 +379,8 @@ def test_startup_cleanup_clears_expired_position_in_flight(monitor):
     ):
         monitor._cleanup_stale_exit_in_flight_on_startup()
 
-    assert position.position_id not in monitor._exit_intent_in_flight
-    assert position.position_id not in monitor._position_to_client_order
-    assert position.position_id not in monitor._open_positions
-    assert client_order_id not in monitor._recent_exit_submissions
+    assert position.position_id in monitor._exit_intent_in_flight
+    assert position.position_id in monitor._position_to_client_order
+    assert position.position_id in monitor._open_positions
+    assert client_order_id in monitor._recent_exit_submissions
     fake_store.update_status.assert_not_called()  # cleanup does not touch store directly

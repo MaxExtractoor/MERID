@@ -11,7 +11,7 @@ Validates:
 
 import pytest
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from merid.event_venues.kalshi.binary_price_space import (
     canonicalize,
@@ -231,5 +231,6 @@ class TestExitIntentTimeoutReconciliation:
         assert monitor._exit_intent_in_flight[position_id]["state"] == "SUBMISSION_UNKNOWN"
 
         # Reconciliation terminalizes the intent and allows a new exit.
-        monitor._mark_exit_intent_reconciled(position_id, "exchange_reconciled")
+        with patch.object(monitor, "_transition_exit_attempt", return_value="attempt-1"):
+            monitor._mark_exit_intent_reconciled(position_id, "not_accepted_confirmed")
         assert monitor._is_exit_intent_in_flight(position_id) is False

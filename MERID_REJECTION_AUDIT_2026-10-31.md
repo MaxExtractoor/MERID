@@ -805,3 +805,13 @@ Individual releases cannot deduct another agent's reservation. However,
 same-agent duplicate releases still require order-level durable identities,
 and full reservation reconstruction and independent reconciliation remain
 open before live use.
+
+The position monitor separately treated expired or missing cached positions
+and empty order lookups as terminal submission outcomes. It now retains
+unknown exit intents, validates the client order and market identity, and
+requires a matched terminal zero-fill order plus a successful durable
+transition before clearing the lock. Cancellation acknowledgements and
+orders with filled or unknown quantities remain locked pending complete
+fill/position reconciliation; the exchange order payload is recorded on the
+successful terminal transition. The complete exit-recovery coordinator and
+protective-service startup verification remain open.

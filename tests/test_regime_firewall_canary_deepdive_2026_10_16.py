@@ -464,7 +464,7 @@ def test_mark_reconciled_uses_caller_coid_when_maps_empty(tmp_path):
         return_value=store,
     ):
         mon._mark_exit_intent_reconciled(
-            "pos_gone_1", "position_closed", "exit_deadbeef"
+            "pos_gone_1", "order_canceled", "exit_deadbeef"
         )
 
     store.get_exit_attempt_by_client_order_id.assert_called_once_with(
@@ -473,7 +473,7 @@ def test_mark_reconciled_uses_caller_coid_when_maps_empty(tmp_path):
     store.transition_exit_attempt.assert_called_once()
     _args, kwargs = store.transition_exit_attempt.call_args
     assert kwargs["attempt_id"] == "att_old_1"
-    assert kwargs["new_state"] == ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
+    assert kwargs["new_state"] == ExitOrderAttemptState.CANCELED.value
 
 
 def test_mark_reconciled_without_coid_and_empty_maps_is_noop(tmp_path):

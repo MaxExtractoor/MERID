@@ -1934,78 +1934,14 @@ class PositionMonitor:
         except Exception as e:
             self._record_cleanup_pending(position, "capacity_release_failed", e)
 
-    def _cancel_durable_order_attempt(self, client_order_id: Optional[str], reason: str) -> None:
-        """Mark a durable order attempt as terminal so it cannot be reused on restart."""
-        if not client_order_id:
-            return
-        try:
-            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
-            store = OrderAttemptStore()
-            record = store.get_by_client_order_id(client_order_id)
-            if record is None:
-                return
-            if record.status in ("SUBMISSION_UNKNOWN", "SUBMITTING", "PERSISTED"):
-                store.update_status(
-                    record.order_attempt_id,
-                    "CANCELLED",
-                    payload={"cancel_reason": reason, "cancelled_at": time.time()},
-                )
-                logger.warning(
-                    "[EXIT-INTENT-STARTUP-CLEANUP] Cancelled stale order attempt %s client_order_id=%s status=%s reason=%s",
-                    record.order_attempt_id[:16],
-                    client_order_id[:8],
-                    record.status,
-                    reason,
-                )
-        except Exception:
-            logger.exception(
-                "[EXIT-INTENT-STARTUP-CLEANUP] Failed to cancel durable order attempt for client_order_id=%s",
-                client_order_id[:8] if client_order_id else "",
-            )
-
     def _cleanup_stale_exit_in_flight_on_startup(self) -> None:
-        """Drop in-flight/submission-unknown state for positions whose contract has expired.
-
-        On process restart the in-memory locks are empty, but the durable order-attempt
-        store may still hold SUBMISSION_UNKNOWN records for positions that have settled.
-        This routine ensures those records are terminalised and that any cached expired
-        position is not re-monitored.
-        """
+        """Retain unresolved exit intents, including for quarantined positions."""
         with self._lock:
-            # Defensive: clear any in-memory locks that point to positions we did not load
-            # or that belong to expired markets.  This should be a no-op on a fresh process,
-            # but it is critical if the monitor is ever started without a full reset.
-            stale_inflight = []
-            for position_id, flight in self._exit_intent_in_flight.items():
-                position = self._open_positions.get(position_id)
-                if position is None:
-                    stale_inflight.append(position_id)
-                elif position.market_id and self._is_expired_market(position.market_id):
-                    stale_inflight.append(position_id)
-
-            for position_id in stale_inflight:
-                self._clear_exit_intent_in_flight(position_id)
-                if position_id in self._open_positions:
-                    self.remove_position(position_id)
-
-            for position_id in list(self._position_to_client_order.keys()):
-                if position_id not in self._open_positions:
-                    del self._position_to_client_order[position_id]
-                else:
-                    position = self._open_positions[position_id]
-                    if position.market_id and self._is_expired_market(position.market_id):
-                        del self._position_to_client_order[position_id]
-
-            for client_order_id in list(self._recent_exit_submissions.keys()):
-                # The client_order_id may be shared across positions; if no open
-                # position still references it, the submission cache is stale.
-                if client_order_id not in self._position_to_client_order.values():
-                    del self._recent_exit_submissions[client_order_id]
-
+            retained = len(self._exit_intent_in_flight)
         logger.info(
-            "[EXIT-INTENT-STARTUP-CLEANUP] Cleared %d stale in-flight lock(s), %d client-order mapping(s)",
-            len(stale_inflight),
-            len([pid for pid in list(self._position_to_client_order.keys()) if pid not in self._open_positions]),
+            "[EXIT-INTENT-STARTUP-CLEANUP] Retained %d unresolved exit intent(s); "
+            "expiry or missing cache state does not prove an order outcome",
+            retained,
         )
 
     def retry_cleanup(self) -> int:
@@ -2879,29 +2815,25 @@ class PositionMonitor:
         self._save_exit_intent_in_flight()
 
     @staticmethod
-    def _terminal_state_from_reason(reason: str) -> str:
-        """Map a reconcile reason to an ExitOrderAttemptState terminal state."""
-        r = (reason or "").lower()
-        if "filled" in r:
-            return ExitOrderAttemptState.FILLED.value
-        if "cancel" in r or "canceled" in r or "cancelled" in r:
-            return ExitOrderAttemptState.CANCELED.value
-        if "rejected" in r or "reject" in r:
-            return ExitOrderAttemptState.REJECTED_EXCHANGE.value
-        if "expired" in r:
-            return ExitOrderAttemptState.EXPIRED_EXCHANGE.value
-        if "exchange_confirmed_flat" in r or "flat" in r:
-            return ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT.value
-        if "not_submitted" in r or "not accepted" in r:
-            return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
-        return ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value
+    def _terminal_state_from_reason(reason: str) -> Optional[str]:
+        """Map only explicit, evidence-backed reconciliation outcomes."""
+        return {
+            "order_filled": ExitOrderAttemptState.FILLED.value,
+            "order_canceled": ExitOrderAttemptState.CANCELED.value,
+            "order_rejected": ExitOrderAttemptState.REJECTED_EXCHANGE.value,
+            "order_cancelled_stale_price": ExitOrderAttemptState.CANCELED.value,
+            "exchange_confirmed_flat": ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT.value,
+            "not_accepted_confirmed": ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value,
+        }.get((reason or "").lower())
 
     def _mark_exit_intent_reconciled(
         self,
         position_id: str,
         reason: str,
         client_order_id: Optional[str] = None,
-    ) -> None:
+        exchange_order_id: Optional[str] = None,
+        raw_payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Mark an exit intent as reconciled (terminal). Safe to call idempotently.
 
         2026-09-02: Also terminalizes the durable ExitOrderAttempt.
@@ -2912,6 +2844,13 @@ class PositionMonitor:
         the in-memory maps silently skipped the durable transition and
         left the attempt wedged in RESOLVING_ON_EXCHANGE forever.
         """
+        terminal_state = self._terminal_state_from_reason(reason)
+        if terminal_state is None:
+            logger.warning(
+                "[EXIT-INTENT-RECONCILE] Refusing unproven terminal outcome: "
+                "position_id=%s reason=%s", position_id[:8], reason,
+            )
+            return False
         with self._lock:
             flight = self._exit_intent_in_flight.get(position_id, {})
             coid = (
@@ -2919,6 +2858,23 @@ class PositionMonitor:
                 or flight.get("client_order_id")
                 or self._position_to_client_order.get(position_id)
             )
+        if not coid or not self._transition_exit_attempt(
+            coid, terminal_state, reason, exchange_order_id=exchange_order_id, raw_payload=raw_payload
+        ):
+            logger.error(
+                "[EXIT-INTENT-RECONCILE] Durable transition failed for position=%s; retaining lock",
+                position_id[:8],
+            )
+            return False
+        with self._lock:
+            current_flight = self._exit_intent_in_flight.get(position_id, {})
+            current_coid = current_flight.get("client_order_id") or self._position_to_client_order.get(position_id)
+            if current_coid and current_coid != coid:
+                logger.warning(
+                    "[EXIT-INTENT-RECONCILE] Position=%s acquired a different in-flight order; retaining lock",
+                    position_id[:8],
+                )
+                return False
             if position_id in self._exit_intent_in_flight:
                 self._exit_intent_in_flight[position_id]["state"] = "RECONCILED"
                 logger.info(
@@ -2927,11 +2883,6 @@ class PositionMonitor:
                 )
             if position_id in self._position_to_client_order:
                 del self._position_to_client_order[position_id]
-        self._transition_exit_attempt(
-            coid,
-            self._terminal_state_from_reason(reason),
-            reason,
-        )
         # 2026-10-05: terminalize the durable hard-lock lifecycle vocabulary.
         with self._lock:
             _hl_pos = self._open_positions.get(position_id)
@@ -2947,6 +2898,7 @@ class PositionMonitor:
                 _hl_record_event(_hl_pos, "HARD_LOCK_UNFILLED", reconcile_reason=reason)
                 _hl_pending["state"] = "UNFILLED"
         self._save_exit_intent_in_flight()
+        return True
 
     def _get_unresolved_exit_client_order_id(
         self, position_id: str
@@ -3383,11 +3335,10 @@ class PositionMonitor:
     ) -> None:
         """Reconcile an exit intent in SUBMISSION_UNKNOWN by order and exchange position lookup.
 
-        CRITICAL FIX (2026-08-27): ``force`` is used by safety/forced exits
-        (settlement guard, loss cap, etc.) to aggressively clear a stale
-        in-flight lock and allow resubmission.  When ``force`` is True and the
-        prior order is not live, the lock is released and a fresh exit attempt
-        can be made.
+        ``force`` may cancel a matched working order at a stale price, but
+        neither an empty lookup nor the cancel acknowledgement alone releases
+        the lock. A terminal zero-fill snapshot and durable transition are
+        required before retrying.
 
         2026-09-02: This is the active resolver path.  The durable
         ExitOrderAttempt is transitioned to RESOLVING_ON_EXCHANGE, then to a
@@ -3400,24 +3351,20 @@ class PositionMonitor:
                 "reconcile_started",
             )
         try:
-            # Best-effort: if position is already flat, terminalize.
             with self._lock:
                 position = self._open_positions.get(position_id)
             if position is None:
-                logger.info(
-                    "[EXIT-INTENT-RECONCILE] position_id=%s is no longer open; terminalizing exit intent",
+                logger.warning(
+                    "[EXIT-INTENT-RECONCILE] position_id=%s missing from cache; retaining unknown intent",
                     position_id[:8]
                 )
-                self._mark_exit_intent_reconciled(position_id, "position_closed", client_order_id)
                 return
 
-            # If the position has zero canonical exposure, terminalize.
             if position.size == 0:
-                logger.info(
-                    "[EXIT-INTENT-RECONCILE] position_id=%s size is zero; terminalizing exit intent",
+                logger.warning(
+                    "[EXIT-INTENT-RECONCILE] position_id=%s cached size is zero; retaining unknown intent",
                     position_id[:8]
                 )
-                self._mark_exit_intent_reconciled(position_id, "position_size_zero", client_order_id)
                 return
 
             # CRITICAL FIX: Query exchange for order state to avoid permanent exit blocking.
@@ -3428,8 +3375,22 @@ class PositionMonitor:
                     lookup = await client.get_order_by_client_id_result(
                         client_order_id, market_id=position.market_id
                     )
-                    order = getattr(lookup, "data", None) if lookup else None
+                    order = getattr(lookup, "data", None) if lookup and getattr(lookup, "success", False) else None
                     if order:
+                        raw = getattr(order, "raw_data", None)
+                        raw = raw if isinstance(raw, dict) else {}
+                        actual_client_id = raw.get("client_order_id") or getattr(order, "client_order_id", None)
+                        actual_market = getattr(order, "market_id", None) or raw.get("ticker")
+                        if (
+                            actual_client_id != client_order_id
+                            or actual_market != position.market_id
+                            or not getattr(order, "order_id", None)
+                        ):
+                            logger.error(
+                                "[EXIT-INTENT-RECONCILE] Order identity mismatch for position=%s; retaining intent",
+                                position_id[:8],
+                            )
+                            return
                         status = (getattr(order, "status", "") or "").lower()
                         order_price_cents: Optional[int] = None
                         if order.price is not None:
@@ -3439,21 +3400,44 @@ class PositionMonitor:
                                 order_price_cents = None
 
                         if status in ("filled", "executed"):
-                            logger.info(
-                                "[EXIT-INTENT-RECONCILE] Order %s is FILLED for position=%s; terminalizing exit intent",
+                            logger.warning(
+                                "[EXIT-INTENT-RECONCILE] Order %s is executed for position=%s; "
+                                "retaining lock until its fills and position are reconciled",
                                 client_order_id[:8], position_id[:8]
                             )
-                            self._update_order_attempt_status(client_order_id, "FILLED", reason="reconcile_order_filled")
-                            self._release_stale_exit_flags(position_id, "order_filled", client_order_id)
                             return
 
                         if status in ("canceled", "rejected"):
+                            fill_values = [
+                                raw[key] for key in ("fill_count_fp", "fill_count", "filled_count")
+                                if raw.get(key) is not None
+                            ]
+                            try:
+                                zero_fill = bool(fill_values) and all(
+                                    Decimal(str(value)).is_finite() and Decimal(str(value)) == 0
+                                    for value in fill_values
+                                ) and Decimal(str(order.filled_size)) == 0
+                            except Exception:
+                                zero_fill = False
+                            if not zero_fill:
+                                logger.warning(
+                                    "[EXIT-INTENT-RECONCILE] Terminal order %s has unknown or nonzero fills; "
+                                    "retaining lock until fill reconciliation",
+                                    client_order_id[:8],
+                                )
+                                return
                             logger.info(
                                 "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; terminalizing exit intent",
                                 client_order_id[:8], status, position_id[:8]
                             )
-                            self._update_order_attempt_status(client_order_id, status.upper(), reason=f"reconcile_order_{status}")
-                            self._release_stale_exit_flags(position_id, f"order_{status}", client_order_id)
+                            if self._release_stale_exit_flags(
+                                position_id, f"order_{status}", client_order_id,
+                                exchange_order_id=order.order_id, raw_payload=raw,
+                            ):
+                                self._update_order_attempt_status(
+                                    client_order_id, status.upper(), reason=f"reconcile_order_{status}",
+                                    raw_payload=raw,
+                                )
                             return
 
                         if status in ("open", "resting", "active"):
@@ -3470,8 +3454,11 @@ class PositionMonitor:
                                     try:
                                         cancel_res = await client.cancel_order_result(order.order_id, market_id=position.market_id)
                                         if cancel_res and getattr(cancel_res, "success", False):
-                                            self._update_order_attempt_status(client_order_id, "CANCELLED", reason="reconcile_force_cancel_stale_price")
-                                            self._release_stale_exit_flags(position_id, "order_cancelled_stale_price", client_order_id)
+                                            logger.info(
+                                                "[EXIT-INTENT-RECONCILE] Cancellation acknowledged for %s; "
+                                                "retaining lock until a terminal order and fill snapshot is verified",
+                                                client_order_id[:8],
+                                            )
                                             return
                                         else:
                                             logger.warning(
@@ -3515,73 +3502,6 @@ class PositionMonitor:
                         position_id[:8], order_exc
                     )
 
-            # CRITICAL FIX (2026-08-21): client_order_id is often missing for positions
-            # that came from REST sync / replay.  Without a lookup key the monitor was
-            # leaving these in SUBMISSION_UNKNOWN forever, blocking protective exits
-            # and leaking risk.  Fall back to an exchange open-order/position snapshot.
-            if position.market_id:
-                try:
-                    from merid.event_venues.kalshi.client import get_kalshi_client
-                    client = get_kalshi_client()
-
-                    # 1) If the market already expired, the contract is gone; remove.
-                    if self._is_expired_market(position.market_id):
-                        logger.warning(
-                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s expired and "
-                            "client_order_id missing; removing position",
-                            position_id[:8], position.market_id
-                        )
-                        self.remove_position(position_id)
-                        self._mark_exit_intent_reconciled(position_id, "expired_no_client_order_id", client_order_id)
-                        return
-
-                    # 2) If there is still an open order on this market, the prior
-                    #    unknown submission may be resting.  Leave it alone and re-check.
-                    open_orders = await client.get_open_orders(market_id=position.market_id)
-                    if open_orders:
-                        logger.info(
-                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s still has %d open order(s); "
-                            "leaving SUBMISSION_UNKNOWN",
-                            position_id[:8], position.market_id, len(open_orders)
-                        )
-                        return
-
-                    # 3) No open order and no client_order_id.  The submission was
-                    #    likely lost or already filled.  Check exchange positions.
-                    exchange_positions = await client.get_positions()
-                    matching = [p for p in exchange_positions if getattr(p, "market_id", None) == position.market_id]
-                    if not matching or all(getattr(p, "size", Decimal("0")) == 0 for p in matching):
-                        logger.warning(
-                            "[EXIT-INTENT-RECONCILE] position_id=%s market=%s not found on exchange "
-                            "and no open order; removing position",
-                            position_id[:8], position.market_id
-                        )
-                        self.remove_position(position_id)
-                        self._mark_exit_intent_reconciled(position_id, "exchange_position_missing", client_order_id)
-                        return
-
-                    # 4) Exchange position still exists and no open order.  The prior
-                    #    exit probably never reached the venue.  Release the in-flight
-                    #    lock so the monitor can retry on the next tick, and also
-                    #    clear any stale terminal flags on the Position so the retry
-                    #    is not immediately dropped by the loop-side idempotency guard.
-                    logger.warning(
-                        "[EXIT-INTENT-RECONCILE] position_id=%s market=%s still open on exchange "
-                        "but no open order; force=%s client_order_id=%s; releasing in-flight lock to retry",
-                        position_id[:8], position.market_id, force, client_order_id[:8] if client_order_id else ""
-                    )
-                    # Do NOT update the order attempt store to terminal here: the order
-                    # was never confirmed accepted, so reusing the same client_order_id
-                    # is the safest idempotent resubmit.  We only clear the in-flight
-                    # guard and stale position flags.
-                    self._release_stale_exit_flags(position_id, "retry_unknown_submission")
-                    return
-                except Exception as fallback_exc:
-                    logger.debug(
-                        "[EXIT-INTENT-RECONCILE] Fallback reconciliation failed for position=%s: %s",
-                        position_id[:8], fallback_exc
-                    )
-
             # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
             logger.warning(
                 "[EXIT-INTENT-RECONCILE] position_id=%s client_order_id=%s force=%s requires external "
@@ -3595,7 +3515,10 @@ class PositionMonitor:
             )
 
     @staticmethod
-    def _update_order_attempt_status(client_order_id: Optional[str], status: str, reason: Optional[str] = None) -> None:
+    def _update_order_attempt_status(
+        client_order_id: Optional[str], status: str, reason: Optional[str] = None,
+        raw_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Mark a durable order attempt as terminal so it is not reused.
 
         Without this, ``finalize_order_identity`` will keep matching the same
@@ -3613,6 +3536,8 @@ class PositionMonitor:
             payload: Dict[str, Any] = {}
             if reason:
                 payload["reconcile_reason"] = reason
+            if raw_payload is not None:
+                payload["exchange_order_evidence"] = raw_payload
             store.update_status(record.order_attempt_id, status, payload=payload or None)
             logger.info(
                 "[EXIT-INTENT-RECONCILE] Updated order_attempt_id=%s client_order_id=%s status=%s reason=%s",
@@ -3632,13 +3557,19 @@ class PositionMonitor:
         position_id: str,
         reason: str,
         client_order_id: Optional[str] = None,
-    ) -> None:
+        exchange_order_id: Optional[str] = None,
+        raw_payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Clear the in-flight lock and any stale terminal flags on the Position.
 
         This is the safe release path used when an exit order is proven terminal
         or not-submitted and the monitor needs to re-emit the exit.
         """
-        self._mark_exit_intent_reconciled(position_id, reason, client_order_id)
+        if not self._mark_exit_intent_reconciled(
+            position_id, reason, client_order_id,
+            exchange_order_id=exchange_order_id, raw_payload=raw_payload,
+        ):
+            return False
         self._clear_exit_intent_in_flight(position_id)
         with self._lock:
             stale_position = self._open_positions.get(position_id)
@@ -3650,6 +3581,7 @@ class PositionMonitor:
                     "[EXIT-INTENT-RECONCILE] Cleared stale terminal flags for position=%s reason=%s",
                     position_id[:8], reason
                 )
+        return True
 
     def _clear_exit_intent_in_flight(self, position_id: str) -> None:
         """
@@ -7532,7 +7464,7 @@ class PositionMonitor:
                 position.exit_reason = None
                 position.exit_price_cents = None
 
-            if not bypass_in_flight_check and self._is_exit_intent_in_flight(position.position_id):
+            if self._is_exit_intent_in_flight(position.position_id):
                 with self._lock:
                     flight = self._exit_intent_in_flight.get(position.position_id)
                     existing_reason = (
@@ -8724,18 +8656,12 @@ class PositionMonitor:
                         known_aliases=cached_pos.known_aliases,
                     )
 
-                    # CRITICAL FIX (2026-08-27): Expired/closed markets can leave a stale
-                    # durable order attempt in SUBMISSION_UNKNOWN.  Do not monitor them and
-                    # terminalise any such attempt so it is not reused on restart.
+                    # Expiry quarantines the position but does not prove an order outcome.
                     if self._is_expired_market(position.market_id):
                         logger.warning(
                             "[POSITION-MONITOR-STARTUP] Skipping expired/closed market %s on startup; "
-                            "cancelling durable order attempt if present",
+                            "retaining durable order attempts for reconciliation",
                             position.market_id,
-                        )
-                        self._cancel_durable_order_attempt(
-                            position.client_order_id,
-                            "startup_expired_market_not_monitored",
                         )
                         continue
 

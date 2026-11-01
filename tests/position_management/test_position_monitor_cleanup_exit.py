@@ -147,7 +147,8 @@ class TestExitInFlightStateMachine:
         pos = make_position()
         monitor.add_position(pos)
         monitor._mark_exit_intent_in_flight(pos.position_id, client_order_id="exit-1")
-        monitor._mark_exit_intent_reconciled(pos.position_id, "exchange_reconciled")
+        with patch.object(monitor, "_transition_exit_attempt", return_value="attempt-1"):
+            monitor._mark_exit_intent_reconciled(pos.position_id, "not_accepted_confirmed")
 
         assert monitor._is_exit_intent_in_flight(pos.position_id) is False
 
