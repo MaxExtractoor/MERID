@@ -3430,14 +3430,19 @@ class PositionMonitor:
                                 "[EXIT-INTENT-RECONCILE] Order %s is %s for position=%s; terminalizing exit intent",
                                 client_order_id[:8], status, position_id[:8]
                             )
-                            if self._release_stale_exit_flags(
+                            if not self._update_order_attempt_status(
+                                client_order_id, status.upper(), reason=f"reconcile_order_{status}",
+                                raw_payload=raw,
+                            ):
+                                logger.error(
+                                    "[EXIT-INTENT-RECONCILE] Order attempt update failed for %s; retaining lock",
+                                    client_order_id[:8],
+                                )
+                                return
+                            self._release_stale_exit_flags(
                                 position_id, f"order_{status}", client_order_id,
                                 exchange_order_id=order.order_id, raw_payload=raw,
-                            ):
-                                self._update_order_attempt_status(
-                                    client_order_id, status.upper(), reason=f"reconcile_order_{status}",
-                                    raw_payload=raw,
-                                )
+                            )
                             return
 
                         if status in ("open", "resting", "active"):
@@ -3518,7 +3523,7 @@ class PositionMonitor:
     def _update_order_attempt_status(
         client_order_id: Optional[str], status: str, reason: Optional[str] = None,
         raw_payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Mark a durable order attempt as terminal so it is not reused.
 
         Without this, ``finalize_order_identity`` will keep matching the same
@@ -3526,19 +3531,20 @@ class PositionMonitor:
         rejected/filled order on the exchange.
         """
         if not client_order_id:
-            return
+            return False
         try:
             from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
             store = OrderAttemptStore()
             record = store.get_by_client_order_id(client_order_id)
             if record is None:
-                return
+                return False
             payload: Dict[str, Any] = {}
             if reason:
                 payload["reconcile_reason"] = reason
             if raw_payload is not None:
                 payload["exchange_order_evidence"] = raw_payload
-            store.update_status(record.order_attempt_id, status, payload=payload or None)
+            if not store.update_status(record.order_attempt_id, status, payload=payload or None):
+                return False
             logger.info(
                 "[EXIT-INTENT-RECONCILE] Updated order_attempt_id=%s client_order_id=%s status=%s reason=%s",
                 record.order_attempt_id[:16] if record.order_attempt_id else "",
@@ -3546,11 +3552,13 @@ class PositionMonitor:
                 status,
                 reason or "",
             )
+            return True
         except Exception:
             logger.exception(
                 "[EXIT-INTENT-RECONCILE] Failed to update order_attempt status for client_order_id=%s",
                 client_order_id[:8] if client_order_id else "",
             )
+            return False
 
     def _release_stale_exit_flags(
         self,

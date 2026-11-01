@@ -129,7 +129,7 @@ async def test_reconcile_exit_intent_force_cancels_stale_open_order(monitor, mon
 
     client_order_id = "merid_test_stale_open"
     monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock(return_value="attempt-1"))
-    monkeypatch.setattr(monitor, "_update_order_attempt_status", Mock())
+    monkeypatch.setattr(monitor, "_update_order_attempt_status", Mock(return_value=True))
     monitor._position_to_client_order[position.position_id] = client_order_id
     monitor._exit_intent_in_flight[position.position_id] = {
         "state": "SUBMISSION_UNKNOWN", "timestamp": 0.0,
@@ -288,6 +288,30 @@ def test_failed_durable_transition_preserves_lock(monitor, monkeypatch):
     monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock(return_value=None))
     assert monitor._mark_exit_intent_reconciled(pid, "order_canceled") is False
     assert monitor._exit_intent_in_flight[pid]["state"] == "SUBMISSION_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_failed_generic_order_update_preserves_exit_lock(monitor, monkeypatch):
+    position = _make_position()
+    monitor.add_position(position)
+    coid = "exit_failed_update"
+    monitor._exit_intent_in_flight[position.position_id] = {
+        "state": "SUBMISSION_UNKNOWN", "timestamp": time.time(), "client_order_id": coid,
+    }
+    order = PlacedOrder(
+        order_id="order-1", market_id=position.market_id, side="sell",
+        size=Decimal("1"), price=Decimal("0.50"), status="canceled",
+        raw_data={"client_order_id": coid, "fill_count_fp": "0.00"},
+    )
+    client = MagicMock()
+    client.get_order_by_client_id_result = AsyncMock(return_value=OperationResult.ok(data=order))
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+    transition = Mock(return_value="attempt-1")
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", transition)
+    monkeypatch.setattr(monitor, "_update_order_attempt_status", Mock(return_value=False))
+    await monitor._reconcile_exit_intent(position.position_id, coid)
+    assert monitor._exit_intent_in_flight[position.position_id]["state"] == "SUBMISSION_UNKNOWN"
+    assert all(call.args[1] != "CANCELED" for call in transition.call_args_list)
 
 
 @pytest.mark.asyncio
