@@ -1,11 +1,11 @@
 """
 Tests for slot allocator fixes (2026-07-31)
 
-Tests verify that phantom slot leaks are prevented and slots are properly
-released on position closes, startup, and periodic cleanup.
+Tests verify that slots are properly released on position closes and
+that startup does not erase reservations based on an empty position cache.
 
 Related changes:
-- loop_15m.py: Startup slot reset, periodic slot cleanup
+- loop_15m.py: Preserve reservations on startup
 - position_cache.py: Enhanced slot release diagnostics
 - order_router.py: Enhanced slot release diagnostics
 """
@@ -17,20 +17,16 @@ from datetime import datetime, timezone, timedelta
 
 
 class TestSlotAllocatorStartupReset:
-    """Test slot allocator reset on loop startup."""
+    """Test slot allocator preservation on loop startup."""
 
-    def test_loop_initialization_clears_phantom_slots(self):
-        """Test that loop initialization clears phantom slots when position cache shows 0 positions."""
-        # This test verifies the startup reset logic exists in loop_15m.py
-        # The logic should call slot_allocator.clear_slots_on_empty_positions(position_count)
+    def test_loop_initialization_preserves_slots(self):
+        """An empty position cache does not prove pending orders are absent."""
         import inspect
-        
-        # Get source code of loop_15m.py
+
         from merid.loop_15m import Kalshi15mLoop
         source = inspect.getsource(Kalshi15mLoop.__init__)
-        
-        # Verify that clear_slots_on_empty_positions is called in __init__
-        assert "clear_slots_on_empty_positions" in source or "slot_allocator" in source
+
+        assert "clear_slots_on_empty_positions" not in source
 
     def test_clear_slots_on_empty_positions_with_zero_positions(self):
         """Test that clear_slots_on_empty_positions clears slots when position_count=0."""

@@ -46,3 +46,13 @@ def test_position_and_loop_construction_preserve_reservations():
     loop = ast.parse((ROOT / "merid" / "loop_15m.py").read_text(encoding="utf-8"))
     assert not (set(_calls(_constructor(cache, "KalshiPositionCache"))) & UNSAFE_RESETS)
     assert not (set(_calls(_constructor(loop, "Kalshi15mLoop"))) & UNSAFE_RESETS)
+
+
+def test_rollover_and_router_do_not_clear_pending_reservations():
+    loop = ast.parse((ROOT / "merid" / "loop_15m.py").read_text(encoding="utf-8"))
+    router = ast.parse(
+        (ROOT / "merid" / "event_venues" / "kalshi" / "order_router.py").read_text(encoding="utf-8")
+    )
+    loop_calls = set(_calls(_function(loop, "_run_loop")))
+    assert not (loop_calls & (UNSAFE_RESETS | {"clear_open_positions_on_empty_cache"}))
+    assert "clear_slots_on_empty_positions" not in set(_calls(router))

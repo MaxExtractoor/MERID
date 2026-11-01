@@ -794,3 +794,11 @@ but does not itself reconstruct or reconcile the allocator. P0 currently
 completes before the protective trading stack is confirmed started, and
 failed P0 startup exits before that stack starts; both ordering defects
 remain open and the server remains down.
+
+The 15-minute loop also cleared every slot at rollover regardless of position
+count and cleared cache/ledger positions when the cache appeared empty. The
+order router similarly cleared slots after an allocation rejection based on
+an empty asset cache. Those implicit resets are removed. The separate risk
+envelope still rolls its own per-window exposure counters and can correct
+exposure from the position cache; its treatment of unresolved orders and
+cross-window reservations needs independent reconciliation before live use.
