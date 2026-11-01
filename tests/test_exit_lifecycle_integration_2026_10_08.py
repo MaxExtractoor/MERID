@@ -183,11 +183,10 @@ class TestOperationalExitAcrossAssetsAndSides:
 
 
 class TestRestartRecovery:
-    def test_restart_sweeps_unsubmitted_persisted_exit(
+    def test_restart_preserves_uncertain_persisted_exit(
         self, tmp_path, monkeypatch, store
     ):
-        """Persisted INTENT_PERSISTED from a killed run is rehydrated then
-        terminalized by the stale-obligation sweep — never silently wedged."""
+        """A persisted exit from a killed run needs reconciliation, not guessing."""
         stale = store.create_exit_attempt(
             exit_intent_id="intent_killed_run",
             position_key="pos-killed",
@@ -211,5 +210,6 @@ class TestRestartRecovery:
         assert monitor._sweep_stale_exit_obligations() >= 1
         assert (
             store.get_exit_attempt(stale.attempt_id).state
-            == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+            == ExitOrderAttemptState.INTENT_PERSISTED.value
         )
+        assert "pos-killed" in monitor._exit_intent_in_flight

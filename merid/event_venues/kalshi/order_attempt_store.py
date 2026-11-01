@@ -185,6 +185,10 @@ EXIT_VALID_TRANSITIONS: Dict[ExitOrderAttemptState, Set[ExitOrderAttemptState]] 
     ExitOrderAttemptState.INTENT_PERSISTED: {
         ExitOrderAttemptState.SUBMITTING,
         ExitOrderAttemptState.CANCELED,
+        # A missing best-effort exit-state write does not prove that the
+        # independently claimed order was never sent.
+        ExitOrderAttemptState.SUBMISSION_UNKNOWN,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
         # An obligation that never reached dispatch (exception between
         # record creation and submit invocation, process kill, or a
         # legacy-migrated record for a long-closed position) must

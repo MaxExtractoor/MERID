@@ -3031,36 +3031,9 @@ class PositionMonitor:
                         )
                         return True
 
-                # 2026-10-08: distinguish a never-dispatched obligation from a
-                # genuinely lost submission.  If the durable attempt is still
-                # INTENT_PERSISTED, the SUBMITTING transition (and therefore
-                # the router call) never ran — a "worker not dispatched" /
-                # dispatch-error stall, NOT an unknown venue outcome.  It
-                # terminalizes as TERMINAL_UNFILLED with the stall reason and
-                # the lock releases so the next evaluation mints a fresh
-                # attempt; entering SUBMISSION_UNKNOWN reconcile would wedge
-                # the position behind a lookup that can never resolve.
-                _durable_state = self._durable_exit_attempt_state(client_order_id)
-                if _durable_state == ExitOrderAttemptState.INTENT_PERSISTED.value:
-                    logger.critical(
-                        "[EXIT-INTENT-STALL] Exit obligation aged out UNSUBMITTED "
-                        "(dispatch never invoked): position_id=%s client_order_id=%s "
-                        "age=%.2fs reason=%s - terminalizing TERMINAL_UNFILLED; "
-                        "re-evaluation will mint a fresh attempt",
-                        position_id[:8], client_order_id,
-                        time.time() - intent_time, flight.get("reason") or "unknown",
-                    )
-                    self._transition_exit_attempt(
-                        client_order_id,
-                        ExitOrderAttemptState.TERMINAL_UNFILLED.value,
-                        "unsubmitted_age_limit:dispatch_timeout",
-                    )
-                    del self._exit_intent_in_flight[position_id]
-                    if position_id in self._position_to_client_order:
-                        del self._position_to_client_order[position_id]
-                    self._save_exit_intent_in_flight()
-                    return False
-
+                # The exit lifecycle write is best-effort and distinct from the
+                # canonical router's submission claim. Its absence cannot prove
+                # that no exchange request was sent.
                 flight["state"] = "SUBMISSION_UNKNOWN"
                 logger.error(
                     "[EXIT-INTENT-IN-FLIGHT] Exit intent timed out -> SUBMISSION_UNKNOWN: position_id=%s "
@@ -3119,24 +3092,10 @@ class PositionMonitor:
             return 180.0
 
     def _sweep_stale_exit_obligations(self) -> int:
-        """Terminalize/reconcile exit obligations whose progress stalled.
+        """Schedule reconciliation for stalled, nonterminal exit obligations.
 
-        Two durable failure classes are swept:
-
-        * ``INTENT_PERSISTED`` older than ``MERID_EXIT_UNSUBMITTED_AGE_S`` —
-          created but the submit was never invoked (worker not dispatched,
-          dispatch exception, process kill, legacy-migrated record).  These
-          terminalize as TERMINAL_UNFILLED with a classified stall reason.
-
-        * ``SUBMITTING`` / ``SUBMISSION_UNKNOWN`` / ``RESOLVING_ON_EXCHANGE``
-          older than ``MERID_EXIT_UNRESOLVED_RECONCILE_S`` — the submission
-          was claimed but the outcome was never written back.  These are NOT
-          terminalized blindly: the venue may hold or have filled the order,
-          so each is pushed through ``_reconcile_exit_intent`` which resolves
-          from exchange evidence (filled→FILLED, resting→re-arm, absent→
-          release for retry).
-
-        Returns the number of obligations actioned.
+        Neither age nor a persisted-only exit record proves non-submission:
+        the exit FSM is not the canonical router's atomic submission claim.
         """
         try:
             store = OrderAttemptStore()
@@ -3149,10 +3108,6 @@ class PositionMonitor:
         now = time.time()
         limit = self._unsubmitted_exit_age_seconds()
         reconcile_age = self._unresolved_exit_reconcile_age_seconds()
-        pending = [
-            r for r in records
-            if r.state == ExitOrderAttemptState.INTENT_PERSISTED.value
-        ]
         unresolved_states = {
             ExitOrderAttemptState.SUBMITTING.value,
             ExitOrderAttemptState.SUBMISSION_UNKNOWN.value,
@@ -3160,8 +3115,12 @@ class PositionMonitor:
         }
         unresolved = [
             r for r in records
-            if r.state in unresolved_states
-            and (now - r.created_at) >= reconcile_age
+            if (
+                r.state in unresolved_states and (now - r.created_at) >= reconcile_age
+            ) or (
+                r.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+                and (now - r.created_at) >= limit
+            )
         ]
         # Throttle repeat reconciles per attempt — a record that stays
         # unresolved (venue unreachable, genuinely ambiguous) must not spawn
@@ -3193,42 +3152,6 @@ class PositionMonitor:
                     record.attempt_id[:8], exc,
                 )
         swept = len(unresolved)
-        for record in pending:
-            age = now - record.created_at
-            if age < limit:
-                continue
-            try:
-                payload = json.loads(record.payload_json or "{}")
-            except Exception:
-                payload = {}
-            with self._lock:
-                position_open = record.position_key in self._open_positions
-            if payload.get("migrated_from_json") or payload.get("migrated_from_order_attempt_id"):
-                stall = "migrated_legacy"
-            elif position_open:
-                stall = "worker_not_dispatched"
-            else:
-                stall = "obligation_orphaned_position_gone"
-            updated = store.transition_exit_attempt(
-                record.attempt_id,
-                ExitOrderAttemptState.TERMINAL_UNFILLED.value,
-                actor="position_monitor",
-                reason=f"unsubmitted_age_limit:{stall}",
-            )
-            if not updated:
-                continue
-            swept += 1
-            with self._lock:
-                flight = self._exit_intent_in_flight.pop(record.position_key, None)
-                self._position_to_client_order.pop(record.position_key, None)
-            log = logger.critical if position_open else logger.warning
-            log(
-                "[EXIT-OBLIGATION-SWEEP] attempt=%s position=%s client_order_id=%s "
-                "age=%.1fs stall=%s - unsubmitted obligation TERMINAL_UNFILLED; "
-                "fresh evaluation will mint a new attempt if still required",
-                record.attempt_id[:8], record.position_key[:8],
-                record.client_order_id[:12], age, stall,
-            )
         if swept:
             self._save_exit_intent_in_flight()
         return swept

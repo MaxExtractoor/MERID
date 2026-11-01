@@ -815,3 +815,10 @@ orders with filled or unknown quantities remain locked pending complete
 fill/position reconciliation; the exchange order payload is recorded on the
 successful terminal transition. The complete exit-recovery coordinator and
 protective-service startup verification remain open.
+
+The exit-state transition to SUBMITTING is best-effort and is separate from
+the canonical order submission claim. Consequently, a stale INTENT_PERSISTED
+exit record, including a migrated legacy JSON record, is not evidence of
+non-submission. The timeout and obligation sweep now retain these records and
+schedule reconciliation instead of marking them TERMINAL_UNFILLED and dropping
+their in-flight locks.

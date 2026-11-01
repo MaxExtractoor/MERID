@@ -6,13 +6,8 @@ never-dispatched stalls — because nothing could transition an unsubmitted
 obligation to a terminal state.  191 ``duplicate:concurrent_in_flight``
 results were also mislabeled SUBMISSION_UNKNOWN, regressing healthy attempts.
 
-These tests pin:
-- INTENT_PERSISTED -> TERMINAL_UNFILLED is a valid FSM edge.
-- The stale-obligation sweep terminalizes aged unsubmitted obligations with
-  a classified stall reason and releases the in-memory lock.
-- A timed-out in-memory intent whose durable record is still
-  INTENT_PERSISTED is a never-dispatched stall, not SUBMISSION_UNKNOWN.
-- A working (RESTING/ACKNOWLEDGED) obligation blocks fresh attempts.
+These tests pin conservative timeout handling and the durable FSM. A legacy
+or stale INTENT_PERSISTED record is not proof that dispatch never occurred.
 """
 
 import json
@@ -83,6 +78,17 @@ class TestFsmEdge:
         assert updated is not None
         assert updated.state == ExitOrderAttemptState.TERMINAL_UNFILLED.value
 
+    @pytest.mark.parametrize("new_state", [
+        ExitOrderAttemptState.SUBMISSION_UNKNOWN,
+        ExitOrderAttemptState.RESOLVING_ON_EXCHANGE,
+    ])
+    def test_persisted_may_require_reconciliation(self, store, new_state):
+        rec = _attempt(store)
+        updated = store.transition_exit_attempt(
+            rec.attempt_id, new_state.value, actor="test", reason="uncertain_dispatch"
+        )
+        assert updated is not None and updated.state == new_state.value
+
     def test_intent_persisted_rejected_exchange_still_invalid(self, store):
         """REJECTED_EXCHANGE remains invalid from INTENT_PERSISTED — the old
         exception handler relied on it and silently left stalls."""
@@ -117,25 +123,23 @@ class TestSingleObligation:
 
 
 class TestStaleObligationSweep:
-    def test_migrated_legacy_aged_out(self, monitor, store):
+    def test_migrated_legacy_is_reconciled_not_terminalized(self, monitor, store, monkeypatch):
         rec = _attempt(
             store,
             position_key="pos-gone",
             age_s=600.0,
             payload={"migrated_from_json": True, "legacy_state": "EXECUTION_PENDING"},
         )
+        scheduled = []
+        monkeypatch.setattr(monitor, "_schedule_exit_reconcile", lambda pid, coid: scheduled.append((pid, coid)))
         assert monitor._sweep_stale_exit_obligations() == 1
         assert (
             store.get_exit_attempt(rec.attempt_id).state
-            == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+            == ExitOrderAttemptState.INTENT_PERSISTED.value
         )
-        events = store._get_conn().execute(
-            "SELECT reason FROM exit_order_attempt_events WHERE attempt_id=? ORDER BY observed_at",
-            (rec.attempt_id,),
-        ).fetchall()
-        assert events[-1][0] == "unsubmitted_age_limit:migrated_legacy"
+        assert scheduled == [(rec.position_key, rec.client_order_id)]
 
-    def test_open_position_stall_marked_worker_not_dispatched(self, monitor, store):
+    def test_open_position_stall_schedules_reconciliation(self, monitor, store, monkeypatch):
         from merid.position_management.position import Position, PositionSide
 
         monitor._open_positions["pos-open"] = Position(
@@ -146,12 +150,11 @@ class TestStaleObligationSweep:
             avg_entry_price_cents=50,
         )
         rec = _attempt(store, position_key="pos-open", age_s=600.0)
+        scheduled = []
+        monkeypatch.setattr(monitor, "_schedule_exit_reconcile", lambda pid, coid: scheduled.append((pid, coid)))
         assert monitor._sweep_stale_exit_obligations() == 1
-        events = store._get_conn().execute(
-            "SELECT reason FROM exit_order_attempt_events WHERE attempt_id=?",
-            (rec.attempt_id,),
-        ).fetchall()
-        assert events[-1][0] == "unsubmitted_age_limit:worker_not_dispatched"
+        assert store.get_exit_attempt(rec.attempt_id).state == ExitOrderAttemptState.INTENT_PERSISTED.value
+        assert scheduled == [(rec.position_key, rec.client_order_id)]
 
     def test_fresh_obligation_untouched(self, monitor, store):
         rec = _attempt(store, position_key="pos-fresh", age_s=5.0)
@@ -161,7 +164,7 @@ class TestStaleObligationSweep:
             == ExitOrderAttemptState.INTENT_PERSISTED.value
         )
 
-    def test_sweep_releases_in_memory_lock(self, monitor, store):
+    def test_sweep_preserves_in_memory_lock(self, monitor, store, monkeypatch):
         rec = _attempt(store, position_key="pos-locked", age_s=600.0)
         monitor._exit_intent_in_flight["pos-locked"] = {
             "state": "EXECUTION_PENDING",
@@ -169,29 +172,28 @@ class TestStaleObligationSweep:
             "client_order_id": rec.client_order_id,
         }
         monitor._position_to_client_order["pos-locked"] = rec.client_order_id
+        monkeypatch.setattr(monitor, "_schedule_exit_reconcile", lambda pid, coid: None)
         assert monitor._sweep_stale_exit_obligations() == 1
-        assert "pos-locked" not in monitor._exit_intent_in_flight
-        assert "pos-locked" not in monitor._position_to_client_order
-        assert monitor._is_exit_intent_in_flight("pos-locked") is False
+        assert "pos-locked" in monitor._exit_intent_in_flight
+        assert "pos-locked" in monitor._position_to_client_order
+        assert monitor._is_exit_intent_in_flight("pos-locked") is True
 
 
 class TestTimeoutClassification:
-    def test_never_dispatched_terminalizes_not_unknown(self, monitor, store):
-        """EXECUTION_PENDING + durable INTENT_PERSISTED at timeout is a
-        never-dispatched stall — TERMINAL_UNFILLED and released, not
-        SUBMISSION_UNKNOWN reconcile."""
+    def test_persisted_timeout_is_unknown(self, monitor, store):
+        """An absent exit lifecycle transition does not prove no order was sent."""
         rec = _attempt(store, position_key="pos-nd")
         monitor._exit_intent_in_flight["pos-nd"] = {
             "state": "EXECUTION_PENDING",
             "timestamp": time.time() - 999,
             "client_order_id": rec.client_order_id,
         }
-        assert monitor._is_exit_intent_in_flight("pos-nd") is False
+        assert monitor._is_exit_intent_in_flight("pos-nd") is True
         assert (
             store.get_exit_attempt(rec.attempt_id).state
-            == ExitOrderAttemptState.TERMINAL_UNFILLED.value
+            == ExitOrderAttemptState.SUBMISSION_UNKNOWN.value
         )
-        assert "pos-nd" not in monitor._exit_intent_in_flight
+        assert monitor._exit_intent_in_flight["pos-nd"]["state"] == "SUBMISSION_UNKNOWN"
 
     def test_dispatched_timeout_becomes_submission_unknown(self, monitor, store):
         """Durable SUBMITTING means the router call ran — the ack is genuinely
