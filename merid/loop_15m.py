@@ -3292,7 +3292,6 @@ async def _execute_exit_order(
             "[EXIT-ORDER-LOCK] Position %s is locked for exit creation - skipping duplicate attempt",
             position.position_id[:8]
         )
-        _clear_in_flight()
         return
     
     durable_exit_attempt = None
@@ -3335,7 +3334,6 @@ async def _execute_exit_order(
                 exit_price_cents,
                 contracts_to_close is not None
             )
-            _clear_in_flight()
             return
         
         # CRITICAL FIX (2026-07-23): Check for duplicate resting exit orders (one-position-one-exit invariant)
@@ -3357,7 +3355,6 @@ async def _execute_exit_order(
                     contracts_to_close is not None
                 )
                 # Skip placing new exit order - existing one will handle the exit
-                _clear_in_flight()
                 return
         except Exception as dup_check_err:
             logger.warning(
@@ -4508,6 +4505,28 @@ async def _execute_exit_order(
                     )
                 return
             _result_status = getattr(result, "status", "")
+            if _result_status == "not_submitted" and (
+                getattr(result, "submission_attempted", False)
+                or getattr(result, "exchange_request_sent", False)
+            ):
+                logger.warning(
+                    "[EXIT-ORDER] Post-send not_submitted is unproven; retaining exit lock "
+                    "for reconciliation: position=%s client_order_id=%s",
+                    position.position_id[:8], intent.client_order_id,
+                )
+                if _arb_position_key is not None:
+                    try:
+                        from merid.position_management.exit_arbiter import get_exit_arbiter
+                        get_exit_arbiter().mark_ack_unknown(
+                            _arb_position_key, note="post_send_not_submitted"
+                        )
+                    except Exception:
+                        logger.exception("[EXIT-ORDER] Failed to mark arbiter outcome unknown")
+                if self._position_monitor:
+                    self._position_monitor._mark_exit_intent_submission_unknown(
+                        position.position_id, "post_send_not_submitted"
+                    )
+                return
             # An intermediate ``not_submitted`` that will be resubmitted keeps
             # the SAME arbiter attempt in-flight — the resubmission rides the
             # same client_order_id, so resolving the attempt here would strand

@@ -836,3 +836,9 @@ before building the next snapshot. Recovery now publishes the mismatch
 immediately and retries fresh snapshots without invoking those mutation
 helpers. A persistent discrepancy remains quarantined. This does not provide
 the separate verified runtime auto-recovery coordinator.
+
+The exit loop now retains the existing in-flight lock when a duplicate worker
+or an already registered/resting exit is encountered. A `not_submitted`
+result after a request was attempted no longer triggers a blind resubmit;
+it is retained as unknown for reconciliation. Other exit re-arm and
+finalizer paths still need an evidence-based review before live deployment.

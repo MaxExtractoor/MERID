@@ -1,4 +1,4 @@
-"""Tests for loop_15m _execute_exit_order resubmission on not_submitted."""
+"""Tests for uncertain exit submissions and duplicate execution protection."""
 
 import pytest
 from decimal import Decimal
@@ -44,11 +44,10 @@ def position():
 
 
 @pytest.mark.asyncio
-async def test_exit_not_submitted_resubmits_with_same_client_order_id(
+async def test_post_send_not_submitted_retains_exit_lock(
     self_mock, position, monkeypatch, tmp_path
 ):
-    """_execute_exit_order resubmits with the same ClOrdID on not_submitted,
-    keeps the in-flight guard, and does not rearm or retry."""
+    """An empty lookup after a request cannot justify another exit."""
 
     # Durable arbiter state must not leak into repo data/ — redirect the
     # store paths and drop the singleton so it rebuilds under tmp_path.
@@ -58,6 +57,13 @@ async def test_exit_not_submitted_resubmits_with_same_client_order_id(
         "MERID_EXIT_STATE_PATH", str(tmp_path / "exit_state.json"))
     monkeypatch.setattr(
         "merid.position_management.exit_arbiter._ARBITER", None)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_attempt_store.DEFAULT_DB_PATH",
+        str(tmp_path / "attempts.db"),
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore._instances", {}
+    )
 
     route_calls = []
 
@@ -115,15 +121,17 @@ async def test_exit_not_submitted_resubmits_with_same_client_order_id(
 
     await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
 
-    # The same idempotency key was used for both attempts.
-    assert len(route_calls) == 2
-    assert route_calls[0][0] == route_calls[1][0] == "coid-resubmit-01"
-    assert route_calls[0][1] == route_calls[1][1] == "oa-resubmit-01"
-
-    # In-flight was preserved; no rearm/retry or submission_unknown.
+    assert len(route_calls) == 1
     assert self_mock._rearm_position_after_failed_exit.called is False
     assert self_mock._position_monitor._mark_exit_intent_retryable.called is False
-    assert self_mock._position_monitor._mark_exit_intent_submission_unknown.called is False
-    assert self_mock._position_monitor._mark_exit_intent_submitted.called is True
+    self_mock._position_monitor._mark_exit_intent_submission_unknown.assert_called_once()
+    assert self_mock._position_monitor._mark_exit_intent_submitted.called is False
     assert self_mock._position_monitor._mark_exit_intent_in_flight.called is True
-    assert self_mock._position_monitor.remove_position.called is True
+    assert self_mock._position_monitor.remove_position.called is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_worker_does_not_clear_existing_lock(self_mock, position):
+    self_mock._position_monitor._get_position_lock.return_value.acquire.return_value = False
+    await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
+    self_mock._position_monitor._clear_exit_intent_in_flight.assert_not_called()
