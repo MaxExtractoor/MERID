@@ -710,10 +710,14 @@ Contract changes now in force:
   (~z>=1.04 -> ~z>=1.28), still admitting the observed winning cohort
   (p_sel 0.91-0.98) while vetoing the thinnest-reachability tail.
 - **Lane sizing cap**: `MERID_PINNED_FAV_MAX_CONTRACTS` (default = generic
-  bounded cap) set to 2.  Deep-favorite binaries lose the whole stake on
-  a pin break � 6 @ ~91.6c was ~38% of bankroll; cap bounds a single
-  settlement tail to ~$1.9 (~13%) consistent with half-Kelly at current
-  shard cash.  The cap is authoritative over risk-scaled sizing:
+  bounded cap) set to 6 — operator-directed sizing realignment
+  2026-10-31, restoring the pre-containment envelope.  Deep-favorite
+  binaries lose the whole stake on
+  a pin break � 6 @ ~91.6c was ~38% of bankroll.  6 @ 94-98c stakes
+  ~$5.6-5.9 per order (~40% of the ~$14.4 bankroll) on a single
+  settlement tail — the same concentration that produced the 10/29-30
+  pin-break losses; re-pin lower on the audit doc's rollback criteria.
+  The cap is authoritative over risk-scaled sizing:
   `MERID_PER_TRADE_LOSS_BUDGET_CENTS`=600 with
   `MERID_RISK_SCALED_SIZING_ENABLED`=1 proposes ~6 contracts inside the
   94-98c band (600/94 ~= 6.4), and the lane cap binds the final
@@ -721,7 +725,7 @@ Contract changes now in force:
   prints the interaction on every preflight.  Scope is per-order at
   construction, effectively per-market via the one-position-per-ticker
   gate; cross-market exposure is not bounded by this cap — independent
-  tickers may each hold a 2-contract position under the global
+  tickers may each hold a 6-contract position under the global
   `MERID_FIXED_EXPOSURE_CAP_USD` slot allocator.
 - **Terminal-market exit suppression**: `exit_arbiter._arbitrate_locked`
   returns `market_terminal` and declines all proposals once the market is
@@ -761,17 +765,20 @@ validated as profitable.
   the wire passivity floor (`_lane_entry_band_cents` -> `order_router.py`)
   all resolve the same env helpers, so this is a single-source change —
   not a fifth override.
-- **ETH quarantine**: `MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_YES_ETH=0` and
-  `_NO_ETH=0` veto both sides via the lane-scoped cap resolver with a
-  distinct `pinned_fav_moneyness_cap` reason (measurable, not a silent
-  block).  ETH >=94c was +$1.38/11 markets in the era — suspended for thin
-  evidence, not proven toxic.  Shadow observation continues.
+- **ETH quarantine** *(lifted 2026-10-31, cohort `eth_pf_reopen_2026-10-31`)*:
+  the 0/0 lane caps were removed by operator-directed controlled reopen —
+  `NO_ETH` restored to the 2026-10-27 mirror value 98, `YES_ETH`
+  intentionally unset (-> no in-lane cap, matching BTC/DOGE/SOL YES).  A
+  policy decision, not evidence of reversal; post-reopen ETH results form
+  a separate cohort.  Rollback criteria and exposure bounds are declared
+  in the audit doc appendix.
 - **Retained 94-98 ex-ETH lane**: monitored reference lane only — 33
   markets, +$3.29 in the replay slice, zero losses.  Thin sample; it is a
   restricted baseline for continued evidence collection, **not** a
   validated profitable strategy.
-- **Cap 2 authoritative over loss-budget sizing**: documented in the lane
-  cap bullet above — loss-budget proposes ~6 in-band, cap binds final qty.
+- **Cap 6 authoritative over loss-budget sizing** *(realigned 2026-10-31
+  from the audit-era 2)*: documented in the lane cap bullet above —
+  loss-budget proposes ~6.4 in-band, cap binds final qty at 6.0.
 - **Entry rest**: `MERID_ENTRY_MAX_REST_S`=15 resolved (see corrected rest
   bound bullet).
 - **Sizing-era uncertainty**: fills were uniformly 6-contract through
@@ -788,9 +795,11 @@ validated as profitable.
   policy — do not assume restart cancels them (15m GTC lifetime bounds the
   exposure).  Post-restart, verify on the *real* process — not a config
   probe — that the `pinned_fav_policy_resolution` P0 line reports band
-  94-98, ETH caps YES 0 / NO 0, `max_contracts=2.0`, the loss-budget
-  subordination line, plus SHA/run_id/config hash.  Verify the first
-  constructed order's `count_fp=2.0`, not just the env var.  On any check
+  94-98, ETH caps YES none / NO 98 (post-reopen resolution),
+  `max_contracts=6.0`, the loss-budget subordination line, plus
+  SHA/run_id/config hash.  Verify the first constructed order's
+  `count_fp` equals the bound value (2.0 under the audit-era cap, 6.0
+  under the realigned cap), not just the env var.  On any check
   failure: halt new submissions; do not revert to the old exposure.
 - **Settlement pseudo-fill exclusion**: ledger-native payout legs
   (`fill_source="settlement"`, `fill_id` prefix `settlement:`,

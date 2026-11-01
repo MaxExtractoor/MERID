@@ -471,20 +471,20 @@ useless. Reserve decomposition remains Â§6 work.
 
 ---
 
-## Appendix — 2026-10-31 ETH pinned-fav reopen (cohort `eth_pf_reopen_2026-10-31`)
+## Appendix ï¿½ 2026-10-31 ETH pinned-fav reopen (cohort `eth_pf_reopen_2026-10-31`)
 
 ### Scope and status
 
 Operator-directed controlled reopen: the pinned-fav lane quarantine
 (`MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{YES,NO}_ETH=0`) lifted to
 pre-quarantine resolution. This is a **policy decision, not evidence the
-earlier ETH result is reversed** — the audit found ETH negative in both
+earlier ETH result is reversed** ï¿½ the audit found ETH negative in both
 live (-368c/84cc, losses concentrated at the <=93c floor pocket) and
 85-91c shadow cohorts; the infrastructure repair does not overturn that.
 
 Restored resolution (verified against
 `directional_regime._moneyness_max_entry_price_cents`):
-- `NO_ETH = 98` — the 2026-10-27 NO-side mirror group value (BTC/DOGE/SOL
+- `NO_ETH = 98` ï¿½ the 2026-10-27 NO-side mirror group value (BTC/DOGE/SOL
   still carry 98).
 - `YES_ETH` intentionally UNSET -> lane cap falls through to per-asset
   `..._YES_ETH` (unset) -> `None` -> no in-lane cap, identical to
@@ -501,17 +501,24 @@ settlement-lane `NO_ETH=99` mirror, drift-lane ETH membership.
 Cohort boundary (durable): reopen restart run_id +
 `pinned_fav_policy_resolution` echo persisted in the startup release
 record; post-reopening ETH = decisions with `decision_ts >=` restart ts.
-`MERID_POLICY_EPOCH` deliberately NOT bumped — it scopes provisional-cell
+`MERID_POLICY_EPOCH` deliberately NOT bumped ï¿½ it scopes provisional-cell
 evidence and bumping it would reset evidence for all assets (shared
 control).  Cohort label for analysis: `eth_pf_reopen_2026-10-31`.
 
 ### Exposure allowance (declared before activation)
 
-- Per-order: `pinned_fav_cap=2.0` contracts (unchanged).
+- Per-order: `pinned_fav_cap` was 2.0 at reopen declaration and was
+  **realigned to 6.0 by the same operator directive later on 2026-10-31**
+  (`MERID_PINNED_FAV_MAX_CONTRACTS=6`; the account envelope
+  `MAX_CONTRACTS_PER_ORDER=6` / `FIXED_EXPOSURE_CAP_USD=$6` /
+  `PER_TRADE_LOSS_BUDGET=600c` was already sized for it â€” the lane cap was
+  the only sub-6 bind).  Max single-order risk ~$5.6-5.9 at 94-98c,
+  ~40% of the ~$14.4 bankroll on one settlement tail.  The reopened ETH
+  cohort therefore begins under 6-contract sizing; do not attribute
+  post-reopen ETH PnL to the reopen alone â€” sizing is a co-varying
+  boundary in this cohort.
 - Aggregate: ETH shares the lane daily budget (480/day) and per-asset
-  mband cap (96/day) as before; **no dedicated ETH allowance exists** —
-  the reopened cohort is bounded by construction at 2 contracts/order and
-  ~$14 bankroll => max single-order risk ~$1.96 at 98c.
+  mband cap (96/day) as before; **no dedicated ETH allowance exists**.
 - Loss bound: ETH entries remain subject to the same EV floor and
   evidence gates as every other asset; no separate ETH loss cap is
   declared beyond the shared controls. Expected reopened-cohort volume:
@@ -519,15 +526,22 @@ control).  Cohort label for analysis: `eth_pf_reopen_2026-10-31`.
 
 ### Rollback criteria (declared before activation)
 
-Re-quarantine (restore caps 0/0) on ANY of:
+Re-quarantine ETH (restore caps 0/0) on ANY of:
 - ETH pinned-fav realized cohort reaches -100c cumulative post-reopen.
-- Any ETH loss at the 92-93c pocket is impossible (band floor 94) — a
-  94-98c ETH loss pattern matching the pre-quarantine mechanism (adverse
+- A 94-98c ETH loss pattern matching the pre-quarantine mechanism (adverse
   selection at fill) reaching 3+ losses triggers review before further
   orders, quarantine on 4.
+
+Re-pin the order cap (6 -> 2) on ANY of:
+- A pin-break loss at 6-contract size (the 10/29-30 pattern: -540..-558c
+  on a single settlement tail).
+- Bankroll decline taking a single 6-contract order above ~50% of trading
+  shard cash.
+
+Immediate re-quarantine on ANY control regression:
 - Settlement-health or readiness gates fail to block an ETH entry that
-  should have been blocked (control regression) — immediate re-quarantine
-  plus incident.
+  should have been blocked.
+- A constructed pinned-fav order exceeds `count_fp=6.0`.
 
 ### Effective-policy matrix (as of eth_pf_reopen_2026-10-31)
 
@@ -553,9 +567,9 @@ tickers each over the last 4h; per-side gate chain recorded in
 | `PROVISIONAL_MIN_EV_C_*` floors (incl. ETH yes/no=0.0) | provisional cells | evidence-dependent restriction | cell-level measured floors | cell evidence updates |
 | `CONVICTION_MIN_DIST_ETH=0.02` | shared gate | shared safety control | per-asset conviction floor | per-asset evidence |
 | settlement-health entry blocking | all assets | shared safety control | 2026-10-31 incident repair | keep |
-| DOGE zero selections | none — ordinary rejection | NOT a restriction | DOGE evaluated identically; zero candidates qualified in 4h | n/a |
+| DOGE zero selections | none ï¿½ ordinary rejection | NOT a restriction | DOGE evaluated identically; zero candidates qualified in 4h | n/a |
 | exploration canaries (`CHEAP_TAIL_CANARY`, `CANARY_4C_LCB`, `LIVE_CANARY`) | off globally | out of scope (disabled experiments) | operator contract: must stay off absent approved experiment | approved experiment doc |
-| ETH in lanes other than pinned-fav | drift/cheap_no/maker_bid/settlement/mband | NOT quarantined (pre-existing) | quarantine was pf-lane-scoped; ETH entered 15x in last 4h via other lanes | n/a — reopening restores parity with what other lanes already allowed |
+| ETH in lanes other than pinned-fav | drift/cheap_no/maker_bid/settlement/mband | NOT quarantined (pre-existing) | quarantine was pf-lane-scoped; ETH entered 15x in last 4h via other lanes | n/a ï¿½ reopening restores parity with what other lanes already allowed |
 
 `_pf_low_p_bypass` inspected: reason-scoped to `pinned_fav_maker_low_p`
 only, requires `admission_decision=allowed` + evidence gate
