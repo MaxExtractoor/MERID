@@ -712,6 +712,16 @@ confirmed the two prior matches, each one YES contract on exchange shard 2:
 - SOL `merid_e841ff42c62e49e6aea7`: fill
   `07212c5c-9af1-93ab-887d-9ca0776b2c3b` at $0.0580 plus $0.0039 fee.
 
+Both fill IDs are absent from the retained `kalshi_fills` ledger. The SOL
+fill is in the attribution database; the BTC fill has no linked attribution
+row there. Event-filtered, paginated `GET /portfolio/positions` with
+`settlement_status=settled` returned a zero position and zero market exposure
+for each market. The market-level realized PnL and fees are aggregate
+account results and cannot be attributed to either particular fill without
+reconstructing every execution. The corresponding historical-position
+queries returned no records; Kalshi documents a buffered handoff, so the
+live settled-position records are the relevant observations here.
+
 An unbounded historical-fills request using `order_id` reached the page
 limit; no conclusion was drawn from that incomplete request. The confirmed
 fill matches above use the documented time bounds and client-side order-ID
