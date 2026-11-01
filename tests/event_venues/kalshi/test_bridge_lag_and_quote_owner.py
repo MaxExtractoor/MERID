@@ -77,16 +77,28 @@ class TestDeltaEnqueueFreshness:
         store = _store()
         _book(store)
         msg = _delta(101)
-        # Venue timestamp far beyond the event-age budget.
-        msg["ts_ms"] = (time.time() * 1000.0) - (_BOOK_MAX_EVENT_AGE_MS + 5000)
-        ok = store._enqueue_delta(TICKER, msg)
-        assert ok is False
-        state = store.get(TICKER)
-        assert state.data_quality == "INVALID"
-        assert state.transition == "RESYNC_REQUIRED"
-        assert state.invalidation_cause == "BOOK_EVENT_TOO_OLD"
-        assert state.executable is False
-        assert state.recovery_required_source == "FULL_SNAPSHOT"
+        # 2026-10-31 clock-domain repair: venue-timestamp staleness requires
+        # a calibrated server-minus-local offset — an uncalibrated raw wall
+        # subtraction is unverifiable, not evidence.  Record a zero-skew
+        # calibration so the old-ts frame is provably stale.
+        from merid.event_venues.kalshi.venue_clock import get_venue_clock
+        clk = get_venue_clock("kalshi")
+        clk.record_measurement(
+            0.0, source="test", precision_seconds=1.0,
+        )
+        try:
+            # Venue timestamp far beyond the event-age budget.
+            msg["ts_ms"] = (time.time() * 1000.0) - (_BOOK_MAX_EVENT_AGE_MS + 5000)
+            ok = store._enqueue_delta(TICKER, msg)
+            assert ok is False
+            state = store.get(TICKER)
+            assert state.data_quality == "INVALID"
+            assert state.transition == "RESYNC_REQUIRED"
+            assert state.invalidation_cause == "BOOK_EVENT_TOO_OLD"
+            assert state.executable is False
+            assert state.recovery_required_source == "FULL_SNAPSHOT"
+        finally:
+            clk.invalidate("test teardown")
 
     def test_upstream_lag_invalidates(self):
         store = _store()
@@ -300,7 +312,13 @@ class TestRestOwnedPreservation:
 
     def test_preserve_drains_stale_queued_deltas(self):
         store = _store()
-        self._rest_owned_state(store)
+        state = self._rest_owned_state(store)
+        # 8a2a2fbc: the preserve path drains the queued WS backlog only on the
+        # FIRST WS-leg invalidation (live_sequence_confirmed -> False); queued
+        # deltas on an already-untrusted leg are the post-invalidation buffer
+        # kept for sequence continuity.  This test exercises the first
+        # invalidation, so the leg must start live-sequence-confirmed.
+        state.live_sequence_confirmed = True
         store._delta_queues[TICKER] = deque({"seq": i} for i in range(5))
         store._mark_book_untrusted_and_resync(TICKER, "BOOK_UPSTREAM_LAG", upstream_wait_ms=9000.0)
         assert len(store._delta_queues[TICKER]) == 0

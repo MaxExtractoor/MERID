@@ -482,6 +482,8 @@ class KalshiMarketState:
     # but sequence-contiguous WS book from a genuinely verified one.
     ws_last_seq: Optional[int] = None          # last applied orderbook_delta seq
     ws_last_event_age_ms: Optional[float] = None  # venue ts (or bridge recv) -> apply
+    ws_last_event_age_status: Optional[str] = None  # clock-domain freshness_status
+    ws_last_event_age_src: Optional[str] = None     # venue_ts_corrected|bridge_recv_wall
     ws_last_queue_wait_ms: Optional[float] = None # bridge/deque enqueue -> dequeue
     ws_last_apply_mono_ns: int = 0             # monotonic_ns of last successful apply
     ws_queue_depth: int = 0                    # per-ticker delta-queue depth at last dequeue

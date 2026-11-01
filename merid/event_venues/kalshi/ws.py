@@ -39,6 +39,11 @@ from merid.data.ingress_replay import (
     replay_time,
     replay_start_time,
 )
+from merid.event_venues.kalshi.venue_clock import (
+    get_venue_clock,
+    parse_venue_ts_ms as _parse_venue_ts_ms,
+    decide_delta_shed as _decide_delta_shed,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.ws")
@@ -723,13 +728,22 @@ class KalshiWebSocket(EventVenueStream):
 
         for attempt, request_fn in enumerate(public_endpoints, 1):
             try:
+                # Bracket the request with local wall stamps so the offset is
+                # computed against the midpoint and the round-trip is recorded
+                # (an HTTP Date header carries ~1s granularity — the precision
+                # is declared honestly rather than treated as exact).
+                _req_start = replay_time()
                 response = request_fn()
+                _req_end = replay_time()
                 if response.status_code in (200, 204, 405) or 200 <= response.status_code < 300:
                     server_date_str = response.headers.get("Date")
                     if server_date_str:
                         server_dt = parsedate_to_datetime(server_date_str)
                         server_time = server_dt.timestamp()
-                        local_time = replay_time()
+                        _rtt_s = max(0.0, _req_end - _req_start)
+                        local_time = _req_start + _rtt_s / 2.0
+                        # server_minus_local: positive = server ahead (local
+                        # slow); negative = server behind (local fast).
                         skew_seconds = server_time - local_time
 
                         logger.info(f"[WS-AUTH] Clock skew: {skew_seconds:.2f}s (server - local)")
@@ -741,6 +755,19 @@ class KalshiWebSocket(EventVenueStream):
                         timestamp = str(int(compensated_time * 1000))
                         skew_compensated = True
                         logger.info(f"[WS-AUTH] Applied clock skew compensation: {skew_seconds:.2f}s")
+                        # Persist the calibration for the shared clock domain
+                        # so venue-timestamp staleness math (delta shed,
+                        # BOOK_EVENT_TOO_OLD, ws_last_event_age) uses the same
+                        # server-vs-local offset instead of raw wall time.
+                        try:
+                            get_venue_clock("kalshi").record_measurement(
+                                skew_seconds,
+                                source="kalshi_ws_auth_date_header",
+                                precision_seconds=1.0 + _rtt_s / 2.0,
+                                rtt_seconds=_rtt_s,
+                            )
+                        except Exception as _clk_e:
+                            logger.warning(f"[WS-AUTH] venue-clock record failed: {_clk_e}")
                         break
             except Exception as e:
                 if attempt == 1:
@@ -2322,57 +2349,46 @@ class KalshiWebSocket(EventVenueStream):
                             _drop_ms = float(
                                 os.environ.get("MERID_WS_DELTA_DROP_RES_MS", "2500")
                             )
-                            _stale = _res_ms > _drop_ms
-                            # 2026-10-06: when the delta carries a venue
-                            # timestamp, supersede on *projected event age*
-                            # (venue→now) rather than queue residence alone.
-                            # A delta with low wire lag and 2.6s residence is
-                            # still inside the downstream KALSHI_BOOK_MAX_
-                            # EVENT_AGE_MS bound and would apply cleanly —
-                            # superseding it anyway manufactures a sequence
-                            # gap, forces an invalidation, and pays a full
-                            # snapshot resync to shed ~1ms of parse work.
-                            # The residence bound remains the fallback for
-                            # frames with no usable venue timestamp.
+                            _age_margin_ms = float(
+                                os.environ.get(
+                                    "MERID_WS_DELTA_DROP_AGE_MARGIN_MS",
+                                    "500",
+                                )
+                            )
+                            _event_age_bound_ms = float(
+                                os.environ.get(
+                                    "KALSHI_BOOK_MAX_EVENT_AGE_MS",
+                                    "4000",
+                                )
+                            ) - _age_margin_ms
+                            # 2026-10-31 (clock-skew repair): venue-timestamp
+                            # age is computed through the shared clock domain —
+                            # corrected for the calibrated server-minus-local
+                            # offset measured at WS auth.  Raw ``local_wall -
+                            # venue_ts`` overstates age by the host skew
+                            # (~3.02s here) and manufactured the untrusted
+                            # storm.  Unknown/anomalous calibrations do NOT
+                            # shed on venue age: monotonic residence governs
+                            # and the frame is forwarded with an explicit
+                            # unverified status rather than a fabricated age.
                             _body0 = _kalshi_ws_payload(data)
-                            _vts0 = (
+                            _vms0 = _parse_venue_ts_ms(
                                 _body0.get("ts_ms") or _body0.get("ts")
                                 or data.get("ts_ms") or data.get("ts")
                             )
-                            if _vts0 is not None:
-                                try:
-                                    if isinstance(_vts0, str):
-                                        from datetime import datetime as _vdt
-                                        _vms0 = _vdt.fromisoformat(
-                                            _vts0.replace("Z", "+00:00")
-                                        ).timestamp() * 1000.0
-                                    else:
-                                        _v0 = float(_vts0)
-                                        _vms0 = _v0 if _v0 > 1e12 else _v0 * 1000.0
-                                    _now_wall0 = _time.time() * 1000.0
-                                    _age_margin_ms = float(
-                                        os.environ.get(
-                                            "MERID_WS_DELTA_DROP_AGE_MARGIN_MS",
-                                            "500",
-                                        )
-                                    )
-                                    _event_age_bound_ms = float(
-                                        os.environ.get(
-                                            "KALSHI_BOOK_MAX_EVENT_AGE_MS",
-                                            "4000",
-                                        )
-                                    ) - _age_margin_ms
-                                    _age_ms0 = _now_wall0 - _vms0
-                                    if 0.0 <= _age_ms0 < (
-                                        _event_age_bound_ms * 4.0
-                                    ):
-                                        # Trust the venue clock only when the
-                                        # derived age is sane; a skewed stamp
-                                        # (future or ancient) falls back to the
-                                        # residence predicate.
-                                        _stale = _age_ms0 >= _event_age_bound_ms
-                                except Exception:
-                                    pass
+                            _timing0 = get_venue_clock("kalshi").evaluate_venue_ts(
+                                _vms0,
+                                now_monotonic_ns=_pq_deq_ns,
+                                receipt_monotonic_ns=float(_ws_recv_ns0),
+                            )
+                            _shed0 = _decide_delta_shed(
+                                queue_residence_ms=_res_ms,
+                                residence_bound_ms=_drop_ms,
+                                timing=_timing0,
+                                venue_age_bound_ms=_event_age_bound_ms,
+                            )
+                            _stale = _shed0.drop
+                            _drop_reason = _shed0.reason
                             if _stale:
                                 # Orderbook deltas nest the ticker in ``msg``;
                                 # keying on "?" made every market share one
@@ -2390,6 +2406,10 @@ class KalshiWebSocket(EventVenueStream):
                                     _st = self._stale_delta_drop = {}
                                 _ent = _st.setdefault(_tk, [0, 0.0])
                                 _ent[0] += 1
+                                _rc = getattr(self, "_stale_drop_by_reason", None)
+                                if _rc is None:
+                                    _rc = self._stale_drop_by_reason = {}
+                                _rc[_drop_reason] = _rc.get(_drop_reason, 0) + 1
                                 _now_m = _pq_deq_ns / 1e9
                                 _notify_s = float(
                                     os.environ.get(
@@ -2401,17 +2421,40 @@ class KalshiWebSocket(EventVenueStream):
                                     # bounded snapshot recovery downstream.
                                     _ent[1] = _now_m
                                     data["_stale_dropped_since"] = _ent[0] - 1
+                                    data["_stale_drop_reason"] = _drop_reason
+                                    data["_venue_age_status"] = (
+                                        _timing0.freshness_status
+                                    )
+                                    _f = lambda v, d=0: (
+                                        f"{v:.{d}f}" if v is not None else "-"
+                                    )
                                     logger.warning(
-                                        "[WS-DELTA-DROP] ticker=%s res_ms=%.0f "
-                                        ">%.0fms — forwarding one stale delta "
-                                        "to trigger resync; superseded=%d",
-                                        _tk, _res_ms, _drop_ms, _ent[0] - 1,
+                                        "[WS-DELTA-DROP] ticker=%s reason=%s "
+                                        "res_ms=%s res_bound_ms=%.0f "
+                                        "raw_age_ms=%s corr_age_ms=%s "
+                                        "age_bound_ms=%.0f offset_s=%s "
+                                        "off_age_s=%s off_src=%s "
+                                        "freshness=%s superseded=%d",
+                                        _tk, _drop_reason,
+                                        _f(_res_ms), _drop_ms,
+                                        _f(_timing0.raw_venue_age_ms),
+                                        _f(_timing0.corrected_venue_age_ms),
+                                        _event_age_bound_ms,
+                                        _f(_timing0.offset_seconds, 3),
+                                        _f(_timing0.offset_measurement_age_s, 1),
+                                        _timing0.offset_source or "-",
+                                        _timing0.freshness_status,
+                                        _ent[0] - 1,
                                     )
                                 else:
                                     logger.debug(
                                         "[WS-DELTA-DROP] superseded stale "
-                                        "delta ticker=%s res_ms=%.0f",
-                                        _tk, _res_ms,
+                                        "delta ticker=%s reason=%s res_ms=%.0f "
+                                        "corr_age_ms=%s",
+                                        _tk, _drop_reason, _res_ms,
+                                        f"{_timing0.corrected_venue_age_ms:.0f}"
+                                        if _timing0.corrected_venue_age_ms
+                                        is not None else "-",
                                     )
                                     # 2026-10-31: record the dropped
                                     # (seq -> ticker) pair on its sid.  The

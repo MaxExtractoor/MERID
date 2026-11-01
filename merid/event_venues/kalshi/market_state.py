@@ -90,6 +90,12 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from merid.data.ingress_replay import is_replay_active, replay_random
 from merid.event_venues.kalshi.models import KalshiMarketState
+from merid.event_venues.kalshi.venue_clock import (
+    STATUS_MEASURED,
+    STATUS_NO_VENUE_TS,
+    get_venue_clock,
+    parse_venue_ts_ms,
+)
 from merid.event_venues.kalshi.orderbook import LocalOrderbook, MultiMarketOrderbook
 from merid.event_venues.kalshi.unified_market_state import (
     Candlestick,
@@ -1446,15 +1452,23 @@ class KalshiMarketStateStore:
                 self._ticker_drain_inflight[ticker] = False
             self._batch_worker_event.set()
 
-    def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Dict[str, float]]:
+    def _book_event_timing(self, msg: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
         """Return ``(event_age_ms, upstream_wait_ms)`` for a book event.
 
-        ``event_age_ms`` is venue-timestamp age when Kalshi supplies
-        ``ts``/``ts_ms``/``timestamp``; otherwise it falls back to the
-        bridge socket-receive wall time stamped on the event
-        (``_t_bridge_recv_wall_ms``).  ``upstream_wait_ms`` is monotonic
-        residence time upstream of the per-ticker delta queue, measured
-        from the bridge recv/enqueue stamp (``_t_bridge_recv_ns``).
+        ``event_age_ms`` is the *offset-corrected* venue-timestamp age when
+        Kalshi supplies ``ts``/``ts_ms``/``timestamp`` and the shared clock
+        domain holds a valid server-minus-local calibration; otherwise it
+        falls back to the local-domain bridge socket-receive wall age
+        (``_t_bridge_recv_wall_ms``) — an honest in-process delay that
+        cannot see venue→socket upstream lag, so the fallback is labelled
+        via ``venue_age_status`` in the returned hops rather than silently
+        standing in for a verified venue age.  ``upstream_wait_ms`` is
+        monotonic residence time upstream of the per-ticker delta queue,
+        measured from the bridge recv/enqueue stamp (``_t_bridge_recv_ns``).
+
+        2026-10-31 (clock-skew repair): the previous ``now_wall - venue_ms``
+        subtraction ran uncompensated; with this host ~3.02s ahead of the
+        venue it fired ``BOOK_EVENT_TOO_OLD`` at ~980ms of true age.
         """
         now_wall_ms = time.time() * 1000.0
         now_mono_ns = time.monotonic_ns()
@@ -1464,36 +1478,37 @@ class KalshiMarketStateStore:
         if venue_ts is None and isinstance(payload, dict):
             venue_ts = payload.get("ts") or payload.get("ts_ms") or payload.get("timestamp")
 
-        event_age_ms: Optional[float] = None
-        if venue_ts is not None:
-            try:
-                if isinstance(venue_ts, str):
-                    from datetime import datetime
-                    venue_ms = datetime.fromisoformat(
-                        venue_ts.replace("Z", "+00:00")
-                    ).timestamp() * 1000.0
-                else:
-                    venue_num = float(venue_ts)
-                    venue_ms = venue_num if venue_num > 1e12 else venue_num * 1000.0
-                if 0 < venue_ms <= now_wall_ms + 1000.0:
-                    event_age_ms = now_wall_ms - venue_ms
-            except Exception:
-                event_age_ms = None
-        if event_age_ms is None:
-            recv_wall = msg.get("_t_bridge_recv_wall_ms")
-            if recv_wall:
-                try:
-                    event_age_ms = now_wall_ms - float(recv_wall)
-                except Exception:
-                    event_age_ms = None
-
-        upstream_wait_ms: Optional[float] = None
+        recv_wall = msg.get("_t_bridge_recv_wall_ms")
         recv_ns = msg.get("_t_bridge_recv_ns") or msg.get("_t_enqueue_ns")
-        if recv_ns:
-            try:
-                upstream_wait_ms = (now_mono_ns - float(recv_ns)) / 1e6
-            except Exception:
-                upstream_wait_ms = None
+
+        _timing = get_venue_clock("kalshi").evaluate_venue_ts(
+            parse_venue_ts_ms(venue_ts),
+            now_wall_ms=now_wall_ms,
+            now_monotonic_ns=now_mono_ns,
+            receipt_monotonic_ns=float(recv_ns) if recv_ns else None,
+            receipt_wall_ms=float(recv_wall) if recv_wall else None,
+        )
+
+        event_age_ms: Optional[float] = None
+        event_age_src: Optional[str] = None
+        if (
+            _timing.freshness_status == STATUS_MEASURED
+            and _timing.corrected_venue_age_ms is not None
+        ):
+            event_age_ms = _timing.corrected_venue_age_ms
+            event_age_src = "venue_ts_corrected"
+        elif _timing.local_pipeline_age_ms is not None:
+            # Local-domain fallback (bridge recv wall -> now): skew-free,
+            # but venue->socket upstream lag is unmeasured while the offset
+            # is unavailable — the status string keeps that explicit.
+            event_age_ms = _timing.local_pipeline_age_ms
+            event_age_src = "bridge_recv_wall"
+            if _timing.freshness_status != STATUS_NO_VENUE_TS:
+                event_age_src = (
+                    f"bridge_recv_wall({_timing.freshness_status})"
+                )
+
+        upstream_wait_ms: Optional[float] = _timing.queue_residence_ms
 
         # Hop breakdown for rejection forensics:
         #   wire_ms      = venue_ts → socket recv-return (venue publish + network
@@ -1508,17 +1523,31 @@ class KalshiMarketStateStore:
         pq_deq_ns = msg.get("_t_pq_dequeue_ns")
         if venue_ts is not None and ws_recv_wall_ms is not None:
             try:
-                if isinstance(venue_ts, str):
-                    from datetime import datetime
-                    _v_ms = datetime.fromisoformat(
-                        venue_ts.replace("Z", "+00:00")
-                    ).timestamp() * 1000.0
-                else:
-                    _v = float(venue_ts)
-                    _v_ms = _v if _v > 1e12 else _v * 1000.0
-                hops["wire_ms"] = round(float(ws_recv_wall_ms) - _v_ms, 1)
+                _v_ms = parse_venue_ts_ms(venue_ts)
+                if _v_ms is not None:
+                    hops["wire_ms"] = round(float(ws_recv_wall_ms) - _v_ms, 1)
+                    if _timing.offset_seconds is not None:
+                        hops["wire_ms_corrected"] = round(
+                            float(ws_recv_wall_ms)
+                            + _timing.offset_seconds * 1000.0
+                            - _v_ms,
+                            1,
+                        )
             except Exception:
                 pass
+        hops["venue_age_status"] = _timing.freshness_status
+        if event_age_src:
+            hops["event_age_src"] = event_age_src
+        if _timing.raw_venue_age_ms is not None:
+            hops["raw_venue_age_ms"] = round(_timing.raw_venue_age_ms, 1)
+        if _timing.corrected_venue_age_ms is not None:
+            hops["corr_venue_age_ms"] = round(_timing.corrected_venue_age_ms, 1)
+        if _timing.offset_seconds is not None:
+            hops["offset_s"] = round(_timing.offset_seconds, 3)
+        if _timing.offset_measurement_age_s is not None:
+            hops["off_age_s"] = round(_timing.offset_measurement_age_s, 1)
+        if _timing.offset_source:
+            hops["off_src"] = _timing.offset_source
         try:
             if ws_recv_ns is not None:
                 hops["recv_to_now_ms"] = round((now_mono_ns - float(ws_recv_ns)) / 1e6, 1)
@@ -2336,6 +2365,8 @@ class KalshiMarketStateStore:
         if _ev_age_ms is not None:
             state.ws_last_event_age_ms = _ev_age_ms
             _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
+        state.ws_last_event_age_status = _hops.get("venue_age_status")
+        state.ws_last_event_age_src = _hops.get("event_age_src")
 
         self._sync_book_fields(
             state, self._ob.get_book(ticker), ticker, via="bridge_queue",
