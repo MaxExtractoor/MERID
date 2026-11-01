@@ -501,14 +501,23 @@ class FillsPoller:
         while not self._shutdown.is_set():
             try:
                 logger.info("[RECONCILE-LOOP] Starting reconciliation cycle")
-                await self._do_reconcile()
+                report = await self._do_reconcile()
+                if not isinstance(report, dict) or report.get("status") != "ok":
+                    raise RuntimeError(f"reconciliation not matched: {report}")
                 self._last_reconcile_time = datetime.now(timezone.utc)
+                if (self._degraded_reason or "").startswith("reconcile_failed:"):
+                    self._degraded_reason = None
                 if not self._first_reconcile_done:
                     self._first_reconcile_done = True
-                    self._transition_readiness()
-                    logger.info("[RECONCILE-LOOP] first reconcile complete — readiness=%s", self._readiness)
+                self._transition_readiness()
+                logger.info("[RECONCILE-LOOP] reconciliation complete — readiness=%s", self._readiness)
             except Exception as e:
                 self._reconcile_errors += 1
+                self._first_reconcile_done = False
+                if not self._degraded_reason or self._degraded_reason.startswith("reconcile_failed:"):
+                    self._degraded_reason = f"reconcile_failed:{e}"
+                self._transition_readiness()
+                self._halt_for_reconciliation(str(e))
                 logger.warning(f"Reconciliation failed: {e}", exc_info=True)
             
             try:
@@ -691,7 +700,7 @@ class FillsPoller:
         logger.info("[RECONCILE] Starting reconciliation cycle")
         client = self._get_client()
         if not client:
-            logger.warning("[RECONCILE] No client available")
+            self._halt_for_reconciliation("no_client")
             return {"status": "no_client"}
         
         try:
@@ -713,18 +722,14 @@ class FillsPoller:
             # Use the fail-closed adapter so missing identity/quantity fields do not
             # silently become ledger entries with implied sides or zero prices.
             logger.info("[RECONCILE] Fetching positions from Kalshi API")
+            rest_started_at = time.time()
             pos_response = await client.get_positions()
             positions: List[Dict[str, Any]] = []
             for p in pos_response.positions:
                 try:
                     positions.append(port_position_to_ledger_dict(p))
                 except PortLedgerAdapterError as exc:
-                    self._reconcile_errors += 1
-                    logger.warning(
-                        "FillsPoller: skipping malformed position from port: %s",
-                        exc,
-                        extra={"field": exc.field, "value": str(exc.value)},
-                    )
+                    raise RuntimeError(f"malformed exchange position: {exc}") from exc
 
             # Debug logging for reconciliation diagnostics
             if positions:
@@ -733,9 +738,46 @@ class FillsPoller:
             # Run reconciliation
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             ledger = get_fills_ledger()
+            if not getattr(ledger, "_load_complete", False):
+                raise RuntimeError(
+                    f"fills ledger restore incomplete: {getattr(ledger, '_last_load_error', None)}"
+                )
+
+            # Check independent signed projections before allowing any cache
+            # synchronization or risk-state updates.
+            from merid.preflight.p0 import (
+                _position_mismatches,
+                _reconciliation_quarantined,
+                _signed_yes_position_map,
+                _trusted_ledger_signed_exposure,
+            )
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+
+            view = await asyncio.to_thread(ledger.get_canonical_fills)
+            ledger_exposure = await asyncio.to_thread(_trusted_ledger_signed_exposure, view)
+            exchange_exposure = {
+                ticker: cc
+                for ticker, cc in _signed_yes_position_map(positions, exchange=False).items()
+                if not _reconciliation_quarantined(ticker)
+            }
+            cache = get_position_cache()
+            cached_positions = list(cache.get_all_positions(validate_freshness=False).values())
+            cache_exposure = {
+                ticker: cc
+                for ticker, cc in _signed_yes_position_map(cached_positions, exchange=False).items()
+                if not _reconciliation_quarantined(ticker)
+            }
+            mismatches = (
+                _position_mismatches(exchange_exposure, ledger_exposure, "ledger")
+                + _position_mismatches(exchange_exposure, cache_exposure, "cache")
+            )
+            if mismatches:
+                raise RuntimeError(f"signed position mismatch: {mismatches[:5]}")
+
             report = await ledger.reconcile_with_kalshi_positions(positions)
-            
             self._last_reconcile_report = report
+            if not isinstance(report, dict) or report.get("status") != "ok":
+                raise RuntimeError(f"ledger reconciliation did not match: {report}")
             
             # CRITICAL FIX: Integrate position drift detector
             # Compare REST position, derived position (ledger replay), and live cache
@@ -778,11 +820,9 @@ class FillsPoller:
                             context=f"fills_poller ticker={market_id}",
                         )
                     except SideValidationError as side_err:
-                        logger.error(
-                            "[FILLS-POLLER-SIDE-INVALID] %s: excluding REST position from drift check: %s",
-                            market_id, side_err,
-                        )
-                        rest_side = None
+                        raise RuntimeError(
+                            f"invalid REST position side for {market_id}: {side_err}"
+                        ) from side_err
 
                     drift_event = await drift_detector.check_drift(
                         market_id=market_id,
@@ -807,8 +847,11 @@ class FillsPoller:
                             },
                             severity=drift_event.severity.value
                         )
+                        raise RuntimeError(
+                            f"position drift for {market_id}: {drift_event.description}"
+                        )
             except Exception as drift_err:
-                logger.warning("[RECONCILE] Drift detection failed: %s", drift_err)
+                raise RuntimeError(f"position drift detection failed: {drift_err}") from drift_err
             
             # Sync position cache with ground truth from Kalshi REST API
             # FIX 7: REST as primary source - always use REST API positions as primary source
@@ -819,76 +862,11 @@ class FillsPoller:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
                     cache = get_position_cache()
 
-                    # FIX 7: Always sync from REST as primary source (with force=True for auto-corrected divergences)
-                    # The auto-corrective reconciliation (Fix 6) may have already synced, but we ensure
-                    # the cache reflects the authoritative REST API state
-                    await cache.sync_from_rest(positions, force=(report.get("status") == "degraded"))
-                    logger.info(f"Position cache synced from REST API (primary source): {len(positions)} positions")
+                    # Re-check under the cache mutex, then refresh verification
+                    # without rebuilding or clearing live position state.
+                    await cache.confirm_matched_rest_projection(exchange_exposure, rest_started_at)
+                    logger.info("Position cache verified against REST: %d positions", len(positions))
                     
-                    # CRITICAL FALLBACK: If REST returns 0 positions but we have fills suggesting positions,
-                    # use fills ledger as fallback to ensure PositionMonitor can track positions for trailing stop
-                    if len(positions) == 0:
-                        computed_positions = ledger.compute_net_positions(since_hours=1)  # Check for recent positions (1h)
-                        if computed_positions:
-                            logger.warning(
-                                f"[POSITION-FALLBACK] REST API returned 0 positions but fills ledger shows {len(computed_positions)} recent positions (within 1h). "
-                                f"NOT clearing fills ledger - fills ledger is canonical source. REST API may be temporarily unavailable."
-                            )
-                            # DO NOT clear fills ledger - fills ledger is the canonical source
-                            # REST API can temporarily return 0 positions due to API issues
-                            # Only clear fills ledger if there's evidence of actual data corruption
-                            # This prevents accidental data loss from transient API issues
-                            
-                            # CRITICAL FIX (2026-07-19): DO NOT clear slot allocator when fills ledger shows recent positions
-                            # The slot allocator state should be preserved when we have evidence of actual positions
-                            # This prevents the allocator from thinking exposure is 0 when it's not
-                            logger.info(
-                                f"[POSITION-FALLBACK] Preserving slot allocator state - fills ledger shows {len(computed_positions)} recent positions"
-                            )
-                        else:
-                            # No recent positions (within 1h) - check if there are stale positions (>24h)
-                            stale_positions = ledger.compute_net_positions(since_hours=24)
-                            if stale_positions:
-                                logger.warning(
-                                    f"[POSITION-FALLBACK] REST API returned 0 positions, fills ledger has {len(stale_positions)} stale positions (>1h, within 24h). "
-                                    f"Clearing stale fills ledger entries as they are likely from previous session."
-                                )
-                                await ledger.clear_open_positions_on_empty_cache()
-                            else:
-                                # CRITICAL FIX (2026-07-13): Clear phantom open positions when REST returns 0
-                                # and fills ledger also shows no computed positions (meaning old closed trades)
-                                await ledger.clear_open_positions_on_empty_cache()
-                            
-                            # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator
-                            # when REST returns 0 positions to fix the $0.66 vs $1.00 exposure discrepancy
-                            # ONLY do this when we have NO evidence of positions (no recent, no stale)
-                            try:
-                                from merid.risk.global_slot_allocator import get_global_slot_allocator
-                                slot_allocator = get_global_slot_allocator()
-                                slot_allocator.clear_slots_on_empty_positions(position_count=0)
-                            except Exception as slot_exc:
-                                logger.warning(f"[RECONCILE] Failed to clear phantom slots: {slot_exc}")
-                            
-                            # CRITICAL FIX (2026-07-13): Reset window exposure state to ensure complete sync
-                            # Window exposure tracks cumulative exposure per 15-minute window and can become
-                            # stale if slots were not properly released during previous sessions
-                            try:
-                                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
-                                force_reset_window_exposure(reason="phantom_position_cleanup")
-                            except Exception as window_exc:
-                                logger.warning(f"[RECONCILE] Failed to reset window exposure: {window_exc}")
-
-                    # CRITICAL FIX: Resync category_contracts counter with actual positions
-                    # This fixes the desync where category_contracts accumulates incorrectly
-                    # when record_close() is not called for settled/closed positions.
-                    # Call after sync completes to ensure cache has the latest positions
-                    try:
-                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-                        risk_mgr = get_kalshi_risk()
-                        risk_mgr.resync_category_contracts_from_positions()
-                    except Exception as _resync_exc:
-                        logger.warning(f"Failed to resync category_contracts after position sync: {_resync_exc}")
-
                     # HIGH-1 FIX: Detect cache vs ledger position divergence.
                     # Cache is WS-event-driven; ledger is the source of truth.
                     # Divergence > _CACHE_LEDGER_DIVERGENCE_THRESHOLD contracts triggers an alert.
@@ -920,7 +898,7 @@ class FillsPoller:
                         logger.debug("Cache vs ledger divergence check skipped: %s", _div_exc)
 
                 except Exception as _cache_err:
-                    logger.warning(f"Position cache sync from reconciliation failed: {_cache_err}")
+                    raise RuntimeError(f"position cache sync failed: {_cache_err}") from _cache_err
 
             if report.get("status") == "broken":
                 # P0: Only broken status indicates ghost trades (positions without fills)
@@ -959,7 +937,19 @@ class FillsPoller:
         except Exception as e:
             self._reconcile_errors += 1
             logger.warning(f"Reconciliation error: {e}")
+            self._halt_for_reconciliation(str(e))
             return {"status": "error", "message": str(e)}
+
+    def _halt_for_reconciliation(self, detail: str) -> None:
+        """Stop new entries without interfering with protective services."""
+        logger.error("[RECONCILE] halting entries: %s", detail)
+        try:
+            from merid.observability.live_runtime_state import get_live_runtime_state
+            get_live_runtime_state().halt_entries(
+                f"fills_reconciliation_failed: {detail}", ["RECONCILIATION_DIVERGENCE"]
+            )
+        except Exception as exc:
+            logger.critical("[RECONCILE] Failed to persist entry halt: %s", exc, exc_info=True)
     
     async def _backfill_loop(self) -> None:
         """Periodic full backfill for completeness with circuit breaker protection."""
@@ -1206,14 +1196,12 @@ class FillsPoller:
                         except Exception:
                             pass
                 except Exception as _mkt_exc:
-                    # 404 for a settled/deleted market means we cannot fetch the
-                    # official outcome and should stop retrying.
+                    # A 404 is not an authoritative settlement outcome.
                     status_code = getattr(_mkt_exc, "status_code", None)
                     err_str = str(_mkt_exc).lower()
                     if status_code == 404 or "not found" in err_str or "not_found" in err_str:
-                        self._settlement_notified[ticker] = time.time()
                         logger.info(
-                            "settlement: market %s not found (404), marking notified and stopping retries",
+                            "settlement: market %s not found (404), retaining for retry",
                             ticker,
                         )
                     logger.debug("settlement: market fetch for %s failed: %s", ticker, _mkt_exc)
@@ -1228,12 +1216,7 @@ class FillsPoller:
                 with tracker._fill_lock:
                     matching_keys = [k for k in tracker._open_trades if k.endswith(f":{ticker}")]
                     if not matching_keys:
-                        self._settlement_notified[ticker] = time.time()
-                        if len(self._settlement_notified) > self._settlement_notified_max:
-                            evict_count = len(self._settlement_notified) // 2
-                            for _ in range(evict_count):
-                                self._settlement_notified.popitem(last=False)
-                        logger.debug("settlement: no open APT trade for %s, skipping record_outcome", ticker)
+                        logger.debug("settlement: no open APT trade for %s, retaining for retry", ticker)
                         continue
                     _side_hint = tracker._open_trades[matching_keys[0]].side
 

@@ -5214,6 +5214,32 @@ class KalshiPositionCache:
             "position_count": position_count,
         }
 
+    async def confirm_matched_rest_projection(
+        self, expected: Dict[str, int], rest_timestamp: float
+    ) -> None:
+        """Refresh REST verification only if the cache still matches under lock."""
+        from merid.preflight.p0 import (
+            _position_mismatches,
+            _reconciliation_quarantined,
+            _signed_yes_position_map,
+        )
+
+        async with self._ensure_mutex():
+            if rest_timestamp <= self._last_rest_sync_timestamp:
+                raise RuntimeError("REST position snapshot is not newer than the last sync")
+            current = {
+                ticker: cc
+                for ticker, cc in _signed_yes_position_map(
+                    list(self._positions.values()), exchange=False
+                ).items()
+                if not _reconciliation_quarantined(ticker)
+            }
+            mismatches = _position_mismatches(expected, current, "cache")
+            if mismatches:
+                raise RuntimeError(f"position cache changed during reconciliation: {mismatches[:5]}")
+            self._last_sync = datetime.now(timezone.utc)
+            self._last_rest_sync_timestamp = rest_timestamp
+
     async def sync_from_rest(
         self,
         positions: list,

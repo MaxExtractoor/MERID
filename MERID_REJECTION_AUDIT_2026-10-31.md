@@ -774,3 +774,14 @@ reports failures and detects its 10,000-row cap; P0 fails closed if restore
 is incomplete. A scalable complete restore remains to be implemented before
 the cap is reached. Neither these checks nor the logged settled positions
 resolve the 198 order attempts.
+
+The fills poller's periodic reconciliation also treated failed, malformed, and
+divergent snapshots as completed work and could clear position-monitor, slot,
+and window-risk state after an empty positions response. It now halts entries
+on those conditions, compares independent signed ledger/exchange/cache
+projections, and verifies the unchanged cache under its mutex before updating
+REST freshness. It does not clear reservations merely because positions are
+empty. An unavailable drift check fails closed. A 404 market lookup does not
+mark settlement delivery complete. Sixty focused reconciliation, restore,
+and P0 tests pass; runtime auto-recovery and the startup protective-service
+ordering remain open.
