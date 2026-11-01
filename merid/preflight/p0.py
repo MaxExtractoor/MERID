@@ -8,6 +8,7 @@ bankroll service, and an RTI stream.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -218,13 +219,29 @@ def _rti_observations_fresh(
 
 
 def _check_uncertain_submissions() -> Tuple[bool, str]:
-    """Fail closed on durable unknown submissions, regardless of their age."""
+    """Fail closed on durable unknown submissions that can still bind exposure.
+
+    An uncertain attempt can only produce a fill while its market is live.
+    Every market this venue trades is a 15-minute contract, and Kalshi cancels
+    all resting orders at market close; an attempt older than
+    ``MERID_UNCERTAIN_ATTEMPT_EXPOSURE_S`` therefore cannot create residual
+    exposure regardless of its unknowable historical outcome.  Those rows are
+    quarantined: still nonterminal, still audited, never rewritten without
+    evidence — but they cannot block entries on live markets forever.
+
+    Rows younger than the bound, or rows with a missing/unparseable
+    ``created_at``, remain strictly blocking.
+    """
     try:
         from merid.event_venues.kalshi.order_attempt_store import (
             DEFAULT_DB_PATH,
             ExitOrderAttemptState,
         )
 
+        quarantine_age_s = float(
+            os.environ.get("MERID_UNCERTAIN_ATTEMPT_EXPOSURE_S", "21600")
+        )
+        cutoff = time.time() - quarantine_age_s
         path = Path(DEFAULT_DB_PATH).resolve()
         if not path.is_file():
             raise FileNotFoundError("order attempt store is missing")
@@ -234,18 +251,44 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
             ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
         )
         with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)) as conn:
-            attempt_count = conn.execute(
+            # created_at NULL or non-numeric fails closed: it counts as
+            # blocking because its market liveness cannot be ruled out.
+            blocking = conn.execute(
                 "SELECT COUNT(*) FROM order_attempts "
-                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN')"
+                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
+                "AND (created_at IS NULL OR created_at > ?)",
+                (cutoff,),
             ).fetchone()[0]
-            exit_count = conn.execute(
-                "SELECT COUNT(*) FROM exit_order_attempts WHERE state IN (?, ?, ?)",
-                uncertain_exit_states,
+            quarantined = conn.execute(
+                "SELECT COUNT(*) FROM order_attempts "
+                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
+                "AND created_at IS NOT NULL AND created_at <= ?",
+                (cutoff,),
             ).fetchone()[0]
+            exit_blocking = conn.execute(
+                f"SELECT COUNT(*) FROM exit_order_attempts "
+                f"WHERE state IN ({','.join('?' for _ in uncertain_exit_states)}) "
+                "AND (created_at IS NULL OR created_at > ?)",
+                (*uncertain_exit_states, cutoff),
+            ).fetchone()[0]
+            exit_quarantined = conn.execute(
+                f"SELECT COUNT(*) FROM exit_order_attempts "
+                f"WHERE state IN ({','.join('?' for _ in uncertain_exit_states)}) "
+                "AND created_at IS NOT NULL AND created_at <= ?",
+                (*uncertain_exit_states, cutoff),
+            ).fetchone()[0]
+        if quarantined or exit_quarantined:
+            logger.critical(
+                "[P0-PREFLIGHT] %d order attempt(s) and %d exit attempt(s) remain "
+                "uncertain but are older than %.0fs; their markets are settled "
+                "so they cannot create exposure — quarantined, not resolved",
+                quarantined, exit_quarantined, quarantine_age_s,
+            )
         return _check(
             "uncertain_submission_recovery",
-            not attempt_count and not exit_count,
-            f"order_attempts={attempt_count} exit_attempts={exit_count}",
+            not blocking and not exit_blocking,
+            f"order_attempts={blocking} quarantined={quarantined} "
+            f"exit_attempts={exit_blocking} exit_quarantined={exit_quarantined}",
         )
     except Exception as exc:
         return _check("uncertain_submission_recovery", False, str(exc))

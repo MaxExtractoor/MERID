@@ -32,7 +32,11 @@ def test_empty_store_passes(store):
 
 
 @pytest.mark.parametrize("status", ["SUBMITTING", "SUBMISSION_UNKNOWN"])
-def test_old_uncertain_attempt_fails_and_is_not_modified(store, status):
+def test_old_uncertain_attempt_is_quarantined_not_modified(store, status):
+    # An attempt older than any possible 15m-market lifetime cannot create
+    # residual exposure: its market settled and the venue cancelled any
+    # resting order at close.  It must not block entries on live markets,
+    # but it is quarantined — never rewritten without evidence.
     old = time.time() - 400 * 86400
     store.persist_attempt(attempts.OrderAttemptRecord(
         order_attempt_id="oa-1", client_order_id="co-1", decision_id="dec-1",
@@ -40,9 +44,42 @@ def test_old_uncertain_attempt_fails_and_is_not_modified(store, status):
         run_id=None, process_id=None, fingerprint="fp-1", status=status,
         created_at=old, updated_at=old, payload_json="{}",
     ))
-    assert not _check_uncertain_submissions()[0]
+    ok, msg = _check_uncertain_submissions()
+    assert ok, msg
+    assert "quarantined=1" in msg
     assert store.get_by_order_attempt_id("oa-1").status == status
     assert store.get_unresolved() == []
+
+
+@pytest.mark.parametrize("status", ["SUBMITTING", "SUBMISSION_UNKNOWN"])
+def test_recent_uncertain_attempt_fails_closed(store, status):
+    now = time.time()
+    store.persist_attempt(attempts.OrderAttemptRecord(
+        order_attempt_id="oa-1", client_order_id="co-1", decision_id="dec-1",
+        replaces_order_attempt_id=None, intent_id="intent-1", client_tag=None,
+        run_id=None, process_id=None, fingerprint="fp-1", status=status,
+        created_at=now, updated_at=now, payload_json="{}",
+    ))
+    assert not _check_uncertain_submissions()[0]
+
+
+def test_untimestamped_uncertain_attempt_fails_closed(store):
+    now = time.time()
+    store.persist_attempt(attempts.OrderAttemptRecord(
+        order_attempt_id="oa-1", client_order_id="co-1", decision_id="dec-1",
+        replaces_order_attempt_id=None, intent_id="intent-1", client_tag=None,
+        run_id=None, process_id=None, fingerprint="fp-1",
+        status="SUBMISSION_UNKNOWN",
+        created_at=now, updated_at=now, payload_json="{}",
+    ))
+    # The column is REAL-affinity but SQLite stores a non-numeric value as
+    # TEXT; a created_at that cannot establish market liveness must block.
+    conn = attempts.OrderAttemptStore()._get_conn()
+    conn.execute(
+        "UPDATE order_attempts SET created_at = 'unparseable' WHERE order_attempt_id = 'oa-1'"
+    )
+    conn.commit()
+    assert not _check_uncertain_submissions()[0]
 
 
 def test_missing_store_fails_closed(tmp_path, monkeypatch):
