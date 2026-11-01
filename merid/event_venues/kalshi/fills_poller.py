@@ -864,8 +864,19 @@ class FillsPoller:
 
                     # Re-check under the cache mutex, then refresh verification
                     # without rebuilding or clearing live position state.
-                    await cache.confirm_matched_rest_projection(exchange_exposure, rest_started_at)
-                    logger.info("Position cache verified against REST: %d positions", len(positions))
+                    # Dispositions: APPLIED / CONFIRMED_UNCHANGED /
+                    # SUPERSEDED_BY_NEWER_REFRESH are all accepted outcomes;
+                    # only a genuine content mismatch raises (FAILED).
+                    _snap_disposition = await cache.confirm_matched_rest_projection(
+                        exchange_exposure,
+                        rest_started_at,
+                        caller="fills_poller.reconcile",
+                    )
+                    logger.info(
+                        "Position cache verified against REST: %d positions (decision=%s)",
+                        len(positions),
+                        _snap_disposition,
+                    )
                     
                     # HIGH-1 FIX: Detect cache vs ledger position divergence.
                     # Cache is WS-event-driven; ledger is the source of truth.

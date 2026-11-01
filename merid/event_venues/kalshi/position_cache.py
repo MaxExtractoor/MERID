@@ -1326,6 +1326,36 @@ class CachedPosition:
             self.unrealized_pnl_usd = Decimal("0")
 
 
+class RestSnapshotDisposition(str):
+    """Outcome classes for a REST position-snapshot acceptance decision.
+
+    Separates "did not apply" (an older or duplicated request lost the ordering
+    race but the state it observed still agrees with the cache) from "could not
+    reconcile" (genuine authority failure).  Defined as plain ``str``
+    constants so it needs no import ceremony at call sites; values are stable
+    log/protocol tokens.
+
+    Semantics per the 2026-11-01 audit contract:
+      APPLIED                    complete accepted snapshot (newer observation).
+      CONFIRMED_UNCHANGED        complete observation reconfirms current state.
+      SUPERSEDED_BY_NEWER_REFRESH an older request lost the race; a newer
+                                 reconciliation result already applied.  The
+                                 state it saw still matched — not a mismatch.
+      INCOMPLETE                 snapshot known incomplete — do not apply,
+                                 entries stay blocked.
+      UNVERIFIED                 completeness/authority could not be
+                                 established — entries stay blocked.
+      FAILED                     could not reconcile — entries stay blocked.
+    """
+
+    APPLIED = "APPLIED"
+    CONFIRMED_UNCHANGED = "CONFIRMED_UNCHANGED"
+    SUPERSEDED_BY_NEWER_REFRESH = "SUPERSEDED_BY_NEWER_REFRESH"
+    INCOMPLETE = "INCOMPLETE"
+    UNVERIFIED = "UNVERIFIED"
+    FAILED = "FAILED"
+
+
 class KalshiPositionCache:
     """Real-time position cache updated from WebSocket events.
 
@@ -5210,10 +5240,31 @@ class KalshiPositionCache:
             "position_count": position_count,
         }
 
+    @staticmethod
+    def _snapshot_state_hash(signed_map: Dict[str, int]) -> int:
+        """Normalized content hash of a signed-YES position map (order-free)."""
+        return hash(tuple(sorted(signed_map.items())))
+
     async def confirm_matched_rest_projection(
-        self, expected: Dict[str, int], rest_timestamp: float
-    ) -> None:
-        """Refresh REST verification only if the cache still matches under lock."""
+        self,
+        expected: Dict[str, int],
+        rest_timestamp: float,
+        caller: str = "",
+    ) -> str:
+        """Refresh REST verification only if the cache still matches under lock.
+
+        Returns a :class:`RestSnapshotDisposition` token.  An older or
+        duplicate request that *lost the ordering race* but whose observed
+        portfolio still equals the cache is SUPERSEDED/CONFIRMED — it is not a
+        portfolio-authority failure.  Only a genuine content divergence raises
+        (FAILED / "could not reconcile"), which keeps entries blocked.
+
+        ``rest_timestamp`` is a locally assigned wall-clock stamp of when the
+        REST fetch *started* (request-time, seconds).  ``_last_rest_sync_timestamp``
+        is the same quantity for the last accepted application — the
+        comparison orders observations, it does not compare exchange
+        position-update times.
+        """
         from merid.preflight.p0 import (
             _position_mismatches,
             _reconciliation_quarantined,
@@ -5221,8 +5272,6 @@ class KalshiPositionCache:
         )
 
         async with self._ensure_mutex():
-            if rest_timestamp <= self._last_rest_sync_timestamp:
-                raise RuntimeError("REST position snapshot is not newer than the last sync")
             current = {
                 ticker: cc
                 for ticker, cc in _signed_yes_position_map(
@@ -5231,10 +5280,46 @@ class KalshiPositionCache:
                 if not _reconciliation_quarantined(ticker)
             }
             mismatches = _position_mismatches(expected, current, "cache")
+            last_ts = self._last_rest_sync_timestamp
             if mismatches:
+                disposition = RestSnapshotDisposition.FAILED
+                logger.warning(
+                    "[POSITION-SNAPSHOT] caller=%s decision=%s "
+                    "incoming_ts=%.3f last_applied_ts=%.3f "
+                    "incoming_hash=%s current_hash=%s mismatches=%s",
+                    caller or "unknown",
+                    disposition,
+                    rest_timestamp,
+                    last_ts,
+                    self._snapshot_state_hash(expected),
+                    self._snapshot_state_hash(current),
+                    mismatches[:5],
+                )
                 raise RuntimeError(f"position cache changed during reconciliation: {mismatches[:5]}")
+
+            # Content agrees with the cache under the lock — classify ordering.
+            if rest_timestamp > last_ts:
+                disposition = RestSnapshotDisposition.APPLIED
+            elif rest_timestamp == last_ts:
+                disposition = RestSnapshotDisposition.CONFIRMED_UNCHANGED
+            else:
+                disposition = RestSnapshotDisposition.SUPERSEDED_BY_NEWER_REFRESH
+            logger.info(
+                "[POSITION-SNAPSHOT] caller=%s decision=%s "
+                "incoming_ts=%.3f last_applied_ts=%.3f "
+                "incoming_hash=%s current_hash=%s positions=%d",
+                caller or "unknown",
+                disposition,
+                rest_timestamp,
+                last_ts,
+                self._snapshot_state_hash(expected),
+                self._snapshot_state_hash(current),
+                len(current),
+            )
             self._last_sync = datetime.now(timezone.utc)
-            self._last_rest_sync_timestamp = rest_timestamp
+            # Never regress the accepted-observation watermark.
+            self._last_rest_sync_timestamp = max(rest_timestamp, last_ts)
+            return disposition
 
     async def sync_from_rest(
         self,
@@ -5243,8 +5328,11 @@ class KalshiPositionCache:
         force: bool = False,
         open_orders: Optional[List[Dict[str, Any]]] = None,
         cleanup_stale: bool = False,
-    ) -> None:
+    ) -> Optional[str]:
         """Sync cache with REST API positions (fallback/reconciliation).
+
+        Returns a :class:`RestSnapshotDisposition` token (``None`` on paths
+        that predate the disposition contract).
 
         BUG-FIX: Now async with mutex protection for thread safety.
         PRODUCTION FIX (2026-05-10): Filter out test positions to prevent bleeding into production.
@@ -5280,12 +5368,20 @@ class KalshiPositionCache:
         # venue_adapter) can race to call sync_from_rest with the same snapshot.
         # Allow force=True to override, otherwise skip stale/repeated snapshots.
         if not force and rest_timestamp <= self._last_rest_sync_timestamp:
-            logger.debug(
-                "[POSITION-CACHE-SYNC-IDEMPOTENCY] Skipping duplicate REST snapshot: "
-                "ts=%.3f <= last=%.3f",
-                rest_timestamp, self._last_rest_sync_timestamp,
+            disposition = (
+                RestSnapshotDisposition.CONFIRMED_UNCHANGED
+                if rest_timestamp == self._last_rest_sync_timestamp
+                else RestSnapshotDisposition.SUPERSEDED_BY_NEWER_REFRESH
             )
-            return
+            logger.info(
+                "[POSITION-SNAPSHOT] caller=sync_from_rest decision=%s "
+                "incoming_ts=%.3f last_applied_ts=%.3f positions=%d",
+                disposition,
+                rest_timestamp,
+                self._last_rest_sync_timestamp,
+                len(positions),
+            )
+            return disposition
 
         # Staleness check: reject if REST snapshot is older than local cache (unless force=True)
         if not force and self._last_sync:
@@ -5298,13 +5394,19 @@ class KalshiPositionCache:
             # even when REST snapshot is older than local cache, with a warning instead of rejection.
             if age_seconds < -30.0:
                 if age_seconds < -60.0:
-                    # Still reject if very stale (> 60s)
+                    # Still reject if very stale (> 60s) — ordering loss, not an
+                    # authority failure: preserving newer local state.
                     logger.warning(
-                        "[POSITION-CACHE-STALE] Rejecting very stale REST snapshot: "
-                        f"REST timestamp={rest_timestamp:.0f}, local sync={local_sync_time:.0f}, "
-                        f"age={age_seconds:.1f}s (threshold=-60s). Preserving local state."
+                        "[POSITION-SNAPSHOT] caller=sync_from_rest "
+                        "decision=%s incoming_ts=%.3f last_applied_ts=%.3f "
+                        "age=%.1fs positions=%d",
+                        RestSnapshotDisposition.SUPERSEDED_BY_NEWER_REFRESH,
+                        rest_timestamp,
+                        local_sync_time,
+                        age_seconds,
+                        len(positions),
                     )
-                    return
+                    return RestSnapshotDisposition.SUPERSEDED_BY_NEWER_REFRESH
                 else:
                     # Allow sync with warning for moderately stale data (30-60s)
                     logger.warning(
@@ -5337,7 +5439,7 @@ class KalshiPositionCache:
                             # Empty REST sync is still a successful sync; keep freshness markers current.
                             self._last_sync = datetime.now(timezone.utc)
                             self._last_rest_sync_timestamp = rest_timestamp
-                            return
+                            return RestSnapshotDisposition.APPLIED
                         except Exception as rebuild_err:
                             logger.error(
                                 "[POSITION-CACHE-REBUILD] Failed to rebuild from fills ledger: %s",
@@ -5372,7 +5474,7 @@ class KalshiPositionCache:
                     # Empty REST sync is still a successful sync; keep freshness markers current.
                     self._last_sync = datetime.now(timezone.utc)
                     self._last_rest_sync_timestamp = rest_timestamp
-                    return
+                    return RestSnapshotDisposition.APPLIED
 
                 # CRITICAL FIX (2026-08-01): Preserve existing positions to avoid overwriting correct side from fills
                 # Kalshi REST API always reports side="yes" (YES-side perspective), which would
@@ -6605,6 +6707,7 @@ class KalshiPositionCache:
                 self._last_sync = datetime.now(timezone.utc)
                 self._last_rest_sync_timestamp = rest_timestamp
                 logger.info(f"Position cache synced from REST: {positions_processed} open positions, {positions_filtered} filtered (test & closed)")
+                return RestSnapshotDisposition.APPLIED
                 # AUDIT #1: Log position cache health after successful sync
                 self.log_health()
             except Exception as e:

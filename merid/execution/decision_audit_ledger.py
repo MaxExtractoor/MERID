@@ -637,6 +637,10 @@ class DecisionAuditLedger:
         from merid.observability import latency_budget as _lat
         while True:
             fn, enqueued_mono, _prio = self._write_queue.get()
+            # In-flight accounting: queue[0] no longer sees this item once
+            # dequeued — a stalled required item with an empty queue must still
+            # read as unhealthy.  Non-"low" priority is required evidence.
+            self._inflight = (enqueued_mono, time.monotonic(), _prio)
             try:
                 _lat.record(
                     "audit_write_wait_ms",
@@ -649,9 +653,203 @@ class DecisionAuditLedger:
                     (time.monotonic() - _t0) * 1000.0,
                 )
             except Exception as exc:  # defensive; impls already swallow
+                if _prio != "low":
+                    self._failed_required_writes = (
+                        getattr(self, "_failed_required_writes", 0) + 1
+                    )
+                    # Durable record: a restart must not masquerade as
+                    # recovery of lost evidence.  Reconciliation is explicit.
+                    try:
+                        import json as _json
+                        import uuid as _uuid
+                        _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
+                        with open(_fpath, "a", encoding="utf-8") as _fh:
+                            _fh.write(_json.dumps({
+                                "kind": "failure",
+                                "failure_id": _uuid.uuid4().hex[:12],
+                                "run_id": getattr(self, "_run_id", None)
+                                          or os.environ.get("MERID_RUN_ID"),
+                                "item_enqueued_mono": enqueued_mono,
+                                "ts": time.time(), "priority": _prio,
+                                "error": str(exc)[:200],
+                            }) + "\n")
+                    except Exception:
+                        # Failure-ledger write failed: drop a sentinel via a
+                        # different path so a later startup cannot silently
+                        # report healthy without explicit reconciliation.
+                        try:
+                            (self.db_path.parent
+                             / "decision_audit_writer_failures.DEGRADED"
+                             ).write_text(str(time.time()))
+                        except Exception:
+                            pass
                 logger.warning("[DECISION-AUDIT-LEDGER] writer error: %s", exc)
             finally:
+                self._inflight = None
                 self._write_queue.task_done()
+                # Commit-observability heartbeat (2026-11-01 audit F0): a
+                # growing queue with zero visible commits is indistinguishable
+                # from a stalled writer without it.  Records last-service time,
+                # queue depth, and oldest-queued age for readiness checks.
+                self._last_commit_mono = time.monotonic()
+                _hb = getattr(self, "_last_writer_heartbeat_mono", 0.0)
+                if self._last_commit_mono - _hb >= 60.0:
+                    self._last_writer_heartbeat_mono = self._last_commit_mono
+                    _oldest_age = 0.0
+                    try:
+                        with self._write_queue.mutex:
+                            if self._write_queue.queue:
+                                _oldest_age = (
+                                    self._last_commit_mono
+                                    - self._write_queue.queue[0][1]
+                                )
+                    except Exception:
+                        pass
+                    logger.info(
+                        "[DECISION-AUDIT-LEDGER] writer heartbeat: "
+                        "queue_depth=%d oldest_queued_age_s=%.1f",
+                        self._write_queue.qsize(),
+                        _oldest_age,
+                    )
+
+    def writer_health(self) -> Dict[str, Any]:
+        """Live writer-queue observability for readiness/lag gates."""
+        now = time.monotonic()
+        last = getattr(self, "_last_commit_mono", 0.0)
+        oldest = 0.0
+        try:
+            with self._write_queue.mutex:
+                if self._write_queue.queue:
+                    oldest = now - self._write_queue.queue[0][1]
+        except Exception:
+            pass
+        depth = self._write_queue.qsize()
+        since = round(now - last, 3) if last else None
+        lag_budget = float(
+            os.environ.get("MERID_AUDIT_WRITER_LAG_BUDGET_S", "120")
+        )
+        inflight = getattr(self, "_inflight", None)
+        inflight_age = round(now - inflight[1], 3) if inflight else None
+        inflight_required = bool(inflight and inflight[2] != "low")
+        if not getattr(self, "_failures_loaded", False):
+            self._failures_loaded = True
+            try:
+                # DEGRADED sentinel: a previous failure-ledger write failed.
+                # Persistence integrity is unestablished — report unhealthy
+                # until explicit reconciliation removes it.
+                if (self.db_path.parent
+                        / "decision_audit_writer_failures.DEGRADED").exists():
+                    self._failed_required_writes = max(
+                        1, getattr(self, "_failed_required_writes", 0))
+                    self._failures_integrity_ok = False
+                else:
+                    self._failures_integrity_ok = True
+                _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
+                if _fpath.exists():
+                    import json as _json
+                    _fids = {}
+                    for _ln in open(_fpath, encoding="utf-8"):
+                        try:
+                            _r = _json.loads(_ln)
+                        except Exception:
+                            continue
+                        if _r.get("kind") == "failure":
+                            _fids[_r.get("failure_id")] = True
+                        elif _r.get("kind") == "reconcile":
+                            for _fid in _r.get("failure_ids") or []:
+                                _fids.pop(_fid, None)
+                    self._failed_required_writes = len(_fids)
+            except Exception:
+                self._failed_required_writes = getattr(
+                    self, "_failed_required_writes", 0)
+        failed = getattr(self, "_failed_required_writes", 0)
+        _wt = getattr(self, "_writer_thread", None)
+        alive = bool(
+            self._writer_started and _wt is not None and _wt.is_alive()
+        )
+        # Readiness (2026-11-01): unhealthy = pending required work past the
+        # lag budget (queued OR in-flight), a failed required write awaiting
+        # reconciliation, or a dead/absent writer.  Idle-when-empty is healthy;
+        # maintenance items never count as required.
+        unhealthy = (
+            failed > 0
+            or (self._writer_started and not alive)
+            or (alive and depth > 0 and oldest > lag_budget)
+            or (inflight_required and inflight_age is not None
+                and inflight_age > lag_budget)
+        )
+        return {
+            "writer_started": self._writer_started,
+            "writer_alive": alive,
+            "queue_depth": depth,
+            "oldest_queued_age_s": round(oldest, 3),
+            "seconds_since_last_write_served": since,
+            "inflight_required": inflight_required,
+            "inflight_age_s": inflight_age,
+            "failed_required_writes": failed,
+            "failures_integrity_ok": getattr(
+                self, "_failures_integrity_ok", True),
+            "unhealthy": unhealthy,
+            "lag_budget_s": lag_budget,
+        }
+
+    def acknowledge_failed_writes(
+        self, failure_ids, disposition: str, note: str = ""
+    ) -> int:
+        """Append-only reconciliation of specific failed required writes.
+
+        ``disposition`` ∈ {recovered, reconstructed, duplicate_no_loss,
+        accepted_loss} — kept distinct per failure_id; the ledger is never
+        truncated.  Outstanding = failures minus reconciled ids.
+        """
+        import json as _json
+        _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
+        _sentinel = (self.db_path.parent
+                     / "decision_audit_writer_failures.DEGRADED")
+        ids = list(failure_ids or [])
+        # Persist the reconcile record FIRST; only its durable success earns
+        # sentinel removal.  When integrity was unestablished (sentinel set),
+        # the original failure record may never have been written — the
+        # reconcile entry must then acknowledge that evidence boundary
+        # explicitly rather than erasing it.
+        _recorded = False
+        try:
+            with open(_fpath, "a", encoding="utf-8") as _fh:
+                _fh.write(_json.dumps({
+                    "kind": "reconcile", "ts": time.time(),
+                    "failure_ids": ids, "disposition": disposition,
+                    "note": note[:200],
+                    **({"evidence_boundary": "failure_record_unwritten"}
+                       if _sentinel.exists() else {}),
+                }) + "\n")
+            _recorded = True
+        except Exception:
+            _recorded = False
+        if _recorded:
+            try:
+                _sentinel.unlink(missing_ok=True)
+            except Exception:
+                # Unlink failure keeps the sentinel — fail closed, still
+                # unhealthy; the persisted reconcile record remains evidence.
+                pass
+        else:
+            # Reconcile record could not be persisted: do not clear the
+            # sentinel, and if it was absent (plain reconcile path) re-mark
+            # integrity unestablished so this cannot read healthy silently.
+            self._failures_integrity_ok = False
+            try:
+                _sentinel.write_text(str(time.time()))
+            except Exception:
+                pass
+        self._failures_loaded = False  # recompute outstanding from ledger
+        self.writer_health()
+        logger.warning(
+            "[DECISION-AUDIT-LEDGER] reconcile: ids=%d disposition=%s "
+            "outstanding=%d note=%s",
+            len(ids), disposition,
+            getattr(self, "_failed_required_writes", 0), note[:120],
+        )
+        return getattr(self, "_failed_required_writes", 0)
 
     def _ensure_db(self) -> None:
         """Create parent directory, schema, and run migrations on first use."""
@@ -2470,9 +2668,10 @@ class DecisionAuditLedger:
                 JOIN strategy_decision_outcomes o ON d.decision_id = o.decision_id
                 WHERE d.ticker = ?
                   AND o.outcome_status = 'PENDING'
-                  AND ABS(d.close_ts - ?) <= 900.0
+                  AND d.close_ts >= ? - 900.0
+                  AND d.close_ts <= ? + 900.0
                 """,
-                (ticker, close_ts),
+                (ticker, close_ts, close_ts),
             ).fetchall()
 
             # Phase A (no lock): fills-DB reads for settlement attribution.
@@ -3636,7 +3835,35 @@ class DecisionAuditLedger:
         )
         total = 0
         try:
+            # 2026-11-01 stall repair: yield to ingestion between batches and
+            # bound each batch's statement time.  A queued heartbeat invoked
+            # this sweep and monopolized the single writer for ~80min while
+            # ~8k decisions queued (each batch commits, but slowly on a
+            # contended 14GB store).  Now: (a) abandon the sweep early when
+            # required ingestion work is waiting — retention resumes at the
+            # next interval/heartbeat; (b) a cooperative progress-handler
+            # deadline interrupts a single over-running statement so one slow
+            # batch cannot pin the writer indefinitely.
+            budget_s = float(os.environ.get("MERID_AUDIT_PRUNE_BATCH_BUDGET_S", "20"))
+            yield_queue_depth = int(
+                os.environ.get("MERID_AUDIT_PRUNE_YIELD_QUEUE_DEPTH", "200")
+            )
+            # Progress-handler stride (VM instructions between deadline
+            # checks).  5000 is a reasonable production default; the deadline
+            # is only enforceable at statement granularity finer than the
+            # work, so tests set this small to exercise interruption on a
+            # tiny store where a batch is <5000 instructions.
+            _stride = max(
+                1, int(os.environ.get("MERID_AUDIT_PRUNE_PROGRESS_STRIDE", "5000"))
+            )
             for _ in range(max_batches):
+                if self._write_queue.qsize() > yield_queue_depth:
+                    logger.info(
+                        "[DECISION-AUDIT-LEDGER] prune_old_rows yielding: "
+                        "queue_depth=%d > %d (resumes next interval)",
+                        self._write_queue.qsize(), yield_queue_depth,
+                    )
+                    break
                 # Lock per batch, not for the whole sweep: holding self._lock
                 # across max_batches x batch deletes froze every writer — and,
                 # before decision-event appends were queued, the event loop —
@@ -3644,23 +3871,37 @@ class DecisionAuditLedger:
                 # dumps). One batch still runs inside a single transaction.
                 with self._lock:
                     conn = self._conn()
-                    ids = [r[0] for r in conn.execute(
-                        "SELECT decision_id FROM strategy_decisions "
-                        "WHERE decision_ts < ? ORDER BY decision_ts LIMIT ?",
-                        (cutoff, batch),
-                    ).fetchall()]
-                    if not ids:
-                        break
-                    ph = ",".join("?" for _ in ids)
-                    with conn:
-                        for t in children:
+                    deadline = time.monotonic() + budget_s
+                    conn.set_progress_handler(
+                        # >= not >: measured on the deployed interpreter
+                        # (get_clock_info('monotonic') -> GetTickCount64,
+                        # resolution 0.015625): handler calls inside one tick
+                        # see the deadline value itself, so '>' never fires.
+                        # Stride is a callback-frequency control, not a
+                        # wall-time guarantee.
+                        lambda: 1 if time.monotonic() >= deadline else 0,
+                        _stride,
+                    )
+                    try:
+                        ids = [r[0] for r in conn.execute(
+                            "SELECT decision_id FROM strategy_decisions "
+                            "WHERE decision_ts < ? ORDER BY decision_ts LIMIT ?",
+                            (cutoff, batch),
+                        ).fetchall()]
+                        if not ids:
+                            break
+                        ph = ",".join("?" for _ in ids)
+                        with conn:
+                            for t in children:
+                                conn.execute(
+                                    f"DELETE FROM {t} "
+                                    f"WHERE decision_id IN ({ph})", ids)
                             conn.execute(
-                                f"DELETE FROM {t} "
+                                "DELETE FROM strategy_decisions "
                                 f"WHERE decision_id IN ({ph})", ids)
-                        conn.execute(
-                            "DELETE FROM strategy_decisions "
-                            f"WHERE decision_id IN ({ph})", ids)
-                    total += len(ids)
+                        total += len(ids)
+                    finally:
+                        conn.set_progress_handler(None, 0)
                 time.sleep(0)
             with self._lock:
                 conn = self._conn()

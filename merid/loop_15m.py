@@ -5240,6 +5240,27 @@ def _emit_rollover_readiness(self, asset: str, ticker: Optional[str], missing: L
         pass
 
 
+def _audit_writer_health_ok() -> Tuple[bool, Optional[str]]:
+    """Entry-gate probe for the decision-audit writer (F0 repair, 2026-11-01).
+
+    Returns (True, None) when the writer is serviceable: alive, no required
+    evidence queued/in-flight past the lag budget, and no unreconciled failed
+    write.  A disabled or never-started ledger reads healthy — the gate cares
+    about pending required evidence, not the writer's existence.  Fail closed:
+    an exception reading health means readiness is not established.
+    """
+    try:
+        from merid.execution.decision_audit_ledger import get_decision_audit_ledger
+
+        wh = get_decision_audit_ledger().writer_health()
+        if wh.get("unhealthy"):
+            return False, "audit_writer_unhealthy"
+        return True, None
+    except Exception as exc:
+        logger.warning("[15m-LOOP] audit-writer health probe failed: %s", exc)
+        return False, "audit_writer_health_error"
+
+
 def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     """Compute whether new entries are allowed for the current loop tick.
 
@@ -5563,6 +5584,20 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         logger.info("[15m-LOOP] observe-only mode: allowing data capture, blocking new entries")
         allow_new_entries = False
         self._entries_block_reason = "observe_only"
+
+    # 2026-11-01 (F0 repair): audit-writer readiness gate — the last
+    # sequential gate so the more fundamental reasons keep precedence.
+    # Required decision evidence is durable only after the single-writer
+    # consumer commits it; required work queued/in-flight past the lag
+    # budget, an unreconciled failed write, or a dead writer means evidence
+    # emitted now may never land.  Blocks new entries only; reconciliation,
+    # cancellation, and existing-position management continue.
+    if allow_new_entries:
+        _wh_ok, _wh_reason = _audit_writer_health_ok()
+        if not _wh_ok:
+            logger.warning("[15m-LOOP] ENTRY_BLOCKED: %s", _wh_reason)
+            allow_new_entries = False
+            self._entries_block_reason = _wh_reason
 
     # ws_time_since_last_event stays inf when the bridge health block was
     # skipped (earlier gate already blocked entries) or no event has been

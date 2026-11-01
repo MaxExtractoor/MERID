@@ -654,6 +654,11 @@ class KalshiWebSocketBridge:
         # This prevents the "shutdown event not created" error in health monitor
         self._shutdown = asyncio.Event()
         self._shutdown_init_lock = threading.Lock()
+        # F1 repair (2026-11-01 audit): venue-clock refresh owned by the bridge
+        # lifecycle.  The ws.py main-loop spawn point is unreachable on the
+        # production bridge path, so the offset expired at auth+TTL and every
+        # venue-age check degraded to unverified_offset_expired.
+        self._clock_refresh_task: Optional[asyncio.Task] = None
         self._events_forwarded: int = 0
         self._events_dropped: int = 0
         self._events_coalesced: int = 0
@@ -1622,6 +1627,35 @@ class KalshiWebSocketBridge:
             self._ensure_shutdown_event().clear()
             self._start_ts = _time.monotonic()
             self._main_loop = asyncio.get_running_loop()
+
+            # F1 repair: start the venue-clock refresher alongside the bridge so
+            # the kalshi clock offset renews for the whole session, independent
+            # of which WS entry point is used.  Liveness predicate is the bridge
+            # shutdown event (survives reconnects); stop() cancels the task.
+            if self._clock_refresh_task is None or self._clock_refresh_task.done():
+                try:
+                    from merid.event_venues.kalshi.venue_clock import get_venue_clock
+                    from merid.event_venues.kalshi.venue_clock_refresh import (
+                        maintain_live_clock,
+                    )
+
+                    self._clock_refresh_task = asyncio.create_task(
+                        maintain_live_clock(
+                            get_venue_clock("kalshi"),
+                            lambda: not self._ensure_shutdown_event().is_set(),
+                        ),
+                        name="kalshi-venue-clock-refresh",
+                    )
+                    logger.info(
+                        "[WS-BRIDGE] venue clock refresh task started "
+                        "(offset_state=%s)",
+                        get_venue_clock("kalshi").offset_state(),
+                    )
+                except Exception as _clock_exc:
+                    logger.warning(
+                        "[WS-BRIDGE] venue clock refresh task failed to start: %s",
+                        _clock_exc,
+                    )
 
             # EVENT-LOOP-FIX: Cache market_state_store reference at startup
             try:
@@ -2905,7 +2939,7 @@ class KalshiWebSocketBridge:
                     logger.info("[WS-BRIDGE] Forward thread exited cleanly")
         
         # Cancel remaining main-loop tasks
-        for task in (self._ui_coalesce_task, self._health_logger_task):
+        for task in (self._ui_coalesce_task, self._health_logger_task, self._clock_refresh_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -2915,6 +2949,7 @@ class KalshiWebSocketBridge:
                     pass
         self._ui_coalesce_task = None
         self._health_logger_task = None
+        self._clock_refresh_task = None
 
         # 2026-08-23: Close the WebSocket and stop the dedicated I/O thread.
         try:
