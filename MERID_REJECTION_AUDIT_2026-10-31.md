@@ -762,12 +762,14 @@ Expired and closed-but-unsettled markets use the canonical quarantine policy.
 Position-monitor, allocator, and reservation reconciliation are not yet
 proven by this change.
 
-A related persistence gap remains: the SQLite fills schema does not retain
+A related persistence gap affected the SQLite fills schema: it did not retain
 `is_live`, `unmatched`, `unmatched_reason`, `derived_id`, or
-`confirmed_by_rest`; restoration currently reconstructs some of those flags
-incorrectly or defaults them. The new P0 projection therefore fails closed
-for active restored fills with unproven live provenance, rather than
-fabricating it. The current ledger has 1,781 retained rows. Restore now
+`confirmed_by_rest`. New nullable columns preserve those values, side-conflict
+and exposure-mismatch flags, and the exchange shard on future writes. Legacy
+rows retain unknown live provenance and are treated as unmatched, rather than
+being silently promoted to trusted live fills. They still need authoritative
+recovery; this migration does not backfill assertions about their identities.
+The current ledger has 1,781 retained rows. Restore now
 reports failures and detects its 10,000-row cap; P0 fails closed if restore
 is incomplete. A scalable complete restore remains to be implemented before
 the cap is reached. Neither these checks nor the logged settled positions

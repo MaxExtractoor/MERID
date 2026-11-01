@@ -224,7 +224,11 @@ class TestLegacyMigration:
         assert fill.canonical_position_action == "buy"
         assert fill.canonical_yes_delta_cc == -100
         assert fill.canonical_leg_price_cents == 32
-        assert fill.unmatched is False
+        # Price/side canonicalization does not prove the missing order identity
+        # or whether a legacy row came from the live account.
+        assert fill.unmatched is True
+        assert fill.unmatched_reason == "legacy_identity_unverified"
+        assert fill.is_live is None
 
         # The backfilled row contributes to live position math.
         pos = fresh_ledger.compute_position_from_fills("KXBTC15M-TEST")

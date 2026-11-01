@@ -218,6 +218,62 @@ class TestRestoreCompleteness:
         assert not ledger._fills
 
 
+class TestDurableFillProvenance:
+    def test_unknown_provisional_provenance_remains_unresolved(self, ledger):
+        fill = _provisional("order-unknown")
+        fill.is_live = None
+        ledger._fills[fill.fill_id] = fill
+        assert ledger.unresolved_router_fills() == [fill]
+
+    @pytest.mark.asyncio
+    async def test_sqlite_round_trip_preserves_safety_flags(self, ledger):
+        from merid.event_venues.kalshi.fills_ledger import KalshiFillsLedger
+
+        await ledger._init_db()
+        fill = _provisional("order-provenance")
+        fill.fill_id = "venue-provenance"
+        fill.ingestion_source = "http_poller"
+        fill.is_live = True
+        fill.unmatched = True
+        fill.unmatched_reason = "identity_unresolved"
+        fill.derived_id = True
+        fill.confirmed_by_rest = True
+        fill.side_conflict = True
+        fill.side_conflict_reason = "conflicting_sides"
+        fill.exposure_mismatch = True
+        fill.exchange_index = 2
+        await ledger._flush_to_sqlite([fill])
+
+        restored = KalshiFillsLedger()
+        assert await restored.load_from_db() == 1
+        actual = restored._fills[fill.fill_id]
+        assert actual.is_live is True
+        assert actual.unmatched and actual.unmatched_reason == "identity_unresolved"
+        assert actual.derived_id and actual.confirmed_by_rest
+        assert actual.side_conflict and actual.side_conflict_reason == "conflicting_sides"
+        assert actual.exposure_mismatch and actual.exchange_index == 2
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_provenance_stays_unknown(self, ledger):
+        await ledger._init_db()
+        with sqlite3.connect(ledger._db_path) as conn:
+            conn.execute(
+                """INSERT INTO kalshi_fills
+                   (fill_id, market_ticker, side, action, count_fp, quantity_cc,
+                    created_time, canonical_position_side, canonical_position_action,
+                    canonical_yes_delta_cc, canonicalization_state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("venue-legacy", "KXBTC15M-TEST", "yes", "buy", "1", 100,
+                 datetime.now(timezone.utc).isoformat(), "yes", "buy", 100,
+                 "TRUSTED_LIVE_V1"),
+            )
+        assert await ledger.load_from_db() == 1
+        restored = ledger._fills["venue-legacy"]
+        assert restored.is_live is None
+        assert restored.unmatched
+        assert restored.unmatched_reason == "legacy_identity_unverified"
+
+
 class TestLateRestoredProvisional:
     """A stale DB row arriving after promotion cannot resurrect the gate."""
 

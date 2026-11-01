@@ -868,7 +868,7 @@ class KalshiFill:
     confirmed_by_rest: bool = False  # True if this fill was later confirmed by HTTP REST API
 
     # LIVE vs PAPER tracking (CRITICAL for bankroll reconciliation)
-    is_live: bool = False  # True if this was a LIVE trade with real money
+    is_live: Optional[bool] = None  # None means the live/paper provenance is unknown.
     # Note: is_live is determined at ingestion time based on process trade mode
     # In strict mode, live trades MUST have derived_id=False (real Kalshi fill ID)
 
@@ -3358,7 +3358,7 @@ class KalshiFillsLedger:
         now = datetime.now(timezone.utc)
         out = []
         for f in view.provisional:
-            if live_only and not getattr(f, "is_live", False):
+            if live_only and getattr(f, "is_live", None) is False:
                 continue
             try:
                 age = (now - f.created_time).total_seconds()
@@ -10086,6 +10086,16 @@ class KalshiFillsLedger:
             # 2026-08-27: Fee/role audit columns.
             ("client_tag", "TEXT"),
             ("liquidity_role", "TEXT"),
+            # Nullable for existing rows: unknown provenance is not a negative.
+            ("is_live", "INTEGER"),
+            ("unmatched", "INTEGER"),
+            ("unmatched_reason", "TEXT"),
+            ("derived_id", "INTEGER"),
+            ("confirmed_by_rest", "INTEGER"),
+            ("side_conflict", "INTEGER"),
+            ("side_conflict_reason", "TEXT"),
+            ("exposure_mismatch", "INTEGER"),
+            ("exchange_index", "INTEGER"),
         ]:
             if col not in existing_col_names:
                 try:
@@ -10635,8 +10645,11 @@ class KalshiFillsLedger:
                             reconciled, raw_payload, decision_trace_id, fill_source,
                             hedge_reason, hedge_pnl_cents, related_alpha_fill_id,
                             is_exit, reduce_only, entry_or_exit,
-                            policy_epoch
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            policy_epoch, is_live, unmatched, unmatched_reason,
+                            derived_id, confirmed_by_rest, side_conflict,
+                            side_conflict_reason, exposure_mismatch, exchange_index
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                  ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                         fill.side, fill.action, str(fill.count_fp), fill.quantity_cc or int(fill.count_fp * 100),
@@ -10675,6 +10688,15 @@ class KalshiFillsLedger:
                         or os.environ.get(
                             "MERID_POLICY_EPOCH", "post_drawdown_2026-10-01"
                         ),
+                        None if fill.is_live is None else int(fill.is_live),
+                        int(fill.unmatched),
+                        fill.unmatched_reason,
+                        int(fill.derived_id),
+                        int(fill.confirmed_by_rest),
+                        int(fill.side_conflict),
+                        fill.side_conflict_reason,
+                        int(fill.exposure_mismatch),
+                        fill.exchange_index,
                     ))
                 except Exception as e:
                     # Classify error
@@ -10921,6 +10943,15 @@ class KalshiFillsLedger:
 
                     _is_untrusted = _row_canonicalization_state not in TRUSTED_CANONICALIZATION_STATES
 
+                    def _stored_bool(name: str) -> Optional[bool]:
+                        value = row[name] if name in row.keys() else None
+                        return bool(value) if value in (0, 1) else None
+
+                    _live = _stored_bool("is_live")
+                    _unmatched = _stored_bool("unmatched")
+                    _unknown_identity = _unmatched is None
+                    _unmatched = _is_untrusted or _unknown_identity or _unmatched
+
                     fill = KalshiFill(
                         fill_id=row["fill_id"],
                         trade_id=row["trade_id"],
@@ -10960,13 +10991,26 @@ class KalshiFillsLedger:
                         ledger_schema_version=_row_ledger_schema_version,
                         canonicalization_version=_row_canonicalization_version,
                         canonicalization_state=_row_canonicalization_state,
+                        is_live=_live,
+                        derived_id=bool(_stored_bool("derived_id")),
+                        confirmed_by_rest=bool(_stored_bool("confirmed_by_rest")),
+                        side_conflict=bool(_stored_bool("side_conflict")),
+                        side_conflict_reason=(
+                            row["side_conflict_reason"] if "side_conflict_reason" in row.keys() else None
+                        ),
+                        exposure_mismatch=bool(_stored_bool("exposure_mismatch")),
+                        exchange_index=row["exchange_index"] if "exchange_index" in row.keys() else None,
                         fill_source=(
                             row["fill_source"]
                             if "fill_source" in row.keys()
                             else ""
                         ),
-                        unmatched=_is_untrusted,
-                        unmatched_reason="untrusted_legacy" if _is_untrusted else None,
+                        unmatched=_unmatched,
+                        unmatched_reason=(
+                            "untrusted_legacy" if _is_untrusted
+                            else "legacy_identity_unverified" if _unknown_identity
+                            else row["unmatched_reason"] if "unmatched_reason" in row.keys() else None
+                        ),
                     )
                     # Restore must merge, not overwrite: the SELECT snapshot was
                     # taken before this loop ran, so an in-memory row for the
