@@ -467,3 +467,97 @@ amendments, markouts) remains open shadow work.
 The EV inversion shows the recorded score did not rank these observed
 outcomes as expected; it does not yet establish that the reserve stack is
 useless. Reserve decomposition remains Â§6 work.
+
+
+---
+
+## Appendix — 2026-10-31 ETH pinned-fav reopen (cohort `eth_pf_reopen_2026-10-31`)
+
+### Scope and status
+
+Operator-directed controlled reopen: the pinned-fav lane quarantine
+(`MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{YES,NO}_ETH=0`) lifted to
+pre-quarantine resolution. This is a **policy decision, not evidence the
+earlier ETH result is reversed** — the audit found ETH negative in both
+live (-368c/84cc, losses concentrated at the <=93c floor pocket) and
+85-91c shadow cohorts; the infrastructure repair does not overturn that.
+
+Restored resolution (verified against
+`directional_regime._moneyness_max_entry_price_cents`):
+- `NO_ETH = 98` — the 2026-10-27 NO-side mirror group value (BTC/DOGE/SOL
+  still carry 98).
+- `YES_ETH` intentionally UNSET -> lane cap falls through to per-asset
+  `..._YES_ETH` (unset) -> `None` -> no in-lane cap, identical to
+  BTC/DOGE/SOL YES. An explicit `=98` was deliberately NOT written: it
+  would override the per-asset fallback and diverge from pre-quarantine
+  semantics.
+
+Unchanged shared controls: band 94-98, `pinned_fav_cap=2.0`,
+`HONOR_MONEYNESS_CAPS=1`, maker `min_p=0.90`, `min_ev=-12c`,
+TTE 90-840s, daily cap 480, settlement-health entry blocking, all
+normal-path ETH caps (`NO_ETH=89` + block band 51-64; YES global 75),
+settlement-lane `NO_ETH=99` mirror, drift-lane ETH membership.
+
+Cohort boundary (durable): reopen restart run_id +
+`pinned_fav_policy_resolution` echo persisted in the startup release
+record; post-reopening ETH = decisions with `decision_ts >=` restart ts.
+`MERID_POLICY_EPOCH` deliberately NOT bumped — it scopes provisional-cell
+evidence and bumping it would reset evidence for all assets (shared
+control).  Cohort label for analysis: `eth_pf_reopen_2026-10-31`.
+
+### Exposure allowance (declared before activation)
+
+- Per-order: `pinned_fav_cap=2.0` contracts (unchanged).
+- Aggregate: ETH shares the lane daily budget (480/day) and per-asset
+  mband cap (96/day) as before; **no dedicated ETH allowance exists** —
+  the reopened cohort is bounded by construction at 2 contracts/order and
+  ~$14 bankroll => max single-order risk ~$1.96 at 98c.
+- Loss bound: ETH entries remain subject to the same EV floor and
+  evidence gates as every other asset; no separate ETH loss cap is
+  declared beyond the shared controls. Expected reopened-cohort volume:
+  ETH in-band candidates occurred at ~1-3 per hour pre-quarantine.
+
+### Rollback criteria (declared before activation)
+
+Re-quarantine (restore caps 0/0) on ANY of:
+- ETH pinned-fav realized cohort reaches -100c cumulative post-reopen.
+- Any ETH loss at the 92-93c pocket is impossible (band floor 94) — a
+  94-98c ETH loss pattern matching the pre-quarantine mechanism (adverse
+  selection at fill) reaching 3+ losses triggers review before further
+  orders, quarantine on 4.
+- Settlement-health or readiness gates fail to block an ETH entry that
+  should have been blocked (control regression) — immediate re-quarantine
+  plus incident.
+
+### Effective-policy matrix (as of eth_pf_reopen_2026-10-31)
+
+All five assets are discovered and evaluated identically (12 distinct
+tickers each over the last 4h; per-side gate chain recorded in
+`strategy_decisions.gate_results_json`/`all_failed_gates_json`).
+
+| restriction | scope | classification | origin / rationale | removal criteria |
+|---|---|---|---|---|
+| pf lane caps ETH 0/0 | pinned-fav lane only | intentional quarantine | 2026-10-31 audit: -368c/84cc live + only negative 85-91c shadow cohort | **REMOVED** this change (controlled reopen, cohort boundary above) |
+| 92-93c pocket exclusion | all assets, pf lane | intentional quarantine | MAKER_LO=94: 92-93 net-negative at any size; >=94 ex-ETH 33/33 +329c | stays; falsify requires post-floor settled cohort evidence |
+| `MONEYNESS_MAX_..._NO_BTC=79` + block band 51-64 | normal path | shared safety control (per-asset measured) | settled-fill audit of <90c pockets | same settled-fill + veto-counterfactual evidence that produced it |
+| `..._NO_ETH=89` + block band 51-64 | normal path | shared safety control | same audit; unchanged by reopen | same |
+| `..._NO_DOGE/SOL=75` | normal path | shared safety control | same audit | same |
+| `..._NO_XRP=1` | normal path + settlement lane | intentional quarantine | audited -9.54 USD, unpriceable down-moves | settled probe fills (pinned-fav XRP-NO probe running) |
+| `..._YES_XRP=89` + block band 76-79 | normal path | shared safety control | settled-fill audit | same |
+| global YES=75 / NO=50 | normal path, all assets | shared safety control | baseline cap superseded per-asset where measured | per-asset evidence |
+| settlement-lane NO mirror 99 (BTC/ETH/DOGE/SOL), XRP excluded | settlement lane | lane-scoped cap | 2026-10-27 mirror; XRP pending probe | per-asset evidence |
+| drift lane: `DRIFT_ASSETS=SOL,ETH,DOGE,XRP` (BTC excluded), min net EV -6c, px 40-79 | drift lane | intentional probe (admit-below-EV paid trials) | pooled cohort +0.6..+3.0c; BTC pooled -1.6c | settled probe outcomes |
+| cheap-no lane: px 25-40, min net EV -10c, min p 0.12 | cheap-no lane | intentional probe | cheap-NO +7..+15c measured settle EV | settled probe outcomes |
+| `maker_bid`/`empirical_marginal_maker` admits claimed-negative-EV | marginal lanes | intentional probe (by-design below-EV admissions, bounded 480/day + per-asset 96) | fill-cohort evidence: measured cohort WAS negative claimed EV | settled probe outcomes |
+| `EDGE_MIDWIN_EXCLUDED_ASSETS_YES=BTC` | mid-window relief | per-asset exclusion | evidence-dependent (BTC midwin YES measured toxic) | per-asset evidence |
+| `PROVISIONAL_MIN_EV_C_*` floors (incl. ETH yes/no=0.0) | provisional cells | evidence-dependent restriction | cell-level measured floors | cell evidence updates |
+| `CONVICTION_MIN_DIST_ETH=0.02` | shared gate | shared safety control | per-asset conviction floor | per-asset evidence |
+| settlement-health entry blocking | all assets | shared safety control | 2026-10-31 incident repair | keep |
+| DOGE zero selections | none — ordinary rejection | NOT a restriction | DOGE evaluated identically; zero candidates qualified in 4h | n/a |
+| exploration canaries (`CHEAP_TAIL_CANARY`, `CANARY_4C_LCB`, `LIVE_CANARY`) | off globally | out of scope (disabled experiments) | operator contract: must stay off absent approved experiment | approved experiment doc |
+| ETH in lanes other than pinned-fav | drift/cheap_no/maker_bid/settlement/mband | NOT quarantined (pre-existing) | quarantine was pf-lane-scoped; ETH entered 15x in last 4h via other lanes | n/a — reopening restores parity with what other lanes already allowed |
+
+`_pf_low_p_bypass` inspected: reason-scoped to `pinned_fav_maker_low_p`
+only, requires `admission_decision=allowed` + evidence gate
+CHALLENGE_ELIGIBLE/CELL_EVIDENCE_PASS, and re-asserts the lane min-EV
+floor itself. The reopen does not expand its authority.
