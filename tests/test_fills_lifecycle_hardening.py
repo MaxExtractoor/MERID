@@ -410,6 +410,42 @@ class TestPollerLifecycle:
     """Readiness reflects task health; shutdown leaves no orphans."""
 
     @pytest.mark.asyncio
+    async def test_incomplete_restore_degrades_even_when_zero_is_returned(
+        self, ledger, monkeypatch
+    ):
+        from merid.event_venues.kalshi import fills_poller as fp_mod
+
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.fills_ledger.get_fills_ledger",
+            lambda: ledger,
+        )
+
+        async def incomplete_restore():
+            ledger._load_complete = False
+            ledger._last_load_error = "complete history was not loaded"
+            return 0
+
+        monkeypatch.setattr(ledger, "ensure_loaded", incomplete_restore)
+        poller = fp_mod.FillsPoller()
+
+        async def idle():
+            await poller._shutdown.wait()
+
+        for name in ("_poll_loop", "_reconcile_loop", "_backfill_loop", "_cache_cleanup_loop"):
+            monkeypatch.setattr(poller, name, idle)
+        await poller.start()
+        try:
+            await poller._restore_task
+            await asyncio.sleep(0)
+            poller._first_reconcile_done = True
+            poller._transition_readiness()
+            assert poller._readiness == "DEGRADED"
+            assert not poller._restore_done
+            assert "restore_incomplete" in poller._degraded_reason
+        finally:
+            await poller.stop()
+
+    @pytest.mark.asyncio
     async def test_crashed_poll_task_demotes_readiness(
         self, ledger, monkeypatch
     ):
@@ -428,8 +464,14 @@ class TestPollerLifecycle:
         async def _boom():
             raise RuntimeError("simulated poll loop crash")
 
+        async def _idle():
+            await poller._shutdown.wait()
+
         monkeypatch.setattr(poller, "_poll_loop", _boom)
+        for name in ("_reconcile_loop", "_backfill_loop", "_cache_cleanup_loop"):
+            monkeypatch.setattr(poller, name, _idle)
         ledger._loaded_count = 1  # skip real DB load
+        ledger._load_complete = True
 
         await poller.start()
         # Let the crashed task's done-callback run.
@@ -456,7 +498,14 @@ class TestPollerLifecycle:
             lambda: ledger,
         )
         ledger._loaded_count = 1
+        ledger._load_complete = True
         poller = fp_mod.FillsPoller()
+
+        async def _idle():
+            await poller._shutdown.wait()
+
+        for name in ("_poll_loop", "_reconcile_loop", "_backfill_loop", "_cache_cleanup_loop"):
+            monkeypatch.setattr(poller, name, _idle)
         await poller.start()
 
         tasks = [
@@ -483,7 +532,14 @@ class TestPollerLifecycle:
             lambda: ledger,
         )
         ledger._loaded_count = 1
+        ledger._load_complete = True
         poller = fp_mod.FillsPoller()
+
+        async def _idle():
+            await poller._shutdown.wait()
+
+        for name in ("_poll_loop", "_reconcile_loop", "_backfill_loop", "_cache_cleanup_loop"):
+            monkeypatch.setattr(poller, name, _idle)
         assert poller._readiness == "STARTING"
         await poller.start()
         try:

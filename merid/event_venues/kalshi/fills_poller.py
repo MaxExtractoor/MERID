@@ -195,16 +195,21 @@ class FillsPoller:
             def _restore_done(t: asyncio.Task) -> None:
                 if t.cancelled():
                     self._degraded_reason = "restore_cancelled"
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    self._degraded_reason = f"restore_failed:{type(exc).__name__}"
-                    logger.warning("DB restore failed: %s", exc)
                 else:
-                    self._restore_done = True
-                    self._transition_readiness()
-                    if t.result() > 0:
-                        logger.info("FillsPoller: Restored %d fills from DB", t.result())
+                    exc = t.exception()
+                    if exc is not None:
+                        self._degraded_reason = f"restore_failed:{type(exc).__name__}"
+                        logger.warning("DB restore failed: %s", exc)
+                    elif not getattr(ledger, "_load_complete", False):
+                        self._degraded_reason = (
+                            f"restore_incomplete:{getattr(ledger, '_last_load_error', None)}"
+                        )
+                        logger.error("DB restore incomplete: %s", self._degraded_reason)
+                    else:
+                        self._restore_done = True
+                        if t.result() > 0:
+                            logger.info("FillsPoller: Restored %d fills from DB", t.result())
+                self._transition_readiness()
 
             self._restore_task.add_done_callback(_restore_done)
         except Exception as e:
