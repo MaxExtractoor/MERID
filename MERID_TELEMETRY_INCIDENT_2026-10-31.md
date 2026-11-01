@@ -30,8 +30,8 @@ Scope: production server (port 8011), telemetry persistence path, event-loop sta
 
 ## Captured evidence
 
-- Stall mechanism: sync sqlite3 settlement write on the asyncio thread + simultaneous backlog in 4 sqlite writer threads (`decision_audit_ledger._writer_main`, `order_decision_ledger._writer_main`, `rejection_counterfactual._writer_main`) + QueueListener file writes — all on one HDD spindle.
-- Amplifier: each ≥80s stall appends ~MBs of full-stack dumps to the same disk → stall→dump→contention→deeper-stall feedback.
+- Stall mechanism: sync sqlite3 settlement write on the asyncio thread — specifically the `time.sleep(2.0 + attempt)` **retry backoff** inside `record_settlement_proceeds` (`fills_ledger.py`), up to ~50s of sleep per call under contention — plus simultaneous backlog in 4 sqlite writer threads (`decision_audit_ledger._writer_main`, `order_decision_ledger._writer_main`, `rejection_counterfactual._writer_main`) + QueueListener file writes — all on one HDD spindle.
+- Amplifier: `faulthandler_dump.log` is **append-mode, created 2026-10-10** — the 13,359 dump headers are ~3 weeks of accumulation, NOT today's incident. Dominant producer: per-cycle `StackDumpTimer(hang_dump_s=80)` — one dump per stalled grid cycle. (Correction vs. earlier reading: the `repeat=True` startup watchdog in `main_15m_lean` is cancelled when the startup coroutine completes — startup window only, ~0-1 dumps per run.) Each stalled ≥80s cycle still appends ~MBs to the same disk → stall→dump→contention→deeper-stall feedback.
 - Queue behavior: backlogs built DURING stall, drained AFTER release → service capacity is adequate when the loop is not stalled; overload was symptom, not primary cause.
 - Process: 1.12GB private bytes, 1432 handles, ~20+ threads, CPU 7071s/66min.
 - Missing: disk queue-length counter (Get-Counter hung in sandbox), memory-commit timeline, exit code for 18:21 death, thread stacks AT the terminal event.
@@ -52,11 +52,21 @@ Scope: production server (port 8011), telemetry persistence path, event-loop sta
 - Whether stalls correlate with WAL checkpoints, the settlement-poll write specifically, or HDD bursts generally.
 - Whether the rising log-queue troughs stabilize or re-backlog on the next stall.
 
-## Next actions (per approved remediation plan)
+## Resolution (commit `c636943f`, deployed 2026-10-31 20:28)
 
-- [ ] Sync-off-loop: route `record_settlement_proceeds` (and audit any other sync sqlite on the loop) through the existing writer-thread pattern or `run_in_executor`.
-- [ ] Bound dump amplification: cap faulthandler_dump.log size/rotation; single dump per stall episode, not per 80s interval.
+**Off-loop settlement write.** `record_settlement_proceeds` split into `_settlement_proceeds_plan` (pure compute, loop-safe) / `_settlement_proceeds_db_write` (blocking: connect+insert+commit+retries) / `_register_settlement_legs` (in-memory, owning thread only). New `record_settlement_proceeds_async` runs the blocking phase on a dedicated **single-worker executor**, awaited by the caller (ack only after commit — never fire-and-forget). Per-market inflight map coalesces poller re-deliveries onto one op (INSERT OR IGNORE under durable `settlement:{ticker}:{side}` identity — no duplicate writes). Timeout → tracked **unresolved** state: the op continues, reconciles by durable identity, no blind retry. Failures raise `SettlementProceedsWriteError` and increment `_settlement_write_stats`. Sync `record_settlement_proceeds` signature/semantics preserved (tests + any sync callers unchanged).
+
+**Dump volume bounded.** Shared `DumpBudget` (`merid/utils/stack_dump_timer.py`) acquired at fire time by every producer: per-stall-episode cap `MERID_DUMP_MAX_PER_STALL=3`, cooldown `MERID_DUMP_COOLDOWN_S=300`, per-process total `MERID_DUMP_MAX_TOTAL=100`, byte-growth cap `MERID_DUMP_MAX_BYTES=50MiB` over file size at first acquisition. Episode resets only on demonstrated loop progress (cycle wait completing). Applied to per-cycle stall timers and the lifetime `repeat=True` startup watchdog.
+
+**Validation:** `tests/event_venues/kalshi/test_settlement_offloop.py` — 9 cases (slow-write loop responsiveness, delayed-ack, poll coalescing, timeout→unresolved without retry, commit-failure propagation, late-completion registration, restart idempotency, budget bounds, permit gating). **16/16 pass** with the 7-case reconciliation suite.
+
+**Deployed:** restart 20:28:56, SHA `c636943f`, run `20261101002835_2976_af5f58b1`, `LIVE_ENTRIES_ENABLED`, all P0 checks PASS.
+
+## Still open
+
 - [ ] Queue-age + consumer-heartbeat metrics independent of the saturated paths.
-- [ ] Capture terminal event: ProcDump/WER for the next exit; thread-stack capture before any controlled shutdown.
+- [ ] Capture terminal event: ProcDump/WER for the next exit; thread-stack capture before any controlled shutdown (18:21 death unclassified).
 - [ ] WAL/checkpoint/reader-lifetime audit on `decision_audit.db` (19GB) during next stall, on a copy.
-- [ ] Failure-injection acceptance tests before declaring fixed (slow-DB → entries block; writer exception → alert; backlog shutdown → bounded drain).
+- [ ] Audit other sync-I/O-on-loop call sites beyond the settlement path.
+- [ ] Dump file rotation (faulthandler holds the fd — rotation requires re-registering the handler, not renaming the path).
+- [ ] First eligible constructed order post-fix: `count_fp=2.0`, price ≥94¢ (none yet — all candidates reject `no_positive_executable_edge`).
