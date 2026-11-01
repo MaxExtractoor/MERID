@@ -1753,6 +1753,13 @@ class KalshiWebSocket(EventVenueStream):
         HARDENING-FIX: Enforces single recv loop with lock to prevent ConcurrencyError
         when multiple tasks try to read from the same WS connection.
         """
+        # 2026-11-01 drain workstream: the bridge entry point is this
+        # method (not _run), so the lag monitor must start here for its
+        # samples to exist on the WS io loop.
+        if not getattr(self, "_lag_monitor_started", False):
+            self._lag_monitor_started = True
+            self._start_lag_monitor()
+
         raw_message_count = 0
 
         while self._running and self._ws:
