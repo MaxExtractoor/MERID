@@ -79,6 +79,24 @@ Scope: production server (port 8011), telemetry persistence path, event-loop sta
 cross-operation overlap (A fails → B commits → still blocked on A → A's
 own commit recovers) and queued-op age coverage. 14/14 + 7/7 recon.
 
+## Milestone ledger (sustained observation)
+
+| milestone | status | evidence |
+|---|---|---|
+| Bucket transitions | OBSERVED (partial) | 20:45→21:00 bucket: `KX*15M-26OCT312100-00` markets cataloged 20:46:27+; ticks continue ~5s cadence through transition |
+| First real settlement write | **OBSERVED 20:48:29** | `Settlement received: KXXRP-15M = YES` 20:48:14 → `[SETTLEMENT-PROCEEDS] KXXRP15M-26OCT312045-45 outcome=yes booked 2 payout leg(s)` — durable commit via worker executor; loop ticks 25–27 continued during/after; no stall, no backlog. (Note: settlement payload is exchange-authoritative for held counts; it reported both legs held though preflight positions=0 — consistent with settle-time vs fetch-time skew, worth a bookkeeping look.) |
+| Contended write | NOT OBSERVED in production | covered by fault injection (`test_slow_write_keeps_loop_responsive`, delayed-ack, coalescing cases) |
+| Late completion after timeout | NOT OBSERVED in production | covered by `test_late_completion_registers_on_loop` + `test_timeout_marks_unresolved_and_never_retries` |
+| First eligible order (count_fp=2.0, ≥94¢) | NOT OBSERVED | candidates still reject `no_positive_executable_edge`; do not manufacture |
+| Independent termination capture | OPEN | ProcDump/WER not installed; 18:21 exit remains unclassified |
+
+**Durability boundary (explicit):** `_settlement_failed` and
+`_settlement_inflight` are in-memory — a restart clears them. Startup
+reconciliation does NOT currently reconstruct equivalent entry-blocking
+state; a restart must not be read as recovery from an outstanding
+accounting failure merely because the map starts empty. Tracked under
+the restart/reconciliation assurance work, not expanded in this patch.
+
 ## Still open
 
 - [ ] Queue-age + consumer-heartbeat metrics independent of the saturated paths.
