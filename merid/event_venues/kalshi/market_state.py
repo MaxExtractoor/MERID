@@ -903,6 +903,9 @@ class KalshiMarketStateStore:
         self._timing_rollup_sums: Dict[str, float] = {}
         self._timing_rollup_maxes: Dict[str, float] = {}
         self._timing_rollup_statuses: Dict[str, int] = {}
+        # Emit+reset must be atomic: per-ticker drain workers race the
+        # window check and would otherwise each emit the same aggregates.
+        self._timing_rollup_lock = threading.Lock()
 
         # 2026-08-24: Snapshot timeout tracking.  Records when a ticker last
         # transitioned to ``snapshot_complete=False`` so we can resubscribe/request
@@ -1606,9 +1609,25 @@ class KalshiMarketStateStore:
             if st:
                 sts = self._timing_rollup_statuses
                 sts[st] = sts.get(st, 0) + 1
-            elapsed = time.monotonic() - self._timing_rollup_t0
-            if elapsed < 60.0 or self._timing_rollup_n <= 0:
+            if time.monotonic() - self._timing_rollup_t0 < 60.0:
                 return
+            with self._timing_rollup_lock:
+                # Re-check under the lock — another drain worker may have
+                # emitted and reset while this call waited.
+                if self._timing_rollup_n <= 0:
+                    return
+                elapsed = time.monotonic() - self._timing_rollup_t0
+                if elapsed < 60.0:
+                    return
+                self._timing_rollup_emit_locked(elapsed)
+        except Exception:
+            pass
+
+    def _timing_rollup_emit_locked(self, elapsed: float) -> None:
+        """Emit one rollup row + reset.  Caller holds _timing_rollup_lock."""
+        try:
+            sums = self._timing_rollup_sums
+            maxes = self._timing_rollup_maxes
             n = self._timing_rollup_n
             stage_bits = []
             stages: Dict[str, Dict[str, float]] = {}
