@@ -412,6 +412,11 @@ class LiveRuntimeState:
         with self._lock:
             if new_state == self._state:
                 return
+            if self._state == "RECOVERY_RUNNING" and new_state == "LIVE_ENTRIES_ENABLED":
+                raise LiveRuntimeStateTransitionError(
+                    "runtime recovery cannot enable entries without verified "
+                    "reconciliation and a durable recovery event"
+                )
             allowed = self._TRANSITIONS.get(self._state, set())
             if new_state not in allowed:
                 raise LiveRuntimeStateTransitionError(
@@ -507,6 +512,18 @@ class LiveRuntimeState:
                 # Already in a terminal or enabled state; only move to halted
                 # if the preflight is being re-run.
                 return
+            if self._state == "RECOVERY_RUNNING" and auto_enable:
+                # A feed-only recovery is not a full startup preflight. Until
+                # the recovery coordinator can supply all required evidence,
+                # retain the entry halt instead of emitting a false pass.
+                self._release_assertion = None
+                self.transition(
+                    "LIVE_ENTRIES_HALTED",
+                    "runtime_recovery_verification_required",
+                    reason_codes=["RECOVERY_VERIFICATION_REQUIRED"],
+                    context={"preflight_context": preflight_context or {}},
+                )
+                return
             # AGENTS.md step 17: emit the structured preflight telemetry for
             # both outcomes, then bind the same fields into the durable
             # release assertion.
@@ -547,6 +564,10 @@ class LiveRuntimeState:
         assertion matches the current deployment/process.
         """
         with self._lock:
+            if self._state == "RECOVERY_RUNNING":
+                raise LiveRuntimeStateTransitionError(
+                    "manual release cannot bypass runtime recovery verification"
+                )
             self._validate_release_assertion(release_assertion)
             self._release_assertion = asdict(release_assertion)
             self._release_assertion["enabled_at"] = self._now()

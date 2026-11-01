@@ -105,6 +105,43 @@ class TestLiveRuntimeState:
         state.halt_entries("circuit_breaker", ["CIRCUIT_BREAKER"])
         assert state._state == "LIVE_ENTRIES_HALTED"
 
+    def test_recovery_cannot_emit_false_preflight_pass(
+        self, temp_state_path: Path, monkeypatch
+    ) -> None:
+        state = LiveRuntimeState(persistence_path=temp_state_path)
+        state.transition("STARTING", "test")
+        state.transition("PREFLIGHT_RUNNING", "test")
+        state.complete_preflight(auto_enable=True)
+        state.halt_entries("feed_failed", ["STALE_MARKET_DATA"])
+        state.transition("RECOVERY_RUNNING", "feed_reconnected")
+        emitted = []
+        monkeypatch.setattr(state, "_emit_startup_telemetry", lambda event, *_: emitted.append(event))
+
+        state.complete_preflight(auto_enable=True, preflight_context={"recovery": "feed"})
+
+        assert state.state == "LIVE_ENTRIES_HALTED"
+        assert state.can_submit_live_entry() is False
+        assert state.can_submit_exit() is True
+        assert state._reason_codes == ["RECOVERY_VERIFICATION_REQUIRED"]
+        assert state._release_assertion is None
+        assert emitted == []
+
+    def test_direct_recovery_transition_cannot_enable(
+        self, temp_state_path: Path
+    ) -> None:
+        state = LiveRuntimeState(persistence_path=temp_state_path)
+        state.transition("STARTING", "test")
+        state.transition("PREFLIGHT_RUNNING", "test")
+        state.complete_preflight(auto_enable=True)
+        state.halt_entries("feed_failed", ["STALE_MARKET_DATA"])
+        state.transition("RECOVERY_RUNNING", "feed_reconnected")
+        with pytest.raises(LiveRuntimeStateError, match="runtime recovery"):
+            state.transition("LIVE_ENTRIES_ENABLED", "unverified")
+        with pytest.raises(LiveRuntimeStateError, match="cannot bypass"):
+            state.request_live_entries_enabled(ReleaseAssertion())
+        assert not state.can_submit_live_entry()
+        assert state.can_submit_exit()
+
     def test_persistence_round_trip(self, temp_state_path: Path) -> None:
         state = LiveRuntimeState(persistence_path=temp_state_path)
         state.transition("STARTING", "test")

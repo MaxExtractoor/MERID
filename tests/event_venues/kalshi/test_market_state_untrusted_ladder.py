@@ -99,7 +99,7 @@ class TestDeadTickerExclusion:
 
 
 class TestRecovery:
-    def test_recovery_when_last_book_heals(self, store, tmp_path, monkeypatch):
+    def test_healed_book_alone_does_not_release_entries(self, store, tmp_path, monkeypatch):
         lrs = _live_runtime(tmp_path, monkeypatch)
         _enable_then_halt(
             lrs, ["BOOK_FEED_DEGRADED", "DATA_QUALITY", "RUNTIME_HALT"]
@@ -116,7 +116,7 @@ class TestRecovery:
         store._states[ticker] = state
         store._untrusted_since[ticker] = time.monotonic() - 9999.0
 
-        # The live-WS attestation pops the entry and drives recovery.
+        # The attestation heals the book but does not prove account recovery.
         ok = store._attest_state_recovery(
             state,
             "WS_ORDERBOOK_DELTA_LIVE",
@@ -126,7 +126,8 @@ class TestRecovery:
         assert ok
         assert state.live_sequence_confirmed is True
         assert store._untrusted_since == {}
-        assert lrs.state == "LIVE_ENTRIES_ENABLED"
+        assert lrs.state == "LIVE_ENTRIES_HALTED"
+        assert lrs._reason_codes == ["RECOVERY_VERIFICATION_REQUIRED"]
 
     def test_no_recovery_for_foreign_halt_reason(self, store, tmp_path, monkeypatch):
         lrs = _live_runtime(tmp_path, monkeypatch)
@@ -150,6 +151,25 @@ class TestRecovery:
         store._untrusted_since["KXBTC15M-A"] = time.monotonic()
         store._maybe_recover_session_book_untrusted()
         assert lrs.state == "LIVE_ENTRIES_HALTED"
+
+    def test_reconnected_websocket_alone_does_not_release_entries(
+        self, tmp_path, monkeypatch
+    ):
+        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+        import merid.config.auto_execution as auto_exec
+        import merid.config.observe_only as observe_only
+
+        lrs = _live_runtime(tmp_path, monkeypatch)
+        _enable_then_halt(lrs, ["WS_DATA_PLANE_DEAD", "STALE_MARKET_DATA"])
+        monkeypatch.setattr(auto_exec, "is_auto_execution_enabled", lambda: True)
+        monkeypatch.setattr(observe_only, "is_observe_only", lambda: False)
+        bridge = object.__new__(KalshiWebSocketBridge)
+        monkeypatch.setattr(bridge, "_ws_data_plane_alive", lambda: True)
+
+        bridge._maybe_resume_live_entries_after_reconnect()
+
+        assert lrs.state == "LIVE_ENTRIES_HALTED"
+        assert lrs._reason_codes == ["RECOVERY_VERIFICATION_REQUIRED"]
 
 
 class TestPruneCleanup:

@@ -747,7 +747,11 @@ The daemon logging monitor emitted closed-stream warnings during test exit.
 
 The WS reconnect and book-recovery paths can currently call
 `complete_preflight` without the fresh reconciliation, trusted fill
-watermark, and durable recovery proof required by the runtime contract. That
-unsafe auto-resume path remains open and must be addressed before restarting.
-P0's position reconciliation also still compares position counts rather
-than independently proving signed quantity and side; further work is needed.
+watermark, and durable recovery proof required by the runtime contract. The
+runtime state machine now rejects this unverified recovery, retains exits,
+and does not emit false preflight-success telemetry. This is a fail-closed
+interim safeguard, not a complete automatic recovery coordinator: entries
+remain halted until a new verified startup. Sixty-seven focused runtime,
+book, bridge, and unknown-submission tests passed. P0's position
+reconciliation still compares position counts rather than independently
+proving signed quantity and side; further work is needed.
