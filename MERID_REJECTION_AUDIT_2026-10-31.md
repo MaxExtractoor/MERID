@@ -540,3 +540,12 @@ local unified-health response reported zero cached open positions, but the
 authenticated reconciliation endpoint returned HTTP 401 and settlement
 worker drain state was not available. No restart was attempted: zero orders
 and positions alone do not prove reconciliation and settlement readiness.
+
+At 13:40 UTC a subsequent startup on `ed37a86b` passed the P0 preflight,
+including exchange reconciliation with no open orders or positions, and
+enabled live entries. The settlement poller started, but its backlog was not
+independently verified. A later read-only live probe found that the periodic
+clock refresh's HEAD request received HTTP 404 while GET returned HTTP 200.
+The fallback to a separately timed GET was added and tested locally; a direct
+live sample succeeded. The fallback is not active in the running `ed37a86b`
+process and requires deployment and post-deploy verification.

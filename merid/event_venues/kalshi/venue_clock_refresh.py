@@ -22,37 +22,45 @@ _MAX_WALL_STEP_S = 0.5
 
 def _sample_live_clock() -> ClockOffsetMeasurement:
     """Measure the existing live REST Date clock without blocking the WS loop."""
-    wall_start = time.time()
-    mono_start = time.monotonic()
-    response = requests.head(
-        _MARKETS_URL, params={"limit": 1},
-        headers={"Cache-Control": "no-cache"},
-        timeout=2, allow_redirects=False,
-    )
-    wall_end = time.time()
-    mono_end = time.monotonic()
-    rtt = mono_end - mono_start
-    if not (0 <= rtt <= _MAX_RTT_S):
-        raise ValueError("clock request RTT outside bounds")
-    if abs((wall_end - wall_start) - rtt) > _MAX_WALL_STEP_S:
-        raise ValueError("host clock stepped during clock request")
-    if not (200 <= response.status_code < 300 or response.status_code == 405):
-        raise ValueError("clock request failed")
-    age = response.headers.get("Age")
-    if age is not None and (not str(age).isdigit() or int(age) != 0):
-        raise ValueError("cached clock response")
-    server_time = parsedate_to_datetime(response.headers["Date"])
-    if server_time.tzinfo is None:
-        raise ValueError("clock response has no timezone")
-    midpoint = wall_start + (wall_end - wall_start) / 2.0
-    return ClockOffsetMeasurement(
-        server_minus_local_seconds=server_time.timestamp() - midpoint,
-        measured_at_wall=wall_end,
-        measured_at_monotonic=mono_end,
-        source="kalshi_periodic_date_header",
-        precision_seconds=1.0 + rtt / 2.0,
-        rtt_seconds=rtt,
-    )
+    last_error = None
+    for request in (requests.head, requests.get):
+        wall_start = time.time()
+        mono_start = time.monotonic()
+        try:
+            response = request(
+                _MARKETS_URL, params={"limit": 1},
+                headers={"Cache-Control": "no-cache"},
+                timeout=2, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+            continue
+        wall_end = time.time()
+        mono_end = time.monotonic()
+        rtt = mono_end - mono_start
+        if not (0 <= rtt <= _MAX_RTT_S):
+            raise ValueError("clock request RTT outside bounds")
+        if abs((wall_end - wall_start) - rtt) > _MAX_WALL_STEP_S:
+            raise ValueError("host clock stepped during clock request")
+        if not (200 <= response.status_code < 300 or response.status_code == 405):
+            last_error = ValueError(f"clock request HTTP {response.status_code}")
+            continue
+        age = response.headers.get("Age")
+        if age is not None and (not str(age).isdigit() or int(age) != 0):
+            raise ValueError("cached clock response")
+        server_time = parsedate_to_datetime(response.headers["Date"])
+        if server_time.tzinfo is None:
+            raise ValueError("clock response has no timezone")
+        midpoint = wall_start + (wall_end - wall_start) / 2.0
+        return ClockOffsetMeasurement(
+            server_minus_local_seconds=server_time.timestamp() - midpoint,
+            measured_at_wall=wall_end,
+            measured_at_monotonic=mono_end,
+            source="kalshi_periodic_date_header",
+            precision_seconds=1.0 + rtt / 2.0,
+            rtt_seconds=rtt,
+        )
+    raise ValueError(f"clock request failed: {last_error}") from last_error
 
 
 async def refresh_live_clock_once(clock: VenueClockCalibration) -> bool:

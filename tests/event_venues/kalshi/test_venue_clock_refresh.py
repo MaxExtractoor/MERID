@@ -35,6 +35,35 @@ def test_date_sample_uses_non_cached_live_endpoint(monkeypatch):
     assert calls[0][1]["allow_redirects"] is False
 
 
+def test_head_not_found_falls_back_to_fresh_get(monkeypatch):
+    calls = []
+
+    def head(*args, **kwargs):
+        calls.append("head")
+        return SimpleNamespace(status_code=404, headers={"Date": formatdate(usegmt=True)})
+
+    def get(*args, **kwargs):
+        calls.append("get")
+        return SimpleNamespace(status_code=200, headers={"Date": formatdate(usegmt=True), "Age": "0"})
+
+    monkeypatch.setattr(refresh.requests, "head", head)
+    monkeypatch.setattr(refresh.requests, "get", get)
+    sample = refresh._sample_live_clock()
+    assert calls == ["head", "get"]
+    assert abs(sample.server_minus_local_seconds) < 2
+
+
+def test_head_timeout_falls_back_to_fresh_get(monkeypatch):
+    def head(*args, **kwargs):
+        raise refresh.requests.Timeout("head timeout")
+
+    monkeypatch.setattr(refresh.requests, "head", head)
+    monkeypatch.setattr(refresh.requests, "get", lambda *a, **kw: SimpleNamespace(
+        status_code=200, headers={"Date": formatdate(usegmt=True)}
+    ))
+    assert refresh._sample_live_clock().source == "kalshi_periodic_date_header"
+
+
 @pytest.mark.parametrize("status,headers", [
     (500, {"Date": formatdate(usegmt=True)}),
     (200, {"Date": formatdate(usegmt=True), "Age": "12"}),
@@ -42,7 +71,9 @@ def test_date_sample_uses_non_cached_live_endpoint(monkeypatch):
     (200, {}),
 ])
 def test_invalid_response_does_not_create_sample(monkeypatch, status, headers):
-    monkeypatch.setattr(refresh.requests, "head", lambda *a, **kw: SimpleNamespace(status_code=status, headers=headers))
+    response = lambda *a, **kw: SimpleNamespace(status_code=status, headers=headers)
+    monkeypatch.setattr(refresh.requests, "head", response)
+    monkeypatch.setattr(refresh.requests, "get", response)
     with pytest.raises((ValueError, KeyError)):
         refresh._sample_live_clock()
 
