@@ -198,3 +198,79 @@ math (+ host `w32tm /resync`) → observe whether the untrusted storm and
 on a clean feed before any gate-level changes.  The next report should
 then be able to say whether `no_positive_executable_edge` volume is
 honest opportunity absence rather than a contaminated evaluation.
+
+---
+
+## Clock-skew remediation — implemented `9849e9ee`, live-verified
+
+**Fix** (committed `9849e9ee`):
+
+- New shared clock domain `merid/event_venues/kalshi/venue_clock.py`:
+  process-wide `server_minus_local_seconds` calibration (sign convention
+  identical to WS auth: `s = server − local`; corrected age =
+  `(local_wall + s) − venue_ts`) with declared `source`,
+  `precision_seconds` (HTTP Date granularity + measured RTT/2), monotonic
+  expiry (`MERID_VENUE_CLOCK_MAX_OFFSET_AGE_S`, default 1800s), and
+  host-clock-step invalidation (`MERID_VENUE_CLOCK_STEP_TOLERANCE_S`,
+  default 0.5s) anchored on `time.monotonic()`.
+- Explicit statuses, never silent-fresh: `measured`,
+  `unverified_no_offset`, `unverified_offset_expired`,
+  `unverified_host_clock_step`, `no_venue_ts`,
+  `anomaly_negative_age` (corrected age < −1500ms tolerance is reported,
+  not clamped), `anomalous_venue_ts`.
+- `ws.py` auth records the measurement each (re)connect with request
+  RTT captured (previously function-local only).
+- `ws.py` shed: residence (monotonic, authoritative overload bound) and
+  corrected-venue-age are separate predicates; per-reason counters;
+  unverifiable/anomalous venue age never sheds a required ordered delta —
+  it forwards with status rather than a fabricated age.  A shed frame
+  still flows through attributed seq-invalidatation + snapshot recovery
+  (transport integrity unchanged).
+- `market_state._book_event_timing`: corrected age when measured;
+  labelled `bridge_recv_wall(unverified_*)` local-domain fallback when
+  not; `venue_age_status` / `raw_venue_age_ms` / `corr_venue_age_ms` /
+  `offset_s` / `off_src` now flow into every untrusted diagnostic;
+  `ws_last_event_age_status`/`_src` stamped on state; `wire_ms_corrected`
+  added to hop forensics.
+- Thresholds unchanged: res bound 4000ms, age bound
+  `4000−250=3750ms`, upstream-wait 2500ms — no relaxation.
+
+**Host note**: `w32tm` service is stopped and this shell lacks elevation
+to start it — the +3.08s skew persists and is now *handled*, but an
+admin `Start-Service W32Time; w32tm /resync` remains worthwhile ops
+hygiene; the step-invalidation path will correctly void the stored
+offset the moment the host clock is corrected.
+
+**Live verification** (run `20261101030426_10272_cbfb4b9b`,
+`LIVE_ENTRIES_ENABLED` 23:04:49):
+
+- `[WS-AUTH] Clock skew: -3.08s` → `[VENUE-CLOCK] kalshi offset=-3.084`
+  recorded with `off_src=kalshi_ws_auth_date_header`.
+- Drop lines now self-describing, e.g.
+  `reason=corrected_venue_age res_ms=4000 res_bound_ms=4000
+  raw_age_ms=6863 corr_age_ms=3779 age_bound_ms=3750 offset_s=-3.084
+  off_age_s=159 freshness=measured` — 6863−3084=3779 confirmed live.
+- Peak-rollover window (23:04–23:08): 50 untrusted, 40 sid-gaps,
+  2 too-old, 1 overflow — but every drop is `corrected_venue_age`
+  *verified-stale* (true ~3.8s upstream lag during the rollover burst +
+  startup catch-up), not the manufactured ~730ms-bound storm.
+  Post-rollover quiet-window rates are the acceptance measurement.
+- Two pre-existing test issues fixed en route: an uncalibrated stale-ts
+  test now records calibration explicitly, and the preserve-drain test
+  sets `live_sequence_confirmed` to exercise the first-invalidation
+  drain it documents (pre-existing failure since `8a2a2fbc`, not caused
+  by this patch).
+
+**5.2M "superseded" counter scope**: `_ent[0]` counts *dropped frames per
+ticker since process start* — cumulative, not per-incident.  The new
+per-reason counters (`_stale_drop_by_reason`) + split log fields now
+attribute each drop to `queue_residence` vs `corrected_venue_age`.
+
+**Incident note**: the deployed process (PID 8052) died silently ~35s
+into module import at 22:57:29 with no traceback/WER/faulthandler
+record — the same signature as the unclassified 18:21 event.  The
+relaunch used `Win32_Process.Create` (WMI) so the launcher+child sit
+outside the interactive session's process tree; the working hypothesis
+is an external/console-teardown kill of session-spawned process trees.
+PID 13096 (launcher) and its uvicorn child remain alive at report time —
+independent termination capture stays on the watch list.
