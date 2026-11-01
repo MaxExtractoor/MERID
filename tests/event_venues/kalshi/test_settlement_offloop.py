@@ -257,7 +257,80 @@ async def test_restart_redelivery_is_idempotent(ledger, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 8. DumpBudget — stall-episode cap, cooldown, byte and lifetime bounds
+# 8. Readiness enforcement — the surface the entry gate consumes
+# ---------------------------------------------------------------------------
+
+
+def test_health_ok_when_idle(ledger):
+    health = ledger.settlement_write_health()
+    assert health["ok"] is True
+    assert health["reason"] is None
+    assert health["pending_unresolved"] == 0
+
+
+async def test_health_blocked_by_failure_then_cleared(ledger, monkeypatch):
+    await ledger.ensure_loaded()
+
+    def boom(*a, **k):
+        raise SettlementProceedsWriteError("simulated write exhaustion")
+
+    monkeypatch.setattr(ledger, "_settlement_proceeds_db_write", boom)
+    with pytest.raises(SettlementProceedsWriteError):
+        await ledger.record_settlement_proceeds_async(
+            TICKER, "yes", yes_count=2.0, timeout_s=30
+        )
+    health = ledger.settlement_write_health()
+    assert health["ok"] is False
+    assert health["reason"] == "settlement_write_failed"
+
+    # A subsequent committed write clears the failure state — entries
+    # resume only after durable accounting is demonstrated healthy again.
+    monkeypatch.undo()
+    written = await ledger.record_settlement_proceeds_async(
+        TICKER, "yes", yes_count=2.0, timeout_s=30
+    )
+    assert written == 1
+    health = ledger.settlement_write_health()
+    assert health["ok"] is True
+
+
+async def test_health_blocked_by_old_unresolved(ledger, monkeypatch):
+    gate = threading.Event()
+    started = threading.Event()
+
+    def blocked(*a, **k):
+        started.set()
+        gate.wait(10)
+        return 0
+
+    monkeypatch.setattr(ledger, "_settlement_proceeds_db_write", blocked)
+    monkeypatch.setenv("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "0.2")
+    try:
+        task = asyncio.ensure_future(
+            ledger.record_settlement_proceeds_async(
+                TICKER, "yes", yes_count=2.0, timeout_s=30
+            )
+        )
+        deadline = time.time() + 5
+        while not started.is_set() and time.time() < deadline:
+            await asyncio.sleep(0.02)  # yield so the task can schedule
+        assert started.is_set()
+        # Op is pending but young — still healthy.
+        assert ledger.settlement_write_health()["ok"] is True
+        await asyncio.sleep(0.3)
+        health = ledger.settlement_write_health()
+        assert health["ok"] is False
+        assert health["reason"].startswith("settlement_unresolved_age")
+        assert health["pending_unresolved"] == 1
+    finally:
+        gate.set()
+    await task
+    # Once the op drains, health recovers without manual intervention.
+    assert ledger.settlement_write_health()["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# 9. DumpBudget — stall-episode cap, cooldown, byte and lifetime bounds
 # ---------------------------------------------------------------------------
 
 

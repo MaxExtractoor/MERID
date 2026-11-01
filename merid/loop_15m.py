@@ -5538,6 +5538,27 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
         except Exception as e:
             logger.warning("[15m-LOOP] Portfolio authority check failed: %s", e)
 
+    # 2026-10-31: settlement-write persistence gate. A failed proceeds
+    # write (newer than the last commit) or an unresolved op older than
+    # MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S means the durable accounting
+    # path is degraded — block new entries only; reconciliation,
+    # cancellation, and existing-position management continue.
+    if allow_new_entries:
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            _settle_health = get_fills_ledger().settlement_write_health()
+            if not _settle_health.get("ok"):
+                logger.warning(
+                    "[15m-LOOP] ENTRY_BLOCKED: %s pending=%d stats=%s",
+                    _settle_health.get("reason"),
+                    _settle_health.get("pending_unresolved", 0),
+                    _settle_health.get("stats"),
+                )
+                allow_new_entries = False
+                self._entries_block_reason = _settle_health["reason"]
+        except Exception as e:
+            logger.warning("[15m-LOOP] settlement-write health check failed: %s", e)
+
     # CRITICAL FIX (2026-08-27): Bankroll drawdown circuit breaker.
     # Entries are blocked when the bankroll breaker is OPEN; exits remain enabled.
     bankroll_circuit_state = None

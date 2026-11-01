@@ -7401,12 +7401,19 @@ class KalshiFillsLedger:
             loop = asyncio.get_running_loop()
 
             async def _run() -> int:
-                written = await loop.run_in_executor(
-                    _settlement_db_executor(),
-                    self._settlement_proceeds_db_write,
-                    market_ticker, outcome_norm, legs, row_ts, now_iso,
-                    revenue_dollars, settle_time_str,
-                )
+                try:
+                    written = await loop.run_in_executor(
+                        _settlement_db_executor(),
+                        self._settlement_proceeds_db_write,
+                        market_ticker, outcome_norm, legs, row_ts, now_iso,
+                        revenue_dollars, settle_time_str,
+                    )
+                except SettlementProceedsWriteError:
+                    stats["failed"] += 1
+                    stats["last_failure_mono"] = time.monotonic()
+                    raise
+                stats["committed"] += 1
+                stats["last_commit_mono"] = time.monotonic()
                 self._register_settlement_legs(
                     market_ticker, legs, row_ts, now_iso, revenue_dollars,
                     outcome_norm, written,
@@ -7414,14 +7421,13 @@ class KalshiFillsLedger:
                 return written
 
             task = asyncio.ensure_future(_run())
+            task._merid_created_mono = time.monotonic()
             inflight[market_ticker] = task
             task.add_done_callback(
                 lambda _t, k=market_ticker: inflight.pop(k, None)
             )
         try:
-            written = await asyncio.wait_for(asyncio.shield(task), timeout_s)
-            stats["committed"] += 1
-            return written
+            return await asyncio.wait_for(asyncio.shield(task), timeout_s)
         except asyncio.TimeoutError:
             stats["unresolved"] += 1
             logger.warning(
@@ -7431,9 +7437,52 @@ class KalshiFillsLedger:
                 market_ticker, timeout_s, market_ticker,
             )
             raise
-        except SettlementProceedsWriteError:
-            stats["failed"] += 1
-            raise
+
+    def settlement_write_health(self) -> Dict[str, Any]:
+        """Readiness signal for settlement-proceeds persistence.
+
+        Not healthy when (a) an in-flight op has been unresolved longer
+        than ``MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S`` (default 300s), or
+        (b) the most recent durable outcome is a failure — a failed write
+        blocks entries until a later write commits.  Counters alone are
+        observability; this is the enforcement surface the entry gate
+        consumes.
+        """
+        now = time.monotonic()
+        inflight = getattr(self, "_settlement_inflight", None) or {}
+        stats = dict(getattr(self, "_settlement_write_stats", None) or {})
+        max_age_s = float(
+            os.environ.get("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "300")
+            or 300
+        )
+        pending = 0
+        oldest_age = 0.0
+        for t in inflight.values():
+            if t is not None and not t.done():
+                pending += 1
+                created = getattr(t, "_merid_created_mono", None)
+                if created is not None:
+                    oldest_age = max(oldest_age, now - created)
+        last_failure = stats.get("last_failure_mono", 0.0) or 0.0
+        last_commit = stats.get("last_commit_mono", 0.0) or 0.0
+        base = {
+            "pending_unresolved": pending,
+            "oldest_unresolved_age_s": oldest_age,
+            "stats": stats,
+        }
+        if oldest_age > max_age_s:
+            return {
+                "ok": False,
+                "reason": f"settlement_unresolved_age:{oldest_age:.0f}s",
+                **base,
+            }
+        if last_failure > last_commit:
+            return {
+                "ok": False,
+                "reason": "settlement_write_failed",
+                **base,
+            }
+        return {"ok": True, "reason": None, **base}
 
     def _settlement_proceeds_plan(
         self,
