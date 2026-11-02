@@ -659,3 +659,18 @@ filtered position pagination now fails on partial or malformed responses, and
 flat resolution requires an authoritative terminal-market response plus a
 complete, valid zero-position snapshot. Fifty-one isolated tests passed.
 These fixes have not been deployed or verified against a fresh live snapshot.
+
+The separately isolated exit-order simulator suite now passes after its
+per-test durable store was isolated and obsolete assumptions were corrected:
+a working partial order is not fully filled, an empty post-timeout lookup is
+inconclusive, and a terminal IOC must have explicit cancellation evidence.
+The focused simulator, fractional-ownership, and submission-certainty run
+passed 40 tests. The previously failed broad router/repricing run has not yet
+been rerun cleanly and must not be counted as a pass.
+
+Further local commits `d3e6d091` and `10347cdf` retain the logical gate on
+duplicate responses, preserve exact fractional working fills, reject
+unsupported quantity precision without releasing ownership, and preserve the
+original requested quantity when IOC remainders are canceled. The resting
+order monitor still uses whole-contract fields; fractional working remainders
+need a separate repair and end-to-end tests.
