@@ -2410,6 +2410,8 @@ class KalshiWebSocket(EventVenueStream):
                     if queue_size >= _HIGH_PRESSURE_DEPTH
                     else _BATCH_SIZE_LOW_PRESSURE
                 )
+                _q_maxsize = batch_queue.maxsize or 0
+                queue_util = (queue_size / _q_maxsize) if _q_maxsize > 0 else 0.0
 
                 # Drain profiler: scheduling gap between iterations while a
                 # backlog exists — the event-loop starvation component of

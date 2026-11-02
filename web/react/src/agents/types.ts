@@ -120,7 +120,7 @@ export interface AgentPosition {
 export interface AgentHeartbeat {
   last_eval_ms?: number;    // ms since last evaluation cycle
   book_age_ms?: number;     // ms since last book update for its market
-  watermark_ms?: number;    // ms since trusted fill watermark advanced
+  watermark_ms?: number;    // age (ms) of the last WS orderbook event applied to the agent's market state
   spot_age_ms?: number;     // ms since spot/RTI update
 }
 

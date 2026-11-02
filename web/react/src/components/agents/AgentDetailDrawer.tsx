@@ -138,7 +138,7 @@ export const AgentDetailDrawer = memo(function AgentDetailDrawer({
             <div className="grid grid-cols-4 gap-1.5">
               <HeartbeatTile label="EVAL" ageMs={agent.heartbeat.last_eval_ms} />
               <HeartbeatTile label="BOOK" ageMs={agent.heartbeat.book_age_ms} />
-              <HeartbeatTile label="WMARK" ageMs={agent.heartbeat.watermark_ms} />
+              <HeartbeatTile label="WS" ageMs={agent.heartbeat.watermark_ms} />
               <HeartbeatTile label="SPOT" ageMs={agent.heartbeat.spot_age_ms} />
             </div>
           </section>

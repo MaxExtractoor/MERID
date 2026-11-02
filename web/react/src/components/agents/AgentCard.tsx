@@ -226,7 +226,7 @@ export const AgentCard = memo(function AgentCard({
       <div className="flex items-center gap-2.5 flex-wrap border-t border-slate-800/80 pt-1.5">
         <HeartbeatChip label="EVAL" ageMs={agent.heartbeat.last_eval_ms} />
         <HeartbeatChip label="BOOK" ageMs={agent.heartbeat.book_age_ms} />
-        <HeartbeatChip label="WM" ageMs={agent.heartbeat.watermark_ms} />
+        <HeartbeatChip label="WS" ageMs={agent.heartbeat.watermark_ms} />
       </div>
 
       {/* lane chips — stopPropagation inside LaneChip keeps these from
