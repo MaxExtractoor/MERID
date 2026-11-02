@@ -658,7 +658,7 @@ class CanonicalPortfolioReconciler:
         if rest_failed:
             status = ReconciliationStatus.UNKNOWN
             source = "no_exchange_data"
-            if self._get_client() is None:
+            if positions_complete and positions_complete.error_code == "UNKNOWN_SOURCE":
                 reason = ReconciliationReason.UNKNOWN_SOURCE
             elif pagination_error == "UNKNOWN_NETWORK":
                 reason = ReconciliationReason.UNKNOWN_NETWORK
@@ -1418,14 +1418,17 @@ class CanonicalPortfolioReconciler:
     ) -> Tuple[Optional[Dict[str, Dict[str, Any]]], Optional[SourceCompleteness]]:
         """Fetch positions from Kalshi authenticated REST API.
 
-        Returns ``({}, None)`` when the client is unavailable, and ``(None,
-        SourceCompleteness)`` when the fetch itself fails.  A non-empty dict is the
-        authoritative position set; an empty dict with ``complete=True`` means the
+        Returns ``(None, SourceCompleteness)`` when the client is unavailable
+        or the fetch fails. An empty dict with ``complete=True`` means the
         exchange confirmed zero open positions.
         """
         client = self._get_client()
         if client is None:
-            return {}, None
+            return None, SourceCompleteness(
+                source="exchange_rest",
+                complete=False,
+                error_code="UNKNOWN_SOURCE",
+            )
         try:
             started = time.time_ns()
             if hasattr(client, "get_positions_result"):

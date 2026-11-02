@@ -175,6 +175,22 @@ def _make_reconciler(
 
 
 @pytest.mark.asyncio
+async def test_missing_client_cannot_produce_authoritative_empty_snapshot(monkeypatch):
+    reconciler = _make_reconciler(
+        cache=_FakePositionCache({}),
+        ledger=_FakeFillsLedger({}),
+    )
+    monkeypatch.setattr(reconciler, "_get_client", lambda: None)
+
+    snapshot = await reconciler.build_snapshot()
+
+    assert snapshot.reconciliation_status == ReconciliationStatus.UNKNOWN
+    assert snapshot.reconciliation_reason == ReconciliationReason.UNKNOWN_SOURCE
+    assert not snapshot.is_authoritative
+    assert not snapshot.pagination_complete
+
+
+@pytest.mark.asyncio
 async def test_matched_snapshot_when_all_sources_agree():
     """Exchange, ledger, and cache all report the same position."""
     ticker = "KXBTC15M-26AUG192030-30"
