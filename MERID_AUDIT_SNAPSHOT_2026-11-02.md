@@ -571,3 +571,23 @@ Event timestamps, not file modification or drain times, must be used when
 judging freshness. Disk free space was approximately 448 GiB at that time;
 PASSIVE checkpoints may retain the WAL file's high-water size and continued
 disk monitoring is required.
+
+## WebSocket snapshot and precision findings (2026-11-02)
+
+The old running build drops Kalshi's documented nested
+`yes_dollars_fp`/`no_dollars_fp` orderbook snapshots in its parser. Commit
+`d1d14650` accepts those snapshots, applies their subscription sequence,
+invalidates sibling books on gaps, and rejects stale replay. An empty or
+one-sided WS snapshot cannot be replaced by an older REST quote. The new build
+is not deployed and does not establish that the feed storm is resolved.
+
+The local book stores whole-cent prices and whole-contract depth; fractional
+prices or quantities are not safely represented. The committed safety gate
+blocks entries for an affected ticker until a representable WS snapshot
+arrives; exact fractional book support remains necessary. This is not a
+complete feed solution. The readiness field `ws_subscribed` currently reports
+whether a local state exists, not whether the subscription is confirmed.
+Also investigate subscription-scoped `ok` messages with sequence numbers:
+the WS parser currently discards them, potentially creating downstream
+apparent gaps. Do not interpret either field or a single matched snapshot as
+proof that the live subscription and runtime recovery are healthy.
