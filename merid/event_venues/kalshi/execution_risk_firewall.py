@@ -228,11 +228,16 @@ class ExecutionRiskFirewall:
         # that produced the 2026-09-01 KXSOL unmatched fill: the first create-order ack
         # was lost, the local position snapshot was still stale, and a second exit was
         # approved and submitted before the first fill was ingested.
-        _in_flight = self._has_in_flight_exit(canonical)
+        try:
+            _in_flight = self._has_in_flight_exit(canonical)
+        except Exception:
+            logger.exception("[FIREWALL-INFLIGHT-CHECK-FAILED] ticker=%s", ticker)
+            return self._rejected("in_flight_exit_check_unavailable", canonical, force=True)
         if _in_flight is not None:
             return self._rejected(
                 f"in_flight_exit:client_order_id={_in_flight.client_order_id}:status={_in_flight.status}",
                 canonical,
+                force=True,
             )
 
         # 1. Fresh exchange position (authoritative).
@@ -716,12 +721,14 @@ class ExecutionRiskFirewall:
         except Exception:
             return False
 
-    def _rejected(self, reason: str, canonical: "CanonicalOrderIntent") -> FirewallDecision:
+    def _rejected(
+        self, reason: str, canonical: "CanonicalOrderIntent", *, force: bool = False,
+    ) -> FirewallDecision:
         coid = self._deterministic_coid(canonical, None, canonical.limit_cents, None)
         decision = FirewallDecision(
             decision_id=f"firewall_{uuid.uuid4().hex}",
             client_order_id=coid,
-            status="rejected" if self._is_enforced() else "observe_only",
+            status="rejected" if force or self._is_enforced() else "observe_only",
             reason=f"firewall_rejected:{reason}",
             market_ticker=canonical.market_ticker,
             contract=canonical.contract,
@@ -1445,36 +1452,24 @@ class ExecutionRiskFirewall:
     def _has_in_flight_exit(
         self, canonical: "CanonicalOrderIntent"
     ) -> Optional[Any]:
-        """Detect an unresolved exit attempt for the same ticker within the lookback.
+        """Detect an unresolved exit attempt for the same ticker, regardless of age.
 
         Returns the most recent matching ``OrderAttemptRecord`` or ``None``.
         This is intentionally defensive: it also rejects an ``ACKNOWLEDGED`` resting
         exit because two concurrent exits can over-close a position.
         """
-        try:
-            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
 
-            lookback = self._in_flight_exit_lookback_seconds()
-            attempts = OrderAttemptStore().get_unresolved(lookback_seconds=lookback)
-            if not attempts:
-                return None
-
-            # get_unresolved returns oldest-first; the newest unresolved is the
-            # relevant one because it is most likely to still be in flight.
-            for attempt in reversed(attempts):
-                if self._attempt_is_exit_for(attempt, canonical.market_ticker):
-                    return attempt
-            return None
-        except Exception as exc:
-            # Fail-open is the intended fallback, but silently degrading the
-            # duplicate-exit guard is exactly the 2026-09-01 incident class —
-            # make it loud so the wedge is visible in telemetry.
-            logger.warning(
-                "[FIREWALL-INFLIGHT-CHECK-FAILED] ticker=%s intent_id=%s "
-                "duplicate-exit dedup unavailable, proceeding fail-open: %s",
-                canonical.market_ticker, canonical.intent_id, exc,
-            )
-            return None
+        attempts = OrderAttemptStore().get_unresolved(lookback_seconds=None)
+        for attempt in reversed(attempts):
+            if (
+                attempt.client_order_id == canonical.client_order_id
+                and attempt.intent_id == canonical.intent_id
+            ):
+                continue
+            if self._attempt_is_exit_for(attempt, canonical.market_ticker):
+                return attempt
+        return None
 
     def _attempt_is_exit_for(
         self, attempt: Any, ticker: str
@@ -1489,10 +1484,12 @@ class ExecutionRiskFirewall:
         except Exception:
             payload = {}
 
+        order = payload.get("order") if isinstance(payload.get("order"), dict) else {}
         attempt_ticker = (
             payload.get("ticker")
             or payload.get("market_ticker")
             or payload.get("market_id")
+            or order.get("ticker")
             or ""
         )
 
@@ -1500,6 +1497,7 @@ class ExecutionRiskFirewall:
         is_exit = (
             payload.get("entry_or_exit") == "exit"
             or payload.get("is_exit") is True
+            or payload.get("reduce_only") is True
             or (attempt.intent_id or "").startswith("intent_exit_")
             or (attempt.client_tag or "").startswith("exit_")
         )
@@ -1508,7 +1506,13 @@ class ExecutionRiskFirewall:
         # not, we require a strong exit label match and assume the caller already
         # scoped by the canonical ticker.
         if attempt_ticker:
-            return attempt_ticker == ticker and is_exit
+            if attempt_ticker != ticker:
+                return False
+            if is_exit:
+                return True
+            # Older rows lack direction. Do not infer "not an exit" from
+            # missing provenance while another submission might be in flight.
+            return payload.get("entry_or_exit") != "entry"
         return is_exit and (ticker in (attempt.intent_id or "") or ticker in (attempt.client_tag or ""))
 
     def _market_active_and_before_deadline(self, ticker: str) -> bool:

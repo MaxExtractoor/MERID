@@ -156,6 +156,8 @@ def _build_record(
     # be audited back to the feed that owned its entry quote.
     payload["quote_owner"] = getattr(intent, "quote_owner", None)
     payload["degraded_mode"] = bool(getattr(intent, "degraded_mode", False))
+    payload["entry_or_exit"] = getattr(intent, "entry_or_exit", None)
+    payload["reduce_only"] = getattr(intent, "reduce_only", None)
     # 2026-10-06: persist the requested order parameters readably.  The
     # fingerprint hashes them but is opaque; the attempt row must answer
     # "what was actually submitted" (e.g. 3-contract sizing vs 1-contract

@@ -467,11 +467,10 @@ class OrderAttemptStore:
 
     def get_unresolved(
         self,
-        lookback_seconds: float = 300.0,
+        lookback_seconds: Optional[float] = 300.0,
         statuses: Optional[Sequence[str]] = None,
     ) -> List[OrderAttemptRecord]:
         conn = self._get_conn()
-        cutoff = self._now() - lookback_seconds
         status_list = list(statuses) if statuses is not None else [
             "SUBMITTING",
             "SUBMISSION_UNKNOWN",
@@ -479,14 +478,15 @@ class OrderAttemptStore:
         ]
         if not status_list:
             return []
+        cutoff_clause = " AND created_at > ?" if lookback_seconds is not None else ""
+        params = tuple(status_list)
+        if lookback_seconds is not None:
+            params += (self._now() - lookback_seconds,)
         cur = conn.execute(
-            f"""
-            SELECT * FROM order_attempts
-            WHERE status IN ({','.join('?' for _ in status_list)})
-              AND created_at > ?
-            ORDER BY created_at ASC
-            """,
-            (*status_list, cutoff),
+            f"SELECT * FROM order_attempts WHERE status IN "
+            f"({','.join('?' for _ in status_list)}){cutoff_clause} "
+            "ORDER BY created_at ASC",
+            params,
         )
         return [OrderAttemptRecord.from_row(r) for r in cur.fetchall()]
 
