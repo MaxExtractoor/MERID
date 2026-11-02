@@ -284,6 +284,8 @@ class KalshiWebSocket(EventVenueStream):
         # P1 FIX: Track subscription IDs (sid) for update_subscription commands
         # Maps channel type to subscription ID returned by Kalshi
         self._subscription_ids: Dict[str, int] = {}  # channel -> sid
+        self._subscription_evidence_lock = threading.Lock()
+        self._observed_orderbook_subscriptions: Dict[str, tuple] = {}
 
         # ── Callback handling with PHASE 1 safety ───────────────────────────
         # PHASE 1 FIX: Initialize with safe no-op async callback to prevent NoneType errors
@@ -662,6 +664,7 @@ class KalshiWebSocket(EventVenueStream):
         from pathlib import Path
 
         logger.info("[WS-CLIENT-CONNECT] connect() method invoked")
+        self._reset_subscription_evidence()
 
         # 2026-10-22: a prior loop-lifecycle bug can leave the running loop's
         # _default_executor shut down ("cannot schedule new futures after
@@ -907,7 +910,6 @@ class KalshiWebSocket(EventVenueStream):
         if not self._running:
             logger.info("[WS-SESSION-RECYCLE] ignored: client not running")
             return
-
         if self._session_recycle_requested:
             logger.info("[WS-SESSION-RECYCLE] already in progress, skipping")
             return
@@ -918,6 +920,7 @@ class KalshiWebSocket(EventVenueStream):
             return
 
         async with self._ensure_reconnect_lock():
+            self._reset_subscription_evidence()
             self._session_recycle_requested = True
             self._session_recycle_reason = reason
             self._session_recycle_requested_at = _time.monotonic()
@@ -1155,6 +1158,7 @@ class KalshiWebSocket(EventVenueStream):
                 market_id,
             )
             return
+        self._forget_orderbook_subscription_observation([market_id])
 
         params: Dict[str, Any] = {
             "channels": ["orderbook_delta"],
@@ -1218,6 +1222,7 @@ class KalshiWebSocket(EventVenueStream):
             )
             return
         claimed = set(new_tickers)
+        self._forget_orderbook_subscription_observation(new_tickers)
         self._orderbook_tickers.update(claimed)
         n_chunks = (len(new_tickers) + chunk_size - 1) // chunk_size
         logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Processing %d new tickers (%d already subscribed) in %d chunks", len(new_tickers), len(uniq) - len(new_tickers), n_chunks)
@@ -1257,13 +1262,8 @@ class KalshiWebSocket(EventVenueStream):
             chunk_size,
         )
 
-        # CRITICAL: REST bootstrap is REQUIRED because WS snapshots are not arriving
-        # Kalshi API documentation states that orderbook_snapshot messages arrive automatically
-        # after subscribing to orderbook_delta, but in production this does not occur.
-        # Without REST bootstrap, orderbooks remain uninitialized and trading fails.
-        # This is a known Kalshi API issue; workaround is to fetch initial state via REST.
-        # TODO: File Kalshi support ticket to investigate snapshot delivery failure.
-        logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Starting REST bootstrap - WS snapshots not arriving in practice")
+        # Bootstrap independently while waiting for sequenced WS snapshots.
+        logger.info("[WS-SUBSCRIBE-ORDERBOOKS-BATCH] Starting REST bootstrap while awaiting WS snapshots")
         
         # REST bootstrap: fetch orderbooks via REST to initialize books
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
@@ -1454,6 +1454,69 @@ class KalshiWebSocket(EventVenueStream):
             except Exception:
                 pass
         return getattr(self._ws, 'open', False)
+
+    def _reset_subscription_evidence(self) -> None:
+        with self._subscription_evidence_lock:
+            self._subscription_ids.clear()
+            self._observed_orderbook_subscriptions.clear()
+
+    def _forget_orderbook_subscription_observation(self, tickers: List[str]) -> None:
+        with self._subscription_evidence_lock:
+            for ticker in tickers:
+                self._observed_orderbook_subscriptions.pop(ticker, None)
+
+    def _record_subscription_confirmation(self, data: Dict[str, Any]) -> None:
+        body = data.get("msg")
+        body = body if isinstance(body, dict) else {}
+        channel = body.get("channel")
+        sid = body.get("sid") if body.get("sid") is not None else data.get("sid")
+        if not channel or sid is None:
+            return
+        with self._subscription_evidence_lock:
+            if channel == "orderbook_delta" and self._subscription_ids.get(channel) != sid:
+                self._observed_orderbook_subscriptions.clear()
+            self._subscription_ids[channel] = sid
+        logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
+
+    def _record_subscription_removal(self, data: Dict[str, Any]) -> None:
+        sid = data.get("sid")
+        if sid is None:
+            return
+        with self._subscription_evidence_lock:
+            channels = [channel for channel, active in self._subscription_ids.items() if active == sid]
+            for channel in channels:
+                self._subscription_ids.pop(channel, None)
+            if "orderbook_delta" in channels:
+                self._observed_orderbook_subscriptions.clear()
+
+    def _note_orderbook_subscription_observation(self, data: Dict[str, Any]) -> None:
+        if data.get("type") not in ("orderbook_snapshot", "orderbook_delta"):
+            return
+        body = _kalshi_ws_payload(data)
+        ticker = body.get("market_ticker") or body.get("ticker")
+        sid = data.get("sid")
+        seq = data.get("seq")
+        with self._subscription_evidence_lock:
+            if (
+                ticker and ticker in self._orderbook_tickers and sid is not None
+                and sid == self._subscription_ids.get("orderbook_delta")
+                and isinstance(seq, int) and not isinstance(seq, bool)
+            ):
+                self._observed_orderbook_subscriptions[ticker] = (
+                    sid, self._connection_generation
+                )
+
+    def is_orderbook_subscription_confirmed(self, ticker: str) -> bool:
+        """A live SID acknowledgement and ticker-specific traffic are required."""
+        if not self.is_connected():
+            return False
+        with self._subscription_evidence_lock:
+            sid = self._subscription_ids.get("orderbook_delta")
+            return bool(
+                sid is not None and ticker in self._orderbook_tickers
+                and self._observed_orderbook_subscriptions.get(ticker)
+                == (sid, self._connection_generation)
+            )
 
     async def is_connected_async(self) -> bool:
         """Async alias for cross-loop submission."""
@@ -1896,6 +1959,7 @@ class KalshiWebSocket(EventVenueStream):
                     # decompose event age into wire vs queue-residence segments.
                     data["_t_ws_recv_ns"] = _recv_ns
                     data["_t_ws_recv_wall_ms"] = _recv_wall_ms
+                    data["_ws_connection_generation"] = self._connection_generation
                     _nested = data.get("msg")
                     if isinstance(_nested, dict):
                         _nested["_t_ws_recv_ns"] = _recv_ns
@@ -1976,19 +2040,6 @@ class KalshiWebSocket(EventVenueStream):
                     if msg_type in ("subscribed", "ok", "error"):
                         logger.info("[WS-SUB-CONFIRM] type=%s id=%s msg=%s", msg_type, data.get("id"), data.get("msg", {}))
                         
-                        # P1 FIX: Capture subscription ID (sid) for update_subscription commands
-                        if msg_type == "subscribed":
-                            msg_data = data.get("msg", {})
-                            if not isinstance(msg_data, dict):
-                                msg_data = {}
-                            channel = msg_data.get("channel")
-                            # Kalshi nests sid inside msg: {"msg": {"channel": ..., "sid": N}}.
-                            # Top-level fallback kept for protocol variants.
-                            sid = msg_data.get("sid") or data.get("sid")
-                            if channel and sid:
-                                self._subscription_ids[channel] = sid
-                                logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
-
                     # TARGETED DEBUG: Log orderbook_delta messages with reduced frequency (every 50th message)
                     if data.get("type") == "orderbook_delta":
                         if not hasattr(self, '_orderbook_delta_count'):
@@ -2007,6 +2058,11 @@ class KalshiWebSocket(EventVenueStream):
                     # ── Sequence check ─────────────────────────────────
                     if not self._check_sequence(data):
                         continue
+                    if msg_type == "subscribed":
+                        self._record_subscription_confirmation(data)
+                    if msg_type == "unsubscribed":
+                        self._record_subscription_removal(data)
+                    self._note_orderbook_subscription_observation(data)
 
                     # ── Enqueue for async processing ───────────────────
                     # Classify message priority for selective dropping
@@ -4487,6 +4543,7 @@ class KalshiWebSocket(EventVenueStream):
         # tracking either.
         if orderbooks_to_drop:
             _drop = sorted(orderbooks_to_drop)
+            self._forget_orderbook_subscription_observation(_drop)
             _sid = self._subscription_ids.get("orderbook_delta")
             if _sid is not None and self._ws:
                 try:

@@ -275,3 +275,21 @@ def test_replayed_control_does_not_rewind_sid(pipeline):
     store.apply_orderbook_sequence_control({"sid": 4, "seq": 9})
     assert store._sid_last_seq[4] == 10
     store._mark_book_untrusted_and_resync.assert_not_called()
+
+
+def test_old_connection_frame_cannot_restore_book(pipeline, monkeypatch):
+    from merid.event_venues.kalshi import market_state
+    from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+
+    ws, store = pipeline
+    ws._connection_generation = 2
+    monkeypatch.setattr(market_state, "get_kalshi_market_state_store", lambda: store)
+    monkeypatch.setattr(KalshiWebSocketBridge, "_instance_created", False)
+    bridge = KalshiWebSocketBridge(ws=ws, config=SimpleNamespace(api_key="test-key"))
+    event = ws._parse_message(_snapshot(1, [["0.3200", "7.00"]], [["0.6700", "11.00"]]))
+    event["_ws_connection_generation"] = 1
+    bridge._apply_orderbook_on_drain(event)
+    assert store.get(TICKER) is None
+    event["_ws_connection_generation"] = 2
+    bridge._apply_orderbook_on_drain(event)
+    assert store._ob.get_book(TICKER).yes_levels == {32: 7}

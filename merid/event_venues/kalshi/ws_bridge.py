@@ -2831,6 +2831,13 @@ class KalshiWebSocketBridge:
         global _ws_forward_stalled
         return _ws_forward_stalled
     
+    def is_orderbook_subscription_confirmed(self, ticker: str) -> bool:
+        """Return live client evidence, not the locally requested ticker list."""
+        try:
+            return bool(self._ws.is_orderbook_subscription_confirmed(ticker))
+        except Exception:
+            return False
+
     def get_forward_loop_health(self) -> Dict[str, Any]:
         """Get forward loop health metrics for monitoring.
         
@@ -4603,6 +4610,10 @@ class KalshiWebSocketBridge:
         global _ws_forward_first_event_ts, _ws_forward_last_event_ts
 
         event_type = event.get("type") or ""
+        generation = event.get("_ws_connection_generation")
+        if generation is not None and generation != getattr(self._ws, "_connection_generation", None):
+            logger.debug("[WS-DRAIN] Dropping frame from replaced connection generation")
+            return
         ticker = "unknown"
         nested = event.get("msg")
         if isinstance(nested, dict):

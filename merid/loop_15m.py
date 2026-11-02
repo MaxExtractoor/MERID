@@ -5600,19 +5600,23 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     # processing events. This keeps the loop and router gates aligned.
     ws_queue_size = 0
     ws_time_since_last_event = float("inf")
-    ws_healthy = True
+    ws_healthy = False
     ws_first_event_ts = 0.0
     ws_queue_threshold = int(os.getenv("MERID_KALSHI_WS_QUEUE_ALLOW_THRESHOLD", "30000"))
     ws_queue_age_s = 0.0
     ws_queue_max_age_s = float(os.getenv("MERID_WS_QUEUE_MAX_AGE_S", "3.0"))
+    bridge = getattr(self, "_ws_bridge", None)
     if allow_new_entries:
         try:
-            bridge = getattr(self, "_ws_bridge", None)
+            if bridge is None:
+                raise RuntimeError("WS bridge unavailable")
             if bridge is not None:
-                bridge_health = bridge.get_forward_loop_health() or {}
+                bridge_health = bridge.get_forward_loop_health()
+                if not isinstance(bridge_health, dict) or not isinstance(bridge_health.get("healthy"), bool):
+                    raise RuntimeError("WS bridge health unavailable")
                 ws_queue_size = int(bridge_health.get("queue_size", 0) or 0)
                 ws_time_since_last_event = float(bridge_health.get("time_since_last_event", float("inf")) or float("inf"))
-                ws_healthy = bool(bridge_health.get("healthy", True))
+                ws_healthy = bool(bridge_health["healthy"])
                 ws_first_event_ts = float(bridge_health.get("first_event_ts", 0.0) or 0.0)
                 ws_last_event_ts = float(bridge_health.get("last_event_ts", 0.0) or 0.0)
 
@@ -5632,13 +5636,20 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 ws_queue_age_s = (
                     ws_queue_size / events_per_sec
                     if events_per_sec and events_per_sec > 0.0
-                    else 0.0
+                    else (float("inf") if ws_queue_size else 0.0)
                 )
                 ws_queue_max_age_s = float(
                     os.getenv("MERID_WS_QUEUE_MAX_AGE_S", "3.0")
                 )
 
-                if ws_queue_size > ws_queue_threshold and ws_queue_age_s > ws_queue_max_age_s:
+                if (
+                    not math.isfinite(ws_first_event_ts) or ws_first_event_ts <= 0.0
+                    or not math.isfinite(ws_time_since_last_event) or ws_time_since_last_event < 0.0
+                    or ws_queue_size < 0
+                ):
+                    allow_new_entries = False
+                    self._entries_block_reason = "ws_health_unavailable"
+                elif ws_queue_size > ws_queue_threshold and ws_queue_age_s > ws_queue_max_age_s:
                     logger.warning(
                         "[15m-LOOP] ENTRY_BLOCKED: WS bridge queue stale backlog=%d drain_age=%.2fs > %.2fs",
                         ws_queue_size, ws_queue_age_s, ws_queue_max_age_s,
@@ -5663,6 +5674,8 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                     self._entries_block_reason = "ws_forwarder_unhealthy"
         except Exception as e:
             logger.warning("[15m-LOOP] WS bridge health check failed: %s", e)
+            allow_new_entries = False
+            self._entries_block_reason = "ws_health_unavailable"
 
     # P0 FIX: portfolio authority gate. New entries require an authoritative,
     # non-stale canonical portfolio snapshot. Exits remain enabled.
@@ -5818,7 +5831,13 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             state = r["market_state"]
             ticker = r["ticker"]
 
-            ws_subscribed = state is not None
+            try:
+                ws_subscribed = bool(
+                    bridge is not None and bridge.is_orderbook_subscription_confirmed(ticker)
+                )
+            except Exception as subscription_err:
+                logger.warning("[15m-LOOP] WS subscription check failed for %s: %s", ticker, subscription_err)
+                ws_subscribed = False
             ws_snapshot_complete = state is not None and getattr(state, "snapshot_complete", False)
             quote_fresh = r["md_fresh"]
             md_reason = (r.get("md_reason") or "").lower()
@@ -6006,7 +6025,9 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             )
             logger.info(readiness.to_log_message(), extra=readiness.__dict__)
     except Exception as e:
-        logger.debug("[15M-LOOP] ENTRY-READINESS log failed: %s", e)
+        logger.warning("[15M-LOOP] ENTRY-READINESS check failed: %s", e)
+        allow_new_entries = False
+        self._entries_block_reason = "entry_readiness_error"
 
     # 2026-09-01: Latch a global portfolio fault if any active ticker has an
     # unresolved exchange/ledger/cache break.  A single unresolved break makes

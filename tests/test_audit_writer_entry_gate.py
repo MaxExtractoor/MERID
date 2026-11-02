@@ -121,6 +121,14 @@ def _healthy_loop(monkeypatch):
     store = KalshiMarketStateStore()
     loop.market_state_store = store
     loop._risk_envelope = None
+    loop._ws_bridge = SimpleNamespace(
+        get_forward_loop_health=lambda: {
+            "healthy": True, "queue_size": 0, "events_per_sec": 1,
+            "first_event_ts": fake_clock.t - 1, "last_event_ts": fake_clock.t,
+            "time_since_last_event": 0.01,
+        },
+        is_orderbook_subscription_confirmed=lambda ticker: True,
+    )
     return loop, store
 
 
@@ -264,3 +272,66 @@ def test_unavailable_ticker_cache_halt_check_blocks_entries(monkeypatch, unavail
     )
     assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
     assert loop._entries_block_reason == "reconciliation_halt_latch"
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "error", "empty", "malformed", "starting"])
+def test_unavailable_ws_health_blocks_entries(monkeypatch, unavailable):
+    loop, store = _healthy_loop(monkeypatch)
+    clear_entry_idempotency_registry()
+    w = WindowFixture(
+        "BTC", datetime(2026, 8, 24, 23, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 24, 23, 15, tzinfo=timezone.utc), 15,
+    )
+    _apply_active_window(store, monkeypatch, w)
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: _writer_stub(unhealthy=False),
+    )
+    if unavailable == "missing":
+        loop._ws_bridge = None
+    elif unavailable == "error":
+        loop._ws_bridge.get_forward_loop_health = MagicMock(side_effect=OSError("bridge unavailable"))
+    elif unavailable == "empty":
+        loop._ws_bridge.get_forward_loop_health = lambda: {}
+    elif unavailable == "malformed":
+        loop._ws_bridge.get_forward_loop_health = lambda: {"healthy": "true"}
+    else:
+        loop._ws_bridge.get_forward_loop_health = lambda: {
+            "healthy": True, "first_event_ts": 0.0, "time_since_last_event": None,
+        }
+    assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
+    assert loop._entries_block_reason == "ws_health_unavailable"
+
+
+def test_unconfirmed_subscription_blocks_entries(monkeypatch):
+    loop, store = _healthy_loop(monkeypatch)
+    clear_entry_idempotency_registry()
+    w = WindowFixture(
+        "BTC", datetime(2026, 8, 24, 23, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 24, 23, 15, tzinfo=timezone.utc), 15,
+    )
+    _apply_active_window(store, monkeypatch, w)
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: _writer_stub(unhealthy=False),
+    )
+    loop._ws_bridge.is_orderbook_subscription_confirmed = lambda ticker: False
+    assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
+    assert "ws_subscribed" in loop._entries_block_reason
+
+
+def test_readiness_computation_failure_blocks_entries(monkeypatch):
+    loop, store = _healthy_loop(monkeypatch)
+    clear_entry_idempotency_registry()
+    w = WindowFixture(
+        "BTC", datetime(2026, 8, 24, 23, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 24, 23, 15, tzinfo=timezone.utc), 15,
+    )
+    _apply_active_window(store, monkeypatch, w)
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: _writer_stub(unhealthy=False),
+    )
+    monkeypatch.setattr(store, "is_quote_coherent", MagicMock(side_effect=OSError("readiness unavailable")))
+    assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
+    assert loop._entries_block_reason == "entry_readiness_error"

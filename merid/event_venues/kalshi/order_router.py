@@ -13675,6 +13675,16 @@ def _record_price_execution(intent: OrderIntent) -> None:
     # The duplicate recording here has been removed to avoid double-counting exposure.
 
 
+def _live_orderbook_subscription_confirmed(ticker: str) -> bool:
+    """Consult the existing bridge without creating one during order routing."""
+    try:
+        from merid.event_venues.kalshi.ws_bridge import _bridge
+
+        return bool(_bridge is not None and _bridge.is_orderbook_subscription_confirmed(ticker))
+    except Exception:
+        return False
+
+
 def _prepare_order_for_gate(
     intent: OrderIntent, mode: TradingMode, t0: float
 ) -> tuple[Optional[OrderResult], Optional[Any]]:
@@ -13744,6 +13754,14 @@ def _prepare_order_for_gate(
                 intent.ticker, _decision_age_ms, _decision_warn_ms, _decision_max_ms,
             )
 
+    if not _is_exit and _is_live_mode(mode) and not _live_orderbook_subscription_confirmed(intent.ticker):
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"ws_subscription_unconfirmed:{intent.ticker}",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        ), None
+
     # Market state / executable / freshness checks
     store = get_kalshi_market_state_store()
     state = store.get(intent.ticker)
@@ -13771,7 +13789,18 @@ def _prepare_order_for_gate(
     # CRITICAL FIX (2026-08-22): Canonical portfolio reconciliation gate.
     # New entries require an authoritative, matched portfolio snapshot.  Exits
     # remain enabled so the agent can flatten even if telemetry is divergent.
-    portfolio_snapshot = get_canonical_portfolio_store().current()
+    try:
+        portfolio_snapshot = get_canonical_portfolio_store().current()
+    except Exception as exc:
+        logger.warning("[order-router] Portfolio snapshot unavailable: %s", exc)
+        portfolio_snapshot = None
+    if not _is_exit and _is_live_mode(mode) and portfolio_snapshot is None:
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"portfolio_unavailable:{intent.ticker}",
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        ), None
     if not _is_exit and portfolio_snapshot is not None:
         if not portfolio_snapshot.is_authoritative:
             latency = (_time.monotonic() - t0) * 1000
