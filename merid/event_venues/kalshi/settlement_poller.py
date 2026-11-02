@@ -1590,6 +1590,22 @@ class KalshiSettlementPoller:
             # by signed-fill reconstruction, not by ``revenue=0`` alone (an
             # unhedged losing residual also pays zero).
             local_history_complete = residual_yes_cc is not None
+            # CANONICAL-VIEW coverage gate: a computed residual over an
+            # incomplete/quarantined execution population is partial truth —
+            # never silently read a zero residual as "verified flat".
+            try:
+                _cov_status = (ledger.get_market_accounting_coverage(
+                    settlement.market_id) or {}).get("coverage_status")
+            except Exception:
+                _cov_status = "coverage_unavailable"
+            if _cov_status in ("conflict_quarantined", "incomplete_coverage",
+                               "provisional_unverified"):
+                logger.warning(
+                    "[SETTLEMENT-COVERAGE] %s local accounting incomplete "
+                    "(coverage_status=%s) — residual/pnl treated as "
+                    "unverified, not verified-flat",
+                    settlement.market_id, _cov_status)
+                local_history_complete = False
             cash_recon = "not_applicable"
             if local_history_complete:
                 rev_c = settlement.exchange_revenue_cents

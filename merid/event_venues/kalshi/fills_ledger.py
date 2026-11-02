@@ -483,6 +483,10 @@ LEDGER_SCHEMA_VERSION: int = 3
 CANONICALIZATION_VERSION: int = 4
 TRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1", "TRUSTED_PAPER_V1"})
 UNTRUSTED_CANONICALIZATION_STATES: frozenset = frozenset({"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"})
+try:
+    from merid.event_venues.kalshi.canonical_fill_view import CANONICAL_CONTRACT_VERSION as _CANONICAL_CONTRACT_VERSION
+except Exception:
+    _CANONICAL_CONTRACT_VERSION = "canonical-fill-view/1.0"
 
 
 def _safe_price_to_cents(p) -> Optional[int]:
@@ -1504,6 +1508,11 @@ class KalshiFillsLedger:
         # the authoritative HTTP/WS fill can promote them without double-applying
         # state.  Key: order_id, value: provisional fill_id.
         self._live_router_fill_ids: Dict[str, str] = {}
+        # CANONICAL-VIEW (P4): mirror rows removed from the authoritative
+        # population are retained here for coverage/telemetry — never
+        # DB-deleted.  Lets get_market_accounting_coverage distinguish
+        # "verified flat" from "flat because evidence was excluded".
+        self._superseded_mirror_fills: Dict[str, KalshiFill] = {}
 
         # Provisional live-router fill_ids that were promoted in memory but may
         # still exist as durable rows.  The next persistence flush deletes them
@@ -3284,9 +3293,46 @@ class KalshiFillsLedger:
         "manual_operator_close", "settlement", "reconciliation",
     })
 
+    def _order_rows_conflict(self, fill: KalshiFill) -> bool:
+        """True when a mirror row's signed delta opposes the venue aggregate
+        on the same order — direction contested; all rows on the order are
+        quarantined from authoritative calculation pending order-ack/position
+        evidence.  See ``canonical_fill_view`` contract (side_conflict).
+        """
+        oid = getattr(fill, "order_id", None)
+        if not oid:
+            return False
+        mirror_d = 0
+        venue_d = 0
+        has_mirror = has_venue = False
+        for other in tuple(self._fills.values()) + tuple(
+            self._superseded_mirror_fills.values()
+        ):
+            if getattr(other, "order_id", None) != oid:
+                continue
+            fid2 = str(getattr(other, "fill_id", "") or "")
+            src2 = (getattr(other, "ingestion_source", "") or "").lower()
+            d = getattr(other, "canonical_yes_delta_cc", 0) or 0
+            if fid2.startswith("live_router_") or src2 == "order_router":
+                mirror_d += d
+                has_mirror = True
+            else:
+                venue_d += d
+                has_venue = True
+        return (
+            has_mirror and has_venue
+            and mirror_d != 0 and venue_d != 0
+            and (mirror_d > 0) != (venue_d > 0)
+        )
+
     def _canonical_fill_class(self, fill: KalshiFill) -> str:
         fid = str(getattr(fill, "fill_id", "") or "")
+        lr = (getattr(fill, "liquidity_role", "") or "").lower()
+        if lr == "settlement" or fid.startswith("settlement:"):
+            return "non_execution"
         src = (getattr(fill, "ingestion_source", "") or "").lower()
+        if self._order_rows_conflict(fill):
+            return "excluded"
         if self._is_superseded_live_router_fill(fill):
             return "excluded"
         if fid.startswith("live_router_") or src == "order_router":
@@ -4666,8 +4712,28 @@ class KalshiFillsLedger:
 
         # Take snapshot under lock to avoid dict mutation during iteration
         fills_snapshot = list(self._fills.values())
+        excluded_fill_count = 0
+        provisional_fill_count = 0
+        non_execution_fill_count = 0
+        provisional_fees = Decimal("0")
 
         for fill in fills_snapshot:
+            # CANONICAL-VIEW: superseded mirrors and conflict-quarantined
+            # rows never contribute fees or realized PnL; provisional rows
+            # are tracked separately, not folded into verified totals.
+            # Settlement pseudo-fills are non-executions: their proceeds
+            # (real settlement payouts) still count as cash, tracked under
+            # their own count.
+            _cls = self._canonical_fill_class(fill)
+            if _cls == "non_execution":
+                non_execution_fill_count += 1
+            elif _cls == "excluded":
+                excluded_fill_count += 1
+                continue
+            elif _cls == "provisional":
+                provisional_fill_count += 1
+                provisional_fees += fill.fee_cost or Decimal("0")
+                continue
             total_fees += fill.fee_cost
 
             # SKIP TEST FIXTURE FILLS: These are fake test data that leak into production
@@ -4823,6 +4889,14 @@ class KalshiFillsLedger:
             "manually_closed_detected": manually_closed_detected,
             "open_markets_list": sorted(list(open_markets)),
             "closed_markets_list": sorted(list(closed_markets)),
+            # Canonical-view accounting coverage (P4 contract): verified
+            # totals above exclude superseded mirrors and conflict-quarantined
+            # rows; provisional rows are reported, not folded in.
+            "canonical_contract_version": _CANONICAL_CONTRACT_VERSION,
+            "excluded_fill_count": excluded_fill_count + len(self._superseded_mirror_fills),
+            "provisional_fill_count": provisional_fill_count,
+            "non_execution_fill_count": non_execution_fill_count,
+            "provisional_fees_usd": float(provisional_fees),
             # Observability counters from kalshi_ledger_metrics
             **_metrics_snap(),
         }
@@ -6008,7 +6082,9 @@ class KalshiFillsLedger:
         These duplicates were previously written to the DB before the router-side
         deduplication was strict; they are never promoted again once an
         authoritative row exists, but they can still be replayed and inflate
-        session-realized PnL.  Delete both in memory and in the DB.
+        session-realized PnL.  P4: the rows are QUARANTINED (moved to
+        ``_superseded_mirror_fills`` for coverage/telemetry), never DB-deleted —
+        the raw ledger is evidence and a conflict-mirror must stay inspectable.
         """
         deleted = 0
         for _fill in list(self._fills.values()):
@@ -6017,12 +6093,8 @@ class KalshiFillsLedger:
             _order_fills = self._fills_by_order.get(_fill.order_id, [])
             if any(fid and not fid.startswith("live_router_") for fid in _order_fills):
                 _fill_id = _fill.fill_id
-                try:
-                    await self._execute_with_retry(db, "DELETE FROM kalshi_fills WHERE fill_id = ?", (_fill_id,))
-                except Exception as e:
-                    logger.warning("[FILLS-LEDGER-BACKFILL] could not delete stale live-router row %s: %s", _fill_id, e)
-                    continue
                 self._fills.pop(_fill_id, None)
+                self._superseded_mirror_fills[_fill_id] = _fill
                 self._processed_fill_ids.discard(_fill_id)
                 if _fill.order_id and _fill.order_id in self._fills_by_order:
                     if _fill_id in self._fills_by_order[_fill.order_id]:
@@ -6032,7 +6104,7 @@ class KalshiFillsLedger:
                         self._fills_by_market[_fill.market_ticker].remove(_fill_id)
                 self._live_router_fill_ids.pop(_fill.order_id, None)
                 deleted += 1
-                logger.info("[FILLS-LEDGER-BACKFILL] deleted stale live-router row %s", _fill_id)
+                logger.info("[FILLS-LEDGER-BACKFILL] quarantined stale live-router row %s (DB row retained)", _fill_id)
         return deleted
 
     def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
@@ -6582,6 +6654,10 @@ class KalshiFillsLedger:
         except Exception:
             pass
 
+        # P4: retain the suppressed mirror for coverage/telemetry so
+        # get_market_accounting_coverage can report "verified_with_excluded_
+        # mirrors" instead of silently complete.
+        self._superseded_mirror_fills[fill.fill_id] = fill
         logger.info(
             "[FILLS-LEDGER-LIVE-ROUTER-DEDUP] order_id=%s suppressed provisional %s; authoritative %s already present",
             fill.order_id, fill.fill_id, auth_id,
@@ -6887,6 +6963,7 @@ class KalshiFillsLedger:
                     client_order_id=getattr(fill, "client_order_id", None),
                     order_id=getattr(fill, "order_id", None),
                     quantity=exited_contracts,
+                    quantity_cc=getattr(fill, "quantity_cc", None),
                     price_cents=held_exit_price_cents,
                 )
                 # A reduction resets the EV persistence counter: any future
@@ -7279,6 +7356,14 @@ class KalshiFillsLedger:
         for fill in list(self._fills.values()):
             if fill.market_ticker != market_ticker:
                 continue
+            # CANONICAL-VIEW: authoritative executions only.  Superseded
+            # mirrors, conflict-quarantined rows, and unverified provisional
+            # records must not contribute to realized PnL or settled
+            # residual exposure; their presence is surfaced separately via
+            # get_market_accounting_coverage so a zero residual is never
+            # silently read as "verified flat".
+            if self._canonical_fill_class(fill) != "authoritative":
+                continue
             if asof_ts is not None:
                 ct = getattr(fill, "created_time", None)
                 try:
@@ -7295,6 +7380,60 @@ class KalshiFillsLedger:
         if not found:
             return None
         return total, residual_yes_cc
+
+    def get_market_accounting_coverage(self, market_ticker: str) -> Dict[str, Any]:
+        """Coverage metadata for one market's verified accounting.
+
+        A zero residual from ``_market_fill_totals`` is *verified-flat* only
+        when ``coverage_status`` is ``verified_complete`` (or
+        ``verified_with_excluded_mirrors``).  ``conflict_quarantined`` /
+        ``incomplete_coverage`` / ``provisional_unverified`` mean execution
+        evidence exists that authoritative totals could not include — the
+        residual/PnL for such a market is explicitly partial truth, never
+        silently complete.
+        """
+        counts: Dict[str, int] = {}
+        reasons: List[str] = []
+        verified = 0
+        conflict = False
+        for fill in tuple(self._fills.values()) + tuple(
+            self._superseded_mirror_fills.values()
+        ):
+            if getattr(fill, "market_ticker", None) != market_ticker:
+                continue
+            cls = self._canonical_fill_class(fill)
+            if cls == "authoritative":
+                verified += 1
+            elif cls == "non_execution":
+                counts[cls] = counts.get(cls, 0) + 1
+            else:
+                counts[cls] = counts.get(cls, 0) + 1
+                reasons.append(f"{getattr(fill, 'fill_id', '')}:{cls}")
+                if self._order_rows_conflict(fill):
+                    conflict = True
+        if conflict:
+            status = "conflict_quarantined"
+        elif counts.get("provisional"):
+            status = "provisional_unverified"
+        elif counts.get("excluded"):
+            status = "verified_with_excluded_mirrors"
+        else:
+            status = "verified_complete"
+        try:
+            from merid.event_venues.kalshi.canonical_fill_view import (
+                CANONICAL_CONTRACT_VERSION as _ver,
+            )
+        except Exception:
+            _ver = "canonical-fill-view/1.0"
+        return {
+            "verified_record_count": verified,
+            "coverage_status": status,
+            "excluded_record_count": counts.get("excluded", 0),
+            "provisional_record_count": counts.get("provisional", 0),
+            "non_execution_record_count": counts.get("non_execution", 0),
+            "exclusion_reasons": reasons,
+            "canonical_contract_version": _ver,
+        }
 
     def record_settlement_proceeds(
         self,

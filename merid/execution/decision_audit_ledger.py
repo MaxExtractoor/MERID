@@ -2084,17 +2084,44 @@ class DecisionAuditLedger:
             try:
                 fconn.row_factory = sqlite3.Row
                 placeholders = ",".join("?" for _ in _UNTRUSTED_FILL_STATES)
-                rows = [
-                    dict(r)
-                    for r in fconn.execute(
-                        "SELECT fill_id, order_id, created_time, execution_outcome_side, "
-                        "execution_action, execution_price_cents, quantity_cc, "
-                        "fee_cost FROM kalshi_fills WHERE market_ticker = ? "
-                        "AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY') "
-                        f"NOT IN ({placeholders})",
-                        (ticker, *_UNTRUSTED_FILL_STATES),
+                try:
+                    rows = [
+                        dict(r)
+                        for r in fconn.execute(
+                            "SELECT fill_id, order_id, created_time, execution_outcome_side, "
+                            "execution_action, execution_price_cents, quantity_cc, "
+                            "fee_cost, trade_id, canonical_yes_delta_cc, ingestion_source, "
+                            "market_ticker, canonicalization_state, liquidity_role "
+                            "FROM kalshi_fills WHERE market_ticker = ? "
+                            "AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY') "
+                            f"NOT IN ({placeholders})",
+                            (ticker, *_UNTRUSTED_FILL_STATES),
+                        )
+                    ]
+                except sqlite3.Error:
+                    rows = [
+                        dict(r)
+                        for r in fconn.execute(
+                            "SELECT fill_id, order_id, created_time, execution_outcome_side, "
+                            "execution_action, execution_price_cents, quantity_cc, "
+                            "fee_cost FROM kalshi_fills WHERE market_ticker = ? "
+                            "AND COALESCE(canonicalization_state, 'UNTRUSTED_LEGACY') "
+                            f"NOT IN ({placeholders})",
+                            (ticker, *_UNTRUSTED_FILL_STATES),
+                        )
+                    ]
+                # Canonical-fill contract (P4): exclude mirror/conflict/
+                # unpaired rows — the trust-state filter alone passes them
+                # (mirror rows carry TRUSTED_LIVE_V1).
+                try:
+                    from merid.event_venues.kalshi.canonical_fill_view import (
+                        classify_fill_rows, VERIFIED_VENUE,
                     )
-                ]
+                    _cls = classify_fill_rows(rows)
+                    rows = [r for r in rows
+                            if _cls.get(r["fill_id"], (None,))[0] == VERIFIED_VENUE]
+                except Exception:
+                    pass
             finally:
                 fconn.close()
         except Exception as exc:

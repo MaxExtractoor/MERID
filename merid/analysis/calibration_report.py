@@ -440,12 +440,41 @@ def load_fill_pnls(fills_db_path: str | Path) -> Dict[str, Dict[str, float]]:
         GROUP BY market_ticker
     """
 
+    # Canonical-fill contract (P4): exclude mirror/conflict/unpaired rows and
+    # duplicate venue trade_ids so each economic execution aggregates once.
+    # Settlement pseudo-fills keep their existing treatment (caller-filtered).
+    _excl: list = []
+    try:
+        from merid.event_venues.kalshi.canonical_fill_view import (
+            classify_fill_rows, VERIFIED_VENUE, NON_EXECUTION,
+        )
+        _crows = conn.execute(
+            "SELECT fill_id, trade_id, order_id, market_ticker, side, action, "
+            "quantity_cc, canonical_yes_delta_cc, proceeds_dollars, fee_cost, "
+            "created_time, ingestion_source, canonicalization_state, "
+            "liquidity_role, unmatched, is_exit, entry_or_exit, side_conflict, "
+            "subaccount_number FROM kalshi_fills"
+        ).fetchall()
+        _cls = classify_fill_rows(_crows)
+        _excl = [
+            fid for fid, (c, ev) in _cls.items()
+            if c not in (VERIFIED_VENUE, NON_EXECUTION)
+            or (c == NON_EXECUTION and "duplicate venue trade_id" in ev)
+        ]
+    except Exception:
+        _excl = []
+    _excl_sql = ""
+    _params: tuple = ()
+    if _excl:
+        _excl_sql = " AND fill_id NOT IN (%s)" % ",".join("?" * len(_excl))
+        _params = tuple(_excl)
+
     detailed = True
     try:
-        rows = conn.execute(detailed_sql).fetchall()
+        rows = conn.execute(detailed_sql + _excl_sql, _params).fetchall()
     except sqlite3.Error:
         try:
-            rows = conn.execute(simple_sql).fetchall()
+            rows = conn.execute(simple_sql + _excl_sql, _params).fetchall()
             detailed = False
         except sqlite3.Error:
             conn.close()
