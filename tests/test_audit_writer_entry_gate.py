@@ -235,3 +235,32 @@ def test_unavailable_canonical_portfolio_blocks_entries(monkeypatch, unavailable
     )
     assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
     assert loop._entries_block_reason == "portfolio_unavailable"
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "error"])
+def test_unavailable_ticker_cache_halt_check_blocks_entries(monkeypatch, unavailable):
+    loop, store = _healthy_loop(monkeypatch)
+    clear_entry_idempotency_registry()
+    w = WindowFixture(
+        "BTC",
+        datetime(2026, 8, 24, 23, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 24, 23, 15, 0, tzinfo=timezone.utc),
+        15,
+    )
+    _apply_active_window(store, monkeypatch, w)
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: _writer_stub(unhealthy=False),
+    )
+
+    def unavailable_cache():
+        if unavailable == "error":
+            raise OSError("cache unavailable")
+        return None
+
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache",
+        unavailable_cache,
+    )
+    assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
+    assert loop._entries_block_reason == "reconciliation_halt_latch"
