@@ -16,8 +16,8 @@ generation until restart.
 
 These tests pin the fixed contract:
 
-  1. ``not_submitted`` (router authoritative-empty) resolves the attempt
-     confirmed-dead -> RETRY_ELIGIBLE.
+  1. ``not_submitted`` after a send remains unknown; a proven pre-submit
+     refusal resolves to RETRY_ELIGIBLE.
   2. ``duplicate`` -> ACK_UNKNOWN (another route owns the coid).
   3. Any unhandled status -> ACK_UNKNOWN safe default (unknown != dead).
   4. Fresh SUBMITTING is excluded from reconcile enumeration; aged
@@ -107,14 +107,31 @@ def _result(status, **kw):
 
 
 class TestPostRouteUpdateUnhandledStatuses:
-    def test_not_submitted_resolves_retry_eligible(self, tmp_path):
-        """Router authoritative-empty (order provably never landed) is
-        confirmed-dead evidence -> RETRY_ELIGIBLE, not a SUBMITTING wedge."""
+    def test_not_submitted_after_send_remains_unknown(self, tmp_path):
         arb = _mint(tmp_path)
         post_route_update(
             PKEY, _result("not_submitted"), arbiter=arb)
         attempt = arb.attempt_store.get_active(PKEY)
-        assert attempt.state == AttemptState.RETRY_ELIGIBLE
+        assert attempt.state == AttemptState.ACK_UNKNOWN
+
+    def test_proven_pre_submit_rejection_resolves_retry_eligible(self, tmp_path):
+        arb = _mint(tmp_path)
+        post_route_update(
+            PKEY, _result("rejected", submission_attempted=False,
+                          submission_certainty="pre_submit"), arbiter=arb)
+        assert arb.attempt_store.get_active(PKEY).state == AttemptState.RETRY_ELIGIBLE
+
+    @pytest.mark.parametrize("status", ["rejected", "failed", "error"])
+    def test_transmitted_unacknowledged_failure_stays_unknown(self, tmp_path, status):
+        arb = _mint(tmp_path)
+        post_route_update(PKEY, _result(status), arbiter=arb)
+        assert arb.attempt_store.get_active(PKEY).state == AttemptState.ACK_UNKNOWN
+
+    def test_exchange_acknowledged_rejection_is_terminal(self, tmp_path):
+        arb = _mint(tmp_path)
+        post_route_update(
+            PKEY, _result("rejected", exchange_ack_received=True), arbiter=arb)
+        assert arb.attempt_store.get_active(PKEY).state == AttemptState.RETRY_ELIGIBLE
 
     def test_duplicate_marks_ack_unknown(self, tmp_path):
         """A router-level duplicate leaves ownership with another in-flight

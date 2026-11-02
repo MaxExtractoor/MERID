@@ -791,25 +791,22 @@ def post_route_update(
         arb.resolve_reconcile(position_key, ReconcileEvidence(
             order_found=True, terminal=True, filled_cc=0,
             source=f"route_{status}"))
-    elif status in ("rejected", "failed", "error"):
+    elif status in ("rejected", "failed", "error", "not_submitted"):
         from merid.position_management.exit_arbiter import ReconcileEvidence
-        _transmitted = bool(getattr(order_result, "submission_attempted", False))
-        arb.begin_reconcile(position_key)
-        arb.resolve_reconcile(position_key, ReconcileEvidence(
-            order_found=_transmitted, terminal=True, filled_cc=0,
-            source=f"route_{status}" if _transmitted else "local_no_transmit"))
-    elif status in ("not_submitted",):
-        # ``not_submitted`` is the router's authoritative-empty verdict: the
-        # in-router reconcile proved the order never landed on the exchange
-        # (submission_attempted=True + empty coid lookup, or a pre-transmit
-        # gate refusal with submission_attempted=False).  Either way the
-        # attempt is confirmed dead — resolve RETRY_ELIGIBLE so the next
-        # decision may mint a fresh attempt instead of wedging SUBMITTING.
-        from merid.position_management.exit_arbiter import ReconcileEvidence
-        arb.begin_reconcile(position_key)
-        arb.resolve_reconcile(position_key, ReconcileEvidence(
-            order_found=True, terminal=True, filled_cc=0,
-            source="route_not_submitted_authoritative_empty"))
+        attempted = bool(getattr(order_result, "submission_attempted", False))
+        sent = bool(getattr(order_result, "exchange_request_sent", False))
+        ack = bool(getattr(order_result, "exchange_ack_received", False))
+        never_sent = certainty == "pre_submit" and not attempted and not sent and not _oid
+        confirmed_rejected = status == "rejected" and ack
+        if never_sent or confirmed_rejected:
+            arb.begin_reconcile(position_key)
+            arb.resolve_reconcile(position_key, ReconcileEvidence(
+                order_found=confirmed_rejected, terminal=True, filled_cc=0,
+                source=f"route_{status}" if confirmed_rejected else "local_no_transmit"))
+        else:
+            # An empty lookup or generic failure after a send does not prove
+            # that the exchange rejected or never accepted the order.
+            arb.mark_ack_unknown(position_key, note=f"route_{status}_unproven")
     elif status in ("duplicate", "duplicate_unknown"):
         # Router-level concurrent dedup: another in-flight route owns this
         # client_order_id and will drive its outcome.  The attempt's fate is
