@@ -313,6 +313,69 @@ async def test_ambiguous_conversion_uses_durable_child_wire_id(
     assert _gate_record(original).status == OrderStatus.SUBMISSION_UNKNOWN
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["working_partial", "terminal_partial", "wrong_market", "precision"])
+async def test_conversion_duplicate_keeps_fractional_ownership(
+    client, monkeypatch, tmp_path, case,
+):
+    from unittest.mock import AsyncMock
+    from merid.event_venues.kalshi import order_attempt_store
+    from merid.event_venues.kalshi.port import Order
+
+    monkeypatch.setattr(order_attempt_store, "DEFAULT_DB_PATH", str(tmp_path / "attempts.db"))
+    client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
+    client.set_orderbook(
+        TICKER, best_bid_cents=50, best_ask_cents=60,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    create = AsyncMock(side_effect=[
+        CreateOrderResponse(success=False, error="post only cross", status_code=400,
+                            submission_certainty="rejected"),
+        CreateOrderResponse(success=False, error="duplicate", status_code=409,
+                            submission_certainty="rejected"),
+    ])
+    monkeypatch.setattr(client, "create_order", create)
+    monkeypatch.setattr(client, "get_orderbook", AsyncMock(return_value=SimpleNamespace(
+        success=True, yes_levels=[SimpleNamespace(price_cents=50)],
+        no_levels=[SimpleNamespace(price_cents=40)], timestamp=time.time(),
+    )), raising=False)
+
+    async def lookup(*, client_order_id, **_):
+        filled = Decimal("0.001") if case == "precision" else Decimal("0.75")
+        return Order(
+            order_id="existing-order", client_order_id=client_order_id,
+            ticker="OTHER" if case == "wrong_market" else TICKER,
+            side="sell", outcome="yes", size=Decimal("2"), filled_size=filled,
+            remaining_size=Decimal("2") - filled, price_cents=50,
+            status="canceled" if case == "terminal_partial" else "open",
+            time_in_force="IOC",
+        )
+
+    monkeypatch.setattr(client, "get_order", AsyncMock(side_effect=lookup))
+    intent = _exit_intent(price_cents=50, count=2, tif="gtc")
+    intent.post_only = True
+    intent.order_expiration_ts = int(time.time()) + 180
+    original = _reserve_gate(intent, monkeypatch)
+
+    result = await _route(intent)
+
+    assert create.await_count == 2
+    wire_id = create.await_args_list[1].args[0].client_order_id
+    assert wire_id != original
+    assert result.wire_client_order_id == wire_id
+    gate_record = _gate_record(original)
+    if case == "working_partial":
+        assert result.is_resting and not result.is_terminal
+        assert result.executed_quantity_cc == 75
+        assert result.remaining_quantity_cc == 125
+        assert gate_record.status == OrderStatus.PARTIAL
+        assert gate_record.filled_qty_cc == 75
+    else:
+        assert result.status == "duplicate_unknown"
+        assert gate_record.status == OrderStatus.SUBMISSION_UNKNOWN
+        assert gate_record.filled_qty_cc == 0
+
+
 # ---------------------------------------------------------------------------
 # Exit order scenarios
 # ---------------------------------------------------------------------------

@@ -4615,11 +4615,19 @@ def _order_snapshot_to_reconciled_result(
     _order_id = getattr(order, "order_id", None)
     _client_order_id = getattr(order, "client_order_id", None)
     _status_raw = (getattr(order, "status", "") or "").lower()
-    _size = getattr(order, "size", None) or Decimal("0")
-    _filled = getattr(order, "filled_size", None) or Decimal("0")
-    _remaining = getattr(order, "remaining_size", None)
-    if _remaining is None:
-        _remaining = _size - _filled
+    try:
+        _size = Decimal(str(getattr(order, "size", None) or 0))
+        _filled = Decimal(str(getattr(order, "filled_size", None) or 0))
+        _remaining_raw = getattr(order, "remaining_size", None)
+        _remaining = (
+            _size - _filled if _remaining_raw is None else Decimal(str(_remaining_raw))
+        )
+        for quantity in (_size, _filled, _remaining):
+            cc = quantity * Decimal("100")
+            if not quantity.is_finite() or quantity < 0 or cc != cc.to_integral_value():
+                return None
+    except (ValueError, TypeError, ArithmeticError):
+        return None
     _price_cents = getattr(order, "price_cents", None) or 0
 
     _tif = (
@@ -4695,7 +4703,6 @@ def _apply_reconciled_order(
     _client_tag = intent.client_tag or _client_order_id
     _order_id = getattr(resolved_order, "order_id", None)
     _status_raw = (getattr(resolved_order, "status", "") or "").lower()
-    _filled = getattr(resolved_order, "filled_size", 0) or 0
     _result = _order_snapshot_to_reconciled_result(
         resolved_order, intent, mode, latency_ms
     )
@@ -4741,12 +4748,13 @@ def _apply_reconciled_order(
         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
         _ptg = get_pre_trade_gate()
         _gate_client_order_id = intent.client_tag or _client_order_id
-        if _filled > 0:
+        _filled_cc = _result.executed_quantity_cc
+        if _filled_cc > 0:
             _ptg.mark_filled(
                 _gate_client_order_id,
-                int(Decimal(str(_filled))),
+                _filled_cc // 100,
                 fill_id=None,
-                filled_qty_cc=int(Decimal(str(_filled)) * 100),
+                filled_qty_cc=_filled_cc,
             )
             if _status_raw in ("canceled", "cancelled", "expired", "rejected"):
                 _ptg.mark_canceled(_gate_client_order_id)
@@ -8354,16 +8362,7 @@ async def _unknown_retry_result(
 ) -> "OrderResult":
     """Retain the logical reservation and reconcile the actual replacement wire ID."""
     wire_id = getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
-    _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
-    try:
-        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
-
-        gate = get_pre_trade_gate()
-        gate.mark_submitted(intent.client_tag or "", None)
-        gate.mark_submission_unknown(intent.client_tag or "")
-        _mark_canonical_entry_submitted(intent, order_id=None)
-    except Exception:
-        logger.exception("[RETRY-SUBMISSION-UNKNOWN] Failed to retain gate state")
+    _retain_unknown_submission(intent)
     if reconcile:
         wire_intent = copy.copy(intent)
         wire_intent.client_order_id = wire_id
@@ -8379,6 +8378,19 @@ async def _unknown_retry_result(
         submission_attempted=True, exchange_request_sent=True,
         submission_certainty="unknown", wire_client_order_id=wire_id,
     )
+
+
+def _retain_unknown_submission(intent: "OrderIntent") -> None:
+    _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
+    try:
+        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+
+        gate = get_pre_trade_gate()
+        gate.mark_submitted(intent.client_tag or "", None)
+        gate.mark_submission_unknown(intent.client_tag or "")
+        _mark_canonical_entry_submitted(intent, order_id=None)
+    except Exception:
+        logger.exception("[SUBMISSION-UNKNOWN] Failed to retain gate state")
 
 
 async def _dispatch_retry_request(port: Any, request: Any) -> Any:
@@ -17853,8 +17865,8 @@ async def _route_live(
             latency = (_time.monotonic() - t0) * 1000
             logger.info(
                 "[MAKER->TAKER] intent_id=%s ticker=%s fresh_ask=%dc "
-                "edge_cap=%dc ioc_price=%dc success=%s",
-                intent.intent_id, intent.ticker, _cb_ask, _cap,
+                "edge_cap=%s ioc_price=%dc success=%s",
+                intent.intent_id, intent.ticker, _cb_ask, _cap if _cap is not None else "n/a",
                 int(intent.price_cents), bool(getattr(placed_res, "success", False)),
             )
             return bool(getattr(placed_res, "success", False))
@@ -18332,18 +18344,15 @@ async def _route_live(
         )
         
         if is_duplicate_error:
-            # Idempotent success: our order was already accepted by Kalshi on a prior attempt.
-            # Look up the order by client_order_id to confirm it's resting.
-            # The lookup key must be the id actually sent on the wire: exit
-            # intents submit with ``client_order_id`` (exit_*) while
-            # ``client_tag`` stays merid-*.  Looking up by client_tag always
-            # misses for exits -> DUPLICATE_UNKNOWN -> resubmit -> 409 churn.
+            # A duplicate may be live, filled, or partially filled and dead.
+            # Retain the logical gate before attempting any broker lookup.
+            _retain_unknown_submission(intent)
             _wire_coid = (
                 getattr(intent, "_wire_client_order_id", None)
                 or intent.client_order_id or intent.client_tag
             )
             logger.info(
-                "[KALSHI_DUPLICATE_SUCCESS] ticker=%s client_order_id=%s — order already accepted, treating as success",
+                "[KALSHI_DUPLICATE] ticker=%s client_order_id=%s — reconciling existing order",
                 intent.ticker,
                 _wire_coid,
             )
@@ -18356,6 +18365,12 @@ async def _route_live(
                     logger.warning(
                         "[KALSHI_DUPLICATE] lookup identity mismatch for %s", _wire_coid
                     )
+                    order_data = None
+                if order_data is not None and (
+                    getattr(order_data, "ticker", None) != intent.ticker
+                    or not getattr(order_data, "order_id", None)
+                ):
+                    logger.warning("[KALSHI_DUPLICATE] lookup market/order mismatch for %s", _wire_coid)
                     order_data = None
                 if order_data is not None:
                     # 2026-10-04: honor the venue status, not just existence.
@@ -18377,56 +18392,15 @@ async def _route_live(
                         # can be partially filled). Retain reservations and
                         # reconcile by the original client order id.
                         return _duplicate_terminal_recovery_result(order_data, mode, latency)
-                    logger.info(
-                        "[KALSHI_DUPLICATE_LOOKUP] ticker=%s order_id=%s status=%s — confirmed resting",
-                        intent.ticker,
-                        order_data.order_id,
-                        order_data.status,
-                    )
-                    # Order was successfully submitted (on prior attempt) - record in rate limiter
-                    _record_successful_order()
-                    # Treat as success: update gate and return filled/submitted result
-                    try:
-                        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
-                        _ptg = get_pre_trade_gate()
-                        _ptg.mark_submitted(_wire_coid, order_data.order_id)
-                        _mark_canonical_entry_submitted(intent, order_id=order_data.order_id)
-                        _filled = int(order_data.filled_size or 0)
-                        if _filled:
-                            _ptg.mark_filled(_wire_coid, _filled, fill_id=f"{order_data.order_id}-dup", filled_qty_cc=_filled * 100)
-                            _mark_canonical_entry_executed(intent, fill_id=f"{order_data.order_id}-dup")
-                            # CRITICAL: Record price execution to prevent repeat price execution
-                            _record_price_execution(intent)
-                    except Exception as _dup_gate_err:
-                        logger.debug("[order-router] duplicate gate update failed: %s", _dup_gate_err)
-
-                    # PHASE1-DUP-2: Update dedup cache with order_id from duplicate lookup
-                    # This ensures the cache entry is marked as completed with the confirmed Kalshi order_id.
-                    try:
-                        cache = _dedup_cache()
-                        _dup_order_id = order_data.order_id
-                        if _dup_order_id:
-                            cache.mark_completed(_wire_coid, _dup_order_id)
-                            logger.debug(
-                                "[DEDUP-CACHE-DUPLICATE-UPDATED] client_order_id=%s kalshi_order_id=%s",
-                                _wire_coid, _dup_order_id
-                            )
-                    except Exception as dedup_dup_err:
-                        logger.warning("[DEDUP-CACHE-ERROR] Failed to update cache on duplicate (non-fatal): %s", dedup_dup_err)
-
-                    # Return synthetic success result (not a rejection)
-                    return OrderResult(
-                        status="filled_live" if int(order_data.filled_size or 0) else "submitted_live",
-                        mode=mode,
-                        fill={
-                            "order_id": order_data.order_id,
-                            "filled_count": int(order_data.filled_size or 0),
-                            "remaining_count": int(order_data.remaining_size or 0),
-                            "price_cents": order_data.price_cents or 0,
-                            "client_tag": _wire_coid,
-                        },
-                        latency_ms=round(latency, 2),
-                    )
+                    if _dup_status in ("resting", "open", "pending", "accepted", "partially_filled"):
+                        wire_intent = copy.copy(intent)
+                        wire_intent.client_order_id = _wire_coid
+                        reconciled = _apply_reconciled_order(
+                            order_data, wire_intent, mode, latency,
+                        )
+                        if reconciled is not None:
+                            _record_successful_order()
+                            return reconciled
             except Exception as _dup_lookup_err:
                 logger.debug("[order-router] duplicate lookup failed: %s", _dup_lookup_err)
             
@@ -18459,6 +18433,7 @@ async def _route_live(
                 exchange_request_sent=True,
                 exchange_ack_received=False,
                 submission_certainty="unknown",
+                wire_client_order_id=_wire_coid,
             )
         
         if not placed_res.success:

@@ -8,8 +8,8 @@ Observed live (KXETH15M-26OCT032245-45):
      a dead order masquerading as a live one.
 
 Fixes under test:
-  * the reprice leg mints a fresh wire client_order_id (``r1`` suffix)
-    while the intent-level coid stays canonical,
+  * the reprice leg persists a fresh wire client_order_id while the
+    intent-level coid stays canonical,
   * terminal duplicate lookups are not treated as resting or zero-fill
     rejections; their fills must be reconciled.
 """
@@ -42,11 +42,12 @@ def test_duplicate_lookup_reconciles_terminal_before_resting():
     code that logs or marks the order as resting/submitted.
     """
     src = inspect.getsource(_or)
-    dup_marker = "KALSHI_DUPLICATE_LOOKUP"
+    dup_marker = "_apply_reconciled_order("
     terminal_marker = "TERMINAL_ORDER_STATUSES"
     rejected_marker = "duplicate_order_terminal"
-    resting_pos = src.find(dup_marker)
-    terminal_pos = src.find(terminal_marker, src.find("is_duplicate_error"))
+    duplicate_pos = src.find("if is_duplicate_error:")
+    resting_pos = src.find(dup_marker, duplicate_pos)
+    terminal_pos = src.find(terminal_marker, duplicate_pos)
     rejected_pos = src.find(rejected_marker)
     assert resting_pos > 0 and terminal_pos > 0 and rejected_pos > 0
     assert terminal_pos < resting_pos, (
