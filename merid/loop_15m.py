@@ -4466,6 +4466,28 @@ async def _execute_exit_order(
                         exit_reason_str,
                         _prepared.result.status, _prepared.denial,
                     )
+                    if _prepared.result.status == "held_unmarketable":
+                        if _terminalize_arbiter_held_exit(
+                            self._position_monitor,
+                            position.position_id,
+                            intent.client_order_id,
+                            _prepared,
+                        ):
+                            if _ev_resolver is not None:
+                                try:
+                                    _ev_resolver.note_ack(
+                                        client_order_id=intent.client_order_id,
+                                        ack_status="rejected",
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "[EXIT-ARBITER] Failed to close held-exit telemetry"
+                                    )
+                            self._rearm_position_after_failed_exit(
+                                position, exit_reason, contracts_to_close,
+                                is_code_failure=True,
+                            )
+                        return
                     _clear_in_flight()
                     self._rearm_position_after_failed_exit(
                         position,
@@ -5075,6 +5097,51 @@ async def _execute_exit_order(
                 )
             # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+
+def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepared) -> bool:
+    """Release only this invocation's provably pre-route unmarketable hold."""
+    result = getattr(prepared, "result", None)
+    if (
+        monitor is None
+        or not client_order_id
+        or getattr(prepared, "approved", True)
+        or getattr(result, "status", None) != "held_unmarketable"
+        or getattr(result, "attempt", None) is not None
+    ):
+        return False
+    with monitor._lock:
+        flight = monitor._exit_intent_in_flight.get(position_id)
+        if (
+            flight is None
+            or flight.get("client_order_id") != client_order_id
+            or monitor._position_to_client_order.get(position_id) != client_order_id
+        ):
+            return False
+    if not monitor._mark_exit_intent_reconciled(
+        position_id,
+        "never_dispatched",
+        client_order_id=client_order_id,
+        raw_payload={
+            "never_dispatched_evidence": "arbiter_held_before_route",
+            "arbiter_status": "held_unmarketable",
+        },
+    ):
+        return False
+    with monitor._lock:
+        flight = monitor._exit_intent_in_flight.get(position_id)
+        if flight is not None:
+            if (
+                flight.get("state") != "RECONCILED"
+                or flight.get("client_order_id") != client_order_id
+            ):
+                return False
+            del monitor._exit_intent_in_flight[position_id]
+        if monitor._position_to_client_order.get(position_id):
+            return False
+        monitor._recent_exit_submissions.pop(client_order_id, None)
+    monitor._save_exit_intent_in_flight()
+    return True
+
 
 def _exit_result_never_dispatched(result, result_status: str) -> bool:
     """True when a route result proves the exit request never reached the wire.
