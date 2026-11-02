@@ -220,18 +220,25 @@ async def _route(intent: OrderIntent):
 
 
 @pytest.mark.asyncio
-async def test_post_send_5xx_keeps_exit_reservation(client, monkeypatch):
+@pytest.mark.parametrize("outcome", ["server_error", "exception"])
+async def test_post_send_failure_keeps_exit_reservation(client, monkeypatch, tmp_path, outcome):
     from unittest.mock import AsyncMock
+    from merid.event_venues.kalshi import order_attempt_store
+
+    monkeypatch.setattr(order_attempt_store, "DEFAULT_DB_PATH", str(tmp_path / "attempts.db"))
 
     client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
     client.set_orderbook(
         TICKER, best_bid_cents=50, best_ask_cents=60,
         bid_size=Decimal("10"), ask_size=Decimal("10"),
     )
-    create = AsyncMock(return_value=CreateOrderResponse(
-        success=False, error="HTTP 503", status_code=503,
-        submission_certainty="unknown",
-    ))
+    if outcome == "server_error":
+        create = AsyncMock(return_value=CreateOrderResponse(
+            success=False, error="HTTP 503", status_code=503,
+            submission_certainty="unknown",
+        ))
+    else:
+        create = AsyncMock(side_effect=RuntimeError("connection dropped after send"))
     monkeypatch.setattr(client, "create_order", create)
     intent = _exit_intent(price_cents=50, count=2)
     coid = _reserve_gate(intent, monkeypatch)

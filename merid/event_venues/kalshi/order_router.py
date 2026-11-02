@@ -14300,6 +14300,7 @@ async def _route_live(
     # These are used for order group risk tracking and rollback if exchange rejects
     _og_manager = None
     _og_debited = False
+    _wire_request_started = False
     
     # AUDIT-LOG: Structured order construction logging for live orders
     _p_yes = getattr(intent, "p_yes", None)
@@ -17502,6 +17503,7 @@ async def _route_live(
         intent._api_send_utc = _time.time()
         _send_mono = _time.monotonic()
         try:
+            _wire_request_started = True
             placed_res = await port.create_order(create_request)
         except asyncio.TimeoutError as _submit_to_exc:
             _submit_timed_out = True
@@ -19134,6 +19136,24 @@ async def _route_live(
         latency = (_time.monotonic() - t0) * 1000
         import traceback
         logger.error(f"[order-router] LIVE execution failed: {exc}\n{traceback.format_exc()}")
+        if _wire_request_started:
+            # An exception after entering the port does not establish that the
+            # exchange did not accept the order. Retain all reservations.
+            _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                gate = get_pre_trade_gate()
+                gate.mark_submitted(intent.client_tag or "", None)
+                gate.mark_submission_unknown(intent.client_tag or "")
+            except Exception:
+                logger.exception("[order-router] Failed to mark post-send exception unknown")
+            return OrderResult(
+                status="submission_unknown", mode=mode,
+                reason=f"live_execution_error_after_possible_send:{exc}",
+                latency_ms=round(latency, 2),
+                submission_attempted=True, exchange_request_sent=True,
+                submission_certainty="unknown",
+            )
         # BUG-03 fix: release reserved exposure on unexpected exception.
         if _exp_tracker and _reserved_category and _reserved_underlying:
             try:
