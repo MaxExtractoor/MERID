@@ -186,6 +186,52 @@ def _isolated_attempt_store(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_uses_latest_wire_id_not_original(monitor, tmp_path, monkeypatch):
+    from tests.event_venues.kalshi.test_wire_attempt_chain import _attempt
+
+    store = _isolated_attempt_store(tmp_path, monkeypatch)
+    position = _make_position()
+    monitor.add_position(position)
+    store.persist_attempt(_attempt("root", "original"))
+    store.persist_attempt(_attempt("child", "wire-child", "root"))
+    store.create_exit_attempt(
+        exit_intent_id="intent-1", position_key=position.position_id,
+        ticker=position.market_id, reason="take_profit",
+        client_order_id="original", requested_quantity=100,
+    )
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock())
+    monkeypatch.setattr(monitor, "_resolve_exchange_confirmed_flat", AsyncMock(return_value=False))
+    client = MagicMock()
+    client.get_order_by_client_id_result = AsyncMock(return_value=OperationResult.ok(None))
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+
+    await monitor._reconcile_exit_intent(position.position_id, "original")
+    client.get_order_by_client_id_result.assert_awaited_once_with(
+        "wire-child", market_id=position.market_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_forked_wire_chain_fails_closed(monitor, tmp_path, monkeypatch):
+    from tests.event_venues.kalshi.test_wire_attempt_chain import _attempt
+
+    store = _isolated_attempt_store(tmp_path, monkeypatch)
+    position = _make_position()
+    monitor.add_position(position)
+    store.persist_attempt(_attempt("root", "original"))
+    store.persist_attempt(_attempt("child-1", "wire-1", "root"))
+    store.persist_attempt(_attempt("child-2", "wire-2", "root"))
+    client = MagicMock()
+    client.get_order_by_client_id_result = AsyncMock()
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+    monkeypatch.setattr(monitor, "_transition_exit_attempt", Mock())
+
+    await monitor._reconcile_exit_intent(position.position_id, "original")
+    client.get_order_by_client_id_result.assert_not_awaited()
+    monitor._transition_exit_attempt.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_releases_never_dispatched_attempt(monitor, tmp_path, monkeypatch):
     """An aged INTENT_PERSISTED attempt with an unclaimed canonical record
     provably never reached the wire; reconcile must terminalize and release it

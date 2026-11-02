@@ -3286,6 +3286,7 @@ class PositionMonitor:
         # position's exits forever behind an unprovable order lookup.  This
         # must run before the RESOLVING_ON_EXCHANGE transition below, which
         # would otherwise mask the INTENT_PERSISTED state it checks.
+        wire_client_order_id = client_order_id
         if client_order_id:
             try:
                 from merid.event_venues.kalshi.order_attempt_store import (
@@ -3294,6 +3295,11 @@ class PositionMonitor:
                 _store = OrderAttemptStore()
                 _exit_rec = _store.get_exit_attempt_by_client_order_id(client_order_id)
                 _canon = _store.get_by_client_order_id(client_order_id)
+                if _canon is not None:
+                    _wire_attempt = _store.get_latest_wire_attempt(client_order_id)
+                    if _wire_attempt is None:
+                        raise ValueError("missing order-attempt replacement chain")
+                    wire_client_order_id = _wire_attempt.client_order_id
                 # Age bound: a live worker between attempt creation and the
                 # submission claim presents the same shape.  Observed
                 # event-loop starvation can stretch that gap to ~60s; an
@@ -3306,6 +3312,7 @@ class PositionMonitor:
                 if (
                     _aged
                     and _exit_rec.state == ExitOrderAttemptState.INTENT_PERSISTED.value
+                    and wire_client_order_id == client_order_id
                     and (_canon is None or getattr(_canon, "status", None) == "PERSISTED")
                 ):
                     logger.info(
@@ -3326,6 +3333,7 @@ class PositionMonitor:
                     "[EXIT-INTENT-RECONCILE] never-dispatched check failed for %s",
                     client_order_id[:8],
                 )
+                return
 
         if client_order_id:
             self._transition_exit_attempt(
@@ -3382,7 +3390,7 @@ class PositionMonitor:
                     from merid.event_venues.kalshi.client import get_kalshi_client
                     client = get_kalshi_client()
                     lookup = await client.get_order_by_client_id_result(
-                        client_order_id, market_id=position.market_id
+                        wire_client_order_id, market_id=position.market_id
                     )
                     order = getattr(lookup, "data", None) if lookup and getattr(lookup, "success", False) else None
                     if order:
@@ -3391,7 +3399,7 @@ class PositionMonitor:
                         actual_client_id = raw.get("client_order_id") or getattr(order, "client_order_id", None)
                         actual_market = getattr(order, "market_id", None) or raw.get("ticker")
                         if (
-                            actual_client_id != client_order_id
+                            actual_client_id != wire_client_order_id
                             or actual_market != position.market_id
                             or not getattr(order, "order_id", None)
                         ):
