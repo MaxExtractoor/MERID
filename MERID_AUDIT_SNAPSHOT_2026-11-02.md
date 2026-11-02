@@ -694,3 +694,19 @@ or flat-state assertion follows from its earlier startup record.
 - WS stale-drop storm persists but is now correctly attributed per-ticker (not full-sid) and books recover to DEGRADED_REST_ONLY/GOOD within ~1-2s; entries flow on the designed degraded path. Consumer-throughput improvement (delta coalescing in bridge, subscription pruning) remains a separate open item.
 - No exposure, exit-policy, or loss-control changes made; raw records and cashflows preserved (auto-prune disabled earlier and remains off).
 
+
+## P&L top-bar repair (commit b84b1a4e)
+
+Root cause: ``daily_pnl_usd`` = fill-date ``proceeds`` sum + ``daily_unrealized_change``; the EOD
+snapshot backing the unrealized-change term is in-memory only, so after restart the figure reduced
+to proceeds attributed by fill date. Settlement rows carry net episode proceeds while buy rows carry
+gross cost, so episodes with both legs double-counted and entries missed by ingestion were dropped
+entirely (2026-11-02: ledger sum +$15.13 vs actual equity delta ~+$6.58). Separately, ``get_risk``
+and ``kalshi_ui`` added total unrealized on top of an already-total daily figure (double-count).
+
+Fix: ``daily_pnl_usd`` is now ``equity_now - day_start_equity`` where the anchor is a durable JSON
+(``data/kalshi_daily_equity_anchor.json``) written once per UTC day on the first FRESH bankroll read;
+``daily_pnl_source`` reports ``equity_delta`` / ``equity_delta_unanchored`` / ``ledger_fills`` so the
+UI can tell authoritative vs fallback values. The two double-counted ``daily_total_pnl_usd`` aliases
+now mirror the canonical daily figure. First-day deployment anchors at first fresh read (anchored_at
+exposed); subsequent days are exact. Requires restart to deploy.
