@@ -156,6 +156,21 @@ class TestIocWorstCaseExposureCap:
     @pytest.fixture(autouse=True)
     def _router_patches(self, monkeypatch):
         monkeypatch.setattr(
+            "merid.event_venues.kalshi.order_router._live_orderbook_subscription_confirmed",
+            lambda ticker: True,
+        )
+        snapshot = SimpleNamespace(
+            is_authoritative=True, reconciliation_status="MATCHED",
+            reconciliation_reason="MATCHED", pagination_complete=True,
+            version=1, age_ms=0, exchange_exposure_cc=0,
+            local_ledger_exposure_cc=0, reserved_exposure_cc=0,
+            gross_exposure_cc=0, gross_reserved_exposure_cc=0,
+        )
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.canonical_portfolio.get_canonical_portfolio_store",
+            lambda: SimpleNamespace(current=lambda: snapshot),
+        )
+        monkeypatch.setattr(
             "merid.event_venues.kalshi.order_router._apply_risk_based_order_sizing",
             lambda intent, bankroll_usd=None: 1,
         )
@@ -205,6 +220,29 @@ class TestIocWorstCaseExposureCap:
         assert result is None
 
 
+@pytest.fixture
+def exact_quote_pricing(monkeypatch):
+    """Isolate side conversion from the separately configurable IOC buffers."""
+    monkeypatch.setenv("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "0")
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._resolve_max_slippage_cents",
+        lambda: 5,
+    )
+
+
+def test_no_side_taker_limits_include_configured_buffers(monkeypatch):
+    monkeypatch.setenv("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2")
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._resolve_max_slippage_cents",
+        lambda: 15,
+    )
+    buy = _intent(side="BUY_NO", action="buy", execution_mode="taker", aggressiveness=1.0)
+    sell = _intent(side="SELL_NO", action="sell", execution_mode="taker", aggressiveness=1.0)
+    assert _adjust_order_price_for_fill_rate(buy, _state()) == 57
+    assert _adjust_order_price_for_fill_rate(sell, _state()) == 35
+
+
+@pytest.mark.usefixtures("exact_quote_pricing")
 class TestNoSidePriceAdjustment:
     def test_buy_no_taker_adjusts_to_no_ask(self):
         intent = _intent(
@@ -240,6 +278,7 @@ class TestNoSidePriceAdjustment:
             _adjust_order_price_for_fill_rate(intent, state)
 
 
+@pytest.mark.usefixtures("exact_quote_pricing")
 class TestDivergenceReprice:
     """_maybe_reprice_on_divergence must apply the repriced limit.
 
