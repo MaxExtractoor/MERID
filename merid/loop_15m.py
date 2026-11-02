@@ -4694,6 +4694,68 @@ async def _execute_exit_order(
                     )
                 return
 
+            # A router-local rejection that provably never reached the wire is a
+            # terminal outcome, not an unknown one: the pre-send gate declined
+            # it before any exchange request (submission_certainty=pre_submit,
+            # no send evidence, no exchange id).  Treating it as
+            # SUBMISSION_UNKNOWN wedges the exit lane — reconcile can never
+            # prove a nonexistent exchange order, the intent stays in-flight,
+            # and the position rides to settlement (KXXRP15M-26NOV020445-45:
+            # firewall_rejected:limit_not_executable -> reconcile attempts 1-N).
+            # Terminalize as never_dispatched and re-arm so the next evaluation
+            # re-fires at a fresh price.
+            if _exit_result_never_dispatched(result, _result_status):
+                logger.warning(
+                    "[EXIT-ORDER] Router-local pre-submit rejection; terminalizing "
+                    "as never_dispatched and re-arming: position=%s market=%s "
+                    "client_order_id=%s reason=%s",
+                    position.position_id[:8],
+                    position.market_id,
+                    intent.client_order_id,
+                    _result_reason,
+                )
+                if _ev_resolver is not None:
+                    try:
+                        _ev_resolver.note_ack(
+                            client_order_id=intent.client_order_id,
+                            ack_status="rejected",
+                        )
+                    except Exception:
+                        pass
+                _terminal_ok = False
+                if self._position_monitor:
+                    _terminal_ok = self._position_monitor._mark_exit_intent_reconciled(
+                        position.position_id,
+                        "never_dispatched",
+                        client_order_id=intent.client_order_id,
+                        raw_payload={
+                            "route_status": _result_status,
+                            "route_reason": _result_reason,
+                            "never_dispatched_evidence": "router_local_pre_submit",
+                        },
+                    )
+                if _terminal_ok:
+                    try:
+                        with self._position_monitor._lock:
+                            self._position_monitor._exit_intent_in_flight.pop(
+                                position.position_id, None
+                            )
+                        self._position_monitor._save_exit_intent_in_flight()
+                    except Exception:
+                        logger.exception(
+                            "[EXIT-ORDER] in-flight cleanup after never_dispatched failed"
+                        )
+                    self._rearm_position_after_failed_exit(
+                        position, exit_reason, contracts_to_close
+                    )
+                else:
+                    if self._position_monitor:
+                        self._position_monitor._mark_exit_intent_submission_unknown(
+                            position.position_id,
+                            f"never_dispatched_transition_refused:{_result_reason}",
+                        )
+                return
+
             # Local failure labels do not establish an exchange terminal outcome.
             logger.error(
                 "[EXIT-ORDER] route_order_async returned no confirmed order: "
@@ -5013,6 +5075,26 @@ async def _execute_exit_order(
                 )
             # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+
+def _exit_result_never_dispatched(result, result_status: str) -> bool:
+    """True when a route result proves the exit request never reached the wire.
+
+    A router-local pre-send rejection (firewall/arbiter/gate) carries
+    ``submission_certainty='pre_submit'`` with no send evidence and no exchange
+    order id — the request died inside the router before any network I/O.
+    That is a provable terminal outcome, unlike a post-send ambiguity which
+    must stay SUBMISSION_UNKNOWN for exchange reconciliation.
+    """
+    if result_status != "rejected" or result is None:
+        return False
+    if getattr(result, "submission_certainty", None) != "pre_submit":
+        return False
+    return not (
+        getattr(result, "submission_attempted", False)
+        or getattr(result, "exchange_request_sent", False)
+        or getattr(result, "order_id", None)
+    )
+
 
 def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_close=None, is_code_failure=False) -> None:
     # Re-arm a position in the PositionMonitor after a failed exit order.
