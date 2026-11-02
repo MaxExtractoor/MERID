@@ -5060,16 +5060,25 @@ class KalshiVenueClient(EventVenueClient):
             total_retries += result.retries or 0
 
             if not result.success:
-                if all_market or all_event:
-                    logger.warning(f"get_positions_filtered: Partial failure, returning collected data")
-                    break
                 return OperationResult.fail(
-                    result.error,
+                    result.error or RuntimeError("filtered positions request failed"),
                     latency_ms=total_latency,
                     retries=total_retries,
+                    truncated=bool(cursor),
                 )
 
-            data = result.data or {}
+            data = result.data
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("market_positions"), list)
+                or not isinstance(data.get("event_positions", []), list)
+            ):
+                return OperationResult.fail(
+                    ValueError("invalid filtered positions response"),
+                    latency_ms=total_latency,
+                    retries=total_retries,
+                    truncated=bool(cursor),
+                )
             all_market.extend(data.get("market_positions", []))
             all_event.extend(data.get("event_positions", []))
 
@@ -5079,7 +5088,12 @@ class KalshiVenueClient(EventVenueClient):
             page += 1
 
         if cursor:
-            logger.warning(f"get_positions_filtered: Hit max_pages limit ({max_pages}), returning partial data")
+            return OperationResult.fail(
+                RuntimeError(f"filtered positions exceeded {max_pages} pages"),
+                latency_ms=total_latency,
+                retries=total_retries,
+                truncated=True,
+            )
 
         return OperationResult.ok(
             {"market_positions": all_market, "event_positions": all_event},
