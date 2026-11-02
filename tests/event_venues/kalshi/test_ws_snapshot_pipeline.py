@@ -169,7 +169,7 @@ def test_unsupported_delta_precision_invalidates_book(pipeline, price, size):
     store._enqueue_delta.assert_not_called()
 
 
-def test_rest_recovery_cannot_clear_invalid_ws_book_entry_latch(pipeline):
+def test_rest_degraded_book_may_enter_while_ws_snapshot_pending(pipeline):
     ws, store = pipeline
     store.apply_orderbook_message(
         ws._parse_message(_snapshot(1, [["0.3200", "7.00"]], [["0.6700", "11.00"]])),
@@ -178,19 +178,43 @@ def test_rest_recovery_cannot_clear_invalid_ws_book_entry_latch(pipeline):
     state = store.get(TICKER)
     state.quote_owner = "REST_VERIFIED_DEGRADED"
     state.data_quality = "GOOD"
+    state.executable = True
+    state.floor_strike = 77000.0
     state.last_rest_quote_update_ts = time.monotonic()
     event = {
         "type": "orderbook_delta", "sid": 4, "seq": 2,
         "msg": {"market_ticker": TICKER, "price_dollars": "0.3200", "delta_fp": "0.50", "side": "yes"},
     }
     store.apply_orderbook_message(ws._parse_message(event), "bridge_queue")
-    assert store.is_market_entry_ready(TICKER) == (False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT")
+    # The WS leg still needs a snapshot, but a REST-owned GOOD executable
+    # book with a fresh attested REST quote is the designed degraded-entry
+    # path — the snapshot latch must not veto it.
+    ready, _reason = store.is_market_entry_ready(TICKER)
+    assert ready is True
 
     store.apply_orderbook_message(
         ws._parse_message(_snapshot(3, [["0.3200", "7.00"]], [["0.6700", "11.00"]])),
         "bridge_queue",
     )
     assert TICKER not in store._ws_book_requires_snapshot
+
+
+def test_ws_snapshot_latch_blocks_without_rest_evidence(pipeline):
+    ws, store = pipeline
+    store.apply_orderbook_message(
+        ws._parse_message(_snapshot(1, [["0.3200", "7.00"]], [["0.6700", "11.00"]])),
+        "bridge_queue",
+    )
+    state = store.get(TICKER)
+    # WS-owned untrusted state: no REST owner, no attested recovery source.
+    state.quote_owner = "WS_FRESH_VERIFIED"
+    state.data_quality = "GOOD"
+    state.executable = True
+    state.floor_strike = 77000.0
+    store._ws_book_requires_snapshot.add(TICKER)
+    state.live_sequence_confirmed = False
+    state.recovery_source = None
+    assert store.is_market_entry_ready(TICKER) == (False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT")
 
 
 def test_snapshot_without_subscription_sequence_cannot_recover_book(pipeline):
@@ -203,7 +227,8 @@ def test_snapshot_without_subscription_sequence_cannot_recover_book(pipeline):
     raw.pop("sid")
     store.apply_orderbook_message(ws._parse_message(raw), "bridge_queue")
     assert store._ob.get_book(TICKER).yes_levels == {32: 7}
-    assert store.is_market_entry_ready(TICKER) == (False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT")
+    ready, _reason = store.is_market_entry_ready(TICKER)
+    assert ready is False
 
 
 def test_sequenced_control_flows_in_order_through_bridge(pipeline, monkeypatch):

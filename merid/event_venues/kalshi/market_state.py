@@ -3177,10 +3177,15 @@ class KalshiMarketStateStore:
         contiguous live WS delta sequence (``live_sequence_confirmed=True``) in
         addition to the standard execution-ready checks.
         """
+        # ``_ws_book_requires_snapshot`` marks the WS leg untrusted after a
+        # gap/invalidation; it clears only on a valid WS snapshot.  It must NOT
+        # veto a book whose effective quote is already REST-owned and attested:
+        # the REST_FULL_ORDERBOOK recovery and REST-degraded carve-outs below
+        # exist precisely for hosts whose WS consumer cannot keep the delta
+        # sequence contiguous.  The flag is therefore evaluated *after* the
+        # positive-evidence checks instead of as an unconditional early exit.
         with self._sid_seq_lock:
             requires_snapshot = ticker in self._ws_book_requires_snapshot
-        if requires_snapshot:
-            return False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT"
 
         ready, reason = self.is_market_execution_ready(ticker, max_age_seconds=max_age_seconds)
         if not ready:
@@ -3255,6 +3260,9 @@ class KalshiMarketStateStore:
             )
             if _rest_degraded_ok:
                 return True, ""
+
+        if requires_snapshot:
+            return False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT"
 
         return False, (
             f"NOT-LIVE-SEQUENCE-CONFIRMED "
