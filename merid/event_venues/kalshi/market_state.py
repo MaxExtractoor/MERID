@@ -2774,6 +2774,10 @@ class KalshiMarketStateStore:
         thread, maintaining the single ingestion path through the bridge queue.
         """
         try:
+            with self._lock:
+                if ticker not in self._states:
+                    logger.debug("[SNAPSHOT-RECOVERY] Skipping removed ticker=%s", ticker)
+                    return
             logger.info("[SNAPSHOT-RECOVERY] Triggering WebSocket snapshot recovery for %s", ticker)
 
             # Get the WebSocket bridge singleton (do not create a new bridge).
@@ -3633,9 +3637,12 @@ class KalshiMarketStateStore:
         try:
             logger.info("[PRODUCTION-SYNC-SIDE-AWARE] ENTRY: Starting REST sync for invariant violation: %s", ticker)
 
-            # Mark ticker as rebuilding to prevent trading during sync
+            # A queued recovery must not recreate a market removed at rollover.
             with self._lock:
-                state = self._get_or_create(ticker)
+                state = self._states.get(ticker)
+                if state is None:
+                    logger.debug("[PRODUCTION-SYNC] Skipping removed ticker=%s", ticker)
+                    return
                 state.executable = False
                 state.book_initialized = False
                 # 2026-08-24: Clear snapshot completion while we refetch; a stale
@@ -3666,15 +3673,17 @@ class KalshiMarketStateStore:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
-                # Apply snapshot directly (bypass invariant validation to avoid loop)
-                logger.info(f"[PRODUCTION-SYNC-SIDE-AWARE] Applying REST snapshot for {ticker}")
-
                 # Apply snapshot to orderbook
                 with self._lock:
+                    # The REST response may arrive after this market was pruned
+                    # or replaced by a new state for the same ticker.
+                    if self._states.get(ticker) is not state:
+                        logger.debug("[PRODUCTION-SYNC] Discarding stale recovery for ticker=%s", ticker)
+                        return
+                    logger.info(f"[PRODUCTION-SYNC-SIDE-AWARE] Applying REST snapshot for {ticker}")
                     self._ob.apply_snapshot(ticker, snapshot_msg)
 
                     # Update state from fresh book
-                    state = self._get_or_create(ticker)
                     prior_quality = state.data_quality
                     prior_transition = state.transition
 
