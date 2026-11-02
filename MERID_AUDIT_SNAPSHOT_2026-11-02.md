@@ -585,9 +585,28 @@ The local book stores whole-cent prices and whole-contract depth; fractional
 prices or quantities are not safely represented. The committed safety gate
 blocks entries for an affected ticker until a representable WS snapshot
 arrives; exact fractional book support remains necessary. This is not a
-complete feed solution. The readiness field `ws_subscribed` currently reports
-whether a local state exists, not whether the subscription is confirmed.
-Also investigate subscription-scoped `ok` messages with sequence numbers:
-the WS parser currently discards them, potentially creating downstream
-apparent gaps. Do not interpret either field or a single matched snapshot as
-proof that the live subscription and runtime recovery are healthy.
+complete feed solution.
+
+The old running build treats a local state as `ws_subscribed` and discards
+sequenced `ok` frames. Commits `2aba0f72` and `6db3637f` forward sequenced
+controls, require a current-connection SID acknowledgement and per-ticker
+orderbook traffic for subscription readiness, and recheck that evidence for
+live entries at the router. These changes are not deployed. A single matched
+snapshot does not prove live subscription health or runtime recovery.
+
+## Test log contamination (2026-11-02)
+
+Test subprocesses run during this audit used isolated runtime-state and
+database paths but the shared logger still appended to the running server's
+`logs/full.log` and `server_output.log`. For example, the
+`NOT_ACCEPTED_CONFIRMED -> RESTING` transition for synthetic `attempt-1`
+logged at 12:03:35 ET came from a test, not a production exit. Other synthetic
+records may be interleaved, including records with test-clock timestamps;
+the affected range is not fully enumerated. Neither shared log was edited or
+removed. Exclude identifiable test events from operational counts, but do not
+assume every event in the interval is synthetic: the server continued logging.
+
+The logger now supports an explicit `MERID_LOG_DIR` override for both log
+handlers; further tests should set it before importing application modules.
+The running process was not restarted. At 12:06 ET it remained halted on
+reconciliation failure while the Kalshi circuit was open.

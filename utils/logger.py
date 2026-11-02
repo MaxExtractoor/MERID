@@ -134,11 +134,13 @@ def set_task_context(
     if correlation_id is not None:
         correlation_id_var.set(correlation_id)  # also propagates to HTTP-style CID field
 
-LOG_DIR = PROJECT_ROOT / "logs"
+_log_dir_override = os.environ.get("MERID_LOG_DIR")
+LOG_DIR = Path(_log_dir_override) if _log_dir_override else PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "full.log"
-# Production-visible log file in project root for easy access
-PRODUCTION_LOG_FILE = PROJECT_ROOT / "server_output.log"
+# Keep both handlers inside the override so isolated processes never append to
+# the running server's logs. Preserve the existing production paths by default.
+PRODUCTION_LOG_FILE = LOG_DIR / "server_output.log" if _log_dir_override else PROJECT_ROOT / "server_output.log"
 
 _LOGGER_CACHE: Dict[str, logging.Logger] = {}
 
