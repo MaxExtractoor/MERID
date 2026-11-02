@@ -3606,8 +3606,8 @@ class KalshiWebSocket(EventVenueStream):
                 # DIAGNOSTIC: Check if this is a valid orderbook snapshot (has bids/asks)
                 # Kalshi sometimes sends messages with channel=orderbook_snapshot but payload
                 # only has market_ticker/market_id - these are not valid orderbook snapshots
-                has_bids = "bids" in data or isinstance(data.get("bids"), list)
-                has_asks = "asks" in data or isinstance(data.get("asks"), list)
+                has_bids = any(k in body for k in ("bids", "yes", "yes_dollars_fp"))
+                has_asks = any(k in body for k in ("asks", "no", "no_dollars_fp"))
                 if not (has_bids or has_asks):
                     logger.debug(
                         "[WS-CLIENT] REJECTING invalid orderbook_snapshot (no bids/asks): keys=%s",

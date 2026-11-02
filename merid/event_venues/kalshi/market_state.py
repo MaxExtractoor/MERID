@@ -85,6 +85,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -819,6 +820,7 @@ class KalshiMarketStateStore:
         self._sid_tickers: Dict[Any, set] = {}
         self._ticker_sid: Dict[str, Any] = {}
         self._sid_seq_lock = threading.Lock()
+        self._ws_book_requires_snapshot: set = set()
         self._last_sid_gap_log_ts: Dict[Any, float] = {}
         # 2026-10-04: owner-latch hysteresis.  REST ownership is released back
         # to WS only after ``MERID_WS_PROMOTE_STREAK`` consecutive deltas arrive
@@ -3175,6 +3177,11 @@ class KalshiMarketStateStore:
         contiguous live WS delta sequence (``live_sequence_confirmed=True``) in
         addition to the standard execution-ready checks.
         """
+        with self._sid_seq_lock:
+            requires_snapshot = ticker in self._ws_book_requires_snapshot
+        if requires_snapshot:
+            return False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT"
+
         ready, reason = self.is_market_execution_ready(ticker, max_age_seconds=max_age_seconds)
         if not ready:
             return False, reason
@@ -3960,6 +3967,41 @@ class KalshiMarketStateStore:
         # FINAL CHECK: Snapshots must have bids/asks OR no/yes (Kalshi format), deltas may have price_dollars/delta_fp/side
         # This catches cases where the WS client forwards raw messages with wrong type field
         payload = msg.get("msg", msg)
+        if channel == "orderbook_snapshot" and (
+            "yes_dollars_fp" in payload or "no_dollars_fp" in payload
+        ):
+            try:
+                normalized = dict(payload)
+                for side in ("yes", "no"):
+                    levels = payload[f"{side}_dollars_fp"]
+                    if not isinstance(levels, list):
+                        raise ValueError("snapshot levels must be lists")
+                    converted = []
+                    for level in levels:
+                        if not isinstance(level, (list, tuple)) or len(level) != 2:
+                            raise ValueError("snapshot level must be a price/size pair")
+                        price, size = (Decimal(str(value)) for value in level)
+                        if not price.is_finite() or not size.is_finite():
+                            raise ValueError("snapshot level must be finite")
+                        if not 0 < price < 1 or size < 0:
+                            raise ValueError("snapshot level outside valid range")
+                        # LocalOrderbook stores whole cents and whole contracts.
+                        if price * 100 != (price * 100).to_integral_value() or size != size.to_integral_value():
+                            raise ValueError("snapshot level exceeds local book precision")
+                        if size:
+                            converted.append([float(price), int(size)])
+                    normalized[side] = converted
+                if msg.get("seq") is not None:
+                    normalized["seq"] = msg["seq"]
+                msg = {**msg, "msg": normalized} if "msg" in msg else normalized
+                payload = normalized
+            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                logger.warning("[WS-SNAPSHOT-INVALID] ticker=%s reason=%s", ticker, exc)
+                if via == "bridge_queue" and self.get(ticker) is not None:
+                    with self._sid_seq_lock:
+                        self._ws_book_requires_snapshot.add(ticker)
+                    self._mark_book_untrusted_and_resync(ticker, "invalid_ws_snapshot")
+                return None
         has_bids = "bids" in payload or isinstance(payload.get("bids"), list)
         has_asks = "asks" in payload or isinstance(payload.get("asks"), list)
         # Kalshi snapshot format uses "no"/"yes" instead of "bids"/"asks"
@@ -4039,6 +4081,25 @@ class KalshiMarketStateStore:
                 )
                 return None
 
+            if via == "bridge_queue" and has_delta_fields:
+                try:
+                    price = Decimal(str(payload["price_dollars"]))
+                    size = Decimal(str(payload["delta_fp"]))
+                    if (
+                        not price.is_finite() or not size.is_finite()
+                        or not 0 < price < 1
+                        or price * 100 != (price * 100).to_integral_value()
+                        or size != size.to_integral_value()
+                    ):
+                        raise ValueError("delta exceeds local book precision or range")
+                except (ValueError, TypeError, InvalidOperation) as exc:
+                    with self._sid_seq_lock:
+                        self._ws_book_requires_snapshot.add(ticker)
+                    self._mark_book_untrusted_and_resync(
+                        ticker, "invalid_ws_delta_precision", error=str(exc)
+                    )
+                    return None
+
             logger.debug(
                 "[OB-APPLY] ticker=%s channel=%s enqueuing_delta=True batch_worker_running=%s",
                 ticker, channel, self._batch_worker_running
@@ -4090,29 +4151,32 @@ class KalshiMarketStateStore:
         if not self._batch_worker_running:
             self._start_batch_worker()
 
+        # Snapshots share the subscription sequence with deltas. They repair
+        # their own book, not missing updates to sibling books.
+        if channel == "orderbook_snapshot" and via == "bridge_queue":
+            _s_sid = msg.get("sid")
+            _s_seq = msg.get("seq") if msg.get("seq") is not None else msg.get("sequence")
+            try:
+                if _s_sid is None or _s_seq is None or isinstance(_s_seq, bool):
+                    raise ValueError("snapshot missing subscription sequence")
+                _s_seq = int(_s_seq)
+            except (TypeError, ValueError):
+                if self.get(ticker) is not None:
+                    with self._sid_seq_lock:
+                        self._ws_book_requires_snapshot.add(ticker)
+                    self._mark_book_untrusted_and_resync(ticker, "invalid_ws_snapshot_sequence")
+                return None
+            _sid_check = self._check_sid_delta_sequence(_s_sid, _s_seq, ticker)
+            if _sid_check < 0:
+                return None
+            if _sid_check > 0:
+                self._handle_sid_sequence_gap(_s_sid, _s_seq, _sid_check, ticker)
+
         # Apply snapshots directly under lock (they're infrequent)
         if channel == "orderbook_snapshot":
             ticker_lock = self._get_ticker_lock(ticker)
             with ticker_lock:
                 payload = msg.get("msg", msg)
-
-                # 2026-10-30: WS snapshots carry (sid, seq) on the same
-                # subscription stream as deltas.  A snapshot is authoritative
-                # full state — heal the sid cursor to its seq so subsequent
-                # deltas validate, and seed the sid->ticker map.
-                if via == "bridge_queue":
-                    _s_sid = msg.get("sid")
-                    _s_seq = msg.get("seq") or msg.get("sequence")
-                    if _s_sid is not None and _s_seq is not None:
-                        try:
-                            _s_seq = int(_s_seq)
-                        except (TypeError, ValueError):
-                            _s_seq = None
-                        if _s_seq is not None:
-                            with self._sid_seq_lock:
-                                self._sid_tickers.setdefault(_s_sid, set()).add(ticker)
-                                self._ticker_sid[ticker] = _s_sid
-                                self._sid_last_seq[_s_sid] = _s_seq
 
                 # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
                 # Check if snapshot has any orderbook data
@@ -4121,14 +4185,10 @@ class KalshiMarketStateStore:
                 yes_count = len(yes_levels) if yes_levels else 0
                 no_count = len(no_levels) if no_levels else 0
 
-                # EMPTY-SNAPSHOT POLICY: A completely empty snapshot is valid for a
-                # contract that has just opened and has no resting orders yet.  We
-                # must allow the LocalOrderbook to become initialized so that the
-                # first WebSocket orderbook deltas can be applied.  If a book is
-                # already initialized, an empty snapshot is suspect and is ignored
-                # to avoid overwriting live data.
+                # A sequenced WS snapshot replaces the book even when empty.
+                # Legacy REST/bootstrap paths retain their existing empty policy.
                 ob = self._ob.get_book(ticker)
-                if yes_count == 0 and no_count == 0 and ob.initialized:
+                if yes_count == 0 and no_count == 0 and ob.initialized and via != "bridge_queue":
                     logger.warning(
                         "[EMPTY-BOOK-REJECTION] Ignoring empty snapshot for %s: existing book already initialized",
                         ticker,
@@ -4137,6 +4197,9 @@ class KalshiMarketStateStore:
 
                 # Apply snapshot (empty snapshots are accepted for uninitialized books)
                 self._ob.apply_snapshot(ticker, payload)
+                if via == "bridge_queue":
+                    with self._sid_seq_lock:
+                        self._ws_book_requires_snapshot.discard(ticker)
 
                 # Log book state after snapshot for validation
                 book = self._ob.get_book(ticker)
@@ -4174,6 +4237,22 @@ class KalshiMarketStateStore:
                     state, self._ob.get_book(ticker), ticker, via,
                     channel="orderbook_snapshot",
                 )
+                _ws_snapshot_one_sided = via == "bridge_queue" and (
+                    not book.yes_levels or not book.no_levels
+                )
+                if _ws_snapshot_one_sided:
+                    # An older REST BBO must not replace a newer empty WS side.
+                    state.best_bid_cents = None
+                    state.best_ask_cents = None
+                    state.yes_bids = []
+                    state.no_bids = []
+                    state.quote_owner = "NONE_UNTRUSTED"
+                    state.degraded_mode = False
+                    state.last_rest_bid_cents = None
+                    state.last_rest_ask_cents = None
+                    state.last_rest_yes_bids = None
+                    state.last_rest_no_bids = None
+                    state.last_rest_quote_update_ts = 0.0
                 self._sync_unified_book(ticker, state)
 
                 # A clean, authoritative snapshot can lift a circuit breaker;
@@ -4192,6 +4271,8 @@ class KalshiMarketStateStore:
                     # _sync_book_fields already set the appropriate SUSPECT/INVALID
                     # data_quality and executable flag; nothing to attest.
                     pass
+                if _ws_snapshot_one_sided:
+                    state.executable = False
 
                 # Update explicit BookHealth state machine.
                 if state.data_quality in ("SUSPECT", "INVALID"):
@@ -4837,6 +4918,7 @@ class KalshiMarketStateStore:
             # next unattributed gap and schedules recovery for dead markets.
             with self._sid_seq_lock:
                 retained = active_set | set(self._states)
+                self._ws_book_requires_snapshot.intersection_update(retained)
                 for ticker in set(self._ticker_sid) - retained:
                     self._ticker_sid.pop(ticker, None)
                 for members in self._sid_tickers.values():
@@ -6651,15 +6733,12 @@ class KalshiMarketStateStore:
         if sid is None or seq is None:
             return 0
         with self._sid_seq_lock:
+            last = self._sid_last_seq.get(sid)
+            if last is not None and seq <= last:
+                return -1
             self._sid_tickers.setdefault(sid, set()).add(ticker)
             self._ticker_sid[ticker] = sid
-            last = self._sid_last_seq.get(sid)
-            if last is None:
-                self._sid_last_seq[sid] = seq
-                return 0
-            if seq <= last:
-                return -1
-            gap = seq - last - 1
+            gap = seq - last - 1 if last is not None else 0
             self._sid_last_seq[sid] = seq
             return gap
 
