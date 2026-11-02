@@ -191,6 +191,34 @@ async def test_missing_client_cannot_produce_authoritative_empty_snapshot(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_source", ["ledger", "ledger_error", "cache_error"])
+async def test_unavailable_local_source_cannot_match_empty_exchange(
+    monkeypatch, missing_source
+):
+    class BrokenLedger:
+        def compute_net_positions(self, since_hours=24):
+            raise RuntimeError("ledger unavailable")
+
+    class BrokenCache:
+        def get_all_positions(self, validate_freshness=True):
+            raise RuntimeError("cache unavailable")
+
+    reconciler = _make_reconciler(
+        _FakeKalshiClient([], []),
+        BrokenCache() if missing_source == "cache_error" else _FakePositionCache({}),
+        BrokenLedger() if missing_source == "ledger_error" else _FakeFillsLedger({}),
+    )
+    if missing_source == "ledger":
+        monkeypatch.setattr(reconciler, "_get_fills_ledger", lambda: None)
+
+    snapshot = await reconciler.build_snapshot()
+
+    assert snapshot.reconciliation_status == ReconciliationStatus.UNKNOWN
+    assert snapshot.reconciliation_reason == ReconciliationReason.UNKNOWN_SOURCE
+    assert not snapshot.is_authoritative
+
+
+@pytest.mark.asyncio
 async def test_matched_snapshot_when_all_sources_agree():
     """Exchange, ledger, and cache all report the same position."""
     ticker = "KXBTC15M-26AUG192030-30"

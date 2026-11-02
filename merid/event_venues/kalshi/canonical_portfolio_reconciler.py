@@ -417,6 +417,8 @@ class CanonicalPortfolioReconciler:
         # 2. Local ledger positions.
         t1 = time.monotonic()
         ledger_positions = await self._fetch_ledger_positions()
+        ledger_unavailable = ledger_positions is None
+        ledger_positions = ledger_positions or {}
         ledger_positions = self._filter_expired_positions(ledger_positions, "ledger")
         logger.info(
             "[CANONICAL-RECONCILER] ledger positions fetched in %.3fs count=%d",
@@ -427,6 +429,8 @@ class CanonicalPortfolioReconciler:
         # 3. Local cache positions.
         t1 = time.monotonic()
         cache_positions = await self._fetch_cache_positions()
+        cache_unavailable = cache_positions is None
+        cache_positions = cache_positions or {}
         cache_positions = self._filter_expired_positions(cache_positions, "cache")
         logger.info(
             "[CANONICAL-RECONCILER] cache positions fetched in %.3fs count=%d",
@@ -675,6 +679,10 @@ class CanonicalPortfolioReconciler:
                 reason = ReconciliationReason.MISMATCH_POSITION
             else:
                 reason = ReconciliationReason.MISMATCH_POSITION
+        elif ledger_unavailable or cache_unavailable:
+            status = ReconciliationStatus.UNKNOWN
+            source = "local_reconciliation_source_unavailable"
+            reason = ReconciliationReason.UNKNOWN_SOURCE
         else:
             status = ReconciliationStatus.MATCHED
             source = "exchange_rest_confirmed"
@@ -1484,7 +1492,7 @@ class CanonicalPortfolioReconciler:
                 error_code="UNKNOWN_NETWORK",
             )
 
-    async def _fetch_ledger_positions(self) -> Dict[str, Dict[str, Any]]:
+    async def _fetch_ledger_positions(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """Fetch positions from local fills ledger.
 
         Runs the synchronous ledger scan in a thread so the reconciler loop
@@ -1492,7 +1500,7 @@ class CanonicalPortfolioReconciler:
         """
         ledger = self._get_fills_ledger()
         if ledger is None:
-            return {}
+            return None
         try:
             return await asyncio.to_thread(
                 ledger.compute_net_positions,
@@ -1500,9 +1508,9 @@ class CanonicalPortfolioReconciler:
             )
         except Exception as e:
             logger.error("[CANONICAL-RECONCILER] ledger positions fetch failed: %s", e)
-            return {}
+            return None
 
-    async def _fetch_cache_positions(self) -> Dict[str, Any]:
+    async def _fetch_cache_positions(self) -> Optional[Dict[str, Any]]:
         """Fetch positions from local cache (or test override).
 
         Runs the synchronous cache scan in a thread so the reconciler loop
@@ -1514,8 +1522,9 @@ class CanonicalPortfolioReconciler:
                     self._position_cache.get_all_positions,
                     validate_freshness=False,
                 )
-            except Exception:
-                return {}
+            except Exception as e:
+                logger.error("[CANONICAL-RECONCILER] cache positions fetch failed: %s", e)
+                return None
         try:
             cache = get_position_cache()
             return await asyncio.to_thread(
@@ -1524,7 +1533,7 @@ class CanonicalPortfolioReconciler:
             )
         except Exception as e:
             logger.error("[CANONICAL-RECONCILER] cache positions fetch failed: %s", e)
-            return {}
+            return None
 
     async def _fetch_working_orders(
         self,
