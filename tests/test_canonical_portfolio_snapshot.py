@@ -925,6 +925,26 @@ async def test_complete_empty_response_is_authoritative_zero():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "raises"])
+async def test_matched_snapshot_loses_authority_when_live_cache_unavailable(monkeypatch, failure):
+    client = _FakeKalshiClient([], [], positions_result=OperationResult.ok([]))
+    reconciler = _make_reconciler(client, _FakePositionCache({}), _FakeFillsLedger({}))
+    snapshot = await reconciler.build_snapshot()
+    assert snapshot.reconciliation_status == ReconciliationStatus.MATCHED
+
+    def unavailable_cache():
+        if failure == "raises":
+            raise OSError("position cache unavailable")
+        return None
+
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache",
+        unavailable_cache,
+    )
+    assert not snapshot.is_authoritative
+
+
+@pytest.mark.asyncio
 async def test_incomplete_orders_source_blocks_authoritative_snapshot():
     """Working orders must be fully fetched before entries are allowed."""
     ticker = "KXBTC15M-26AUG192030-30"

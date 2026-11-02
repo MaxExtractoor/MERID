@@ -281,14 +281,14 @@ class CanonicalPortfolioSnapshot:
             from merid.event_venues.kalshi.position_cache import get_position_cache
 
             cache = get_position_cache()
-            if cache is not None:
-                for ticker in self.positions_by_ticker:
-                    if cache.is_reconciliation_halted(ticker):
-                        return False
+            if cache is None:
+                return False
+            for ticker in self.positions_by_ticker:
+                if cache.is_reconciliation_halted(ticker):
+                    return False
         except Exception:
-            # If the cache cannot be consulted, preserve the existing matched
-            # decision rather than fail-closed on a diagnostic lookup.
-            pass
+            # Authority cannot be established without the live cache latch.
+            return False
 
         return True
 
