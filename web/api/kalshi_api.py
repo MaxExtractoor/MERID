@@ -1593,7 +1593,7 @@ async def _ensure_fresh_positions(max_staleness_seconds: int = 60) -> Tuple[List
         Tuple of (positions list, freshness metadata dict)
     """
     from merid.event_venues.kalshi.position_cache import get_position_cache
-    from merid.event_venues.kalshi.venue_adapter import get_venue_adapter
+    from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter as get_venue_adapter
     from datetime import datetime, timezone
     
     cache = get_position_cache()

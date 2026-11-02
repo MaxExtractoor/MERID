@@ -41,8 +41,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify the size is stored as int, not float
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 10, "10 + 0.28 should round to 10"
+        assert book.yes_levels[50] == pytest.approx(10.28), "10 + 0.28 preserves centi precision"
     
     def test_delta_with_float_size_delta_rounds_up(self):
         """Test that float size_delta rounds correctly (round half up)."""
@@ -65,8 +64,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify rounding
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 11, "10 + 0.72 should round to 11"
+        assert book.yes_levels[50] == pytest.approx(10.72), "10 + 0.72 preserves centi precision"
     
     def test_delta_with_negative_float_size_delta(self):
         """Test that negative float size_delta works correctly."""
@@ -89,8 +87,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify the size remains 10 (10 + 0 = 10)
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 10, "10 + (-0.28) should round to 10"
+        assert book.yes_levels[50] == pytest.approx(9.72), "10 + (-0.28) preserves centi precision"
     
     def test_delta_with_negative_float_size_delta_removes_level(self):
         """Test that negative float size_delta can remove a level."""
@@ -108,7 +105,7 @@ class TestOrderbookDeltaFloatToIntFix:
         delta = {
             "side": "yes",
             "price_dollars": 0.50,
-            "delta_fp": -0.72,  # Should round to -1, removing the level
+            "delta_fp": -1.0,  # Removes the level exactly
         }
         book.apply_delta(delta)
         
@@ -136,8 +133,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify the size is stored as int
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 15, "10 + 5 should equal 15"
+        assert book.yes_levels[50] == pytest.approx(15.0), "10 + 5 should equal 15"
     
     def test_delta_with_string_float_size_delta(self):
         """Test that string float size_delta is handled (WS may send strings)."""
@@ -160,8 +156,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify the size is stored as int
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 10, "10 + 0.28 should round to 10"
+        assert book.yes_levels[50] == pytest.approx(10.28), "10 + 0.28 preserves centi precision"
     
     def test_multiple_deltas_with_floats(self):
         """Test multiple delta applications with floats."""
@@ -185,9 +180,8 @@ class TestOrderbookDeltaFloatToIntFix:
         for delta in deltas:
             book.apply_delta(delta)
         
-        # Final size: 10 + 0 + 1 + 0 = 11 (round(-0.50) = 0 in banker's rounding)
-        assert isinstance(book.yes_levels[50], int), "Size should be stored as int"
-        assert book.yes_levels[50] == 11, "Final size should be 11"
+        # Final size: 10 + 0.28 + 0.72 - 0.50 = 10.50 on the centi grid
+        assert book.yes_levels[50] == pytest.approx(10.50), "Final size 10 + 0.28 + 0.72 - 0.50 = 10.50"
     
     def test_no_side_delta_converts_to_int(self):
         """Test that NO side deltas also convert to int."""
@@ -210,8 +204,7 @@ class TestOrderbookDeltaFloatToIntFix:
         book.apply_delta(delta)
         
         # Verify the size is stored as int
-        assert isinstance(book.no_levels[50], int), "Size should be stored as int"
-        assert book.no_levels[50] == 10, "10 + 0.28 should round to 10"
+        assert book.no_levels[50] == pytest.approx(10.28), "10 + 0.28 preserves centi precision"
     
     def test_crossed_market_invariant_with_tolerance(self):
         """Test that crossed market invariant has 3c tolerance for crypto volatility."""

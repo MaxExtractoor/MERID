@@ -91,7 +91,12 @@ def _latency_snapshot_field() -> str:
 
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
+-- NORMAL is the documented WAL-mode tradeoff: transactions stay durable across
+-- process crashes (the WAL is replayed); only an OS/power failure could lose
+-- the last uncommitted frames.  FULL fsync'd every commit at ~1s/write on a
+-- multi-GB DB, which starved the writer queue (write-wait p95 ~370s) and forced
+-- low-priority evidence drops — a worse durability outcome in practice.
+PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 

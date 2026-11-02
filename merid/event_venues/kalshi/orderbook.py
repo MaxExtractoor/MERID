@@ -184,8 +184,8 @@ class LocalOrderbook:
 
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.yes_levels: Dict[int, int] = defaultdict(int)  # price_cents -> size
-        self.no_levels: Dict[int, int] = defaultdict(int)
+        self.yes_levels: Dict[int, float] = defaultdict(float)  # price_cents -> size (contracts, centi precision)
+        self.no_levels: Dict[int, float] = defaultdict(float)
         # Per-level sequence numbers.  Kalshi orderbook_deltas are one-sided,
         # so the side that was *not* updated can carry stale prices.  When a
         # crossed/locked book is detected, we remove the price level with the
@@ -269,7 +269,7 @@ class LocalOrderbook:
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
                     if price_cents > 0 and price_cents < 100:
-                        self.yes_levels[price_cents] = int(size)
+                        self.yes_levels[price_cents] = float(size)
                         self._yes_level_seq[price_cents] = snap_seq
 
         # Parse no side.  When use_yes_price is set, NO-side prices arrive as
@@ -283,7 +283,7 @@ class LocalOrderbook:
                     # Clamp to valid range to handle rounding edge cases
                     price_cents = max(1, min(99, price_cents))
                     if price_cents > 0 and price_cents < 100:
-                        self.no_levels[price_cents] = int(size)
+                        self.no_levels[price_cents] = float(size)
                         self._no_level_seq[price_cents] = snap_seq
 
         self._initialized = True
@@ -368,14 +368,13 @@ class LocalOrderbook:
 
         levels = self.yes_levels if side == "yes" else self.no_levels
 
-        # CRITICAL FIX: Convert size_delta to int to match Dict[int, int] type
-        # Kalshi WS sends delta_fp as float (e.g., 0.28), but orderbook levels store int sizes
-        # Without this conversion, float values get stored in int dict, causing depth calculations
-        # to fail microstructure gate checks (e.g., 0.28 < 1 threshold)
-        size_delta = int(round(size_delta))
+        # Kalshi ``delta_fp`` carries centi-contract precision (e.g. 0.28 or
+        # 2.75 contracts); preserve it exactly on the 0.01 grid rather than
+        # flooring to whole contracts.
+        size_delta = round(float(size_delta), 2)
 
         # Apply signed delta
-        new_size = levels[price] + size_delta
+        new_size = round(levels[price] + size_delta, 2)
         if new_size <= 0:
             levels.pop(price, None)
         else:

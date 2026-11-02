@@ -51,6 +51,15 @@ def _snapshot_msg_15m(ticker: str, yes: list, no: list) -> dict:
     }
 
 
+def _ws_snapshot_msg_15m(ticker: str, yes: list, no: list) -> dict:
+    """WS bridge-queue snapshot frames carry subscription identity; sid-less
+    frames are treated as untrusted by the fail-closed gate."""
+    msg = _snapshot_msg_15m(ticker, yes, no)
+    msg["sid"] = 1
+    msg["seq"] = 1
+    return msg
+
+
 def _delta_msg(ticker: str, side: str, price: int, size_delta: int) -> dict:
     return {
         "type": "orderbook_delta",
@@ -855,7 +864,7 @@ class TestRestPreferredBBO:
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         # WS snapshot: yes_bid=40, no_bid=40 -> BBO 40/60 (bid 20c stale)
         state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state is not None
         assert state.best_bid_cents == 60
@@ -871,7 +880,7 @@ class TestRestPreferredBBO:
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         # WS: yes_bid=58 -> BBO 58/60, only 2c divergent on the bid
         state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue"
+            _ws_snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.best_bid_cents == 58
         assert state.quote_owner == "WS_FRESH_VERIFIED"
@@ -884,7 +893,7 @@ class TestRestPreferredBBO:
         # Backdate the REST quote clock beyond the 3s preference window.
         state.last_rest_quote_update_ts = time.monotonic() - 30.0
         state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.best_bid_cents == 40
         assert state.quote_owner == "WS_FRESH_VERIFIED"
@@ -895,7 +904,7 @@ class TestRestPreferredBBO:
         t = "KXBTC15M-T"
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
+            _ws_snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.quote_owner == "REST_VERIFIED_DEGRADED"
         yes_prices = [lvl[0] for lvl in state.yes_bids]
@@ -908,7 +917,7 @@ class TestRestPreferredBBO:
         t = "KXBTC15M-T"
         self._rest_snapshot(store, t, [[0.58, 5]], [[0.40, 8]])
         store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         ok, reason = store.is_quote_coherent(t, max_divergence_cents=10)
         assert ok is True, reason
