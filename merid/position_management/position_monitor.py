@@ -3563,20 +3563,27 @@ class PositionMonitor:
     ) -> bool:
         """Verify inventory on the exchange and resolve the intent as flat.
 
-        The prior submission outcome stays unknown — what is verified is
-        that no remaining exposure exists for this market (any subaccount
-        unless ``subaccount`` narrows it), so the exit requirement itself is
-        moot.  Emits the distinct ``exchange_confirmed_flat`` disposition
-        rather than ``FILLED`` — no fill evidence exists.  Returns True only
-        when the positions request succeeded *and* showed no nonzero market
-        position; an errored, truncated, or still-open result keeps the
-        intent unresolved and returns False.
+        Flat inventory alone does not prove an unknown order cannot still
+        execute. Require fresh terminal-market evidence and a complete,
+        well-formed positions snapshot before clearing the obligation.
         """
         if not market_id:
             return False
         try:
             from merid.event_venues.kalshi.client import get_kalshi_client
             client = get_kalshi_client()
+            market_result = await client.get_market_result(market_id)
+            market = getattr(market_result, "data", None)
+            raw_market = getattr(market, "raw_data", None)
+            if (
+                not getattr(market_result, "success", False)
+                or getattr(market, "market_id", None) != market_id
+                or getattr(market, "venue", None) != "kalshi"
+                or not isinstance(raw_market, dict)
+                or str(raw_market.get("status", "")).lower()
+                not in ("closed", "settled", "finalized")
+            ):
+                return False
             filters: Dict[str, Any] = {"market_ticker": market_id}
             if subaccount:
                 filters["subaccount_number"] = subaccount
@@ -3589,23 +3596,40 @@ class PositionMonitor:
             return False
         if not (lookup and getattr(lookup, "success", False)):
             return False
-        data = getattr(lookup, "data", None) or {}
-        market_rows = data.get("market_positions") or []
+        data = getattr(lookup, "data", None)
+        metadata = getattr(lookup, "metadata", None)
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("market_positions"), list)
+            or data.get("cursor")
+            or data.get("has_more")
+            or data.get("truncated")
+            or not isinstance(metadata, dict)
+            or metadata.get("truncated")
+        ):
+            return False
+        market_rows = data["market_positions"]
         nonzero: list = []
         for row in market_rows:
+            if not isinstance(row, dict):
+                return False
             row_ticker = row.get("ticker") or row.get("market_ticker")
-            if row_ticker and row_ticker != market_id:
-                continue
-            qty = Decimal("0")
+            if row_ticker != market_id:
+                return False
+            quantities = []
             for field in ("position_fp", "position", "count"):
                 if row.get(field) is not None:
                     try:
                         qty = Decimal(str(row[field]))
+                        if not qty.is_finite():
+                            return False
+                        quantities.append(qty)
                     except Exception:
-                        qty = Decimal("0")
-                    break
-            if qty != 0:
-                nonzero.append({"ticker": row_ticker, "qty": str(qty)})
+                        return False
+            if not quantities:
+                return False
+            if any(qty != 0 for qty in quantities):
+                nonzero.append({"ticker": row_ticker, "qty": str(quantities)})
         if nonzero:
             logger.warning(
                 "[EXIT-INTENT-RECONCILE] flat-check: exchange still holds %s "
