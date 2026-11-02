@@ -185,7 +185,7 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                 "total_notional_usd": total_notional,
                 "total_unrealized_pnl_usd": total_unrealized_pnl,
                 "daily_realized_pnl_usd": _daily_pnl,
-                "daily_total_pnl_usd": _daily_pnl + total_unrealized_pnl,
+                "daily_total_pnl_usd": _daily_pnl,
                 "daily_trades": len(summary["fills"]),
                 "daily_fees_usd": 0.0,
                 "drawdown_pct": _drawdown,

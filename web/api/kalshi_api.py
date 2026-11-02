@@ -4196,6 +4196,36 @@ async def _order_groups_dashboard_impl(_empty_dashboard: Dict[str, Any]) -> Dict
     }
 
 
+_DAILY_EQUITY_ANCHOR_PATH = _Path(
+    os.environ.get("MERID_DAILY_EQUITY_ANCHOR_PATH", "data/kalshi_daily_equity_anchor.json")
+)
+
+
+def _daily_equity_anchor(equity_now_usd: float, *, fresh: bool) -> Tuple[float, str, bool]:
+    """Return the UTC day-start equity anchor, creating it on the day's first fresh read.
+
+    Returns (anchor_usd, anchored_at_iso, ok). ``ok`` is False when no same-day
+    anchor exists and none could be durably written (stale equity source or a
+    storage failure) — callers must fall back rather than fabricate a delta.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if _DAILY_EQUITY_ANCHOR_PATH.exists():
+            data = json.loads(_DAILY_EQUITY_ANCHOR_PATH.read_text())
+            if data.get("date") == today and isinstance(data.get("equity_usd"), (int, float)):
+                return float(data["equity_usd"]), str(data.get("anchored_at") or ""), True
+        if not fresh:
+            return 0.0, "", False
+        anchored_at = datetime.now(timezone.utc).isoformat()
+        payload = {"date": today, "equity_usd": equity_now_usd, "anchored_at": anchored_at}
+        _DAILY_EQUITY_ANCHOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DAILY_EQUITY_ANCHOR_PATH.write_text(json.dumps(payload, indent=2))
+        return equity_now_usd, anchored_at, True
+    except Exception as exc:
+        logger.warning("daily equity anchor unavailable: %s", exc)
+        return 0.0, "", False
+
+
 @router.get("/pnl")
 async def get_pnl() -> Dict[str, Any]:
     """Portfolio PnL summary — canonical source: fills ledger.
@@ -4248,6 +4278,31 @@ async def get_pnl() -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("PnL: fills_ledger unavailable: %s", exc)
         result["source"] = "unavailable"
+
+    # ── Canonical daily P&L: equity change since UTC day start ───────────
+    # Anchored to a durable day-start equity snapshot so the figure is the true
+    # portfolio value change (Kalshi "recent P&L"), independent of ledger fill
+    # ingestion completeness or per-fill date attribution.
+    daily_pnl_source = "ledger_fills"
+    try:
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync as _br_summary
+        from merid.event_venues.kalshi.bankroll_models import BalanceState as _BalanceState
+        _bs = _br_summary("kalshi_api_pnl")
+        equity_now = float(_bs.equity_usd) if _bs is not None and _bs.equity_usd is not None else None
+        if equity_now is not None:
+            anchor, anchor_ts, anchor_ok = _daily_equity_anchor(
+                equity_now, fresh=_bs.state == _BalanceState.FRESH
+            )
+            if anchor_ok:
+                result["daily_pnl_usd"] = round(equity_now - anchor, 2)
+                result["daily_pnl_anchor_usd"] = round(anchor, 2)
+                result["daily_pnl_anchor_ts"] = anchor_ts
+                daily_pnl_source = "equity_delta"
+            else:
+                daily_pnl_source = "equity_delta_unanchored"
+    except Exception as exc:
+        logger.debug("PnL: equity anchor unavailable: %s", exc)
+    result["daily_pnl_source"] = daily_pnl_source
 
     # ── Supplemental equity / drawdown from risk manager ─────────────
     risk = _get_risk()
@@ -4524,9 +4579,9 @@ async def get_risk() -> Dict[str, Any]:
     # Frontend type aliases (KalshiRiskSummary interface uses these field names)
     base["total_unrealized_pnl_usd"] = base.get("unrealized_pnl_usd", 0.0)
     base["daily_realized_pnl_usd"] = base.get("realized_pnl_usd", 0.0)
-    base["daily_total_pnl_usd"] = round(
-        base.get("daily_pnl_usd", 0.0) + base.get("unrealized_pnl_usd", 0.0), 2
-    )
+    # daily_pnl_usd is already total daily P&L (realized + unrealized change);
+    # adding total unrealized again would double-count it.
+    base["daily_total_pnl_usd"] = round(base.get("daily_pnl_usd", 0.0), 2)
 
     return base
 
