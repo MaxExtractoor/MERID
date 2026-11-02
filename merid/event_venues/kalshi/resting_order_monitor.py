@@ -19,6 +19,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional, Dict, List, Set, Any
 
@@ -1215,7 +1216,7 @@ class RestingOrderMonitor:
             result = await client.get_order_result(record.kalshi_order_id, record.ticker)
             
             # Handle "no data" case - order may be gone or never existed
-            if not result.data:
+            if not result.success or not result.data:
                 record.missing_data_count += 1
                 logger.warning(
                     f"[RESTING_ORDER_MONITOR] No order data for {record.kalshi_order_id} "
@@ -1236,7 +1237,24 @@ class RestingOrderMonitor:
             # Access attributes directly instead of using .get()
             order_data = result.data
             raw_status = order_data.status if order_data else ""
-            remaining_size = int(order_data.remaining_size) if order_data and order_data.remaining_size else 0
+            try:
+                remaining = Decimal(str(order_data.remaining_size))
+                if not remaining.is_finite() or remaining < 0:
+                    raise ValueError("invalid remaining quantity")
+                if remaining != remaining.to_integral_value():
+                    logger.error(
+                        "[RESTING_ORDER_MONITOR] Fractional remainder %s for %s "
+                        "cannot be tracked safely; retaining order for reconciliation",
+                        remaining, record.kalshi_order_id,
+                    )
+                    return False
+                remaining_size = int(remaining)
+            except (InvalidOperation, TypeError, ValueError):
+                logger.error(
+                    "[RESTING_ORDER_MONITOR] Missing or invalid remaining quantity for %s; "
+                    "retaining order for reconciliation", record.kalshi_order_id,
+                )
+                return False
             
             # Normalize status to internal vocabulary
             status = _normalize_status(raw_status)
@@ -1312,6 +1330,14 @@ class RestingOrderMonitor:
                     if _eff_remaining <= 0 and status in RESTING_STATUSES:
                         status = "filled"
                         record.status = status
+
+            if status in RESTING_STATUSES and remaining_size == 0:
+                record.remaining_size = record_remaining_before
+                logger.warning(
+                    "[RESTING_ORDER_MONITOR] Working order %s reports zero remaining; "
+                    "retaining prior remainder until reconciled", record.kalshi_order_id,
+                )
+                return False
             
             # Partial fill detection
             if remaining_size > 0 and record_remaining_before > remaining_size:
@@ -1332,9 +1358,8 @@ class RestingOrderMonitor:
                     trigger="venue_remaining_decrease", fill_amount=fill_amount,
                 )
             
-            # Terminal handling - use terminal status as primary signal
-            # remaining_size == 0 is a sanity check
-            if status in TERMINAL_STATUSES or remaining_size == 0:
+            # Zero remaining alone does not prove a working order is terminal.
+            if status in TERMINAL_STATUSES:
                 logger.info(
                     f"[RESTING_ORDER_MONITOR] Order terminal: kalshi_order_id={record.kalshi_order_id} "
                     f"status={status} remaining_size={remaining_size} - removing from monitor"
