@@ -508,6 +508,7 @@ class TestRestBboDivergenceGuard:
                     "yes": [[0.48, 5]],
                     "no": [[0.50, 4]],
                     "seq": 100,
+                    "sid": 1,
                 },
                 via="bridge_queue",
             )
@@ -630,6 +631,7 @@ class TestRestBboDivergenceGuard:
                     "yes": [[0.48, 5]],
                     "no": [[0.50, 4]],
                     "seq": 100,
+                    "sid": 1,
                 },
                 via="bridge_queue",
             )
