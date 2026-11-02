@@ -2340,8 +2340,8 @@ class KalshiWebSocket(EventVenueStream):
         # sustained flow.  50 amortizes the scheduling cost while staying
         # bounded; high-pressure unchanged.
         _BATCH_SIZE_LOW_PRESSURE = 50
-        _BATCH_SIZE_HIGH_PRESSURE = 200
-        _PRESSURE_THRESHOLD = 0.50
+        _BATCH_SIZE_HIGH_PRESSURE = 600
+        _HIGH_PRESSURE_DEPTH = 1500
         _COOPERATIVE_YIELD_EVERY = 25
 
         # 2026-10-31: bounded drain-path profiler.  Rollover measurement
@@ -2399,10 +2399,17 @@ class KalshiWebSocket(EventVenueStream):
                 batch_queue = self._ensure_msg_queue()
                 priority_queue = self._ensure_priority_msg_queue()
 
-                # Calculate current queue pressure for adaptive batch sizing
+                # Absolute backlog depth drives the drain batch.  maxsize is a
+                # ~2-minute absorption buffer so utilization never approached
+                # the old 50% trigger — bursts were being drained at the idle
+                # batch size (50/iter ≈ arrival rate) while residence climbed
+                # past the shed bound.  ~1.5s of arrivals marks a real backlog.
                 queue_size = batch_queue.qsize()
-                queue_util = queue_size / batch_queue.maxsize
-                batch_size = _BATCH_SIZE_HIGH_PRESSURE if queue_util > _PRESSURE_THRESHOLD else _BATCH_SIZE_LOW_PRESSURE
+                batch_size = (
+                    _BATCH_SIZE_HIGH_PRESSURE
+                    if queue_size >= _HIGH_PRESSURE_DEPTH
+                    else _BATCH_SIZE_LOW_PRESSURE
+                )
 
                 # Drain profiler: scheduling gap between iterations while a
                 # backlog exists — the event-loop starvation component of
@@ -2755,6 +2762,11 @@ class KalshiWebSocket(EventVenueStream):
                         _pq_prof["body_max"] = _bd
                     _pq_prof["items"] += 1
                     messages_processed += 1
+                    # Cooperative yield during deep drains: hand the loop back
+                    # to socket reads / HTTP handlers every N items instead of
+                    # monopolizing it for a whole 600-item burst.
+                    if i and i % _COOPERATIVE_YIELD_EVERY == 0:
+                        await asyncio.sleep(0)
 
                 # Yield control briefly if we did not fill the first slot of a batch.
                 if messages_processed == 0:
