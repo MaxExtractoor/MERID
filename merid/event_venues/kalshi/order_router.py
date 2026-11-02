@@ -339,9 +339,7 @@ def _finalize_attempt_store_for_result(
                 and getattr(result, "submission_certainty", None) == "rejected"
             )
         ):
-            # The venue authoritatively rejected or proved the order terminal
-            # (e.g. duplicate_order_terminal: a resubmitted coid resolved to a
-            # canceled/filled order).  Without this branch an ACKNOWLEDGED
+            # The venue authoritatively rejected an order. Without this branch an ACKNOWLEDGED
             # record stayed non-terminal forever — every retry rebound the
             # dead client_order_id and 409'd in a loop (ETH SELL_NO, ~427×).
             # The in-memory ACKED state is superseded by the venue verdict —
@@ -8251,6 +8249,22 @@ class OrderResult:
     def requires_recovery(self) -> bool:
         """Outcome is unknown; background reconciliation must resolve before sizing."""
         return self.status in ("submission_unknown", "duplicate_unknown")
+
+
+def _duplicate_terminal_recovery_result(order_data: Any, mode: TradingMode, latency_ms: float) -> OrderResult:
+    """A terminal duplicate may have fills; preserve its identity for reconciliation."""
+    status = str(getattr(order_data, "status", "") or "").lower()
+    order_id = getattr(order_data, "order_id", None)
+    return OrderResult(
+        status="duplicate_unknown",
+        mode=mode,
+        reason=f"duplicate_order_terminal:{status}:reconcile_fills:order_id={order_id}",
+        latency_ms=round(latency_ms, 2),
+        submission_attempted=True,
+        exchange_request_sent=True,
+        exchange_ack_received=True,
+        submission_certainty="unknown",
+    )
 
 
 # ── Typed rejections and execution plan ───────────────────────────────────
@@ -18214,17 +18228,10 @@ async def _route_live(
                             order_data.order_id,
                             order_data.status,
                         )
-                        _release_allocated_slot(intent)
-                        return OrderResult(
-                            status="rejected",
-                            mode=mode,
-                            reason=f"duplicate_order_terminal:{_dup_status}",
-                            latency_ms=round(latency, 2),
-                            submission_attempted=True,
-                            exchange_request_sent=True,
-                            exchange_ack_received=True,
-                            submission_certainty="rejected",
-                        )
+                        # Terminal does not imply zero fills (canceled orders
+                        # can be partially filled). Retain reservations and
+                        # reconcile by the original client order id.
+                        return _duplicate_terminal_recovery_result(order_data, mode, latency)
                     logger.info(
                         "[KALSHI_DUPLICATE_LOOKUP] ticker=%s order_id=%s status=%s — confirmed resting",
                         intent.ticker,

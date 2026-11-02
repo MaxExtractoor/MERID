@@ -10,14 +10,19 @@ Observed live (KXETH15M-26OCT032245-45):
 Fixes under test:
   * the reprice leg mints a fresh wire client_order_id (``r1`` suffix)
     while the intent-level coid stays canonical,
-  * duplicate lookups honoring the venue status: terminal orders are
-    rejected, not treated as resting.
+  * terminal duplicate lookups are not treated as resting or zero-fill
+    rejections; their fills must be reconciled.
 """
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import merid.event_venues.kalshi.order_router as _or
+from merid.loop_15m import _confirmed_submission
+from merid.prediction.trading_mode import TradingMode
+import pytest
 
 
 def test_terminal_order_statuses_cover_observed_states():
@@ -27,11 +32,11 @@ def test_terminal_order_statuses_cover_observed_states():
     assert "rejected" in _or.TERMINAL_ORDER_STATUSES
 
 
-def test_duplicate_lookup_rejects_terminal_before_resting():
+def test_duplicate_lookup_reconciles_terminal_before_resting():
     """The terminal-status check must precede the 'confirmed resting' path.
 
     Source-order regression guard: the duplicate block must consult
-    TERMINAL_ORDER_STATUSES and return a rejected OrderResult before any
+    TERMINAL_ORDER_STATUSES and return a recovery result before any
     code that logs or marks the order as resting/submitted.
     """
     src = inspect.getsource(_or)
@@ -46,6 +51,38 @@ def test_duplicate_lookup_rejects_terminal_before_resting():
         "terminal-status check must run before the resting-confirm path"
     )
     assert rejected_pos < resting_pos
+    terminal_branch = src[terminal_pos:resting_pos]
+    assert "return _duplicate_terminal_recovery_result(" in terminal_branch
+    assert "_release_allocated_slot(intent)" not in terminal_branch
+
+
+@pytest.mark.parametrize(
+    ("status", "filled_size"),
+    [("canceled", "0.25"), ("canceled", "0"), ("filled", "1.00"),
+     ("expired", None), ("rejected", None)],
+)
+def test_terminal_duplicate_keeps_fill_outcome_unresolved(status, filled_size):
+    order = SimpleNamespace(order_id="exchange-order-1", status=status, filled_size=filled_size)
+    result = _or._duplicate_terminal_recovery_result(order, TradingMode.LIVE, 10.0)
+    assert result.status == "duplicate_unknown"
+    assert result.requires_recovery
+    assert result.submission_certainty == "unknown"
+    assert not result.has_execution
+    assert not _confirmed_submission(result)
+    assert "exchange-order-1" in result.reason
+
+
+def test_terminal_duplicate_keeps_exit_arbiter_in_reconciliation():
+    from merid.position_management.exit_pipeline import post_route_update
+
+    order = SimpleNamespace(order_id="exchange-order-1", status="canceled", filled_size="0.25")
+    result = _or._duplicate_terminal_recovery_result(order, TradingMode.LIVE, 10.0)
+    arbiter = MagicMock()
+    post_route_update("position-1", result, arbiter=arbiter)
+    arbiter.mark_ack_unknown.assert_called_once_with(
+        "position-1", note="route_duplicate_unknown"
+    )
+    arbiter.resolve_reconcile.assert_not_called()
 
 
 def test_post_only_reprice_mints_fresh_wire_coid():
