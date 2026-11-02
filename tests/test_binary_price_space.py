@@ -200,19 +200,21 @@ class TestPriceRangeChecking:
     """Test price range checking functions."""
     
     def test_is_price_in_canonical_range(self):
-        """Test canonical entry range (symmetric 10c-75c)."""
-        # CRITICAL FIX (2026-08-14): Fail-closed to 10c-75c to prevent
-        # extreme longshot / shortshot fills that drained the bankroll.
+        """Test canonical entry range (side-aware: YES 10c-95c, NO 25c-95c)."""
+        # 2026-09-03: side-aware range; 2026-10-31: YES ceiling raised 75->95.
         assert is_price_in_canonical_range(10, "yes") == True
         assert is_price_in_canonical_range(75, "yes") == True
+        assert is_price_in_canonical_range(95, "yes") == True
         assert is_price_in_canonical_range(50, "yes") == True
         assert is_price_in_canonical_range(9, "yes") == False
-        assert is_price_in_canonical_range(76, "yes") == False
-        assert is_price_in_canonical_range(10, "no") == True
+        assert is_price_in_canonical_range(96, "yes") == False
+        assert is_price_in_canonical_range(25, "no") == True
         assert is_price_in_canonical_range(75, "no") == True
+        assert is_price_in_canonical_range(95, "no") == True
         assert is_price_in_canonical_range(50, "no") == True
-        assert is_price_in_canonical_range(9, "no") == False
-        assert is_price_in_canonical_range(76, "no") == False
+        assert is_price_in_canonical_range(24, "no") == False
+        assert is_price_in_canonical_range(10, "no") == False
+        assert is_price_in_canonical_range(96, "no") == False
 
     def test_is_price_in_crisis_range(self):
         """Test crisis range (side-aware: YES 1c-99c, NO 5c-99c)."""
@@ -268,13 +270,13 @@ class TestPriceRangeChecking:
         assert is_price_in_flb_edge_band(50, "yes") == False
     
     def test_clamp_to_canonical_range(self):
-        """Test clamping to canonical entry range (10c-75c)."""
-        # CRITICAL FIX (2026-08-14): Fail-closed to 10c-75c.
+        """Test clamping to canonical entry range (10c-95c)."""
+        # Legacy symmetric clamp; ceiling raised 75->95 on 2026-10-31.
         assert clamp_to_canonical_range(5) == 10
-        assert clamp_to_canonical_range(90) == 75
+        assert clamp_to_canonical_range(90) == 90
         assert clamp_to_canonical_range(50) == 50
         assert clamp_to_canonical_range(0) == 10
-        assert clamp_to_canonical_range(100) == 75
+        assert clamp_to_canonical_range(100) == 95
     
     def test_clamp_to_crisis_range(self):
         """Test clamping to crisis range."""
@@ -294,8 +296,8 @@ class TestPriceRangeChecking:
     
     def test_get_price_range_for_condition(self):
         """Test getting price range for condition."""
-        # CRITICAL FIX (2026-08-14): Normal regime is canonical 10c-75c.
-        assert get_price_range_for_condition(False) == (10, 75)
+        # Normal regime is canonical 10c-95c (ceiling raised 2026-10-31).
+        assert get_price_range_for_condition(False) == (10, 95)
         assert get_price_range_for_condition(True) == (5, 99)   # Extreme (crisis)
 
 
@@ -409,23 +411,23 @@ class TestCanonicalBinaryMarketState:
     
     def test_is_yes_in_range_normal(self):
         """Test YES price in range check (normal regime)."""
-        # CRITICAL FIX (2026-08-14): Normal canonical range is 10c-75c.
+        # Normal canonical YES range is 10c-95c (raised 2026-10-31).
         state = CanonicalBinaryMarketState(
             ticker="KXBTC-TEST",
             yes_bid_cents=50,
         )
         assert state.is_yes_in_range(is_extreme=False) == True
-        
+
         state.yes_bid_cents = 10
         assert state.is_yes_in_range(is_extreme=False) == True
-        
-        state.yes_bid_cents = 75
+
+        state.yes_bid_cents = 95
         assert state.is_yes_in_range(is_extreme=False) == True
-        
+
         state.yes_bid_cents = 9
         assert state.is_yes_in_range(is_extreme=False) == False
-        
-        state.yes_bid_cents = 76
+
+        state.yes_bid_cents = 96
         assert state.is_yes_in_range(is_extreme=False) == False
     
     def test_is_yes_in_range_extreme(self):
@@ -445,23 +447,23 @@ class TestCanonicalBinaryMarketState:
     
     def test_is_no_in_range_normal(self):
         """Test NO price in range check (normal regime)."""
-        # CRITICAL FIX (2026-08-14): Normal canonical range is 10c-75c.
+        # Normal canonical NO range is 25c-95c (side-aware since 2026-09-03).
         state = CanonicalBinaryMarketState(
             ticker="KXBTC-TEST",
             no_bid_cents=50,
         )
         assert state.is_no_in_range(is_extreme=False) == True
-        
-        state.no_bid_cents = 10
+
+        state.no_bid_cents = 25
         assert state.is_no_in_range(is_extreme=False) == True
-        
-        state.no_bid_cents = 75
+
+        state.no_bid_cents = 95
         assert state.is_no_in_range(is_extreme=False) == True
-        
-        state.no_bid_cents = 9
+
+        state.no_bid_cents = 24
         assert state.is_no_in_range(is_extreme=False) == False
-        
-        state.no_bid_cents = 76
+
+        state.no_bid_cents = 96
         assert state.is_no_in_range(is_extreme=False) == False
     
     def test_is_no_in_range_extreme(self):

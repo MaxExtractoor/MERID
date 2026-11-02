@@ -59,12 +59,14 @@ class ExitReason(Enum):
     ADAPTIVE_TIMING = "adaptive_timing"
     TIME_STOP = "time_stop"
     EDGE_DECAY = "edge_decay"
+    CURRENT_EDGE_REVERSAL = "current_edge_reversal"
     OPPORTUNITY_COST = "opportunity_cost"
     SCALE_OUT = "scale_out"
     MANUAL = "manual"
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     AUTO_EXIT_99C = "auto_exit_99c"
+    HARD_PROFIT_LOCK = "hard_profit_lock"
     EXTREME_PROFIT = "extreme_profit"
     DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"
     RATCHET_TRIM = "ratchet_trim"
@@ -72,6 +74,10 @@ class ExitReason(Enum):
     TRAIL = "trail"
     LOSS_CUT_40PCT = "loss_cut_40pct"
     SETTLEMENT_GUARD = "settlement_guard"
+    MARKET_EXPIRED = "market_expired"
+    LOSS_CAP = "loss_cap"
+    MODEL_INVALIDATION_LOSS_EXIT = "model_invalidation_loss_exit"
+    CONTINUATION_STOP = "continuation_stop"
 
 
 @dataclass

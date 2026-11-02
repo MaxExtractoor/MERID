@@ -1143,7 +1143,8 @@ def is_price_in_canonical_range(price_cents: int, side: str) -> bool:
     """Check if price is in the production side-aware canonical entry range.
 
     CRITICAL FIX (2026-09-03): Side-aware canonical range.  YES contracts are
-    bounded 10c-75c to avoid low-profit, high-risk longshot entries.  NO
+    bounded 10c-95c (ceiling raised from 75c on 2026-10-31 alongside the
+    edge-budget repricing).  NO
     contracts are bounded 25c-95c because the 88c-95c NO band showed
     systematic positive EV (inverse favorite-longshot bias) and because a high
     NO price simply reflects a high probability of the event NOT occurring.
@@ -1380,10 +1381,11 @@ def is_price_in_side_aware_range(price_cents: int, side: str) -> bool:
 
 
 def clamp_to_canonical_range(price_cents: int) -> int:
-    """Clamp price to canonical entry range (10c-75c).
+    """Clamp price to canonical entry range (10c-95c).
 
-    CRITICAL FIX (2026-08-14): Aligned with the symmetric 10c-75c production
-    entry range.  DEPRECATED: prefer is_price_in_canonical_range() with side.
+    CRITICAL FIX (2026-08-14): Aligned with the symmetric production
+    entry range (ceiling raised 75c -> 95c on 2026-10-31).
+    DEPRECATED: prefer is_price_in_canonical_range() with side.
 
     Args:
         price_cents: Price in cents (0-99)
@@ -1394,8 +1396,8 @@ def clamp_to_canonical_range(price_cents: int) -> int:
     Example:
         >>> clamp_to_canonical_range(5)
         10
-        >>> clamp_to_canonical_range(80)
-        75
+        >>> clamp_to_canonical_range(96)
+        95
     """
     return max(CANONICAL_MIN_CENTS, min(CANONICAL_MAX_CENTS, price_cents))
 
