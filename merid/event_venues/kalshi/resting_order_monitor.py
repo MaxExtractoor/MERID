@@ -1221,13 +1221,12 @@ class RestingOrderMonitor:
                     f"[RESTING_ORDER_MONITOR] No order data for {record.kalshi_order_id} "
                     f"(missing_count={record.missing_data_count}) - treating as non-terminal for now"
                 )
-                # After 3 consecutive "no data" responses, treat as terminal
+                # Repeated empty or failed lookups do not prove the order is dead.
                 if record.missing_data_count >= 3:
                     logger.error(
                         f"[RESTING_ORDER_MONITOR] Order {record.kalshi_order_id} has {record.missing_data_count} "
-                        f"consecutive missing data responses - treating as unknown terminal, manual reconciliation needed"
+                        f"consecutive missing data responses - retaining order, manual reconciliation needed"
                     )
-                    return True
                 return False
             
             # Reset missing data counter on successful data fetch
