@@ -562,7 +562,8 @@ batch-removal message was found in that server log, but these logs alone do not
 prove historical completeness or exclude earlier deletion. The live writer
 scheduled pruning by default; commit `ddbba3c8` removes that schedule and uses
 non-waiting PASSIVE checkpoints. It does not delete or restore any records and
-is not deployed to the old process. The old process can attempt pruning again.
+is not deployed to the old process. A further 11:20:33 ET attempt also logged
+`interrupted`; the old process can attempt pruning again.
 
 At 11:10 ET the asynchronous log writer reported a queue depth of 9,712 and
 zero recorded drops, while a recent record showed 164 seconds of drain lag.
