@@ -4460,8 +4460,41 @@ class KalshiWebSocket(EventVenueStream):
             len(tickers_to_drop), len(orderbooks_to_drop), len(keep_tickers_set)
         )
         
-        # Unsubscribe from orderbook deltas (highest bandwidth)
-        if orderbooks_to_drop and "orderbook_delta" not in keep_channels:
+        # 2026-11-01: actually remove dropped orderbook tickers on the wire.
+        # Kalshi multiplexes every orderbook_delta ticker on one sid; the
+        # ``subscribe`` path adds markets to it but nothing ever removed
+        # them, so expired 15m markets kept streaming deltas for the whole
+        # process lifetime and starved the drain pipeline (per-ticker queue
+        # overflow -> unattributed sid sequence gaps -> book invalidation
+        # storms -> NOT-EXECUTABLE rejections). ``update_subscription`` with
+        # ``action=remove_markets`` prunes the sid server-side. The local
+        # discard is also unconditional now: ``orderbooks_to_drop`` is
+        # ticker-scoped (already minus the keep set), and the previous
+        # ``keep_channels`` guard meant the sync path never pruned local
+        # tracking either.
+        if orderbooks_to_drop:
+            _drop = sorted(orderbooks_to_drop)
+            _sid = self._subscription_ids.get("orderbook_delta")
+            if _sid is not None and self._ws:
+                try:
+                    _payload = json.dumps({
+                        "id": self._next_sub_id(),
+                        "cmd": "update_subscription",
+                        "params": {
+                            "sid": _sid,
+                            "market_tickers": _drop,
+                            "action": "remove_markets",
+                        },
+                    })
+                    await self._ws.send(_payload)
+                    logger.warning(
+                        "[WS-REMOVE-MARKETS] sent remove_markets for %d tickers on sid=%s: %s",
+                        len(_drop), _sid, _drop,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[WS-REMOVE-MARKETS] send failed - applying local prune only"
+                    )
             for ticker in orderbooks_to_drop:
                 self._orderbook_tickers.discard(ticker)
                 self._subscriptions.discard(f"orderbook:{ticker}")
