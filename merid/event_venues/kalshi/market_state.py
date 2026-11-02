@@ -6736,11 +6736,21 @@ class KalshiMarketStateStore:
             last = self._sid_last_seq.get(sid)
             if last is not None and seq <= last:
                 return -1
-            self._sid_tickers.setdefault(sid, set()).add(ticker)
-            self._ticker_sid[ticker] = sid
+            if ticker:
+                self._sid_tickers.setdefault(sid, set()).add(ticker)
+                self._ticker_sid[ticker] = sid
             gap = seq - last - 1 if last is not None else 0
             self._sid_last_seq[sid] = seq
             return gap
+
+    def apply_orderbook_sequence_control(self, event: Dict[str, Any]) -> None:
+        """Advance a SID for an ordered subscription-control response."""
+        sid, seq = event.get("sid"), event.get("seq")
+        if sid is None or not isinstance(seq, int) or isinstance(seq, bool):
+            return
+        gap = self._check_sid_delta_sequence(sid, seq, "")
+        if gap > 0:
+            self._handle_sid_sequence_gap(sid, seq, gap, "")
 
     def _handle_sid_sequence_gap(
         self,
@@ -6765,9 +6775,8 @@ class KalshiMarketStateStore:
         books keep their verified state.  ``"overflow"`` or a partially
         covered range falls back to full-sid invalidation (fail closed).
         """
-        missing = set(range(seq - gap, seq))
         attributed: Optional[set] = None
-        if isinstance(dropped, (list, tuple)) and dropped:
+        if isinstance(dropped, (list, tuple)) and len(dropped) >= gap:
             dropped_map = {}
             try:
                 for item in dropped:
@@ -6775,7 +6784,10 @@ class KalshiMarketStateStore:
                         dropped_map[int(item[0])] = item[1]
             except (TypeError, ValueError):
                 dropped_map = {}
-            if dropped_map and missing.issubset(dropped_map.keys()):
+            if len(dropped_map) >= gap and all(
+                missing_seq in dropped_map for missing_seq in range(seq - gap, seq)
+            ):
+                missing = range(seq - gap, seq)
                 attributed = {dropped_map[s] for s in missing}
         if attributed:
             _now = time.monotonic()
@@ -6800,7 +6812,8 @@ class KalshiMarketStateStore:
 
         with self._sid_seq_lock:
             tickers = set(self._sid_tickers.get(sid, ()))
-        tickers.add(ticker)
+        if ticker:
+            tickers.add(ticker)
         _now = time.monotonic()
         if _now - self._last_sid_gap_log_ts.get(sid, 0.0) >= 1.0:
             self._last_sid_gap_log_ts[sid] = _now

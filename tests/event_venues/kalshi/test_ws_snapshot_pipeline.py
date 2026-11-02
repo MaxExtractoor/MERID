@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 from types import SimpleNamespace
+import asyncio
 import time
 
 import pytest
@@ -203,3 +204,74 @@ def test_snapshot_without_subscription_sequence_cannot_recover_book(pipeline):
     store.apply_orderbook_message(ws._parse_message(raw), "bridge_queue")
     assert store._ob.get_book(TICKER).yes_levels == {32: 7}
     assert store.is_market_entry_ready(TICKER) == (False, "WS-BOOK-REQUIRES-VALID-SNAPSHOT")
+
+
+def test_sequenced_control_flows_in_order_through_bridge(pipeline, monkeypatch):
+    from merid.event_venues.kalshi import market_state
+    from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+
+    ws, store = pipeline
+    ws._subscription_ids["orderbook_delta"] = 4
+    monkeypatch.setattr(market_state, "get_kalshi_market_state_store", lambda: store)
+    monkeypatch.setattr(KalshiWebSocketBridge, "_instance_created", False)
+    bridge = KalshiWebSocketBridge(ws=MagicMock(), config=SimpleNamespace(api_key="test-key"))
+    events = [
+        ws._parse_message(_snapshot(1, [["0.3200", "7.00"]], [["0.6700", "11.00"]])),
+        ws._parse_message({"type": "ok", "sid": 4, "seq": 2, "msg": {"market_tickers": [TICKER]}}),
+        ws._parse_message({
+            "type": "orderbook_delta", "sid": 4, "seq": 3,
+            "msg": {"market_ticker": TICKER, "price_dollars": "0.3200", "delta_fp": "2.00", "side": "yes"},
+        }),
+    ]
+    assert all(event is not None for event in events)
+    for event in events:
+        asyncio.run(bridge._enqueue_event(event))
+    for event in events:
+        bridge._apply_orderbook_on_drain(bridge._thread_queue.get_nowait())
+    assert bridge._sequence_gaps == 0
+    assert store._sid_last_seq[4] == 3
+    assert store._enqueue_delta.call_count == 1
+    assert store.get(TICKER).snapshot_complete
+
+
+def test_control_with_gap_invalidates_all_known_sid_books(pipeline):
+    _, store = pipeline
+    sibling = "KXETH15M-26NOV021145-45"
+    store._check_sid_delta_sequence(4, 1, TICKER)
+    store._check_sid_delta_sequence(4, 2, sibling)
+    store._mark_book_untrusted_and_resync = MagicMock()
+    store.apply_orderbook_sequence_control({"sid": 4, "seq": 5})
+    assert store._sid_last_seq[4] == 5
+    assert {call.args[0] for call in store._mark_book_untrusted_and_resync.call_args_list} == {
+        TICKER, sibling
+    }
+    assert "" not in store._ticker_sid
+
+
+def test_other_subscription_ack_is_not_orderbook_control(pipeline):
+    ws, _ = pipeline
+    ws._subscription_ids["orderbook_delta"] = 4
+    assert ws._parse_message({"type": "ok", "sid": 9, "seq": 2, "msg": {}}) is None
+
+
+def test_unattributed_large_control_gap_does_not_expand_missing_range(pipeline, monkeypatch):
+    from merid.event_venues.kalshi import market_state
+
+    _, store = pipeline
+    store._check_sid_delta_sequence(4, 1, TICKER)
+    store._mark_book_untrusted_and_resync = MagicMock()
+    monkeypatch.setattr(
+        market_state, "range", MagicMock(side_effect=AssertionError("expanded missing range")),
+        raising=False,
+    )
+    store.apply_orderbook_sequence_control({"sid": 4, "seq": 1_000_000_001})
+    store._mark_book_untrusted_and_resync.assert_called_once()
+
+
+def test_replayed_control_does_not_rewind_sid(pipeline):
+    _, store = pipeline
+    store._check_sid_delta_sequence(4, 10, TICKER)
+    store._mark_book_untrusted_and_resync = MagicMock()
+    store.apply_orderbook_sequence_control({"sid": 4, "seq": 9})
+    assert store._sid_last_seq[4] == 10
+    store._mark_book_untrusted_and_resync.assert_not_called()

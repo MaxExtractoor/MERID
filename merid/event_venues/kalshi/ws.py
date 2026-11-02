@@ -3508,6 +3508,18 @@ class KalshiWebSocket(EventVenueStream):
             channel = data.get("type") or data.get("channel")
             body = _kalshi_ws_payload(data)
 
+            # Subscription updates can consume the same SID sequence as
+            # orderbook frames; forward them in order rather than inventing
+            # a downstream gap at the next delta.
+            if (
+                channel == "ok"
+                and data.get("sid") is not None
+                and data.get("sid") == self._subscription_ids.get("orderbook_delta")
+                and isinstance(data.get("seq"), int)
+                and not isinstance(data.get("seq"), bool)
+            ):
+                return {**data, "type": "orderbook_sequence_control"}
+
             # Infer channel from payload structure if channel is empty
             # Kalshi sometimes sends valid orderbook deltas with empty channel
             if not channel:

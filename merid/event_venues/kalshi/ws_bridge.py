@@ -4137,7 +4137,9 @@ class KalshiWebSocketBridge:
         # deltas as gaps (~600k false gaps/hr).  Track per sid — the true seq
         # space — so a real gap still means a dropped frame for this feed, and
         # keep the ticker in the log line for diagnosis.
-        if isinstance(event, dict) and event.get("type") in ("orderbook_snapshot", "orderbook_delta"):
+        if isinstance(event, dict) and event.get("type") in (
+            "orderbook_snapshot", "orderbook_delta", "orderbook_sequence_control"
+        ):
             seq = event.get("seq")
             if seq is None:
                 seq = event.get("sequence") or event.get("msg_id")
@@ -4545,7 +4547,7 @@ class KalshiWebSocketBridge:
             # hops that saturated the forwarder loop at ~1.4k deltas/s and
             # produced ~1.5s of upstream queue residence (BOOK_UPSTREAM_LAG).
             if isinstance(event, dict) and event.get("type") in (
-                "orderbook_snapshot", "orderbook_delta",
+                "orderbook_snapshot", "orderbook_delta", "orderbook_sequence_control",
             ):
                 self._apply_orderbook_on_drain(event)
                 continue
@@ -4627,7 +4629,7 @@ class KalshiWebSocketBridge:
                 _ws_forward_first_event_ts = now_mono
             _ws_forward_last_event_ts = now_mono
             self._last_message_at = replay_time()
-            if ticker not in self._first_orderbook_seen:
+            if ticker != "unknown" and ticker not in self._first_orderbook_seen:
                 self._first_orderbook_seen[ticker] = replay_time()
                 if len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
                     for _ in range(len(self._first_orderbook_seen) // 2):
@@ -4643,6 +4645,9 @@ class KalshiWebSocketBridge:
                 _BOOK_MAX_UPSTREAM_WAIT_MS,
             )
             store = get_kalshi_market_state_store()
+            if event_type == "orderbook_sequence_control":
+                store.apply_orderbook_sequence_control(event)
+                return
             _recv_ns = event.get("_t_bridge_recv_ns")
             _wait_ms = None
             if _recv_ns:
