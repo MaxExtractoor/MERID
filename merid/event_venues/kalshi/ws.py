@@ -4467,9 +4467,10 @@ class KalshiWebSocket(EventVenueStream):
         # process lifetime and starved the drain pipeline (per-ticker queue
         # overflow -> unattributed sid sequence gaps -> book invalidation
         # storms -> NOT-EXECUTABLE rejections). ``update_subscription`` with
-        # ``action=remove_markets`` prunes the sid server-side. The local
-        # discard is also unconditional now: ``orderbooks_to_drop`` is
-        # ticker-scoped (already minus the keep set), and the previous
+        # ``action=delete_markets`` (the documented verb; ``remove_markets``
+        # returns code 13 'Unsupported action') prunes the sid server-side.
+        # The local discard is also unconditional now: ``orderbooks_to_drop``
+        # is ticker-scoped (already minus the keep set), and the previous
         # ``keep_channels`` guard meant the sync path never pruned local
         # tracking either.
         if orderbooks_to_drop:
@@ -4483,17 +4484,17 @@ class KalshiWebSocket(EventVenueStream):
                         "params": {
                             "sid": _sid,
                             "market_tickers": _drop,
-                            "action": "remove_markets",
+                            "action": "delete_markets",
                         },
                     })
                     await self._ws.send(_payload)
                     logger.warning(
-                        "[WS-REMOVE-MARKETS] sent remove_markets for %d tickers on sid=%s: %s",
+                        "[WS-DELETE-MARKETS] sent delete_markets for %d tickers on sid=%s: %s",
                         len(_drop), _sid, _drop,
                     )
                 except Exception:
                     logger.exception(
-                        "[WS-REMOVE-MARKETS] send failed - applying local prune only"
+                        "[WS-DELETE-MARKETS] send failed - applying local prune only"
                     )
             for ticker in orderbooks_to_drop:
                 self._orderbook_tickers.discard(ticker)
