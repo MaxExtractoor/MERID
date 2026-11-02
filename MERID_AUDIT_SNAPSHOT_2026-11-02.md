@@ -533,3 +533,19 @@ class. Backfill candidates (evidence-preserving, marked
 d3ae entry fills' delta/proceeds correction remains a projection-layer concern,
 not a raw-row rewrite — raw rows stay as ingested, truth lives in this record +
 the versioned canonical rebuild manifest.
+
+## Runtime-state test contamination (2026-11-02)
+
+An exit-regression pytest run at 10:26:33 ET passed string paths to
+Path-based temporary stores. Their error handlers wrote test-generated
+`EXIT_STATE_CORRUPT` and `EXIT_ATTEMPTS_CORRUPT` halt events to the production
+`data/live_runtime_state.json`. Its bounded recent transition history was
+overwritten. The server had already halted entries at 09:54:47 ET after a
+reconciliation failure; that transition remains in the server log. Production
+exit-state and exit-attempt JSON files parsed successfully, and the server log
+did not show the test-generated corruption events.
+
+The persisted runtime-state file was not restored or cleared. The test
+fixtures now use Path objects and isolated runtime-state files; subsequent
+focused tests verified that the production runtime-state file did not change.
+These observations do not establish that all recovery prerequisites are met.
