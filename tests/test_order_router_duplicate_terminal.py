@@ -90,9 +90,7 @@ def test_terminal_duplicate_keeps_exit_arbiter_in_reconciliation():
 def test_post_only_reprice_mints_fresh_wire_coid():
     """The bounded post-only reprice must not reuse the consumed coid."""
     src = inspect.getsource(_or)
-    assert 'f"{intent.client_order_id}r1"' in src, (
-        "reprice must mint a fresh wire client_order_id with the r1 suffix"
-    )
+    assert '_prepare_retry_wire_attempt(intent, create_request, _rt_old_res, "reprice")' in src
     assert "reprice_of_client_order_id" in src, (
         "retry metadata must preserve the original intent-level coid"
     )

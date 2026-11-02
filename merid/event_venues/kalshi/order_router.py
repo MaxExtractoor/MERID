@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import math
 import os
@@ -55,11 +56,13 @@ from merid.observability.live_runtime_state import can_submit_live_entry
 from merid.config.observe_only import is_observe_only
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 from merid.event_venues.kalshi.models import KalshiMarketState
+from merid.event_venues.kalshi.port import CreateOrderResponse
 from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 from merid.prediction.trade_decision import (
     TRADE_DECISION_MIN_P_SELECTED,
 )
 from merid.event_venues.kalshi.order_identity import (
+    create_replacement_attempt,
     finalize_order_identity,
     OrderIdentityError,
 )
@@ -4671,6 +4674,7 @@ def _order_snapshot_to_reconciled_result(
         exchange_request_sent=True,
         exchange_ack_received=True,
         submission_certainty="ack_received",
+        wire_client_order_id=_client_order_id or intent.client_order_id,
     )
 
 
@@ -4736,21 +4740,23 @@ def _apply_reconciled_order(
     try:
         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
         _ptg = get_pre_trade_gate()
+        _gate_client_order_id = intent.client_tag or _client_order_id
         if _filled > 0:
             _ptg.mark_filled(
-                _client_order_id,
+                _gate_client_order_id,
                 int(Decimal(str(_filled))),
                 fill_id=None,
                 filled_qty_cc=int(Decimal(str(_filled)) * 100),
             )
             if _status_raw in ("canceled", "cancelled", "expired", "rejected"):
-                _ptg.mark_canceled(_client_order_id)
+                _ptg.mark_canceled(_gate_client_order_id)
         elif _status_raw in ("resting", "open"):
-            _ptg.store.mark_live(_client_order_id, _order_id)
+            _ptg.store.mark_live(_gate_client_order_id, _order_id)
         elif _status_raw in ("canceled", "cancelled"):
-            _ptg.mark_canceled(_client_order_id)
+            _ptg.mark_canceled(_gate_client_order_id)
         else:
-            _ptg.mark_rejected(_client_order_id, _status_raw or "reconciled")
+            if _result.is_terminal:
+                _ptg.mark_rejected(_gate_client_order_id, _status_raw or "reconciled")
     except Exception as _gate_err:
         logger.debug("[SUBMISSION-RECONCILE] pre-trade gate update failed: %s", _gate_err)
 
@@ -4835,8 +4841,8 @@ async def _reconcile_submission_unknown(
     it immediately and promote the state. An empty or failed lookup is
     inconclusive, so return ``None`` and retain ``submission_unknown``.
     """
-    _client_tag = intent.client_tag or ""
-    _client_order_id = intent.client_order_id or _client_tag
+    _client_order_id = intent.client_order_id or intent.client_tag or ""
+    _client_tag = _client_order_id
     _ticker = intent.ticker
     _latency = (_time.monotonic() - t0) * 1000
 
@@ -4998,6 +5004,8 @@ async def reconcile_submission_unknown_client_order_id(
         if _attempt is not None:
             intent.order_attempt_id = _attempt.order_attempt_id
             intent.intent_id = _attempt.intent_id or client_order_id
+            if _attempt.replaces_order_attempt_id:
+                intent.client_tag = _attempt.client_tag or client_order_id
     except Exception:
         pass
 
@@ -8126,6 +8134,7 @@ class OrderResult:
     exchange_request_sent: bool = False
     exchange_ack_received: bool = False
     submission_certainty: str = "pre_submit"
+    wire_client_order_id: Optional[str] = None
 
     # Successful *execution* / accepted request.  Does NOT include
     # ``unfilled_ioc`` because a zero-fill IOC is not an execution success.
@@ -8280,6 +8289,7 @@ def _duplicate_terminal_recovery_result(order_data: Any, mode: TradingMode, late
         exchange_request_sent=True,
         exchange_ack_received=True,
         submission_certainty="unknown",
+        wire_client_order_id=getattr(order_data, "client_order_id", None),
     )
 
 
@@ -8287,11 +8297,98 @@ def _create_order_outcome_needs_reconciliation(response: Any) -> bool:
     if response is None:
         return True
     if getattr(response, "success", False):
-        return False
+        try:
+            has_execution = Decimal(str(getattr(response, "filled_size", 0) or 0)) > 0
+        except Exception:
+            has_execution = False
+        status = str(getattr(response, "status", "") or "").lower()
+        return not (
+            getattr(response, "order_id", None) or has_execution
+            or status in ("accepted", "resting", "open", "filled", "executed", "partially_filled")
+        )
     reason = str(getattr(response, "error", "") or "").lower()
     if getattr(response, "status_code", None) == 409 or "duplicate" in reason:
         return False  # The duplicate lookup path reconciles the existing order.
     return getattr(response, "submission_certainty", "unknown") == "unknown"
+
+
+def _prepare_retry_wire_attempt(intent: "OrderIntent", request: Any, response: Any, kind: str) -> str:
+    """Persist and claim a new wire identity only after a confirmed cross rejection."""
+    from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+
+    if (
+        response is None or getattr(response, "success", False)
+        or getattr(response, "submission_certainty", "unknown") != "rejected"
+        or "post only cross" not in str(getattr(response, "error", "") or "").lower()
+    ):
+        raise ValueError("replacement requires a confirmed post-only cross rejection")
+    store = OrderAttemptStore()
+    parent = store.get_by_order_attempt_id(getattr(intent, "order_attempt_id", None))
+    previous_wire_id = getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+    if parent is None or parent.client_order_id != previous_wire_id:
+        raise ValueError("replacement parent identity is unavailable or inconsistent")
+    if not store.claim_confirmed_rejection_for_replacement(parent.order_attempt_id):
+        raise ValueError("replacement parent was not exclusively claimed")
+
+    wire_intent = copy.copy(intent)
+    wire_intent.time_in_force = request.time_in_force
+    wire_intent.post_only = request.post_only
+    create_replacement_attempt(wire_intent, parent.order_attempt_id, store=store)
+    request.client_order_id = wire_intent.client_order_id
+    request.idempotency_key = wire_intent.client_order_id
+    request.metadata["retry_kind"] = kind
+    request.metadata["retry_of_client_order_id"] = previous_wire_id
+    request.metadata["original_client_order_id"] = intent.client_order_id
+    request.metadata["order_attempt_id"] = wire_intent.order_attempt_id
+    request.metadata["client_order_id"] = wire_intent.client_order_id
+    intent.order_attempt_id = wire_intent.order_attempt_id
+    intent._wire_client_order_id = wire_intent.client_order_id
+    if not store.claim_for_submission(wire_intent.order_attempt_id):
+        raise ValueError("replacement submission claim failed")
+    return wire_intent.client_order_id
+
+
+async def _unknown_retry_result(
+    intent: "OrderIntent", port: Any, mode: TradingMode, t0: float,
+    reason: str, *, reconcile: bool = True,
+) -> "OrderResult":
+    """Retain the logical reservation and reconcile the actual replacement wire ID."""
+    wire_id = getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+    _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
+    try:
+        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+
+        gate = get_pre_trade_gate()
+        gate.mark_submitted(intent.client_tag or "", None)
+        gate.mark_submission_unknown(intent.client_tag or "")
+        _mark_canonical_entry_submitted(intent, order_id=None)
+    except Exception:
+        logger.exception("[RETRY-SUBMISSION-UNKNOWN] Failed to retain gate state")
+    if reconcile:
+        wire_intent = copy.copy(intent)
+        wire_intent.client_order_id = wire_id
+        try:
+            resolved = await _reconcile_submission_unknown(wire_intent, port, mode, t0)
+            if resolved is not None:
+                return resolved
+        except Exception:
+            logger.exception("[RETRY-SUBMISSION-UNKNOWN] Fast reconcile failed")
+    return OrderResult(
+        status="submission_unknown", mode=mode, reason=reason,
+        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        submission_attempted=True, exchange_request_sent=True,
+        submission_certainty="unknown", wire_client_order_id=wire_id,
+    )
+
+
+async def _dispatch_retry_request(port: Any, request: Any) -> Any:
+    try:
+        return await port.create_order(request)
+    except Exception as exc:
+        return CreateOrderResponse(
+            success=False, error=f"retry_transport_exception:{exc}",
+            client_order_id=request.client_order_id, submission_certainty="unknown",
+        )
 
 
 # ── Typed rejections and execution plan ───────────────────────────────────
@@ -17585,7 +17682,7 @@ async def _route_live(
         # same coid -> 409 duplicate carrying order_id status=canceled — the
         # rejected order DID register the coid venue-side (created then
         # auto-canceled), so reusing it guarantees a 409.  The intent-level
-        # coid stays canonical; only the wire id gets the ``r1`` suffix.
+        # coid stays canonical; a durable replacement owns the new wire ID.
         # 2026-10-08: maker->taker conversion (one-shot, bounded).  When the
         # venue rejects a post-only order as crossed — or a passive reprice
         # attempt is itself cross-rejected — the book has moved against us and
@@ -17596,7 +17693,7 @@ async def _route_live(
         # cap; the IOC limit is min(fresh_ask, cap) so we never chase beyond
         # the economic bound.  Buy-side only (entries are always buys here).
         async def _convert_to_ioc() -> bool:
-            nonlocal placed_res, latency, final_price_cents
+            nonlocal placed_res, latency, final_price_cents, effective_tif
             if getattr(intent, "_postonly_converted_taker", False):
                 return False
             _act = (getattr(intent, "action", "") or "").lower()
@@ -17736,30 +17833,31 @@ async def _route_live(
                     intent.intent_id, intent.ticker, _conv_req_err,
                 )
                 return False
-            # Fresh wire coid — the rejected maker submission consumed the
-            # original client_order_id venue-side (created then auto-canceled).
-            _conv_req.client_order_id = f"{intent.client_order_id}t1"
-            if getattr(_conv_req, "idempotency_key", None):
-                _conv_req.idempotency_key = f"{_conv_req.idempotency_key}t1"
             try:
-                _conv_req.metadata["maker_to_taker_conversion"] = True
-                _conv_req.metadata["conversion_of_client_order_id"] = getattr(
-                    intent, "client_order_id", None
+                _previous_wire_id = (
+                    getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
                 )
-            except Exception:
-                pass
-            _conv_res = await port.create_order(_conv_req)
+                _prepare_retry_wire_attempt(intent, _conv_req, placed_res, "maker_to_taker")
+                _conv_req.metadata["maker_to_taker_conversion"] = True
+                _conv_req.metadata["conversion_of_client_order_id"] = _previous_wire_id
+            except Exception as _conv_identity_err:
+                logger.exception("[MAKER->TAKER] Cannot persist retry identity")
+                intent._retry_prepare_failed = True
+                placed_res = CreateOrderResponse(
+                    success=False, error=f"retry_identity_unavailable:{_conv_identity_err}",
+                    submission_certainty="unknown",
+                )
+                return False
+            placed_res = await _dispatch_retry_request(port, _conv_req)
+            effective_tif = "ioc"
             latency = (_time.monotonic() - t0) * 1000
             logger.info(
                 "[MAKER->TAKER] intent_id=%s ticker=%s fresh_ask=%dc "
                 "edge_cap=%dc ioc_price=%dc success=%s",
                 intent.intent_id, intent.ticker, _cb_ask, _cap,
-                int(intent.price_cents), bool(getattr(_conv_res, "success", False)),
+                int(intent.price_cents), bool(getattr(placed_res, "success", False)),
             )
-            if getattr(_conv_res, "success", False):
-                placed_res = _conv_res
-                return True
-            return False
+            return bool(getattr(placed_res, "success", False))
 
         _po_err_lower = str(getattr(placed_res, "error", "") or "").lower()
         if (
@@ -17795,23 +17893,20 @@ async def _route_live(
                             expiration_ts=resolved_tif.expiration_time,
                             post_only=effective_post_only,
                         )
-                        # Fresh wire coid for the retry (see header note) —
-                        # the rejected order already consumed the original.
-                        _rt_coid = f"{intent.client_order_id}r1"
-                        create_request.client_order_id = _rt_coid
-                        if getattr(create_request, "idempotency_key", None):
-                            create_request.idempotency_key = (
-                                f"{create_request.idempotency_key}r1"
-                            )
-                        try:
-                            create_request.metadata[
-                                "reprice_of_client_order_id"
-                            ] = getattr(intent, "client_order_id", None)
-                            create_request.metadata["client_order_id"] = _rt_coid
-                        except Exception:
-                            pass
                         _rt_old_res = placed_res
-                        placed_res = await port.create_order(create_request)
+                        try:
+                            _previous_wire_id = (
+                                getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+                            )
+                            _prepare_retry_wire_attempt(intent, create_request, _rt_old_res, "reprice")
+                            create_request.metadata["reprice_of_client_order_id"] = _previous_wire_id
+                        except Exception as _rt_identity_err:
+                            logger.exception("[POST-ONLY-REPRICE] Cannot persist retry identity")
+                            return await _unknown_retry_result(
+                                intent, port, mode, t0,
+                                f"retry_identity_unavailable:{_rt_identity_err}", reconcile=False,
+                            )
+                        placed_res = await _dispatch_retry_request(port, create_request)
                         latency = (_time.monotonic() - t0) * 1000
                         _rt_ev = getattr(intent, "ev_net_cents", None)
                         _rt_ev_new = (
@@ -17837,6 +17932,7 @@ async def _route_live(
                         if (
                             placed_res is not None
                             and not placed_res.success
+                            and getattr(placed_res, "submission_certainty", "unknown") == "rejected"
                             and "post only cross"
                             in str(getattr(placed_res, "error", "") or "").lower()
                         ):
@@ -17878,6 +17974,15 @@ async def _route_live(
             and _is_exit_order(intent)
         ):
             await _convert_to_ioc()
+
+        if getattr(intent, "_retry_prepare_failed", False) or (
+            getattr(intent, "_wire_client_order_id", None)
+            and _create_order_outcome_needs_reconciliation(placed_res)
+        ):
+            return await _unknown_retry_result(
+                intent, port, mode, t0, "retry_submission_unknown",
+                reconcile=not getattr(intent, "_retry_prepare_failed", False),
+            )
 
         # 2026-09-29: consolidated pipeline stage timing — decision age,
         # router-entry to economics revalidation, revalidation to wire, wire
@@ -18233,7 +18338,10 @@ async def _route_live(
             # intents submit with ``client_order_id`` (exit_*) while
             # ``client_tag`` stays merid-*.  Looking up by client_tag always
             # misses for exits -> DUPLICATE_UNKNOWN -> resubmit -> 409 churn.
-            _wire_coid = intent.client_order_id or intent.client_tag
+            _wire_coid = (
+                getattr(intent, "_wire_client_order_id", None)
+                or intent.client_order_id or intent.client_tag
+            )
             logger.info(
                 "[KALSHI_DUPLICATE_SUCCESS] ticker=%s client_order_id=%s — order already accepted, treating as success",
                 intent.ticker,
@@ -18242,6 +18350,13 @@ async def _route_live(
             try:
                 # Query Kalshi (via the port) to reconcile actual exchange state
                 order_data = await port.get_order(client_order_id=_wire_coid)
+                if order_data is not None and not _matches_client_identity(
+                    order_data, _wire_coid, _wire_coid
+                ):
+                    logger.warning(
+                        "[KALSHI_DUPLICATE] lookup identity mismatch for %s", _wire_coid
+                    )
+                    order_data = None
                 if order_data is not None:
                     # 2026-10-04: honor the venue status, not just existence.
                     # A duplicate coid can resolve to a TERMINAL order
@@ -18560,7 +18675,10 @@ async def _route_live(
         # This updates the pre-registered mapping with the canonical wire client_order_id so
         # HTTP/WS fills that omit client_order_id can still recover the same key used by
         # register_tp_targets and position_cache._pending_tp_targets.
-        _canonical_coid = intent.client_order_id or intent.client_tag or intent.intent_id
+        _canonical_coid = (
+            getattr(intent, "_wire_client_order_id", None)
+            or intent.client_order_id or intent.client_tag or intent.intent_id
+        )
         if _venue_oid and _venue_oid != "unknown" and _canonical_coid:
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -19122,6 +19240,9 @@ async def _route_live(
                 "net_edge_at_fill_cents": _compute_net_edge_at_fill(intent, fill_price_cents),
                 "order_id": placed_res.order_id,
                 "client_tag": intent.client_tag,
+                "wire_client_order_id": (
+                    getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+                ),
                 "status": placed_res.status,
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "simulated": False,
@@ -19131,6 +19252,9 @@ async def _route_live(
             exchange_request_sent=True,
             exchange_ack_received=True,
             submission_certainty="ack_received",
+            wire_client_order_id=(
+                getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+            ),
         )
     except Exception as exc:
         latency = (_time.monotonic() - t0) * 1000
@@ -19153,6 +19277,9 @@ async def _route_live(
                 latency_ms=round(latency, 2),
                 submission_attempted=True, exchange_request_sent=True,
                 submission_certainty="unknown",
+                wire_client_order_id=(
+                    getattr(intent, "_wire_client_order_id", None) or intent.client_order_id
+                ),
             )
         # BUG-03 fix: release reserved exposure on unexpected exception.
         if _exp_tracker and _reserved_category and _reserved_underlying:

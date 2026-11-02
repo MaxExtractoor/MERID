@@ -3287,6 +3287,7 @@ class PositionMonitor:
         # must run before the RESOLVING_ON_EXCHANGE transition below, which
         # would otherwise mask the INTENT_PERSISTED state it checks.
         wire_client_order_id = client_order_id
+        unresolved_replacement = False
         if client_order_id:
             try:
                 from merid.event_venues.kalshi.order_attempt_store import (
@@ -3300,6 +3301,12 @@ class PositionMonitor:
                     if _wire_attempt is None:
                         raise ValueError("missing order-attempt replacement chain")
                     wire_client_order_id = _wire_attempt.client_order_id
+                    unresolved_replacement = (
+                        wire_client_order_id != client_order_id
+                        and _wire_attempt.status in (
+                            "PERSISTED", "SUBMITTING", "SUBMISSION_UNKNOWN", "ACKNOWLEDGED"
+                        )
+                    )
                 # Age bound: a live worker between attempt creation and the
                 # submission claim presents the same shape.  Observed
                 # event-loop starvation can stretch that gap to ~60s; an
@@ -3358,7 +3365,7 @@ class PositionMonitor:
                         _flat_ticker = getattr(_er, "ticker", None)
                     except Exception:
                         _flat_ticker = None
-                if _flat_ticker and await self._resolve_exchange_confirmed_flat(
+                if not unresolved_replacement and _flat_ticker and await self._resolve_exchange_confirmed_flat(
                     position_id, _flat_ticker, client_order_id,
                     evidence_context="position_missing_from_cache",
                 ):
@@ -3373,7 +3380,7 @@ class PositionMonitor:
                 # Cached size is zero — verify against exchange inventory.
                 # Verified flat resolves the intent; an unverifiable or
                 # still-open exchange position retains SUBMISSION_UNKNOWN.
-                if await self._resolve_exchange_confirmed_flat(
+                if not unresolved_replacement and await self._resolve_exchange_confirmed_flat(
                     position_id, position.market_id, client_order_id,
                     evidence_context="cached_size_zero",
                 ):
@@ -3448,7 +3455,7 @@ class PositionMonitor:
                                 client_order_id[:8], status, position_id[:8]
                             )
                             if not self._update_order_attempt_status(
-                                client_order_id, status.upper(), reason=f"reconcile_order_{status}",
+                                wire_client_order_id, status.upper(), reason=f"reconcile_order_{status}",
                                 raw_payload=raw,
                             ):
                                 logger.error(
@@ -3529,7 +3536,7 @@ class PositionMonitor:
             # view means the exit requirement no longer exists regardless of
             # the order's fate (e.g. settlement or an untracked fill removed
             # the exposure); anything unverifiable stays unresolved.
-            if await self._resolve_exchange_confirmed_flat(
+            if not unresolved_replacement and await self._resolve_exchange_confirmed_flat(
                 position_id, position.market_id, client_order_id,
                 evidence_context="order_lookup_inconclusive",
             ):

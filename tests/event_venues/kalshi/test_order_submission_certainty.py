@@ -7,7 +7,7 @@ import pytest
 from merid.event_venues.kalshi.order_router import (
     _create_order_outcome_needs_reconciliation,
 )
-from merid.event_venues.kalshi.port import CreateOrderRequest
+from merid.event_venues.kalshi.port import CreateOrderRequest, CreateOrderResponse
 from merid.event_venues.kalshi.venue_client_port import KalshiVenueClientExecutionPort
 from merid.resilience.result import OperationResult
 
@@ -65,3 +65,16 @@ async def test_empty_success_is_ambiguous(monkeypatch):
     assert response.submission_certainty == "unknown"
     assert _create_order_outcome_needs_reconciliation(response)
     assert _create_order_outcome_needs_reconciliation(None)
+
+
+@pytest.mark.parametrize(
+    ("response", "needs_reconciliation"),
+    [
+        (CreateOrderResponse(success=True), True),
+        (CreateOrderResponse(success=True, order_id="order-1"), False),
+        (CreateOrderResponse(success=True, status="accepted"), False),
+        (CreateOrderResponse(success=True, status="resting"), False),
+    ],
+)
+def test_success_requires_venue_acceptance_evidence(response, needs_reconciliation):
+    assert _create_order_outcome_needs_reconciliation(response) is needs_reconciliation

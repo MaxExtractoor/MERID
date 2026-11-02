@@ -96,7 +96,7 @@ class TestMakerToTakerConversion(unittest.TestCase):
         src = self._src()
         conv_pos = src.find("async def _convert_to_ioc")
         assert conv_pos > 0
-        seg = src[conv_pos:conv_pos + 6000]
+        seg = src[conv_pos:src.index("\n        _po_err_lower =", conv_pos)]
         assert 'effective_tif="ioc"' in seg
         assert "post_only=False" in seg
 
@@ -105,17 +105,16 @@ class TestMakerToTakerConversion(unittest.TestCase):
         the IOC limit is min(ask, cap) — never chase beyond the economic bound."""
         src = self._src()
         conv_pos = src.find("async def _convert_to_ioc")
-        seg = src[conv_pos:conv_pos + 6000]
+        seg = src[conv_pos:src.index("\n        _po_err_lower =", conv_pos)]
         assert "_max_edge_preserving_buy_price(intent)" in seg
         assert "_cb_ask <= 0 or _cb_ask > _cap" in seg
         assert "min(_cb_ask, _cap)" in seg
 
     def test_conversion_mints_fresh_wire_coid(self):
         """The rejected maker submission consumed the coid venue-side — the
-        conversion must mint a fresh wire id ('t1') mirroring the 'r1'
-        reprice convention, else Kalshi 409-duplicates it."""
+        conversion must persist a fresh wire id, else Kalshi 409-duplicates it."""
         src = self._src()
-        assert 'f"{intent.client_order_id}t1"' in src
+        assert '_prepare_retry_wire_attempt(intent, _conv_req, placed_res, "maker_to_taker")' in src
         assert "maker_to_taker_conversion" in src
         assert "conversion_of_client_order_id" in src
 

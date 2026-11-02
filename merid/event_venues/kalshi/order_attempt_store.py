@@ -567,6 +567,24 @@ class OrderAttemptStore:
             if conn is not self._persistent_conn:
                 conn.close()
 
+    def claim_confirmed_rejection_for_replacement(self, order_attempt_id: str) -> bool:
+        """Atomically consume a rejected in-flight attempt before replacing it."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE order_attempts SET status = 'REJECTED', updated_at = ? "
+                "WHERE order_attempt_id = ? AND status = 'SUBMITTING'",
+                (self._now(), order_attempt_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            logger.exception("[ORDER-ATTEMPT-STORE] Failed to claim confirmed rejection")
+            return False
+        finally:
+            if conn is not self._persistent_conn:
+                conn.close()
+
     def update_status(
         self,
         order_attempt_id: str,

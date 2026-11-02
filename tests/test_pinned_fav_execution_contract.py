@@ -125,9 +125,9 @@ def test_ioc_conversion_honors_allow_taker_fallback():
     """AST pin: the maker->taker conversion in route_order_async must gate
     entries on execution_policy.allow_taker_fallback so a maker lane can
     never be downgraded to taker on post-only-cross."""
-    with open("merid/event_venues/kalshi/order_router.py", "r",
-              encoding="utf-8") as f:
-        src = f.read()
+    import inspect
+    from merid.event_venues.kalshi import order_router
+    src = inspect.getsource(order_router)
     tree = ast.parse(src)
     conv = None
 

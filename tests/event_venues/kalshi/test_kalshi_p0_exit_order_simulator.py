@@ -252,6 +252,67 @@ async def test_post_send_failure_keeps_exit_reservation(client, monkeypatch, tmp
     assert client._position_yes[TICKER] == Decimal("5")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_outcome", ["server_error", "exception"])
+async def test_ambiguous_conversion_uses_durable_child_wire_id(
+    client, monkeypatch, tmp_path, retry_outcome,
+):
+    from unittest.mock import AsyncMock
+    from merid.event_venues.kalshi import order_attempt_store
+
+    monkeypatch.setattr(order_attempt_store, "DEFAULT_DB_PATH", str(tmp_path / "attempts.db"))
+    client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
+    client.set_orderbook(
+        TICKER, best_bid_cents=50, best_ask_cents=60,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    second = (
+        CreateOrderResponse(
+            success=False, error="HTTP 503", status_code=503,
+            submission_certainty="unknown",
+        ) if retry_outcome == "server_error" else RuntimeError("lost retry response")
+    )
+    create = AsyncMock(side_effect=[
+        CreateOrderResponse(
+            success=False, error="post only cross", status_code=400,
+            submission_certainty="rejected",
+        ),
+        second,
+    ])
+    monkeypatch.setattr(client, "create_order", create)
+    monkeypatch.setattr(client, "get_orderbook", AsyncMock(return_value=SimpleNamespace(
+        success=True, yes_levels=[SimpleNamespace(price_cents=50)],
+        no_levels=[SimpleNamespace(price_cents=40)], timestamp=time.time(),
+    )), raising=False)
+    intent = _exit_intent(price_cents=50, count=2, tif="gtc")
+    intent.post_only = True
+    intent.order_expiration_ts = int(time.time()) + 180
+    original = _reserve_gate(intent, monkeypatch)
+    store = order_attempt_store.OrderAttemptStore()
+    exit_attempt = store.create_exit_attempt(
+        exit_intent_id=intent.intent_id, position_key="position-1", ticker=TICKER,
+        reason="test", client_order_id=original, requested_quantity=200,
+    )
+
+    result = await _route(intent)
+
+    assert create.await_count == 2
+    first = create.await_args_list[0].args[0]
+    retry = create.await_args_list[1].args[0]
+    assert first.client_order_id == original
+    assert retry.client_order_id != original
+    assert result.status == "submission_unknown"
+    assert result.wire_client_order_id == retry.client_order_id
+    parent = store.get_by_client_order_id(original)
+    child = store.get_latest_wire_attempt(original)
+    assert parent.status == "REJECTED"
+    assert child.client_order_id == retry.client_order_id
+    assert child.status == "SUBMISSION_UNKNOWN"
+    assert child.replaces_order_attempt_id == parent.order_attempt_id
+    assert store.get_exit_attempt_by_wire_client_order_id(retry.client_order_id) == exit_attempt
+    assert _gate_record(original).status == OrderStatus.SUBMISSION_UNKNOWN
+
+
 # ---------------------------------------------------------------------------
 # Exit order scenarios
 # ---------------------------------------------------------------------------
