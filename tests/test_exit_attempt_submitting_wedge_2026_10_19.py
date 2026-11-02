@@ -133,6 +133,14 @@ class TestPostRouteUpdateUnhandledStatuses:
             PKEY, _result("rejected", exchange_ack_received=True), arbiter=arb)
         assert arb.attempt_store.get_active(PKEY).state == AttemptState.RETRY_ELIGIBLE
 
+    def test_contradictory_ack_does_not_prove_pre_submit(self, tmp_path):
+        arb = _mint(tmp_path)
+        post_route_update(
+            PKEY, _result("rejected", submission_attempted=False,
+                          submission_certainty="pre_submit",
+                          exchange_ack_received=True), arbiter=arb)
+        assert arb.attempt_store.get_active(PKEY).state == AttemptState.ACK_UNKNOWN
+
     def test_duplicate_marks_ack_unknown(self, tmp_path):
         """A router-level duplicate leaves ownership with another in-flight
         route — the outcome is unknown, so reconcile must observe it."""

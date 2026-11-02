@@ -796,8 +796,11 @@ def post_route_update(
         attempted = bool(getattr(order_result, "submission_attempted", False))
         sent = bool(getattr(order_result, "exchange_request_sent", False))
         ack = bool(getattr(order_result, "exchange_ack_received", False))
-        never_sent = certainty == "pre_submit" and not attempted and not sent and not _oid
-        confirmed_rejected = status == "rejected" and ack
+        never_sent = (
+            certainty == "pre_submit" and not attempted and not sent
+            and not ack and not _oid
+        )
+        confirmed_rejected = status == "rejected" and ack and (attempted or sent)
         if never_sent or confirmed_rejected:
             arb.begin_reconcile(position_key)
             arb.resolve_reconcile(position_key, ReconcileEvidence(
