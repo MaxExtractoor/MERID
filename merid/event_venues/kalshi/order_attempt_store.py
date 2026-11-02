@@ -458,6 +458,30 @@ class OrderAttemptStore:
         )
         return [OrderAttemptRecord.from_row(r) for r in cur.fetchall()]
 
+    def get_latest_wire_attempt(self, client_order_id: str) -> Optional[OrderAttemptRecord]:
+        """Follow the durable replacement chain from a logical order's first wire ID."""
+        current = self.get_by_client_order_id(client_order_id)
+        if current is None:
+            return None
+        conn = self._get_conn()
+        seen = set()
+        while True:
+            if current.order_attempt_id in seen:
+                raise ValueError("cyclic order-attempt replacement chain")
+            seen.add(current.order_attempt_id)
+            rows = conn.execute(
+                "SELECT * FROM order_attempts WHERE replaces_order_attempt_id = ?",
+                (current.order_attempt_id,),
+            ).fetchall()
+            if not rows:
+                return current
+            if len(rows) != 1:
+                raise ValueError("ambiguous order-attempt replacement chain")
+            child = OrderAttemptRecord.from_row(rows[0])
+            if child.intent_id != current.intent_id:
+                raise ValueError("replacement attempt belongs to a different intent")
+            current = child
+
     def get_by_decision_id(self, decision_id: str) -> List[OrderAttemptRecord]:
         conn = self._get_conn()
         cur = conn.execute(
@@ -966,7 +990,32 @@ class OrderAttemptStore:
             (f"{client_order_id}:superseded:%",),
         )
         row = cur.fetchone()
-        return ExitOrderAttemptRecord.from_row(row) if row else None
+        if row:
+            return ExitOrderAttemptRecord.from_row(row)
+
+        # A bounded reprice/conversion has its own durable wire identity but
+        # belongs to the original exit obligation. Follow parent links instead
+        # of assuming a wire suffix or mutating historical exit records.
+        child = self.get_by_client_order_id(client_order_id)
+        seen = set()
+        while child is not None and child.replaces_order_attempt_id:
+            if child.order_attempt_id in seen:
+                raise ValueError("cyclic order-attempt replacement chain")
+            seen.add(child.order_attempt_id)
+            parent = self.get_by_order_attempt_id(child.replaces_order_attempt_id)
+            if parent is None or parent.intent_id != child.intent_id:
+                raise ValueError("invalid order-attempt replacement chain")
+            record = self.get_exit_attempt_by_client_order_id(parent.client_order_id)
+            if record is not None:
+                return record
+            row = conn.execute(
+                "SELECT * FROM exit_order_attempts WHERE client_order_id LIKE ?",
+                (f"{parent.client_order_id}:superseded:%",),
+            ).fetchone()
+            if row:
+                return ExitOrderAttemptRecord.from_row(row)
+            child = parent
+        return None
 
     def exit_attempt_by_fill_reason(self, fill_id: str) -> Optional[str]:
         """Return the attempt_id a fill_id was already applied to, if any.
