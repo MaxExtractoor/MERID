@@ -84,7 +84,11 @@ class _DynamicRiskStub:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _isolate_gate_and_lease():
+def _isolate_gate_and_lease(tmp_path, monkeypatch):
+    from merid.event_venues.kalshi import order_attempt_store
+
+    monkeypatch.setattr(order_attempt_store, "DEFAULT_DB_PATH", str(tmp_path / "attempts.db"))
+    monkeypatch.setattr(order_attempt_store.OrderAttemptStore, "_instances", {})
     reset_pre_trade_gate_for_testing()
     reset_contract_lease_registry_for_testing()
     yield
@@ -220,7 +224,7 @@ async def _route(intent: OrderIntent):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["server_error", "exception"])
+@pytest.mark.parametrize("outcome", ["server_error", "exception", "invalid_quantity"])
 async def test_post_send_failure_keeps_exit_reservation(client, monkeypatch, tmp_path, outcome):
     from unittest.mock import AsyncMock
     from merid.event_venues.kalshi import order_attempt_store
@@ -236,6 +240,12 @@ async def test_post_send_failure_keeps_exit_reservation(client, monkeypatch, tmp
         create = AsyncMock(return_value=CreateOrderResponse(
             success=False, error="HTTP 503", status_code=503,
             submission_certainty="unknown",
+        ))
+    elif outcome == "invalid_quantity":
+        create = AsyncMock(return_value=CreateOrderResponse(
+            success=True, order_id="order-1", status="filled",
+            filled_size=Decimal("0.001"), remaining_size=Decimal("1.999"),
+            submission_certainty="ack_received",
         ))
     else:
         create = AsyncMock(side_effect=RuntimeError("connection dropped after send"))
@@ -419,8 +429,8 @@ async def test_exit_order_partial_fill(client: DeterministicKalshiClient, monkey
 
     result = await _route(intent)
 
-    # Partial fill is still exposure-affecting: filled_live with partial detail.
-    assert result.status == "filled_live", result.reason
+    # The IOC executed only part of its requested quantity.
+    assert result.status == "partial_live", result.reason
     assert result.fill["count"] == 1
     assert result.fill["requested_count"] == 2
     assert result.fill["partial"] is True
@@ -440,6 +450,17 @@ async def test_exit_order_zero_fill_ioc(client: DeterministicKalshiClient, monke
     # Bid below our limit: a sell at 50 does not cross a 40c bid.
     client.set_orderbook(TICKER, best_bid_cents=40, best_ask_cents=60,
                          bid_size=Decimal("10"), ask_size=Decimal("10"))
+    create_order = client.create_order
+
+    async def canceled_ioc(request):
+        response = await create_order(request)
+        # The simulator knows its zero-fill IOC is terminal; make that
+        # cancellation explicit instead of relying on its generic "unfilled".
+        if response.status == "unfilled":
+            response.status = "canceled"
+        return response
+
+    monkeypatch.setattr(client, "create_order", canceled_ioc)
 
     intent = _exit_intent(price_cents=50, count=2)
     coid = _reserve_gate(intent, monkeypatch)
@@ -447,6 +468,7 @@ async def test_exit_order_zero_fill_ioc(client: DeterministicKalshiClient, monke
     result = await _route(intent)
 
     assert result.status == "unfilled_ioc", (result.status, result.reason)
+    assert result.fill["requested_count"] == 2
     assert client._position_yes[TICKER] == Decimal("5")
     assert (await client.get_open_orders_result()).data == []
     assert client._fills == []
@@ -534,7 +556,8 @@ async def test_exit_order_cancel_after_partial_fill(
 
     result = await _route(intent)
 
-    assert result.status == "filled_live", result.reason
+    assert result.status == "submitted_live", result.reason
+    assert not result.is_terminal
     assert result.fill["count"] == 3
     assert result.fill["remaining_count"] == 2
     assert result.fill["partial"] is True
@@ -560,14 +583,10 @@ async def test_exit_order_cancel_after_partial_fill(
 
 
 @pytest.mark.asyncio
-async def test_exit_order_timeout_after_submit_not_submitted(
+async def test_exit_order_timeout_after_submit_empty_lookup_remains_unknown(
     client: DeterministicKalshiClient, monkeypatch,
 ) -> None:
-    """Lost ack plus an authoritative empty broker lookup returns not_submitted.
-
-    This is the signal that the POST never reached the exchange, so the
-    caller can safely resubmit with the same client_order_id.
-    """
+    """A lost acknowledgement and empty lookups cannot prove a POST was not sent."""
     client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
     client.set_orderbook(TICKER, best_bid_cents=50, best_ask_cents=60,
                          bid_size=Decimal("10"), ask_size=Decimal("10"))
@@ -588,9 +607,9 @@ async def test_exit_order_timeout_after_submit_not_submitted(
 
     result = await _route(intent)
 
-    assert result.status == "not_submitted", (result.status, result.reason)
-    assert not result.requires_recovery
-    assert "authoritative_lookup_empty" in result.reason
+    assert result.status == "submission_unknown", (result.status, result.reason)
+    assert result.requires_recovery
+    assert "timeout_after_submit" in result.reason
 
     rec = _gate_record(coid)
     assert rec is not None

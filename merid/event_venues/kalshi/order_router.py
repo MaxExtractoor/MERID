@@ -18568,24 +18568,33 @@ async def _route_live(
         # the authoritative requested size for fill reconciliation.
         # Fixed-point intent count is the authority for fractional orders; the
         # legacy int helper would truncate 0.11 -> 0 and misclassify partials.
-        _intent_count_fp = (
-            Decimal(str(intent.count_fp)) if intent.count_fp is not None
-            else Decimal(str(intent.count or 0))
-        )
+        try:
+            _intent_count_fp = (
+                Decimal(str(intent.count_fp)) if intent.count_fp is not None
+                else Decimal(str(intent.count or 0))
+            )
+            filled_count_fp = Decimal(str(placed_res.filled_size or 0))
+            remaining_count_fp = (
+                Decimal(str(placed_res.remaining_size))
+                if placed_res.remaining_size is not None
+                else _intent_count_fp - filled_count_fp
+            )
+            for _quantity in (_intent_count_fp, filled_count_fp, remaining_count_fp):
+                _cc = _quantity * Decimal("100")
+                if not _quantity.is_finite() or _quantity < 0 or _cc != _cc.to_integral_value():
+                    raise ValueError("invalid or unsupported order quantity")
+            if _intent_count_fp <= 0 or filled_count_fp + remaining_count_fp > _intent_count_fp:
+                raise ValueError("inconsistent order quantities")
+        except (ValueError, TypeError, ArithmeticError) as _quantity_err:
+            logger.error("[ORDER-ACK] Invalid quantity evidence: %s", _quantity_err)
+            return await _unknown_retry_result(
+                intent, port, mode, t0, f"invalid_order_quantity:{_quantity_err}",
+                reconcile=False,
+            )
         requested_count = _resolve_requested_count(None, intent.count) if _intent_count_fp >= 1 else float(_intent_count_fp)
-        filled_count_fp = Decimal(str(placed_res.filled_size or 0))
-        remaining_count_fp = (
-            Decimal(str(placed_res.remaining_size))
-            if placed_res.remaining_size is not None
-            else max(Decimal("0"), _intent_count_fp - filled_count_fp)
-        )
-        # Authoritative requested size from the V2 response, falling back to the
-        # fixed-point intent count.  Integer display counts are floors.
-        requested_count_fp = (
-            filled_count_fp + remaining_count_fp
-            if placed_res.remaining_size is not None
-            else _intent_count_fp
-        )
+        # Canceled IOC quantity is no longer in remaining_size; the sent
+        # intent, not filled + remaining, is the requested quantity.
+        requested_count_fp = _intent_count_fp
         # Canonical centi-contract quantities for fractional fills.
         _filled_quantity_cc = int(filled_count_fp * Decimal("100"))
         _remaining_quantity_cc = int(remaining_count_fp * Decimal("100"))
