@@ -1003,9 +1003,10 @@ class OrderAttemptStore:
         if record is not None:
             return record
         conn = self._get_conn()
+        tombstone_prefix = f"{client_order_id}:superseded:"
         cur = conn.execute(
-            "SELECT * FROM exit_order_attempts WHERE client_order_id LIKE ?",
-            (f"{client_order_id}:superseded:%",),
+            "SELECT * FROM exit_order_attempts WHERE substr(client_order_id, 1, ?) = ?",
+            (len(tombstone_prefix), tombstone_prefix),
         )
         row = cur.fetchone()
         if row:
@@ -1026,9 +1027,10 @@ class OrderAttemptStore:
             record = self.get_exit_attempt_by_client_order_id(parent.client_order_id)
             if record is not None:
                 return record
+            tombstone_prefix = f"{parent.client_order_id}:superseded:"
             row = conn.execute(
-                "SELECT * FROM exit_order_attempts WHERE client_order_id LIKE ?",
-                (f"{parent.client_order_id}:superseded:%",),
+                "SELECT * FROM exit_order_attempts WHERE substr(client_order_id, 1, ?) = ?",
+                (len(tombstone_prefix), tombstone_prefix),
             ).fetchone()
             if row:
                 return ExitOrderAttemptRecord.from_row(row)

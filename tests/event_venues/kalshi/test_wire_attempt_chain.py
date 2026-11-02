@@ -50,6 +50,20 @@ def test_wire_chain_rejects_forks_and_wrong_intent(tmp_path):
         store.get_exit_attempt_by_wire_client_order_id("wrong")
 
 
+def test_superseded_lookup_treats_wire_id_as_literal(tmp_path):
+    store = OrderAttemptStore(tmp_path / "attempts.db")
+    store.create_exit_attempt(
+        exit_intent_id="intent-other", position_key="other", ticker="KXTEST",
+        reason="exit", client_order_id="exitXabc:superseded:1", requested_quantity=100,
+    )
+    assert store.get_exit_attempt_by_wire_client_order_id("exit_abc") is None
+    expected = store.create_exit_attempt(
+        exit_intent_id="intent-1", position_key="position-1", ticker="KXTEST",
+        reason="exit", client_order_id="exit_abc:superseded:2", requested_quantity=100,
+    )
+    assert store.get_exit_attempt_by_wire_client_order_id("exit_abc") == expected
+
+
 def test_retry_identity_is_persisted_and_claimed_before_send(tmp_path, monkeypatch):
     from merid.event_venues.kalshi import order_attempt_store as attempts
     from merid.event_venues.kalshi.order_router import OrderIntent, _prepare_retry_wire_attempt
