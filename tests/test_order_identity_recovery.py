@@ -431,6 +431,139 @@ async def _route(intent: OrderIntent) -> OrderResult:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_outcome", ["server_error", "exception"])
+async def test_entry_reprice_unknown_reconciles_child_wire_id(
+    client, attempt_store, monkeypatch, retry_outcome,
+):
+    from unittest.mock import AsyncMock
+
+    ticker = "KXBTC15M-REPRICE-50000"
+    client.set_market(
+        ticker, SimpleNamespace(best_bid=45, best_ask=55, volume=1000,
+                                open_interest=1000, active=True, resolved=False),
+    )
+    client.set_orderbook(
+        ticker, best_bid_cents=45, best_ask_cents=55,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    intent = _base_intent(
+        ticker=ticker, price_cents=50, tif="gtc", post_only=True,
+        order_expiration_ts=int(time.time()) + 3600,
+    )
+    original = _reserve_gate(intent, monkeypatch)
+    finalize_order_identity(intent, store=attempt_store)
+    parent_id = intent.order_attempt_id
+    second = (
+        CreateOrderResponse(success=False, error="503", status_code=503,
+                            submission_certainty="unknown")
+        if retry_outcome == "server_error" else RuntimeError("retry response lost")
+    )
+    create = AsyncMock(side_effect=[
+        CreateOrderResponse(success=False, error="post only cross", status_code=400,
+                            submission_certainty="rejected"),
+        second,
+    ])
+    monkeypatch.setattr(client, "create_order", create)
+    monkeypatch.setattr(client, "get_orderbook", AsyncMock(side_effect=[
+        SimpleNamespace(
+            success=True, yes_levels=[SimpleNamespace(price_cents=45)],
+            no_levels=[SimpleNamespace(price_cents=45)], timestamp=time.time(),
+        ),
+        SimpleNamespace(
+            success=True, yes_levels=[SimpleNamespace(price_cents=45)],
+            no_levels=[SimpleNamespace(price_cents=52)], timestamp=time.time(),
+        ),
+    ]), raising=False)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(client, "get_order", lookup)
+
+    result = await _route(intent)
+
+    assert create.await_count == 2, result
+    first, retry = (call.args[0] for call in create.await_args_list)
+    assert first.client_order_id == original
+    assert retry.client_order_id != original
+    assert result.status == "submission_unknown"
+    assert result.wire_client_order_id == retry.client_order_id
+    lookup.assert_awaited_with(client_order_id=retry.client_order_id, market_id=None)
+    assert attempt_store.get_by_order_attempt_id(parent_id).status == "REJECTED"
+    child = attempt_store.get_latest_wire_attempt(original)
+    assert child.client_order_id == retry.client_order_id
+    assert child.replaces_order_attempt_id == parent_id
+    assert child.status == "SUBMISSION_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_entry_reprice_then_conversion_tracks_three_wire_ids(
+    client, attempt_store, monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    ticker = "KXBTC15M-DOUBLE-CROSS-50000"
+    client.set_market(
+        ticker, SimpleNamespace(best_bid=45, best_ask=55, volume=1000,
+                                open_interest=1000, active=True, resolved=False),
+    )
+    client.set_orderbook(
+        ticker, best_bid_cents=45, best_ask_cents=55,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    intent = _base_intent(
+        ticker=ticker, price_cents=50, tif="gtc", post_only=True,
+        order_expiration_ts=int(time.time()) + 3600,
+    )
+    original = _reserve_gate(intent, monkeypatch)
+    finalize_order_identity(intent, store=attempt_store)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router._max_edge_preserving_buy_price",
+        lambda _: 60,
+    )
+    monkeypatch.setenv("MERID_MAKER_TAKER_DRIFT_VETO_C", "100")
+    cross = CreateOrderResponse(
+        success=False, error="post only cross", status_code=400,
+        submission_certainty="rejected",
+    )
+    create = AsyncMock(side_effect=[
+        cross, cross,
+        CreateOrderResponse(success=False, error="503", status_code=503,
+                            submission_certainty="unknown"),
+    ])
+    monkeypatch.setattr(client, "create_order", create)
+    books = [
+        SimpleNamespace(
+            success=True, yes_levels=[SimpleNamespace(price_cents=45)],
+            no_levels=[SimpleNamespace(price_cents=no_bid)], timestamp=time.time(),
+        )
+        for no_bid in (45, 52, 52)
+    ]
+    monkeypatch.setattr(client, "get_orderbook", AsyncMock(side_effect=books), raising=False)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(client, "get_order", lookup)
+
+    result = await _route(intent)
+
+    assert create.await_count == 3, result
+    requests = [call.args[0] for call in create.await_args_list]
+    wire_ids = [request.client_order_id for request in requests]
+    assert wire_ids[0] == original
+    assert len(set(wire_ids)) == 3
+    assert requests[1].post_only is True
+    assert requests[2].post_only is False
+    assert requests[2].time_in_force.upper() == "IOC"
+    assert result.status == "submission_unknown"
+    assert result.wire_client_order_id == wire_ids[2]
+    lookup.assert_awaited_with(client_order_id=wire_ids[2], market_id=None)
+    parent, reprice, conversion = (
+        attempt_store.get_by_client_order_id(coid) for coid in wire_ids
+    )
+    assert [parent.status, reprice.status, conversion.status] == [
+        "REJECTED", "REJECTED", "SUBMISSION_UNKNOWN",
+    ]
+    assert reprice.replaces_order_attempt_id == parent.order_attempt_id
+    assert conversion.replaces_order_attempt_id == reprice.order_attempt_id
+
+
+@pytest.mark.asyncio
 async def test_failed_submission_claim_never_sends(client, attempt_store, monkeypatch):
     ticker = "KXBTC15M-CLAIM-50000"
     client.set_market(
