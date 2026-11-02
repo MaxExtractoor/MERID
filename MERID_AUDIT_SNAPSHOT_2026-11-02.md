@@ -610,3 +610,28 @@ The logger now supports an explicit `MERID_LOG_DIR` override for both log
 handlers; further tests should set it before importing application modules.
 The running process was not restarted. At 12:06 ET it remained halted on
 reconciliation failure while the Kalshi circuit was open.
+
+## Order recovery follow-up (2026-11-02)
+
+Local commits `5136b2e3`, `633edf92`, `159f9069`, and `a1c4e812` retain
+uncertain order outcomes and reservations, prevent an unresolved or working
+order from being ignored merely because it is old, and preserve working
+partial-fill ownership. They are not deployed. A 120-test isolated subset and
+two end-to-end simulator cases for 503/transport exceptions passed with
+external networking blocked and logs/databases redirected.
+
+The larger simulator and legacy IOC run did not pass: test cases reused
+durable order identities across cases, and several assertions expect the old
+partial-fill or zero-fill IOC classifications. A separate older test file
+still uses the removed whole-contract dedup API and assumes a one-contract
+limit that is not the current configuration. These failed runs must not be
+reported as passing.
+
+An unresolved safety issue remains in the post-only reprice and maker-to-taker
+retry paths: their new wire client-order IDs are not durably bound to their
+own attempt before dispatch, and the conversion path can discard its retry
+failure result. A later ambiguous retry must not be reconciled using only the
+original ID. This requires repair and independent validation before deployment.
+The resting-order monitor also has whole-contract fields, so fractional working
+remainders require further end-to-end review. The running old process remained
+halted at 12:37 ET on a Kalshi circuit-open reconciliation error.
