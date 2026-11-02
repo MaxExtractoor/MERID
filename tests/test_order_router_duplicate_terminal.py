@@ -30,6 +30,8 @@ def test_terminal_order_statuses_cover_observed_states():
     assert "cancelled" in _or.TERMINAL_ORDER_STATUSES
     assert "expired" in _or.TERMINAL_ORDER_STATUSES
     assert "rejected" in _or.TERMINAL_ORDER_STATUSES
+    assert "filled" in _or.TERMINAL_ORDER_STATUSES
+    assert "executed" in _or.TERMINAL_ORDER_STATUSES
 
 
 def test_duplicate_lookup_reconciles_terminal_before_resting():

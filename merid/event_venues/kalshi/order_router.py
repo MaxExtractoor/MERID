@@ -293,7 +293,10 @@ def _finalize_attempt_store_for_result(
         )
 
         target: Optional[str] = None
-        if has_execution or result_status in (
+        if has_execution and result_status in ("accepted_live", "submitted_live", "resting"):
+            if record.status in ("PERSISTED", "SUBMITTING", "SUBMISSION_UNKNOWN"):
+                target = "ACKNOWLEDGED"
+        elif has_execution or result_status in (
             "filled_mock",
             "filled_paper",
             "filled_live",
@@ -1155,7 +1158,7 @@ def check_market_microstructure_edge_aware(
 # post-only-cross order was created-then-auto-canceled venue-side and
 # the duplicate handler recorded submitted_live for a dead order).
 TERMINAL_ORDER_STATUSES = frozenset(
-    {"canceled", "cancelled", "expired", "rejected"}
+    {"canceled", "cancelled", "expired", "rejected", "filled", "executed"}
 )
 
 
@@ -4574,6 +4577,28 @@ def _side_aware_book_for_intent(book: Dict[str, Any], side: Optional[str]) -> Di
     }
 
 
+def _classify_venue_order_status(
+    status: str, filled: Decimal, remaining: Decimal, size: Decimal, tif: str,
+) -> str:
+    status = (status or "").lower()
+    is_ioc = (tif or "").upper() in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL")
+    if status in ("resting", "open"):
+        return "resting"
+    if status in ("pending", "accepted", "partially_filled"):
+        return "submitted_live"
+    if filled > 0 and status in (
+        "filled", "executed", "canceled", "cancelled", "expired", "rejected"
+    ):
+        return "partial_live" if remaining > 0 or (size > 0 and filled < size) else "filled_live"
+    if status in ("canceled", "cancelled"):
+        return "unfilled_ioc" if is_ioc else "canceled"
+    if status == "rejected":
+        return "unfilled_ioc" if is_ioc else "rejected"
+    if status == "expired":
+        return "unfilled_ioc" if is_ioc else "expired"
+    return "submitted_live"
+
+
 def _order_snapshot_to_reconciled_result(
     order: Any,
     intent: OrderIntent,
@@ -4599,23 +4624,9 @@ def _order_snapshot_to_reconciled_result(
         or getattr(intent, "time_in_force", "")
         or ""
     ).upper()
-    _is_ioc = _tif in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL")
-
-    # Map the broker status to the router's canonical status space.
-    if _filled > 0:
-        _router_status = "filled_live"
-    elif _status_raw in ("resting", "open"):
-        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "resting"
-    elif _status_raw in ("canceled", "cancelled"):
-        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "canceled"
-    elif _status_raw == "rejected":
-        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "rejected"
-    elif _status_raw == "expired":
-        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "expired"
-    elif _status_raw == "unfilled":
-        _router_status = "unfilled_ioc"
-    else:
-        _router_status = "unfilled_ioc" if _is_ioc and _filled == 0 else "submitted_live"
+    _router_status = _classify_venue_order_status(
+        _status_raw, _filled, _remaining, _size, _tif
+    )
 
     # Fractional fills are first-class: derive centi-contract quantities from
     # the exact fixed-point sizes BEFORE producing the legacy whole-contract
@@ -4681,6 +4692,11 @@ def _apply_reconciled_order(
     _order_id = getattr(resolved_order, "order_id", None)
     _status_raw = (getattr(resolved_order, "status", "") or "").lower()
     _filled = getattr(resolved_order, "filled_size", 0) or 0
+    _result = _order_snapshot_to_reconciled_result(
+        resolved_order, intent, mode, latency_ms
+    )
+    if _result is None:
+        return None
 
     if _order_id:
         try:
@@ -4706,12 +4722,12 @@ def _apply_reconciled_order(
             logger.debug("[SUBMISSION-RECONCILE] cache mapping failed: %s", _cache_err)
 
     # Promote the durable attempt record out of SUBMISSION_UNKNOWN.
-    if _filled > 0:
+    if _result.is_terminal and _result.has_execution:
         _attempt_status = "FILLED"
-    elif _status_raw in ("resting", "open"):
-        _attempt_status = "ACKNOWLEDGED"
-    else:
+    elif _result.is_terminal:
         _attempt_status = "REJECTED"
+    else:
+        _attempt_status = "ACKNOWLEDGED"
     _mark_attempt_status(intent, _attempt_status)
 
     # Promote the pre-trade gate record from SUBMISSION_UNKNOWN to the
@@ -4723,10 +4739,12 @@ def _apply_reconciled_order(
         if _filled > 0:
             _ptg.mark_filled(
                 _client_order_id,
-                int(_filled),
+                int(Decimal(str(_filled))),
                 fill_id=None,
-                filled_qty_cc=int(_filled) * 100,
+                filled_qty_cc=int(Decimal(str(_filled)) * 100),
             )
+            if _status_raw in ("canceled", "cancelled", "expired", "rejected"):
+                _ptg.mark_canceled(_client_order_id)
         elif _status_raw in ("resting", "open"):
             _ptg.store.mark_live(_client_order_id, _order_id)
         elif _status_raw in ("canceled", "cancelled"):
@@ -4736,9 +4754,7 @@ def _apply_reconciled_order(
     except Exception as _gate_err:
         logger.debug("[SUBMISSION-RECONCILE] pre-trade gate update failed: %s", _gate_err)
 
-    return _order_snapshot_to_reconciled_result(
-        resolved_order, intent, mode, latency_ms
-    )
+    return _result
 
 
 def _matches_client_identity(value: Any, client_order_id: str, client_tag: str) -> bool:
@@ -8265,6 +8281,17 @@ def _duplicate_terminal_recovery_result(order_data: Any, mode: TradingMode, late
         exchange_ack_received=True,
         submission_certainty="unknown",
     )
+
+
+def _create_order_outcome_needs_reconciliation(response: Any) -> bool:
+    if response is None:
+        return True
+    if getattr(response, "success", False):
+        return False
+    reason = str(getattr(response, "error", "") or "").lower()
+    if getattr(response, "status_code", None) == 409 or "duplicate" in reason:
+        return False  # The duplicate lookup path reconciles the existing order.
+    return getattr(response, "submission_certainty", "unknown") == "unknown"
 
 
 # ── Typed rejections and execution plan ───────────────────────────────────
@@ -17487,14 +17514,15 @@ async def _route_live(
         _exec_stamp(intent, "api_ack")
         latency = (_time.monotonic() - t0) * 1000
 
-        # Timeout-after-submit (or a venue-reported timeout): mark the gate
-        # record SUBMISSION_UNKNOWN and return WITHOUT releasing exposure —
+        # An ambiguous transport or server failure after a possible send must
+        # retain the gate record and exposure until order/fill reconciliation —
         # the order may be resting/filled on the exchange and must be
         # reconciled via port.get_order before risk is released.
         _timeout_err_str = ""
         if placed_res is not None and not placed_res.success and placed_res.error:
             _timeout_err_str = str(placed_res.error).lower()
-        if _submit_timed_out or "timeout" in _timeout_err_str or "timed out" in _timeout_err_str:
+        _is_timeout = _submit_timed_out or "timeout" in _timeout_err_str or "timed out" in _timeout_err_str
+        if _is_timeout or _create_order_outcome_needs_reconciliation(placed_res):
             _mark_attempt_status(intent, "SUBMISSION_UNKNOWN")
             try:
                 from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg_unknown
@@ -17509,7 +17537,7 @@ async def _route_live(
                 from monitoring.metrics import get_metrics_registry
                 get_metrics_registry().counter(
                     "kalshi_submission_unknown",
-                    "Order submit ack lost in flight (timeout after submit)",
+                    "Order submission outcome unknown after possible send",
                     ["ticker"]
                 ).inc(labels={"ticker": intent.ticker})
             except Exception as _m_err:
@@ -17536,7 +17564,7 @@ async def _route_live(
             return OrderResult(
                 status="submission_unknown",
                 mode=mode,
-                reason=f"submission_unknown:timeout_after_submit:{intent.client_tag}",
+                reason=f"submission_unknown:{'timeout_after_submit' if _is_timeout else 'ambiguous_post_send'}:{intent.client_tag}",
                 latency_ms=round(latency, 2),
                 submission_attempted=True,
                 exchange_request_sent=True,
@@ -18425,10 +18453,10 @@ async def _route_live(
                 mode=mode,
                 reason=reason,
                 latency_ms=round(latency, 2),
-                submission_attempted=True,
-                exchange_request_sent=True,
-                exchange_ack_received=True,
-                submission_certainty="rejected",
+                submission_attempted=getattr(placed_res, "submission_certainty", "unknown") != "pre_submit",
+                exchange_request_sent=getattr(placed_res, "submission_certainty", "unknown") != "pre_submit",
+                exchange_ack_received=getattr(placed_res, "submission_certainty", "unknown") == "rejected",
+                submission_certainty=getattr(placed_res, "submission_certainty", "unknown"),
             )
 
         # Order successfully submitted to exchange - record in rate limiter
@@ -18755,37 +18783,12 @@ async def _route_live(
         _resp_status = (placed_res.status or "").lower()
         _tif_upper = (effective_tif or intent.time_in_force or "").upper()
 
-        # CRITICAL FIX (2026-08-10): IOC/FOK orders with zero fills are terminally unfilled,
-        # regardless of whatever status string the venue returns (including ambiguous
-        # "filled" responses with filled_count=0).  Treating them as anything else leaks
-        # the pre-trade gate record and causes the loop to believe an order is in-flight
-        # when it is not, blocking all re-entry for that contract.
-        if _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL") and filled_count_fp == 0 and requested_count_fp > 0:
-            status = "unfilled_ioc"
-        elif _resp_status == "filled" or (filled_count_fp >= requested_count_fp and requested_count_fp > 0):
-            status = "filled_live"
-        elif _resp_status == "partially_filled" or filled_count_fp > 0:
-            # Partial fill: exposure-affecting, report filled_live with the
-            # partial detail carried in the fill dict (requested/remaining).
-            status = "filled_live"
-        elif _resp_status == "resting":
-            # IOC/FOK orders are terminal and cannot rest on the book.  If the
-            # port reports a zero-fill "resting" status for one of those TIFs,
-            # treat it as an unfilled IOC so exposure reservations are released.
-            if _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL") and filled_count_fp == 0:
-                status = "unfilled_ioc"
-            else:
-                status = "resting"
-        elif _resp_status == "unfilled" and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
-            status = "unfilled_ioc"
-        elif _resp_status == "unfilled":
-            status = "unfilled_ioc"
-        elif _resp_status == "accepted" and filled_count_fp == 0 and _tif_upper in ("IOC", "FOK", "IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"):
-            # IOC/FOK orders that the port acks without a fill have zero remaining risk.
-            status = "unfilled_ioc"
-        elif _resp_status == "accepted" and filled_count_fp == 0:
-            # GTC/post-only orders that the port acks without a fill are resting on the book.
-            status = "resting"
+        # The TIF alone cannot prove terminality. Use the same venue-status
+        # classification as reconciliation, retaining any working remainder.
+        status = _classify_venue_order_status(
+            _resp_status, filled_count_fp, remaining_count_fp,
+            _intent_count_fp, _tif_upper,
+        )
         
         # CRITICAL FIX (2026-07-18): Window is now set on SUBMISSION, not on fill
         # This prevents multiple submissions even if orders don't fill immediately
@@ -18883,10 +18886,6 @@ async def _route_live(
                 "[UNFILLED-IOC] ticker=%s order_id=%s requested=%d remaining=%d — no exposure recorded, slot released",
                 intent.ticker, _venue_oid, requested_count, remaining_count,
             )
-        elif status not in {"resting", "filled_live"}:
-            # Fallback for any other accepted-but-unclassified port outcome.
-            status = "accepted_live"
-
         # Record executed notional in UnifiedRiskManager.  Buys add open exposure;
         # sells reduce it.  No pre-submission reservation is made, so there is no
         # unfilled remainder to release for IOC/FOK/GTC partial fills.
@@ -18957,7 +18956,7 @@ async def _route_live(
         # If an exit order doesn't fill immediately (liquidity issues, spread, etc.), it will rest
         # and needs to be tracked for cancellation/replacement. Exit orders are critical for
         # position management and must never be orphaned on the book.
-        if status in ("accepted_live", "resting") and remaining_count > 0:
+        if status in ("accepted_live", "submitted_live", "resting") and remaining_count > 0:
             try:
                 from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor, RestingOrderRecord
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
@@ -19116,7 +19115,7 @@ async def _route_live(
                 "remaining_count_fp": str(remaining_count_fp),
                 "quantity_cc": _filled_quantity_cc,
                 "remaining_quantity_cc": _remaining_quantity_cc,
-                "partial": 0 < filled_count < requested_count,
+                "partial": Decimal("0") < filled_count_fp < _intent_count_fp,
                 "fee_cents": fee_cents,
                 "net_edge_at_fill_cents": _compute_net_edge_at_fill(intent, fill_price_cents),
                 "order_id": placed_res.order_id,

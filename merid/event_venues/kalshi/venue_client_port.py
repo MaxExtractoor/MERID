@@ -39,6 +39,28 @@ from merid.event_venues.kalshi.port import (
 logger = get_logger("merid.event_venues.kalshi.venue_client_port")
 
 
+def _failed_create_order_response(result: Any) -> CreateOrderResponse:
+    metadata = result.metadata or {}
+    status_code = metadata.get("status_code")
+    if result.success:
+        certainty = "unknown"  # An empty success response is not a pre-send refusal.
+    elif not metadata.get("submission_may_have_been_sent"):
+        certainty = "pre_submit"
+    elif (
+        isinstance(status_code, int)
+        and 400 <= status_code < 500
+        and status_code not in (408, 409, 425, 429)
+        and not result.retries
+    ):
+        certainty = "rejected"
+    else:
+        certainty = "unknown"
+    return CreateOrderResponse(
+        success=False, error=str(result.error),
+        status_code=status_code, submission_certainty=certainty,
+    )
+
+
 class KalshiVenueClientExecutionPort:
     """Production port implementation backed by ``KalshiVenueClient``."""
 
@@ -110,6 +132,7 @@ class KalshiVenueClientExecutionPort:
                     return CreateOrderResponse(
                         success=False,
                         error="firewall:missing_or_invalid_approval_token",
+                        submission_certainty="pre_submit",
                     )
                 # The approval covers THIS order — a mutated protected field
                 # is rejected here as well as at the client boundary.
@@ -122,6 +145,7 @@ class KalshiVenueClientExecutionPort:
                     return CreateOrderResponse(
                         success=False,
                         error=f"firewall:approval_binding_mismatch:{';'.join(_mm)}",
+                        submission_certainty="pre_submit",
                     )
 
         result = await self._client.place_order_result(
@@ -132,7 +156,7 @@ class KalshiVenueClientExecutionPort:
         )
 
         if not result.success or result.data is None:
-            response = CreateOrderResponse(success=False, error=str(result.error))
+            response = _failed_create_order_response(result)
             try:
                 from merid.monitoring.trade_attribution_fact_table import get_trade_attribution_table
                 table = get_trade_attribution_table()
@@ -153,7 +177,11 @@ class KalshiVenueClientExecutionPort:
                         action=request.side,
                         quantity_cc=int(request.size * 100) if request.size is not None else None,
                         price_cents=request.price_cents,
-                        status="rejected",
+                        status=(
+                            "submission_unknown"
+                            if response.submission_certainty == "unknown"
+                            else "rejected"
+                        ),
                         error=str(response.error),
                     )
             except Exception as e:

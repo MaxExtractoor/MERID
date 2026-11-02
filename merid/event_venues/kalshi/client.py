@@ -2989,6 +2989,7 @@ class KalshiVenueClient(EventVenueClient):
                 result.error,
                 latency_ms=result.latency_ms,
                 retries=result.retries,
+                **{**result.metadata, "submission_may_have_been_sent": True},
             )
 
         # Kalshi's create-order response omits action/book_side, which sends

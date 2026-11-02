@@ -64,6 +64,8 @@ class CreateOrderResponse:
     average_price_cents: Optional[int] = None
     error: Optional[str] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
+    status_code: Optional[int] = None
+    submission_certainty: str = "unknown"
 
 
 @dataclass
