@@ -62,6 +62,16 @@ from merid.position_management.exit_pipeline import (
 GEN = "fill_entry_market_term"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime_state(tmp_path, monkeypatch):
+    from merid.observability import live_runtime_state
+
+    monkeypatch.setattr(
+        live_runtime_state, "_live_runtime_state",
+        live_runtime_state.LiveRuntimeState(tmp_path / "runtime_state.json"),
+    )
+
+
 def _ticker_for_window_end_utc(end_utc: datetime) -> str:
     """Build a canonical-shaped KX*15M ticker from a UTC instant.
 

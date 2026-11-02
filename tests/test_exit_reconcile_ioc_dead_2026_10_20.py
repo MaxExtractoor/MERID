@@ -55,12 +55,22 @@ GEN = "fill_entry_recon_ioc"
 PKEY = f"{TICKER}|{GEN}"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime_state(tmp_path, monkeypatch):
+    from merid.observability import live_runtime_state
+
+    monkeypatch.setattr(
+        live_runtime_state, "_live_runtime_state",
+        live_runtime_state.LiveRuntimeState(tmp_path / "runtime_state.json"),
+    )
+
+
 def _arbiter(tmp_path) -> ExitArbiter:
     return ExitArbiter(
         state_store=PositionExitStateStore(
-            str(tmp_path / "exit_state.json")),
+            tmp_path / "exit_state.json"),
         attempt_store=ExitAttemptStore(
-            str(tmp_path / "exit_attempts.json")),
+            tmp_path / "exit_attempts.json"),
     )
 
 

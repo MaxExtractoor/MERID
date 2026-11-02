@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 _TMP = Path(tempfile.mkdtemp(prefix="recon_live_"))
 os.environ["MERID_TOTAL_CAPITAL_USD"] = "100"
+os.environ["MERID_LIVE_RUNTIME_STATE_PATH"] = str(_TMP / "runtime_state.json")
 os.environ["MERID_EXIT_STATE_PATH"] = str(_TMP / "es.json")
 os.environ["MERID_EXIT_ATTEMPTS_PATH"] = str(_TMP / "ea.json")
 os.environ["MERID_EXIT_ARBITER_REQUIRED"] = "1"

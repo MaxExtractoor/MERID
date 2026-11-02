@@ -11,6 +11,16 @@ import merid.position_management.position_monitor as monitor_module
 from merid.position_management.position_monitor import PositionMonitor
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime_state(tmp_path, monkeypatch):
+    from merid.observability import live_runtime_state
+
+    monkeypatch.setattr(
+        live_runtime_state, "_live_runtime_state",
+        live_runtime_state.LiveRuntimeState(tmp_path / "runtime_state.json"),
+    )
+
+
 def _monitor(transition_ok=True):
     monitor = PositionMonitor.__new__(PositionMonitor)
     monitor._lock = RLock()
