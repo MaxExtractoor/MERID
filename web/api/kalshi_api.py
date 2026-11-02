@@ -4214,7 +4214,7 @@ def _daily_equity_anchor(equity_now_usd: float, *, fresh: bool) -> Tuple[float, 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         if _DAILY_EQUITY_ANCHOR_PATH.exists():
-            data = json.loads(_DAILY_EQUITY_ANCHOR_PATH.read_text())
+            data = json.loads(_DAILY_EQUITY_ANCHOR_PATH.read_text(encoding="utf-8-sig"))
             if data.get("date") == today and isinstance(data.get("equity_usd"), (int, float)):
                 return float(data["equity_usd"]), str(data.get("anchored_at") or ""), True
         if not fresh:
