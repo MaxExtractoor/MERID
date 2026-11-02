@@ -674,3 +674,12 @@ unsupported quantity precision without releasing ownership, and preserve the
 original requested quantity when IOC remainders are canceled. The resting
 order monitor still uses whole-contract fields; fractional working remainders
 need a separate repair and end-to-end tests.
+
+Follow-up commits `030d3f4c` and `a3d5e379` retain monitored orders when
+lookups are missing or failed, quantities are malformed or fractional, or a
+working order reports zero remaining without conclusive fill evidence. These
+are containment safeguards, not exact fractional management: the router can
+still skip registration of a fractional working remainder. Thirty-five
+isolated resting-monitor regressions passed. At 18:40 UTC the old production
+process still reported a circuit-open reconciliation halt; no fresh recovery
+or flat-state assertion follows from its earlier startup record.
