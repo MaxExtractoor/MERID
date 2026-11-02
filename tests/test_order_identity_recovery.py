@@ -557,6 +557,23 @@ async def test_timeout_after_server_receipt(client, attempt_store, monkeypatch):
 # 2. Crash/restart during submission
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("status", ["SUBMITTING", "SUBMISSION_UNKNOWN", "ACKNOWLEDGED"])
+def test_old_unresolved_fingerprint_keeps_identity(attempt_store, status):
+    original = _base_intent(ticker="KXBTC15M-OLD-50000", price_cents=50, tif="gtc")
+    finalize_order_identity(original, store=attempt_store)
+    attempt_store.update_status(original.order_attempt_id, status)
+    conn = attempt_store._get_conn()
+    conn.execute(
+        "UPDATE order_attempts SET created_at=? WHERE order_attempt_id=?",
+        (time.time() - 3600, original.order_attempt_id),
+    )
+    conn.commit()
+    retry = _base_intent(ticker="KXBTC15M-OLD-50000", price_cents=50, tif="gtc")
+    finalize_order_identity(retry, store=attempt_store)
+    assert retry.client_order_id == original.client_order_id
+    assert retry.order_attempt_id == original.order_attempt_id
+
+
 @pytest.mark.asyncio
 async def test_crash_restart_during_submission(attempt_store):
     """A process crash leaves an attempt in SUBMITTING.

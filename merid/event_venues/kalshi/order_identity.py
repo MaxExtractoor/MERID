@@ -331,11 +331,9 @@ def finalize_order_identity(
     now = time.time()
     for pending in store.get_by_fingerprint(fingerprint):
         age_s = now - pending.created_at
-        # Only treat actively in-flight or very recently allocated (but not yet
-        # submitted) records as duplicate. Acknowledged/filled/rejected orders
-        # are terminal and need a fresh attempt. Stale (>60s) SUBMITTING records
-        # are presumed dead and are not reused.
-        if pending.status in ("SUBMITTING", "SUBMISSION_UNKNOWN") and age_s < 60.0:
+        # An acknowledged or possibly submitted order remains an owner until
+        # authoritative reconciliation, regardless of its age.
+        if pending.status in ("SUBMITTING", "SUBMISSION_UNKNOWN", "ACKNOWLEDGED"):
             pass
         elif pending.status == "PERSISTED" and age_s < 30.0:
             pass
