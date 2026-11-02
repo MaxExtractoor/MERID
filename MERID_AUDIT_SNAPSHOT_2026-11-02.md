@@ -635,3 +635,21 @@ original ID. This requires repair and independent validation before deployment.
 The resting-order monitor also has whole-contract fields, so fractional working
 remainders require further end-to-end review. The running old process remained
 halted at 12:37 ET on a Kalshi circuit-open reconciliation error.
+
+### Subsequent local retry repair
+
+Commits `7a9c1e0a`, `562a27ab`, and `0da71e0b` add durable replacement
+chains, route retries with freshly claimed wire IDs, preserve failed retry
+responses, and reconcile/attribute by the actual child ID. The 109-test
+isolated subset includes a simulated exit conversion followed by either a
+503 or a transport exception. It does not yet cover every entry-reprice,
+successful-conversion, duplicate-ID, cancellation, or crash window; do not
+deploy until those cases and the broader suites are independently validated.
+
+Further audit finding: `_resolve_exchange_confirmed_flat` accepts a successful
+position response without verifying all pagination/provenance and currently
+coerces invalid quantities to zero. Flat inventory alone also does not prove
+that an unresolved live order cannot subsequently execute. Replacement
+attempts with unresolved wire status now retain their lock rather than use
+that flat shortcut, but the general flat-resolution path needs a fail-closed
+repair and dedicated tests before restart.
