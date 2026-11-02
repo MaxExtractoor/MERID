@@ -443,17 +443,35 @@ def _backfill_linkage_from_covered_fills(
     fill = _select_covered_entry_fill(covered_fills, pos_yes)
     if fill is None:
         return False
+    return _apply_covered_entry_linkage(cached_pos, fill, pos_yes)
+
+
+def _apply_covered_entry_linkage(cached_pos: Any, fill: Any, pos_yes: int) -> bool:
+    """Stamp durable entry linkage from a covered entry fill onto cached_pos.
+
+    Shared by _backfill_linkage_from_covered_fills and
+    _backfill_risk_params_state: restores ids, entry fill price/timestamp, and
+    upgrades risk_params_state to original_persisted (schema v2) when the
+    fill's source is trusted.  Idempotent; never downgrades existing
+    provenance and never stamps exit fills.
+    """
     fill_id = getattr(fill, "fill_id", None)
     _coid = getattr(fill, "client_order_id", None)
     _order = getattr(fill, "order_id", None)
     _intent = getattr(fill, "intent_id", None)
-    cached_pos.entry_fill_id = fill_id
-    if _coid:
+    changed = False
+    if fill_id and not getattr(cached_pos, "entry_fill_id", None):
+        cached_pos.entry_fill_id = fill_id
+        changed = True
+    if _coid and not getattr(cached_pos, "client_order_id", None):
         cached_pos.client_order_id = _coid
-    if _order:
+        changed = True
+    if _order and not getattr(cached_pos, "entry_order_id", None):
         cached_pos.entry_order_id = _order
-    if _intent:
+        changed = True
+    if _intent and not getattr(cached_pos, "entry_intent_id", None):
         cached_pos.entry_intent_id = _intent
+        changed = True
     if _coid and (
         not getattr(cached_pos, "entry_signal_id", None)
         or str(cached_pos.entry_signal_id).lower()
@@ -468,13 +486,83 @@ def _backfill_linkage_from_covered_fills(
         )
     if not getattr(cached_pos, "entry_fill_timestamp", None):
         cached_pos.entry_fill_timestamp = _fill_created_time_dt(fill)
+    # 2026-11-02: with durable linkage stamped from a trusted entry fill, the
+    # cache record's risk provenance must upgrade in lockstep.  Without this,
+    # positions born via REST coverage keep risk_params_state='unknown'
+    # forever — the exit-policy quarantine then blocks every discretionary
+    # exit (edge-decay, model-invalidation, TP/SL restore) for the life of
+    # the position.  Mirrors the reconstruction-path rule (entry linkage +
+    # trusted fill source -> original_persisted, schema v2).  Never
+    # downgrades 'fallback' or 'original_persisted'; untrusted fill sources
+    # leave the state untouched.
+    _trusted_source = getattr(fill, "fill_source", "unknown") not in (
+        "rest_sync", "replay", "historical", "manual", "unknown",
+    )
+    if (
+        _trusted_source
+        and getattr(cached_pos, "risk_params_state", "unknown") == "unknown"
+    ):
+        cached_pos.risk_params_state = "original_persisted"
+        cached_pos.risk_params_schema_version = 2
+        changed = True
+        logger.info(
+            "[POSITION-CACHE-RISK-STATE-RESTORED] market=%s "
+            "risk_params_state=original_persisted schema=2 "
+            "(trusted covered entry fill + linkage present)",
+            getattr(cached_pos, "market_id", "?"),
+        )
     logger.info(
         "[POSITION-CACHE-LINKAGE-RESTORED] market=%s entry_fill_id=%s "
         "client_order_id=%s order_id=%s intent_id=%s "
         "(entry fill covered by REST snapshot)",
         getattr(cached_pos, "market_id", "?"), fill_id, _coid, _order, _intent,
     )
-    return True
+    return changed
+
+
+def _backfill_risk_params_state(
+    cached_pos: Any,
+    covered_fills: List[Any],
+    pos_yes: int,
+) -> bool:
+    """Upgrade risk_params_state on a linked position orphaned by REST coverage.
+
+    2026-11-02: the REST-subsume race stamps durable linkage (via
+    _backfill_linkage_from_covered_fills) but leaves
+    ``risk_params_state='unknown'`` — every subsequent REST sync preserves the
+    unknown state, the exit-policy quarantine blocks all discretionary exits
+    (edge-decay, model-invalidation), TP/SL stays unrestored, and losing
+    positions structurally cannot be cut — they ride to settlement.  Live
+    evidence: KXDOGE15M-26NOV020230-30 trail@64c floor-suppressed while
+    EXIT-POLICY-QUARANTINE blocked both loss channels (2026-11-02 session,
+    HARD_PROFIT_LOCK_TRIGGER_NO_INTENT P0 alert).
+
+    Independent of _backfill_linkage_from_covered_fills: that helper returns
+    early when linkage already exists, which is exactly the state orphaned
+    positions reach after linkage is restored.  This helper runs whenever the
+    state is still 'unknown' and a trusted covered entry fill exists; it
+    re-stamps linkage harmlessly (idempotent) and upgrades the state.
+    """
+    if cached_pos is None:
+        return False
+    if getattr(cached_pos, "risk_params_state", "unknown") != "unknown":
+        return False
+    linkage = (
+        getattr(cached_pos, "entry_fill_id", None)
+        or getattr(cached_pos, "client_order_id", None)
+        or getattr(cached_pos, "entry_order_id", None)
+        or getattr(cached_pos, "entry_intent_id", None)
+    )
+    if not linkage:
+        return False
+    fill = _select_covered_entry_fill(covered_fills, pos_yes)
+    if fill is None:
+        return False
+    if getattr(fill, "fill_source", "unknown") in (
+        "rest_sync", "replay", "historical", "manual", "unknown",
+    ):
+        return False
+    return _apply_covered_entry_linkage(cached_pos, fill, pos_yes)
 
 
 def _backfill_entry_risk_contract(
@@ -1978,6 +2066,26 @@ class KalshiPositionCache:
                     and fill_source in ("ws", "http_poller", "alpha")
                 )
                 monitor_risk_params_state = "original_persisted" if is_trusted_live_fill else "unknown"
+                # 2026-11-02: the monitor-side upgrade is not enough — every
+                # later REST sync re-reads the cache record's own
+                # risk_params_state, which stayed 'unknown' forever, and the
+                # exit-policy quarantine then blocked all discretionary exits
+                # for the position's life (KXDOGE15M-26NOV020230-30).  Persist
+                # the upgrade on the cache record so REST-recreated monitor
+                # positions inherit it.  Never downgrades 'fallback'.
+                if (
+                    monitor_risk_params_state == "original_persisted"
+                    and getattr(cached_position, "risk_params_state", "unknown")
+                    == "unknown"
+                ):
+                    cached_position.risk_params_state = "original_persisted"
+                    cached_position.risk_params_schema_version = 2
+                    logger.info(
+                        "[POSITION-CACHE-RISK-STATE-RESTORED] market=%s "
+                        "risk_params_state=original_persisted schema=2 "
+                        "(trusted live fill on_fill path)",
+                        market_id,
+                    )
 
             series_ticker = market_id.split("-")[0] if "-" in market_id else market_id
 
@@ -6372,6 +6480,21 @@ class KalshiPositionCache:
                             # linkage result: also covers positions whose
                             # linkage arrived via the on_fill covered path.
                             _backfill_entry_risk_contract(
+                                self._positions.get(market_id),
+                                _covered_records,
+                                _covered_pos_yes,
+                            )
+                            # 2026-11-02: the same race left the cache
+                            # record's risk_params_state='unknown' even
+                            # after linkage restored — the exit-policy
+                            # quarantine then blocked every discretionary
+                            # exit for the life of the position
+                            # (KXDOGE15M-26NOV020230-30: edge-decay +
+                            # model-invalidation quarantined, TP/SL never
+                            # armed, rode to settlement).  Upgrade to
+                            # original_persisted when a trusted covered
+                            # entry fill + durable linkage are present.
+                            _backfill_risk_params_state(
                                 self._positions.get(market_id),
                                 _covered_records,
                                 _covered_pos_yes,

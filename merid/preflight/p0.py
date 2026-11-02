@@ -276,23 +276,63 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
                 "AND created_at IS NOT NULL AND created_at <= ?",
                 (cutoff,),
             ).fetchone()[0]
-            exit_blocking = conn.execute(
-                f"SELECT COUNT(*) FROM exit_order_attempts "
+            # 2026-11-02: age is only a proxy for "market settled".  A young
+            # uncertain attempt on a market that has already expired also
+            # cannot create exposure — Kalshi cancels resting orders at close
+            # and settlement sweeps whatever remains — yet it boot-blocked
+            # P0 deterministically: attempt 9189c4c7 (RESOLVING_ON_EXCHANGE,
+            # ~15min old, market KXDOGE15M-26NOV020245-45 already expired)
+            # failed this gate until resolved offline.  Reclassify young
+            # blocking rows whose market expiry has passed as quarantined
+            # (still nonterminal, still audited, resolved by runtime
+            # reconcile).  Unparseable/NULL tickers or future expiries stay
+            # strictly blocking.
+            from merid.event_venues.kalshi.market_filter import (
+                parse_expiry_from_ticker,
+            )
+
+            _now_s = time.time()
+
+            def _market_expired(row) -> bool:
+                ticker = row[1]
+                if not ticker:
+                    return False
+                try:
+                    expiry_ts = parse_expiry_from_ticker(str(ticker))
+                except Exception:
+                    return False
+                return bool(expiry_ts) and expiry_ts <= _now_s
+
+            young_exit_rows = conn.execute(
+                f"SELECT attempt_id, ticker FROM exit_order_attempts "
                 f"WHERE state IN ({','.join('?' for _ in uncertain_exit_states)}) "
                 "AND (created_at IS NULL OR created_at > ?)",
                 (*uncertain_exit_states, cutoff),
-            ).fetchone()[0]
+            ).fetchall()
+            exit_blocking = 0
+            exit_settled_quarantined = 0
+            for _r in young_exit_rows:
+                if _r[0] is None or _r[1] is None:
+                    # created_at NULL rows already counted above by the same
+                    # predicate; treat missing identity as blocking.
+                    exit_blocking += 1
+                elif _market_expired(_r):
+                    exit_settled_quarantined += 1
+                else:
+                    exit_blocking += 1
             exit_quarantined = conn.execute(
                 f"SELECT COUNT(*) FROM exit_order_attempts "
                 f"WHERE state IN ({','.join('?' for _ in uncertain_exit_states)}) "
                 "AND created_at IS NOT NULL AND created_at <= ?",
                 (*uncertain_exit_states, cutoff),
             ).fetchone()[0]
+            exit_quarantined += exit_settled_quarantined
         if quarantined or exit_quarantined:
             logger.critical(
                 "[P0-PREFLIGHT] %d order attempt(s) and %d exit attempt(s) remain "
-                "uncertain but are older than %.0fs; their markets are settled "
-                "so they cannot create exposure — quarantined, not resolved",
+                "uncertain but are older than %.0fs or on expired markets; "
+                "their markets are settled so they cannot create exposure — "
+                "quarantined, not resolved",
                 quarantined, exit_quarantined, quarantine_age_s,
             )
         return _check(

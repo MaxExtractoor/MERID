@@ -653,6 +653,15 @@ class DecisionAuditLedger:
                     (time.monotonic() - _t0) * 1000.0,
                 )
             except Exception as exc:  # defensive; impls already swallow
+                # 2026-11-02: a cached writer connection poisoned by
+                # SQLITE_READONLY(_RECOVERY) never self-heals — without
+                # invalidation every subsequent task reuses it and fails
+                # forever (1529 writes dropped in one session on 2026-11-02).
+                # Drop the handle so the next task reconnects; recovery
+                # reruns on the fresh connection.  The failed item keeps its
+                # durable failure record below — it is not silently retried.
+                if "readonly" in str(exc).lower():
+                    self._drop_shared_conn()
                 if _prio != "low":
                     self._failed_required_writes = (
                         getattr(self, "_failed_required_writes", 0) + 1
@@ -915,6 +924,27 @@ class DecisionAuditLedger:
             )
             self._shared_conn = conn
         return self._shared_conn
+
+    def _drop_shared_conn(self) -> None:
+        """Invalidate the cached writer connection after a fatal error.
+
+        2026-11-02: a connection that goes through WAL recovery under
+        contention can be marked SQLITE_READONLY for its entire lifetime —
+        every subsequent write on the cached handle fails permanently even
+        though the database itself is healthy (1529 audit writes dropped in
+        the 2026-11-02 session until a process restart recreated the handle).
+        SQLite reruns recovery on a fresh connection, so dropping the cached
+        handle lets the next write reconnect and heal.  Guarded by the same
+        ``self._lock`` that guards all ``_shared_conn`` use.
+        """
+        with self._lock:
+            conn = self._shared_conn
+            self._shared_conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _read(self) -> sqlite3.Connection:
         """Lazily-opened persistent read connection (WAL snapshot isolation).

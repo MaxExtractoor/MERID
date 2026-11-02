@@ -2046,6 +2046,18 @@ class KalshiFillsLedger:
         Returns:
             Number of fills removed.
         """
+        # 2026-11-02: fail-closed evidence guard.  A wholesale wipe of the raw
+        # fills ledger on a REST "0 positions" answer destroys every mirror,
+        # conflict, and settlement record the canonical contract exists to
+        # preserve (d3ae/da6e quarantine evidence included).  No production
+        # path calls this; require an explicit operator opt-in so a future
+        # caller cannot wipe evidence through a transient REST failure.
+        if os.environ.get("MERID_ALLOW_FILL_LEDGER_WIPE") != "1":
+            logger.error(
+                "[FILLS-LEDGER] clear_all_fills refused: raw ledger is "
+                "evidence; set MERID_ALLOW_FILL_LEDGER_WIPE=1 to override"
+            )
+            return 0
         try:
             import aiosqlite
 
@@ -6354,8 +6366,9 @@ class KalshiFillsLedger:
             self._reindex_fill_id(old_id, new_id, existing)
             self._live_router_fill_ids[fill.order_id] = new_id
             # The provisional row may already have been flushed under its old
-            # id; queue it for deletion at the next persistence flush so a DB
-            # replay cannot double-apply the same economic fill.
+            # id; track it so the persistence flush can log retention.  Under
+            # canonical-fill-view/1.0 the retained row replays as a superseded
+            # mirror (excluded from economics) — evidence, not a duplicate.
             if old_id.startswith("live_router_"):
                 self._stale_live_router_db_ids.add(old_id)
 
@@ -10772,26 +10785,21 @@ class KalshiFillsLedger:
                     elif not is_permanent:
                         logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
 
-            # Delete provisional live-router rows that were promoted in memory
-            # after they were already flushed.
+            # Provisional live-router rows promoted in memory after they were
+            # already flushed were previously DELETEd from the DB so a replay
+            # could not double-apply the same economic fill.  2026-11-02:
+            # canonical-fill-view/1.0 classifies retained live_router rows as
+            # superseded mirrors and excludes them from economics on load —
+            # the delete is obsolete and destroys evidence.  Retain the rows;
+            # clear the id set so the bookkeeping does not accumulate.
             if self._stale_live_router_db_ids:
                 _stale_ids = sorted(self._stale_live_router_db_ids)
-                try:
-                    _placeholders = ",".join(f"${i+1}" for i in range(len(_stale_ids)))
-                    await conn.execute(
-                        f"DELETE FROM kalshi_fills WHERE fill_id IN ({_placeholders})",
-                        *_stale_ids,
-                    )
-                    self._stale_live_router_db_ids.clear()
-                    logger.info(
-                        "[FILLS-LEDGER] deleted %d stale live-router rows post-promotion",
-                        len(_stale_ids),
-                    )
-                except Exception as _stale_err:
-                    logger.warning(
-                        "[FILLS-LEDGER] stale live-router row cleanup failed: %s",
-                        _stale_err,
-                    )
+                self._stale_live_router_db_ids.clear()
+                logger.info(
+                    "[FILLS-LEDGER] retained %d promoted live-router rows as "
+                    "superseded mirrors post-promotion (no DB delete)",
+                    len(_stale_ids),
+                )
 
             # Aggregate logging for schema errors
             if errors_by_category:
@@ -10913,28 +10921,20 @@ class KalshiFillsLedger:
                     elif not is_permanent:
                         logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
 
-            # Delete provisional live-router rows that were promoted in memory
-            # after they were already flushed.  Leaving them lets a DB replay
-            # double-apply the same economic fill.
+            # Provisional live-router rows promoted in memory after they were
+            # already flushed were previously DELETEd from the DB so a replay
+            # could not double-apply the same economic fill.  2026-11-02:
+            # canonical-fill-view/1.0 classifies retained live_router rows as
+            # superseded mirrors and excludes them from economics on load —
+            # the delete is obsolete and destroys evidence.  Retain the rows.
             if self._stale_live_router_db_ids:
                 _stale_ids = sorted(self._stale_live_router_db_ids)
-                try:
-                    _placeholders = ",".join("?" for _ in _stale_ids)
-                    await self._execute_with_retry(
-                        _db,
-                        f"DELETE FROM kalshi_fills WHERE fill_id IN ({_placeholders})",
-                        tuple(_stale_ids),
-                    )
-                    self._stale_live_router_db_ids.clear()
-                    logger.info(
-                        "[FILLS-LEDGER] deleted %d stale live-router rows post-promotion",
-                        len(_stale_ids),
-                    )
-                except Exception as _stale_err:
-                    logger.warning(
-                        "[FILLS-LEDGER] stale live-router row cleanup failed: %s",
-                        _stale_err,
-                    )
+                self._stale_live_router_db_ids.clear()
+                logger.info(
+                    "[FILLS-LEDGER] retained %d promoted live-router rows as "
+                    "superseded mirrors post-promotion (no DB delete)",
+                    len(_stale_ids),
+                )
 
             await _db.commit()
 
@@ -11275,12 +11275,13 @@ class KalshiFillsLedger:
                 if _backfilled:
                     logger.info("[FILLS-LEDGER-BACKFILL] re-canonicalized %d rows", _backfilled)
 
-                # Delete stale live-router provisional rows that already have an
+                # Quarantine stale live-router provisional rows that already have an
                 # authoritative exchange fill.  These rows leak into the DB from older
                 # router builds and can inflate realized PnL if left in place.
-                _deleted = await self._delete_stale_live_router_rows(db)
-                if _deleted:
-                    logger.info("[FILLS-LEDGER-BACKFILL] deleted %d stale live-router rows", _deleted)
+                # P4: quarantined to _superseded_mirror_fills, never DB-deleted.
+                _quarantined = await self._delete_stale_live_router_rows(db)
+                if _quarantined:
+                    logger.info("[FILLS-LEDGER-BACKFILL] quarantined %d stale live-router rows (DB rows retained)", _quarantined)
 
                 # Drain deferred proceeds repairs once per dirty market now that
                 # the full fill set (post-backfill, post-deletion) is stable.
