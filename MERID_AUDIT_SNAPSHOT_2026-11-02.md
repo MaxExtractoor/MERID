@@ -653,3 +653,9 @@ that an unresolved live order cannot subsequently execute. Replacement
 attempts with unresolved wire status now retain their lock rather than use
 that flat shortcut, but the general flat-resolution path needs a fail-closed
 repair and dedicated tests before restart.
+
+Follow-up commits `9b8f441b` and `c95bd070` address those findings locally:
+filtered position pagination now fails on partial or malformed responses, and
+flat resolution requires an authoritative terminal-market response plus a
+complete, valid zero-position snapshot. Fifty-one isolated tests passed.
+These fixes have not been deployed or verified against a fresh live snapshot.
