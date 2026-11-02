@@ -77,6 +77,35 @@ class TestSidSequenceTracking:
         # subscription — a stale high cursor must not drop the new stream
         assert store._check_sid_delta_sequence(4, 1, "KXBTC15M-A") == 0
 
+    def test_cleanup_removes_expired_and_orphan_sid_members(self, store, monkeypatch):
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.market_state._recompute_seconds_to_expiry",
+            lambda state: None,
+        )
+        expired = "KXBTC15M-OLD"
+        active = "KXBTC15M-NEW"
+        retained_live = "KXETH15M-LIVE"
+        orphan = "KXSOL15M-OLD"
+        store._get_or_create(expired).seconds_to_expiry = -1
+        store._get_or_create(active).seconds_to_expiry = 30
+        store._get_or_create(retained_live).seconds_to_expiry = 30
+        for seq, ticker in enumerate((expired, active, retained_live, orphan), 100):
+            store._check_sid_delta_sequence(4, seq, ticker)
+
+        store.cleanup_stale_states([active])
+
+        assert expired not in store._states
+        assert retained_live in store._states
+        assert store._sid_tickers[4] == {active, retained_live}
+        assert set(store._ticker_sid) == {active, retained_live}
+        assert store._sid_last_seq[4] == 103
+        store._mark_book_untrusted_and_resync = MagicMock()
+        gap = store._check_sid_delta_sequence(4, 106, active)
+        store._handle_sid_sequence_gap(4, 106, gap, active)
+        assert {c.args[0] for c in store._mark_book_untrusted_and_resync.call_args_list} == {
+            active, retained_live
+        }
+
 
 class TestDequeueValidator:
     def test_newer_seq_on_sid_applies(self, store):

@@ -4824,6 +4824,15 @@ class KalshiMarketStateStore:
                 self._last_untrusted_log_ts.pop(ticker, None)
                 logger.info(f"[MARKET-STATE-CLEANUP] Removed stale state for ticker={ticker}")
 
+            # Old sid membership otherwise recreates expired states on the
+            # next unattributed gap and schedules recovery for dead markets.
+            with self._sid_seq_lock:
+                retained = active_set | set(self._states)
+                for ticker in set(self._ticker_sid) - retained:
+                    self._ticker_sid.pop(ticker, None)
+                for members in self._sid_tickers.values():
+                    members.intersection_update(retained)
+
             if deletable:
                 logger.info(f"[MARKET-STATE-CLEANUP] Cleaned up {len(deletable)} stale tickers: {deletable}")
 
