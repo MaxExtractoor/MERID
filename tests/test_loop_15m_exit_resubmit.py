@@ -6,9 +6,23 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock
 
 from merid.event_venues.kalshi.order_router import OrderResult, TradingMode
-from merid.loop_15m import _execute_exit_order, _rearm_position_after_failed_exit
+from merid.loop_15m import (
+    _execute_exit_order,
+    _exit_result_never_dispatched,
+    _rearm_position_after_failed_exit,
+)
 from merid.position_management.exit_policy import ExitReason
 from merid.position_management.position import Position, PositionSide
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime_state(tmp_path, monkeypatch):
+    from merid.observability import live_runtime_state
+
+    monkeypatch.setattr(
+        live_runtime_state, "_live_runtime_state",
+        live_runtime_state.LiveRuntimeState(tmp_path / "runtime_state.json"),
+    )
 
 
 @pytest.fixture
@@ -43,11 +57,35 @@ def position():
     )
 
 
+@pytest.mark.parametrize("status", ["rejected", "not_submitted"])
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"submission_attempted": True},
+        {"exchange_request_sent": True},
+        {"exchange_ack_received": True},
+        {"order_id": "venue-order"},
+        {"submission_certainty": "unknown"},
+    ],
+)
+def test_never_dispatched_refuses_contradictory_evidence(status, evidence):
+    result = OrderResult(status=status, mode=TradingMode.LIVE, **evidence)
+    assert not _exit_result_never_dispatched(result, status)
+
+
+@pytest.mark.parametrize("status", ["rejected", "not_submitted"])
+def test_never_dispatched_accepts_proven_pre_submit(status):
+    result = OrderResult(status=status, mode=TradingMode.LIVE)
+    assert _exit_result_never_dispatched(result, status)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
-        "not_submitted", "rejected", "missing_durable", "existing_attempt",
+        "not_submitted", "not_submitted_unknown", "not_submitted_ack",
+        "not_submitted_order", "pre_submit_exhausted", "rejected",
+        "missing_durable", "existing_attempt",
         "identity_mismatch", "filled_store_failure", "filled_exit_failure",
     ],
 )
@@ -94,6 +132,18 @@ async def test_unproven_exit_outcome_retains_lock(
     async def _fake_route(intent):
         route_calls.append((intent.client_order_id, intent.order_attempt_id))
         if failure not in ("filled_store_failure", "filled_exit_failure"):
+            if failure == "pre_submit_exhausted":
+                return OrderResult(status="not_submitted", mode=TradingMode.LIVE)
+            if failure.startswith("not_submitted_"):
+                return OrderResult(
+                    status="not_submitted",
+                    mode=TradingMode.LIVE,
+                    submission_certainty=(
+                        "unknown" if failure == "not_submitted_unknown" else "pre_submit"
+                    ),
+                    exchange_ack_received=failure == "not_submitted_ack",
+                    order_id="unexpected-order" if failure == "not_submitted_order" else None,
+                )
             return OrderResult(
                 status=failure,
                 mode=TradingMode.LIVE,
@@ -145,6 +195,14 @@ async def test_unproven_exit_outcome_retains_lock(
 
     await _execute_exit_order(self_mock, position, ExitReason.TAKE_PROFIT, 60)
 
+    if failure == "pre_submit_exhausted":
+        assert len(route_calls) == 3
+        assert len({coid for coid, _ in route_calls}) == 1
+        self_mock._position_monitor._mark_exit_intent_reconciled.assert_called_once()
+        self_mock._position_monitor._mark_exit_intent_submission_unknown.assert_not_called()
+        self_mock._rearm_position_after_failed_exit.assert_called_once()
+        return
+
     assert len(route_calls) == (
         0 if failure in ("missing_durable", "existing_attempt", "identity_mismatch") else 1
     )
@@ -152,7 +210,7 @@ async def test_unproven_exit_outcome_retains_lock(
     assert self_mock._position_monitor._mark_exit_intent_retryable.called is False
     if failure in ("missing_durable", "identity_mismatch"):
         self_mock._position_monitor._mark_exit_intent_reconciliation_required.assert_called_once()
-    elif failure in ("not_submitted", "rejected", "existing_attempt"):
+    elif failure.startswith("not_submitted") or failure in ("rejected", "existing_attempt"):
         self_mock._position_monitor._mark_exit_intent_submission_unknown.assert_called_once()
     else:
         self_mock._position_monitor._update_order_attempt_status.assert_called_once()

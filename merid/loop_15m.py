@@ -4591,12 +4591,11 @@ async def _execute_exit_order(
                     )
                 return
             _result_status = getattr(result, "status", "")
-            if _result_status == "not_submitted" and (
-                getattr(result, "submission_attempted", False)
-                or getattr(result, "exchange_request_sent", False)
+            if _result_status == "not_submitted" and not _exit_result_never_dispatched(
+                result, _result_status
             ):
                 logger.warning(
-                    "[EXIT-ORDER] Post-send not_submitted is unproven; retaining exit lock "
+                    "[EXIT-ORDER] not_submitted is unproven; retaining exit lock "
                     "for reconciliation: position=%s client_order_id=%s",
                     position.position_id[:8], intent.client_order_id,
                 )
@@ -4604,13 +4603,13 @@ async def _execute_exit_order(
                     try:
                         from merid.position_management.exit_arbiter import get_exit_arbiter
                         get_exit_arbiter().mark_ack_unknown(
-                            _arb_position_key, note="post_send_not_submitted"
+                            _arb_position_key, note="unproven_not_submitted"
                         )
                     except Exception:
                         logger.exception("[EXIT-ORDER] Failed to mark arbiter outcome unknown")
                 if self._position_monitor:
                     self._position_monitor._mark_exit_intent_submission_unknown(
-                        position.position_id, "post_send_not_submitted"
+                        position.position_id, "unproven_not_submitted"
                     )
                 return
             # An intermediate ``not_submitted`` that will be resubmitted keeps
@@ -4656,7 +4655,7 @@ async def _execute_exit_order(
 
             if _result_status == "not_submitted":
                 if _current_resubmit >= _max_resubmits:
-                    logger.error(
+                    logger.warning(
                         "[EXIT-ORDER] not_submitted resubmit limit reached: "
                         "position=%s market=%s client_order_id=%s attempts=%d",
                         position.position_id[:8],
@@ -4664,22 +4663,17 @@ async def _execute_exit_order(
                         intent.client_order_id,
                         _current_resubmit + 1,
                     )
-                    if self._position_monitor:
-                        self._position_monitor._mark_exit_intent_submission_unknown(
-                            position.position_id,
-                            "not_submitted_resubmit_limit_exhausted",
-                        )
-                    return
-                _current_resubmit += 1
-                logger.warning(
-                    "[EXIT-ORDER] Exit not_submitted; resubmitting with same client_order_id=%s "
-                    "attempt=%d/%d",
-                    intent.client_order_id,
-                    _current_resubmit,
-                    _max_resubmits + 1,
-                )
-                await asyncio.sleep(0.2)
-                continue
+                else:
+                    _current_resubmit += 1
+                    logger.warning(
+                        "[EXIT-ORDER] Exit not_submitted; resubmitting with same client_order_id=%s "
+                        "attempt=%d/%d",
+                        intent.client_order_id,
+                        _current_resubmit,
+                        _max_resubmits + 1,
+                    )
+                    await asyncio.sleep(0.2)
+                    continue
 
             if _result_status == "duplicate":
                 # "duplicate": another route for this client_order_id is still
@@ -4716,7 +4710,7 @@ async def _execute_exit_order(
                     )
                 return
 
-            # A router-local rejection that provably never reached the wire is a
+            # A router-local refusal that provably never reached the wire is a
             # terminal outcome, not an unknown one: the pre-send gate declined
             # it before any exchange request (submission_certainty=pre_submit,
             # no send evidence, no exchange id).  Treating it as
@@ -5146,20 +5140,23 @@ def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepar
 def _exit_result_never_dispatched(result, result_status: str) -> bool:
     """True when a route result proves the exit request never reached the wire.
 
-    A router-local pre-send rejection (firewall/arbiter/gate) carries
+    A router-local pre-send refusal (firewall/arbiter/gate) carries
     ``submission_certainty='pre_submit'`` with no send evidence and no exchange
     order id — the request died inside the router before any network I/O.
     That is a provable terminal outcome, unlike a post-send ambiguity which
     must stay SUBMISSION_UNKNOWN for exchange reconciliation.
     """
-    if result_status != "rejected" or result is None:
+    if result_status not in ("rejected", "not_submitted") or result is None:
         return False
     if getattr(result, "submission_certainty", None) != "pre_submit":
         return False
     return not (
         getattr(result, "submission_attempted", False)
         or getattr(result, "exchange_request_sent", False)
+        or getattr(result, "exchange_ack_received", False)
         or getattr(result, "order_id", None)
+        or getattr(result, "has_execution", False)
+        or getattr(result, "requires_recovery", False)
     )
 
 
