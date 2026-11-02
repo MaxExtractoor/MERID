@@ -105,6 +105,13 @@ def _healthy_loop(monkeypatch):
     # gates open so the baseline can reach it.
     monkeypatch.setattr("merid.loop_15m.can_submit_live_entry", lambda: True)
     monkeypatch.setattr("merid.loop_15m.is_observe_only", lambda: False)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.canonical_portfolio.get_canonical_portfolio_store",
+        lambda: SimpleNamespace(current=lambda: SimpleNamespace(
+            is_authoritative=True, age_ms=0,
+            reconciliation_status="MATCHED", reconciliation_reason="MATCHED",
+        )),
+    )
 
     loop = Kalshi15mLoop(
         agent_grid=MagicMock(),
@@ -203,3 +210,28 @@ def test_unhealthy_audit_writer_blocks_entries(monkeypatch):
     clear_entry_idempotency_registry()
     assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
     assert loop._entries_block_reason == "audit_writer_unhealthy"
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "error"])
+def test_unavailable_canonical_portfolio_blocks_entries(monkeypatch, unavailable):
+    loop, store = _healthy_loop(monkeypatch)
+    clear_entry_idempotency_registry()
+    w = WindowFixture(
+        "BTC",
+        datetime(2026, 8, 24, 23, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 24, 23, 15, 0, tzinfo=timezone.utc),
+        15,
+    )
+    _apply_active_window(store, monkeypatch, w)
+
+    def current():
+        if unavailable == "error":
+            raise OSError("portfolio unavailable")
+        return None
+
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.canonical_portfolio.get_canonical_portfolio_store",
+        lambda: SimpleNamespace(current=current),
+    )
+    assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
+    assert loop._entries_block_reason == "portfolio_unavailable"

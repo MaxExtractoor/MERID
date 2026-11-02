@@ -5667,12 +5667,16 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
     # P0 FIX: portfolio authority gate. New entries require an authoritative,
     # non-stale canonical portfolio snapshot. Exits remain enabled.
     portfolio_age_ms = 0
-    portfolio_authoritative = True
+    portfolio_authoritative = False
     if allow_new_entries:
         try:
             from merid.event_venues.kalshi.canonical_portfolio import get_canonical_portfolio_store
             portfolio = get_canonical_portfolio_store().current()
-            if portfolio is not None:
+            if portfolio is None:
+                allow_new_entries = False
+                self._entries_block_reason = "portfolio_unavailable"
+                logger.warning("[15m-LOOP] ENTRY_BLOCKED: canonical portfolio unavailable")
+            else:
                 portfolio_authoritative = bool(portfolio.is_authoritative)
                 portfolio_age_ms = int(portfolio.age_ms)
                 if not portfolio_authoritative:
@@ -5685,9 +5689,6 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                     allow_new_entries = False
                     self._entries_block_reason = "portfolio_not_authoritative"
                 elif portfolio_age_ms > 300000:
-                    # P0 FIX: The canonical portfolio reconciler runs every 60s. A 10s
-                    # threshold caused constant false-positive entry blocks. 300s gives
-                    # the reconciler several cycles plus long REST/build processing slack.
                     logger.warning(
                         "[15m-LOOP] ENTRY_BLOCKED: portfolio stale age_ms=%d > 300000",
                         portfolio_age_ms,
@@ -5696,6 +5697,9 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                     self._entries_block_reason = "portfolio_stale"
         except Exception as e:
             logger.warning("[15m-LOOP] Portfolio authority check failed: %s", e)
+            portfolio_authoritative = False
+            allow_new_entries = False
+            self._entries_block_reason = "portfolio_unavailable"
 
     # 2026-10-31: settlement-write persistence gate. A failed proceeds
     # write (newer than the last commit) or an unresolved op older than
@@ -5868,7 +5872,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
             # exchange/ledger/cache break for this ticker must make the
             # portfolio non-authoritative *for this ticker* and block new
             # entries.  Exits remain available.
-            reconciliation_halted = False
+            reconciliation_halted = True
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
 
