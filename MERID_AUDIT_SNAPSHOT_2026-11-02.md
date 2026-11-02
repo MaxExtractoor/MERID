@@ -710,3 +710,28 @@ Fix: ``daily_pnl_usd`` is now ``equity_now - day_start_equity`` where the anchor
 UI can tell authoritative vs fallback values. The two double-counted ``daily_total_pnl_usd`` aliases
 now mirror the canonical daily figure. First-day deployment anchors at first fresh read (anchored_at
 exposed); subsequent days are exact. Requires restart to deploy.
+
+## Feed precision + API import + audit writer repairs (commits d328057a, c057f5cb)
+
+Root causes found via live error census on the deployed build:
+- ``[API-POSITIONS] cannot import name 'get_venue_adapter'`` every ~15s — misnamed import; the real
+  symbol is ``get_kalshi_venue_adapter``. This starved the positions endpoint freshness path and
+  surfaced as the persistent backend/UI balance error.
+- ``invalid_ws_delta_precision`` / ``snapshot level exceeds local book precision`` — the local
+  orderbook stored whole-cent prices and whole-contract sizes. Authoritative venue evidence shows
+  Kalshi books are subpenny (0.0010-dollar levels observed on KXBTC15M) with fractional sizes
+  (e.g. 741754.08 contracts); Kalshi docs confirm ``price_dollars`` up to 4 decimals and
+  ``*_fp`` quantities on a 0.01-contract grid. Every fractional/subpenny frame was rejected, so WS
+  books could never reach HEALTHY — permanent RESYNC/UNTRADEABLE churn with resync_attempt >50.
+- ``decision_audit`` writer: 15.1 GB DB under ``synchronous=FULL`` fsync'd ~1s per commit;
+  write-wait p95 hit ~370s and low-priority evidence was being shed.
+
+Fixes: book sizes now centi-contract float; price keys on the documented 0.01-cent grid;
+snapshot/delta gates validate those grids instead of whole-cent/whole-contract; audit WAL uses
+``synchronous=NORMAL`` (durable across process crash; only power-loss could drop uncommitted frames —
+previously shed anyway). Post-deploy evidence on c057f5cb: zero precision rejections, books reach
+HEALTHY/WS_FRESH_VERIFIED with executable=true, entries_allowed on real WS quotes (not only the
+REST-degraded carve-out), writer queue_depth 0-1, no API-POSITIONS errors.
+
+Follow-up noted: order submission still int(round)s book prices; a 92.5c ask rounds to 92c — fails
+safe (under-priced IOC simply rests), but ceil-ask/floor-bid semantics would be more correct.
