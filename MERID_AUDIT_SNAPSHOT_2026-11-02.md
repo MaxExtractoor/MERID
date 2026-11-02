@@ -517,9 +517,11 @@ position/cost-basis snapshot). Both episodes are now RESOLVED at exchange truth:
   realized loss — the execution was real, not phantom. The local zero-payout
   settlement sweep was consistent with venue view.
 
-**Complete-historical realized (both episodes included at exchange truth):**
+**Verified cohort plus two resolved episodes (not complete account truth):**
 −4384.53c −13.06c −65.62c = **−4463.21c ≈ −$44.63** vs prior verified-only
-−$43.85 and the pre-contract polluted figure −$28.02. Both were buy-NO entries
+−$43.85 and the pre-contract polluted figure −$28.02. This arithmetic does not
+resolve the other exclusions or coverage gaps and is not a bound on the full
+account result. Both were buy-NO entries
 that lost (one via hedge-lock, one at settlement) — consistent with the
 losses-in-NO-side/no-exit concentration finding.
 

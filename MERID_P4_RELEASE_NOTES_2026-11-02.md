@@ -52,7 +52,9 @@ benchmarks.
 snapshot §P4-PAIRS addendum): d3ae −13.06c (buy-NO + buy-YES hedge pair, $1.00
 payout), da6e −65.62c (real buy-NO execution, YES won → $0; venue fill
 `0723b3d4` never ingested — 09-25 fills-poller gap, backfill candidate).
-Complete-history realized: **−4,463.21c ≈ −$44.63**.
+Verified cohort plus these two resolved episodes: **−4,463.21c ≈ −$44.63**.
+This is not complete account truth or a bound; other exclusions and coverage
+gaps remain.
 
 ## Pre-restart checks (recorded)
 
@@ -125,4 +127,3 @@ current live totals reconcile separately — never force equal.
 - Exit FSM worked: FILLED / EXCHANGE_CONFIRMED_FLAT / CANCELED / RESOLVING all durable and correct.
 - DEFECT (env/lifecycle, not P4): stale decision_audit -wal from prior unclean exit -> WAL-recovery race at boot -> server's audit conns permanently readonly (1529+ writes dropped; schema init + record_* all failed). Fresh conns write fine; WAL checkpointed clean post-stop.
 - EXIT-POLICY FINDING: every position born risk_params_state=unknown (REST position poll precedes fill ingestion; no upgrade path) -> EXIT-POLICY-QUARANTINE blocks discretionary exits; profit_only_v1 floor suppresses sub-entry trails -> only profit-trails + derived fallback SL + settlement function. Live mechanism behind the historical 'no-exit losses' concentration. HARD_PROFIT_LOCK_TRIGGER_NO_INTENT P0 alert also observed.
-

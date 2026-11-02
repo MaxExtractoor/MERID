@@ -36,7 +36,7 @@ Artifacts computed on the pre-canonical (mirror-polluted) dataset are
 | `exit_counterfactuals` on the 22 mirror-affected markets | 14 rows | Rebuild under contract 1.0 (v2, keep v1 rows annotated) |
 | `bankroll_reconciliation` settlement-trigger telemetry | 468 rows | Preserve as `v1_telemetry`; recompute affected settlements on canonical fills |
 | Calibration outputs on the 22 changed markets | 22 market-buckets | Re-fit per-market tail curves on canonical fill set before reusing in eligibility |
-| decision-audit episode aggregates (A-basis totals) | full history | Label A-basis totals `as_computed_legacy`; C-basis (verified-only: −4384.53c/−3301.68c/−1082.85c, 798 eps) is the reference benchmark, not a bound; **complete-history at exchange truth: −4463.21c ≈ −$44.63** (d3ae −13.06c + da6e −65.62c added) |
+| decision-audit episode aggregates (A-basis totals) | full history | Label A-basis totals `as_computed_legacy`; C-basis (verified-only: −4384.53c/−3301.68c/−1082.85c, 798 eps) is the reference benchmark, not a bound; **verified cohort plus two resolved episodes: −4463.21c ≈ −$44.63** (d3ae −13.06c + da6e −65.62c added), not complete account truth or a bound |
 | `kalshi_fills` backfill: da6e venue fill `0723b3d4` | 1 row | Ingest with `ingestion_source=fills_poller_gap_backfill`, `fill_source` trusted (exchange-verified via fills feed + settlement cost basis); mirror `live_router_01a0da6e` then classifies `mirror_with_side_conflict` |
 | d3ae raw venue rows (3 fills) | 3 rows | Retain as ingested (evidence immutable). Label-corrupt `action`/`side`/proceeds handled at projection layer via `resolved_exchange` note — do not rewrite raw rows |
 
