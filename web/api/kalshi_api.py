@@ -2734,7 +2734,10 @@ async def get_balance() -> Dict[str, Any]:
         response["trading_shard"] = trading_shard
         client = _get_client()
         if client is not None:
-            shards = await get_shard_balances_cached(client)
+            # Shard balances only move on fills/settlements/transfers; a longer
+            # TTL keeps per-request latency off the Kalshi balance bucket while
+            # the trading loop's own reads keep the shared cache warm.
+            shards = await get_shard_balances_cached(client, max_age_s=60.0)
             if shards:
                 response["shard_balances_usd"] = {
                     str(int(k)): float(v) for k, v in shards.items()
@@ -4285,9 +4288,9 @@ async def get_pnl() -> Dict[str, Any]:
     # ingestion completeness or per-fill date attribution.
     daily_pnl_source = "ledger_fills"
     try:
-        from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync as _br_summary
         from merid.event_venues.kalshi.bankroll_models import BalanceState as _BalanceState
-        _bs = _br_summary("kalshi_api_pnl")
+        _svc = await get_bankroll_service()
+        _bs = await _svc.get_summary(caller_module="kalshi_api_pnl") if _svc is not None else None
         equity_now = float(_bs.equity_usd) if _bs is not None and _bs.equity_usd is not None else None
         if equity_now is not None:
             anchor, anchor_ts, anchor_ok = _daily_equity_anchor(
