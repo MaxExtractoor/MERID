@@ -6982,13 +6982,33 @@ async def _run_loop(self) -> None:
                                 # The router independently rechecks its own stake gate.
                                 _stake_cap_usd = None
                                 try:
-                                    from merid.event_venues.kalshi.shard_funding import fresh_cached_shard_cash
+                                    from merid.event_venues.kalshi.shard_funding import (
+                                        fresh_cached_shard_cash,
+                                        last_result as _shard_last_result,
+                                    )
                                     _shard = candidate.get("exchange_index")
                                     if _shard is None and getattr(self, "_catalog", None):
                                         _cm = self._catalog.get_market(ticker)
                                         _shard = getattr(_cm, "exchange_index", None)
                                     if _shard is not None and not isinstance(_shard, bool):
                                         _cash = fresh_cached_shard_cash(int(_shard))
+                                        if _cash is None:
+                                            # 2026-11-02: the 15s-fresh read is
+                                            # blind between the 60s funding
+                                            # rechecks, so the cap silently
+                                            # disabled ~75% of the time and
+                                            # over-cap intents reached the
+                                            # router to be rejected instead of
+                                            # resized.  Fall back to the
+                                            # last-known-good funding result —
+                                            # the same unbounded staleness the
+                                            # sizer already accepts for
+                                            # spendable_usd.  The router's own
+                                            # gate re-checks fresh cash at
+                                            # submit and remains authoritative.
+                                            _lr = _shard_last_result()
+                                            if _lr is not None and _lr.shard_balances:
+                                                _cash = _lr.shard_balances.get(int(_shard))
                                         if _cash is not None:
                                             _stake_cap_usd = shard_stake_cap_usd(
                                                 _cash,
