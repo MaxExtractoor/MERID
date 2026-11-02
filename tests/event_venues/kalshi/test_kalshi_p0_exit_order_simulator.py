@@ -219,6 +219,32 @@ async def _route(intent: OrderIntent):
     return await _route_live(intent, TradingMode.LIVE, time.monotonic())
 
 
+@pytest.mark.asyncio
+async def test_post_send_5xx_keeps_exit_reservation(client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    client.set_initial_position(TICKER, "yes", 5, avg_price_cents=50)
+    client.set_orderbook(
+        TICKER, best_bid_cents=50, best_ask_cents=60,
+        bid_size=Decimal("10"), ask_size=Decimal("10"),
+    )
+    create = AsyncMock(return_value=CreateOrderResponse(
+        success=False, error="HTTP 503", status_code=503,
+        submission_certainty="unknown",
+    ))
+    monkeypatch.setattr(client, "create_order", create)
+    intent = _exit_intent(price_cents=50, count=2)
+    coid = _reserve_gate(intent, monkeypatch)
+
+    result = await _route(intent)
+
+    assert result.status == "submission_unknown"
+    assert result.requires_recovery
+    assert create.await_count == 1
+    assert _gate_record(coid).status == OrderStatus.SUBMISSION_UNKNOWN
+    assert client._position_yes[TICKER] == Decimal("5")
+
+
 # ---------------------------------------------------------------------------
 # Exit order scenarios
 # ---------------------------------------------------------------------------
@@ -479,4 +505,3 @@ async def test_submission_unknown_duplicate_client_order_id_returns_duplicate_un
     rec = _gate_record(coid)
     assert rec is not None
     assert rec.status in (OrderStatus.PENDING, OrderStatus.SUBMISSION_UNKNOWN)
-
