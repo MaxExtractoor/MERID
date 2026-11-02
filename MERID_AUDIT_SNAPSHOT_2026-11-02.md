@@ -683,3 +683,14 @@ still skip registration of a fractional working remainder. Thirty-five
 isolated resting-monitor regressions passed. At 18:40 UTC the old production
 process still reported a circuit-open reconciliation halt; no fresh recovery
 or flat-state assertion follows from its earlier startup record.
+
+## 2026-11-02 post-restart verification (PID 12208, e7854442->8f1a3fcb)
+
+- Restart on e7854442 (18:50 UTC): preflight PASS, order_attempts=0 quarantined=198, reconciler MATCHED flat, equity ~$18.50, LIVE_ENTRIES_ENABLED. Runtime state JSON confirmed healthy.
+- Entries were fully suppressed ~50 min: all books latched in `_ws_book_requires_snapshot`; the latch vetoed the REST-degraded carve-out unconditionally (checked before positive evidence). Root cause of zero-entry session identified and fixed in `8f1a3fcb` (latch now evaluated after attested REST-recovery/live-sequence/REST-degraded evidence; no-evidence books still fail closed).
+- Fractional resting-order tracking fixed in `4f730c41`: monitor + ExitOrderState now carry exact fractional counts (registration used int floor -> 0.75 remainder orphaned, 2.75 truncated to 2 on retry); venue remainders validated to centi precision; own-order depth overlay no longer floors sub-contract quantities; market_order_fallback retries now size exactly via OrderIntent.count_fp.
+- Stale test corrected: GTC exit retry `reduce_only=False` is required (Kalshi rejects reduce_only on GTC); test asserted pre-fix `True`.
+- Post-deploy evidence (8f1a3fcb, 19:50 UTC): preflight PASS, quarantined=198, `allow_new_entries_final=True` markets_ready=5/5 quote_fresh=True on REST_VERIFIED_DEGRADED books, portfolio_authoritative=True, reconcilers MATCHED. Transient NOT-EXECUTABLE during invalidation bursts still blocks correctly (fail-closed).
+- WS stale-drop storm persists but is now correctly attributed per-ticker (not full-sid) and books recover to DEGRADED_REST_ONLY/GOOD within ~1-2s; entries flow on the designed degraded path. Consumer-throughput improvement (delta coalescing in bridge, subscription pruning) remains a separate open item.
+- No exposure, exit-policy, or loss-control changes made; raw records and cashflows preserved (auto-prune disabled earlier and remains off).
+
