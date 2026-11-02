@@ -184,8 +184,8 @@ class LocalOrderbook:
 
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.yes_levels: Dict[int, float] = defaultdict(float)  # price_cents -> size (contracts, centi precision)
-        self.no_levels: Dict[int, float] = defaultdict(float)
+        self.yes_levels: Dict[float, float] = defaultdict(float)  # price_cents -> size (contracts)
+        self.no_levels: Dict[float, float] = defaultdict(float)
         # Per-level sequence numbers.  Kalshi orderbook_deltas are one-sided,
         # so the side that was *not* updated can carry stale prices.  When a
         # crossed/locked book is detected, we remove the price level with the
@@ -249,11 +249,10 @@ class LocalOrderbook:
         # Float inputs are always treated as dollars and converted to cents;
         # integer inputs are used as-is.  This removes the previous heuristic
         # that mis-classified sub-penny cent values as dollars.
-        def _to_cents(price, convert_from_yes_space: bool = False) -> int:
-            if isinstance(price, float):
-                price_cents = int(round(price * 100))
-            else:
-                price_cents = int(price)
+        def _to_cents(price, convert_from_yes_space: bool = False) -> float:
+            # Venue books are subpenny (e.g. 0.0010-dollar bids); keep the
+            # documented 0.01-cent grid rather than flooring to whole cents.
+            price_cents = round(float(price) * 100, 4)
             if convert_from_yes_space:
                 price_cents = 100 - price_cents
             return price_cents
@@ -265,10 +264,7 @@ class LocalOrderbook:
                 price, size = level[0], level[1]
                 if size > 0:
                     price_cents = _to_cents(price)
-                    # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
-                    # Clamp to valid range to handle rounding edge cases
-                    price_cents = max(1, min(99, price_cents))
-                    if price_cents > 0 and price_cents < 100:
+                    if 0 < price_cents < 100:
                         self.yes_levels[price_cents] = float(size)
                         self._yes_level_seq[price_cents] = snap_seq
 
@@ -279,10 +275,7 @@ class LocalOrderbook:
                 price, size = level[0], level[1]
                 if size > 0:
                     price_cents = _to_cents(price, convert_from_yes_space=self._use_yes_price)
-                    # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
-                    # Clamp to valid range to handle rounding edge cases
-                    price_cents = max(1, min(99, price_cents))
-                    if price_cents > 0 and price_cents < 100:
+                    if 0 < price_cents < 100:
                         self.no_levels[price_cents] = float(size)
                         self._no_level_seq[price_cents] = snap_seq
 
@@ -344,7 +337,7 @@ class LocalOrderbook:
         # WS may send numbers as strings, so convert to float first
         if "price_dollars" in delta:
             price_dollars = float(delta["price_dollars"]) if isinstance(delta["price_dollars"], str) else delta["price_dollars"]
-            price = int(round(price_dollars * 100))  # Convert dollars to cents
+            price = round(price_dollars * 100, 4)  # dollars -> cents, 0.01c grid
         else:
             price = delta.get("price")
         
@@ -360,9 +353,7 @@ class LocalOrderbook:
         if side == "no" and self._use_yes_price:
             price = 100 - price
 
-        # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
-        # Clamp to valid range to handle rounding edge cases
-        price = max(1, min(99, price))
+        # Subpenny prices are valid; only drop levels outside (0, 100).
         if price <= 0 or price >= 100:
             return
 
@@ -557,7 +548,7 @@ class LocalOrderbook:
         # The best NO bid is the highest NO price; its complement is the best YES ask.
         best_no_price = max(self.no_levels.keys())
         
-        # CRITICAL FIX: Handle invalid NO prices (0 or >=100)
+        # CRITICAL FIX: Handle invalid NO prices (<=0 or >=100)
         if best_no_price <= 0 or best_no_price >= 100:
             logger.warning(
                 "[ORDERBOOK] Invalid NO price %d - cannot derive YES-equivalent, skipping",
@@ -567,11 +558,11 @@ class LocalOrderbook:
         
         # Convert to YES-equivalent ask
         yes_equivalent = 100 - best_no_price
-        
-        # Validate the derived price is in valid range
-        if not (1 <= yes_equivalent <= 99):
+
+        # Validate the derived price is in valid range (subpenny-aware)
+        if not (0 < yes_equivalent < 100):
             logger.warning(
-                "[ORDERBOOK] Derived YES-equivalent price %d out of valid range [1,99] from NO price %d",
+                "[ORDERBOOK] Derived YES-equivalent price %s out of valid range (0,100) from NO price %s",
                 yes_equivalent, best_no_price
             )
             return None

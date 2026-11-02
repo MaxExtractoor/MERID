@@ -3993,9 +3993,10 @@ class KalshiMarketStateStore:
                             raise ValueError("snapshot level must be finite")
                         if not 0 < price < 1 or size < 0:
                             raise ValueError("snapshot level outside valid range")
-                        # LocalOrderbook stores whole-cent prices; sizes are
-                        # centi-contract grid (0.01) like Kalshi ``count_fp``.
-                        if price * 100 != (price * 100).to_integral_value() or size * 100 != (size * 100).to_integral_value():
+                        # LocalOrderbook stores cent prices on the documented
+                        # 0.01-cent grid (subpenny books exist, e.g. 0.0010);
+                        # sizes are centi-contract grid (0.01) like ``count_fp``.
+                        if price * 10000 != (price * 10000).to_integral_value() or size * 100 != (size * 100).to_integral_value():
                             raise ValueError("snapshot level exceeds local book precision")
                         if size:
                             converted.append([float(price), float(size)])
@@ -4097,7 +4098,7 @@ class KalshiMarketStateStore:
                     if (
                         not price.is_finite() or not size.is_finite()
                         or not 0 < price < 1
-                        or price * 100 != (price * 100).to_integral_value()
+                        or price * 10000 != (price * 10000).to_integral_value()
                         or size * 100 != (size * 100).to_integral_value()
                     ):
                         raise ValueError("delta exceeds local book precision or range")

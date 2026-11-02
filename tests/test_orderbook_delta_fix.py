@@ -279,37 +279,32 @@ class TestOrderbookDeltaFloatToIntFix:
                     # If it exists, it should be clamped to 1 or 99
                     assert price_cents in [1, 99], f"Invalid price {price_cents}c should be clamped to 1 or 99"
     
-    def test_invalid_no_price_clamped_to_valid_range(self):
-        """Test that invalid NO price (0c) is clamped to 1c in snapshot."""
+    def test_invalid_no_price_dropped_out_of_range(self):
+        """Out-of-range prices (0c) are dropped; subpenny prices are kept."""
         book = LocalOrderbook("KXBTC15M-26JUL050730-30")
-        
-        # Create book with invalid NO price (0c) - should be clamped to 1c
+
         snapshot = {
             "ticker": "KXBTC15M-26JUL050730-30",
             "yes": [[0.50, 10]],
-            "no": [[0.0, 10]],  # Invalid NO price (0c) -> clamped to 1c
+            "no": [[0.0, 10], [0.0010, 25]],  # 0c dropped; 0.1c kept (subpenny)
         }
         book.apply_snapshot(snapshot)
-        
-        # NO price should be clamped to 1c (valid range)
-        assert 1 in book.no_levels, "NO price 0c should be clamped to 1c"
-        assert book.no_levels[1] == 10, "Size should be preserved after clamping"
-    
-    def test_invalid_no_price_boundary_clamped_to_valid_range(self):
-        """Test that NO price >= 100c is clamped to 99c in snapshot."""
+
+        assert 0 not in book.no_levels and 0.1 in book.no_levels
+        assert book.no_levels[0.1] == pytest.approx(25.0)
+
+    def test_invalid_no_price_boundary_dropped(self):
+        """NO price >= 100c is dropped rather than clamped into the book."""
         book = LocalOrderbook("KXBTC15M-26JUL050730-30")
-        
-        # Create book with NO price at boundary - should be clamped to 99c
+
         snapshot = {
             "ticker": "KXBTC15M-26JUL050730-30",
             "yes": [[0.50, 10]],
-            "no": [[1.0, 10]],  # NO price = 100c (invalid) -> clamped to 99c
+            "no": [[1.0, 10]],  # NO price = 100c (invalid) -> dropped
         }
         book.apply_snapshot(snapshot)
-        
-        # NO price should be clamped to 99c (valid range)
-        assert 99 in book.no_levels, "NO price 100c should be clamped to 99c"
-        assert book.no_levels[99] == 10, "Size should be preserved after clamping"
+
+        assert not book.no_levels, "NO price >= 100c should be dropped"
 
 
 if __name__ == "__main__":
