@@ -106,6 +106,7 @@ _TERMINAL_STATES = frozenset({
 _BLOCK_DUPLICATE_STATES = frozenset({
     OrderStatus.PENDING,
     OrderStatus.SUBMITTED,
+    OrderStatus.SUBMISSION_UNKNOWN,
     OrderStatus.LIVE,
     OrderStatus.PARTIAL,
     OrderStatus.FILLED,
@@ -619,23 +620,19 @@ class IdempotentOrderStore:
                     and rec.action == action
                     and rec.price_cents == price_cents
                     and rec.target_qty_cc == target_qty_cc  # CRITICAL: Check count to prevent multi-contract bypass
-                    and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
+                    and rec.status in (
+                        OrderStatus.PENDING, OrderStatus.SUBMITTED,
+                        OrderStatus.SUBMISSION_UNKNOWN, OrderStatus.LIVE,
+                        OrderStatus.PARTIAL,
+                    )
                 ):
                     age_seconds = now - rec.updated_at
-                    # CRITICAL FIX (2026-08-10): stale in-flight records must not block new orders forever.
-                    # PENDING that never transitioned is almost always a leak; SUBMITTED/LIVE without a fill
-                    # should also time out because the maintenance scheduler may not be running or may lag.
-                    # Use the same TTL as the orphan sweep so the gate is self-healing even without scheduled cleanup.
+                    # Only identity-free pending records may be treated as stale.
+                    # Age cannot prove that a sent or working order is dead.
                     if rec.status == OrderStatus.PENDING and age_seconds > self.ORPHAN_PENDING_TTL_S:
                         logger.warning(
                             "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=%.0fs)",
                             rec.client_order_id, age_seconds, self.ORPHAN_PENDING_TTL_S
-                        )
-                        continue
-                    if rec.status in (OrderStatus.SUBMITTED, OrderStatus.LIVE) and age_seconds > self.ORPHAN_SUBMITTED_TTL_S:
-                        logger.warning(
-                            "[find_resting_duplicate] Skipping stale %s order coid=%s age=%.1fs (threshold=%.0fs)",
-                            rec.status.value, rec.client_order_id, age_seconds, self.ORPHAN_SUBMITTED_TTL_S
                         )
                         continue
                     return rec
