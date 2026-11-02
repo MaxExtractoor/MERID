@@ -347,15 +347,9 @@ _WAL_CHECKPOINT_INTERVAL_S = float(
 # callback cost is noise.
 _EVIDENCE_PROGRESS_STEPS = 100000
 
-# Rolling hot-retention prune.  The ledger is audit/telemetry — live evidence
-# reads only the trailing ~5h, so rows past the retention window are research
-# history.  Prune cadence x batch must exceed daily write volume or the file
-# re-grows toward the multi-GB delete-bottleneck state that motivated the
-# 2026-10-22 rebuild-swap.  Defaults: check hourly, 5k decisions per batch,
-# <=20 batches per invocation (~100k decisions/hour capacity, comfortably
-# above the ~65-215k/day write rate).  <=0 disables.  See
-# scripts/rebuild_hot_decision_audit.py for the one-time compaction flow.
-_PRUNE_INTERVAL_S = float(os.environ.get("MERID_AUDIT_PRUNE_S", "3600"))
+# Historical rows are audit evidence. Pruning is never scheduled by the live
+# writer; an explicitly authorized archival workflow is required before any
+# use of the manual maintenance helper.
 _AUDIT_RETENTION_DAYS = float(os.environ.get("MERID_AUDIT_RETENTION_DAYS", "7"))
 _PRUNE_BATCH = int(os.environ.get("MERID_AUDIT_PRUNE_BATCH", "5000"))
 _PRUNE_MAX_BATCHES = int(os.environ.get("MERID_AUDIT_PRUNE_MAX_BATCHES", "20"))
@@ -388,7 +382,6 @@ class DecisionAuditLedger:
         self._read_conn_lock = threading.Lock()
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_wal_checkpoint = 0.0
-        self._last_prune = 0.0
         self._startup_checkpoint_done = False
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
@@ -873,12 +866,9 @@ class DecisionAuditLedger:
             self._db_ready = True
             if not self._startup_checkpoint_done:
                 self._startup_checkpoint_done = True
-                # Drain the WAL once at startup: the only moment a TRUNCATE
-                # checkpoint is cheap (no analytics readers yet).  Runs on the
-                # writer thread, never the event loop, and gives up fast via
-                # busy_timeout if a reader does hold the WAL.
+                # Do not wait for other readers during startup maintenance.
                 self._submit_write(
-                    lambda: self.wal_checkpoint("TRUNCATE"), priority="low"
+                    lambda: self.wal_checkpoint("PASSIVE"), priority="low"
                 )
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
@@ -3841,29 +3831,13 @@ class DecisionAuditLedger:
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] record_heartbeat failed for %s: %s", cycle_id, exc)
 
-        # Scheduled WAL maintenance.  Heartbeats fire every cycle, so gate the
-        # checkpoint on wall-clock interval.  TRUNCATE first so the -wal file
-        # actually shrinks (PASSIVE merges frames but leaves the file at its
-        # high-water size — observed: a 1.8GB container of already-merged
-        # frames).  TRUNCATE defers to readers via busy_timeout; on busy the
-        # PASSIVE fallback still merges what it can.  Both run on this writer
-        # thread, never the event loop.
+        # PASSIVE avoids waiting on long-lived readers. The WAL can retain its
+        # high-water file size, so disk use must still be monitored.
         if _WAL_CHECKPOINT_INTERVAL_S > 0:
             now = time.time()
             if now - self._last_wal_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
                 self._last_wal_checkpoint = now
-                if self.wal_checkpoint("TRUNCATE"):
-                    self.wal_checkpoint("PASSIVE")
-
-        # Rolling hot-retention prune: keeps the audit DB bounded at
-        # ~MERID_AUDIT_RETENTION_DAYS so it can never grow back to the
-        # multi-GB delete-bottleneck state.  Batched DELETEs run on this
-        # serialized writer thread, never the event loop; one txn per batch.
-        if _PRUNE_INTERVAL_S > 0:
-            now = time.time()
-            if now - self._last_prune >= _PRUNE_INTERVAL_S:
-                self._last_prune = now
-                self.prune_old_rows()
+                self.wal_checkpoint("PASSIVE")
 
     def prune_old_rows(self, retention_days: Optional[float] = None,
                        batch: Optional[int] = None,

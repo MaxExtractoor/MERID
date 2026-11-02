@@ -13,6 +13,7 @@ import queue
 import sqlite3
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,7 +28,14 @@ def _make_db(path, n=40, with_children=True):
     for t in ("strategy_decision_events", "strategy_decision_side_ev",
               "strategy_decision_outcomes", "strategy_decision_snapshots"):
         con.execute(f"CREATE TABLE {t} (decision_id TEXT, v INT)")
-    con.execute("CREATE TABLE decision_audit_heartbeats (created_at REAL)")
+    con.execute(
+        "CREATE TABLE decision_audit_heartbeats ("
+        "cycle_id TEXT PRIMARY KEY, tick INTEGER, assets_evaluated INTEGER, "
+        "decisions_expected INTEGER, decisions_persisted INTEGER, "
+        "snapshots_persisted INTEGER, side_ev_expected INTEGER, "
+        "side_ev_persisted INTEGER, ledger_write_latency_ms REAL, "
+        "ledger_error_count INTEGER, created_at REAL)"
+    )
     old = time.time() - 30 * 86400  # all expired under any 7d retention
     for i in range(n):
         did = f"d{i}"
@@ -62,6 +70,28 @@ def _depths(led):
         led._test_conn.execute("SELECT COUNT(*) FROM strategy_decisions").fetchone()[0],
         led._test_conn.execute("SELECT COUNT(*) FROM strategy_decision_events").fetchone()[0],
     )
+
+
+def test_heartbeat_preserves_history_and_uses_passive_checkpoint(tmp_path, monkeypatch):
+    led, con = _ledger(tmp_path, monkeypatch)
+    monkeypatch.setenv("MERID_AUDIT_PRUNE_S", "1")
+    monkeypatch.setattr(dal, "_WAL_CHECKPOINT_INTERVAL_S", 1)
+    led._last_wal_checkpoint = 0.0
+    led._ensure_db = MagicMock()
+    led.prune_old_rows = MagicMock()
+    led.wal_checkpoint = MagicMock(return_value=False)
+
+    led.record_heartbeat(
+        cycle_id="test", tick=1, assets_evaluated=1,
+        decisions_expected=1, decisions_persisted=1,
+        snapshots_persisted=0, side_ev_expected=0, side_ev_persisted=0,
+        ledger_write_latency_ms=1, ledger_error_count=0,
+    )
+
+    assert con.execute("SELECT COUNT(*) FROM decision_audit_heartbeats").fetchone()[0] == 1
+    assert _depths(led) == (40, 40)
+    led.prune_old_rows.assert_not_called()
+    led.wal_checkpoint.assert_called_once_with("PASSIVE")
 
 
 def test_yield_before_first_batch(tmp_path, monkeypatch):
