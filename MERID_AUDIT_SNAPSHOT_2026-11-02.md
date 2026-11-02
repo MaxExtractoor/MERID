@@ -549,3 +549,7 @@ The persisted runtime-state file was not restored or cleared. The test
 fixtures now use Path objects and isolated runtime-state files; subsequent
 focused tests verified that the production runtime-state file did not change.
 These observations do not establish that all recovery prerequisites are met.
+
+At 10:40:28 ET the running process repersisted its own in-memory halted state,
+replacing the test-generated on-disk reasons with reconciliation-failure
+reasons. This does not establish that every earlier transition was recovered.
