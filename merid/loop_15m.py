@@ -4071,6 +4071,34 @@ async def _execute_exit_order(
                     intent.order_attempt_id = None
                     durable_exit_attempt = None
                     preexisting_exit_attempt = False
+                    # Retry-storm visibility (P2): the sibling count under the
+                    # stable exit_intent_id is the obligation's true attempt
+                    # ordinal — surface it so uncontrolled rearm cycles are
+                    # observable instead of silent.  Log-only; does not alter
+                    # which attempts are created or how many.
+                    try:
+                        _obligation_attempts = store.count_exit_attempts_for_intent(
+                            intent.intent_id
+                        ) + 1  # +1 for the replacement about to be created
+                        _retry_msg = (
+                            "[EXIT-OBLIGATION-RETRY] intent=%s position=%s "
+                            "prior_terminal=%s attempt_ordinal=%d"
+                        ) % (
+                            intent.intent_id[:24],
+                            position.position_id[:8],
+                            getattr(superseded, "state", "?"),
+                            _obligation_attempts,
+                        )
+                        if _obligation_attempts >= 50:
+                            logger.critical(_retry_msg)
+                        elif _obligation_attempts >= 25:
+                            logger.error(_retry_msg)
+                        elif _obligation_attempts >= 5:
+                            logger.warning(_retry_msg)
+                        else:
+                            logger.info(_retry_msg)
+                    except Exception:
+                        pass
             if durable_exit_attempt is None:
                 # exit_policy may be None or malformed; a missing policy must
                 # never prevent the durable attempt record from being created —

@@ -805,6 +805,127 @@ def record_stop_candidate(candidate: StopCandidate) -> None:
     get_stop_candidate_ledger().record(candidate)
 
 
+# ── Signal dispositions (2026-11-02 audit repair) ────────────────────────────
+# The candidate record proves a sell signal existed; this record proves what
+# the system did with it.  Audit finding: suppression reasons lived only in
+# the returned OrderResult + a log line, so SELL_SIGNALLED evaluations had no
+# joinable downstream outcome.  ``intent_id``/``client_order_id`` reproduce the
+# deterministic identities used at order construction so the disposition joins
+# ``exit_order_attempts.exit_intent_id`` and router rows without new plumbing.
+
+SIGNAL_DISPOSITION_APPROVED = "approved"
+SIGNAL_DISPOSITION_SUPPRESSED = "suppressed"
+SIGNAL_DISPOSITION_UNRESOLVED = "unresolved"
+SIGNAL_DISPOSITION_ERROR = "error"
+# A SELL-signalled evaluation whose consumer is observe-only by design (the
+# settlement-aligned shadow eval inside _evaluate_stop_loss).  The eval record
+# exists in exit_evaluations.jsonl with would_submit=true; this disposition
+# records that no dispatch was *expected*, preventing shadow approvals from
+# being misread as dropped handoffs.
+SIGNAL_DISPOSITION_OBSERVE_ONLY = "observe_only"
+
+# Persistence-failure diagnostic: recording is best-effort and never alters
+# the execution result.  A failed write is NOT silent — it increments this
+# counter and logs a warning.  `approved` means the candidate passed into the
+# execution path (e.g. unfilled_ioc is approved with zero fill), not that the
+# position exited.
+signal_disposition_persist_failures = {"count": 0}
+
+
+def _signal_disposition_for_result(
+    result: Any, error: Optional[BaseException] = None
+) -> str:
+    if error is not None:
+        return SIGNAL_DISPOSITION_ERROR
+    status = str(getattr(result, "status", "") or "").lower()
+    if status == "rejected":
+        return SIGNAL_DISPOSITION_SUPPRESSED
+    if status == "submission_unknown":
+        return SIGNAL_DISPOSITION_UNRESOLVED
+    return SIGNAL_DISPOSITION_APPROVED
+
+
+def record_signal_disposition(
+    candidate: Optional[StopCandidate],
+    result: Any = None,
+    *,
+    disposition: Optional[str] = None,
+    reason: Optional[str] = None,
+    error: Optional[BaseException] = None,
+    fields: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append the durable downstream disposition for a stop-candidate signal.
+
+    ``candidate`` may be ``None`` for dispositions that predate candidate
+    construction (e.g. observe-only shadow evaluations); ``fields`` then
+    carries the identity/inputs directly.  Never raises — observability must
+    never block or alter the exit path.
+    """
+    try:
+        _cid = getattr(candidate, "candidate_id", None)
+        record = {
+            "record_type": "signal_disposition",
+            "candidate_id": _cid,
+            "recorded_at": time.time(),
+            "market_ticker": getattr(candidate, "market_ticker", None),
+            "trigger_reason": getattr(candidate, "trigger_reason", None),
+            "held_contract": getattr(candidate, "held_contract", None),
+            "position_from_exchange_cc": getattr(
+                candidate, "position_from_exchange_cc", None),
+            "executable_exit_cents": getattr(
+                candidate, "executable_exit_cents", None),
+            "entry_price_cents": getattr(candidate, "entry_price_cents", None),
+            "fair_value_cents": getattr(candidate, "fair_value_cents", None),
+            "seconds_to_expiry": getattr(candidate, "seconds_to_expiry", None),
+            "intent_id": f"stop_candidate:{_cid}" if _cid else None,
+            "client_order_id": f"stopcand_{_cid}"[:64] if _cid else None,
+            "disposition": disposition
+            or _signal_disposition_for_result(result, error=error),
+            "result_status": (
+                str(getattr(result, "status", "") or "") or None
+            ),
+            "reason": reason
+            or getattr(result, "reason", None)
+            or (str(error) if error is not None else None),
+            "error_class": type(error).__name__ if error is not None else None,
+        }
+        if fields:
+            record.update({k: v for k, v in fields.items() if v is not None})
+        logger.info(
+            "[STOP-SIGNAL-DISPOSITION] candidate=%s ticker=%s trigger=%s "
+            "disposition=%s status=%s reason=%s",
+            _cid,
+            record.get("market_ticker"),
+            record.get("trigger_reason"),
+            record["disposition"],
+            record["result_status"],
+            record["reason"],
+        )
+        log_dir = Path(__file__).resolve().parents[3] / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "stop_candidates.jsonl"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception as _disp_exc:
+        # Best-effort contract: a recording failure must never replace or mask
+        # the execution result, but it is visible — counter + warning, not a
+        # silent debug line or a fabricated success record.
+        try:
+            signal_disposition_persist_failures["count"] += 1
+        except Exception:
+            pass
+        logger.warning(
+            "[STOP-SIGNAL-DISPOSITION-FAIL] persist failed for candidate=%s "
+            "ticker=%s disposition=%s reason=%s (%s) — signal outcome NOT "
+            "durably recorded this attempt",
+            getattr(candidate, "candidate_id", "?"),
+            getattr(candidate, "market_ticker", "?"),
+            disposition,
+            reason,
+            _disp_exc,
+        )
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _serialize_result(result: Any) -> Dict[str, Any]:
@@ -2016,7 +2137,7 @@ async def _maybe_degraded_stop_exit(
     get_stop_candidate_ledger().record_residual_decision(candidate, record)
 
 
-async def maybe_submit_stop_candidate(
+async def _maybe_submit_stop_candidate_impl(
     candidate: StopCandidate,
     *,
     force: bool = False,
@@ -2883,6 +3004,29 @@ async def maybe_submit_stop_candidate(
     return result
 
 
+async def maybe_submit_stop_candidate(
+    candidate: StopCandidate,
+    *,
+    force: bool = False,
+) -> Optional[Any]:
+    """Submit a stop candidate and durably record the signal's disposition.
+
+    Thin observability wrapper over ``_maybe_submit_stop_candidate_impl``:
+    every return path — gate suppression, arbiter denial, router result,
+    ambiguous submission, or a raised exception — yields exactly one
+    ``signal_disposition`` record in ``stop_candidates.jsonl`` keyed by
+    ``candidate_id`` + ``intent_id``.  Behavior is unchanged; disposition
+    recording is observability-only and never raises.
+    """
+    try:
+        result = await _maybe_submit_stop_candidate_impl(candidate, force=force)
+    except Exception as exc:
+        record_signal_disposition(candidate, None, error=exc)
+        raise
+    record_signal_disposition(candidate, result)
+    return result
+
+
 def maybe_submit_stop_candidate_sync(
     candidate: StopCandidate,
     *,
@@ -2905,4 +3049,10 @@ def maybe_submit_stop_candidate_sync(
         candidate.candidate_id, candidate.market_ticker, candidate.trigger_reason,
     )
     record_stop_candidate(candidate)
+    record_signal_disposition(
+        candidate,
+        None,
+        disposition=SIGNAL_DISPOSITION_ERROR,
+        reason="no_running_event_loop",
+    )
     return None

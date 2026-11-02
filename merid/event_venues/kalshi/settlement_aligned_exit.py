@@ -2187,9 +2187,16 @@ class ExitAttemptResolver:
             for a in open_attempts:
                 if a.order_id == order_id:
                     return a
-        market_open = [a for a in open_attempts if a.market_key == market_key]
-        if len(market_open) == 1:
-            return market_open[0]
+        # Market-attribution fallback: only safe when the fill itself carries
+        # no order identity.  A fill that names a client_order_id/order_id
+        # which matches no *open* attempt belongs to a different attempt
+        # (already resolved, or never registered in this in-memory map) —
+        # attributing it to the sole open attempt on the market falsifies that
+        # attempt's fill claim and steals the fill from its real owner.
+        if not client_order_id and not order_id:
+            market_open = [a for a in open_attempts if a.market_key == market_key]
+            if len(market_open) == 1:
+                return market_open[0]
         return None
 
     def note_fill(
@@ -2200,6 +2207,7 @@ class ExitAttemptResolver:
         client_order_id: Optional[str] = None,
         order_id: Optional[str] = None,
         quantity: Any = None,
+        quantity_cc: Any = None,
         price_cents: Any = None,
     ) -> Optional[str]:
         """Resolve a matching attempt to FILLED.  Returns the attempt_id."""
@@ -2207,6 +2215,29 @@ class ExitAttemptResolver:
         with self._lock:
             attempt = self._find_attempt(mkey, client_order_id, order_id)
             if attempt is None:
+                # No open in-memory attempt.  The fill may still own a durable
+                # attempt: a late fill against a terminalized order, a second
+                # partial on an already-FILLED attempt, or an attempt this
+                # process never registered.  Consult the durable store before
+                # quarantining so verified fills always reach the FSM.
+                record = self._durable_attempt_for_fill(client_order_id, order_id)
+                if record is not None:
+                    self._apply_durable_fill(
+                        record, fill_id=fill_id, quantity_cc=quantity_cc,
+                        order_id=order_id, price_cents=price_cents,
+                    )
+                    # Keep in-memory siblings honest: a terminal in-memory
+                    # attempt with the same coid still observes the fill.
+                    for a in self._attempts.values():
+                        if client_order_id and a.client_order_id == client_order_id:
+                            if fill_id:
+                                a.fill_ids.append(str(fill_id))
+                            a.fills.append(
+                                {"fill_id": fill_id, "quantity": str(quantity),
+                                 "price_cents": price_cents}
+                            )
+                            a.updated_ts = time.time()
+                    return record.attempt_id
                 self._unmatched_fills.append(
                     {
                         "market_key": mkey,
@@ -2232,8 +2263,79 @@ class ExitAttemptResolver:
             )
             attempt.status = AttemptStatus.FILLED
             attempt.updated_ts = time.time()
-            self._store_transition(attempt, "FILLED", f"fill:{fill_id}")
+            self._apply_durable_fill_by_coid(
+                attempt, fill_id=fill_id, quantity_cc=quantity_cc,
+                order_id=order_id, price_cents=price_cents,
+            )
             return attempt.attempt_id
+
+    def _durable_attempt_for_fill(
+        self,
+        client_order_id: Optional[str],
+        order_id: Optional[str],
+    ) -> Any:
+        """Durable-store lookup for a fill that matched no open attempt."""
+        store = self._store
+        if store is None:
+            return None
+        try:
+            record = None
+            if client_order_id:
+                record = store.get_exit_attempt_by_wire_client_order_id(
+                    client_order_id
+                )
+            if record is None and order_id:
+                record = store.get_exit_attempt_by_exchange_order_id(order_id)
+            return record
+        except Exception:
+            return None
+
+    def _apply_durable_fill_by_coid(
+        self,
+        attempt: "ExitAttempt",
+        *,
+        fill_id: Any,
+        quantity_cc: Any,
+        order_id: Optional[str],
+        price_cents: Any,
+    ) -> None:
+        """Apply the fill to the durable record for an open in-memory attempt."""
+        store = self._store
+        if store is None or not attempt.client_order_id:
+            return
+        try:
+            record = store.get_exit_attempt_by_client_order_id(
+                attempt.client_order_id
+            )
+            if record is not None:
+                self._apply_durable_fill(
+                    record, fill_id=fill_id, quantity_cc=quantity_cc,
+                    order_id=order_id, price_cents=price_cents,
+                )
+        except Exception as exc:
+            logger.debug("[EV-EXIT-RESOLVER] durable fill apply failed: %s", exc)
+
+    def _apply_durable_fill(
+        self,
+        record: Any,
+        *,
+        fill_id: Any,
+        quantity_cc: Any,
+        order_id: Optional[str],
+        price_cents: Any,
+    ) -> None:
+        """Exactly-once durable fill application (never raises)."""
+        try:
+            self._store.apply_exit_fill(
+                record.attempt_id,
+                fill_id=str(fill_id) if fill_id else "",
+                quantity_cc=int(quantity_cc or 0),
+                exchange_order_id=order_id or record.exchange_order_id,
+                price_cents=int(price_cents) if price_cents is not None else None,
+                actor="ev_exit_resolver",
+            )
+        except Exception as exc:
+            logger.debug("[EV-EXIT-RESOLVER] durable fill apply failed: %s", exc)
 
     def note_ack(
         self,

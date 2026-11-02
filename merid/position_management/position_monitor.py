@@ -50,7 +50,10 @@ from merid.event_venues.kalshi.stop_candidate import (
     loss_exits_enabled,
     no_edge_loss_salvage_enabled,
     maybe_submit_stop_candidate_sync,
+    record_signal_disposition,
     record_stop_candidate,
+    SIGNAL_DISPOSITION_OBSERVE_ONLY,
+    SIGNAL_DISPOSITION_SUPPRESSED,
 )
 from merid.event_venues.kalshi.binary_price_space import to_signed_yes_exposure
 from merid.event_venues.kalshi.executable_quote import (
@@ -2895,6 +2898,11 @@ class PositionMonitor:
             _r = (reason or "").lower()
             if "partial" in _r:
                 _hl_record_event(_hl_pos, "HARD_LOCK_PARTIAL_FILL", reconcile_reason=reason)
+            elif "exchange_confirmed_flat" in _r:
+                # Verified-flat inventory resolved the obligation — no fill
+                # evidence exists, so this is not HARD_LOCK_FILLED.
+                _hl_record_event(_hl_pos, "HARD_LOCK_RECONCILED_FLAT", reconcile_reason=reason)
+                _hl_pending["state"] = "RECONCILED_FLAT"
             elif "filled" in _r or "position_closed" in _r or "size_zero" in _r or "flat" in _r:
                 _hl_record_event(_hl_pos, "HARD_LOCK_FILLED", reconcile_reason=reason)
                 _hl_pending["state"] = "FILLED"
@@ -3329,6 +3337,24 @@ class PositionMonitor:
             with self._lock:
                 position = self._open_positions.get(position_id)
             if position is None:
+                # Local cache lost the position — check exchange inventory
+                # before retaining.  A verified-flat exchange view resolves
+                # the intent as EXCHANGE_CONFIRMED_FLAT (distinct from
+                # FILLED: no fill evidence exists).
+                _flat_ticker = None
+                if client_order_id:
+                    try:
+                        _er = OrderAttemptStore().get_exit_attempt_by_client_order_id(
+                            client_order_id
+                        )
+                        _flat_ticker = getattr(_er, "ticker", None)
+                    except Exception:
+                        _flat_ticker = None
+                if _flat_ticker and await self._resolve_exchange_confirmed_flat(
+                    position_id, _flat_ticker, client_order_id,
+                    evidence_context="position_missing_from_cache",
+                ):
+                    return
                 logger.warning(
                     "[EXIT-INTENT-RECONCILE] position_id=%s missing from cache; retaining unknown intent",
                     position_id[:8]
@@ -3336,6 +3362,14 @@ class PositionMonitor:
                 return
 
             if position.size == 0:
+                # Cached size is zero — verify against exchange inventory.
+                # Verified flat resolves the intent; an unverifiable or
+                # still-open exchange position retains SUBMISSION_UNKNOWN.
+                if await self._resolve_exchange_confirmed_flat(
+                    position_id, position.market_id, client_order_id,
+                    evidence_context="cached_size_zero",
+                ):
+                    return
                 logger.warning(
                     "[EXIT-INTENT-RECONCILE] position_id=%s cached size is zero; retaining unknown intent",
                     position_id[:8]
@@ -3482,6 +3516,16 @@ class PositionMonitor:
                         position_id[:8], order_exc
                     )
 
+            # Order lookup was inconclusive — before retaining
+            # SUBMISSION_UNKNOWN, verify exchange inventory.  A verified-flat
+            # view means the exit requirement no longer exists regardless of
+            # the order's fate (e.g. settlement or an untracked fill removed
+            # the exposure); anything unverifiable stays unresolved.
+            if await self._resolve_exchange_confirmed_flat(
+                position_id, position.market_id, client_order_id,
+                evidence_context="order_lookup_inconclusive",
+            ):
+                return
             # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
             logger.warning(
                 "[EXIT-INTENT-RECONCILE] position_id=%s client_order_id=%s force=%s requires external "
@@ -3493,6 +3537,92 @@ class PositionMonitor:
                 "[EXIT-INTENT-RECONCILE] Error reconciling position_id=%s: %s",
                 position_id[:8], e
             )
+
+    async def _resolve_exchange_confirmed_flat(
+        self,
+        position_id: str,
+        market_id: Optional[str],
+        client_order_id: Optional[str],
+        evidence_context: str,
+        subaccount: Optional[str] = None,
+    ) -> bool:
+        """Verify inventory on the exchange and resolve the intent as flat.
+
+        The prior submission outcome stays unknown — what is verified is
+        that no remaining exposure exists for this market (any subaccount
+        unless ``subaccount`` narrows it), so the exit requirement itself is
+        moot.  Emits the distinct ``exchange_confirmed_flat`` disposition
+        rather than ``FILLED`` — no fill evidence exists.  Returns True only
+        when the positions request succeeded *and* showed no nonzero market
+        position; an errored, truncated, or still-open result keeps the
+        intent unresolved and returns False.
+        """
+        if not market_id:
+            return False
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            client = get_kalshi_client()
+            filters: Dict[str, Any] = {"market_ticker": market_id}
+            if subaccount:
+                filters["subaccount_number"] = subaccount
+            lookup = await client.get_positions_with_filters(filters)
+        except Exception as exc:
+            logger.debug(
+                "[EXIT-INTENT-RECONCILE] flat-check failed position=%s market=%s: %s",
+                position_id[:8], market_id, exc,
+            )
+            return False
+        if not (lookup and getattr(lookup, "success", False)):
+            return False
+        data = getattr(lookup, "data", None) or {}
+        market_rows = data.get("market_positions") or []
+        nonzero: list = []
+        for row in market_rows:
+            row_ticker = row.get("ticker") or row.get("market_ticker")
+            if row_ticker and row_ticker != market_id:
+                continue
+            qty = Decimal("0")
+            for field in ("position_fp", "position", "count"):
+                if row.get(field) is not None:
+                    try:
+                        qty = Decimal(str(row[field]))
+                    except Exception:
+                        qty = Decimal("0")
+                    break
+            if qty != 0:
+                nonzero.append({"ticker": row_ticker, "qty": str(qty)})
+        if nonzero:
+            logger.warning(
+                "[EXIT-INTENT-RECONCILE] flat-check: exchange still holds %s "
+                "for position=%s market=%s; retaining unresolved intent",
+                nonzero, position_id[:8], market_id,
+            )
+            return False
+        evidence = {
+            "evidence_context": evidence_context,
+            "market_id": market_id,
+            "filters": filters,
+            "market_positions_rows": len(market_rows),
+            "checked_at": time.time(),
+        }
+        logger.warning(
+            "[EXIT-INTENT-RECONCILE] exchange-confirmed flat: position=%s "
+            "market=%s context=%s - resolving unresolved exit intent "
+            "(no fill evidence; inventory verified flat)",
+            position_id[:8], market_id, evidence_context,
+        )
+        # Mark reconciled + clear the in-flight lock, but do NOT reset
+        # exit_triggered: the local position may still look open while it is
+        # verifiably flat on the exchange, and re-arming its trigger would
+        # emit fresh exit intents for exposure that no longer exists.  The
+        # position-cache/fills reconciliation owns retiring the record.
+        if not self._mark_exit_intent_reconciled(
+            position_id, "exchange_confirmed_flat", client_order_id,
+            raw_payload=evidence,
+        ):
+            return False
+        self._clear_exit_intent_in_flight(position_id)
+        return True
 
     @staticmethod
     def _update_order_attempt_status(
@@ -6523,6 +6653,41 @@ class PositionMonitor:
                 ev_eval.model_prob_cents,
                 ev_eval.consecutive_breach,
             )
+            # 2026-11-02 audit repair: a SELL-signalled shadow eval has no
+            # downstream consumer *by design* (observe-only), which made
+            # would_submit=true evals indistinguishable from live-gate
+            # approvals in exit_evaluations.jsonl — the audit's "37
+            # sell-signalled episodes with no obligation" cohort.  Stamp the
+            # truthful disposition so signal->outcome joins classify these as
+            # observe_only rather than dropped handoffs.
+            if (
+                ev_eval.decision == EvDecision.SELL_SIGNALLED
+                or getattr(ev_eval, "would_submit", False)
+            ):
+                record_signal_disposition(
+                    None,
+                    disposition=SIGNAL_DISPOSITION_OBSERVE_ONLY,
+                    reason="ev_exit_shadow_observe_only",
+                    fields={
+                        "evaluation_id": getattr(
+                            ev_eval, "evaluation_id", None),
+                        "market_ticker": position.market_id,
+                        "trigger_reason": "stop_loss",
+                        "canonical_reason": "stop_loss",
+                        "eval_decision": ev_eval.decision.value,
+                        "would_submit": bool(
+                            getattr(ev_eval, "would_submit", False)),
+                        "bid_cents": getattr(ev_eval, "bid_cents", None),
+                        "model_prob_cents": getattr(
+                            ev_eval, "model_prob_cents", None),
+                        "net_sell_value_cents": getattr(
+                            ev_eval, "net_sell_value_cents", None),
+                        "consecutive_breach": getattr(
+                            ev_eval, "consecutive_breach", None),
+                        "seconds_to_expiry": seconds_to_expiry,
+                        "source": "ev_exit_shadow",
+                    },
+                )
         except Exception as _ev_exc:
             logger.debug("[EV-EXIT-SHADOW] eval failed (non-critical): %s", _ev_exc)
 
@@ -6661,6 +6826,14 @@ class PositionMonitor:
                     position.stop_loss_price_cents,
                     edge_candidate.edge_decay_exit_cents,
                     _ev_detail,
+                )
+                # 2026-11-02 audit repair: the veto was previously log-only —
+                # record the durable suppression disposition on the candidate.
+                record_signal_disposition(
+                    edge_candidate,
+                    None,
+                    disposition=SIGNAL_DISPOSITION_SUPPRESSED,
+                    reason=f"ev_gate_veto:{_ev_detail}",
                 )
             return False, "edge-decay-candidate"
 

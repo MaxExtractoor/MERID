@@ -316,8 +316,35 @@ for _late_fill_state in (
     # request did reach Kalshi the order can still fill — exchange truth wins.
     ExitOrderAttemptState.TERMINAL_UNFILLED,
 ):
-    EXIT_VALID_TRANSITIONS.setdefault(_late_fill_state, set()).add(
-        ExitOrderAttemptState.FILLED
+    EXIT_VALID_TRANSITIONS.setdefault(_late_fill_state, set()).update(
+        (ExitOrderAttemptState.FILLED, ExitOrderAttemptState.PARTIALLY_FILLED)
+    )
+
+# A fill landing on a superseded attempt's original client_order_id falsifies
+# the confirmed-terminal verdict that authorized the supersede — the order was
+# still live on the exchange.  The fill is authoritative; record it on the
+# attempt that actually owned the order.
+EXIT_VALID_TRANSITIONS.setdefault(
+    ExitOrderAttemptState.SUPERSEDED_AFTER_CONFIRMED_TERMINAL, set()
+).update((ExitOrderAttemptState.FILLED, ExitOrderAttemptState.PARTIALLY_FILLED))
+
+# A FILLED attempt whose claiming fill is later proven to belong to a
+# different order (sibling-attempt or unrelated-order misattribution) must be
+# correctable to the verified-flat disposition rather than keeping a false
+# fill claim forever.  Used only with the sibling fill evidence attached.
+EXIT_VALID_TRANSITIONS.setdefault(ExitOrderAttemptState.FILLED, set()).add(
+    ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT
+)
+
+# Verified-flat inventory evidence is orthogonal to the order lifecycle: a
+# settlement, sibling-attempt fill, or untracked close can extinguish the
+# exposure while this attempt sits in any nonterminal state.  The state was
+# defined (2026-11-01) with no inbound edges, so the verified-flat producer
+# could never reach it — wire it from every nonterminal state, same shape as
+# the authoritative-fill edge above.
+for _flat_source in _EXIT_NONTERMINAL_STATES:
+    EXIT_VALID_TRANSITIONS.setdefault(_flat_source, set()).add(
+        ExitOrderAttemptState.EXCHANGE_CONFIRMED_FLAT
     )
 
 
@@ -782,6 +809,21 @@ class OrderAttemptStore:
         )
         return [ExitOrderAttemptRecord.from_row(r) for r in cur.fetchall()]
 
+    def count_exit_attempts_for_intent(self, exit_intent_id: str) -> int:
+        """Count all durable attempts ever created for one exit obligation.
+
+        Observability primitive for retry-storm visibility: supersede+rearm
+        mints a fresh row per resubmission, so the sibling count under a
+        stable ``exit_intent_id`` is the obligation's true attempt ordinal.
+        """
+        conn = self._get_conn()
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM exit_order_attempts WHERE exit_intent_id = ?",
+            (exit_intent_id,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
     @staticmethod
     def is_terminal_state(state: str) -> bool:
         try:
@@ -904,3 +946,193 @@ class OrderAttemptStore:
                 ),
             )
             return ExitOrderAttemptRecord.from_row(updated_row)
+
+    def get_exit_attempt_by_wire_client_order_id(
+        self, client_order_id: str
+    ) -> Optional[ExitOrderAttemptRecord]:
+        """Look up an exit attempt by the client_order_id carried on the wire.
+
+        A superseded attempt keeps its original id as a tombstone prefix
+        (``<coid>:superseded:<attempt8>``), so fills arriving after a
+        supersede still name the original coid.  Exact match first, then the
+        tombstone prefix.
+        """
+        record = self.get_exit_attempt_by_client_order_id(client_order_id)
+        if record is not None:
+            return record
+        conn = self._get_conn()
+        cur = conn.execute(
+            "SELECT * FROM exit_order_attempts WHERE client_order_id LIKE ?",
+            (f"{client_order_id}:superseded:%",),
+        )
+        row = cur.fetchone()
+        return ExitOrderAttemptRecord.from_row(row) if row else None
+
+    def exit_attempt_by_fill_reason(self, fill_id: str) -> Optional[str]:
+        """Return the attempt_id a fill_id was already applied to, if any.
+
+        Fill applications record ``fill:<fill_id>`` (state transition) or
+        ``fill_linked:<fill_id>`` (same-state quantity/evidence update) as the
+        event reason, making the (attempt, fill) application exactly-once and
+        the fill itself attributable to exactly one attempt.
+        """
+        conn = self._get_conn()
+        cur = conn.execute(
+            """
+            SELECT attempt_id FROM exit_order_attempt_events
+            WHERE reason = ? OR reason = ? LIMIT 1
+            """,
+            (f"fill:{fill_id}", f"fill_linked:{fill_id}"),
+        )
+        row = cur.fetchone()
+        return str(row[0]) if row else None
+
+    def apply_exit_fill(
+        self,
+        attempt_id: str,
+        *,
+        fill_id: str,
+        quantity_cc: int,
+        exchange_order_id: Optional[str] = None,
+        price_cents: Optional[int] = None,
+        actor: str = "fills_ledger",
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Optional[ExitOrderAttemptRecord]:
+        """Apply a verified ledger fill to an exit attempt exactly once.
+
+        A second call with the same ``fill_id`` is a no-op.  If the fill was
+        already applied to a *different* attempt, that misattribution is kept
+        — this call returns the current record unchanged so callers can
+        surface the conflict instead of double-counting the fill.
+
+        ``confirmed_quantity`` accumulates across fills.  The state moves to
+        PARTIALLY_FILLED while cumulative quantity is below the request and
+        FILLED at/above it; attempts already in a terminal state that admits
+        the late-fill edge transition the same way, and attempts already
+        FILLED or in another terminal state without a fill edge keep their
+        state while still recording the fill evidence (``fill_linked``).
+        """
+        if not fill_id:
+            return None
+        conn = self._get_conn()
+        now = self._now()
+        fill_evidence = dict(evidence or {})
+        fill_evidence.setdefault("fill_id", fill_id)
+        fill_evidence.setdefault("quantity_cc", quantity_cc)
+        if price_cents is not None:
+            fill_evidence.setdefault("price_cents", price_cents)
+        payload_json_str = json.dumps(fill_evidence, default=str, sort_keys=True)
+
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "SELECT * FROM exit_order_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            record = ExitOrderAttemptRecord.from_row(row)
+
+            owner = self.exit_attempt_by_fill_reason(fill_id)
+            if owner is not None:
+                if owner != attempt_id:
+                    logger.warning(
+                        "[EXIT-ORDER-ATTEMPT-STORE] fill %s already applied to "
+                        "attempt %s; refusing duplicate application to %s",
+                        fill_id, owner, attempt_id,
+                    )
+                return self.get_exit_attempt(attempt_id)
+
+            new_cq = int(record.confirmed_quantity or 0) + int(quantity_cc or 0)
+            rq = record.requested_quantity
+            target: Optional[ExitOrderAttemptState] = None
+            try:
+                current = ExitOrderAttemptState(record.state)
+            except ValueError:
+                current = None
+            if current is not None and current is not ExitOrderAttemptState.FILLED:
+                if rq is None or rq <= 0 or new_cq >= rq:
+                    target = ExitOrderAttemptState.FILLED
+                elif current not in EXIT_TERMINAL_STATES:
+                    # A live (nonterminal) order may still fill the remainder;
+                    # PARTIALLY_FILLED records that honestly.  A *terminal*
+                    # attempt can never fill again — resurrecting it to a
+                    # nonterminal state would re-enter the in-flight
+                    # rehydration/reconcile paths on a dead order.  Partial
+                    # execution on a dead order is preserved via
+                    # confirmed_quantity + the fill_linked event instead.
+                    target = ExitOrderAttemptState.PARTIALLY_FILLED
+
+            if target is not None and target in EXIT_VALID_TRANSITIONS.get(
+                current, set()
+            ):
+                conn.execute(
+                    """
+                    UPDATE exit_order_attempts
+                    SET state = ?, confirmed_quantity = ?, updated_at = ?,
+                        state_version = state_version + 1,
+                        exchange_order_id = COALESCE(?, exchange_order_id)
+                    WHERE attempt_id = ?
+                    """,
+                    (target.value, new_cq, now, exchange_order_id, attempt_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO exit_order_attempt_events (
+                        event_id, attempt_id, old_state, new_state, reason,
+                        observed_at, exchange_order_id, raw_exchange_payload,
+                        actor
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        attempt_id,
+                        record.state,
+                        target.value,
+                        f"fill:{fill_id}",
+                        now,
+                        exchange_order_id,
+                        payload_json_str,
+                        actor,
+                    ),
+                )
+            else:
+                if target is not None:
+                    logger.warning(
+                        "[EXIT-ORDER-ATTEMPT-STORE] no edge %s -> %s for "
+                        "attempt %s; recording fill %s as evidence only",
+                        record.state,
+                        target.value,
+                        attempt_id,
+                        fill_id,
+                    )
+                conn.execute(
+                    """
+                    UPDATE exit_order_attempts
+                    SET confirmed_quantity = ?, updated_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (new_cq, now, attempt_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO exit_order_attempt_events (
+                        event_id, attempt_id, old_state, new_state, reason,
+                        observed_at, exchange_order_id, raw_exchange_payload,
+                        actor
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        attempt_id,
+                        record.state,
+                        record.state,
+                        f"fill_linked:{fill_id}",
+                        now,
+                        exchange_order_id,
+                        payload_json_str,
+                        actor,
+                    ),
+                )
+            return self.get_exit_attempt(attempt_id)
