@@ -209,15 +209,15 @@ def _normalize_own_order(o: Any) -> Tuple[Optional[str], Optional[str], Optional
     if price_cents is not None and not (0 < price_cents < 100):
         price_cents = None
 
-    qty = 0
+    qty = 0.0
     rem = getattr(o, "remaining_size", None)
     try:
         if rem is not None:
-            qty = int(rem)
+            qty = float(rem)
         else:
-            qty = max(0, int(getattr(o, "size", 0) or 0) - int(getattr(o, "filled_size", 0) or 0))
+            qty = max(0.0, float(getattr(o, "size", 0) or 0) - float(getattr(o, "filled_size", 0) or 0))
     except (TypeError, ValueError):
-        qty = 0
+        qty = 0.0
 
     return action, outcome, price_cents, qty
 
@@ -316,7 +316,7 @@ def _vwap_with_ownership(
     anomaly = False
     top_external = 0
     for i, (price, size) in enumerate(levels):
-        own = int(own_qty_map.get(price, 0) or 0)
+        own = float(own_qty_map.get(price, 0) or 0)
         external = size - own
         if external < 0:
             anomaly = True
@@ -611,7 +611,7 @@ def resolve_executable_quote(
         trade_levels, own_qty_map, quantity, stp=self_trade_prevention
     )
     total_depth = sum(
-        max(0, s - int(own_qty_map.get(p, 0) or 0)) for p, s in trade_levels
+        max(0.0, s - float(own_qty_map.get(p, 0) or 0)) for p, s in trade_levels
     )
     if own_book_anomaly or own_unattributable:
         logger.warning(

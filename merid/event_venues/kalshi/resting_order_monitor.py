@@ -206,9 +206,12 @@ class RestingOrderRecord:
     ticker: str = ""
     side: str = ""
     action: str = ""
-    original_size: int = 0
-    remaining_size: int = 0  # Tracked from portfolio endpoint, not calculated
-    filled_size: int = 0  # Cumulative filled size (original_size - remaining_size)
+    # Exact fractional contract quantities on the centi-contract grid
+    # (Kalshi count_fp supports 2 decimals; validated to centi precision on
+    # sync — beyond-grid values retain the order for reconciliation).
+    original_size: float = 0.0
+    remaining_size: float = 0.0  # Tracked from portfolio endpoint, not calculated
+    filled_size: float = 0.0  # Cumulative filled size (original_size - remaining_size)
     price_cents: int = 0
     created_at: datetime = None
     asset: str = ""
@@ -296,7 +299,7 @@ class ExitOrderState:
     intent_id: str = ""  # Original intent ID
     client_order_id: str = ""  # Original client_order_id for stable retry identity
     ticker: str = ""  # Market ticker
-    count: int = 0  # Order size
+    count: float = 0.0  # Order size (exact fractional contracts; OrderIntent derives count_fp via Decimal(str(count)))
     exit_reason: str = ""  # Exit reason (tp, sl, 99c, etc.)
     exit_policy_id: str = ""  # Exit policy ID
     
@@ -1239,16 +1242,17 @@ class RestingOrderMonitor:
             raw_status = order_data.status if order_data else ""
             try:
                 remaining = Decimal(str(order_data.remaining_size))
+                _remaining_cc = remaining * Decimal("100")
                 if not remaining.is_finite() or remaining < 0:
                     raise ValueError("invalid remaining quantity")
-                if remaining != remaining.to_integral_value():
+                if _remaining_cc != _remaining_cc.to_integral_value():
                     logger.error(
-                        "[RESTING_ORDER_MONITOR] Fractional remainder %s for %s "
+                        "[RESTING_ORDER_MONITOR] Sub-centi remainder %s for %s "
                         "cannot be tracked safely; retaining order for reconciliation",
                         remaining, record.kalshi_order_id,
                     )
                     return False
-                remaining_size = int(remaining)
+                remaining_size = float(remaining)
             except (InvalidOperation, TypeError, ValueError):
                 logger.error(
                     "[RESTING_ORDER_MONITOR] Missing or invalid remaining quantity for %s; "

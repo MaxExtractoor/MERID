@@ -338,7 +338,10 @@ async def test_exit_retry_carries_stable_identity_and_reduce_only():
 
     intent = captured["intent"]
     assert intent.entry_or_exit == "exit"
-    assert intent.reduce_only is True
+    # Kalshi's order endpoint rejects reduce_only unless the order is IOC.
+    # A resting (GTC) exit retry must carry reduce_only=False; its inventory
+    # bound is enforced by the internal arbiter/expected-position controls.
+    assert intent.reduce_only is False
     assert intent.intent_id == "exit_intent_1"
     # Deterministic per-attempt identity derived from the original coid.
     assert intent.client_order_id == "exit_coid_1_r01"

@@ -19060,7 +19060,7 @@ async def _route_live(
         # If an exit order doesn't fill immediately (liquidity issues, spread, etc.), it will rest
         # and needs to be tracked for cancellation/replacement. Exit orders are critical for
         # position management and must never be orphaned on the book.
-        if status in ("accepted_live", "submitted_live", "resting") and remaining_count > 0:
+        if status in ("accepted_live", "submitted_live", "resting") and remaining_count_fp > 0:
             try:
                 from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor, RestingOrderRecord
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
@@ -19125,8 +19125,8 @@ async def _route_live(
                             ticker=intent.ticker,
                             side=intent.side,
                             action=intent.action,
-                            original_size=remaining_count,
-                            remaining_size=remaining_count,
+                            original_size=float(remaining_count_fp),
+                            remaining_size=float(remaining_count_fp),
                             price_cents=intent.price_cents,
                             asset=asset,
                             reprice_cap_cents=_reprice_cap,
@@ -19145,7 +19145,7 @@ async def _route_live(
                         monitor.register_order(resting_record)
                         logger.info(
                             f"[RESTING_ORDER_MONITOR] Registered order: kalshi_order_id={kalshi_order_id} "
-                            f"ticker={intent.ticker} remaining={remaining_count} is_exit={is_exit_order}"
+                            f"ticker={intent.ticker} remaining={remaining_count_fp} is_exit={is_exit_order}"
                         )
 
                         # CRITICAL FIX (2026-07-29): Register ExitOrderState for exit orders
@@ -19169,7 +19169,7 @@ async def _route_live(
                                     intent_id=intent.intent_id,
                                     client_order_id=intent.client_order_id or intent.client_tag or intent.intent_id,
                                     ticker=intent.ticker,
-                                    count=remaining_count,
+                                    count=float(remaining_count_fp),
                                     exit_reason=getattr(intent, 'exit_reason', 'unknown'),
                                     exit_policy_id=intent.exit_policy_id or "",
                                 )

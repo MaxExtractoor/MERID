@@ -29,7 +29,28 @@ async def test_repeated_missing_snapshots_retain_order(monkeypatch, result):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("remaining", ["0.75", "1.25", None, "NaN", "-1", "bad"])
+@pytest.mark.parametrize("remaining,expected", [("0.75", 0.75), ("1.25", 1.25)])
+async def test_fractional_remaining_tracked_exactly(monkeypatch, remaining, expected):
+    snapshot = SimpleNamespace(status="resting", remaining_size=remaining)
+    client = SimpleNamespace(
+        get_order_result=AsyncMock(return_value=OperationResult.ok(snapshot)),
+    )
+    ledger = SimpleNamespace(
+        get_canonical_fills=lambda **_: SimpleNamespace(authoritative=[]),
+    )
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+    monkeypatch.setattr("merid.event_venues.kalshi.fills_ledger.get_fills_ledger", lambda: ledger)
+    monitor = RestingOrderMonitor()
+    record = RestingOrderRecord(
+        kalshi_order_id="order-1", ticker="KXTEST", original_size=2, remaining_size=2,
+    )
+    assert not await monitor._sync_order_status(record)
+    assert record.status == "resting"
+    assert record.remaining_size == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining", [None, "NaN", "-1", "bad", "0.001"])
 async def test_unsupported_remaining_never_removes_order(monkeypatch, remaining):
     snapshot = SimpleNamespace(status="resting", remaining_size=remaining)
     client = SimpleNamespace(
