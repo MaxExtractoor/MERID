@@ -553,3 +553,20 @@ These observations do not establish that all recovery prerequisites are met.
 At 10:40:28 ET the running process repersisted its own in-memory halted state,
 replacing the test-generated on-disk reasons with reconciliation-failure
 reasons. This does not establish that every earlier transition was recovered.
+
+## Live audit maintenance and log lag (2026-11-02)
+
+The old running build attempted automatic audit-ledger pruning at 05:20,
+08:20, 09:20, and 10:20 ET; each attempt logged `interrupted`. No successful
+batch-removal message was found in that server log, but these logs alone do not
+prove historical completeness or exclude earlier deletion. The live writer
+scheduled pruning by default; commit `ddbba3c8` removes that schedule and uses
+non-waiting PASSIVE checkpoints. It does not delete or restore any records and
+is not deployed to the old process. The old process can attempt pruning again.
+
+At 11:10 ET the asynchronous log writer reported a queue depth of 9,712 and
+zero recorded drops, while a recent record showed 164 seconds of drain lag.
+Event timestamps, not file modification or drain times, must be used when
+judging freshness. Disk free space was approximately 448 GiB at that time;
+PASSIVE checkpoints may retain the WAL file's high-water size and continued
+disk monitoring is required.
