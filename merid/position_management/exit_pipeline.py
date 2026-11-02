@@ -506,10 +506,9 @@ def _market_is_terminal(market_id: Optional[str]) -> bool:
 def _attempt_is_ioc(attempt: Any) -> bool:
     """True when the attempt's order is provably immediate-only (IOC/FOK).
 
-    Immediate-only orders cannot rest on the book, so "not found anywhere"
-    after a bounded age is terminal evidence — unlike a resting order,
-    where absence is ambiguous.  ``stopcand_`` coids are IOC by
-    construction; a ``time_in_force`` marker on the record also counts.
+    Immediate-only orders cannot rest, but their fills still require exchange
+    evidence. ``stopcand_`` coids are IOC by construction; a
+    ``time_in_force`` marker on the record also counts.
     """
     tif = str(getattr(attempt, "time_in_force", "") or "").lower()
     if tif in ("ioc", "fok", "immediate_or_cancel", "fill_or_kill"):
@@ -529,7 +528,7 @@ def _attempt_is_ioc(attempt: Any) -> bool:
 
 
 def _ioc_attempt_is_dead(attempt: Any) -> bool:
-    """An immediate-only attempt old enough that it must be terminal."""
+    """Check the age threshold, not whether an IOC filled or can be retried."""
     if not _attempt_is_ioc(attempt):
         return False
     created = float(getattr(attempt, "created_ts", 0.0) or 0.0)
@@ -637,22 +636,10 @@ async def reconcile_attempt(
             arb.resolve_reconcile(position_key, ReconcileEvidence(
                 order_found=False, terminal=True, filled_cc=0,
                 source="local_no_transmit"))
-        elif _ioc_attempt_is_dead(attempt):
-            # IOC/FOK orders cannot rest: if every exchange view (resting,
-            # executed, canceled) still can't see the order well past its
-            # terminal-by-construction deadline, the order is dead — either
-            # it never transmitted or it terminally processed off the live
-            # orders feed (Kalshi ages terminal orders into /historical).
-            # Unlike a resting order, a missing IOC is never "still working",
-            # so releasing a fresh reduce-only attempt cannot stack exposure.
-            arb.resolve_reconcile(position_key, ReconcileEvidence(
-                order_found=True, terminal=True, filled_cc=0,
-                source="ioc_terminal_inferred"))
         elif _market_is_terminal(
                 market_id or position_key.split("|", 1)[0]):
             # Market close cancels every resting order — an unfindable
-            # order on a closed market is dead by construction, same
-            # inference class as ioc_terminal_inferred.  Without this path
+            # order on a closed market is dead by construction. Without this path
             # any resting-limit attempt whose market expired wedged in
             # RECONCILING forever: the coid lookup only covers current
             # order views, and Kalshi ages terminal orders off them, so

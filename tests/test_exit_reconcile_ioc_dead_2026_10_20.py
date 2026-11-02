@@ -14,11 +14,8 @@ Fixed contract pinned here:
   1. ``get_order_by_client_id_result`` retries a miss with
      ``status=executed`` and ``status=canceled`` so terminal orders are
      observable.
-  2. An immediate-only attempt (``stopcand_`` coid / ``stop_candidate:``
-     proposal / ``time_in_force`` marker) whose exchange views all miss
-     after ``MERID_EXIT_IOC_DEAD_AFTER_S`` resolves ``ioc_terminal_inferred``
-     -> RETRY_ELIGIBLE.  IOCs cannot rest — unfindable is dead — and a fresh
-     reduce-only retry cannot stack exposure.
+  2. An old immediate-only attempt remains unresolved on an empty or failed
+     lookup. IOC orders cannot rest, but may have filled.
   3. Non-IOC attempts keep the strict contract: inconclusive lookups stay
      RECONCILING (absence is never proof of death for resting orders).
   4. ``accepted_live``/``submitted_live``/``resting`` route outcomes are
@@ -137,8 +134,8 @@ class _FakeClient:
 
 
 class TestIocTerminalInference:
-    def test_old_ioc_attempt_releases_to_retry(self, tmp_path):
-        """stopcand_ IOC unfindable past the dead-after bound = dead."""
+    def test_old_ioc_attempt_stays_unresolved_on_empty_lookup(self, tmp_path):
+        """An unfindable IOC may have filled despite being unable to rest."""
         arb = _mint(tmp_path)
         attempt = arb.attempt_store.get_active(PKEY)
         attempt.created_ts = time.time() - 120.0
@@ -148,7 +145,45 @@ class TestIocTerminalInference:
 
         out = asyncio.run(reconcile_attempt(
             PKEY, _FakeClient(order=None), arbiter=arb))
-        assert out == AttemptState.RETRY_ELIGIBLE.value
+        assert out == AttemptState.RECONCILING.value
+        result = arb.arbitrate(
+            market_id=TICKER, generation_id=GEN, held_side="yes",
+            remaining_cc=300, breakeven_floor_cents=36,
+            book=ExitBook(
+                held_side="yes", liquidation_cents=60, qty_cc=500, age_ms=50),
+            proposals=[ExitProposal(
+                kind=ProposalKind.PROFIT_LOCK.value, proposal_id="retry",
+                limit_cents=55, qty_cc=300, reason="test")],
+        )
+        assert result.status == "reconcile_required"
+
+    def test_old_ioc_attempt_stays_unresolved_on_failed_lookup(self, tmp_path):
+        arb = _mint(tmp_path)
+        attempt = arb.attempt_store.get_active(PKEY)
+        attempt.created_ts = time.time() - 120.0
+        arb.attempt_store.save_active(attempt)
+
+        class FailedLookupClient(_FakeClient):
+            async def get_order_by_client_id_result(self, *args, **kwargs):
+                return SimpleNamespace(success=False)
+
+        out = asyncio.run(reconcile_attempt(
+            PKEY, FailedLookupClient(), arbiter=arb))
+        assert out == AttemptState.RECONCILING.value
+
+    def test_old_ioc_attempt_stays_unresolved_on_lookup_exception(self, tmp_path):
+        arb = _mint(tmp_path)
+        attempt = arb.attempt_store.get_active(PKEY)
+        attempt.created_ts = time.time() - 120.0
+        arb.attempt_store.save_active(attempt)
+
+        class FailedLookupClient(_FakeClient):
+            async def get_order_by_client_id_result(self, *args, **kwargs):
+                raise TimeoutError("lookup timed out")
+
+        out = asyncio.run(reconcile_attempt(
+            PKEY, FailedLookupClient(), arbiter=arb))
+        assert out == AttemptState.RECONCILING.value
 
     def test_fresh_ioc_attempt_stays_reconciling(self, tmp_path):
         """Inside the bound, absence is still treated as inconclusive —

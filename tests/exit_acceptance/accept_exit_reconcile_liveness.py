@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 _TMP = Path(tempfile.mkdtemp(prefix="recon_live_"))
+os.environ["MERID_TOTAL_CAPITAL_USD"] = "100"
 os.environ["MERID_EXIT_STATE_PATH"] = str(_TMP / "es.json")
 os.environ["MERID_EXIT_ATTEMPTS_PATH"] = str(_TMP / "ea.json")
 os.environ["MERID_EXIT_ARBITER_REQUIRED"] = "1"
@@ -64,7 +65,7 @@ class StubClient:
         self.calls += 1
         return _Res(self.order)
 
-    async def get_order_by_client_id_result(self, coid, market_id=None):
+    async def get_order_by_client_id_result(self, coid, market_id=None, min_ts=None):
         self.calls += 1
         return _Res(self.order)
 
@@ -203,4 +204,3 @@ async def main():
 
 
 asyncio.new_event_loop().run_until_complete(main())
-

@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="arbiter_test_"))
+os.environ["MERID_TOTAL_CAPITAL_USD"] = "100"
 os.environ["MERID_EXIT_STATE_PATH"] = str(_TMP / "exit_state.json")
 os.environ["MERID_EXIT_ATTEMPTS_PATH"] = str(_TMP / "exit_attempts.json")
 
@@ -417,4 +418,3 @@ print(f"\nEXIT ARBITER MATRIX: {len(PASS) - len(fails)}/{len(PASS)} passed")
 if fails:
     print("FAILURES:", fails)
 sys.exit(0 if not fails else 1)
-
