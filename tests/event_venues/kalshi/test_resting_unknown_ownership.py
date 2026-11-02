@@ -62,3 +62,19 @@ async def test_zero_remaining_with_working_status_stays_tracked(monkeypatch):
     assert not await monitor._sync_order_status(record)
     assert record.status == "resting"
     assert record.remaining_size == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filled", [None, "bad", "NaN", "-1", "0.001"])
+async def test_terminal_order_with_invalid_fill_evidence_stays_tracked(monkeypatch, filled):
+    snapshot = SimpleNamespace(status="canceled", remaining_size=0, filled_size=filled)
+    client = SimpleNamespace(
+        get_order_result=AsyncMock(return_value=OperationResult.ok(snapshot)),
+    )
+    monkeypatch.setattr("merid.event_venues.kalshi.client.get_kalshi_client", lambda: client)
+    monitor = RestingOrderMonitor()
+    record = RestingOrderRecord(
+        kalshi_order_id="order-1", ticker="KXTEST", original_size=2, remaining_size=2,
+    )
+    assert not await monitor._sync_order_status(record)
+    assert record.remaining_size == 2

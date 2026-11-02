@@ -1258,6 +1258,19 @@ class RestingOrderMonitor:
             
             # Normalize status to internal vocabulary
             status = _normalize_status(raw_status)
+            if status in TERMINAL_STATUSES:
+                try:
+                    filled = Decimal(str(getattr(order_data, "filled_size", None)))
+                    cc = filled * 100
+                    if not filled.is_finite() or filled < 0 or cc != cc.to_integral_value():
+                        raise ValueError("invalid filled quantity")
+                except (InvalidOperation, TypeError, ValueError):
+                    logger.error(
+                        "[RESTING_ORDER_MONITOR] Terminal order %s has missing or invalid "
+                        "fill evidence; retaining order for reconciliation",
+                        record.kalshi_order_id,
+                    )
+                    return False
             
             old_status = record.status
             record.status = status
