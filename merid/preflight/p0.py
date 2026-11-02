@@ -153,13 +153,24 @@ def _trusted_ledger_signed_exposure(view: Any) -> Dict[str, int]:
             continue
         if getattr(fill, "fill_source", "") == "settlement":
             raise ValueError(f"{ticker} has settlement evidence for an active market")
+        # A true conflict requires the signed-YES exposure to diverge from the
+        # recorded intent (exposure_mismatch).  A bare outcome-side label
+        # mismatch (side_conflict) with proven-matching exposure is the
+        # documented counterparty/book-form reporting artifact — e.g. a maker
+        # buy_no resting on the YES ask reported as "sell yes" — and matches
+        # position_cache.py semantics.  A label conflict whose exposure cannot
+        # be compared (exposure_mismatch is None) still fails closed.
+        _exposure_mismatch = getattr(fill, "exposure_mismatch", None)
         if (
             getattr(fill, "canonicalization_state", None)
             not in {"TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1"}
             or getattr(fill, "unmatched", False)
             or getattr(fill, "derived_id", False)
-            or getattr(fill, "side_conflict", False)
-            or getattr(fill, "exposure_mismatch", False)
+            or _exposure_mismatch is True
+            or (
+                getattr(fill, "side_conflict", False)
+                and _exposure_mismatch is None
+            )
         ):
             raise ValueError(f"{ticker} has an untrusted or unmatched ledger fill")
         if not getattr(fill, "fill_id", None) or not getattr(fill, "order_id", None):

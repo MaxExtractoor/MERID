@@ -37,18 +37,23 @@ def _record_intent(ledger, side, action, order_id=None, client_order_id=None, en
 
 class TestV2FillSideActionDerivation:
     """_parse_fill must preserve raw exchange execution fields and derive the
-    canonical position effect from them.  The canonical fields are the raw
-    ``outcome_side`` and order ``action``; the resulting long side is encoded
-    in ``canonical_yes_delta_cc`` (positive=long YES, negative=long NO).
+    canonical position effect from them.  Per Kalshi's documented
+    order-direction contract, ``outcome_side`` is the outcome the fill
+    positioned the user for and ``book_side`` is the same bit (bid=yes,
+    ask=no); the deprecated ``action`` is the book action, so the coherent
+    execution pair places ``outcome_side`` on the BUY leg and the opposite
+    leg on the SELL leg — identical to the http_poller port's
+    ``v2_to_legacy`` normalization.  The resulting long side is encoded in
+    ``canonical_yes_delta_cc`` (positive=long YES, negative=long NO).
     """
 
     @pytest.mark.asyncio
     async def test_parse_buy_no_with_real_sell_raw(self, ledger):
-        """A book-form SELL_NO report on a BUY_NO intent canonicalizes through
-        the intent: the exchange reports the taker's action, so ``sell`` here
-        means the counterparty sold into our resting NO bid — we bought NO.
-        (2026-09-24 phantom-position fix: trusting the raw action produced
-        +qty/long-YES instead of -qty/long-NO.)"""
+        """A maker buy_no resting on the YES ask is reported in book form:
+        outcome_side=no (user positioned for NO), book_side=ask, action=sell
+        (we sold on the YES book).  The coherent pair is (sell, yes) — exactly
+        what the 2026-11-01 production SOL fill stored — and the signed
+        exposure is -YES = long NO, matching the intent."""
         _record_intent(ledger, side="BUY_NO", action="buy", client_order_id="coid-buy-no")
         raw = {
             "fill_id": "fill-buy-no-1",
@@ -65,13 +70,12 @@ class TestV2FillSideActionDerivation:
             "created_time": datetime.now(timezone.utc).isoformat(),
         }
         fill = ledger._parse_fill(raw, "http_poller")
-        # The execution delta (sell/no -> +YES) disagrees with the intent delta
-        # (buy/no -> -YES), so the fill is book/counterparty-form: canonical
-        # side/action follow the recorded intent, not the reported action.
-        assert fill.canonical_position_side == "no"
-        assert fill.canonical_position_action == "buy"
+        # Execution delta -YES (sell/yes) matches the intent delta (buy/no):
+        # canonical side/action preserve the wire-form execution labels.
+        assert fill.canonical_position_side == "yes"
+        assert fill.canonical_position_action == "sell"
         assert fill.canonical_yes_delta_cc == -100  # long NO
-        assert fill.price_cents == 32
+        assert fill.price_cents == 68
         assert fill.is_exit is False
 
     @pytest.mark.asyncio
@@ -80,10 +84,13 @@ class TestV2FillSideActionDerivation:
             "fill_id": "fill-sell-no-1",
             "market_ticker": "KXETH15M-TEST",
             "client_order_id": "coid-sell-no",
-            "outcome_side": "no",
+            # A SELL_NO order is a buy on the YES bid: outcome_side=yes,
+            # book_side=bid, action=buy (matches the 2026-11-01 production
+            # SOL exit fill's raw shape).
+            "outcome_side": "yes",
             "book_side": "bid",
-            "side": "no",
-            "action": "sell",
+            "side": "yes",
+            "action": "buy",
             "yes_price_dollars": "0.4800",
             "no_price_dollars": "0.5200",
             "count_fp": "1",
@@ -93,11 +100,11 @@ class TestV2FillSideActionDerivation:
         _record_intent(ledger, side="SELL_NO", action="sell", client_order_id="coid-sell-no", entry_or_exit="exit")
         fill = ledger._parse_fill(raw, "http_poller")
         # SELL_NO is a long-YES exposure.  The canonical fields preserve the
-        # raw exchange outcome side and action.
-        assert fill.canonical_position_side == "no"
-        assert fill.canonical_position_action == "sell"
+        # wire-form execution pair (buy, yes).
+        assert fill.canonical_position_side == "yes"
+        assert fill.canonical_position_action == "buy"
         assert fill.canonical_yes_delta_cc == 100
-        assert fill.price_cents == 52
+        assert fill.price_cents == 48
         assert fill.is_exit is True
 
     @pytest.mark.asyncio
@@ -130,9 +137,11 @@ class TestV2FillSideActionDerivation:
             "fill_id": "fill-sell-yes-1",
             "market_ticker": "KXETH15M-TEST",
             "client_order_id": "coid-sell-yes",
-            "outcome_side": "yes",
+            # A SELL_YES fills on the YES ask: book_side=ask, outcome_side=no
+            # (selling YES positions the user for NO).
+            "outcome_side": "no",
             "book_side": "ask",
-            "side": "yes",
+            "side": "no",
             "action": "sell",
             "yes_price_dollars": "0.6800",
             "no_price_dollars": "0.3200",
@@ -190,9 +199,9 @@ class TestV2FillSideActionDerivation:
             "created_time": datetime.now(timezone.utc).isoformat(),
         }
         fill = ledger._parse_fill(raw, "http_poller")
-        assert fill.canonical_position_side == "no"
+        assert fill.canonical_position_side == "yes"
         assert fill.canonical_position_action == "sell"
-        assert fill.price_cents == 32
+        assert fill.price_cents == 68
         assert fill.is_exit is None
         assert fill.unmatched is True
 
@@ -630,9 +639,10 @@ class TestExitClassificationAndIdempotency:
             "fill_id": "f-sell-yes-reduce-exit",
             "market_ticker": "KXETH15M-REDUCE-SELL-YES",
             "client_order_id": "coid-exit-sell-yes",
-            "outcome_side": "yes",
+            # SELL_YES fills on the YES ask: book_side=ask, outcome_side=no.
+            "outcome_side": "no",
             "book_side": "ask",
-            "side": "yes",
+            "side": "no",
             "action": "sell",
             "yes_price_dollars": "0.6000",
             "no_price_dollars": "0.4000",
@@ -642,8 +652,8 @@ class TestExitClassificationAndIdempotency:
         exit_fill = ledger._parse_fill(exit_raw, "http_poller")
         assert exit_fill.is_exit is True
         assert exit_fill.reduce_only is True
-        # SELL_YES is a long-NO exposure.  The exchange reports outcome_side=yes,
-        # action=sell; the canonical fields preserve that raw execution.
+        # SELL_YES is a long-NO exposure.  The canonical fields preserve the
+        # coherent wire-form execution pair (sell, yes).
         assert exit_fill.canonical_position_side == "yes"
         assert exit_fill.canonical_position_action == "sell"
         assert exit_fill.price_cents == 60
@@ -718,8 +728,8 @@ class TestExitClassificationAndIdempotency:
         assert pos.contracts == 1
 
         # Reduce-only BUY_NO (equivalent to SELL_YES) closes the long YES position.
-        # Kalshi V2 fills report the YES-book trade direction as "sell" even though
-        # the MERID intent is BUY_NO; the fill is canonicalized to side=no, action=buy.
+        # A buy_no fill rests on the YES ask and is reported in book form:
+        # outcome_side=no, book_side=ask, action=sell -> coherent pair (sell,yes).
         ledger.record_intent(OrderIntent(
             intent_id="i-exit-buy-no",
             client_order_id="coid-exit-buy-no",
@@ -735,8 +745,8 @@ class TestExitClassificationAndIdempotency:
             "fill_id": "f-buy-no-reduce-exit",
             "market_ticker": "KXETH15M-REDUCE-BUY-NO",
             "client_order_id": "coid-exit-buy-no",
-            "outcome_side": "yes",
-            "book_side": "bid",
+            "outcome_side": "no",
+            "book_side": "ask",
             "side": "no",
             "action": "sell",
             "yes_price_dollars": "0.7000",
@@ -831,24 +841,41 @@ class TestExitClassificationAndIdempotency:
 
 
 class TestCanonicalFillMatrix:
-    """Parametric matrix across all four order forms and both execution sides."""
+    """Parametric matrix across all four order forms and both report shapes.
+
+    Raw fields are in canonical Kalshi vocabulary: ``outcome_side`` is the
+    outcome the fill positioned the user for, ``book_side`` is the same bit
+    (bid=yes, ask=no), and ``action`` is the book action.  A maker buy_no or
+    sell_yes resting on the YES ask is reported as (outcome=no, ask, sell) —
+    the coherent execution pair (sell, yes) — which mismatches the intent's
+    outcome label only (side_conflict) while the signed-YES exposure agrees;
+    those fills are trusted.  A report whose outcome_side direction opposes
+    the intent's signed exposure is a true inversion and is quarantined.
+    """
 
     @pytest.mark.parametrize(
-        "intent_side,execution_outcome,yes_price,no_price,expected_side,expected_action,expected_price_cents,conflict,expect_quarantine",
+        "intent_side,execution_outcome,book_side,raw_action,yes_price,no_price,"
+        "expected_exec_side,expected_exec_action,expected_exec_price,"
+        "expected_side,expected_action,expected_price_cents,conflict,expect_quarantine",
         [
-            # Matching executions: contract side and execution outcome agree.
-            ("BUY_YES",  "yes", "0.5500", "0.4500", "yes", "buy", 55, False, False),
-            ("SELL_NO",  "no",  "0.5500", "0.4500", "no",  "sell", 45, False, False),
-            ("BUY_NO",   "no",  "0.5500", "0.4500", "no",  "buy", 45, False, False),
-            ("SELL_YES", "yes", "0.5500", "0.4500", "yes", "sell", 55, False, False),
-            # Opposite-side executions: the intent's contract side does not match
-            # the exchange's execution outcome, so side_conflict is True.
-            ("BUY_YES",  "no",  "0.6000", "0.4000", "no",  "sell", 40, True, False),
-            ("SELL_NO",  "yes", "0.6000", "0.4000", "yes", "buy", 60, True, False),
-            # True exposure inversions (e.g. BUY_YES reported for a BUY_NO).
-            # The fill is quarantined as an UNTRUSTED_SIDE_CONFLICT.
-            ("BUY_NO",   "yes", "0.6000", "0.4000", "yes", "buy", 60, True, True),
-            ("SELL_YES", "no",  "0.6000", "0.4000", "no", "sell", 40, True, True),
+            # Correct-direction fills: the report's canonical outcome matches
+            # the intent's signed exposure.  Sell-form reports carry a benign
+            # side_conflict label artifact (matching production).
+            ("BUY_YES",  "yes", "bid", "buy",  "0.5500", "0.4500", "yes", "buy",  55, "yes", "buy",  55, False, False),
+            ("SELL_NO",  "yes", "bid", "buy",  "0.5500", "0.4500", "yes", "buy",  55, "yes", "buy",  55, True,  False),
+            ("BUY_NO",   "no",  "ask", "sell", "0.5500", "0.4500", "yes", "sell", 55, "yes", "sell", 55, True,  False),
+            ("SELL_YES", "no",  "ask", "sell", "0.5500", "0.4500", "yes", "sell", 55, "yes", "sell", 55, False, False),
+            # Direct-form reports (action on the outcome leg itself) are also
+            # coherent: a buy_no reported as action=buy on the no leg.
+            ("BUY_NO",   "no",  "ask", "buy",  "0.5500", "0.4500", "no",  "buy",  45, "no",  "buy",  45, False, False),
+            # True exposure inversions: the reported direction opposes the
+            # intent's signed exposure; quarantined as UNTRUSTED_SIDE_CONFLICT.
+            ("BUY_NO",   "yes", "bid", "buy",  "0.6000", "0.4000", "yes", "buy",  60, None,  None,   None, True, True),
+            # Labels agree (yes) but the coherent delta opposes the intent —
+            # a real inversion caught by the exposure comparison alone.
+            ("BUY_YES",  "no",  "ask", "sell", "0.6000", "0.4000", "yes", "sell", 60, None,  None,   None, False, True),
+            ("SELL_NO",  "no",  "ask", "sell", "0.6000", "0.4000", "yes", "sell", 60, None,  None,   None, True, True),
+            ("SELL_YES", "yes", "bid", "buy",  "0.6000", "0.4000", "yes", "buy",  60, None,  None,   None, False, True),
         ],
     )
     @pytest.mark.asyncio
@@ -857,24 +884,29 @@ class TestCanonicalFillMatrix:
         ledger,
         intent_side,
         execution_outcome,
+        book_side,
+        raw_action,
         yes_price,
         no_price,
+        expected_exec_side,
+        expected_exec_action,
+        expected_exec_price,
         expected_side,
         expected_action,
         expected_price_cents,
         conflict,
         expect_quarantine,
     ):
-        coid = f"coid-{intent_side}-{execution_outcome}"
+        coid = f"coid-{intent_side}-{execution_outcome}-{raw_action}"
         _record_intent(ledger, side=intent_side, action="buy" if intent_side.startswith("BUY") else "sell", client_order_id=coid)
         raw = {
-            "fill_id": f"f-{intent_side}-{execution_outcome}",
+            "fill_id": f"f-{intent_side}-{execution_outcome}-{raw_action}",
             "market_ticker": "KXETH15M-TEST",
             "client_order_id": coid,
             "outcome_side": execution_outcome,
-            "book_side": "bid" if execution_outcome == "yes" else "ask",
+            "book_side": book_side,
             "side": execution_outcome,
-            "action": expected_action,
+            "action": raw_action,
             "yes_price_dollars": yes_price,
             "no_price_dollars": no_price,
             "count_fp": "1",
@@ -886,9 +918,10 @@ class TestCanonicalFillMatrix:
         # intent_target_side is the contract side the agent intended to trade
         # (BUY_YES/SELL_YES -> yes; BUY_NO/SELL_NO -> no), not the resulting long side.
         assert fill.intent_target_side == ("yes" if intent_side in ("BUY_YES", "SELL_YES") else "no")
-        assert fill.execution_outcome_side == execution_outcome
-        # execution_price_cents is the raw price on the executed outcome side.
-        expected_exec_price = int(float(yes_price) * 100) if execution_outcome == "yes" else int(float(no_price) * 100)
+        # execution_outcome_side/execution_action hold the coherent execution
+        # pair (the leg the reported action applies to).
+        assert fill.execution_outcome_side == expected_exec_side
+        assert fill.execution_action == expected_exec_action
         assert fill.execution_price_cents == expected_exec_price
 
         if expect_quarantine:

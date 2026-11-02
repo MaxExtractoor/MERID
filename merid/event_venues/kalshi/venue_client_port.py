@@ -645,6 +645,21 @@ def _venue_trade_to_fill(trade: Any) -> Fill:
             )
             action = canonical_action
             outcome = canonical_outcome
+        elif outcome_side in ("yes", "no") and (
+            not book_side
+            or (
+                book_side in ("bid", "ask")
+                and (book_side == "bid") == (outcome_side == "yes")
+            )
+        ):
+            # Deprecated ``action`` absent (Kalshi may drop action/side any time
+            # after 2026-05-28): ``outcome_side`` alone gives the signed
+            # exposure direction, so synthesize the canonical delta form
+            # (buy, outcome_side) which always reproduces the exact delta.
+            action = "buy"
+            outcome = outcome_side
+            _ysc = _yes_space_cents()
+            price_cents = _ysc if outcome_side == "yes" else (100 - _ysc if _ysc else 0)
         else:
             raise ValueError("missing V2 fill fields")
     except Exception:

@@ -289,15 +289,16 @@ class TestCounterpartyFormCanonicalization:
 
     @pytest.mark.asyncio
     async def test_sell_no_form_on_buy_no_intent_canonicalizes_to_intent(self, ledger):
-        """REST 'sell no@70' on a buy-no intent -> canonical no/buy, delta -90,
-        proceeds paid at the NO leg (-0.63 - fee), never a phantom +delta."""
+        """REST book-form (sell, yes@30) on a buy-no intent -> canonical
+        yes/sell, delta -90 (long NO), proceeds paid at the NO leg
+        (-0.63 - fee), never a phantom +delta."""
         self._intent(ledger, side="no", action="buy")
         fill = ledger._parse_fill(self._rest_form_raw(), "http_poller")
 
-        assert fill.canonical_position_side == "no"
-        assert fill.canonical_position_action == "buy"
+        assert fill.canonical_position_side == "yes"
+        assert fill.canonical_position_action == "sell"
         assert fill.canonical_yes_delta_cc == -90
-        assert fill.canonical_leg_price_cents == 70
+        assert fill.canonical_leg_price_cents == 30
         assert fill.canonicalization_state == "TRUSTED_LIVE_V1"
         assert fill.unmatched is not True
         # User paid for NO@70 on 0.9 contracts + fee.
@@ -305,13 +306,13 @@ class TestCounterpartyFormCanonicalization:
 
     @pytest.mark.asyncio
     async def test_sell_yes_form_on_buy_no_intent_unaffected(self, ledger):
-        """WS-form 'sell yes@30' already yields the intent's delta (-90); the
-        counterparty override must not disturb it."""
+        """WS-form report of the same buy_no fill (outcome_side=no, ask,
+        action=sell) already yields the intent's delta (-90); no override."""
         self._intent(ledger, side="no", action="buy")
         raw = self._rest_form_raw("fill_cp_ws")
-        raw["side"] = "yes"
-        raw["outcome_side"] = "yes"
-        raw["book_side"] = "bid"
+        raw["side"] = "no"
+        raw["outcome_side"] = "no"
+        raw["book_side"] = "ask"
         fill = ledger._parse_fill(raw, "ws")
 
         # Deltas agree (-90 == -90): no override, execution form preserved.
@@ -321,21 +322,21 @@ class TestCounterpartyFormCanonicalization:
 
     @pytest.mark.asyncio
     async def test_counterparty_form_exit_fill(self, ledger):
-        """Maker-form 'buy no@60' on a sell-no exit intent -> canonical
-        no/sell, +delta (closes the long NO position)."""
+        """A sell_no exit is a buy on the YES bid: (buy, yes@40) -> canonical
+        yes/buy, +delta (closes the long NO position)."""
         self._intent(ledger, side="no", action="sell", entry_or_exit="exit")
         raw = self._rest_form_raw("fill_cp_exit")
         raw["action"] = "buy"
-        raw["side"] = "no"
-        raw["outcome_side"] = "no"
-        raw["book_side"] = "ask"
+        raw["side"] = "yes"
+        raw["outcome_side"] = "yes"
+        raw["book_side"] = "bid"
         raw["yes_price_dollars"] = "0.40"
         raw["no_price_dollars"] = "0.60"
         fill = ledger._parse_fill(raw, "http_poller")
 
-        assert fill.canonical_position_side == "no"
-        assert fill.canonical_position_action == "sell"
+        assert fill.canonical_position_side == "yes"
+        assert fill.canonical_position_action == "buy"
         assert fill.canonical_yes_delta_cc == 90
-        # No prior NO holding in this fixture: the sell is modeled as a
-        # pair-mint — user pays the complement YES leg (0.9 * 0.40 - fee).
+        # No prior YES holding in this fixture: the buy is modeled as a
+        # pair-mint — user pays the YES leg (0.9 * 0.40 + fee).
         assert fill.proceeds_dollars == pytest.approx(Decimal("-0.3733"), abs=Decimal("0.001"))

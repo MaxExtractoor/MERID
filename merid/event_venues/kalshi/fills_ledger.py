@@ -8695,8 +8695,54 @@ class KalshiFillsLedger:
         # field (trusted) or from a side-agreement/default heuristic (must be
         # re-validated against a live position before it can mutate exposure).
         _action_was_inferred = False
+        _v2_pair_inconsistent = False
 
-        if _raw_traded_side and _raw_action:
+        if _market_outcome_side in ("yes", "no") and _book_side in ("bid", "ask"):
+            # Canonical Kalshi V2 direction (docs.kalshi.com/getting_started/
+            # order_direction): ``outcome_side`` is the outcome the fill
+            # positioned the *user* for (buy-yes/sell-no -> yes; buy-no/sell-yes
+            # -> no) and ``book_side`` is the same bit (bid=yes, ask=no).  The
+            # deprecated ``action`` is the book action on the YES book, so the
+            # coherent (action, leg) pair places ``outcome_side`` on the BUY
+            # side and the opposite leg on the SELL side:
+            #   outcome_side=no, action=sell -> SELL_YES (long-NO exposure)
+            #   outcome_side=no, action=buy  -> BUY_NO
+            #   outcome_side=yes, action=buy -> BUY_YES
+            #   outcome_side=yes, action=sell -> SELL_NO
+            # 2026-11-01: the previous model treated ``outcome_side`` as the
+            # book contract and flipped/kept the deprecated ``side`` field,
+            # which sign-flipped sell-form V2 fills (e.g. a maker buy_no resting
+            # on the YES ask reported as side=no/action=sell canonicalized to
+            # +YES instead of -YES).
+            if (_book_side == "bid") != (_market_outcome_side == "yes"):
+                # Internally inconsistent V2 report: bid<=>yes, ask<=>no must
+                # hold.  Fail closed rather than guess the exposure direction —
+                # and do NOT let the legacy fallback below resurrect a
+                # direction from the deprecated ``side`` field.
+                _v2_pair_inconsistent = True
+                _execution_outcome_side = None
+                _execution_action = None
+                logger.warning(
+                    "[FILL-SIDE-CANONICALIZATION] fill_id=%s market=%s - "
+                    "inconsistent V2 direction: outcome_side=%s book_side=%s "
+                    "(bid<=>yes, ask<=>no must hold); quarantining.",
+                    fill_id, _ticker_for_identity or "",
+                    _market_outcome_side, _book_side,
+                )
+            elif _raw_action in ("buy", "sell"):
+                _execution_action = _raw_action
+                _execution_outcome_side = (
+                    _market_outcome_side
+                    if _raw_action == "buy"
+                    else _opposite_outcome(_market_outcome_side)
+                )
+            else:
+                # Deprecated ``action`` absent: the canonical delta form
+                # (buy, outcome_side) reproduces the exact signed exposure.
+                _execution_action = "buy"
+                _execution_outcome_side = _market_outcome_side
+                _action_was_inferred = True
+        elif _raw_traded_side and _raw_action:
             # The explicit user-side payload (side / purchased_side) tells us
             # which contract the user traded.  When the exchange's
             # ``outcome_side`` (the book/matched contract) differs from the
@@ -8732,7 +8778,7 @@ class KalshiFillsLedger:
                 fill_id, _ticker_for_identity or "", _execution_outcome_side,
             )
 
-        if _execution_outcome_side is None:
+        if _execution_outcome_side is None and not _v2_pair_inconsistent:
             # Legacy fallback: use raw side/action directly.
             _execution_outcome_side = _raw_traded_side
             _execution_action = _execution_action or _raw_action
@@ -9009,12 +9055,17 @@ class KalshiFillsLedger:
             )
 
         _exposure_mismatch = False
-        if _side_conflict:
-            if _execution_yes_delta_cc is not None and _intent_yes_delta_cc is not None:
-                _exposure_mismatch = _execution_yes_delta_cc != _intent_yes_delta_cc
-            else:
-                # Cannot compare exposure; assume the worst.
-                _exposure_mismatch = True
+        if _execution_yes_delta_cc is not None and _intent_yes_delta_cc is not None:
+            # 2026-11-01: compare the signed-YES exposure whenever both deltas
+            # are known — not only under a label conflict.  A coherent V2
+            # report can carry a matching side label with an opposite exposure
+            # direction (e.g. BUY_YES intent vs an outcome_side=no/ask/sell
+            # report whose coherent pair is sell/yes): the label check alone
+            # misses that real inversion.
+            _exposure_mismatch = _execution_yes_delta_cc != _intent_yes_delta_cc
+        elif _side_conflict:
+            # Cannot compare exposure; assume the worst.
+            _exposure_mismatch = True
 
         if _side_conflict:
             _immutable_identity = (
@@ -9084,7 +9135,11 @@ class KalshiFillsLedger:
         if _exposure_mismatch:
             is_unmatched = True
             if not unmatched_reason:
-                unmatched_reason = f"fill_side_conflict:{_side_conflict_reason}"
+                unmatched_reason = (
+                    f"fill_side_conflict:{_side_conflict_reason}"
+                    if _side_conflict_reason
+                    else "fill_exposure_mismatch"
+                )
             _canonicalization_state = "UNTRUSTED_SIDE_CONFLICT"
             _action = None
             _canonical_side = None

@@ -227,7 +227,11 @@ def test_ledger_replay_uses_exact_trusted_signed_deltas(monkeypatch):
     {"canonicalization_state": "UNTRUSTED_RAW"},
     {"unmatched": True},
     {"derived_id": True},
+    # Bare side_conflict with exposure_mismatch absent (None) still fails
+    # closed — the exposure cannot be proven to match the intent.
     {"side_conflict": True},
+    {"side_conflict": True, "exposure_mismatch": None},
+    {"exposure_mismatch": True},
     {"order_id": None},
     {"client_order_id": None, "intent_id": None},
     {"quantity_cc": 0},
@@ -240,6 +244,28 @@ def test_ledger_replay_rejects_incomplete_or_untrusted_live_fill(monkeypatch, ch
         _trusted_ledger_signed_exposure(
             _canonical_view(authoritative=[_trusted_fill(**changes)])
         )
+
+
+def test_ledger_replay_trusts_counterparty_form_label_artifact(monkeypatch):
+    """Maker buy_no fills are wire-encoded as YES-ask sells; Kalshi reports the
+    book form (canonical sell/yes labels) while the signed-YES exposure matches
+    the buy_no intent.  The ledger marks this side_conflict=True with
+    exposure_mismatch=False — a reporting artifact, not a conflict — and the
+    fill must remain trusted (production SOL fill, 2026-11-01)."""
+    monkeypatch.setattr("merid.preflight.p0._reconciliation_quarantined", lambda ticker: False)
+    sol_book_form = _trusted_fill(
+        market_ticker="KXSOL15M-26NOV012000-00",
+        side_conflict=True,
+        side_conflict_reason="execution_outcome_side=yes != intent_target_side=no",
+        exposure_mismatch=False,
+        quantity_cc=464,
+        canonical_position_action="sell",
+        canonical_position_side="yes",
+        canonical_yes_delta_cc=-464,
+    )
+    assert _trusted_ledger_signed_exposure(
+        _canonical_view(authoritative=[sol_book_form])
+    ) == {"KXSOL15M-26NOV012000-00": -464}
 
 
 def test_ledger_replay_preserves_quarantine_and_rejects_provisional(monkeypatch):
