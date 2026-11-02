@@ -4288,13 +4288,12 @@ async def get_pnl() -> Dict[str, Any]:
     # ingestion completeness or per-fill date attribution.
     daily_pnl_source = "ledger_fills"
     try:
-        from merid.event_venues.kalshi.bankroll_models import BalanceState as _BalanceState
         _svc = await get_bankroll_service()
         _bs = await _svc.get_summary(caller_module="kalshi_api_pnl") if _svc is not None else None
         equity_now = float(_bs.equity_usd) if _bs is not None and _bs.equity_usd is not None else None
         if equity_now is not None:
             anchor, anchor_ts, anchor_ok = _daily_equity_anchor(
-                equity_now, fresh=_bs.state == _BalanceState.FRESH
+                equity_now, fresh=_bs.state == BalanceState.FRESH
             )
             if anchor_ok:
                 result["daily_pnl_usd"] = round(equity_now - anchor, 2)
