@@ -2490,6 +2490,11 @@ class KalshiMarketStateStore:
                 pass
         _ev_age_ms, _uw_ms, _hops = self._book_event_timing(msg)
         if _ev_age_ms is not None:
+            # An event age cannot be negative: small sub-zero values are
+            # clock-calibration jitter meaning "at or ahead of local now",
+            # i.e. fresh.  Materially negative ages are already filtered to
+            # STATUS_ANOMALY_NEGATIVE_AGE upstream (never stored here).
+            _ev_age_ms = max(0.0, _ev_age_ms)
             state.ws_last_event_age_ms = _ev_age_ms
             _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
         state.ws_last_event_age_status = _hops.get("venue_age_status")
