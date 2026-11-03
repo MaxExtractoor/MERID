@@ -2985,6 +2985,45 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                             _asset, _nxt_id,
                             _cur_mte if _cur_mte is not None else -1.0,
                         )
+            # 2026-11-03: deterministic next-window union.  The catalog fetch
+            # filters status=open: Kalshi only flips a market to open at window
+            # start, and the snapshot goes EMPTY around expiry (the dying
+            # market leaves 'open' before close_time while the next market is
+            # not yet listed — observed live: snapshot=0 at T-18s, prewarm
+            # never fired, minutes of ws_subscribed=False after rollover).
+            # get_current/get_next therefore cannot see the next market in
+            # exactly the window where prewarm matters.  The 15m ticker grid
+            # is mechanical (ticker time IS expiry, ET) and aligns in UTC, so
+            # the next window's ticker derives from wall clock alone.
+            try:
+                from datetime import timedelta as _td
+                _now_utc = datetime.now(timezone.utc)
+                _base = _now_utc.replace(second=0, microsecond=0)
+                _win_end = _base.replace(minute=0) + _td(
+                    minutes=((_base.minute // 15) + 1) * 15)
+                _secs = (_win_end - _now_utc).total_seconds()
+                if 0.0 < _secs <= _prewarm_min * 60.0:
+                    from zoneinfo import ZoneInfo
+                    from merid.event_venues.kalshi.ticker_utils import (
+                        format_ticker_for_15m_window,
+                    )
+                    _next_exp = _win_end + _td(minutes=15)
+                    _et = _next_exp.astimezone(ZoneInfo("America/New_York"))
+                    for _asset in allowed_assets:
+                        _nxt_id = (
+                            f"{format_ticker_for_15m_window(_asset, _next_exp)}"
+                            f"-{_et.minute:02d}"
+                        )
+                        if _nxt_id not in active_tickers:
+                            active_tickers.add(_nxt_id)
+                            logger.info(
+                                "[WS-PREWARM-NEXT] derived next-window "
+                                "ticker=%s asset=%s window_ends_in=%.0fs",
+                                _nxt_id, _asset, _secs,
+                            )
+            except Exception as _dn_err:
+                logger.warning(
+                    "[WS-PREWARM-NEXT] deterministic derive failed: %s", _dn_err)
         except Exception as _pw_err:
             logger.debug("[WS-PREWARM] next-market union failed: %s", _pw_err)
     except Exception as e:
