@@ -1513,22 +1513,57 @@ class RestingOrderMonitor:
                 _emit_resting_lifecycle(
                     "RESTING_ORDER_CANCEL_REQUESTED", record, trigger=result.reason,
                 )
-                # Cancel the order on Kalshi
+                # Cancel the order on Kalshi.  cancel_order returns False on
+                # a logical refusal (404 = already terminal, not found) — it
+                # does not raise — so the result must be checked, not assumed.
                 _cancel_ok = False
                 try:
                     from merid.event_venues.kalshi.client import get_kalshi_client
                     client = get_kalshi_client()
-                    await client.cancel_order(record.kalshi_order_id, record.ticker)
-                    _cancel_ok = True
+                    _cancel_ok = bool(
+                        await client.cancel_order(record.kalshi_order_id, record.ticker)
+                    )
                 except Exception as e:
                     logger.error(f"[RESTING_ORDER_MONITOR] Failed to cancel order {record.kalshi_order_id}: {e}")
-                _emit_resting_lifecycle(
-                    "RESTING_ORDER_CANCEL_ACKNOWLEDGED" if _cancel_ok else "RESTING_ORDER_CANCEL_FAILED",
-                    record, trigger=result.reason,
-                )
 
-                # Unregister cancelled order
-                self.unregister_order(record.kalshi_order_id)
+                # A failed cancel is not evidence the order is gone.  Kalshi
+                # cancel is not server-idempotent: a 404 means the order is
+                # already terminal (filled/canceled/expired) OR unreachable,
+                # and a cancel/fill race is decided in favor of the fill
+                # (observed 2026-11-03: 404 treated as ack, order deregistered,
+                # then it filled 2.24+1.76cc untracked).  Verify terminal state
+                # before unregistering; keep a live/unknown order registered so
+                # the next pass retries the cancel and fills stay attributed.
+                if not _cancel_ok:
+                    try:
+                        _verify = await client.get_order(
+                            record.kalshi_order_id, record.ticker
+                        )
+                        _ostatus = (getattr(_verify, "status", None) or "").lower()
+                    except Exception:
+                        _ostatus = ""
+                    if _ostatus in ("canceled", "expired", "filled"):
+                        _emit_resting_lifecycle(
+                            "RESTING_ORDER_CANCEL_FAILED_TERMINAL",
+                            record, trigger=result.reason, verified_status=_ostatus,
+                        )
+                        self.unregister_order(record.kalshi_order_id)
+                    else:
+                        _emit_resting_lifecycle(
+                            "RESTING_ORDER_CANCEL_FAILED",
+                            record, trigger=result.reason, verified_status=_ostatus or "unknown",
+                        )
+                        logger.warning(
+                            "[RESTING_ORDER_MONITOR] Cancel unverified — keeping order "
+                            "registered: kalshi_order_id=%s ticker=%s status=%s",
+                            record.kalshi_order_id, record.ticker, _ostatus or "unknown",
+                        )
+                else:
+                    _emit_resting_lifecycle(
+                        "RESTING_ORDER_CANCEL_ACKNOWLEDGED", record, trigger=result.reason,
+                    )
+                    # Unregister only after a confirmed cancel
+                    self.unregister_order(record.kalshi_order_id)
             elif result.action == "adjust" and result.new_price_cents:
                 # Bounded chase requote: amend price in place via the Kalshi
                 # amend endpoint (keeps order_id/intent lineage and fill

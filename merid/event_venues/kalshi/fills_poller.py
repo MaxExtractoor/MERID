@@ -772,6 +772,45 @@ class FillsPoller:
                 + _position_mismatches(exchange_exposure, cache_exposure, "cache")
             )
             if mismatches:
+                # Kalshi books positions at fill time while the local ledger
+                # and cache converge through the independent ~10s ingest poll
+                # — an exchange-vs-ledger delta a few seconds old is
+                # propagation lag, not divergence (observed live 2026-11-03:
+                # exchange=224 vs ledger=0 latched a ~3h entry halt; the same
+                # cycle's ingest recorded the fill 4s later and the canonical
+                # reconciler MATCHED 9s after that).  Ingest outstanding fills
+                # and recheck once before declaring a halt-grade mismatch; a
+                # genuine divergence survives the recheck and still halts
+                # this cycle.
+                logger.warning(
+                    "[RECONCILE] mismatch detected, ingesting fills and rechecking once: %s",
+                    mismatches[:5],
+                )
+                try:
+                    await self._do_poll()
+                except Exception as _poll_exc:
+                    logger.warning(
+                        "[RECONCILE] ingest-before-recheck failed: %s", _poll_exc
+                    )
+                view = await asyncio.to_thread(ledger.get_canonical_fills)
+                ledger_exposure = await asyncio.to_thread(
+                    _trusted_ledger_signed_exposure, view
+                )
+                cached_positions = list(
+                    cache.get_all_positions(validate_freshness=False).values()
+                )
+                cache_exposure = {
+                    ticker: cc
+                    for ticker, cc in _signed_yes_position_map(
+                        cached_positions, exchange=False
+                    ).items()
+                    if not _reconciliation_quarantined(ticker)
+                }
+                mismatches = (
+                    _position_mismatches(exchange_exposure, ledger_exposure, "ledger")
+                    + _position_mismatches(exchange_exposure, cache_exposure, "cache")
+                )
+            if mismatches:
                 raise RuntimeError(f"signed position mismatch: {mismatches[:5]}")
 
             report = await ledger.reconcile_with_kalshi_positions(positions)
