@@ -1996,6 +1996,12 @@ class KalshiMarketStateStore:
         # instead of partially replaying historical deltas.
         event_age_ms, upstream_wait_ms, hop_diag = self._book_event_timing(msg)
         if upstream_wait_ms is not None and upstream_wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS:
+            try:
+                self.record_sid_frame_drop(
+                    msg.get("_sid") or msg.get("sid"), msg.get("seq"), ticker
+                )
+            except Exception:
+                pass
             self._mark_book_untrusted_and_resync(
                 ticker,
                 "BOOK_UPSTREAM_LAG",
@@ -2004,6 +2010,12 @@ class KalshiMarketStateStore:
             )
             return False
         if event_age_ms is not None and event_age_ms > _BOOK_MAX_EVENT_AGE_MS:
+            try:
+                self.record_sid_frame_drop(
+                    msg.get("_sid") or msg.get("sid"), msg.get("seq"), ticker
+                )
+            except Exception:
+                pass
             self._mark_book_untrusted_and_resync(
                 ticker,
                 "BOOK_EVENT_TOO_OLD",
@@ -4149,6 +4161,10 @@ class KalshiMarketStateStore:
                     ):
                         raise ValueError("delta exceeds local book precision or range")
                 except (ValueError, TypeError, InvalidOperation) as exc:
+                    try:
+                        self.record_sid_frame_drop(_sid, _seq_int, ticker)
+                    except Exception:
+                        pass
                     with self._sid_seq_lock:
                         self._ws_book_requires_snapshot.add(ticker)
                     self._mark_book_untrusted_and_resync(
