@@ -48,6 +48,7 @@ from merid.event_venues.kalshi.stop_candidate import (
     evaluate_edge_stop,
     loss_sell_blocked,
     loss_exits_enabled,
+    model_edge_tail_floor_salvage_enabled,
     no_edge_loss_salvage_enabled,
     maybe_submit_stop_candidate_sync,
     record_signal_disposition,
@@ -731,6 +732,29 @@ def _scalp_arm_override_cents(position: Any, min_profit_cents: float) -> float:
         and float(pos_edge) <= 0.0
     ):
         arm = min(arm, probe_arm_c)
+    # 2026-11-03 operator decision: extend the scalp arm to model-edge
+    # entries.  The +4-9c dying-peak cluster banks nothing when the arm
+    # stays at +10-12c (XRP-0315 peaked +5c then settled 0 — the trail
+    # never armed).  ``MERID_TRAIL_MODEL_EDGE_ARM_CENTS`` (default 5c,
+    # matching the probe cohort) arms the trail inside the band; the
+    # executable own-side bid check downstream still decides activation,
+    # so a mid-price wick cannot arm the trail.  Set to 0 to keep the
+    # pre-11-03 model-edge posture (replay: hold-to-settle beats early
+    # exits on average — this accepts more scratch exits in exchange for
+    # cutting the ride-to-zero tail).
+    try:
+        model_edge_arm_c = float(
+            os.environ.get("MERID_TRAIL_MODEL_EDGE_ARM_CENTS", "5")
+        )
+    except Exception:
+        model_edge_arm_c = 5.0
+    if (
+        model_edge_arm_c > 0
+        and pos_edge is not None
+        and isinstance(pos_edge, (int, float))
+        and float(pos_edge) > 0.0
+    ):
+        arm = min(arm, model_edge_arm_c)
     try:
         late_arm_tte = float(
             os.environ.get("MERID_TRAIL_LATE_ARM_TTE_S", "240")
@@ -4429,7 +4453,17 @@ class PositionMonitor:
                 _no_edge_salvage = bool(
                     _no_edge and no_edge_loss_salvage_enabled()
                 )
-                if not loss_exits_enabled() and not _no_edge_salvage:
+                # 2026-11-03 operator decision: the absolute floor
+                # (bid <= floor_cents) fires for model-edge entries too —
+                # terminal-collapse salvage is distinct from the
+                # drop-triggered whipsaw stops that stay suppressed.
+                # See model_edge_tail_floor_salvage_enabled in
+                # stop_candidate; the downstream breakeven floor is
+                # exempted via the candidate's tail_floor_breach flag.
+                _floor_salvage = bool(
+                    _floor_hit and model_edge_tail_floor_salvage_enabled()
+                )
+                if not loss_exits_enabled() and not _no_edge_salvage and not _floor_salvage:
                     _supp_at = float(
                         getattr(position, "tail_loss_suppress_logged_at", 0.0) or 0.0
                     )
@@ -4541,6 +4575,11 @@ class PositionMonitor:
                                 peak_price_cents=position.high_watermark_cents,
                                 claimed_entry_edge=getattr(position, "entry_edge", None),
                                 claimed_entry_edge_pct=getattr(position, "entry_edge_pct", None),
+                                # 2026-11-03: stamp whether the absolute
+                                # floor (not the drop test) fired — the
+                                # breakeven floor resolver exempts
+                                # floor-breach salvage for model-edge.
+                                tail_floor_breach=bool(_floor_hit),
                             )
                             record_stop_candidate(candidate)
                             self._submit_stop_candidate(candidate)

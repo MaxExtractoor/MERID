@@ -4467,12 +4467,13 @@ async def _execute_exit_order(
                         _prepared.result.status, _prepared.denial,
                     )
                     if _prepared.result.status == "held_unmarketable":
-                        if _terminalize_arbiter_held_exit(
+                        _released, _held_coid = _terminalize_arbiter_held_exit(
                             self._position_monitor,
                             position.position_id,
                             intent.client_order_id,
                             _prepared,
-                        ):
+                        )
+                        if _released:
                             if _ev_resolver is not None:
                                 try:
                                     _ev_resolver.note_ack(
@@ -4487,6 +4488,65 @@ async def _execute_exit_order(
                                 position, exit_reason, contracts_to_close,
                                 is_code_failure=True,
                             )
+                        else:
+                            # Release could not be proven — do NOT silently
+                            # leave the intent in-flight (2026-11-02
+                            # XRP-0315: a suppressed lock wedged the
+                            # position unexitable to settlement).  The
+                            # suppression is provably pre-route, but absent
+                            # a durable terminal transition we cannot claim
+                            # never_dispatched: mark submission-unknown so
+                            # the timeout/reconcile machinery owns
+                            # resolution and stale-force / forced exits can
+                            # still break the lock.
+                            logger.error(
+                                "[EXIT-ARBITER] held-exit release failed: "
+                                "position=%s market=%s reason=%s — "
+                                "marking submission_unknown for reconcile",
+                                position.position_id[:8],
+                                position.market_id, exit_reason_str,
+                            )
+                            if self._position_monitor is not None:
+                                try:
+                                    # Only mark when the same obligation
+                                    # still owns the in-flight lock — a
+                                    # newer obligation (different coid)
+                                    # must not be corrupted by this hold's
+                                    # fallout.
+                                    _unresolved = (
+                                        self._position_monitor
+                                        ._get_unresolved_exit_client_order_id(
+                                            position.position_id
+                                        )
+                                    )
+                                    if _unresolved is not None and (
+                                        _held_coid is None
+                                        or _unresolved == _held_coid
+                                        or _unresolved == intent.client_order_id
+                                    ):
+                                        self._position_monitor._mark_exit_intent_submission_unknown(
+                                            position.position_id,
+                                            "held_unmarketable_release_failed",
+                                        )
+                                    elif _unresolved is None:
+                                        logger.info(
+                                            "[EXIT-ARBITER] held-exit already "
+                                            "resolved in-flight for position=%s",
+                                            position.position_id[:8],
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "[EXIT-ARBITER] newer exit obligation "
+                                            "owns flight for position=%s "
+                                            "(coid=%s) — skipping submission_unknown",
+                                            position.position_id[:8],
+                                            _unresolved[:8],
+                                        )
+                                except Exception:
+                                    logger.exception(
+                                        "[EXIT-ARBITER] failed to mark "
+                                        "held-exit submission_unknown"
+                                    )
                         return
                     _clear_in_flight()
                     self._rearm_position_after_failed_exit(
@@ -5092,8 +5152,14 @@ async def _execute_exit_order(
             # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
-def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepared) -> bool:
-    """Release only this invocation's provably pre-route unmarketable hold."""
+def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepared):
+    """Release only this invocation's provably pre-route unmarketable hold.
+
+    Returns ``(released, flight_coid)`` — the flight's authoritative
+    client_order_id when one was observed, so the caller can tell a failed
+    release on THIS obligation apart from a newer obligation that replaced
+    the in-flight record in the meantime.
+    """
     result = getattr(prepared, "result", None)
     if (
         monitor is None
@@ -5102,39 +5168,79 @@ def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepar
         or getattr(result, "status", None) != "held_unmarketable"
         or getattr(result, "attempt", None) is not None
     ):
-        return False
+        return False, None
     with monitor._lock:
         flight = monitor._exit_intent_in_flight.get(position_id)
-        if (
-            flight is None
-            or flight.get("client_order_id") != client_order_id
-            or monitor._position_to_client_order.get(position_id) != client_order_id
-        ):
-            return False
+        if flight is None:
+            logger.warning(
+                "[EXIT-ARBITER] held-exit release refused: position=%s "
+                "no in-flight record",
+                position_id[:8],
+            )
+            return False, None
+        # The flight's own client_order_id is authoritative for the in-flight
+        # obligation — the monitor marks it with the *durable attempt's* id
+        # before arbitration, which need not equal intent.client_order_id.
+        # Requiring exact intent-coid equality is what wedged XRP-0315: the
+        # release refused, the lock outlived the market, and the position
+        # rode to settlement behind a dead hold.
+        flight_coid = (
+            flight.get("client_order_id")
+            or monitor._position_to_client_order.get(position_id)
+        )
+        # Provably pre-wire only.  A held_unmarketable result means the
+        # arbiter early-returned before any order construction — nothing
+        # reached the exchange under this obligation.  EXECUTION_PENDING
+        # with no exchange evidence is the only state where that proof
+        # holds; anything else stays locked for reconcile.
+        pre_wire = (
+            flight.get("state") == "EXECUTION_PENDING"
+            and not flight.get("exchange_order_id")
+            and not flight.get("ack_status")
+        )
+    if not flight_coid or not pre_wire:
+        logger.warning(
+            "[EXIT-ARBITER] held-exit release refused: position=%s "
+            "flight_coid=%s state=%s exchange_order_id=%s — "
+            "cannot prove pre-wire",
+            position_id[:8], (flight_coid or "")[:8],
+            flight.get("state") if flight else None,
+            flight.get("exchange_order_id") if flight else None,
+        )
+        return False, flight_coid
+    if flight_coid != client_order_id:
+        logger.warning(
+            "[EXIT-ARBITER] held-exit release: flight coid=%s differs from "
+            "intent coid=%s — releasing the in-flight obligation",
+            flight_coid[:8], client_order_id[:8],
+        )
     if not monitor._mark_exit_intent_reconciled(
         position_id,
         "never_dispatched",
-        client_order_id=client_order_id,
+        client_order_id=flight_coid,
         raw_payload={
             "never_dispatched_evidence": "arbiter_held_before_route",
             "arbiter_status": "held_unmarketable",
+            "intent_client_order_id": client_order_id,
+            "flight_client_order_id": flight_coid,
         },
     ):
-        return False
+        return False, flight_coid
     with monitor._lock:
         flight = monitor._exit_intent_in_flight.get(position_id)
         if flight is not None:
             if (
                 flight.get("state") != "RECONCILED"
-                or flight.get("client_order_id") != client_order_id
+                or flight.get("client_order_id") != flight_coid
             ):
-                return False
+                return False, flight_coid
             del monitor._exit_intent_in_flight[position_id]
         if monitor._position_to_client_order.get(position_id):
-            return False
+            return False, flight_coid
         monitor._recent_exit_submissions.pop(client_order_id, None)
+        monitor._recent_exit_submissions.pop(flight_coid, None)
     monitor._save_exit_intent_in_flight()
-    return True
+    return True, flight_coid
 
 
 def _exit_result_never_dispatched(result, result_status: str) -> bool:
@@ -8160,6 +8266,58 @@ async def _run_one_cycle(self, tick: int) -> None:
                             nxt = self._catalog.get_next_15m_market(asset)
                             if nxt is not None and getattr(nxt.market, "market_id", None):
                                 desired_ws.add(nxt.market.market_id)
+                        # 2026-11-03: deterministic next-window fallback.
+                        # The catalog fetch filters status=open and Kalshi
+                        # only flips a market to open at window start, so
+                        # get_next_15m_market cannot see the upcoming market
+                        # early — observed ws_subscribed=False for minutes
+                        # into a live window.  The 15m ticker grid is
+                        # mechanical (ticker time IS expiry, ET): derive the
+                        # next window's ticker from the current market's
+                        # expiry +15m and pre-subscribe inside the lead so
+                        # its book streams contiguously from rollover.
+                        _prewarm_lead_s = float(
+                            os.environ.get("MERID_WS_PREWARM_NEXT_LEAD_S", "120"))
+                        for asset in self._allowed_assets:
+                            try:
+                                _cur = catalog_snapshot.get_current_15m_market(asset)
+                                _exp = getattr(_cur, "expires_at", None) or getattr(
+                                    getattr(_cur, "market", None), "expires_at", None)
+                                if _exp is None:
+                                    continue
+                                if isinstance(_exp, str):
+                                    _exp = datetime.fromisoformat(
+                                        _exp.replace("Z", "+00:00"))
+                                elif isinstance(_exp, (int, float)):
+                                    _exp = datetime.fromtimestamp(
+                                        _exp, tz=timezone.utc)
+                                if _exp.tzinfo is None:
+                                    _exp = _exp.replace(tzinfo=timezone.utc)
+                                _secs = (
+                                    _exp - datetime.now(timezone.utc)
+                                ).total_seconds()
+                                if not (0.0 < _secs <= _prewarm_lead_s):
+                                    continue
+                                from zoneinfo import ZoneInfo
+                                from merid.event_venues.kalshi.ticker_utils import (
+                                    format_ticker_for_15m_window,
+                                )
+                                _next_exp = _exp + timedelta(minutes=15)
+                                _et = _next_exp.astimezone(
+                                    ZoneInfo("America/New_York"))
+                                _nxt_t = (
+                                    f"{format_ticker_for_15m_window(asset, _next_exp)}"
+                                    f"-{_et.minute:02d}"
+                                )
+                                if _nxt_t not in desired_ws:
+                                    desired_ws.add(_nxt_t)
+                                    logger.info(
+                                        "[WS-PREWARM-NEXT] derived next-window "
+                                        "ticker=%s asset=%s expiry_in=%.0fs",
+                                        _nxt_t, asset, _secs,
+                                    )
+                            except Exception:
+                                continue
                         if desired_ws and desired_ws != self._last_ws_desired_tickers:
                             added = sorted(desired_ws - self._last_ws_desired_tickers)
                             removed = sorted(self._last_ws_desired_tickers - desired_ws)

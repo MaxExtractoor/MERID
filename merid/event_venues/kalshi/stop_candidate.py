@@ -298,6 +298,31 @@ def no_edge_loss_salvage_enabled() -> bool:
     return _env_bool("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", True)
 
 
+def model_edge_tail_floor_salvage_enabled() -> bool:
+    """2026-11-03 operator decision: absolute tail floor fires for model-edge.
+
+    The 2026-10-20 directive suppressed every price-depth loss exit for
+    model-edge entries, including the catastrophic absolute floor — so
+    XRP-0315 (YES@77) rode to settlement 0 for -308c while armed machinery
+    watched.  The directive's evidence was measured on shallow dips (its own
+    example, NO@40 stopped at 16c -> settled NO, is an absolute-floor breach
+    that recovered), but the operator reviewed the trade-off on 2026-11-03
+    and chose terminal-collapse salvage: a bid <= floor_cents (default 18c)
+    on a 15m binary is deep-tail risk where salvage value is real, distinct
+    from the drop-triggered whipsaw stops that stay suppressed.
+
+    With this flag on (default), ``LOSS_CAP``/``HARD_STOP`` candidates
+    carrying ``tail_floor_breach=True`` (set only when the monitor's
+    absolute-floor test fired, not the drop test) regain LOSS_SELL_EXEMPT
+    status inside ``resolve_loss_sell_floor`` regardless of entry edge —
+    mirroring the no-edge carve-out.  Drop-triggered and all other
+    price-depth exits keep the ride-to-settlement posture for model-edge.
+    ``MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED=0`` restores full
+    suppression.
+    """
+    return _env_bool("MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED", True)
+
+
 # Price-depth loss triggers: capital-protection exits keyed on how far the
 # held-side price fell.  Exempt from the breakeven floor only while
 # ``MERID_LOSS_EXITS_ENABLED=1``; with the flag off they face the same
@@ -378,6 +403,7 @@ def loss_sell_blocked(
     hold_value_cents: Optional[int] = None,
     peak_price_cents: Optional[int] = None,
     entry_edge: Optional[float] = None,
+    tail_floor_breach: Optional[bool] = None,
 ) -> bool:
     """True when profit-only exits are armed and this candidate would realize
     a loss at ``exit_price_cents`` vs the held-side ``entry_price_cents``.
@@ -409,6 +435,7 @@ def loss_sell_blocked(
         hold_value_cents=hold_value_cents,
         peak_price_cents=peak_price_cents,
         entry_edge=entry_edge,
+        tail_floor_breach=tail_floor_breach,
     )
     if floor is None or exit_price_cents is None:
         return False
@@ -433,6 +460,7 @@ def resolve_loss_sell_floor(
     hold_value_cents: Optional[int] = None,
     peak_price_cents: Optional[int] = None,
     entry_edge: Optional[float] = None,
+    tail_floor_breach: Optional[bool] = None,
 ) -> Optional[int]:
     """The breakeven floor a loss-sale may not cross, or None when no floor
     applies (exits disabled, exempt trigger, or no entry price to anchor).
@@ -463,6 +491,16 @@ def resolve_loss_sell_floor(
                     return None
             except (TypeError, ValueError):
                 pass
+        # 2026-11-03: absolute-floor salvage for model-edge entries.
+        # ``tail_floor_breach`` is set only when the monitor's absolute
+        # floor test (bid <= floor_cents, not the drop test) fired —
+        # see model_edge_tail_floor_salvage_enabled.
+        if (
+            str(_tr).upper() in _PRICE_DEPTH_LOSS_TRIGGERS
+            and tail_floor_breach
+            and model_edge_tail_floor_salvage_enabled()
+        ):
+            return None
     if str(_tr).upper() in _exempt:
         return None
     if entry_price_cents is None:
@@ -624,6 +662,12 @@ class StopCandidate:
     # XRP NO@89 (entry_edge=+0.0062, entry_edge_pct=-2.89) read as a
     # model-edge position and the no-edge salvage floor never applied.
     claimed_entry_edge_pct: Optional[float] = None
+    # 2026-11-03: set only when the monitor's absolute tail-floor test
+    # (bid <= floor_cents, not the drop test) fired this candidate.  The
+    # floor resolver uses it to exempt terminal-collapse salvage from the
+    # breakeven floor for model-edge entries — see
+    # model_edge_tail_floor_salvage_enabled.
+    tail_floor_breach: Optional[bool] = None
     # 2026-10-17: issuing controller identity for structured emergency
     # authorization (validated by the execution firewall; never the reason
     # text).  Defaults to the position monitor, which builds all current
@@ -668,6 +712,7 @@ class StopCandidate:
             "peak_price_cents": self.peak_price_cents,
             "claimed_entry_edge": self.claimed_entry_edge,
             "claimed_entry_edge_pct": self.claimed_entry_edge_pct,
+            "tail_floor_breach": self.tail_floor_breach,
             "authorization_source": self.authorization_source,
         }
         return d
@@ -1490,6 +1535,7 @@ def build_stop_candidate(
     peak_price_cents: Optional[int] = None,
     claimed_entry_edge: Optional[float] = None,
     claimed_entry_edge_pct: Optional[float] = None,
+    tail_floor_breach: Optional[bool] = None,
 ) -> StopCandidate:
     """Build a `StopCandidate` from live market and position state."""
     # Canonical exposure is always an integer number of centi-contracts.
@@ -1572,6 +1618,7 @@ def build_stop_candidate(
         peak_price_cents=peak_price_cents,
         claimed_entry_edge=claimed_entry_edge,
         claimed_entry_edge_pct=claimed_entry_edge_pct,
+        tail_floor_breach=tail_floor_breach,
     )
 
 
@@ -1838,6 +1885,7 @@ async def _maybe_degraded_stop_exit(
         hold_value_cents=candidate.fair_value_cents,
         peak_price_cents=candidate.peak_price_cents,
         entry_edge=_candidate_floor_entry_edge(candidate),
+        tail_floor_breach=getattr(candidate, "tail_floor_breach", None),
     ):
         _finish(
             "HOLD_TO_SETTLEMENT_APPROVED",
@@ -2270,6 +2318,7 @@ async def _maybe_submit_stop_candidate_impl(
         hold_value_cents=candidate.fair_value_cents,
         peak_price_cents=candidate.peak_price_cents,
         entry_edge=_candidate_floor_entry_edge(candidate),
+        tail_floor_breach=getattr(candidate, "tail_floor_breach", None),
     ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "
@@ -2477,6 +2526,7 @@ async def _maybe_submit_stop_candidate_impl(
         hold_value_cents=candidate.fair_value_cents,
         peak_price_cents=candidate.peak_price_cents,
         entry_edge=_candidate_floor_entry_edge(candidate),
+        tail_floor_breach=getattr(candidate, "tail_floor_breach", None),
     )
     if (
         _resolved_floor is not None
@@ -2513,6 +2563,7 @@ async def _maybe_submit_stop_candidate_impl(
         hold_value_cents=candidate.fair_value_cents,
         peak_price_cents=candidate.peak_price_cents,
         entry_edge=_candidate_floor_entry_edge(candidate),
+        tail_floor_breach=getattr(candidate, "tail_floor_breach", None),
     ):
         logger.warning(
             "[BREAKEVEN-FLOOR] candidate=%s ticker=%s trigger=%s "

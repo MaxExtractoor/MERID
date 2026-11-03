@@ -735,3 +735,22 @@ REST-degraded carve-out), writer queue_depth 0-1, no API-POSITIONS errors.
 
 Follow-up noted: order submission still int(round)s book prices; a 92.5c ask rounds to 92c — fails
 safe (under-priced IOC simply rests), but ceil-ask/floor-bid semantics would be more correct.
+
+## P&L anchor — deployed and verified (2026-11-02 ~21:23Z)
+
+- Root cause of the persistent untrue top-bar figure: two stacked defects.
+  1. `web/api/kalshi_api.py` referenced `get_bankroll_service`/`BalanceState` via a nonexistent `merid.event_venues.kalshi.bankroll_models` path — the broad except silently fell back to `ledger_fills` (fill-date proceeds sum, +15.13 vs true +3.75 equity delta).
+  2. The bootstrap anchor file `data/kalshi_daily_equity_anchor.json` was written via PowerShell `Set-Content -Encoding utf8` which emits a UTF-8 BOM; `json.loads` raised `Expecting value: line 1 column 1 (char 0)` on every poll.
+- Fixes: `cc19d7fa` (package-level BalanceState, no bankroll_models import) + `f2add818` (read anchor as utf-8-sig) + anchor file rewritten without BOM.
+- Verified live: `daily_pnl_usd=3.75` `daily_pnl_source=equity_delta` `daily_pnl_anchor_usd=14.75` `daily_pnl_anchor_ts=2026-11-02T07:39:07Z`. Balance endpoint ~770ms state=FRESH with 60s shard cache TTL.
+- Frontend: `useAgentWall` marks the BAL chip `ok:false` only on fetch rejection (HTTP error or >10s abort); sessions auto-remint on 401. With the endpoint fast+FRESH the chip should stay green.
+- Ops note: a duplicate uvicorn launch (PID 10676) lost the bind race and was killed; stopping it cascaded to the serving process — both were children of the same launcher invocation. Only one uvicorn process holds :8011 now.
+- Heartbeat `pnl=$0.00` remains a separate P&L surface (heartbeat_monitor computes its own figure) — flagged for unification with the equity-delta canonical path.
+
+## WS drain throughput — congestion collapse broken (7b9cf8b5, ~22:00Z)
+
+- Measured root cause (pq_drain_profile.jsonl): Kalshi orderbook_delta sends ~900-1,575 frames/s on the 5-ticker subscription; the drain loop's adaptive batch keyed off queue *utilization* of a 131,072-deep buffer — the >50% trigger was unreachable, so bursts drained at the idle batch of 50 while residence climbed past the 4s shed bound. Every shed delta gapped the shared sid=1 seq -> all 5 books invalidated -> REST resync flood -> deeper backlog (self-generated ~60-70% of load).
+- Fix: absolute-depth trigger (>=1500 queued -> batch 600) + cooperative yield every 25 items via the previously-dead _COOPERATIVE_YIELD_EVERY.
+- Post-deploy evidence: zero SID-SEQUENCE-GAP / WS-DELTA-DROP / UPSTREAM_LAG events through the 22:00Z rollover; venue frame rate normalized to ~200-365/s; all markets quote_fresh=True with healthy snapshot completion on window transitions.
+- Verified live: /pnl returns equity_delta (+3.89, anchor 14.75); /balance ~730ms FRESH; equity ticked to $18.64.
+- Audit writer backlog (~430 pending) drains slowly — serial one-transaction-per-item loop; batched-commit refactor belongs to the versioned-artifact work, not a hot patch.
