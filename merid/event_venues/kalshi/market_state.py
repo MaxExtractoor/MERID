@@ -848,6 +848,14 @@ class KalshiMarketStateStore:
         # One BOOK_STATE_TRANSITION event per change, never per delta.
         self._book_state_last: Dict[str, str] = {}
         self._book_state_transition_total: Dict[str, int] = {}
+        # 2026-11-03: same-pair flap suppression for the LOG LINE only —
+        # _book_state_transition_total stays exact (audit reads the
+        # counter, not the log).  A stale-burst flaps the same old->new
+        # pair many times/sec; repeats within 1s collapse to a
+        # log_suppressed count on the next emitted event.  Each emitted
+        # line is ~500B of JSON — the top LOG-QUEUE producer in bursts.
+        self._transition_log_gate: Dict[tuple, float] = {}
+        self._transition_log_suppressed: Dict[tuple, int] = {}
         # 2026-10-02: deduplicated resync coordinator — at most one recovery
         # flight per ticker at a time (time-throttle alone allowed overlapping
         # snapshot tasks 15s apart during sustained gap storms).
@@ -2276,6 +2284,14 @@ class KalshiMarketStateStore:
                 if _parity_since else None
             )
             _ob = self._ob.get_book(ticker)
+            _gate_key = (ticker, old or "UNINITIALIZED", new)
+            if _now_mono - self._transition_log_gate.get(_gate_key, 0.0) < 1.0:
+                self._transition_log_suppressed[_gate_key] = (
+                    self._transition_log_suppressed.get(_gate_key, 0) + 1
+                )
+                return
+            _log_suppressed = self._transition_log_suppressed.pop(_gate_key, 0)
+            self._transition_log_gate[_gate_key] = _now_mono
             logger.warning(
                 "[BOOK-STATE-TRANSITION] %s",
                 json.dumps(
@@ -2307,6 +2323,7 @@ class KalshiMarketStateStore:
                         "ws_promote_streak": self._ws_promote_streak.get(ticker, 0),
                         "ws_parity_ms": _parity_ms,
                         "executable": bool(getattr(state, "executable", False)),
+                        "log_suppressed": _log_suppressed,
                     },
                     default=str,
                 ),

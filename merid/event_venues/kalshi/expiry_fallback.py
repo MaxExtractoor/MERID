@@ -118,10 +118,19 @@ def parse_kalshi_15m_window_end_utc(ticker: str) -> Optional[datetime]:
         return None
 
 
+_last_inferred_log = {}
+
+
 def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
     end_utc = parse_kalshi_15m_window_end_utc(ticker)
     if end_utc is not None:
-        logger.info("[EXPIRY-FALLBACK] ticker=%s → end_utc=%s (ticker time IS expiry, ET)", ticker, end_utc)
+        # 2026-11-03: dedup — the same ticker→end_utc pair re-logged every
+        # catalog refresh (~1022 INFO/30min) fed the LOG-QUEUE growth for
+        # zero information.  Log first sight per (ticker, value) only.
+        key = end_utc.isoformat()
+        if _last_inferred_log.get(ticker) != key:
+            _last_inferred_log[ticker] = key
+            logger.info("[EXPIRY-FALLBACK] ticker=%s → end_utc=%s (ticker time IS expiry, ET)", ticker, end_utc)
     return end_utc
 
 
