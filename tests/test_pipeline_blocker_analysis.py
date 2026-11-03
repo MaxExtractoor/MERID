@@ -14,7 +14,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import sys
 
-# Add parent directory to path
+# Add parent directory and scripts/legacy to path. The analyzer script moved
+# from repo root to scripts/legacy/ in commit 6d0921dc (bulk relocation of
+# one-off root scripts); repo root stays on path for its `utils` import.
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "legacy"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from analyze_trading_pipeline_blockers import (

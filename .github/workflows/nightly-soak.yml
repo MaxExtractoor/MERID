@@ -45,15 +45,19 @@ jobs:
       # tests/legacy/ and imports the deleted core.consensus_math module —
       # it can never run against the 15m stack.
 
-      - name: Golden Path + Phase 2/3 Hardening
+      - name: Kalshi Venue Hardening (WS resilience + rate limits)
         run: |
+          # 2026-11-03: dropped tests/test_e2e_golden_path.py,
+          # tests/test_hardening.py, tests/integration/test_swarm_health_gating.py,
+          # tests/integration/test_kalshi_e2e_stress.py — all four are in
+          # tests/conftest.py collect_ignore (legacy/broken: they import deleted
+          # modules merid.signals.decay, merid.prediction.trading_agent,
+          # merid.prediction.risk). Explicitly passing ignored files on the
+          # command line bypasses collect_ignore, so the step died at collection
+          # with pytest exit code 2 every night since 2026-10-18.
           python -m pytest \
-            tests/test_e2e_golden_path.py \
-            tests/test_hardening.py \
             tests/event_venues/kalshi/test_ws_resilience.py \
             tests/event_venues/kalshi/test_rate_limits.py \
-            tests/integration/test_swarm_health_gating.py \
-            tests/integration/test_kalshi_e2e_stress.py \
             -v --tb=short --timeout=60
         timeout-minutes: 30
 
