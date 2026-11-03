@@ -1376,6 +1376,16 @@ class KalshiMarketStateStore:
                         self._set_book_health(ticker, BookHealth.INVALID, "queue_overflow")
                         self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "queue_overflow")
                         self._maybe_trigger_book_recovery(ticker, "queue_overflow_worker")
+                    # Cleared frames' sid seqs were already consumed by
+                    # _check_sid_delta_sequence — attribute each drop so the
+                    # resulting gap invalidates only this book.
+                    for _q in queue:
+                        try:
+                            self.record_sid_frame_drop(
+                                _q.get("_sid") or _q.get("sid"), _q.get("seq"), ticker
+                            )
+                        except Exception:
+                            pass
                     queue.clear()
                     return
 
@@ -2047,6 +2057,24 @@ class KalshiMarketStateStore:
                 # snapshot rebuild heal the book.
                 # NOTE: the overflow log is emitted below, OUTSIDE this queue
                 # lock — file I/O under the lock stalls every producer.
+                # 2026-11-03: these frames' sid seqs were already consumed by
+                # _check_sid_delta_sequence — attribute each drop (including
+                # the incoming msg, which is never appended) so the gap only
+                # invalidates this book.
+                _drop_sid = msg.get("_sid") or msg.get("sid")
+                try:
+                    self.record_sid_frame_drop(_drop_sid, msg.get("seq"), ticker)
+                except Exception:
+                    pass
+                for _q in queue:
+                    try:
+                        self.record_sid_frame_drop(
+                            _q.get("_sid") or _q.get("sid") or _drop_sid,
+                            _q.get("seq"),
+                            ticker,
+                        )
+                    except Exception:
+                        pass
                 queue.clear()
             else:
                 queue.append(msg)
