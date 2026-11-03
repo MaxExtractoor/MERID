@@ -1036,6 +1036,7 @@ class KalshiWebSocketBridge:
                 self._queue.put_nowait(evt)
             except queue.Full:
                 self._events_dropped += 1
+                self._mark_orderbook_drop_untrusted(evt, "BRIDGE_QUEUE_COALESCE_FULL")
         
         # Update metrics
         if dropped > 0:
@@ -4409,6 +4410,13 @@ class KalshiWebSocketBridge:
                 store = get_kalshi_market_state_store()
                 self._market_state_store = store
             store.mark_book_untrusted_for_bridge(ticker, reason, event_type=etype)
+            # 2026-11-03: also record (seq -> ticker) on the sid so the gap
+            # this drop creates downstream is attributed to this book only —
+            # without it the next forwarded delta nukes every book on the
+            # shared subscription as an unexplained gap.
+            _rec = getattr(store, "record_sid_frame_drop", None)
+            if callable(_rec):
+                _rec(event.get("sid"), event.get("seq"), ticker)
         except Exception as e:
             logger.debug("[WS-BOOK-DROP] failed to mark %s untrusted (%s): %s", ticker, reason, e)
 
@@ -4823,6 +4831,17 @@ class KalshiWebSocketBridge:
         """
         logger.info("[WS-REORDER] scheduling resync for channel=%s seq=%d", channel, seq)
         if self._reorder_buffer is not None:
+            # The reset discards every buffered event: those frames' seqs will
+            # never reach market_state.  Record each (seq -> ticker) before
+            # the reset so the resulting sid gap stays attributed; when the
+            # buffer is too large to enumerate it degrades to full-sid
+            # invalidation via the store-side overflow marker.
+            try:
+                _pending = self._reorder_buffer.buffered_events(channel)
+            except Exception:
+                _pending = {}
+            for _dseq, _dev in _pending.items():
+                self._mark_orderbook_drop_untrusted(_dev, "WS_REORDER_BUFFER_RESET")
             released = self._reorder_buffer.reset_and_catch_up(channel, seq, event)
             for ev in released:
                 self._drain_put_event(ev)

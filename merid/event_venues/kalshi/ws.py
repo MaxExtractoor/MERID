@@ -232,6 +232,10 @@ class KalshiWebSocket(EventVenueStream):
     # Priorities <= this are critical account/order events: they go to the
     # dedicated priority lane and are never sacrificed to queue pressure.
     _CRITICAL_PRIORITY_MAX = 2
+    # 2026-11-03: cap on per-sid (seq -> ticker) drop attribution.  Sized to
+    # cover ~8s of shed traffic at ~1k frames/s; beyond it the sid degrades
+    # to "overflow" and downstream falls back to full-sid invalidation.
+    _DROPPED_DELTA_ATTR_CAP = int(os.getenv("MERID_WS_DROP_ATTR_CAP", "8192"))
 
     def __init__(self, config: Optional[Any] = None):
         # Use unified config by default (kalshi_config.py)
@@ -1180,8 +1184,10 @@ class KalshiWebSocket(EventVenueStream):
         }
 
         self._orderbook_tickers.add(market_id)
+        payload = json.dumps(message)
+        logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
         try:
-            await self._ws.send(json.dumps(message))
+            await self._ws.send(payload)
         except Exception:
             self._orderbook_tickers.discard(market_id)
             raise
@@ -2179,7 +2185,13 @@ class KalshiWebSocket(EventVenueStream):
                         if not dropped:
                             # Couldn't make room (all messages are high priority) - force enqueue
                             try:
-                                self._ensure_msg_queue().get_nowait()
+                                _evicted = self._ensure_msg_queue().get_nowait()
+                                # The evicted frame leaves a sid gap — record
+                                # its attribution so only its book is lost.
+                                try:
+                                    self._record_dropped_delta_frame(_evicted[1])
+                                except Exception:
+                                    pass
                             except asyncio.QueueEmpty:
                                 pass
                             self._ensure_msg_queue().put_nowait((msg_priority, data))
@@ -2304,6 +2316,7 @@ class KalshiWebSocket(EventVenueStream):
                                 
                             except asyncio.QueueFull:
                                 # Backpressure: drop the coalesced message
+                                self._record_dropped_delta_frame(coalesced_msg)
                                 logger.warning(f"[COALESCING-PROCESSOR] Queue full - dropping coalesced message for {market_id}")
                                 
                     except Exception as e:
@@ -2670,30 +2683,7 @@ class KalshiWebSocket(EventVenueStream):
                                     # invalidated every book multiplexed on
                                     # the subscription (the main
                                     # book_untrusted storm source).
-                                    _dd_sid = data.get("sid")
-                                    _dd_seq = data.get("seq")
-                                    if _dd_sid is not None and _dd_seq is not None:
-                                        _dr = getattr(
-                                            self, "_dropped_delta_frames", None
-                                        )
-                                        if _dr is None:
-                                            _dr = self._dropped_delta_frames = {}
-                                        _lst = _dr.get(_dd_sid)
-                                        if _lst != "overflow":
-                                            if _lst is None:
-                                                _lst = _dr[_dd_sid] = []
-                                            if len(_lst) < 1024:
-                                                try:
-                                                    _lst.append(
-                                                        (int(_dd_seq), _tk)
-                                                    )
-                                                except (TypeError, ValueError):
-                                                    pass
-                                            else:
-                                                # Cannot prove coverage —
-                                                # downstream must treat any
-                                                # gap as unexplained.
-                                                _dr[_dd_sid] = "overflow"
+                                    self._record_dropped_delta_frame(data, _tk)
                                     try:
                                         item_queue.task_done()
                                     except Exception:
@@ -3179,6 +3169,49 @@ class KalshiWebSocket(EventVenueStream):
 
     # ── Sequence tracking ──────────────────────────────────────────────
 
+    def _record_dropped_delta_frame(self, data: Dict[str, Any], ticker: str = "") -> None:
+        """Record a deliberately dropped orderbook frame for sid-gap attribution.
+
+        The next forwarded delta on the same sid carries the accumulated
+        ``(seq -> ticker)`` list to market_state, which then invalidates only
+        the books that actually lost frames.  Beyond
+        ``_DROPPED_DELTA_ATTR_CAP`` the sid falls back to an ``"overflow"``
+        marker — coverage can no longer be proven and the next gap
+        invalidates every book on the subscription (fail closed).
+        """
+        if not isinstance(data, dict):
+            return
+        if data.get("type") not in ("orderbook_delta", "orderbook_snapshot"):
+            return
+        sid = data.get("sid")
+        seq = data.get("seq")
+        if sid is None or seq is None:
+            return
+        if not ticker:
+            nested = data.get("msg")
+            ticker = (
+                (nested.get("market_ticker") or nested.get("ticker"))
+                if isinstance(nested, dict)
+                else None
+            ) or data.get("ticker") or data.get("market_ticker") or ""
+        if not ticker:
+            return
+        dr = getattr(self, "_dropped_delta_frames", None)
+        if dr is None:
+            dr = self._dropped_delta_frames = {}
+        lst = dr.get(sid)
+        if lst == "overflow":
+            return
+        if lst is None:
+            lst = dr[sid] = []
+        if len(lst) < self._DROPPED_DELTA_ATTR_CAP:
+            try:
+                lst.append((int(seq), ticker))
+            except (TypeError, ValueError):
+                pass
+        else:
+            dr[sid] = "overflow"
+
     def _check_sequence(self, data: Dict[str, Any]) -> bool:
         """Validate message sequence; returns False to drop the message."""
         seq = data.get("seq")
@@ -3207,6 +3240,10 @@ class KalshiWebSocket(EventVenueStream):
             logger.debug(
                 f"WS seq duplicate/OOO: market={recovery_ticker} got={seq} last={last}"
             )
+            # A dropped frame leaves a gap in the downstream sid stream —
+            # record its (seq -> ticker) so market_state invalidates only
+            # the affected book instead of every book on the subscription.
+            self._record_dropped_delta_frame(data, recovery_ticker)
             return False
 
         if last is not None and seq > last + 1:
@@ -4488,6 +4525,9 @@ class KalshiWebSocket(EventVenueStream):
             if temp_items and temp_items[0][0] > incoming_priority:
                 dropped = temp_items.pop(0)
                 found_drop = True
+                # Record (seq -> ticker) so the sid gap this creates is
+                # attributed to the affected book, not the whole subscription.
+                self._record_dropped_delta_frame(dropped[1])
                 # Log what we dropped for debugging
                 logger.debug(
                     "Dropped low-priority message (priority=%d) to make room for priority=%d",

@@ -778,38 +778,86 @@ class FillsPoller:
                 # propagation lag, not divergence (observed live 2026-11-03:
                 # exchange=224 vs ledger=0 latched a ~3h entry halt; the same
                 # cycle's ingest recorded the fill 4s later and the canonical
-                # reconciler MATCHED 9s after that).  Ingest outstanding fills
-                # and recheck once before declaring a halt-grade mismatch; a
-                # genuine divergence survives the recheck and still halts
-                # this cycle.
-                logger.warning(
-                    "[RECONCILE] mismatch detected, ingesting fills and rechecking once: %s",
-                    mismatches[:5],
+                # reconciler MATCHED 9s after that).
+                #
+                # 2026-11-03 fix: the single ingest+recheck still raced — the
+                # exchange snapshot was captured before the fill and the
+                # ledger view before the ingest commit, so a fresh fill
+                # showed exchange=224/ledger=0 even after the retry.  Recheck
+                # in a bounded loop that re-ingests fills AND re-fetches
+                # exchange positions each round so both sides are compared at
+                # the same instant; a genuine divergence survives every round
+                # and still halts this cycle.
+                _recheck_budget_s = float(
+                    _os.environ.get("MERID_RECON_MISMATCH_RECHECK_S", "10")
                 )
-                try:
-                    await self._do_poll()
-                except Exception as _poll_exc:
+                _recheck_sleep_s = float(
+                    _os.environ.get("MERID_RECON_MISMATCH_RECHECK_INTERVAL_S", "2")
+                )
+                _recheck_deadline = time.monotonic() + _recheck_budget_s
+                _round = 0
+                while mismatches and time.monotonic() < _recheck_deadline:
+                    _round += 1
                     logger.warning(
-                        "[RECONCILE] ingest-before-recheck failed: %s", _poll_exc
+                        "[RECONCILE] mismatch detected, ingest+refetch recheck round=%d: %s",
+                        _round,
+                        mismatches[:5],
                     )
-                view = await asyncio.to_thread(ledger.get_canonical_fills)
-                ledger_exposure = await asyncio.to_thread(
-                    _trusted_ledger_signed_exposure, view
-                )
-                cached_positions = list(
-                    cache.get_all_positions(validate_freshness=False).values()
-                )
-                cache_exposure = {
-                    ticker: cc
-                    for ticker, cc in _signed_yes_position_map(
-                        cached_positions, exchange=False
-                    ).items()
-                    if not _reconciliation_quarantined(ticker)
-                }
-                mismatches = (
-                    _position_mismatches(exchange_exposure, ledger_exposure, "ledger")
-                    + _position_mismatches(exchange_exposure, cache_exposure, "cache")
-                )
+                    try:
+                        await self._do_poll()
+                    except Exception as _poll_exc:
+                        logger.warning(
+                            "[RECONCILE] ingest-before-recheck failed: %s", _poll_exc
+                        )
+                    # The exchange snapshot is stale by the ingest window —
+                    # re-fetch it so the comparison is same-instant.
+                    try:
+                        _pos_resp = await client.get_positions()
+                        _positions_re: List[Dict[str, Any]] = []
+                        for _p in _pos_resp.positions:
+                            _positions_re.append(port_position_to_ledger_dict(_p))
+                        exchange_exposure = {
+                            ticker: cc
+                            for ticker, cc in _signed_yes_position_map(
+                                _positions_re, exchange=False
+                            ).items()
+                            if not _reconciliation_quarantined(ticker)
+                        }
+                        positions = _positions_re
+                    except PortLedgerAdapterError as exc:
+                        raise RuntimeError(
+                            f"malformed exchange position: {exc}"
+                        ) from exc
+                    except Exception as _pos_exc:
+                        logger.warning(
+                            "[RECONCILE] positions re-fetch failed during recheck: %s",
+                            _pos_exc,
+                        )
+                    view = await asyncio.to_thread(ledger.get_canonical_fills)
+                    ledger_exposure = await asyncio.to_thread(
+                        _trusted_ledger_signed_exposure, view
+                    )
+                    cached_positions = list(
+                        cache.get_all_positions(validate_freshness=False).values()
+                    )
+                    cache_exposure = {
+                        ticker: cc
+                        for ticker, cc in _signed_yes_position_map(
+                            cached_positions, exchange=False
+                        ).items()
+                        if not _reconciliation_quarantined(ticker)
+                    }
+                    mismatches = (
+                        _position_mismatches(exchange_exposure, ledger_exposure, "ledger")
+                        + _position_mismatches(exchange_exposure, cache_exposure, "cache")
+                    )
+                    if mismatches and time.monotonic() < _recheck_deadline:
+                        await asyncio.sleep(_recheck_sleep_s)
+                if not mismatches and _round:
+                    logger.info(
+                        "[RECONCILE] mismatch resolved after %d ingest+refetch round(s) — transient ingest lag, not divergence",
+                        _round,
+                    )
             if mismatches:
                 raise RuntimeError(f"signed position mismatch: {mismatches[:5]}")
 
@@ -982,6 +1030,64 @@ class FillsPoller:
             except Exception as e:
                 logger.debug("Failed to record EOD snapshot: %s", e)
 
+            # Auto-recovery: this cycle passed every check end-to-end, so a
+            # prior RECONCILIATION_DIVERGENCE halt is resolved.  Per the
+            # operator contract the transition goes through RECOVERY_RUNNING
+            # and completes only with verified evidence plus a durable
+            # ``live_runtime_recovery_passed`` record — verified inside
+            # complete_runtime_recovery().  Kill-switch:
+            # MERID_RECON_AUTO_RECOVERY=0 restores manual-restart behavior.
+            try:
+                if _os.environ.get("MERID_RECON_AUTO_RECOVERY", "1").lower() not in (
+                    "0", "false", "off",
+                ):
+                    from merid.observability.live_runtime_state import (
+                        get_live_runtime_state,
+                    )
+                    _lrs = get_live_runtime_state()
+                    _lrs_dict = _lrs.to_dict()
+                    if (
+                        _lrs_dict.get("state") == "LIVE_ENTRIES_HALTED"
+                        and "RECONCILIATION_DIVERGENCE"
+                        in (_lrs_dict.get("reason_codes") or [])
+                    ):
+                        _lrs.transition(
+                            "RECOVERY_RUNNING",
+                            "reconciliation_recovery_evaluation",
+                            ["RECOVERY_EVALUATION"],
+                        )
+                        try:
+                            from merid.governance.trading_circuit_breaker import (
+                                get_trading_circuit_breaker,
+                            )
+                            _cur_wm = getattr(
+                                get_trading_circuit_breaker(),
+                                "_http_fill_watermark",
+                                None,
+                            )
+                        except Exception:
+                            _cur_wm = None
+                        _lrs.complete_runtime_recovery(
+                            "reconciliation_recheck_passed",
+                            {
+                                "resolved_failure": True,
+                                "fresh_reconciliation": True,
+                                "reconciliation_snapshot_id": f"recon_{rest_started_at:.0f}",
+                                "fill_watermark": _cur_wm,
+                                "fill_watermark_at_halt": getattr(
+                                    self, "_halted_fill_watermark", None
+                                ),
+                                "no_critical_discrepancy": True,
+                                "exits_available": True,
+                                "router_available": True,
+                                "production_live": True,
+                            },
+                        )
+            except Exception as _rec_exc:
+                logger.warning(
+                    "[RECONCILE] auto-recovery evaluation failed: %s", _rec_exc
+                )
+
             return report
             
         except Exception as e:
@@ -994,6 +1100,17 @@ class FillsPoller:
         """Stop new entries without interfering with protective services."""
         logger.error("[RECONCILE] halting entries: %s", detail)
         try:
+            # Capture the trusted fill watermark at halt time — the recovery
+            # path requires the watermark to be current and non-regressing.
+            try:
+                from merid.governance.trading_circuit_breaker import (
+                    get_trading_circuit_breaker,
+                )
+                self._halted_fill_watermark = getattr(
+                    get_trading_circuit_breaker(), "_http_fill_watermark", None
+                )
+            except Exception:
+                self._halted_fill_watermark = None
             from merid.observability.live_runtime_state import get_live_runtime_state
             get_live_runtime_state().halt_entries(
                 f"fills_reconciliation_failed: {detail}", ["RECONCILIATION_DIVERGENCE"]

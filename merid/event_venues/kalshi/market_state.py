@@ -359,6 +359,10 @@ _BOOK_UNTRUSTED_EVAL_S = float(os.getenv("MERID_BOOK_UNTRUSTED_EVAL_S", "30"))
 _BOOK_MAX_EVENT_AGE_MS = float(os.getenv("KALSHI_BOOK_MAX_EVENT_AGE_MS", "4000"))
 _BOOK_MAX_QUEUE_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_QUEUE_WAIT_MS", "250"))
 _BOOK_MAX_UPSTREAM_WAIT_MS = float(os.getenv("KALSHI_BOOK_MAX_UPSTREAM_WAIT_MS", "1500"))
+# 2026-11-03: cap on the store-side explained-drop ledger per sid.  Sized to
+# cover ~8s of shed traffic at ~1k frames/s; exceeding it degrades gap
+# attribution to overflow -> full-sid invalidation (fail closed).
+_SID_FRAME_DROP_CAP = int(os.getenv("MERID_SID_FRAME_DROP_CAP", "8192"))
 # Raw WS-vs-REST parity tolerance (ticks/cents).  Measured on the raw
 # delta-derived BBO, never on a REST-substituted effective quote.
 _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
@@ -822,6 +826,15 @@ class KalshiMarketStateStore:
         self._sid_seq_lock = threading.Lock()
         self._ws_book_requires_snapshot: set = set()
         self._last_sid_gap_log_ts: Dict[Any, float] = {}
+        # 2026-11-03: explained-drop ledger.  Every pipeline hop that
+        # deliberately discards a sequenced orderbook frame records
+        # (seq -> ticker) here, so the next sid gap can attribute the
+        # missing seqs and invalidate only the books that actually lost
+        # frames.  Past ``_SID_FRAME_DROP_CAP`` entries the sid degrades to
+        # an overflow marker — coverage can no longer be proven and the
+        # next gap falls back to full-sid invalidation (fail closed).
+        self._sid_frame_drops: Dict[Any, List[Tuple[int, str]]] = {}
+        self._sid_frame_drop_overflow: set = set()
         # 2026-10-04: owner-latch hysteresis.  REST ownership is released back
         # to WS only after ``MERID_WS_PROMOTE_STREAK`` consecutive deltas arrive
         # in-parity with the REST BBO over ``MERID_WS_PROMOTE_MIN_S`` seconds —
@@ -4973,6 +4986,8 @@ class KalshiMarketStateStore:
             self._sid_last_seq.clear()
             self._sid_tickers.clear()
             self._ticker_sid.clear()
+            self._sid_frame_drops.clear()
+            self._sid_frame_drop_overflow.clear()
         with self._lock:
             count = 0
             for ticker, state in self._states.items():
@@ -6758,6 +6773,31 @@ class KalshiMarketStateStore:
             self._sid_last_seq[sid] = seq
             return gap
 
+    def record_sid_frame_drop(self, sid: Any, seq: Any, ticker: str) -> None:
+        """Record that a local pipeline hop deliberately dropped a sequenced frame.
+
+        The next ``_handle_sid_sequence_gap`` on this sid can then attribute
+        the missing seqs to the tickers that actually lost frames instead of
+        invalidating every book multiplexed on the subscription.  Overflow
+        degrades to unexplained (full-sid) invalidation — fail closed.
+        """
+        if sid is None or seq is None or not ticker:
+            return
+        try:
+            s = int(seq)
+        except (TypeError, ValueError):
+            return
+        with self._sid_seq_lock:
+            if sid in self._sid_frame_drop_overflow:
+                return
+            lst = self._sid_frame_drops.setdefault(sid, [])
+            if len(lst) >= _SID_FRAME_DROP_CAP:
+                lst.clear()
+                self._sid_frame_drops.pop(sid, None)
+                self._sid_frame_drop_overflow.add(sid)
+                return
+            lst.append((s, ticker))
+
     def apply_orderbook_sequence_control(self, event: Dict[str, Any]) -> None:
         """Advance a SID for an ordered subscription-control response."""
         sid, seq = event.get("sid"), event.get("seq")
@@ -6791,19 +6831,33 @@ class KalshiMarketStateStore:
         covered range falls back to full-sid invalidation (fail closed).
         """
         attributed: Optional[set] = None
-        if isinstance(dropped, (list, tuple)) and len(dropped) >= gap:
-            dropped_map = {}
+        dropped_map: Dict[int, Any] = {}
+        if isinstance(dropped, (list, tuple)):
             try:
                 for item in dropped:
                     if isinstance(item, (list, tuple)) and len(item) == 2:
                         dropped_map[int(item[0])] = item[1]
             except (TypeError, ValueError):
                 dropped_map = {}
-            if len(dropped_map) >= gap and all(
-                missing_seq in dropped_map for missing_seq in range(seq - gap, seq)
-            ):
-                missing = range(seq - gap, seq)
-                attributed = {dropped_map[s] for s in missing}
+        # 2026-11-03: merge store-side explained drops recorded by the
+        # bridge/reorder/queue drop paths (record_sid_frame_drop).  An
+        # overflow marker means coverage cannot be proven -> the gap stays
+        # unexplained and falls back to full-sid invalidation.
+        with self._sid_seq_lock:
+            store_drops = self._sid_frame_drops.pop(sid, None)
+            drop_overflow = sid in self._sid_frame_drop_overflow
+            self._sid_frame_drop_overflow.discard(sid)
+        if store_drops:
+            for _s, _t in store_drops:
+                try:
+                    dropped_map.setdefault(int(_s), _t)
+                except (TypeError, ValueError):
+                    pass
+        if not drop_overflow and len(dropped_map) >= gap and all(
+            missing_seq in dropped_map for missing_seq in range(seq - gap, seq)
+        ):
+            missing = range(seq - gap, seq)
+            attributed = {dropped_map[s] for s in missing}
         if attributed:
             _now = time.monotonic()
             if _now - self._last_sid_gap_log_ts.get(sid, 0.0) >= 1.0:

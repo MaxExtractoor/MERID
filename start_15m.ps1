@@ -38,6 +38,11 @@ if ($existingOwner) {
 # the same port uvicorn will bind (uvicorn's --port is not visible to the app).
 $env:MERID_HTTP_PORT = "$Port"
 
+# 0.0c Crash forensics: dump interpreter tracebacks on fatal signals
+# (SIGSEGV/SIGABRT/...) so a silent server exit cannot vanish without evidence
+# again — three unrecorded exits on 2026-10-31 and watchdog coverage gaps.
+$env:PYTHONFAULTHANDLER = "1"
+
 # 0.1 Load .env file so the observe-only guard and all other settings are
 # resolved from the operator's persistent configuration before the process
 # environment is defaulted.

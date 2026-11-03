@@ -666,6 +666,87 @@ class LiveRuntimeState:
                 "transition_history": self._transition_history[-20:],
             }
 
+    def complete_runtime_recovery(
+        self,
+        reason: str,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Enable entries after a verified runtime recovery.
+
+        The only path through the ``RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED``
+        block in :meth:`transition`.  The caller must first move the machine
+        to ``RECOVERY_RUNNING`` and supply positive evidence for every
+        contract requirement; anything missing refuses recovery (the machine
+        stays halted — fail closed).  A durable
+        ``live_runtime_recovery_passed`` transition record is persisted.
+
+        Required evidence keys (all truthy):
+          ``resolved_failure``      — the specific halt cause is resolved
+          ``fresh_reconciliation``  — a new reconciliation snapshot passed
+          ``fill_watermark``        — trusted fill watermark, non-regressing
+                                      vs ``fill_watermark_at_halt`` when known
+          ``no_critical_discrepancy`` — no unresolved audit discrepancy
+          ``exits_available``       — reduce-only exits/cancel/flatten usable
+          ``router_available``      — canonical live router still selected
+          ``production_live``       — production/live mode unchanged
+        """
+        ev = dict(evidence or {})
+        with self._lock:
+            if self._state != "RECOVERY_RUNNING":
+                return False
+            missing = [
+                k
+                for k in (
+                    "resolved_failure",
+                    "fresh_reconciliation",
+                    "no_critical_discrepancy",
+                    "exits_available",
+                    "router_available",
+                    "production_live",
+                )
+                if not ev.get(k)
+            ]
+            wm = ev.get("fill_watermark")
+            wm0 = ev.get("fill_watermark_at_halt")
+            if wm is None:
+                missing.append("fill_watermark_missing")
+            elif wm0 is not None:
+                try:
+                    if wm < wm0:
+                        missing.append("fill_watermark_regressed")
+                except TypeError:
+                    missing.append("fill_watermark_incomparable")
+            if missing:
+                logger.error(
+                    "[LIVE-RUNTIME-STATE] recovery refused — incomplete evidence: %s",
+                    missing,
+                )
+                return False
+            self._release_assertion = {
+                **ev,
+                "enabled_at": self._now(),
+                "auto_enable": True,
+                "recovery": True,
+            }
+            self._state = "LIVE_ENTRIES_ENABLED"
+            self._entry_halted = False
+            self._reason = reason
+            self._reason_codes = ["RECOVERY_PASSED", "RUNTIME_RECOVERY_VERIFIED"]
+            self._last_transition_at = self._now()
+            self._log_transition(
+                "RECOVERY_RUNNING",
+                "LIVE_ENTRIES_ENABLED",
+                reason,
+                self._reason_codes,
+                {"live_runtime_recovery_passed": True, "evidence": ev},
+            )
+            self._persist()
+        try:
+            self._emit_startup_telemetry("live_runtime_recovery_passed", None)
+        except Exception:
+            pass
+        return True
+
     def halt_entries(self, reason: str, reason_codes: List[str]) -> None:
         """Convenience helper to halt entries from any state."""
         if self._state in ("LIVE_ENTRIES_ENABLED", "RECOVERY_RUNNING"):

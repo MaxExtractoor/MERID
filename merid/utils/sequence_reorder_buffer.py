@@ -83,6 +83,13 @@ class SequenceReorderBuffer:
         self._buffered[channel] = {}
         return self.push(channel, seq, event)
 
+    def buffered_events(self, channel: str) -> Dict[int, Any]:
+        """Return a copy of the buffered {seq: event} map for *channel*.
+
+        Used by the resync path to attribute the frames a reset discards.
+        """
+        return dict(self._buffered.get(channel, {}))
+
     def has_gap(self, channel: str) -> bool:
         return bool(self._buffered.get(channel))
 
