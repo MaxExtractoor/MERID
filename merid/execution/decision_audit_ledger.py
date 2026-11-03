@@ -917,6 +917,13 @@ class DecisionAuditLedger:
                 "PRAGMA wal_autocheckpoint = %d"
                 % int(os.getenv("MERID_AUDIT_WAL_AUTOCHECKPOINT", "2000"))
             )
+            # Hard WAL ceiling (2026-11-03): readers can starve truncation so
+            # autocheckpoint is only a soft trigger; journal_size_limit caps
+            # the -wal file on disk (default 64MB; observed 632MB-1.5GB).
+            conn.execute(
+                "PRAGMA journal_size_limit = %d"
+                % int(os.getenv("MERID_AUDIT_JOURNAL_SIZE_LIMIT", "67108864"))
+            )
             self._shared_conn = conn
         return self._shared_conn
 
