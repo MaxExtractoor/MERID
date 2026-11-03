@@ -281,6 +281,7 @@ class HeartbeatMonitor:
             f"[HEARTBEAT] #{self._state.heartbeat_count} "
             f"uptime={self._state.uptime_seconds:.0f}s "
             f"pnl=${metrics.get('pnl_usd', 0):.2f} "
+            f"equity=${metrics.get('equity_usd', 0):.2f} "
             f"positions={metrics.get('position_count', 0)} "
             f"orders={metrics.get('order_count', 0)}"
         )
@@ -312,6 +313,18 @@ class HeartbeatMonitor:
             metrics["position_count"] = snapshot.get("position_count", 0)
         except Exception as e:
             logger.debug(f"[HEARTBEAT] Failed to get position cache metrics: {e}")
+
+        # Canonical account equity (same cached anchor the risk/UI surfaces
+        # use) — unrealized-only pnl misses realized losses, so report both.
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import (
+                get_equity_for_risk_calc_sync_cached,
+            )
+            eq = get_equity_for_risk_calc_sync_cached()
+            if eq is not None:
+                metrics["equity_usd"] = float(eq)
+        except Exception as e:
+            logger.debug(f"[HEARTBEAT] Failed to get canonical equity: {e}")
         
         # Try to get order count
         try:
