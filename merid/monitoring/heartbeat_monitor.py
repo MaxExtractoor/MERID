@@ -277,11 +277,12 @@ class HeartbeatMonitor:
         issues = self._check_health(metrics)
         
         # Log heartbeat
+        _eq = metrics.get('equity_usd')
         logger.info(
             f"[HEARTBEAT] #{self._state.heartbeat_count} "
             f"uptime={self._state.uptime_seconds:.0f}s "
             f"pnl=${metrics.get('pnl_usd', 0):.2f} "
-            f"equity=${metrics.get('equity_usd', 0):.2f} "
+            f"equity={'$%.2f' % _eq if _eq is not None else 'n/a'} "
             f"positions={metrics.get('position_count', 0)} "
             f"orders={metrics.get('order_count', 0)}"
         )
@@ -316,15 +317,19 @@ class HeartbeatMonitor:
 
         # Canonical account equity (same cached anchor the risk/UI surfaces
         # use) — unrealized-only pnl misses realized losses, so report both.
+        # NOTE: get_equity_for_risk_calc_sync_cached is a service METHOD, not
+        # a module function — importing it raised ImportError and silently
+        # produced equity=$0.00 on every heartbeat.  The module-level
+        # get_equity_for_risk_calc_sync is cache-first and non-blocking.
         try:
             from merid.event_venues.kalshi.bankroll_service_v2 import (
-                get_equity_for_risk_calc_sync_cached,
+                get_equity_for_risk_calc_sync,
             )
-            eq = get_equity_for_risk_calc_sync_cached()
+            eq = get_equity_for_risk_calc_sync()
             if eq is not None:
                 metrics["equity_usd"] = float(eq)
         except Exception as e:
-            logger.debug(f"[HEARTBEAT] Failed to get canonical equity: {e}")
+            logger.warning(f"[HEARTBEAT] Failed to get canonical equity: {e}")
         
         # Try to get order count
         try:
