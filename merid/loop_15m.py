@@ -8259,13 +8259,14 @@ async def _run_one_cycle(self, tick: int) -> None:
                 # bridge subscribes the moment the next ticker exists, so its
                 # book is snapshotted/contiguous at rollover instead of
                 # bootstrapping for 2-4 minutes after open.
-                if self._ws_bridge and catalog_snapshot:
+                if self._ws_bridge:
                     try:
                         desired_ws = set(current_market_ids)
-                        for asset in self._allowed_assets:
-                            nxt = self._catalog.get_next_15m_market(asset)
-                            if nxt is not None and getattr(nxt.market, "market_id", None):
-                                desired_ws.add(nxt.market.market_id)
+                        if catalog_snapshot:
+                            for asset in self._allowed_assets:
+                                nxt = self._catalog.get_next_15m_market(asset)
+                                if nxt is not None and getattr(nxt.market, "market_id", None):
+                                    desired_ws.add(nxt.market.market_id)
                         # 2026-11-03: deterministic next-window fallback.
                         # The catalog fetch filters status=open and Kalshi
                         # only flips a market to open at window start — and
@@ -8274,11 +8275,13 @@ async def _run_one_cycle(self, tick: int) -> None:
                         # neither get_current_15m_market nor
                         # get_next_15m_market can see anything in the exact
                         # window where prewarm is needed (observed
-                        # snapshot_markets=0 at T-5s, ws_subscribed=False
-                        # for minutes into a live window).  The 15m ticker
-                        # grid is mechanical (ticker time IS expiry, ET) and
-                        # the window grid aligns in UTC and ET, so the next
-                        # window's ticker derives from wall clock alone:
+                        # snapshot_markets=0 at T-5s and the catalog_snapshot
+                        # guard itself falsy -> the whole block skipped;
+                        # ws_subscribed=False for minutes into a live
+                        # window).  The 15m ticker grid is mechanical (ticker
+                        # time IS expiry, ET) and the window grid aligns in
+                        # UTC and ET, so the next window's ticker derives
+                        # from wall clock alone — no catalog dependency.
                         # current window ends at the next 15m boundary, next
                         # window ends 15m later.  Prewarm inside the lead so
                         # the new book streams contiguously from rollover.
@@ -8332,7 +8335,7 @@ async def _run_one_cycle(self, tick: int) -> None:
                                 len(desired_ws), added, removed,
                             )
                     except Exception as _pw_exc:
-                        logger.debug("[WS-PREWARM] desired-set update failed: %s", _pw_exc)
+                        logger.warning("[WS-PREWARM] desired-set update failed: %s", _pw_exc)
             
             # Apply WS warmup grace period after catalog roll
             # Allow N seconds for WS to deliver initial snapshots before flagging staleness
