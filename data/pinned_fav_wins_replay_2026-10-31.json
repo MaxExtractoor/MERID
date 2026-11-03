@@ -1,0 +1,3859 @@
+{
+ "winners": [
+  {
+   "ticker": "KXETH15M-26OCT311230-30",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1236,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T16:26:44.812809+00:00",
+   "submit_epoch": 1793463999.5676088,
+   "submit_to_fill_s": 5.2,
+   "decision_id": "cand_a33f3b4579a63208c00540db:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 202.0,
+   "zscore": 1.1067016535887317,
+   "dist_to_strike": 0.0005025460852547883,
+   "book_age_ms": 0,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 65,
+   "yes_ask": 68,
+   "no_bid": 32,
+   "no_ask": 35,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.05778256989523978,
+     "ev": -9.233636627497301,
+     "lcb": -15.038530244518578,
+     "ge": -1.221743010476023,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.5640000000000001,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 55650.95392680168
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9237805922947626,
+     "ev": -4.982940770523743,
+     "lcb": -6.982940770523743,
+     "ge": 0.3780592294762575,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 1.6919999999999997,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 55650.95392680168
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T16:26:38.317642+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:27:04.949909+00:00",
+     "d": "{\"order_intent_id\": \"intent_890559ce17ec4e3aa7280fca1ba23103\", \"exchange_order_id\": \"01a192c8-da18-77de-b9eb-b91dd4d1588e\"}"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:27:15.338012+00:00",
+     "d": "{\"fill_id\": \"0727d9eb-6c99-83c8-47b8-f9827b452692\", \"exchange_order_id\": \"01a192c8-da18-77de-b9eb-b91dd4d1588e\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T17:06:27.732759+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 46.986000000000004, \"counterfactual_no_pnl_cents\": -42.858}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT311215-15",
+   "asset": "KXDOGE15M",
+   "held_side": "yes",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0836,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T16:09:50.702252+00:00",
+   "submit_epoch": 1793462979.9915187,
+   "submit_to_fill_s": 10.7,
+   "decision_id": "cand_5bf90b482a09dfa2b62d4c28:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 321.0,
+   "zscore": 1.622112504075418,
+   "dist_to_strike": 0.0014547570555717062,
+   "book_age_ms": 7,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 94,
+   "yes_ask": 95,
+   "no_bid": 5,
+   "no_ask": 6,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.046749780177601785,
+     "ev": -8.265479362697203,
+     "lcb": -13.934398281616122,
+     "ge": -0.32502198223982176,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.6615384615384615,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 54632.274203538895
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9532502198223982,
+     "ev": -8.289593402375559,
+     "lcb": -10.289593402375559,
+     "ge": 1.3250219822398268,
+     "fee": 0.1,
+     "asr": 5.5,
+     "giveback": 1.9846153846153842,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 54632.274203538895
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T16:09:39.637940+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:09:52.198151+00:00",
+     "d": "{\"order_intent_id\": \"intent_a55c78cd99ae45e6b39e426b79348ddc\", \"exchange_order_id\": \"01a192b9-4da0-798b-9dec-52ec72a92b88\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T16:09:52.394602+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXDOGE15M-26OCT311215-15\", \"order_id\": \"01a192b9-4da0-798b-9dec-52ec72a92b88\", \"intent_id\": \"intent_a55c78cd99ae45e6b39e426"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:09:59.235711+00:00",
+     "d": "{\"fill_id\": \"0727d85c-9f61-9fd5-be78-fcc066aa6bb8\", \"exchange_order_id\": \"01a192b9-4da0-798b-9dec-52ec72a92b88\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T16:18:01.307704+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT311215-15",
+   "asset": "KXSOL15M",
+   "held_side": "yes",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0793,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T16:09:50.699766+00:00",
+   "submit_epoch": 1793462918.0796554,
+   "submit_to_fill_s": 72.6,
+   "decision_id": "cand_3ae05e510c3bb36729d1e89f:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 384.0,
+   "zscore": 1.7659686230332463,
+   "dist_to_strike": 0.0014618356479064484,
+   "book_age_ms": 260,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 95,
+   "yes_ask": 96,
+   "no_bid": 4,
+   "no_ask": 5,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 4,
+     "cp": 0.04233144503496,
+     "ev": -3.9352999409484446,
+     "lcb": -5.935299940948445,
+     "ge": 0.23314450349600016,
+     "fee": 0.09,
+     "asr": 1.5,
+     "giveback": 0.5694444444444444,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 54568.76918196678
+    },
+    {
+     "side": "yes",
+     "px": 95,
+     "cp": 0.95766855496504,
+     "ev": -4.558477836829329,
+     "lcb": -6.558477836829329,
+     "ge": 0.7668554965040042,
+     "fee": 0.09,
+     "asr": 1.5,
+     "giveback": 1.7083333333333333,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 54568.76918196678
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T16:08:36.122003+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:08:42.041318+00:00",
+     "d": "{\"order_intent_id\": \"intent_92b755193ef549d8a5c5c26869f969b9\", \"exchange_order_id\": \"01a192b8-5788-7feb-8db7-9c483a9897b0\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T16:08:42.075791+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXSOL15M-26OCT311215-15\", \"order_id\": \"01a192b8-5788-7feb-8db7-9c483a9897b0\", \"intent_id\": \"intent_92b755193ef549d8a5c5c268"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T16:09:58.744618+00:00",
+     "d": "{\"fill_id\": \"0727d85d-8549-b6a9-2a3d-d203395fa3c8\", \"exchange_order_id\": \"01a192b8-5788-7feb-8db7-9c483a9897b0\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T16:19:27.351828+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 29.298000000000002, \"counterfactual_no_pnl_cents\": -0.0}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT311145-45",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0908,
+   "n_legs": 1,
+   "n_exits": 2,
+   "first_fill": "2026-10-31T15:35:16.109845+00:00",
+   "submit_epoch": 1793460911.025312,
+   "submit_to_fill_s": 5.1,
+   "decision_id": "cand_68b09dec37e0b1e65c11c4bc:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 590.0,
+   "zscore": 1.2304585685973015,
+   "dist_to_strike": 0.0015453599167268872,
+   "book_age_ms": 90,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 93,
+   "yes_ask": 94,
+   "no_bid": 6,
+   "no_ask": 7,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 6,
+     "cp": 0.06025691007522904,
+     "ev": -4.374490810658914,
+     "lcb": -6.374490810658914,
+     "ge": 0.02569100752290443,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 0.7681818181818182,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 52562.50309801102
+    },
+    {
+     "side": "yes",
+     "px": 93,
+     "cp": 0.9135230731771701,
+     "ev": -7.608238136828452,
+     "lcb": -9.60823813682845,
+     "ge": -1.6476926822829974,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 2.3045454545454542,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 52562.50309801102
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T15:35:09.840775+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:35:16.579600+00:00",
+     "d": "{\"order_intent_id\": \"intent_5df16898c37f4be1a0eecab5e69372de\", \"exchange_order_id\": \"01a19299-bf80-7bde-8714-a231f3e391a1\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T15:35:16.622736+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT311145-45\", \"order_id\": \"01a19299-bf80-7bde-8714-a231f3e391a1\", \"intent_id\": \"intent_5df16898c37f4be1a0eecab5"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:35:21.718776+00:00",
+     "d": "{\"fill_id\": \"0727d8fe-8301-bcec-c156-528e6c0183f9\", \"exchange_order_id\": \"01a19299-bf80-7bde-8714-a231f3e391a1\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T15:45:20.192211+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 41.064, \"counterfactual_no_pnl_cents\": -36.792}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT311130-30",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 97,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.06,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T15:25:57.287435+00:00",
+   "submit_epoch": 1793460345.6250532,
+   "submit_to_fill_s": 11.7,
+   "decision_id": "cand_43f4c04811ce53c186b006c4:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 257.0,
+   "zscore": 1.1993598350183212,
+   "dist_to_strike": 0.0009459676126342463,
+   "book_age_ms": 4,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 97,
+   "yes_ask": 98,
+   "no_bid": 2,
+   "no_ask": 3,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 2,
+     "cp": 0.04143227912322356,
+     "ev": -2.1909539058594625,
+     "lcb": -4.1909539058594625,
+     "ge": 2.143227912322356,
+     "fee": 0.06,
+     "asr": 1.5,
+     "giveback": 0.7681818181818182,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 51995.97882723808
+    },
+    {
+     "side": "yes",
+     "px": 97,
+     "cp": 0.9585677208767764,
+     "ev": -7.025773366867807,
+     "lcb": -9.025773366867806,
+     "ge": -1.1432279123223532,
+     "fee": 0.06,
+     "asr": 1.5,
+     "giveback": 2.3045454545454542,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 51995.97882723808
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T15:25:43.271476+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:25:50.942086+00:00",
+     "d": "{\"order_intent_id\": \"intent_a9f04712e3c047eab1b3574ce25d442a\", \"exchange_order_id\": \"01a19291-18a8-74bd-b694-59708d78f7ed\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T15:25:50.965157+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT311130-30\", \"order_id\": \"01a19291-18a8-74bd-b694-59708d78f7ed\", \"intent_id\": \"intent_a9f04712e3c047eab1b3574c"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:26:02.456500+00:00",
+     "d": "{\"fill_id\": \"0727d8d4-0689-b3c7-dd67-20acc18163a1\", \"exchange_order_id\": \"01a19291-18a8-74bd-b694-59708d78f7ed\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T15:34:36.026437+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 17.532, \"counterfactual_no_pnl_cents\": -12.395999999999999}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT311130-30",
+   "asset": "KXSOL15M",
+   "held_side": "yes",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0943,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T15:25:56.342946+00:00",
+   "submit_epoch": 1793460354.0121644,
+   "submit_to_fill_s": 2.3,
+   "decision_id": "cand_1d8c687704243f41c2c42aaa:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 248.0,
+   "zscore": 1.5684388434927885,
+   "dist_to_strike": 0.0010109426439024942,
+   "book_age_ms": 6,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 94,
+   "yes_ask": 95,
+   "no_bid": 5,
+   "no_ask": 6,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.04250809961616753,
+     "ev": -4.933475752668961,
+     "lcb": -6.933475752668961,
+     "ge": -0.7491900383832475,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.5742857142857143,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 52005.10621404648
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9574919003838325,
+     "ev": -3.6036671044738897,
+     "lcb": -5.60366710447389,
+     "ge": 1.7491900383832526,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 1.7228571428571426,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 52005.10621404648
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T15:25:52.412948+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:25:58.294577+00:00",
+     "d": "{\"order_intent_id\": \"intent_ca4ba7e89ec44a85830e8564b19163fd\", \"exchange_order_id\": \"01a19291-3bd0-712c-903a-cf52decd318a\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T15:25:58.311189+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXSOL15M-26OCT311130-30\", \"order_id\": \"01a19291-3bd0-712c-903a-cf52decd318a\", \"intent_id\": \"intent_ca4ba7e89ec44a85830e8564"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T15:26:01.984778+00:00",
+     "d": "{\"fill_id\": \"0727d8d4-3551-b3d6-3feb-93c65500cffa\", \"exchange_order_id\": \"01a19291-3bd0-712c-903a-cf52decd318a\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T15:33:08.992460+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT311100-00",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0951,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T14:56:31.585034+00:00",
+   "submit_epoch": 1793458586.5578802,
+   "submit_to_fill_s": 5.0,
+   "decision_id": "cand_06a19f14942442632c213873:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 215.0,
+   "zscore": 1.155183195686941,
+   "dist_to_strike": 0.0008178319435535766,
+   "book_age_ms": 9,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 94,
+   "yes_ask": 95,
+   "no_bid": 5,
+   "no_ask": 6,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.07015647178632645,
+     "ev": -2.399352821367356,
+     "lcb": -4.399352821367356,
+     "ge": 2.015647178632644,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.8049999999999999,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 50238.28889131546
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9297736461168427,
+     "ev": -7.067635388315729,
+     "lcb": -9.067635388315729,
+     "ge": -1.022635388315729,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 2.415,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 50238.28889131546
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T14:56:25.603821+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T14:56:31.607545+00:00",
+     "d": "{\"order_intent_id\": \"intent_2356f96c581d413e874681670dda1e0c\", \"exchange_order_id\": \"01a19276-4578-7785-a49c-a25d82fac718\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T14:56:31.651343+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT311100-00\", \"order_id\": \"01a19276-4578-7785-a49c-a25d82fac718\", \"intent_id\": \"intent_2356f96c581d413e87468167"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T14:56:35.482043+00:00",
+     "d": "{\"fill_id\": \"0727dbaf-1119-b44f-94e6-f2ad19454f10\", \"exchange_order_id\": \"01a19276-4578-7785-a49c-a25d82fac718\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T15:03:42.250369+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT311045-45",
+   "asset": "KXDOGE15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.16,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T14:36:49.707397+00:00",
+   "submit_epoch": 1793457351.548818,
+   "submit_to_fill_s": 58.2,
+   "decision_id": "cand_1958c6d50f06ab8cce1a21e0:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 550.0,
+   "zscore": 1.3858326708780957,
+   "dist_to_strike": 0.0016751086826466866,
+   "book_age_ms": 11,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 92,
+   "yes_ask": 93,
+   "no_bid": 7,
+   "no_ask": 8,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.06197100508244335,
+     "ev": -8.776356872213047,
+     "lcb": -14.445275791131966,
+     "ge": -0.8028994917556653,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.6615384615384615,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 49003.27908539772
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9297978524773309,
+     "ev": -9.173830136882295,
+     "lcb": -11.173830136882295,
+     "ge": 0.9797852477330893,
+     "fee": 0.13,
+     "asr": 6.0,
+     "giveback": 1.9846153846153842,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 49003.27908539772
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T14:35:50.595195+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T14:36:02.422757+00:00",
+     "d": "{\"order_intent_id\": \"intent_f86ac987196143e1afd4e4fe933fb134\", \"exchange_order_id\": \"01a19263-80c8-761c-bf8d-381543085c3f\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T14:36:02.459628+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXDOGE15M-26OCT311045-45\", \"order_id\": \"01a19263-80c8-761c-bf8d-381543085c3f\", \"intent_id\": \"intent_f86ac987196143e1afd4e4f"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T14:37:00.557177+00:00",
+     "d": "{\"fill_id\": \"0727dbf2-af69-8612-2a92-8a8017bf9f23\", \"exchange_order_id\": \"01a19263-80c8-761c-bf8d-381543085c3f\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T14:46:57.835381+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 31.324, \"counterfactual_no_pnl_cents\": -42.858}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310945-45",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.025,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T13:41:36.773822+00:00",
+   "submit_epoch": 1793454096.0619285,
+   "submit_to_fill_s": 0.7,
+   "decision_id": "cand_ef4a7ddc74f5b5847a377eef:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 205.0,
+   "zscore": 1.1800036332553436,
+   "dist_to_strike": 0.0008103987803899185,
+   "book_age_ms": 144,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 98,
+   "yes_ask": 99,
+   "no_bid": 1,
+   "no_ask": 2,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 1,
+     "cp": 0.02766268837589314,
+     "ev": -2.672175606855131,
+     "lcb": -4.672175606855131,
+     "ge": 1.7662688375893139,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.8944444444444446,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 45748.387523412704
+    },
+    {
+     "side": "yes",
+     "px": 98,
+     "cp": 0.9723373116241069,
+     "ev": -7.001602170922645,
+     "lcb": -9.001602170922645,
+     "ge": -0.7662688375893123,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 2.6833333333333336,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 45748.387523412704
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T13:41:35.755075+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:41:39.675922+00:00",
+     "d": "{\"order_intent_id\": \"intent_af122cebf4fb4121b25b61cd451290c5\", \"exchange_order_id\": \"01a19231-ba98-7871-930c-365be46e1100\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T13:41:39.708284+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT310945-45\", \"order_id\": \"01a19231-ba98-7871-930c-365be46e1100\", \"intent_id\": \"intent_af122cebf4fb4121b25b61cd"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:41:42.786563+00:00",
+     "d": "{\"fill_id\": \"0727daf7-4099-918b-aa05-ae0296783a7c\", \"exchange_order_id\": \"01a19231-ba98-7871-930c-365be46e1100\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T13:46:39.174444+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 11.687999999999999, \"counterfactual_no_pnl_cents\": -6.264}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310930-30",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0335,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T13:27:05.506474+00:00",
+   "submit_epoch": 1793453205.851552,
+   "submit_to_fill_s": 19.7,
+   "decision_id": "cand_8b577b0c7cd9c6708af88c4e:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 197.0,
+   "zscore": 1.889559886542678,
+   "dist_to_strike": 0.000846464673465155,
+   "book_age_ms": 315,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 98,
+   "yes_ask": 99,
+   "no_bid": 1,
+   "no_ask": 2,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 1,
+     "cp": 0.01354907989737042,
+     "ev": -7.557985627284236,
+     "lcb": -13.362879244305512,
+     "ge": 0.35490798973704196,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.5640000000000001,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 44855.46784758568
+    },
+    {
+     "side": "yes",
+     "px": 98,
+     "cp": 0.9864509201026296,
+     "ev": -4.59890798973704,
+     "lcb": -6.59890798973704,
+     "ge": 0.6450920102629598,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 1.6919999999999997,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 44855.46784758568
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T13:26:42.781612+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:26:51.994193+00:00",
+     "d": "{\"order_intent_id\": \"intent_f02ee0d42b574348bd88b6a28ddaebfb\", \"exchange_order_id\": \"01a19224-2dd8-76ad-b2ab-e9ec46c373c6\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T13:26:52.021738+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXETH15M-26OCT310930-30\", \"order_id\": \"01a19224-2dd8-76ad-b2ab-e9ec46c373c6\", \"intent_id\": \"intent_f02ee0d42b574348bd88b6a2"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:27:11.742670+00:00",
+     "d": "{\"fill_id\": \"0727dab5-fd79-854b-1d6e-db8b7f2616ca\", \"exchange_order_id\": \"01a19224-2dd8-76ad-b2ab-e9ec46c373c6\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T13:33:08.961273+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 11.687999999999999, \"counterfactual_no_pnl_cents\": -6.264}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310930-30",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.14,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T13:25:13.484851+00:00",
+   "submit_epoch": 1793453109.717675,
+   "submit_to_fill_s": 3.8,
+   "decision_id": "cand_9475a780084ff0e1d160da37:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 293.0,
+   "zscore": 1.0375789620509437,
+   "dist_to_strike": 0.000883179446005523,
+   "book_age_ms": 96,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 94,
+   "yes_ask": 95,
+   "no_bid": 5,
+   "no_ask": 6,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.07014941361249694,
+     "ev": -2.465058638750307,
+     "lcb": -4.465058638750307,
+     "ge": 2.014941361249693,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.8699999999999999,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 44760.15475702286
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9214030598125968,
+     "ev": -8.09969401874031,
+     "lcb": -10.09969401874031,
+     "ge": -1.85969401874031,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 2.61,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 44760.15475702286
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T13:25:07.471508+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:25:13.970637+00:00",
+     "d": "{\"order_intent_id\": \"intent_a7ee3dc640e04c418a863a5d80f5226c\", \"exchange_order_id\": \"01a19222-b2f0-71fc-a771-6d493c2f9bbd\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T13:25:14.044550+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT310930-30\", \"order_id\": \"01a19222-b2f0-71fc-a771-6d493c2f9bbd\", \"intent_id\": \"intent_a7ee3dc640e04c418a863a5d"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T13:25:18.453615+00:00",
+     "d": "{\"fill_id\": \"0727daa8-4851-9482-80a2-3553fb6c0bb5\", \"exchange_order_id\": \"01a19222-b2f0-71fc-a771-6d493c2f9bbd\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T13:34:41.798439+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310845-45",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0335,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T12:39:06.901308+00:00",
+   "submit_epoch": 1793450335.2115095,
+   "submit_to_fill_s": 11.7,
+   "decision_id": "cand_377059c539ea105b31450793:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 366.0,
+   "zscore": 1.4117164771035249,
+   "dist_to_strike": 0.002400003562157364,
+   "book_age_ms": 17,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 97,
+   "yes_ask": 99,
+   "no_bid": 1,
+   "no_ask": 3,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 1,
+     "cp": 0.029220803323797173,
+     "ev": -6.03985676290243,
+     "lcb": -11.844750379923706,
+     "ge": 1.922080332379717,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.6130434782608696,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 41986.60804390907
+    },
+    {
+     "side": "yes",
+     "px": 98,
+     "cp": 0.9707791966762028,
+     "ev": -6.313210767162324,
+     "lcb": -8.313210767162325,
+     "ge": -0.9220803323797155,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 1.8391304347826085,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 41986.60804390907
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T12:38:53.957623+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T12:39:02.006605+00:00",
+     "d": "{\"order_intent_id\": \"intent_4f0a89777f8345c49071afd7468364f6\", \"exchange_order_id\": \"01a191f8-62e8-7d48-892d-9b4c28dacf9d\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T12:39:02.168641+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXETH15M-26OCT310845-45\", \"order_id\": \"01a191f8-62e8-7d48-892d-9b4c28dacf9d\", \"intent_id\": \"intent_4f0a89777f8345c49071afd7"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T12:40:32.877591+00:00",
+     "d": "{\"fill_id\": \"0727d61a-7aa9-a812-f114-ebabf735a799\", \"exchange_order_id\": \"01a191f8-62e8-7d48-892d-9b4c28dacf9d\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T12:46:44.387348+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 11.687999999999999, \"counterfactual_no_pnl_cents\": -6.264}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT310615-15",
+   "asset": "KXSOL15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.14,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T10:10:29.123045+00:00",
+   "submit_epoch": 1793441423.5522158,
+   "submit_to_fill_s": 5.6,
+   "decision_id": "cand_3e16e5d78fa197fdf1fe4430:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 279.0,
+   "zscore": 1.3176327918067394,
+   "dist_to_strike": 0.0011881703121017747,
+   "book_age_ms": 3,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 93,
+   "yes_ask": 94,
+   "no_bid": 6,
+   "no_ask": 7,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 6,
+     "cp": 0.057401467342027446,
+     "ev": -4.496019932463922,
+     "lcb": -6.496019932463922,
+     "ge": -0.2598532657972552,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 0.6041666666666667,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 33074.116844177246
+    },
+    {
+     "side": "yes",
+     "px": 93,
+     "cp": 0.9425985326579726,
+     "ev": -4.208646734202749,
+     "lcb": -6.208646734202749,
+     "ge": 1.2598532657972505,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 1.8124999999999998,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 33074.116844177246
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T10:10:21.475360+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T10:10:29.289725+00:00",
+     "d": "{\"order_intent_id\": \"intent_0629af7485564c7c810f2a67330e9566\", \"exchange_order_id\": \"01a19170-6668-713a-bf34-0244f11241a8\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T10:10:29.390663+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXSOL15M-26OCT310615-15\", \"order_id\": \"01a19170-6668-713a-bf34-0244f11241a8\", \"intent_id\": \"intent_0629af7485564c7c810f2a67"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T10:10:33.050247+00:00",
+     "d": "{\"fill_id\": \"0727d4b1-be49-8b78-92ef-21c2170df828\", \"exchange_order_id\": \"01a19170-6668-713a-bf34-0244f11241a8\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T10:15:19.412453+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 41.064, \"counterfactual_no_pnl_cents\": -36.792}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT310530-30",
+   "asset": "KXSOL15M",
+   "held_side": "yes",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1093,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T09:26:34.439307+00:00",
+   "submit_epoch": 1793438792.252796,
+   "submit_to_fill_s": 2.2,
+   "decision_id": "cand_8cb81e7e596da1eeccf53921:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 209.0,
+   "zscore": 1.3794935346147943,
+   "dist_to_strike": 0.0009002751190399385,
+   "book_age_ms": 186,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 94,
+   "yes_ask": 95,
+   "no_bid": 5,
+   "no_ask": 6,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.04769210517296363,
+     "ev": -4.532681374595529,
+     "lcb": -6.532681374595529,
+     "ge": -0.23078948270363747,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.6918918918918919,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 30443.697375297546
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9523078948270364,
+     "ev": -4.474886192972033,
+     "lcb": -6.474886192972033,
+     "ge": 1.2307894827036425,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 2.075675675675676,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 30443.697375297546
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T09:26:31.060471+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T09:26:36.979560+00:00",
+     "d": "{\"order_intent_id\": \"intent_e88b3ae5850c48c88665b779d24259ef\", \"exchange_order_id\": \"01a19148-3940-7e50-9785-d0e48b05fc12\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T09:26:37.042778+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXSOL15M-26OCT310530-30\", \"order_id\": \"01a19148-3940-7e50-9785-d0e48b05fc12\", \"intent_id\": \"intent_e88b3ae5850c48c88665b779"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T09:26:46.010702+00:00",
+     "d": "{\"fill_id\": \"0727d469-3d01-91b6-4c97-08787372864a\", \"exchange_order_id\": \"01a19148-3940-7e50-9785-d0e48b05fc12\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T09:32:52.770774+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310515-15",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.14,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T09:06:40.348063+00:00",
+   "submit_epoch": 1793437587.0993366,
+   "submit_to_fill_s": 13.2,
+   "decision_id": "cand_b3f0901e0819383296c7261b:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 515.0,
+   "zscore": 1.3279683593703253,
+   "dist_to_strike": 0.00103196869248224,
+   "book_age_ms": 367,
+   "quote_owner": "WS_FRESH_VERIFIED",
+   "degraded": 0,
+   "book_crossed": 0,
+   "yes_bid": 93,
+   "yes_ask": 94,
+   "no_bid": 6,
+   "no_ask": 7,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 6,
+     "cp": 0.07728241320534612,
+     "ev": -6.410735629819999,
+     "lcb": -12.215629246841274,
+     "ge": 1.7282413205346125,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 0.7020833333333334,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 29238.207377672195
+    },
+    {
+     "side": "yes",
+     "px": 93,
+     "cp": 0.9227175867946539,
+     "ev": -6.490491320534616,
+     "lcb": -8.490491320534616,
+     "ge": -0.7282413205346172,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 2.1062499999999997,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 29238.207377672195
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T09:06:25.576167+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T09:06:31.460095+00:00",
+     "d": "{\"order_intent_id\": \"intent_6d3f76fbee02401bb6d5f6bf24e1d697\", \"exchange_order_id\": \"01a19135-d250-78c1-980d-968d38081dc5\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T09:06:31.526429+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXETH15M-26OCT310515-15\", \"order_id\": \"01a19135-d250-78c1-980d-968d38081dc5\", \"intent_id\": \"intent_6d3f76fbee02401bb6d5f6bf"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T09:06:46.408267+00:00",
+     "d": "{\"fill_id\": \"0727d5ed-f651-bd2f-60cf-27ab3d8f2fd9\", \"exchange_order_id\": \"01a19135-d250-78c1-980d-968d38081dc5\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T09:19:17.483033+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 41.064, \"counterfactual_no_pnl_cents\": -36.792}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310500-00",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0186,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T08:56:09.307853+00:00",
+   "submit_epoch": 1793436945.7304635,
+   "submit_to_fill_s": 23.6,
+   "decision_id": "cand_d0d24a8449e7c050e0ffe361:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 256.0,
+   "zscore": 1.705528297834054,
+   "dist_to_strike": 0.0008941864468160256,
+   "book_age_ms": 11,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 98,
+   "yes_ask": 98,
+   "no_bid": 2,
+   "no_ask": 2,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 1,
+     "cp": 0.016078637339209556,
+     "ev": -7.473638578752495,
+     "lcb": -13.27853219577377,
+     "ge": 0.6078637339209556,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.7326086956521739,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 28597.003799915314
+    },
+    {
+     "side": "yes",
+     "px": 98,
+     "cp": 0.9839213626607904,
+     "ev": -5.357689820877475,
+     "lcb": -7.357689820877475,
+     "ge": 0.39213626607904617,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 2.1978260869565216,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 28597.003799915314
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T08:55:44.362345+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:56:53.673916+00:00",
+     "d": "{\"order_intent_id\": \"intent_2cca7c97ba564f19a020cb8205c88909\", \"exchange_order_id\": \"01a1912c-1238-7835-9b25-bc56393d0be2\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T08:56:53.715880+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXETH15M-26OCT310500-00\", \"order_id\": \"01a1912c-1238-7835-9b25-bc56393d0be2\", \"intent_id\": \"intent_2cca7c97ba564f19a020cb82"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:57:00.426702+00:00",
+     "d": "{\"fill_id\": \"0727d59d-b299-9567-554b-5ff6e29b6d42\", \"exchange_order_id\": \"01a1912c-1238-7835-9b25-bc56393d0be2\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T09:02:15.654991+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 11.687999999999999, \"counterfactual_no_pnl_cents\": -6.264}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT310500-00",
+   "asset": "KXDOGE15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1151,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T08:50:44.995796+00:00",
+   "submit_epoch": 1793436588.9739945,
+   "submit_to_fill_s": 56.0,
+   "decision_id": "cand_0ef56c919c8309d3c402755d:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 611.0,
+   "zscore": 1.5958363156375048,
+   "dist_to_strike": 0.002043078237878408,
+   "book_age_ms": 4,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 99,
+   "yes_ask": 99,
+   "no_bid": 1,
+   "no_ask": 1,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.05973648954827482,
+     "ev": -9.09938107520255,
+     "lcb": -14.768299994121469,
+     "ge": -1.0263510451725188,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.7611111111111111,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 28241.324536323547
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9368015209652076,
+     "ev": -8.272181236812573,
+     "lcb": -10.272181236812573,
+     "ge": 1.6801520965207595,
+     "fee": 0.13,
+     "asr": 5.5,
+     "giveback": 2.283333333333333,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 28241.324536323547
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T08:49:48.692059+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:55:57.761978+00:00",
+     "d": "{\"order_intent_id\": \"intent_097057d77cb54f3b97f6a758b4bd166c\", \"exchange_order_id\": \"01a19126-97e0-7ce7-8e65-529829b19a38\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T08:55:57.762977+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXDOGE15M-26OCT310500-00\", \"order_id\": \"01a19126-97e0-7ce7-8e65-529829b19a38\", \"intent_id\": \"intent_097057d77cb54f3b97f6a75"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:56:44.138451+00:00",
+     "d": "{\"fill_id\": \"0727d5bb-5d61-8e15-f961-55453810bf7c\", \"exchange_order_id\": \"01a19126-97e0-7ce7-8e65-529829b19a38\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T09:03:26.175471+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 46.986000000000004, \"counterfactual_no_pnl_cents\": -42.858}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310445-45",
+   "asset": "KXETH15M",
+   "held_side": "no",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0943,
+   "n_legs": 3,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T08:40:34.837669+00:00",
+   "submit_epoch": 1793436014.7563143,
+   "submit_to_fill_s": 20.1,
+   "decision_id": "cand_3688c7b189baf790aa162370:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 288.0,
+   "zscore": -1.3117022272919978,
+   "dist_to_strike": -0.0009244620702589875,
+   "book_age_ms": 9,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 5,
+   "yes_ask": 6,
+   "no_bid": 94,
+   "no_ask": 95,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 94,
+     "cp": 0.9460515566050772,
+     "ev": -5.2226704264487935,
+     "lcb": -7.2226704264487935,
+     "ge": 0.605155660507728,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 2.1978260869565216,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 27664.853435516357
+    },
+    {
+     "side": "yes",
+     "px": 5,
+     "cp": 0.05394844339492282,
+     "ev": -7.752657973181168,
+     "lcb": -13.557551590202443,
+     "ge": 0.3948443394922819,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.7326086956521739,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 27664.853435516357
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T08:40:12.175457+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:40:18.166819+00:00",
+     "d": "{\"order_intent_id\": \"intent_008db0470bd544d8b2cce57d010e309f\", \"exchange_order_id\": \"01a1911d-d5b0-70ac-8569-8a551af54790\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T08:40:18.191805+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXETH15M-26OCT310445-45\", \"order_id\": \"01a1911d-d5b0-70ac-8569-8a551af54790\", \"intent_id\": \"intent_008db0470bd544d8b2cce57d0"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:40:38.228929+00:00",
+     "d": "{\"fill_id\": \"0727d565-5af1-b59e-a8fa-2c7f2329fd8c\", \"exchange_order_id\": \"01a1911d-d5b0-70ac-8569-8a551af54790\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:40:39.511607+00:00",
+     "d": "{\"fill_id\": \"0727d565-4b51-8e4a-1e56-3db3bc049820\", \"exchange_order_id\": \"01a1911d-d5b0-70ac-8569-8a551af54790\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T08:44:57.521629+00:00",
+     "d": "{\"fill_id\": \"0727d565-7b31-b7d2-44e8-aeb2fd73ceb8\", \"exchange_order_id\": \"01a1911d-d5b0-70ac-8569-8a551af54790\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T08:54:59.931913+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -30.659999999999997, \"counterfactual_no_pnl_cents\": 35.22}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXETH15M-26OCT310345-45",
+   "asset": "KXETH15M",
+   "held_side": "no",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.04,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T07:40:39.410854+00:00",
+   "submit_epoch": 1793432402.9374151,
+   "submit_to_fill_s": 36.5,
+   "decision_id": "cand_4e180964b7fb09047cb7c74c:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 298.0,
+   "zscore": -2.153090340044772,
+   "dist_to_strike": -0.0012306759353806927,
+   "book_age_ms": 1,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 1,
+   "yes_ask": 2,
+   "no_bid": 98,
+   "no_ask": 99,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 98,
+     "cp": 0.9891231352657848,
+     "ev": -4.837512560378043,
+     "lcb": -6.837512560378043,
+     "ge": 0.9123135265784788,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 2.1978260869565216,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 24055.360078811646
+    },
+    {
+     "side": "yes",
+     "px": 1,
+     "cp": 0.01087686473421523,
+     "ev": -7.993815839251928,
+     "lcb": -13.798709456273205,
+     "ge": 0.087686473421523,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.7326086956521739,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 24055.360078811646
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T07:40:02.709915+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:40:08.152170+00:00",
+     "d": "{\"order_intent_id\": \"intent_ccc4a0e582cf4f6ca61cbb54b1d9b1ec\", \"exchange_order_id\": \"01a190e6-c020-7efc-b2ff-61eff6eba2be\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T07:40:08.178851+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXETH15M-26OCT310345-45\", \"order_id\": \"01a190e6-c020-7efc-b2ff-61eff6eba2be\", \"intent_id\": \"intent_ccc4a0e582cf4f6ca61cbb54b"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:40:47.668273+00:00",
+     "d": "{\"fill_id\": \"0727d37b-e341-bb5e-ee97-b3459f80aa1e\", \"exchange_order_id\": \"01a190e6-c020-7efc-b2ff-61eff6eba2be\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T07:45:44.146976+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -6.264, \"counterfactual_no_pnl_cents\": 11.687999999999999}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310330-30",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.14,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T07:25:08.931708+00:00",
+   "submit_epoch": 1793431487.6573818,
+   "submit_to_fill_s": 21.3,
+   "decision_id": "cand_87704b418f0988d9b5f84fea:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 315.0,
+   "zscore": 0.9775443231143495,
+   "dist_to_strike": 0.0008671216378964029,
+   "book_age_ms": 19,
+   "quote_owner": "WS_FRESH_VERIFIED",
+   "degraded": 0,
+   "book_crossed": 0,
+   "yes_bid": 93,
+   "yes_ask": 93,
+   "no_bid": 7,
+   "no_ask": 7,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 6,
+     "cp": 0.060085062037754766,
+     "ev": -4.493493796224523,
+     "lcb": -6.493493796224523,
+     "ge": 0.00850620377547684,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 0.8699999999999999,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 23138.272659540176
+    },
+    {
+     "side": "yes",
+     "px": 93,
+     "cp": 0.9082529158688647,
+     "ev": -8.440708413113535,
+     "lcb": -10.440708413113535,
+     "ge": -2.1747084131135352,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 2.61,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 23138.272659540176
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T07:24:45.591832+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:24:52.059467+00:00",
+     "d": "{\"order_intent_id\": \"intent_717b80860a324a13863876266434a304\", \"exchange_order_id\": \"01a190d8-c600-7c22-9360-8588019618a5\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T07:24:52.087450+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT310330-30\", \"order_id\": \"01a190d8-c600-7c22-9360-8588019618a5\", \"intent_id\": \"intent_717b80860a324a1386387626"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:25:15.819191+00:00",
+     "d": "{\"fill_id\": \"0727d3bc-9681-89b0-7534-47666eec563d\", \"exchange_order_id\": \"01a190d8-c600-7c22-9360-8588019618a5\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T07:33:51.180795+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 41.064, \"counterfactual_no_pnl_cents\": -36.792}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310315-15",
+   "asset": "KXXRP15M",
+   "held_side": "no",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0293,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T07:12:40.893979+00:00",
+   "submit_epoch": 1793430694.2840679,
+   "submit_to_fill_s": 66.6,
+   "decision_id": "cand_efae63fdc1debbdf5ee3e451:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 207.0,
+   "zscore": -2.15093779180087,
+   "dist_to_strike": -0.0014836795252224776,
+   "book_age_ms": 133,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 1,
+   "yes_ask": 2,
+   "no_bid": 98,
+   "no_ask": 99,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 98,
+     "cp": 0.9847904487565159,
+     "ev": -5.636591487984773,
+     "lcb": -7.636591487984773,
+     "ge": 0.4790448756515908,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 2.5636363636363635,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 22346.128314256668
+    },
+    {
+     "side": "yes",
+     "px": 1,
+     "cp": 0.015209551243484106,
+     "ev": -3.877590330197044,
+     "lcb": -5.8775903301970445,
+     "ge": 0.5209551243484106,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.8545454545454545,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 22346.128314256668
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T07:11:33.496901+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:11:37.408598+00:00",
+     "d": "{\"order_intent_id\": \"intent_2ba5abc65f394c5f94213ea8226969cf\", \"exchange_order_id\": \"01a190cc-a488-754c-a0be-4474a6921501\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T07:11:37.488545+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXXRP15M-26OCT310315-15\", \"order_id\": \"01a190cc-a488-754c-a0be-4474a6921501\", \"intent_id\": \"intent_2ba5abc65f394c5f94213ea82"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T07:12:48.338834+00:00",
+     "d": "{\"fill_id\": \"0727d3fa-0d89-996e-ffeb-5c4baadba315\", \"exchange_order_id\": \"01a190cc-a488-754c-a0be-4474a6921501\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T07:17:34.645477+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -6.264, \"counterfactual_no_pnl_cents\": 11.687999999999999}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXBTC15M-26OCT310200-00",
+   "asset": "KXBTC15M",
+   "held_side": "no",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.16,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T05:55:56.295230+00:00",
+   "submit_epoch": 1793426153.094045,
+   "submit_to_fill_s": 3.2,
+   "decision_id": "cand_8408d265b4009bc636af5989:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 249.0,
+   "zscore": -1.2972819213435849,
+   "dist_to_strike": -0.0006014207057706775,
+   "book_age_ms": 3,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 7,
+   "yes_ask": 8,
+   "no_bid": 92,
+   "no_ask": 93,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 92,
+     "cp": 0.9091689508264966,
+     "ev": -6.578890631636056,
+     "lcb": -8.578890631636057,
+     "ge": -1.0831049173503415,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 1.8267857142857142,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 17803.983988523483
+    },
+    {
+     "side": "yes",
+     "px": 7,
+     "cp": 0.06308561148874815,
+     "ev": -7.03231479097481,
+     "lcb": -11.121262159395862,
+     "ge": -0.6914388511251854,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.6089285714285715,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 17803.983988523483
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T05:55:51.310859+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T05:55:59.010950+00:00",
+     "d": "{\"order_intent_id\": \"intent_13d1b524f4804e628988eabaf90c4e4f\", \"exchange_order_id\": \"01a19087-6210-7fc7-94cc-9b4bdb1bfdc5\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T05:55:59.040932+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXBTC15M-26OCT310200-00\", \"order_id\": \"01a19087-6210-7fc7-94cc-9b4bdb1bfdc5\", \"intent_id\": \"intent_13d1b524f4804e628988eabaf"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T05:56:02.058783+00:00",
+     "d": "{\"fill_id\": \"0727d29a-c591-ac9d-69e7-bdd151223695\", \"exchange_order_id\": \"01a19087-6210-7fc7-94cc-9b4bdb1bfdc5\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T06:04:18.472556+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -42.858, \"counterfactual_no_pnl_cents\": 46.986000000000004}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310100-00",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 96,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.08,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T04:56:50.672889+00:00",
+   "submit_epoch": 1793422591.3169165,
+   "submit_to_fill_s": 19.4,
+   "decision_id": "cand_12cd46a19f91adc60e7f5cc2:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 210.0,
+   "zscore": 1.479078866665169,
+   "dist_to_strike": 0.0010316756669623357,
+   "book_age_ms": 251,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 96,
+   "yes_ask": 97,
+   "no_bid": 3,
+   "no_ask": 4,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 3,
+     "cp": 0.0428112279356786,
+     "ev": -3.1504226609775947,
+     "lcb": -5.150422660977595,
+     "ge": 1.2811227935678597,
+     "fee": 0.07,
+     "asr": 1.5,
+     "giveback": 0.8545454545454545,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 14243.295288324356
+    },
+    {
+     "side": "yes",
+     "px": 96,
+     "cp": 0.9571887720643214,
+     "ev": -6.435759157204219,
+     "lcb": -8.43575915720422,
+     "ge": -0.2811227935678562,
+     "fee": 0.07,
+     "asr": 1.5,
+     "giveback": 2.5636363636363635,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 14243.295288324356
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T04:56:30.639822+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T04:56:35.708796+00:00",
+     "d": "{\"order_intent_id\": \"intent_a25427fae0fd4955bf7c1ca8b904d0b4\", \"exchange_order_id\": \"01a19051-0418-7e41-8025-e2d612b8a799\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T04:56:35.753090+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT310100-00\", \"order_id\": \"01a19051-0418-7e41-8025-e2d612b8a799\", \"intent_id\": \"intent_a25427fae0fd4955bf7c1ca8"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T04:57:00.105643+00:00",
+     "d": "{\"fill_id\": \"0727d114-3d59-890f-6254-bb167061bd65\", \"exchange_order_id\": \"01a19051-0418-7e41-8025-e2d612b8a799\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T05:03:42.532377+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 23.454, \"counterfactual_no_pnl_cents\": -18.462}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT310030-30",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1087,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T04:23:13.797862+00:00",
+   "submit_epoch": 1793420582.726354,
+   "submit_to_fill_s": 11.1,
+   "decision_id": "cand_da564e28020eaa0317d23544:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 419.0,
+   "zscore": 1.3817478602252373,
+   "dist_to_strike": 0.0014399485158072224,
+   "book_age_ms": 3,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 93,
+   "yes_ask": 93,
+   "no_bid": 7,
+   "no_ask": 7,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.06002182270292544,
+     "ev": -5.535817729707456,
+     "lcb": -7.535817729707456,
+     "ge": -0.9978177297074564,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.895,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 12233.844375610352
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9214429673128205,
+     "ev": -6.209703268717955,
+     "lcb": -8.209703268717956,
+     "ge": 0.14429673128204534,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 2.685,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 12233.844375610352
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T04:23:01.208471+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T04:23:07.213287+00:00",
+     "d": "{\"order_intent_id\": \"intent_209cb92965a14a01923140c56ab27239\", \"exchange_order_id\": \"01a19032-6058-72ba-ab53-34a11e9830a5\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T04:23:07.237272+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT310030-30\", \"order_id\": \"01a19032-6058-72ba-ab53-34a11e9830a5\", \"intent_id\": \"intent_209cb92965a14a01923140c5"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T04:23:19.427383+00:00",
+     "d": "{\"fill_id\": \"0727d0f8-7df9-80a4-ab08-9cccd80bc431\", \"exchange_order_id\": \"01a19032-6058-72ba-ab53-34a11e9830a5\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-31T04:32:22.838764+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 7.831, \"counterfactual_no_pnl_cents\": -42.858}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT302345-45",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 96,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.08,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T03:40:03.981269+00:00",
+   "submit_epoch": 1793418002.9675255,
+   "submit_to_fill_s": 1.0,
+   "decision_id": "cand_846e529d6411ba92ec909c45:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 298.0,
+   "zscore": -1.6023564906857757,
+   "dist_to_strike": -0.001374080093014743,
+   "book_age_ms": 17,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 3,
+   "yes_ask": 4,
+   "no_bid": 96,
+   "no_ask": 97,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 96,
+     "cp": 0.9665393878483431,
+     "ev": -5.243957766889819,
+     "lcb": -7.243957766889819,
+     "ge": 0.6539387848343181,
+     "fee": 0.07,
+     "asr": 1.5,
+     "giveback": 2.3068965517241375,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 9655.145340204239
+    },
+    {
+     "side": "yes",
+     "px": 3,
+     "cp": 0.03346061215165682,
+     "ev": -11.668823220994618,
+     "lcb": -17.337742139913537,
+     "ge": 0.3460612151656821,
+     "fee": 0.07,
+     "asr": 5.5,
+     "giveback": 0.7689655172413793,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 9655.145340204239
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T03:40:02.488761+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:40:07.568576+00:00",
+     "d": "{\"order_intent_id\": \"intent_752278533d3c460f9bbf2abcdd5bd96d\", \"exchange_order_id\": \"01a1900a-fe50-71de-b796-09b3f34a95c8\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T03:40:07.649104+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT302345-45\", \"order_id\": \"01a1900a-fe50-71de-b796-09b3f34a95c8\", \"intent_id\": \"intent_752278533d3c460f9bbf2abc"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:40:10.419030+00:00",
+     "d": "{\"fill_id\": \"0727d026-f6b1-b93c-b97a-2b491b5d680c\", \"exchange_order_id\": \"01a1900a-fe50-71de-b796-09b3f34a95c8\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T03:46:48.774313+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -18.462, \"counterfactual_no_pnl_cents\": 23.454}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXBTC15M-26OCT302315-15",
+   "asset": "KXBTC15M",
+   "held_side": "no",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0207,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T03:11:15.772283+00:00",
+   "submit_epoch": 1793416263.1765032,
+   "submit_to_fill_s": 12.6,
+   "decision_id": "cand_07115ed84f337f809ec69eb3:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 239.0,
+   "zscore": -3.6609654093294948,
+   "dist_to_strike": -0.0016563536959365668,
+   "book_age_ms": 6,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 1,
+   "yes_ask": 2,
+   "no_bid": 98,
+   "no_ask": 99,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 98,
+     "cp": 0.99,
+     "ev": -4.315793103448275,
+     "lcb": -6.315793103448275,
+     "ge": 1.0000000000000009,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 1.7637931034482757,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7913.557950496674
+    },
+    {
+     "side": "yes",
+     "px": 1,
+     "cp": 0.010000000000000009,
+     "ev": -6.220878402903811,
+     "lcb": -10.309825771324864,
+     "ge": 8.673617379884035e-16,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.5879310344827586,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7913.557950496674
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T03:11:00.904819+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:11:08.339337+00:00",
+     "d": "{\"order_intent_id\": \"intent_1165805c98294f0cb2ac5a11fdea5439\", \"exchange_order_id\": \"01a18ff0-7558-75aa-a739-ad5e0e552b22\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T03:11:08.421381+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXBTC15M-26OCT302315-15\", \"order_id\": \"01a18ff0-7558-75aa-a739-ad5e0e552b22\", \"intent_id\": \"intent_1165805c98294f0cb2ac5a11f"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:11:19.335882+00:00",
+     "d": "{\"fill_id\": \"0727b032-e5b9-9f00-b864-7f456af9498a\", \"exchange_order_id\": \"01a18ff0-7558-75aa-a739-ad5e0e552b22\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T03:19:37.696220+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -6.264, \"counterfactual_no_pnl_cents\": 11.687999999999999}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT302315-15",
+   "asset": "KXXRP15M",
+   "held_side": "no",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.16,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T03:10:58.993017+00:00",
+   "submit_epoch": 1793416249.1838174,
+   "submit_to_fill_s": 9.8,
+   "decision_id": "cand_e367cba68c81a0c84da0c05c:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 252.0,
+   "zscore": -1.2182462415971151,
+   "dist_to_strike": -0.0009481316229782681,
+   "book_age_ms": 48,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 7,
+   "yes_ask": 8,
+   "no_bid": 92,
+   "no_ask": 93,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 92,
+     "cp": 0.9147570452684546,
+     "ev": -6.878295473154545,
+     "lcb": -8.878295473154544,
+     "ge": -0.5242954731545457,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 2.685,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7900.671625137329
+    },
+    {
+     "side": "yes",
+     "px": 7,
+     "cp": 0.06090677519741444,
+     "ev": -9.447322480258556,
+     "lcb": -11.447322480258556,
+     "ge": -0.9093224802585564,
+     "fee": 0.13,
+     "asr": 5.5,
+     "giveback": 0.895,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7900.671625137329
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T03:10:48.033372+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:10:54.662830+00:00",
+     "d": "{\"order_intent_id\": \"intent_774b50c6e68c4afa8b9322ee5c556f20\", \"exchange_order_id\": \"01a18ff0-3ea8-774a-ba29-3e4a88155abf\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T03:10:54.726638+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXXRP15M-26OCT302315-15\", \"order_id\": \"01a18ff0-3ea8-774a-ba29-3e4a88155abf\", \"intent_id\": \"intent_774b50c6e68c4afa8b9322ee5"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:11:05.013942+00:00",
+     "d": "{\"fill_id\": \"0727b031-b9e9-a7e4-c480-2c32d27899d7\", \"exchange_order_id\": \"01a18ff0-3ea8-774a-ba29-3e4a88155abf\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T03:17:29.930902+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -7.143, \"counterfactual_no_pnl_cents\": 46.986000000000004}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT302300-00",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1471,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T02:56:59.301885+00:00",
+   "submit_epoch": 1793415354.3984325,
+   "submit_to_fill_s": 64.9,
+   "decision_id": "cand_53ee3a0c6627f13150476066:maker_bid",
+   "run_id": "20261031014619_13012_a97f5df8",
+   "tte_at_decision": 246.0,
+   "zscore": -0.9267752967595515,
+   "dist_to_strike": -0.00071169686985171,
+   "book_age_ms": 57,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": null,
+   "yes_ask": 1,
+   "no_bid": 99,
+   "no_ask": null,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 92,
+     "cp": 0.9141676231954943,
+     "ev": -6.512237680450577,
+     "lcb": -8.512237680450577,
+     "ge": -0.5832376804505768,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 2.26,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7006.666543722153
+    },
+    {
+     "side": "yes",
+     "px": 7,
+     "cp": 0.06457306296275632,
+     "ev": -12.607945955976621,
+     "lcb": -18.27686487489554,
+     "ge": -0.5426937037243686,
+     "fee": 0.13,
+     "asr": 5.5,
+     "giveback": 0.7533333333333334,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 7006.666543722153
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T02:55:53.994279+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:02:47.214767+00:00",
+     "d": "{\"order_intent_id\": \"intent_f9af53d044344403a3e279abfa96bd9c\", \"exchange_order_id\": \"01a18fe2-9e60-72d7-99bf-1f7ad4965879\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T03:02:47.215766+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT302300-00\", \"order_id\": \"01a18fe2-9e60-72d7-99bf-1f7ad4965879\", \"intent_id\": \"intent_f9af53d044344403a3e279ab"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T03:03:10.447166+00:00",
+     "d": "{\"fill_id\": \"0727b06c-cf81-b909-78d7-ca59c4443335\", \"exchange_order_id\": \"01a18fe2-9e60-72d7-99bf-1f7ad4965879\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T03:06:16.050535+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -42.858, \"counterfactual_no_pnl_cents\": 31.324}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXETH15M-26OCT302115-15",
+   "asset": "KXETH15M",
+   "held_side": "no",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.16,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-31T01:11:56.857831+00:00",
+   "submit_epoch": 1793409094.2362564,
+   "submit_to_fill_s": 22.6,
+   "decision_id": "cand_34c7f2a8e51b3952fde9a4bf:maker_bid",
+   "run_id": "20261031010644_4404_2f0db6b0",
+   "tte_at_decision": 207.0,
+   "zscore": -1.4814779814284766,
+   "dist_to_strike": -0.0008235582166625455,
+   "book_age_ms": 64,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": null,
+   "yes_ask": 1,
+   "no_bid": 99,
+   "no_ask": null,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 92,
+     "cp": 0.9399295947401807,
+     "ev": -3.863540525981937,
+     "lcb": -5.8635405259819375,
+     "ge": 1.9929594740180634,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 2.1875,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 745.901689529419
+    },
+    {
+     "side": "yes",
+     "px": 7,
+     "cp": 0.056486369265302316,
+     "ev": -9.528423357157713,
+     "lcb": -15.33331697417899,
+     "ge": -1.351363073469769,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.7291666666666667,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 745.901689529419
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-31T01:11:33.248527+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T01:15:39.283808+00:00",
+     "d": "{\"order_intent_id\": \"intent_793deeae830f41fc864117b606fef997\", \"exchange_order_id\": \"01a18f83-1940-7b10-88f9-986efe5b462b\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-31T01:15:39.321737+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXETH15M-26OCT302115-15\", \"order_id\": \"01a18f83-1940-7b10-88f9-986efe5b462b\", \"intent_id\": \"intent_793deeae830f41fc864117b60"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-31T01:15:46.944786+00:00",
+     "d": "{\"fill_id\": \"0727b18e-84c1-9272-7f19-b58941f24ecf\", \"exchange_order_id\": \"01a18f83-1940-7b10-88f9-986efe5b462b\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-31T01:16:02.296387+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -42.858, \"counterfactual_no_pnl_cents\": 46.986000000000004}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXXRP15M-26OCT301945-45",
+   "asset": "KXXRP15M",
+   "held_side": "yes",
+   "held_px": 98,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.04,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T23:40:19.829829+00:00",
+   "submit_epoch": 1793403611.1220565,
+   "submit_to_fill_s": 8.7,
+   "decision_id": "cand_776930d5ae1c1b3f89816c12:maker_bid",
+   "run_id": "20261030233832_7728_ac6921eb",
+   "tte_at_decision": 289.0,
+   "zscore": 2.3329672676235567,
+   "dist_to_strike": 0.002069351230424952,
+   "book_age_ms": 0,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 99,
+   "yes_ask": 99,
+   "no_bid": 1,
+   "no_ask": 1,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 1,
+     "cp": 0.01297777218562668,
+     "ev": -4.9620047188453755,
+     "lcb": -9.46768039452105,
+     "ge": 0.2977772185626679,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 0.895,
+     "bias": -1.684893738267632,
+     "evst": "FRESH",
+     "evage": 72.10013961791992
+    },
+    {
+     "side": "yes",
+     "px": 98,
+     "cp": 0.9686122865913005,
+     "ev": -6.788402919817315,
+     "lcb": -12.201034498764685,
+     "ge": -1.1387713408699485,
+     "fee": 0.04,
+     "asr": 1.5,
+     "giveback": 2.685,
+     "bias": -4.0,
+     "evst": "FRESH",
+     "evage": 72.10013961791992
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T23:40:10.921675+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T23:42:38.621982+00:00",
+     "d": "{\"order_intent_id\": \"intent_7c611dfe9f1f40648202dad9422dbb88\", \"exchange_order_id\": \"01a18f2f-6b60-7154-afee-0df1553948f4\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T23:42:38.634064+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXXRP15M-26OCT301945-45\", \"order_id\": \"01a18f2f-6b60-7154-afee-0df1553948f4\", \"intent_id\": \"intent_7c611dfe9f1f40648202dad9"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T23:42:41.746234+00:00",
+     "d": "{\"fill_id\": \"0727b391-7181-b50e-3cc6-5bf3d8a907cc\", \"exchange_order_id\": \"01a18f2f-6b60-7154-afee-0df1553948f4\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-30T23:47:36.783473+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 11.687999999999999, \"counterfactual_no_pnl_cents\": -6.264}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT301715-15",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.12,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T21:10:09.430901+00:00",
+   "submit_epoch": 1793394607.984596,
+   "submit_to_fill_s": 1.4,
+   "decision_id": "cand_a004024f2f9c060ed263d2c9:maker_bid",
+   "run_id": "20261030184151_9604_a8962cf5",
+   "tte_at_decision": 293.0,
+   "zscore": -1.6699772504679922,
+   "dist_to_strike": -0.002415010217350941,
+   "book_age_ms": 80,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 5,
+   "yes_ask": 6,
+   "no_bid": 94,
+   "no_ask": 95,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 94,
+     "cp": 0.9565888610326811,
+     "ev": -4.2311138967318795,
+     "lcb": -6.2311138967318795,
+     "ge": 1.6588861032681201,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 2.26,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 230.2927691936493
+    },
+    {
+     "side": "yes",
+     "px": 5,
+     "cp": 0.04341113896731886,
+     "ev": -5.022219436601447,
+     "lcb": -7.022219436601447,
+     "ge": -0.6588861032681144,
+     "fee": 0.1,
+     "asr": 5.5,
+     "giveback": 0.7533333333333334,
+     "bias": -4.0,
+     "evst": "FRESH",
+     "evage": 230.2927691936493
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T21:10:07.771796+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T21:10:11.150256+00:00",
+     "d": "{\"order_intent_id\": \"intent_082d164c4fb54cc385df8115b17ddb90\", \"exchange_order_id\": \"01a18ea6-0780-739c-97d0-f2afbe534bcd\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T21:10:11.203434+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT301715-15\", \"order_id\": \"01a18ea6-0780-739c-97d0-f2afbe534bcd\", \"intent_id\": \"intent_082d164c4fb54cc385df8115"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T21:10:15.471628+00:00",
+     "d": "{\"fill_id\": \"0727b43e-2a21-b37a-e99c-7fe8a3e64289\", \"exchange_order_id\": \"01a18ea6-0780-739c-97d0-f2afbe534bcd\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T21:16:55.114680+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -0.0, \"counterfactual_no_pnl_cents\": 0.0}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT301630-30",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 93,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.14,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T20:23:02.471602+00:00",
+   "submit_epoch": 1793391756.2339435,
+   "submit_to_fill_s": 26.2,
+   "decision_id": "cand_6365b1b82cf9b97779d77f69:maker_bid",
+   "run_id": "20261030184151_9604_a8962cf5",
+   "tte_at_decision": 444.0,
+   "zscore": -1.631022031515634,
+   "dist_to_strike": -0.0027064317554658756,
+   "book_age_ms": 226,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 5,
+   "yes_ask": 7,
+   "no_bid": 93,
+   "no_ask": 95,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 93,
+     "cp": 0.9535982000732486,
+     "ev": -3.5561799926751467,
+     "lcb": -5.556179992675147,
+     "ge": 2.359820007324853,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 2.26,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 589.1636238098145
+    },
+    {
+     "side": "yes",
+     "px": 5,
+     "cp": 0.046401799926751364,
+     "ev": -4.120153340658198,
+     "lcb": -6.120153340658198,
+     "ge": -0.3598200073248639,
+     "fee": 0.12,
+     "asr": 4.875,
+     "giveback": 0.7533333333333334,
+     "bias": -4.0,
+     "evst": "FRESH",
+     "evage": 589.1636238098145
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T20:22:36.031175+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T20:22:38.997711+00:00",
+     "d": "{\"order_intent_id\": \"intent_b70df0fc025c42e98a941147e438866f\", \"exchange_order_id\": \"01a18e7a-82e0-7812-9742-5733720717e9\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T20:22:39.033564+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT301630-30\", \"order_id\": \"01a18e7a-82e0-7812-9742-5733720717e9\", \"intent_id\": \"intent_b70df0fc025c42e98a941147"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T20:23:07.172383+00:00",
+     "d": "{\"fill_id\": \"0727b791-2321-a4b0-df11-dd9913b53d51\", \"exchange_order_id\": \"01a18e7a-82e0-7812-9742-5733720717e9\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T20:30:24.714061+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -30.791999999999998, \"counterfactual_no_pnl_cents\": 41.064}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXBTC15M-26OCT301600-00",
+   "asset": "KXBTC15M",
+   "held_side": "yes",
+   "held_px": 94,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.12,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T19:52:16.291011+00:00",
+   "submit_epoch": 1793389927.732361,
+   "submit_to_fill_s": 8.6,
+   "decision_id": "cand_2fde2408efbcb5e02574cbbf:maker_bid",
+   "run_id": "20261030184151_9604_a8962cf5",
+   "tte_at_decision": 477.0,
+   "zscore": 2.265381023017045,
+   "dist_to_strike": 0.0036752020870860227,
+   "book_age_ms": 1,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 95,
+   "yes_ask": 96,
+   "no_bid": 4,
+   "no_ask": 5,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 5,
+     "cp": 0.026925780635996266,
+     "ev": -2.5053529708831324,
+     "lcb": -4.505352970883132,
+     "ge": -2.307421936400374,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 0.5879310344827586,
+     "bias": -4.0,
+     "evst": "FRESH",
+     "evage": 1163.6626601219177
+    },
+    {
+     "side": "yes",
+     "px": 94,
+     "cp": 0.9730742193640037,
+     "ev": -2.8968974828373715,
+     "lcb": -5.707423798626846,
+     "ge": 3.3074219364003787,
+     "fee": 0.1,
+     "asr": 1.5,
+     "giveback": 1.7637931034482757,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 1163.6626601219177
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T19:52:03.321436+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T19:52:44.084360+00:00",
+     "d": "{\"order_intent_id\": \"intent_646f65681731404da3b73ca3eed27d35\", \"exchange_order_id\": \"01a18e5e-a228-705b-a1e3-c39f916006a9\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T19:52:44.086357+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXBTC15M-26OCT301600-00\", \"order_id\": \"01a18e5e-a228-705b-a1e3-c39f916006a9\", \"intent_id\": \"intent_646f65681731404da3b73ca3"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T19:52:45.553726+00:00",
+     "d": "{\"fill_id\": \"0727b724-5429-b8dd-59b6-8a8bffda4171\", \"exchange_order_id\": \"01a18e5e-a228-705b-a1e3-c39f916006a9\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-30T20:00:46.572588+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 35.22, \"counterfactual_no_pnl_cents\": -30.659999999999997}"
+    }
+   ],
+   "settled_outcome": "yes"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT301430-30",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 95,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.1,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T18:26:59.865730+00:00",
+   "submit_epoch": 1793384813.3459444,
+   "submit_to_fill_s": 6.5,
+   "decision_id": "cand_200f29ffd40aa6596f15e2d4:maker_bid",
+   "run_id": "20261030172829_3032_aa202657",
+   "tte_at_decision": 187.0,
+   "zscore": -1.6491218707380695,
+   "dist_to_strike": -0.001913290727183229,
+   "book_age_ms": 29,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 4,
+   "yes_ask": 5,
+   "no_bid": 95,
+   "no_ask": 96,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 95,
+     "cp": 0.961910995045887,
+     "ev": -4.724287592185494,
+     "lcb": -6.724287592185494,
+     "ge": 1.1910995045886996,
+     "fee": 0.09,
+     "asr": 1.5,
+     "giveback": 2.2983870967741935,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 1660.5562415122986
+    },
+    {
+     "side": "yes",
+     "px": 4,
+     "cp": 0.03808900495411309,
+     "ev": -9.284657108275326,
+     "lcb": -12.638085679703897,
+     "ge": -0.1910995045886911,
+     "fee": 0.09,
+     "asr": 4.875,
+     "giveback": 0.7661290322580646,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 1660.5562415122986
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T18:26:52.799360+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T18:26:58.206506+00:00",
+     "d": "{\"order_intent_id\": \"intent_892ff33f7af94ac796ecdda213d127ae\", \"exchange_order_id\": \"01a18e10-95b0-7763-9654-e548d99c141b\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T18:26:58.289617+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT301430-30\", \"order_id\": \"01a18e10-95b0-7763-9654-e548d99c141b\", \"intent_id\": \"intent_892ff33f7af94ac796ecdda2"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T18:27:05.754627+00:00",
+     "d": "{\"fill_id\": \"0727b652-3151-8119-5359-7126e0dd03df\", \"exchange_order_id\": \"01a18e10-95b0-7763-9654-e548d99c141b\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T18:35:46.029258+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -24.594, \"counterfactual_no_pnl_cents\": 29.298000000000002}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT301400-00",
+   "asset": "KXSOL15M",
+   "held_side": "no",
+   "held_px": 97,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.06,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T17:53:39.423264+00:00",
+   "submit_epoch": 1793382811.0831995,
+   "submit_to_fill_s": 8.3,
+   "decision_id": "cand_30c3cb8fe6b7e32067ac6a9e:maker_bid",
+   "run_id": "20261030172829_3032_aa202657",
+   "tte_at_decision": 390.0,
+   "zscore": -2.368023409258433,
+   "dist_to_strike": -0.0039640326225596515,
+   "book_age_ms": 1126,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 2,
+   "yes_ask": 3,
+   "no_bid": 97,
+   "no_ask": 98,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 97,
+     "cp": 0.9835645559812476,
+     "ev": -6.354968314918713,
+     "lcb": -10.392142227962188,
+     "ge": 1.3564555981247617,
+     "fee": 0.06,
+     "asr": 1.5,
+     "giveback": 2.09625,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 261.5094609260559
+    },
+    {
+     "side": "yes",
+     "px": 2,
+     "cp": 0.016435444018752434,
+     "ev": -4.621205598124757,
+     "lcb": -6.621205598124757,
+     "ge": -0.35645559812475663,
+     "fee": 0.06,
+     "asr": 1.5,
+     "giveback": 0.69875,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 261.5094609260559
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T17:53:30.327945+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T17:53:34.712073+00:00",
+     "d": "{\"order_intent_id\": \"intent_7620a65f3b5d41fcac2c5c0efe56242e\", \"exchange_order_id\": \"01a18df2-0190-7eeb-bb3e-fe437d971ae3\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T17:53:34.798749+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXSOL15M-26OCT301400-00\", \"order_id\": \"01a18df2-0190-7eeb-bb3e-fe437d971ae3\", \"intent_id\": \"intent_7620a65f3b5d41fcac2c5c0ef"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T17:53:52.199435+00:00",
+     "d": "{\"fill_id\": \"0727ba3a-9371-a6a1-8970-1f167195bfbf\", \"exchange_order_id\": \"01a18df2-0190-7eeb-bb3e-fe437d971ae3\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T18:06:03.955293+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -12.395999999999999, \"counterfactual_no_pnl_cents\": 17.532}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT301400-00",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 97,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": 0.0386,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T17:53:27.486290+00:00",
+   "submit_epoch": 1793382802.6593034,
+   "submit_to_fill_s": 4.8,
+   "decision_id": "cand_a05273f7ef8e4ee82e5dbe6c:maker_bid",
+   "run_id": "20261030172829_3032_aa202657",
+   "tte_at_decision": 398.0,
+   "zscore": -2.722288941276144,
+   "dist_to_strike": -0.004077094143810266,
+   "book_age_ms": 1195,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 1,
+   "yes_ask": 3,
+   "no_bid": 97,
+   "no_ask": 99,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 97,
+     "cp": 0.99,
+     "ev": -3.876387096774192,
+     "lcb": -5.876387096774192,
+     "ge": 2.0000000000000018,
+     "fee": 0.06,
+     "asr": 1.5,
+     "giveback": 2.2983870967741935,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 253.47386932373047
+    },
+    {
+     "side": "yes",
+     "px": 1,
+     "cp": 0.010000000000000009,
+     "ev": -8.695129032258064,
+     "lcb": -11.683129032258064,
+     "ge": 8.673617379884035e-16,
+     "fee": 0.06,
+     "asr": 4.875,
+     "giveback": 0.7661290322580646,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 253.47386932373047
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T17:53:22.283117+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T17:53:27.087498+00:00",
+     "d": "{\"order_intent_id\": \"intent_16442f9b21254fcfae8716bb7dcc777d\", \"exchange_order_id\": \"01a18df1-e250-7d2b-9949-cdbc90c463d4\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T17:53:27.163020+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXDOGE15M-26OCT301400-00\", \"order_id\": \"01a18df1-e250-7d2b-9949-cdbc90c463d4\", \"intent_id\": \"intent_16442f9b21254fcfae8716bb"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T17:53:40.933477+00:00",
+     "d": "{\"fill_id\": \"0727ba36-3531-b7a5-a264-2dcbee5af988\", \"exchange_order_id\": \"01a18df1-e250-7d2b-9949-cdbc90c463d4\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T18:01:34.127300+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -6.396000000000001, \"counterfactual_no_pnl_cents\": 17.532}"
+    }
+   ],
+   "settled_outcome": "no"
+  }
+ ],
+ "losers": [
+  {
+   "ticker": "KXBTC15M-26OCT301130-30",
+   "asset": "KXBTC15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 2.0,
+   "fees": 0,
+   "net": -1.84,
+   "n_legs": 4,
+   "n_exits": 1,
+   "first_fill": "2026-10-30T15:19:24.152207+00:00",
+   "submit_epoch": 1793373516.1603298,
+   "submit_to_fill_s": 48.0,
+   "decision_id": "cand_16514b1465dccae2779dde94:maker_bid",
+   "run_id": "BTC_15M_1793373514.810296_36e6d353",
+   "tte_at_decision": 685.0,
+   "zscore": 1.4005129305447863,
+   "dist_to_strike": 0.00426058557327194,
+   "book_age_ms": 157,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 92,
+   "yes_ask": 93,
+   "no_bid": 7,
+   "no_ask": 8,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.059999943320204085,
+     "ev": -6.714383728196643,
+     "lcb": -9.56141075522367,
+     "ge": -1.0000056679795921,
+     "fee": 0.13,
+     "asr": 4.5,
+     "giveback": 0.5683333333333334,
+     "bias": -2.3439823001433084,
+     "evst": "FRESH",
+     "evage": 614.3642392158508
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9260749179406188,
+     "ev": -2.3282076054746814,
+     "lcb": -4.328207605474681,
+     "ge": 0.6074917940618763,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 1.7049999999999998,
+     "bias": -2.438300600463442,
+     "evst": "FRESH",
+     "evage": 614.3642392158508
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-30T15:18:35.055635+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T15:18:41.863251+00:00",
+     "d": "{\"order_intent_id\": \"intent_a45e90280c2649a683a9148844f5af2a\", \"exchange_order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-30T15:18:41.864251+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXBTC15M-26OCT301130-30\", \"order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\", \"intent_id\": \"intent_a45e90280c2649a683a91488"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T15:19:27.936324+00:00",
+     "d": "{\"fill_id\": \"0727b8f7-8161-b56b-1e50-be9d17ece8da\", \"exchange_order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T15:19:28.165672+00:00",
+     "d": "{\"fill_id\": \"0727b8f7-8161-901f-b742-61c02c09b66e\", \"exchange_order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T15:19:28.436544+00:00",
+     "d": "{\"fill_id\": \"0727b8f7-8161-938f-643e-2c0f7baf58ee\", \"exchange_order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-30T15:19:28.862794+00:00",
+     "d": "{\"fill_id\": \"0727b8f7-8161-a773-5f83-c10a56861396\", \"exchange_order_id\": \"01a18d64-30e0-7a55-9442-edf240bad27e\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-30T15:31:22.184207+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -553.014, \"counterfactual_no_pnl_cents\": 557.142}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXETH15M-26OCT291215-15",
+   "asset": "KXETH15M",
+   "held_side": "yes",
+   "held_px": 92,
+   "contracts": 6.0,
+   "fees": 0.0326,
+   "net": -5.5246,
+   "n_legs": 2,
+   "n_exits": 1,
+   "first_fill": "2026-10-29T16:08:52.380686+00:00",
+   "submit_epoch": 1793290131.3406098,
+   "submit_to_fill_s": 1.0,
+   "decision_id": "cand_0ae4198c23c7faa91c9951dd:maker_bid",
+   "run_id": "ETH_15M_1793290129.613951_5152c08f",
+   "tte_at_decision": 370.0,
+   "zscore": 1.3493464319959758,
+   "dist_to_strike": 0.002721755447737247,
+   "book_age_ms": 83,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 92,
+   "yes_ask": 93,
+   "no_bid": 7,
+   "no_ask": 8,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 7,
+     "cp": 0.08015717363307817,
+     "ev": -3.383735282221175,
+     "lcb": -5.383735282221175,
+     "ge": 1.0157173633078165,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 0.7173076923076924,
+     "bias": 0.03914495322129908,
+     "evst": "FRESH",
+     "evage": 3767.260412454605
+    },
+    {
+     "side": "yes",
+     "px": 92,
+     "cp": 0.9198428263669218,
+     "ev": -1.836640440230898,
+     "lcb": -3.836640440230898,
+     "ge": -0.01571736330782114,
+     "fee": 0.13,
+     "asr": 1.5,
+     "giveback": 2.151923076923077,
+     "bias": -4.0,
+     "evst": "FRESH",
+     "evage": 3767.260412454605
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-29T16:08:49.856610+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_yes\"], \"selected_side\": \"yes\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-29T16:08:55.832390+00:00",
+     "d": "{\"order_intent_id\": \"intent_62ca67f8d40d4e52ad317e440c99639d\", \"exchange_order_id\": \"01a1886b-da20-7de0-8309-bbaf9b45e0e4\"}"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-29T16:08:55.882385+00:00",
+     "d": "{\"fill_id\": \"01a1886b-da20-7de0-8309-bbaf9b45e0e4\", \"exchange_order_id\": \"01a1886b-da20-7de0-8309-bbaf9b45e0e4\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"buy\", \"fill_price_selected_side_c"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-29T16:08:56.006261+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"yes\", \"ticker\": \"KXETH15M-26OCT291215-15\", \"order_id\": \"01a1886b-da20-7de0-8309-bbaf9b45e0e4\", \"intent_id\": \"intent_62ca67f8d40d4e52ad317e44"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-29T16:17:09.022305+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -553.014, \"counterfactual_no_pnl_cents\": 0.0}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXETH15M-26OCT282030-30",
+   "asset": "KXETH15M",
+   "held_side": "no",
+   "held_px": 93,
+   "contracts": 6.0,
+   "fees": 0,
+   "net": -1.5299,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-29T00:23:29.824176+00:00",
+   "submit_epoch": 1793233407.1806662,
+   "submit_to_fill_s": 2.6,
+   "decision_id": "cand_a9113ea1c5bcdb28c43d5848:maker_bid",
+   "run_id": "ETH_15M_1793233404.427115_669569d6",
+   "tte_at_decision": 396.0,
+   "zscore": -1.2349273960323048,
+   "dist_to_strike": -0.0016085153700221811,
+   "book_age_ms": 49,
+   "quote_owner": "WS_FRESH_VERIFIED",
+   "degraded": 0,
+   "book_crossed": 0,
+   "yes_bid": 6,
+   "yes_ask": 7,
+   "no_bid": 93,
+   "no_ask": 94,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 93,
+     "cp": 0.9194410301256544,
+     "ev": -6.909973910511491,
+     "lcb": -8.909973910511491,
+     "ge": -1.055896987434568,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 2.1980769230769233,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 212.73998308181763
+    },
+    {
+     "side": "yes",
+     "px": 6,
+     "cp": 0.06388487003593193,
+     "ev": -7.307784251467535,
+     "lcb": -12.639363198835955,
+     "ge": 0.38848700359319366,
+     "fee": 0.12,
+     "asr": 1.5,
+     "giveback": 0.7326923076923078,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 212.73998308181763
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-29T00:23:24.741040+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-29T00:23:31.942719+00:00",
+     "d": "{\"order_intent_id\": \"intent_a56daf0c91e04866b50ba0bdd8dac93b\", \"exchange_order_id\": \"01a1850a-53e8-75c2-8306-607498e0e25f\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": "Order submitted successfully",
+     "event_ts_utc": "2026-10-29T00:23:31.972067+00:00",
+     "d": "{\"to_state\": \"EXECUTED\", \"from_state\": \"RECEIVED\", \"side\": \"no\", \"ticker\": \"KXETH15M-26OCT282030-30\", \"order_id\": \"01a1850a-53e8-75c2-8306-607498e0e25f\", \"intent_id\": \"intent_a56daf0c91e04866b50ba0bdd"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-29T00:23:34.530073+00:00",
+     "d": "{\"fill_id\": \"07279123-1c49-8978-3c1b-3ad421459963\", \"exchange_order_id\": \"01a1850a-53e8-75c2-8306-607498e0e25f\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_no",
+     "event_ts_utc": "2026-10-29T00:31:49.335631+00:00",
+     "d": "{\"settled_yes\": false, \"settlement_value_cents\": 0, \"counterfactual_yes_pnl_cents\": -36.792, \"counterfactual_no_pnl_cents\": 41.064}"
+    }
+   ],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXSOL15M-26OCT281730-30",
+   "asset": "KXSOL15M",
+   "held_side": "yes",
+   "held_px": 93,
+   "contracts": 6.0,
+   "fees": 0,
+   "net": -5.58,
+   "n_legs": 2,
+   "n_exits": 1,
+   "first_fill": "2026-10-28T21:24:43.675647+00:00",
+   "submit_epoch": 1793222613.5988386,
+   "submit_to_fill_s": 70.1,
+   "decision_id": "cand_ad44c0c18e8c4d0c4e8120cd:maker_bid",
+   "run_id": "SOL_15M_1793222608.563251_6d15c087",
+   "tte_at_decision": null,
+   "zscore": null,
+   "dist_to_strike": null,
+   "book_age_ms": null,
+   "quote_owner": null,
+   "degraded": null,
+   "book_crossed": null,
+   "yes_bid": null,
+   "yes_ask": null,
+   "no_bid": null,
+   "no_ask": null,
+   "side_ev": [],
+   "lifecycle_events": [],
+   "settled_outcome": "no"
+  },
+  {
+   "ticker": "KXDOGE15M-26OCT281300-00",
+   "asset": "KXDOGE15M",
+   "held_side": "no",
+   "held_px": 90,
+   "contracts": 6.0,
+   "fees": 0,
+   "net": -5.4,
+   "n_legs": 1,
+   "n_exits": 1,
+   "first_fill": "2026-10-28T16:51:58.496755+00:00",
+   "submit_epoch": 1793206272.5065694,
+   "submit_to_fill_s": 46.0,
+   "decision_id": "cand_3a88c7373f41108cbe85f861:maker_bid",
+   "run_id": "DOGE_15M_1793206272.148381_abe8a2a2",
+   "tte_at_decision": 528.0,
+   "zscore": -1.3586229364242974,
+   "dist_to_strike": -0.0027981058975462634,
+   "book_age_ms": 233,
+   "quote_owner": "REST_VERIFIED_DEGRADED",
+   "degraded": 1,
+   "book_crossed": 0,
+   "yes_bid": 79,
+   "yes_ask": 83,
+   "no_bid": 17,
+   "no_ask": 21,
+   "side_ev": [
+    {
+     "side": "no",
+     "px": 90,
+     "cp": 0.9218828635804439,
+     "ev": -3.9759636419556115,
+     "lcb": -5.9759636419556115,
+     "ge": 2.188286358044389,
+     "fee": 0.16,
+     "asr": 1.5,
+     "giveback": 2.4562500000000003,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 345.9125244617462
+    },
+    {
+     "side": "yes",
+     "px": 9,
+     "cp": 0.06564999675501164,
+     "ev": -21.017326082074593,
+     "lcb": -33.10490183965035,
+     "ge": -2.435000324498836,
+     "fee": 0.16,
+     "asr": 5.5,
+     "giveback": 0.8187500000000001,
+     "bias": 0.0,
+     "evst": "FRESH",
+     "evage": 345.9125244617462
+    }
+   ],
+   "lifecycle_events": [
+    {
+     "event_type": "MODEL_SELECTED",
+     "stage": "MODEL",
+     "reason_code": "selected",
+     "event_ts_utc": "2026-10-28T16:51:12.297421+00:00",
+     "d": "{\"decision\": \"ENTER\", \"reason_codes\": [\"selected\", \"best_executable_edge_no\"], \"selected_side\": \"no\", \"route\": \"maker_bid\"}"
+    },
+    {
+     "event_type": "ORDER_SUBMITTED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-28T16:54:50.266301+00:00",
+     "d": "{\"order_intent_id\": \"intent_ea782076f2d64e22b41946beca460cf5\", \"exchange_order_id\": \"01a1836c-47d0-7114-af94-afe21c9df001\"}"
+    },
+    {
+     "event_type": "ORDER_FILLED",
+     "stage": "EXECUTION",
+     "reason_code": null,
+     "event_ts_utc": "2026-10-28T16:55:03.624115+00:00",
+     "d": "{\"fill_id\": \"07278edf-8911-8eaa-25aa-f302e089abc1\", \"exchange_order_id\": \"01a1836c-47d0-7114-af94-afe21c9df001\", \"execution_outcome_side\": \"yes\", \"execution_action\": \"sell\", \"fill_price_selected_side_"
+    },
+    {
+     "event_type": "SETTLEMENT_RESOLVED",
+     "stage": "OUTCOME",
+     "reason_code": "settled_yes",
+     "event_ts_utc": "2026-10-28T17:02:58.552668+00:00",
+     "d": "{\"settled_yes\": true, \"settlement_value_cents\": 100, \"counterfactual_yes_pnl_cents\": 544.944, \"counterfactual_no_pnl_cents\": -541.248}"
+    }
+   ],
+   "settled_outcome": "yes"
+  }
+ ],
+ "generated_utc": "2026-10-31T22:48:51.733635Z",
+ "method": "fills+attempts+decision_audit join; lane=pinned_fav; era>=2026-10-28"
+}
