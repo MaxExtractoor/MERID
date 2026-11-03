@@ -3465,15 +3465,20 @@ class KalshiVenueClient(EventVenueClient):
             retries=result.retries,
         )
 
-    async def batch_cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+    async def batch_cancel_orders(
+        self,
+        order_ids: List[str],
+        market_tickers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """Batch cancel up to 20 orders in a single API call.
 
-        Kalshi supports batch cancel via POST /portfolio/orders/batch_cancel
-        with a list of order_ids. This is more efficient than individual cancels
-        and reduces rate limit pressure.
+        Kalshi V2 batch cancel: DELETE /portfolio/events/orders/batched with
+        per-item {order_id, market_ticker?}.  market_ticker enables shard
+        auto-routing — required for non-shard-0 (e.g. 15m shard-2) orders.
 
         Args:
             order_ids: List of order IDs to cancel (max 20 per Kalshi limits)
+            market_tickers: Optional {order_id: ticker} map for shard routing
 
         Returns:
             Dict with canceled, failed, and not_found order IDs
@@ -3485,10 +3490,21 @@ class KalshiVenueClient(EventVenueClient):
             logger.warning(f"batch_cancel_orders: Truncating to 20 orders (received {len(order_ids)})")
             order_ids = order_ids[:20]
 
+        # V2: DELETE /portfolio/events/orders/batched with per-item
+        # {order_id, market_ticker?}.  market_ticker drives shard auto-routing;
+        # callers may pass market_tickers={order_id: ticker} — without it the
+        # cancel defaults to shard 0 and cannot reach shard-2 (15m) orders.
+        items = []
+        for oid in order_ids:
+            item = {"order_id": oid}
+            tkr = (market_tickers or {}).get(oid) if market_tickers else None
+            if tkr:
+                item["market_ticker"] = tkr
+            items.append(item)
         result = await self._request_with_resilience(
-            "POST",
-            "/portfolio/orders/batch_cancel",
-            json_data={"order_ids": order_ids},
+            "DELETE",
+            "/portfolio/events/orders/batched",
+            json_data={"orders": items},
             operation_name=f"batch_cancel_orders({len(order_ids)})",
         )
 
@@ -3501,11 +3517,25 @@ class KalshiVenueClient(EventVenueClient):
                 "error": str(result.error),
             }
 
-        # Parse response - Kalshi returns canceled orders in the response
+        # V2 response: {orders: [{order_id, client_order_id?, reduced_by,
+        # ts_ms?, error?}]} — per-item error entries fail individually.
         data = result.data or {}
-        canceled = data.get("canceled", [])
-        failed = data.get("failed", [])
-        not_found = data.get("not_found", [])
+        resp_orders = data.get("orders", [])
+        canceled: List[str] = []
+        failed: List[str] = []
+        not_found: List[str] = []
+        for o in resp_orders:
+            oid = o.get("order_id")
+            if not oid:
+                continue
+            err = o.get("error")
+            if err:
+                if "not found" in str(err).lower() or "does not exist" in str(err).lower():
+                    not_found.append(oid)
+                else:
+                    failed.append(oid)
+            else:
+                canceled.append(oid)
 
         # Determine which orders weren't in the response
         canceled_set = set(canceled)
@@ -3602,45 +3632,50 @@ class KalshiVenueClient(EventVenueClient):
                     spec.get("action"), spec.get("side"), spec.get("ticker"),
                 )
                 continue
+            # V2 item shape: {ticker, side(bid|ask YES-leg), count, price
+            # (dollars), time_in_force, self_trade_prevention_type}.  Convert
+            # legacy action/outcome/cents via the canonical converter — same
+            # mapping as place_order (BUY_NO@N -> ask@(100-N)).
+            _price_cents = spec.get("yesprice") or spec.get("yes_price") \
+                if _spec_side == "yes" \
+                else spec.get("noprice") or spec.get("no_price")
+            if _price_cents is None:
+                logger.error(
+                    "[KALSHI_BATCH_ORDER_VALIDATION] Missing price for side=%s "
+                    "ticker=%s - skipping order", _spec_side, spec.get("ticker")
+                )
+                continue
+            try:
+                kalshi_side, yes_space_cents = legacy_to_v2(
+                    _spec_action, _spec_side, int(_price_cents)
+                )
+            except ValueError as exc:
+                logger.error(
+                    "[KALSHI_BATCH_ORDER_VALIDATION] legacy_to_v2 failed: %s "
+                    "ticker=%s - skipping order", exc, spec.get("ticker")
+                )
+                continue
             order = {
                 "client_order_id": spec.get("client_order_id", str(uuid.uuid4())),
                 "ticker": spec["ticker"],
-                "side": _spec_side,
-                "action": _spec_action,
-                "type": spec.get("type", "limit"),
-                "count": spec["count"],
-            }
-
-            # Kalshi API expects yesprice/noprice (without underscore)
-            if "yesprice" in spec or "yes_price" in spec:
-                order["yesprice"] = spec.get("yesprice") or spec.get("yes_price")
-            if "noprice" in spec or "no_price" in spec:
-                order["noprice"] = spec.get("noprice") or spec.get("no_price")
-            
-            # VALIDATION: Ensure at most one price field is set per order
-            price_fields = ["yesprice", "noprice", "yespricedollars", "nopricedollars"]
-            set_prices = [f for f in price_fields if f in order]
-            if len(set_prices) > 1:
-                logger.error(
-                    "[KALSHI_BATCH_ORDER_VALIDATION] Multiple price fields in order: %s | "
-                    "ticker=%s",
-                    set_prices, spec.get("ticker")
-                )
-                continue  # Skip this order, don't fail entire batch
-            if "subaccount" in spec:
-                order["subaccount_number"] = spec["subaccount"]
-            if "time_in_force" in spec:
-                order["time_in_force"] = merid_time_in_force_to_kalshi_api(
+                "side": kalshi_side,
+                "price": f"{yes_space_cents / 100.0:.4f}",
+                "count": f"{float(spec['count']):.2f}",
+                "time_in_force": merid_time_in_force_to_kalshi_api(
                     spec["time_in_force"]
-                )
+                ) if "time_in_force" in spec else "good_till_canceled",
+                "self_trade_prevention_type": spec.get(
+                    "self_trade_prevention_type", "maker"
+                ),
+            }
+            if "subaccount" in spec:
+                order["subaccount"] = spec["subaccount"]
             if "post_only" in spec:
                 order["post_only"] = spec["post_only"]
             if "reduce_only" in spec:
                 order["reduce_only"] = spec["reduce_only"]
             if "order_group_id" in spec:
                 order["order_group_id"] = spec["order_group_id"]
-            if "self_trade_prevention_type" in spec:
-                order["self_trade_prevention_type"] = spec["self_trade_prevention_type"]
 
             body_orders.append(order)
 
@@ -3648,7 +3683,7 @@ class KalshiVenueClient(EventVenueClient):
 
         result = await self._request_with_resilience(
             "POST",
-            "/portfolio/orders/batched",
+            "/portfolio/events/orders/batched",
             json_data=payload,
             operation_name=f"batch_place_orders({len(order_specs)})",
         )
