@@ -8268,56 +8268,60 @@ async def _run_one_cycle(self, tick: int) -> None:
                                 desired_ws.add(nxt.market.market_id)
                         # 2026-11-03: deterministic next-window fallback.
                         # The catalog fetch filters status=open and Kalshi
-                        # only flips a market to open at window start, so
-                        # get_next_15m_market cannot see the upcoming market
-                        # early — observed ws_subscribed=False for minutes
-                        # into a live window.  The 15m ticker grid is
-                        # mechanical (ticker time IS expiry, ET): derive the
-                        # next window's ticker from the current market's
-                        # expiry +15m and pre-subscribe inside the lead so
-                        # its book streams contiguously from rollover.
+                        # only flips a market to open at window start — and
+                        # the snapshot goes EMPTY around expiry (the dying
+                        # market leaves 'open' status before close_time), so
+                        # neither get_current_15m_market nor
+                        # get_next_15m_market can see anything in the exact
+                        # window where prewarm is needed (observed
+                        # snapshot_markets=0 at T-5s, ws_subscribed=False
+                        # for minutes into a live window).  The 15m ticker
+                        # grid is mechanical (ticker time IS expiry, ET) and
+                        # the window grid aligns in UTC and ET, so the next
+                        # window's ticker derives from wall clock alone:
+                        # current window ends at the next 15m boundary, next
+                        # window ends 15m later.  Prewarm inside the lead so
+                        # the new book streams contiguously from rollover.
+                        # Subscription is metadata-independent; trading the
+                        # new market still requires its REST metadata via
+                        # the normal catalog path.
                         _prewarm_lead_s = float(
                             os.environ.get("MERID_WS_PREWARM_NEXT_LEAD_S", "120"))
-                        for asset in self._allowed_assets:
+                        try:
+                            _now_utc = datetime.now(timezone.utc)
+                            _base = _now_utc.replace(second=0, microsecond=0)
+                            _win_end = _base.replace(minute=0) + timedelta(
+                                minutes=((_base.minute // 15) + 1) * 15)
+                            _secs = (_win_end - _now_utc).total_seconds()
+                        except Exception:
+                            _secs = -1.0
+                        if 0.0 < _secs <= _prewarm_lead_s:
                             try:
-                                _cur = catalog_snapshot.get_current_15m_market(asset)
-                                _exp = getattr(_cur, "expires_at", None) or getattr(
-                                    getattr(_cur, "market", None), "expires_at", None)
-                                if _exp is None:
-                                    continue
-                                if isinstance(_exp, str):
-                                    _exp = datetime.fromisoformat(
-                                        _exp.replace("Z", "+00:00"))
-                                elif isinstance(_exp, (int, float)):
-                                    _exp = datetime.fromtimestamp(
-                                        _exp, tz=timezone.utc)
-                                if _exp.tzinfo is None:
-                                    _exp = _exp.replace(tzinfo=timezone.utc)
-                                _secs = (
-                                    _exp - datetime.now(timezone.utc)
-                                ).total_seconds()
-                                if not (0.0 < _secs <= _prewarm_lead_s):
-                                    continue
                                 from zoneinfo import ZoneInfo
                                 from merid.event_venues.kalshi.ticker_utils import (
                                     format_ticker_for_15m_window,
                                 )
-                                _next_exp = _exp + timedelta(minutes=15)
+                                _next_exp = _win_end + timedelta(minutes=15)
                                 _et = _next_exp.astimezone(
                                     ZoneInfo("America/New_York"))
-                                _nxt_t = (
-                                    f"{format_ticker_for_15m_window(asset, _next_exp)}"
-                                    f"-{_et.minute:02d}"
-                                )
-                                if _nxt_t not in desired_ws:
-                                    desired_ws.add(_nxt_t)
-                                    logger.info(
-                                        "[WS-PREWARM-NEXT] derived next-window "
-                                        "ticker=%s asset=%s expiry_in=%.0fs",
-                                        _nxt_t, asset, _secs,
+                                for asset in self._allowed_assets:
+                                    _nxt_t = (
+                                        f"{format_ticker_for_15m_window(asset, _next_exp)}"
+                                        f"-{_et.minute:02d}"
                                     )
-                            except Exception:
-                                continue
+                                    if _nxt_t not in desired_ws:
+                                        desired_ws.add(_nxt_t)
+                                        logger.info(
+                                            "[WS-PREWARM-NEXT] derived "
+                                            "next-window ticker=%s asset=%s "
+                                            "window_ends_in=%.0fs",
+                                            _nxt_t, asset, _secs,
+                                        )
+                            except Exception as _dn_exc:
+                                logger.warning(
+                                    "[WS-PREWARM-NEXT] deterministic derive "
+                                    "failed: %s", _dn_exc,
+                                )
                         if desired_ws and desired_ws != self._last_ws_desired_tickers:
                             added = sorted(desired_ws - self._last_ws_desired_tickers)
                             removed = sorted(self._last_ws_desired_tickers - desired_ws)
