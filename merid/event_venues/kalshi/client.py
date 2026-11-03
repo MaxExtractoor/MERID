@@ -3408,11 +3408,14 @@ class KalshiVenueClient(EventVenueClient):
                 order_result.error
             )
         
-        # Step 2: Attempt cancel
+        # Step 2: Attempt cancel — V2 (DELETE /portfolio/events/orders/{id}).
+        # market_ticker is required for shard auto-routing (15m markets are on
+        # shard 2; omitting it defaults to shard 0 and 404s).
+        params = {"market_ticker": market_id} if market_id else {"exchange_index": -1}
         result = await self._request_with_resilience(
-            "POST",
-            f"/portfolio/orders/{order_id}/cancel",
-            json_data={"order_id": order_id},
+            "DELETE",
+            f"/portfolio/events/orders/{order_id}",
+            params=params,
             operation_name=f"cancel_order({order_id})",
         )
 
@@ -3690,27 +3693,61 @@ class KalshiVenueClient(EventVenueClient):
         Raises:
             ValueError: If no amendments provided
         """
+        # V2 migration (2026-11-03): legacy /portfolio/orders mutations are
+        # deprecated (410 deprecated_v1_order_endpoint).  Amend V2 requires
+        # {ticker, side(bid|ask on the YES leg), price(dollars), count(total
+        # fillable = filled + remaining)} — so fetch the order for its
+        # action/side/counts when callers only supply a legacy price field.
+        order_d: Dict[str, Any] = {}
+        try:
+            oinfo = await self._request_with_resilience(
+                "GET", f"/portfolio/orders/{order_id}",
+                operation_name=f"get_order_for_amend({order_id})",
+            )
+            if oinfo.success and isinstance(oinfo.data, dict):
+                order_d = oinfo.data.get("order") or oinfo.data
+        except Exception:
+            order_d = {}
+
+        action = order_d.get("action") or "buy"
+        outcome = order_d.get("side")
+        if outcome not in ("yes", "no"):
+            outcome = "yes" if yes_price is not None else "no"
+        price_cents = yes_price if outcome == "yes" else no_price
+        if price_cents is None:
+            price_cents = yes_price if yes_price is not None else no_price
+        ticker = order_d.get("ticker") or order_d.get("market_ticker")
+
         body: Dict[str, Any] = {}
-        # Kalshi API expects yesprice/noprice (without underscore)
-        if yes_price is not None:
-            body["yesprice"] = yes_price
-        if no_price is not None:
-            body["noprice"] = no_price
+        if price_cents is not None:
+            kalshi_side, yes_space_cents = legacy_to_v2(action, outcome, int(price_cents))
+            body["side"] = kalshi_side
+            body["price"] = f"{yes_space_cents / 100.0:.4f}"
         if new_count is not None:
             body["count"] = str(new_count)
+        elif order_d:
+            _filled = float(order_d.get("fill_count_fp") or order_d.get("fill_count") or 0)
+            _resting = float(
+                order_d.get("remaining_count_fp") or order_d.get("remaining_count")
+                or order_d.get("count_fp") or order_d.get("count") or 0
+            )
+            if _filled or _resting:
+                body["count"] = f"{_filled + _resting:.2f}"
+        if ticker:
+            body["ticker"] = ticker
+        if order_d.get("client_order_id"):
+            body["client_order_id"] = order_d["client_order_id"]
 
-        # VALIDATION: Ensure at most one price field is set
-        price_fields = ["yesprice", "noprice", "yespricedollars", "nopricedollars"]
-        set_prices = [f for f in price_fields if f in body]
-        if len(set_prices) > 1:
-            raise ValueError(f"Cannot set multiple price fields: {set_prices}")
-
-        if not body:
+        if "price" not in body and "count" not in body:
             raise ValueError("Nothing to amend - provide yes_price, no_price, or new_count")
+        if "ticker" not in body or "side" not in body or "price" not in body or "count" not in body:
+            raise ValueError(
+                f"V2 amend requires ticker+side+price+count; got {sorted(body.keys())}"
+            )
 
         result = await self._request_with_resilience(
             "POST",
-            f"/portfolio/orders/{order_id}/amend",
+            f"/portfolio/events/orders/{order_id}/amend",
             json_data=body,
             operation_name=f"amend_order({order_id})",
         )
@@ -3772,61 +3809,60 @@ class KalshiVenueClient(EventVenueClient):
         if not result.success:
             raise KalshiValidationError(
                 f"Amend failed: {result.error}",
-                field="amend_operation",
+                details={"field": "amend_operation"},
             )
 
         new_order = result.data
         if not isinstance(new_order, dict):
             raise KalshiValidationError(
                 "Invalid order response format",
-                field="response_format",
+                details={"field": "response_format"},
             )
 
-        # Validate order_id matches
-        if new_order.get("order_id") != order_id:
+        # Validate order_id matches (present in both v1 full-order and V2 thin-ack)
+        if new_order.get("order_id") not in (None, order_id):
             raise KalshiValidationError(
                 f"Order ID mismatch: expected {order_id}, got {new_order.get('order_id')}",
-                field="order_id",
+                details={"field": "order_id"},
             )
 
-        # Validate ticker matches
-        if new_order.get("ticker") != expected_ticker:
+        # V2 thin acks omit ticker/price/status — validate only fields present.
+        if new_order.get("ticker") is not None and new_order.get("ticker") != expected_ticker:
             raise KalshiValidationError(
                 f"Ticker mismatch: expected {expected_ticker}, got {new_order.get('ticker')}",
-                field="ticker",
+                details={"field": "ticker"},
             )
 
-        # Validate price updates
-        if yes_price is not None:
+        if yes_price is not None and new_order.get("yes_price") is not None:
             actual_yes = new_order.get("yes_price")
             if actual_yes != yes_price:
                 raise KalshiValidationError(
                     f"yes_price not updated: expected {yes_price}, got {actual_yes}",
-                    field="yes_price",
+                    details={"field": "yes_price"},
                 )
 
-        if no_price is not None:
+        if no_price is not None and new_order.get("no_price") is not None:
             actual_no = new_order.get("no_price")
             if actual_no != no_price:
                 raise KalshiValidationError(
                     f"no_price not updated: expected {no_price}, got {actual_no}",
-                    field="no_price",
+                    details={"field": "no_price"},
                 )
 
-        # Validate count update via remaining_count
-        if new_count is not None:
+        # Validate count update via remaining_count (V2 emits fp string)
+        if new_count is not None and new_order.get("remaining_count") is not None:
             remaining = new_order.get("remaining_count")
-            if str(remaining) != str(new_count):
+            if str(remaining) not in (str(new_count), f"{float(new_count):.2f}"):
                 raise KalshiValidationError(
                     f"remaining_count mismatch: expected {new_count}, got {remaining}",
-                    field="remaining_count",
+                    details={"field": "remaining_count"},
                 )
 
-        # Validate status
-        if validate_status and new_order.get("status") != "resting":
+        # Validate status only when present (V2 thin ack omits it)
+        if validate_status and new_order.get("status") not in (None, "resting"):
             raise KalshiValidationError(
                 f"Unexpected status after amend: {new_order.get('status')}",
-                field="status",
+                details={"field": "status"},
             )
 
         return new_order
@@ -4042,7 +4078,7 @@ class KalshiVenueClient(EventVenueClient):
 
         result = await self._request_with_resilience(
             "POST",
-            f"/portfolio/orders/{order_id}/decrease",
+            f"/portfolio/events/orders/{order_id}/decrease",
             json_data=body,
             operation_name=f"decrease_order({order_id})",
         )
