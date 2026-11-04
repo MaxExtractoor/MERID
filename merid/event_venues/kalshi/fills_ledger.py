@@ -3305,7 +3305,23 @@ class KalshiFillsLedger:
         "manual_operator_close", "settlement", "reconciliation",
     })
 
-    def _order_rows_conflict(self, fill: KalshiFill) -> bool:
+    def _build_order_rows_index(self) -> Dict[Any, list]:
+        """order_id -> sibling rows, for same-order conflict checks.
+
+        2026-11-04: ``_order_rows_conflict`` scanned the whole ledger per fill
+        — O(n²) per ``summary()`` call — which pinned the uvicorn loop for
+        seconds per ``/api/kalshi/risk`` request ("backend unreachable").
+        """
+        idx: Dict[Any, list] = {}
+        for row in tuple(self._fills.values()) + tuple(
+            self._superseded_mirror_fills.values()
+        ):
+            oid = getattr(row, "order_id", None)
+            if oid:
+                idx.setdefault(oid, []).append(row)
+        return idx
+
+    def _order_rows_conflict(self, fill: KalshiFill, order_index: Any = None) -> bool:
         """True when a mirror row's signed delta opposes the venue aggregate
         on the same order — direction contested; all rows on the order are
         quarantined from authoritative calculation pending order-ack/position
@@ -3317,9 +3333,14 @@ class KalshiFillsLedger:
         mirror_d = 0
         venue_d = 0
         has_mirror = has_venue = False
-        for other in tuple(self._fills.values()) + tuple(
-            self._superseded_mirror_fills.values()
-        ):
+        siblings = (
+            order_index.get(oid, ())
+            if order_index is not None
+            else tuple(self._fills.values()) + tuple(
+                self._superseded_mirror_fills.values()
+            )
+        )
+        for other in siblings:
             if getattr(other, "order_id", None) != oid:
                 continue
             fid2 = str(getattr(other, "fill_id", "") or "")
@@ -3337,15 +3358,15 @@ class KalshiFillsLedger:
             and (mirror_d > 0) != (venue_d > 0)
         )
 
-    def _canonical_fill_class(self, fill: KalshiFill) -> str:
+    def _canonical_fill_class(self, fill: KalshiFill, order_index: Any = None) -> str:
         fid = str(getattr(fill, "fill_id", "") or "")
         lr = (getattr(fill, "liquidity_role", "") or "").lower()
         if lr == "settlement" or fid.startswith("settlement:"):
             return "non_execution"
         src = (getattr(fill, "ingestion_source", "") or "").lower()
-        if self._order_rows_conflict(fill):
+        if self._order_rows_conflict(fill, order_index):
             return "excluded"
-        if self._is_superseded_live_router_fill(fill):
+        if self._is_superseded_live_router_fill(fill, order_index):
             return "excluded"
         if fid.startswith("live_router_") or src == "order_router":
             return "provisional"
@@ -3360,6 +3381,7 @@ class KalshiFillsLedger:
     ) -> "CanonicalFillsView":
         """Authoritative execution view; see class contract above."""
         auth, prov, excl = [], [], []
+        _gcf_order_idx = self._build_order_rows_index()
         for f in list(self._fills.values()):
             if since is not None:
                 try:
@@ -3373,7 +3395,7 @@ class KalshiFillsLedger:
                 continue
             if asset and f.asset != asset:
                 continue
-            cls = self._canonical_fill_class(f)
+            cls = self._canonical_fill_class(f, order_index=_gcf_order_idx)
             (auth if cls == "authoritative" else
              prov if cls == "provisional" else excl).append(f)
 
@@ -4728,6 +4750,7 @@ class KalshiFillsLedger:
         provisional_fill_count = 0
         non_execution_fill_count = 0
         provisional_fees = Decimal("0")
+        _order_idx = self._build_order_rows_index()
 
         for fill in fills_snapshot:
             # CANONICAL-VIEW: superseded mirrors and conflict-quarantined
@@ -4736,7 +4759,7 @@ class KalshiFillsLedger:
             # Settlement pseudo-fills are non-executions: their proceeds
             # (real settlement payouts) still count as cash, tracked under
             # their own count.
-            _cls = self._canonical_fill_class(fill)
+            _cls = self._canonical_fill_class(fill, order_index=_order_idx)
             if _cls == "non_execution":
                 non_execution_fill_count += 1
             elif _cls == "excluded":
@@ -5259,7 +5282,7 @@ class KalshiFillsLedger:
                 return None
         return None
 
-    def _is_superseded_live_router_fill(self, fill: KalshiFill) -> bool:
+    def _is_superseded_live_router_fill(self, fill: KalshiFill, order_index: Any = None) -> bool:
         """True when a provisional fill's order has an authoritative fill.
 
         A ``live_router_`` row is a provisional mirror of one economic
@@ -5275,7 +5298,12 @@ class KalshiFillsLedger:
         oid = getattr(fill, "order_id", None)
         if not oid:
             return False
-        for other in self._fills.values():
+        siblings = (
+            order_index.get(oid, ())
+            if order_index is not None
+            else self._fills.values()
+        )
+        for other in siblings:
             if other is fill:
                 continue
             if getattr(other, "order_id", None) != oid:
@@ -5319,6 +5347,7 @@ class KalshiFillsLedger:
         # timestamp priors, so a closing fill saw zero exposure and booked the
         # pair-mint leg instead of the netting credit — a $1/contract inversion.
         exclude_seen = False
+        _order_idx = self._build_order_rows_index()
         for f in self._fills.values():
             if f.market_ticker != market_ticker:
                 continue
@@ -5327,7 +5356,7 @@ class KalshiFillsLedger:
                 continue
             if exclude_order_id and f.order_id == exclude_order_id:
                 continue
-            if self._is_superseded_live_router_fill(f):
+            if self._is_superseded_live_router_fill(f, order_index=_order_idx):
                 continue
             if not self._fill_position_effective(f):
                 continue
@@ -7366,6 +7395,7 @@ class KalshiFillsLedger:
         total = Decimal("0")
         residual_yes_cc = 0
         found = False
+        _order_idx = self._build_order_rows_index()
         for fill in list(self._fills.values()):
             if fill.market_ticker != market_ticker:
                 continue
@@ -7375,7 +7405,7 @@ class KalshiFillsLedger:
             # residual exposure; their presence is surfaced separately via
             # get_market_accounting_coverage so a zero residual is never
             # silently read as "verified flat".
-            if self._canonical_fill_class(fill) != "authoritative":
+            if self._canonical_fill_class(fill, order_index=_order_idx) != "authoritative":
                 continue
             if asof_ts is not None:
                 ct = getattr(fill, "created_time", None)
@@ -7409,12 +7439,13 @@ class KalshiFillsLedger:
         reasons: List[str] = []
         verified = 0
         conflict = False
+        _order_idx = self._build_order_rows_index()
         for fill in tuple(self._fills.values()) + tuple(
             self._superseded_mirror_fills.values()
         ):
             if getattr(fill, "market_ticker", None) != market_ticker:
                 continue
-            cls = self._canonical_fill_class(fill)
+            cls = self._canonical_fill_class(fill, order_index=_order_idx)
             if cls == "authoritative":
                 verified += 1
             elif cls == "non_execution":
@@ -7422,7 +7453,7 @@ class KalshiFillsLedger:
             else:
                 counts[cls] = counts.get(cls, 0) + 1
                 reasons.append(f"{getattr(fill, 'fill_id', '')}:{cls}")
-                if self._order_rows_conflict(fill):
+                if self._order_rows_conflict(fill, order_index=_order_idx):
                     conflict = True
         if conflict:
             status = "conflict_quarantined"
