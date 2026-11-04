@@ -56,6 +56,17 @@ except ImportError:
 logger = get_logger("merid.settings")
 
 
+# Last-good balance cache for _fetch_kalshi_balance: repeated Settings()
+# instantiations re-use a recent successful fetch instead of re-hitting the
+# REST endpoint (recurring 429s in prod were driven partly by
+# re-instantiation), and transient failures fall back to the last real
+# value rather than a $0 placeholder.  Module-level because Settings is a
+# Pydantic model (annotated class attrs become ModelPrivateAttr).
+_BALANCE_CACHE_TTL_S = 300.0
+_LAST_GOOD_BALANCE_USD = 0.0
+_LAST_GOOD_BALANCE_TS = 0.0
+
+
 class AssetCapConfig(BaseModel):
     """Per-asset daily notional limits configuration."""
     max_daily_notional_usd: float
@@ -1184,7 +1195,8 @@ class Settings(BaseSettings):
         Fetch actual account balance from Kalshi API.
 
         Returns:
-            Balance in USD as float. Returns 0 if unable to fetch.
+            Balance in USD as float. Returns the last-good cached balance
+            when the endpoint is transiently unreachable, else 0.
         """
         if self.MERID_REPLAY_TAPE:
             logger.info("[KALSHI_BALANCE_FETCH] Replay mode: skipping live balance fetch")
@@ -1201,7 +1213,15 @@ class Settings(BaseSettings):
         if not key_id or not private_key_path:
             logger.error("[KALSHI_BALANCE_FETCH] Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PATH")
             return 0.0
-        
+
+        # Serve from cache when a recent fetch succeeded — avoids hammering
+        # the endpoint every Settings() init.
+        import time as _time
+        global _LAST_GOOD_BALANCE_USD, _LAST_GOOD_BALANCE_TS
+        age = _time.time() - _LAST_GOOD_BALANCE_TS
+        if _LAST_GOOD_BALANCE_TS > 0 and age < _BALANCE_CACHE_TTL_S:
+            return _LAST_GOOD_BALANCE_USD
+
         try:
             # Load private key
             private_key_data = Path(private_key_path).read_bytes()
@@ -1247,10 +1267,39 @@ class Settings(BaseSettings):
             
             # URL uses the base_url which already has /trade-api/v2
             url = f"{base_url}/portfolio/balance"
-            # OLD-HARDWARE FIX: Increased from 10s to 30s for slow connections
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
+            # 2026-11-03: bounded retry on 429/5xx/timeouts with jittered
+            # backoff honoring Retry-After.  Previously a single 429 dropped
+            # straight to the $0 placeholder even though the endpoint answers
+            # cleanly a second or two later.
+            import random as _rand
+            response = None
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status is not None and status not in (408, 425, 429) and status < 500:
+                        raise  # auth/validation failures are not retriable
+                    if attempt == 2:
+                        raise
+                    retry_after = 0.0
+                    resp = getattr(exc, "response", None)
+                    try:
+                        retry_after = float(resp.headers.get("Retry-After", 0)) if resp is not None else 0.0
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    backoff = max(retry_after, (1.5 * (2 ** attempt)) + _rand.uniform(0, 0.5))
+                    logger.warning(
+                        "[KALSHI_BALANCE_FETCH] attempt %d/3 failed (%s); retrying in %.1fs",
+                        attempt + 1, exc, backoff,
+                    )
+                    __import__('time').sleep(backoff)
+
             data = response.json()
             # Kalshi returns an integer ``balance`` (cents) but also the exact
             # sub-cent ``balance_dollars`` string.  For a 1.97c account the
@@ -1269,9 +1318,17 @@ class Settings(BaseSettings):
                 "[KALSHI_BALANCE_FETCH] Successfully fetched Kalshi balance: $%.4f USD (from %s)",
                 balance_usd, env
             )
+            _LAST_GOOD_BALANCE_USD = balance_usd
+            _LAST_GOOD_BALANCE_TS = _time.time()
             return balance_usd
-            
+
         except Exception as exc:
+            if _LAST_GOOD_BALANCE_USD > 0 and _LAST_GOOD_BALANCE_TS > 0:
+                logger.warning(
+                    "[KALSHI_BALANCE_FETCH] Failed to fetch balance: %s — using last-good $%.4f (%.0fs old)",
+                    exc, _LAST_GOOD_BALANCE_USD, _time.time() - _LAST_GOOD_BALANCE_TS,
+                )
+                return _LAST_GOOD_BALANCE_USD
             logger.error("[KALSHI_BALANCE_FETCH] Failed to fetch balance: %s", exc)
             return 0.0
     

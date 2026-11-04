@@ -302,13 +302,53 @@ _queue_listener: Optional[QueueListener] = None
 _log_dropped = 0
 _log_queue_max_seen = 0
 
+# Depth-aware level shed (2026-11-03): the drain serializes to two rotating
+# files + console, so a sustained producer burst turns the queue into a
+# 10-30min write-ahead lag — emitted lines stop describing "now", which is
+# exactly when operators most need them.  Once depth crosses the shed bound
+# the handler drops bulk records at enqueue so the backlog stays shallow and
+# fresh instead of growing an ever-older deferred stream.  INFO (except the
+# audit-critical prefixes below) sheds first; WARNING sheds only under the
+# much higher emergency bound; ERROR/CRITICAL are never shed.  Records that
+# are shed are counted and surfaced via get_log_queue_stats / [LOG-QUEUE].
+_LOG_SHED_INFO_DEPTH = int(os.getenv("MERID_LOG_SHED_INFO_DEPTH", "20000"))
+_LOG_SHED_WARN_DEPTH = int(os.getenv("MERID_LOG_SHED_WARN_DEPTH", "150000"))
+_log_shed_info = 0
+_log_shed_warn = 0
+
+# Audit- and safety-critical INFO lines that must survive a depth shed.
+# Rejections/fills also persist in the ledgers, but these lines are the
+# operational spine of an incident review (orders, risk, halts, preflight).
+_LOG_SHED_KEEP_PREFIXES = (
+    "[ORDER-ACK", "[ORDER-", "[FILL", "[POSITION", "[RECONCILE", "[RECON-",
+    "[TRADE-DECISION", "[ENTRY-", "[EXIT-", "[RISK", "[BANKROLL", "[HALT",
+    "[PREFLIGHT", "[LIVE-", "[LIFESPAN", "[STARTUP", "[WATCHDOG", "[KILL",
+    "[SETTLE", "[SETTLEMENT", "[BALANCE", "[SHARD", "[TRANSFER", "[AMEND",
+    "[CANCEL", "[CHASE", "[PROTECTIVE", "[STOP-", "[SESSION-",
+)
+
 
 class _NonBlockingQueueHandler(QueueHandler):
     """QueueHandler that drops instead of blocking the calling thread."""
 
     def enqueue(self, record: logging.LogRecord) -> None:
-        global _log_dropped, _log_queue_max_seen
+        global _log_dropped, _log_queue_max_seen, _log_shed_info, _log_shed_warn
         try:
+            depth = self.queue.qsize()
+            if depth > _LOG_SHED_INFO_DEPTH and record.levelno < logging.ERROR:
+                if record.levelno >= logging.WARNING:
+                    if depth <= _LOG_SHED_WARN_DEPTH:
+                        pass  # WARNING survives until the emergency bound
+                    else:
+                        _log_shed_warn += 1
+                        return
+                else:
+                    msg = record.msg
+                    if isinstance(msg, str) and msg.startswith(_LOG_SHED_KEEP_PREFIXES):
+                        pass  # audit-critical INFO always enqueues
+                    else:
+                        _log_shed_info += 1
+                        return
             self.queue.put_nowait(record)
             _d = self.queue.qsize()
             if _d > _log_queue_max_seen:
@@ -436,6 +476,8 @@ def get_log_queue_stats() -> Dict[str, int]:
         "queue_max": _LOG_QUEUE_MAX,
         "queue_max_seen": _log_queue_max_seen,
         "dropped_total": _log_dropped,
+        "shed_info_total": _log_shed_info,
+        "shed_warn_total": _log_shed_warn,
     }
 
 
@@ -463,10 +505,11 @@ def _log_queue_monitor() -> None:
                 level=level,
                 pathname=__file__,
                 lineno=0,
-                msg="[LOG-QUEUE] depth=%d/%d max_seen=%d dropped_total=%d dropped_delta=%d",
+                msg="[LOG-QUEUE] depth=%d/%d max_seen=%d dropped_total=%d shed_info=%d shed_warn=%d dropped_delta=%d",
                 args=(
                     stats["queue_depth"], stats["queue_max"],
-                    stats["queue_max_seen"], stats["dropped_total"], delta,
+                    stats["queue_max_seen"], stats["dropped_total"],
+                    stats["shed_info_total"], stats["shed_warn_total"], delta,
                 ),
                 exc_info=None,
             )
