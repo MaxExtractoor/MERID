@@ -413,6 +413,13 @@ def _validate_fill_keys(agent_id: Optional[str], market_id: Optional[str]) -> tu
 # orderbook events are additionally age-gated downstream (events older than
 # the freshness budget invalidate + resync rather than being replayed).
 _BRIDGE_QUEUE_SIZE = int(os.getenv("MERID_BRIDGE_QUEUE_SIZE", "8192"))
+# 2026-11-04: orderbook events are sharded across this many drain threads.
+# The single kalshi-ws-drain thread capped at ~1900 items/s while roll
+# bursts reach ~4000/s, pinning _thread_queue at a multi-second backlog.
+# The only global-order requirement is the sid sequence check, which now
+# runs in _enqueue_event (strict _msg_queue arrival order); shard threads
+# then apply in parallel with per-ticker FIFO preserved by stable hash.
+_BOOK_DRAIN_SHARDS = max(1, int(os.getenv("MERID_BOOK_DRAIN_SHARDS", "3")))
 
 # Events that must survive market-data backpressure.  A dropped orderbook
 # delta only costs a throttled snapshot resync (the book is invalidated and
@@ -798,6 +805,16 @@ class KalshiWebSocketBridge:
         
         # Legacy queue reference for backward compatibility (will be deprecated)
         self._queue: queue.Queue = self._thread_queue
+
+        # 2026-11-04: per-shard orderbook queues.  Orderbook events route by
+        # stable ticker hash so all frames for one market stay FIFO on one
+        # drain thread; non-orderbook traffic keeps using _thread_queue.
+        self._book_queues: List[queue.Queue] = [
+            queue.Queue(maxsize=_BRIDGE_QUEUE_SIZE)
+            for _ in range(_BOOK_DRAIN_SHARDS)
+        ]
+        self._book_drain_threads: List[threading.Thread] = []
+        self._ms_store = None
 
         # UI coalescing: latest QuoteEvent per market, flushed every 100ms
         self._ui_coalesce_task: Optional[asyncio.Task] = None
@@ -4197,7 +4214,55 @@ class KalshiWebSocketBridge:
                         except Exception:
                             pass
                 self._last_sequence[event_type] = seq
-        
+
+        # 2026-11-04 (drain-thread sharding): the sole kalshi-ws-drain thread
+        # ran the full apply path per delta at ~1900/s while roll bursts hit
+        # ~4000/s, pinning a multi-second backlog.  The only global-order
+        # requirement is the sid sequence check — it runs here in strict
+        # _msg_queue arrival order, and the result rides on the event so
+        # shard drain threads can apply in parallel without re-serializing.
+        _book_q = None
+        if isinstance(event, dict) and event.get("type") in (
+            "orderbook_snapshot", "orderbook_delta", "orderbook_sequence_control"
+        ):
+            _bm = event.get("msg")
+            _bt = (
+                ((_bm.get("market_ticker") or _bm.get("ticker") or _bm.get("series_ticker"))
+                 if isinstance(_bm, dict) else None)
+                or event.get("ticker") or event.get("market_ticker")
+                or event.get("series_ticker") or ""
+            )
+            if event.get("type") == "orderbook_delta":
+                _bsid = event.get("sid")
+                _bseq = (_bm.get("seq") if isinstance(_bm, dict) else None)
+                if _bseq is None:
+                    _bseq = event.get("seq") or event.get("sequence")
+                try:
+                    _bseq_int = int(_bseq) if _bseq is not None else None
+                except (TypeError, ValueError):
+                    _bseq_int = None
+                try:
+                    _store0 = self._ms_store
+                    if _store0 is None:
+                        from merid.event_venues.kalshi.market_state import (
+                            get_kalshi_market_state_store,
+                        )
+                        _store0 = self._ms_store = get_kalshi_market_state_store()
+                    _sc = _store0._check_sid_delta_sequence(_bsid, _bseq_int, _bt)
+                except Exception:
+                    _sc = 0  # fail open to the apply-side check (unstamped)
+                else:
+                    event["_sid_checked"] = 1
+                    if _sc < 0:
+                        # Duplicate/replayed frame — identical drop semantics to
+                        # the old drain-thread check, just earlier in the pipe.
+                        self._events_dropped += 1
+                        return
+                    if _sc > 0:
+                        # Handled by the shard thread (same call, off the loop).
+                        event["_sid_gap"] = (_bsid, _bseq_int, _sc)
+            _book_q = self._book_queues[hash(_bt) % _BOOK_DRAIN_SHARDS]
+
         # Message deduplication check
         if isinstance(event, dict):
             _msg = event.get("msg")
@@ -4236,7 +4301,9 @@ class KalshiWebSocketBridge:
         
         # EVENT-LOOP-FIX: Check queue depth and apply backpressure
         # DUAL-QUEUE BRIDGE PATTERN: _thread_queue is the thread-safe producer queue.
-        current_qsize = self._thread_queue.qsize()
+        # 2026-11-04: orderbook events target a per-shard book queue.
+        _target_q = _book_q if _book_q is not None else self._thread_queue
+        current_qsize = _target_q.qsize()
         queue_pressure = current_qsize / _BRIDGE_QUEUE_SIZE
         
         # Hard backpressure: throttle producer when queue near full
@@ -4254,14 +4321,14 @@ class KalshiWebSocketBridge:
                 current_qsize, PRESSURE_STOP,
             )
 
-            dropped = self._drop_oldest_droppable_event()
+            dropped = self._drop_oldest_droppable_event() if _target_q is self._thread_queue else None
             if dropped is not None:
                 event_type = dropped.get("type") if isinstance(dropped, dict) else "unknown"
                 self._events_dropped += 1
                 _inc_ws_events_dropped(event_type)
                 self._mark_orderbook_drop_untrusted(dropped, "BRIDGE_QUEUE_DROP_OLDEST")
                 logger.debug("[WS-BACKPRESSURE] Dropped oldest droppable event (type=%s)", event_type)
-            elif not self._is_critical_event(event):
+            elif _book_q is not None or not self._is_critical_event(event):
                 # Nothing droppable in the scan window — shed the incoming
                 # market-data event rather than any queued critical one.
                 event_type = event.get("type") if isinstance(event, dict) else "unknown"
@@ -4312,7 +4379,7 @@ class KalshiWebSocketBridge:
         # and can stall the WebSocket callback thread. Only coalesce at extreme queue
         # depth where dropping is preferable to unbounded buffering.
         COALESCE_HIGH_WATERMARK = _BRIDGE_QUEUE_SIZE
-        current_qsize = self._thread_queue.qsize()
+        current_qsize = _target_q.qsize()
         
         # Track max queue size seen for metrics
         if not hasattr(self, '_max_queue_size_seen'):
@@ -4325,14 +4392,21 @@ class KalshiWebSocketBridge:
         # Coalesce if above high watermark
         if current_qsize > COALESCE_HIGH_WATERMARK:
             self._coalesce_queue()
-        
+
         # CRITICAL FIX: Thread-safe queue operations for cross-event-loop calls
         # DUAL-QUEUE BRIDGE PATTERN: Put into thread_queue (thread-safe)
         try:
             # Use put_nowait for thread-safe operation on thread_queue
-            self._thread_queue.put_nowait(event)
+            _target_q.put_nowait(event)
             self._ws_events_enqueued += 1  # Track successful enqueues
         except queue.Full:
+            if _book_q is not None:
+                # Shard queue saturated — drop the orderbook event and mark its
+                # book untrusted so resync restores correctness (fail-closed).
+                self._events_dropped += 1
+                _inc_ws_events_dropped(event.get("type", "unknown"))
+                self._mark_orderbook_drop_untrusted(event, "BOOK_SHARD_QUEUE_FULL")
+                return
             # Evict the oldest droppable event to make room — never a queued
             # critical one.
             dropped = self._drop_oldest_droppable_event()
@@ -4342,7 +4416,7 @@ class KalshiWebSocketBridge:
             # the legacy _queue alias is the same object, but referencing it here
             # is a foot-gun if it is ever reassigned to an asyncio.Queue.
             try:
-                self._thread_queue.put_nowait(event)
+                _target_q.put_nowait(event)
             except queue.Full:
                 # A racing producer refilled the freed slot (or nothing in the
                 # window was droppable).  Never let QueueFull escape into the
@@ -4498,6 +4572,22 @@ class KalshiWebSocketBridge:
         self._drain_thread.start()
         logger.warning("[WS-FORWARDER-LOOP] Drain thread started")
 
+        # 2026-11-04: sharded orderbook drain threads — one per book queue.
+        # _enqueue_event already performed the sid seq check in arrival
+        # order; each shard thread just applies events for its ticker slice.
+        self._book_drain_threads = [
+            threading.Thread(
+                target=self._book_drain_loop,
+                args=(bq,),
+                name=f"kalshi-ws-drain-s{_i}",
+                daemon=True,
+            )
+            for _i, bq in enumerate(self._book_queues)
+        ]
+        for _t in self._book_drain_threads:
+            _t.start()
+        logger.warning("[WS-FORWARDER-LOOP] %d book drain threads started", len(self._book_drain_threads))
+
         try:
             # Run the forward loop (now consumes from async_queue)
             await self._forward_loop()
@@ -4506,6 +4596,9 @@ class KalshiWebSocketBridge:
             if getattr(self, '_drain_thread', None) and self._drain_thread.is_alive():
                 self._drain_thread.join(timeout=2.0)
                 logger.warning("[WS-FORWARDER-LOOP] Drain thread stopped")
+            for _t in self._book_drain_threads:
+                if _t.is_alive():
+                    _t.join(timeout=2.0)
     
     def _drain_loop_thread(self) -> None:
         """Dedicated drain thread: queue.Queue → asyncio.Queue via call_soon_threadsafe.
@@ -4604,6 +4697,27 @@ class KalshiWebSocketBridge:
                 logger.error("[WS-DRAIN-THREAD] call_soon_threadsafe error: %s", e)
 
         logger.warning("[WS-DRAIN-THREAD] Drain thread exiting")
+
+    def _book_drain_loop(self, q: "queue.Queue") -> None:
+        """Per-shard orderbook drain thread (2026-11-04).
+
+        Each shard queue carries a stable-hash slice of tickers, so
+        per-ticker FIFO is preserved while K threads apply in parallel.
+        The sid sequence check already ran in ``_enqueue_event`` (strict
+        _msg_queue arrival order); stamped gaps are handled inside
+        ``apply_orderbook_message`` here, off the WS io loop.
+        """
+        from queue import Empty
+        while not self._shutdown.is_set():
+            try:
+                event = q.get(timeout=0.05)
+            except Empty:
+                continue
+            except Exception as e:
+                logger.error("[WS-BOOK-DRAIN] queue get error: %s", e)
+                break
+            self._apply_orderbook_on_drain(event)
+        logger.warning("[WS-BOOK-DRAIN] shard drain thread exiting")
 
     def _apply_orderbook_on_drain(self, event: Any) -> None:
         """Apply an orderbook event to the state store directly on the drain thread.

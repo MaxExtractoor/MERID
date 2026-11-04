@@ -4333,18 +4333,32 @@ class KalshiMarketStateStore:
                 _seq_int = int(_seq) if _seq is not None else None
             except (TypeError, ValueError):
                 _seq_int = None
-            _sid_check = self._check_sid_delta_sequence(_sid, _seq_int, ticker)
-            if _sid_check < 0:
-                return None  # duplicate/replayed frame on the shared sid stream
-            if _sid_check > 0:
-                self._handle_sid_sequence_gap(
-                    _sid,
-                    _seq_int,
-                    _sid_check,
-                    ticker,
-                    dropped=msg.get("_dropped_delta_frames"),
-                )
-                return None
+            if msg.get("_sid_checked"):
+                # 2026-11-04: the sid sequence was already validated in
+                # strict _msg_queue arrival order inside the bridge
+                # ``_enqueue_event`` (drain-thread sharding).  Only the
+                # stamped gap still needs handling here, on the shard
+                # drain thread — off the WS io loop.
+                _sg = msg.get("_sid_gap")
+                if _sg:
+                    self._handle_sid_sequence_gap(
+                        _sg[0], _sg[1], _sg[2], ticker,
+                        dropped=msg.get("_dropped_delta_frames"),
+                    )
+                    return None
+            else:
+                _sid_check = self._check_sid_delta_sequence(_sid, _seq_int, ticker)
+                if _sid_check < 0:
+                    return None  # duplicate/replayed frame on the shared sid stream
+                if _sid_check > 0:
+                    self._handle_sid_sequence_gap(
+                        _sid,
+                        _seq_int,
+                        _sid_check,
+                        ticker,
+                        dropped=msg.get("_dropped_delta_frames"),
+                    )
+                    return None
 
             if via == "bridge_queue" and has_delta_fields:
                 try:
