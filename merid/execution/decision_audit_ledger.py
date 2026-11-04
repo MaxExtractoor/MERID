@@ -383,6 +383,14 @@ class DecisionAuditLedger:
         # behind whichever slow txn held it (py-spy: ~60s MainThread park in
         # _emit_pre_decision_audit).
         self._writer_start_lock = threading.Lock()
+        # 2026-11-04: schema init gets its own lock.  _ensure_db used to take
+        # self._lock, but the writer thread holds that ~continuously while a
+        # queued-write backlog drains — init could never win it, _db_ready
+        # stayed False, and every _ensure_db caller (incl. signal-eval via
+        # append_decision_event) parked indefinitely.  Init runs on a
+        # separate isolation_level=None connection and never touches
+        # _shared_conn, so the write lock buys nothing here.
+        self._init_lock = threading.Lock()
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         # 2026-10-28: dedicated persistent read connection.  WAL-mode readers
@@ -870,11 +878,14 @@ class DecisionAuditLedger:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self._lock, self._conn(isolation_level=None) as conn:
-                conn.executescript(_SCHEMA)
-                self._migrate(conn)
-                self._register_known_gaps(conn)
-            self._db_ready = True
+            with self._init_lock:
+                if self._db_ready:
+                    return
+                with self._conn(isolation_level=None) as conn:
+                    conn.executescript(_SCHEMA)
+                    self._migrate(conn)
+                    self._register_known_gaps(conn)
+                self._db_ready = True
             if not self._startup_checkpoint_done:
                 self._startup_checkpoint_done = True
                 # Do not wait for other readers during startup maintenance.
@@ -1712,7 +1723,8 @@ class DecisionAuditLedger:
         """
         if not _is_enabled() or not decision_id:
             return None
-        self._ensure_db()
+        if _is_test_context():
+            self._ensure_db()
         if isinstance(event_ts_utc, datetime):
             ts = event_ts_utc.timestamp()
         elif event_ts_utc is None:
@@ -1757,6 +1769,13 @@ class DecisionAuditLedger:
         # stall dumps, 2026-10-28). Queue the append on the serialized writer
         # thread instead — FIFO ordering and crash-tail durability are the
         # same guarantee every other queued audit write already has.
+        # 2026-11-04: _ensure_db() must not run on the caller either — while
+        # _db_ready is false it parks on self._lock behind the cold audit-DB
+        # connect + migration pass (reconcile_fill_outcomes held it; the
+        # signal-eval worker stalled the whole EVAL heartbeat). Queue init
+        # FIFO before this write on the same writer thread.
+        if not self._db_ready:
+            self._submit_write(self._ensure_db)
         self._submit_write(_write)
         return None
 
