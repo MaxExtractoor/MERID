@@ -261,6 +261,13 @@ def _update_regime_state(
     the rest reuse the stored state so one cycle cannot count as N ticks.
     """
     with _REGIME_LOCK:
+        # 2026-11-04: check the tick window against the TTL-cached state
+        # before paying for a forced disk read.  This runs once per asset
+        # per eval on the uvicorn loop; the unconditional force=True made
+        # every call re-read regime_state.json (~5 disk reads/eval cycle).
+        st = _load_regime_state()
+        if ts - float(st.get("last_ts") or 0.0) < _regime_min_tick_s():
+            return st
         st = _load_regime_state(force=True)
         # Stale state (restart gap, clock jump): a hours-old confirmed label
         # must not carry into a fresh session — decay back to the prior.

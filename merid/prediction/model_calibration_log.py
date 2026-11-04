@@ -32,6 +32,43 @@ _ROOT = Path(__file__).resolve().parents[2]
 _lock = threading.Lock()
 _seen: Dict[Tuple[str, str, int], float] = {}
 
+# 2026-11-04: the synchronous mkdir+open+write used to run on the caller's
+# thread — including the uvicorn main loop during decision evaluation —
+# stalling HTTP health endpoints mid-burst.  Records now go on a bounded
+# deque drained by a daemon writer thread; overflow drops telemetry (never
+# the decision path).
+import collections
+
+_MAX_PENDING = 8192
+_pending: "collections.deque" = collections.deque()
+_pending_cv = threading.Condition(_lock)
+_writer_started = False
+
+
+def _writer_loop() -> None:
+    while True:
+        with _pending_cv:
+            while not _pending:
+                _pending_cv.wait()
+            batch = list(_pending)
+            _pending.clear()
+        try:
+            path = log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                for rec in batch:
+                    f.write(json.dumps(rec) + "\n")
+        except Exception as exc:
+            logger.debug("[MODEL-CAL] observation write failed: %s", exc)
+
+
+def _ensure_writer() -> None:
+    global _writer_started
+    if _writer_started:
+        return
+    _writer_started = True
+    threading.Thread(target=_writer_loop, name="model-cal-writer", daemon=True).start()
+
 
 def enabled() -> bool:
     return os.environ.get("MERID_MODEL_CAL_LOG_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -82,10 +119,11 @@ def log_model_observation(
             "fee_cents": None if fee is None else round(fee, 3),
             "gross_edge_c": round(100.0 * p - px, 3),
         }
-        path = log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with _lock, open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+        with _pending_cv:
+            _ensure_writer()
+            if len(_pending) < _MAX_PENDING:
+                _pending.append(rec)
+                _pending_cv.notify()
     except Exception as exc:  # telemetry must never break trading
         logger.debug("[MODEL-CAL] observation log failed: %s", exc)
 
