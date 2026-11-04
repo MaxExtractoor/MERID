@@ -455,7 +455,27 @@ if ($DryRun) {
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
 # Prefer the project virtualenv so the exact package set is used.
-$python = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "py" }
+# 2026-11-04: bypass the .venv redirector (bpo-35797 / joblib pattern).  The
+# redirector wraps its child in a Job Object with KILL_ON_JOB_CLOSE, so any
+# redirector-side exit kernel-kills the real interpreter with NO ExitProcess
+# or WER event -- the silent-death signature observed on live workers.
+# Launching sys._base_executable with __PYVENV_LAUNCHER__=<venv python> gives
+# identical venv site-packages semantics without the shim or the job chain.
+$venvPython = ".\.venv\Scripts\python.exe"
+$python = "py"
+if (Test-Path $venvPython) {
+    $venvPythonAbs = (Resolve-Path $venvPython).Path
+    $baseExe = ((& $venvPythonAbs -c "import sys; print(sys._base_executable)" 2>$null) | Select-Object -Last 1)
+    if ($LASTEXITCODE -eq 0 -and $baseExe -and (Test-Path $baseExe.Trim())) {
+        $env:__PYVENV_LAUNCHER__ = $venvPythonAbs
+        $env:VIRTUAL_ENV = (Resolve-Path ".\.venv").Path
+        $python = $baseExe.Trim()
+        Write-Host "[start_15m] bypassing venv redirector: base=$python (removes job-object silent-kill chain)" -ForegroundColor Cyan
+    } else {
+        $python = $venvPython
+        Write-Host "[start_15m] WARN: base executable unresolved; falling back to venv redirector" -ForegroundColor Yellow
+    }
+}
 # Launch via Start-Process -PassThru so the serving PID is recorded in the
 # fingerprint trail (previously the blocking call gave us no PID until exit).
 $uvicornArgs = @("-m","uvicorn","web.main_15m_lean:app","--host","$ServerHost","--port","$Port","--log-level","info")

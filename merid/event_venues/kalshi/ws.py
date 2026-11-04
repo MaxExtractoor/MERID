@@ -836,6 +836,8 @@ class KalshiWebSocket(EventVenueStream):
                 ping_interval=30,  # HARDENING-FIX (2026-06-05): Increased from 20s to 30s for keepalive tolerance
                 ping_timeout=60,  # BUG-FIX (2026-05-07): Increased from 10s to 60s to tolerate event-loop lag
                 close_timeout=5,
+                compression=None,  # Skip permessage-deflate negotiation; removes compression CPU cost on a hot consumer loop
+                max_queue=4096,  # Default 32 is far too shallow for ~1.2k deltas/s + multi-second loop stalls; overflow backpressures TCP instead of stalling reads
             )
             # DIAGNOSTIC: Log after websockets.connect() returns
             logger.info("[WS-CONNECT-DIAG] websockets.connect() returned successfully with additional_headers")
@@ -866,6 +868,8 @@ class KalshiWebSocket(EventVenueStream):
                     ping_interval=30,  # HARDENING-FIX (2026-06-05): Increased from 20s to 30s for keepalive tolerance
                     ping_timeout=60,  # BUG-FIX (2026-05-07): Increased from 10s to 60s to tolerate event-loop lag
                     close_timeout=5,
+                    compression=None,
+                    max_queue=4096,
                 )
                 logger.info("[WS-CONNECT-DIAG] websockets.connect() returned successfully with extra_headers")
                 self._running = True
