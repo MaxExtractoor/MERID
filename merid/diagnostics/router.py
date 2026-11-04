@@ -70,6 +70,11 @@ async def list_diagnostics() -> Dict[str, Any]:
                 "description": "Check end-to-end signal generation path"
             },
             {
+                "name": "memory",
+                "endpoint": "/diagnostics/memory",
+                "description": "On-demand heap census (RSS, gc type counts, log queue) - ~1-2s GIL pause"
+            },
+            {
                 "name": "all",
                 "endpoint": "/diagnostics/all",
                 "description": "Run all diagnostics and return combined results"
@@ -156,6 +161,47 @@ async def run_end_to_end_signal_path() -> Dict[str, Any]:
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/memory")
+def run_memory_snapshot() -> Dict[str, Any]:
+    """On-demand heap census for the silent-exit memory-growth investigation.
+
+    Sync endpoint (threadpool): gc.get_objects() holds the GIL ~1-2s on a hot
+    process — call manually only; there is no steady-state overhead.
+    """
+    import gc
+    import os
+    from collections import Counter
+
+    import psutil
+
+    proc = psutil.Process(os.getpid())
+    mem = proc.memory_info()
+    counts: Counter = Counter()
+    total = 0
+    for obj in gc.get_objects():
+        counts[type(obj).__name__] += 1
+        total += 1
+    try:
+        from utils.logger import get_log_queue_stats
+        log_queue = get_log_queue_stats()
+    except Exception:
+        log_queue = {}
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": proc.pid,
+        "rss_mb": round(mem.rss / 1048576, 1),
+        "vms_mb": round(mem.vms / 1048576, 1),
+        "num_handles": proc.num_handles(),
+        "num_threads": proc.num_threads(),
+        "gc_counts": list(gc.get_count()),
+        "gc_stats": gc.get_stats(),
+        "gc_thresholds": list(gc.get_threshold()),
+        "total_objects": total,
+        "top_types": counts.most_common(30),
+        "log_queue": log_queue,
+    }
 
 
 @router.get("/all")
