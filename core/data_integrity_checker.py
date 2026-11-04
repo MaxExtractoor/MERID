@@ -948,17 +948,33 @@ class DataSafetyIntegrityChecker:
         
         while not shutdown.is_set():
             try:
-                # Check all registered databases
+                # Check all registered databases.  2026-11-04: the checks
+                # are synchronous inside async signatures (full-file SHA256
+                # + PRAGMA integrity_check) — py-spy caught ~15s MainThread
+                # parks in _calculate_checksum starving the HTTP loop.
+                # Run each coroutine on a worker thread so the event loop
+                # stays responsive; semantics are identical.
+                _loop = asyncio.get_running_loop()
                 for db_path in self._databases:
                     try:
-                        await self.check_database(db_path)
+                        await _loop.run_in_executor(
+                            None,
+                            lambda p=db_path: asyncio.run(
+                                self.check_database(p)
+                            ),
+                        )
                     except Exception as e:
                         logger.error(f"Error checking {db_path}: {e}")
-                
+
                 # Check cross-database relationships
                 for db_a, db_b, _ in self._relationships:
                     try:
-                        await self.check_cross_database_consistency(db_a, db_b)
+                        await _loop.run_in_executor(
+                            None,
+                            lambda a=db_a, b=db_b: asyncio.run(
+                                self.check_cross_database_consistency(a, b)
+                            ),
+                        )
                     except Exception as e:
                         logger.error(f"Error checking cross-db {db_a} <-> {db_b}: {e}")
                 
