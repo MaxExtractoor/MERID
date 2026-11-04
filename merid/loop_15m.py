@@ -6395,7 +6395,14 @@ async def _run_loop(self) -> None:
                 # Call _run_agent_grid_with_timeout which returns candidates
                 # This eliminates the dual call problem
                 # CRITICAL FIX (2026-08-14): Respect allow_new_entries from loop state.
-                allow_new_entries = self._compute_allow_new_entries(cycle_bankroll)
+                # 2026-11-04: _compute_allow_new_entries calls
+                # bridge.get_forward_loop_health() -> _ws_sync_call ->
+                # Future.result(), parking the uvicorn loop while ws-io is
+                # busy (py-spy during API timeouts).  Gate unchanged; the
+                # cross-thread wait now runs on the default executor.
+                allow_new_entries = await asyncio.get_running_loop().run_in_executor(
+                    None, self._compute_allow_new_entries, cycle_bankroll
+                )
                 logger.info("[15m-LOOP] About to call _run_agent_grid_with_timeout tick=%d allow_new_entries=%s", tick_id, allow_new_entries)
                 candidates = await self._run_agent_grid_with_timeout(tick_id, trading_ready=allow_new_entries, allow_new_entries=allow_new_entries)
                 logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)

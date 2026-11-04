@@ -377,6 +377,12 @@ class DecisionAuditLedger:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else _DB_PATH
         self._lock = threading.Lock()
+        # 2026-11-04: separate lock for writer-thread startup.  ``self._lock``
+        # serializes every shared-connection write txn; _submit_write used it
+        # just to spawn the writer thread, so each audit submitter parked
+        # behind whichever slow txn held it (py-spy: ~60s MainThread park in
+        # _emit_pre_decision_audit).
+        self._writer_start_lock = threading.Lock()
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         # 2026-10-28: dedicated persistent read connection.  WAL-mode readers
@@ -618,7 +624,7 @@ class DecisionAuditLedger:
                 pass
             return
         if not self._writer_started:
-            with self._lock:
+            with self._writer_start_lock:
                 if not self._writer_started:
                     self._writer_thread = threading.Thread(
                         target=self._writer_main,
