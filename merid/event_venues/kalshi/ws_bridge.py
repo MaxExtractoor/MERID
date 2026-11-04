@@ -138,6 +138,7 @@ class WSBridgeHealth:
             "stale_threshold_sec": stale_threshold_sec,
         }
 
+import json
 import numbers
 import os
 import queue  # Thread-safe queue for cross-thread communication
@@ -814,6 +815,15 @@ class KalshiWebSocketBridge:
             for _ in range(_BOOK_DRAIN_SHARDS)
         ]
         self._book_drain_threads: List[threading.Thread] = []
+        # 2026-11-04: raw-orderbook bypass — the recv loop hands unparsed
+        # orderbook frames here so the io loop does recv()+put only; the
+        # kalshi-ws-raw-router thread parses and dispatches through the same
+        # _enqueue_event path.  Overflow fails closed via the producer-side
+        # shed (book invalidated -> snapshot resync).
+        self._raw_ob_queue: "queue.Queue" = queue.Queue(
+            maxsize=int(os.getenv("KALSHI_RAW_OB_QUEUE", "32768"))
+        )
+        self._raw_router_thread: Optional[threading.Thread] = None
         self._ms_store = None
 
         # UI coalescing: latest QuoteEvent per market, flushed every 100ms
@@ -4100,6 +4110,21 @@ class KalshiWebSocketBridge:
         call it directly instead of paying the ``ThreadPoolExecutor`` scheduling cost
         that was driving multi-second ``Slow WS callback`` latencies under load.
         PERFORMANCE FIX: Removed excessive diagnostic logging to reduce callback latency.
+
+        2026-11-04: body extracted to ``_enqueue_event_sync`` so the raw
+        orderbook router thread runs the identical path off the WS io loop.
+        """
+        self._enqueue_event_sync(event)
+
+    def _enqueue_event_sync(self, event: Any) -> None:
+        """Synchronous body of ``_enqueue_event``.
+
+        Every step on the orderbook path is non-blocking; the legacy coroutine
+        only awaited the fill dead-letter on queue-full, now scheduled via
+        ``_dead_letter_fill_threadsafe``.  Called on the WS io loop by
+        ``_enqueue_event`` and on the raw-orderbook router thread by
+        ``submit_raw_orderbook`` — the sid sequence check still runs in strict
+        arrival order on whichever caller produces the events.
         """
         # Track events received from WS
         self._events_seen += 1
@@ -4427,7 +4452,7 @@ class KalshiWebSocketBridge:
                     self._fills_dropped += 1
                     if ws_fills_dropped_total:
                         ws_fills_dropped_total.inc()
-                    await self._dead_letter_fill(event)
+                    self._dead_letter_fill_threadsafe(event)
                 else:
                     if self._is_critical_event(event):
                         logger.error(
@@ -4448,6 +4473,83 @@ class KalshiWebSocketBridge:
                     self._fills_dropped,
                     current_qsize,
                 )
+
+    def _dead_letter_fill_threadsafe(self, event: Any) -> None:
+        """Schedule :meth:`_dead_letter_fill` when the caller is not on a loop."""
+        loop = getattr(self, "_ws_loop", None) or getattr(self, "_forward_loop_ref", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(self._dead_letter_fill(event), loop)
+                return
+            except Exception:
+                pass
+        logger.error("[DEAD-LETTER] fill event could not be dead-lettered (loop unavailable)")
+
+    def submit_raw_orderbook(self, raw: str, recv_ns: int, recv_wall_ms: float) -> bool:
+        """Parse and dispatch a raw orderbook frame through ``_enqueue_event_sync``.
+
+        Called with the raw JSON text so the WS io loop only pays recv()+put
+        per frame.  The sid sequence check, dedup, backpressure, shard routing
+        and drop-untrusted handling are the identical ``_enqueue_event`` path —
+        arrival order is preserved because the raw router thread drains a
+        single FIFO.  Returns True when the frame was handled here (False lets
+        the caller fall back to the legacy parse path).
+        """
+        try:
+            data = json.loads(raw)
+        except Exception:
+            self._events_dropped += 1
+            return True
+        if not isinstance(data, dict):
+            return False
+        if data.get("type") not in (
+            "orderbook_snapshot", "orderbook_delta", "orderbook_sequence_control"
+        ):
+            # Substring sniff mispredicted — let the legacy path handle it.
+            return False
+        data["_t_ws_recv_ns"] = recv_ns
+        data["_t_ws_recv_wall_ms"] = recv_wall_ms
+        # pq_wait measures raw-router queue residence for this path.
+        data["_t_pq_dequeue_ns"] = _time.monotonic_ns()
+        _ws = getattr(self, "_ws", None)
+        data["_ws_connection_generation"] = getattr(_ws, "_connection_generation", 0)
+        _nested = data.get("msg")
+        if isinstance(_nested, dict):
+            _nested["_t_ws_recv_ns"] = recv_ns
+            _nested["_t_ws_recv_wall_ms"] = recv_wall_ms
+        # Subscription-flow evidence feeding is_orderbook_subscription_confirmed.
+        try:
+            _note = getattr(_ws, "_note_orderbook_subscription_observation", None)
+            if _note is not None:
+                _note(data)
+        except Exception:
+            pass
+        self._enqueue_event_sync(data)
+        return True
+
+    def _raw_router_loop(self) -> None:
+        """Dedicated thread draining the raw-orderbook queue.
+
+        The measured bottleneck: the WS io loop ran json.loads + seq check +
+        classification + stats per frame (~150-400us) while websockets parsed
+        eagerly on the same loop; at ~440/s sustained and 2500+/s bursts the
+        socket-side buffer accumulated and frames reached the recv stamp
+        already 10-20s venue-old with every downstream queue empty.  The loop
+        now does recv()+put only; parse+dispatch happens here (~30-50us/frame,
+        ~20k+/s capacity).
+        """
+        q = getattr(self, "_raw_ob_queue", None)
+        if q is None:
+            return
+        while not self._ensure_shutdown_event().is_set():
+            try:
+                raw, recv_ns, recv_wall_ms = q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.submit_raw_orderbook(raw, recv_ns, recv_wall_ms)
+            except Exception as e:
+                logger.debug("[WS-RAW-ROUTER] dispatch failed: %s", e)
 
     def _mark_orderbook_drop_untrusted(self, event: Any, reason: str) -> None:
         """Invalidate a ticker's book when its orderbook event is dropped.
@@ -4571,6 +4673,16 @@ class KalshiWebSocketBridge:
         )
         self._drain_thread.start()
         logger.warning("[WS-FORWARDER-LOOP] Drain thread started")
+
+        # Raw-orderbook router thread (2026-11-04): parses raw frames bypassed
+        # off the io loop and dispatches through _enqueue_event_sync.
+        self._raw_router_thread = threading.Thread(
+            target=self._raw_router_loop,
+            name="kalshi-ws-raw-router",
+            daemon=True,
+        )
+        self._raw_router_thread.start()
+        logger.warning("[WS-FORWARDER-LOOP] Raw orderbook router thread started")
 
         # 2026-11-04: sharded orderbook drain threads — one per book queue.
         # _enqueue_event already performed the sid seq check in arrival

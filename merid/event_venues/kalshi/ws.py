@@ -1950,6 +1950,19 @@ class KalshiWebSocket(EventVenueStream):
                 if time_since_sub < 60.0:
                     logger.debug("[WS-RAW-ALL] t=%.1fs: %s", time_since_sub, raw[:200])
 
+                # 2026-11-04 raw-orderbook fast path: frames that sniff as
+                # orderbook bypass json.loads/classification on this loop and
+                # are parsed on the bridge's raw router thread (identical
+                # _enqueue_event path, FIFO order preserved).  This keeps the
+                # io loop at recv()+put so the socket cannot accumulate a
+                # multi-second venue-old backlog under roll bursts.
+                if '"orderbook_' in raw:
+                    try:
+                        if self._submit_raw_orderbook(raw, _recv_ns, _recv_wall_ms):
+                            continue
+                    except Exception:
+                        pass
+
                 try:
                     data = json.loads(raw)
 
@@ -3195,6 +3208,55 @@ class KalshiWebSocket(EventVenueStream):
             )
 
     # ── Sequence tracking ──────────────────────────────────────────────
+
+    def _submit_raw_orderbook(self, raw: str, recv_ns: int, recv_wall_ms: float) -> bool:
+        """Hand an unparsed orderbook frame to the bridge's raw router thread.
+
+        Keeps the io loop at recv()+put (~15us/frame) — the measured fix for
+        frames arriving at the recv stamp already 10-20s venue-old while every
+        downstream queue read empty (the io loop's per-frame parse/classify
+        work could not keep pace with ~440/s sustained + roll bursts).
+
+        Ordering: the raw queue is a single FIFO drained by one router thread
+        that runs the identical ``_enqueue_event`` path — sid sequence checks
+        still execute in strict arrival order.  Overflow sheds the oldest
+        frame and attributes its (seq -> ticker) so only that book is
+        invalidated (same fail-closed semantics as the bridge shed path).
+
+        Returns True when the frame was accepted (or shed-accounted) here;
+        False makes the caller run the legacy parse path.
+        """
+        import queue as _queue_mod
+        bridge = getattr(getattr(self, "_callback", None), "__self__", None)
+        q = getattr(bridge, "_raw_ob_queue", None) if bridge is not None else None
+        if q is None:
+            return False
+        try:
+            q.put_nowait((raw, recv_ns, recv_wall_ms))
+            return True
+        except _queue_mod.Full:
+            self._messages_dropped += 1
+            try:
+                evicted = q.get_nowait()
+                try:
+                    ev_data = json.loads(evicted[0])
+                    if isinstance(ev_data, dict):
+                        bridge._mark_orderbook_drop_untrusted(
+                            ev_data, "RAW_OB_QUEUE_OVERFLOW"
+                        )
+                except Exception:
+                    pass
+                q.put_nowait((raw, recv_ns, recv_wall_ms))
+            except Exception:
+                pass
+            now = _time.monotonic()
+            if now - getattr(self, "_raw_ob_drop_log_ts", 0.0) >= 5.0:
+                self._raw_ob_drop_log_ts = now
+                logger.warning(
+                    "WS raw-orderbook queue full — shedding oldest frame "
+                    "(dropped_total=%d)", self._messages_dropped
+                )
+            return True
 
     def _record_dropped_delta_frame(self, data: Dict[str, Any], ticker: str = "") -> None:
         """Record a deliberately dropped orderbook frame for sid-gap attribution.
