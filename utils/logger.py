@@ -601,6 +601,70 @@ def _ensure_handlers() -> None:
     _handlers_initialized = True
 
 
+# 2026-11-04: uvicorn's dictConfig installs synchronous StreamHandlers on
+# uvicorn.error (-> sys.stderr) and uvicorn.access (-> ext://sys.stdout)
+# with propagate=False, bypassing the drain queue entirely.  Under the
+# detached Task-Scheduler launch those streams are .NET anonymous pipes
+# (Start-Process -RedirectStandard*); when the parent PowerShell reader
+# stalls, stream.write() blocks for seconds at a time — py-spy showed
+# MainThread parked in StreamHandler.emit mid-response while the API
+# timed out.  Route those loggers through the non-blocking queue handler
+# and drop their synchronous stream handlers.
+_PASSTHROUGH_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+class _RootDedupFilter(logging.Filter):
+    """Drop at root the records already enqueued by an owner logger.
+
+    App loggers created via get_logger carry _queue_handler themselves,
+    so a propagated copy arriving at root would enqueue a duplicate.
+    Third-party loggers (websockets, asyncio, httpx) have no handlers —
+    without this root handler their WARNING+ records would hit
+    logging.lastResort, a synchronous stderr StreamHandler, on the
+    calling thread (reconnect storms → event-loop stalls).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        lgr = logging.getLogger(record.name)
+        while lgr is not None:
+            if _queue_handler in lgr.handlers:
+                return False
+            lgr = lgr.parent
+        return True
+
+
+def route_third_party_loggers_through_queue() -> int:
+    """Re-route uvicorn loggers through the non-blocking drain queue.
+
+    Idempotent; call after uvicorn has applied its dictConfig (lifespan
+    startup is the safe point).  Returns the number of synchronous
+    stream handlers detached.  Records keep flowing — through the drain
+    thread — so access/error lines still land in full.log.
+    """
+    _ensure_handlers()
+    detached = 0
+    if _queue_handler is None:
+        return detached
+    for name in _PASSTHROUGH_LOGGERS:
+        lgr = logging.getLogger(name)
+        for h in list(lgr.handlers):
+            if isinstance(h, logging.StreamHandler) and h is not _queue_handler:
+                lgr.removeHandler(h)
+                detached += 1
+        if _queue_handler not in lgr.handlers:
+            lgr.addHandler(_queue_handler)
+        lgr.propagate = False
+    root = logging.getLogger()
+    if not any(
+        isinstance(h, _NonBlockingQueueHandler) for h in root.handlers
+    ):
+        root_q = _NonBlockingQueueHandler(_log_queue)
+        root_q.setLevel(logging.WARNING)
+        root_q.addFilter(_RootDedupFilter())
+        root.addHandler(root_q)
+    return detached
+
+
 def startup_log_cleanup() -> None:
     """Archive oversized log files before any handler opens them.
 

@@ -492,6 +492,18 @@ async def lifespan(app: FastAPI):
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
     logger.info("=" * 80)
 
+    # 2026-11-04: uvicorn's dictConfig installs synchronous StreamHandlers on
+    # uvicorn.error/access; under the detached launcher those write to .NET
+    # pipes whose parent reader can stall — py-spy caught MainThread parked
+    # in stream.write mid-response while the API timed out.  Route them
+    # through the non-blocking drain queue before serving traffic.
+    try:
+        from utils.logger import route_third_party_loggers_through_queue
+        _detached_n = route_third_party_loggers_through_queue()
+        logger.info("[LIFESPAN] uvicorn loggers routed through drain queue (detached=%d)", _detached_n)
+    except Exception as _rl_err:
+        logger.warning("[LIFESPAN] uvicorn logger reroute failed: %s", _rl_err)
+
     # CRITICAL FIX (2026-09-27): Single-instance guard — the FIRST startup
     # check, before any side effects.  FastAPI runs the lifespan before
     # uvicorn binds its port, so a second uvicorn previously completed the
@@ -4888,6 +4900,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =============================================================================
+# REACT DASHBOARD STATIC SERVING (additive — never required for the API)
+# =============================================================================
+# The operator console (web/react, vite build -> web/react/dist) is a
+# state-driven SPA with no client-side router: '/' serves index.html and
+# '/assets/*' serves the content-hashed bundles. Guarded so a backend started
+# before `npm run build` still comes up normally — the dashboard simply is not
+# served. Mounted AFTER every explicit /api/* and /debug/* route so nothing
+# can shadow an API path. The legacy web/index.html SSE page is unrelated and
+# remains untouched.
+try:
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    _react_dist = Path(__file__).resolve().parent / "react" / "dist"
+    _react_assets = _react_dist / "assets"
+    _react_index = _react_dist / "index.html"
+
+    if _react_assets.is_dir() and _react_index.is_file():
+        app.mount("/assets", StaticFiles(directory=_react_assets), name="react-assets")
+
+        @app.get("/", include_in_schema=False)
+        def react_dashboard_index():
+            return FileResponse(_react_index)
+
+        logger.info(f"[STATIC] React dashboard mounted from {_react_dist}")
+    else:
+        logger.info(
+            f"[STATIC] React dist not found at {_react_dist} — dashboard not "
+            "served (run `npm run build` in web/react, or use `npm run dev` on :5173)"
+        )
+except Exception as _static_exc:  # UI serving must never break the trading API
+    logger.warning(f"[STATIC] React dashboard mount skipped: {_static_exc}")
 
 
 # NOTE: __main__ block removed - use run_15m_lean.py to start the server
