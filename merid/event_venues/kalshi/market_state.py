@@ -2186,6 +2186,7 @@ class KalshiMarketStateStore:
 
         overflowed = False
         overflow_queue_len = 0
+        wake_needed = False
         with queue_lock:
             if len(queue) >= self._MAX_PER_TICKER_QUEUE:
                 overflowed = True
@@ -2233,13 +2234,19 @@ class KalshiMarketStateStore:
                 _dropped_items = list(queue)
                 queue.clear()
             else:
+                wake_needed = len(queue) == 0
                 queue.append(msg)
 
         # Wake the batch scheduler OUTSIDE queue_lock: Event.set() acquires
         # the Event's internal condition lock, which must not serialize
         # against the per-ticker queue critical section (measured 2026-11-04:
-        # 3 producers × ~2000/s on one shared Event).
-        if not overflowed:
+        # 3 producers × ~2000/s on one shared Event — drain producers were
+        # observed parked inside set() acquiring _cond).
+        # 2026-11-04 (edge-trigger): the scheduler also sweeps every
+        # _batch_interval_ms (10ms), so a per-frame set() buys at most ~10ms
+        # on the empty->nonempty transition while the ~2000/s set() storm
+        # convoys every producer on _cond.  Only wake on that edge.
+        if wake_needed:
             self._batch_worker_event.set()
 
         # Attribute the cleared frames + the incoming frame in a single
