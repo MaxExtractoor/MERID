@@ -8452,7 +8452,14 @@ class PositionMonitor:
                 if _now_m - getattr(self, "_last_obligation_sweep", 0.0) >= 30.0:
                     self._last_obligation_sweep = _now_m
                     try:
-                        self._sweep_stale_exit_obligations()
+                        # 2026-11-04: py-spy caught this synchronous SQLite
+                        # scan parked inside the uvicorn loop for >12s under
+                        # DB contention — starving HTTP and every sibling
+                        # thread.  The sweep is a 30s-throttled sync helper;
+                        # run it on the default executor.
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, self._sweep_stale_exit_obligations
+                        )
                     except Exception as _sw_err:
                         logger.warning("[EXIT-OBLIGATION-SWEEP] failed: %s", _sw_err)
 
