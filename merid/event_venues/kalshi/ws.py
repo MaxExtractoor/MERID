@@ -2359,7 +2359,6 @@ class KalshiWebSocket(EventVenueStream):
         _BATCH_SIZE_LOW_PRESSURE = 50
         _BATCH_SIZE_HIGH_PRESSURE = 600
         _HIGH_PRESSURE_DEPTH = 1500
-        _COOPERATIVE_YIELD_EVERY = 25
 
         # 2026-10-31: bounded drain-path profiler.  Rollover measurement
         # localised residual lag to _msg_queue residence (~3.2s mean at
@@ -2455,6 +2454,7 @@ class KalshiWebSocket(EventVenueStream):
                 
                 # Batch drain: process multiple messages per iteration under pressure
                 messages_processed = 0
+                _yield_t0_ns = _time.monotonic_ns()
 
                 # THROUGHPUT FIX: sequential awaits instead of per-message
                 # create_task+gather.  Task allocation+scheduling cost per
@@ -2495,36 +2495,55 @@ class KalshiWebSocket(EventVenueStream):
                                 # we wait on BOTH queues so a critical event
                                 # never sits up to the 1s main-queue timeout.
                                 if i == 0:
-                                    _get_main = asyncio.ensure_future(batch_queue.get())
-                                    _get_prio = asyncio.ensure_future(priority_queue.get())
-                                    _idle_t0_ns = _time.monotonic_ns()
-                                    _done, _pending = await asyncio.wait(
-                                        (_get_main, _get_prio),
-                                        timeout=1.0,
-                                        return_when=asyncio.FIRST_COMPLETED,
-                                    )
-                                    for _p in (_get_main, _get_prio):
-                                        if not _p.done():
-                                            _p.cancel()
-                                    # Collect every completed result — a
-                                    # second future can win the same tick;
-                                    # its item is dispatched on the next slot
-                                    # (priority lane first preserves intent).
-                                    _results = sorted(
-                                        (
-                                            (_f.result(), priority_queue if _f is _get_prio else batch_queue)
-                                            for _f in (_get_main, _get_prio)
-                                            if _f.done() and not _f.cancelled()
-                                        ),
-                                        key=lambda _rq: 0 if _rq[1] is priority_queue else 1,
-                                    )
-                                    _pq_prof["idle_ms"] += (
-                                        _time.monotonic_ns() - _idle_t0_ns
-                                    ) / 1e6
-                                    if not _results:
-                                        break
-                                    item, item_queue = _results[0]
-                                    pending_items.extend(_results[1:])
+                                    # 2026-11-04: when the main queue is
+                                    # backed up, take an item with get_nowait
+                                    # instead of the ensure_future+asyncio.wait
+                                    # dance — that path costs a full event-loop
+                                    # round trip per iteration (futures,
+                                    # cancellation, scheduling), which during a
+                                    # flood capped the drain at ~2.5 iters/s
+                                    # (~1000 items/s) and pinned a permanent
+                                    # multi-second _msg_queue backlog.  The
+                                    # dual wait is only needed when both queues
+                                    # may be empty; the priority lane was
+                                    # already probed above, so ordering is
+                                    # unchanged.
+                                    try:
+                                        item = batch_queue.get_nowait()
+                                        item_queue = batch_queue
+                                    except asyncio.QueueEmpty:
+                                        item = None
+                                    if item is None:
+                                        _get_main = asyncio.ensure_future(batch_queue.get())
+                                        _get_prio = asyncio.ensure_future(priority_queue.get())
+                                        _idle_t0_ns = _time.monotonic_ns()
+                                        _done, _pending = await asyncio.wait(
+                                            (_get_main, _get_prio),
+                                            timeout=1.0,
+                                            return_when=asyncio.FIRST_COMPLETED,
+                                        )
+                                        for _p in (_get_main, _get_prio):
+                                            if not _p.done():
+                                                _p.cancel()
+                                        # Collect every completed result — a
+                                        # second future can win the same tick;
+                                        # its item is dispatched on the next slot
+                                        # (priority lane first preserves intent).
+                                        _results = sorted(
+                                            (
+                                                (_f.result(), priority_queue if _f is _get_prio else batch_queue)
+                                                for _f in (_get_main, _get_prio)
+                                                if _f.done() and not _f.cancelled()
+                                            ),
+                                            key=lambda _rq: 0 if _rq[1] is priority_queue else 1,
+                                        )
+                                        _pq_prof["idle_ms"] += (
+                                            _time.monotonic_ns() - _idle_t0_ns
+                                        ) / 1e6
+                                        if not _results:
+                                            break
+                                        item, item_queue = _results[0]
+                                        pending_items.extend(_results[1:])
                                 else:
                                     try:
                                         item = batch_queue.get_nowait()
@@ -2758,10 +2777,14 @@ class KalshiWebSocket(EventVenueStream):
                         _pq_prof["body_max"] = _bd
                     _pq_prof["items"] += 1
                     messages_processed += 1
-                    # Cooperative yield during deep drains: hand the loop back
-                    # to socket reads / HTTP handlers every N items instead of
-                    # monopolizing it for a whole 600-item burst.
-                    if i and i % _COOPERATIVE_YIELD_EVERY == 0:
+                    # Cooperative yield during deep drains by elapsed time:
+                    # each sleep(0) costs one event-loop round trip — under a
+                    # flood that's ~15-400ms each and a 25-item cadence made
+                    # yields the dominant drain cost (~17ms/item effective).
+                    # 20ms bounds loop monopolization while letting the drain
+                    # chew at full speed; keepalive/HTTP still get serviced.
+                    if i and (_pq_deq_ns - _yield_t0_ns) >= 20_000_000:
+                        _yield_t0_ns = _pq_deq_ns
                         await asyncio.sleep(0)
 
                 # Yield control briefly if we did not fill the first slot of a batch.
