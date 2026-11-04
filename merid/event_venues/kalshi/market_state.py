@@ -235,17 +235,17 @@ def _parse_market_ticker(ticker: str) -> tuple[str, str]:
     """
     if not ticker:
         return None, None
-
-    # Try to match pattern like KXBTC15M-... or KXBTC-15M-...
-    # Also handles test tickers like KXBTC15M-T
+    # 2026-11-04: called per WS frame on the drain thread — memoize the
+    # regex+import cost; the ticker set is bounded (~dozens).
+    cached = _PARSED_TICKER_CACHE.get(ticker)
+    if cached is not None:
+        return cached
     import re
     match = re.match(r"^KX([A-Z]+)(?:-?)(\d+[mM])", ticker.upper())
-    if match:
-        underlying = match.group(1)
-        timeframe = match.group(2).upper()
-        return underlying, timeframe
-
-    return None, None
+    result = (match.group(1), match.group(2).upper()) if match else (None, None)
+    if len(_PARSED_TICKER_CACHE) < 4096:
+        _PARSED_TICKER_CACHE[ticker] = result
+    return result
 
 # Auto-switch to IOC when market expires within this many seconds
 # 15m scalper: configurable threshold (default 120s = 2 min before expiry)
@@ -371,6 +371,8 @@ _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
 _MERID_DEV_MODE = os.getenv("MERID_DEV_MODE", "false").lower() in ("true", "1", "yes")
 _REST_BBO_MAX_AGE_S = float(os.getenv("MERID_REST_BBO_MAX_AGE_S", "3.0"))
 _REST_BBO_MIN_DIV_CENTS = int(os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3"))
+# 2026-11-04: memoization table for _parse_market_ticker (per-frame drain cost).
+_PARSED_TICKER_CACHE: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 # 2026-10-04: consecutive in-parity WS deltas required to reclaim quote
 # ownership from REST_VERIFIED_DEGRADED (promotion hysteresis).
 _WS_PROMOTE_STREAK = int(os.getenv("MERID_WS_PROMOTE_STREAK", "5"))
@@ -814,6 +816,9 @@ class KalshiMarketStateStore:
         self._last_enqueue_reject_log_ts: Dict[str, float] = {}
         self._enqueue_reject_suppressed: Dict[str, int] = {}
         self._last_overflow_log_ts: Dict[str, float] = {}
+        # 2026-11-04: per-ticker rate limit for the enqueue-side
+        # _book_event_timing call (drain-thread cost control).
+        self._last_enq_timing_ts: Dict[str, float] = {}
         self._overflow_log_suppressed: Dict[str, int] = {}
         self._last_pending_full_log_ts: Dict[str, float] = {}
         # 2026-10-30: per-subscription (sid) sequence tracking.  Kalshi's WS
@@ -2094,7 +2099,23 @@ class KalshiMarketStateStore:
         # or whose venue/bridge-receive timestamp is too old, invalidates the
         # book — drain the stale backlog and resync from a fresh snapshot
         # instead of partially replaying historical deltas.
-        event_age_ms, upstream_wait_ms, hop_diag = self._book_event_timing(msg)
+        # 2026-11-04 (drain-thread cost): _book_event_timing + the stale-marks
+        # ran on EVERY delta on the sole drain thread; under a backlog every
+        # frame is lagged so ~2 marks/s worth of work became ~2500/s and
+        # capped drain throughput ~500/s.  The apply side
+        # (_apply_delta_internal) re-measures and re-marks with the same
+        # bounds, so the enqueue-side marks are rate-limited to once per
+        # ticker per 250ms — detection latency is unchanged.
+        _now_enq = time.monotonic()
+        _skip_timing = (
+            _now_enq - self._last_enq_timing_ts.get(ticker, 0.0) < 0.25
+        )
+        if _skip_timing:
+            event_age_ms = upstream_wait_ms = None
+            hop_diag = {}
+        else:
+            self._last_enq_timing_ts[ticker] = _now_enq
+            event_age_ms, upstream_wait_ms, hop_diag = self._book_event_timing(msg)
         # 2026-11-03 (freshness != integrity): a lagged but seq-contiguous
         # delta is still valid book data.  Stale-mark the book (entries stay
         # vetoed on honest data-age; sustained staleness still escalates to
