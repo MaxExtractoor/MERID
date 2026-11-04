@@ -1405,14 +1405,29 @@ class KalshiMarketStateStore:
                     # Cleared frames' sid seqs were already consumed by
                     # _check_sid_delta_sequence — attribute each drop so the
                     # resulting gap invalidates only this book.
-                    for _q in queue:
-                        try:
-                            self.record_sid_frame_drop(
-                                _q.get("_sid") or _q.get("sid"), _q.get("seq"), ticker
-                            )
-                        except Exception:
-                            pass
+                    # 2026-11-04: copy refs under the lock (~20µs), attribute
+                    # after release — the per-item record_sid_frame_drop used
+                    # to hold queue_lock through ~4096 _sid_seq_lock acquires.
+                    _ovl_dropped = list(queue)
                     queue.clear()
+                    _ovl_pairs: List[tuple] = []
+                    for _q in _ovl_dropped:
+                        try:
+                            _ovl_pairs.append((
+                                _q.get("_sid") or _q.get("sid"),
+                                int(_q.get("seq")),
+                            ))
+                        except (TypeError, ValueError):
+                            pass
+                    with self._sid_seq_lock:
+                        for _osid, _oseq in _ovl_pairs:
+                            _olst = self._sid_frame_drops.setdefault(_osid, [])
+                            if _osid not in self._sid_frame_drop_overflow:
+                                _olst.append((_oseq, ticker))
+                                if len(_olst) >= _SID_FRAME_DROP_CAP:
+                                    _olst.clear()
+                                    self._sid_frame_drops.pop(_osid, None)
+                                    self._sid_frame_drop_overflow.add(_osid)
                     return
 
                 # Pop a batch while holding the queue lock.
@@ -2083,7 +2098,7 @@ class KalshiMarketStateStore:
             queue_lock = self._delta_queue_locks[ticker]
         with queue_lock:
             queue.append(msg)
-            self._batch_worker_event.set()
+        self._batch_worker_event.set()
         return True
 
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
@@ -2208,36 +2223,44 @@ class KalshiMarketStateStore:
                 # _check_sid_delta_sequence — attribute each drop (including
                 # the incoming msg, which is never appended) so the gap only
                 # invalidates this book.
-                # 2026-11-04 (drain-thread stall): the attribution loop used to
-                # call record_sid_frame_drop per queued frame — a _sid_seq_lock
-                # acquire + list append per item.  With tens-of-thousands-deep
-                # queues a single overflow cost ~50-150ms on the sole drain
-                # thread, repeatedly, during exactly the floods that overflow.
-                # Collect (sid, seq) pairs lock-free first, then extend under
-                # one _sid_seq_lock hold; identical attribution coverage.
+                # 2026-11-04 (shard-drain stall, measured): when the queue sat
+                # pinned at the cap, EVERY enqueue ran a 4096-item dict scan
+                # inside queue_lock (~5-10ms) — producers capped at ~100-200/s
+                # per ticker and the whole pipeline pinned at ~75s residence.
+                # Copy refs (~20µs) and clear under the lock; the dict parsing
+                # + sid attribution runs outside it.
                 _drop_sid = msg.get("_sid") or msg.get("sid")
-                _drop_pairs: List[tuple] = []
-                try:
-                    _s0 = int(msg.get("seq"))
-                    _drop_pairs.append((_drop_sid, _s0))
-                except (TypeError, ValueError):
-                    pass
-                for _q in queue:
-                    try:
-                        _drop_pairs.append((
-                            _q.get("_sid") or _q.get("sid") or _drop_sid,
-                            int(_q.get("seq")),
-                        ))
-                    except (TypeError, ValueError):
-                        pass
+                _dropped_items = list(queue)
                 queue.clear()
             else:
                 queue.append(msg)
-                self._batch_worker_event.set()
+
+        # Wake the batch scheduler OUTSIDE queue_lock: Event.set() acquires
+        # the Event's internal condition lock, which must not serialize
+        # against the per-ticker queue critical section (measured 2026-11-04:
+        # 3 producers × ~2000/s on one shared Event).
+        if not overflowed:
+            self._batch_worker_event.set()
 
         # Attribute the cleared frames + the incoming frame in a single
         # _sid_seq_lock hold, outside queue_lock; an already-overflow-marked
         # sid needs no further records (record_sid_frame_drop discards them).
+        # 2026-11-04: pair extraction moved here — the refs were copied under
+        # queue_lock, dict parsing runs lock-free.
+        _drop_pairs: List[tuple] = []
+        if overflowed:
+            try:
+                _drop_pairs.append((_drop_sid, int(msg.get("seq"))))
+            except (TypeError, ValueError):
+                pass
+            for _q in _dropped_items:
+                try:
+                    _drop_pairs.append((
+                        _q.get("_sid") or _q.get("sid") or _drop_sid,
+                        int(_q.get("seq")),
+                    ))
+                except (TypeError, ValueError):
+                    pass
         if overflowed and _drop_pairs:
             with self._sid_seq_lock:
                 if _drop_sid not in self._sid_frame_drop_overflow:
