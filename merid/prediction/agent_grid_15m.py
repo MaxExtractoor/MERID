@@ -22,6 +22,7 @@ import collections
 import re
 
 import asyncio
+import concurrent.futures
 import threading
 
 import os
@@ -206,6 +207,13 @@ from merid.validation.regime_gating_invariants import (
 
 # Import candidate tracing for end-to-end validation
 logger = get_logger("merid.prediction.agent_grid_15m")
+
+# 2026-11-04: single-worker executor for the synchronous signal/decision
+# eval.  One worker preserves the serial eval order the trading loop had
+# on the uvicorn loop while keeping HTTP/bankroll/WS responsive.
+_SIGNAL_EVAL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="signal-eval"
+)
 
 try:
     from merid.execution.decision_audit_ledger import get_decision_audit_ledger
@@ -20929,7 +20937,23 @@ class LeanAgent15m:
             except Exception:
                 pass
 
-            signal = self._generate_signal(spot_price, market, minutes_to_expiry, tick)
+            # 2026-11-04: the entire signal+decision path (regime compute,
+            # model eval, calibration/provisional file persistence, JSON
+            # dumps) is synchronous and used to run directly on the uvicorn
+            # loop — py-spy showed collect_order_candidate pinning the loop
+            # through json.dumps/file I/O per eval, which is what made the
+            # backend unreachable while data sources were actually healthy.
+            # Run it on a dedicated single-worker executor: serial eval
+            # order is preserved exactly (one worker), but the loop stays
+            # responsive for HTTP, bankroll refresh and WS bookkeeping.
+            signal = await asyncio.get_running_loop().run_in_executor(
+                _SIGNAL_EVAL_EXECUTOR,
+                self._generate_signal,
+                spot_price,
+                market,
+                minutes_to_expiry,
+                tick,
+            )
 
             if not signal:
 
