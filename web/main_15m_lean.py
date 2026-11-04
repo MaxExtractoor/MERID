@@ -1484,7 +1484,9 @@ async def ws_bridge_status():
             "running": False,
             "reason": "bridge_singleton_is_none"
         }
-    summary = ws_bridge.summary()
+    summary = await asyncio.get_running_loop().run_in_executor(
+        None, ws_bridge.summary
+    )
     return {
         "status": "running" if summary.get("running", False) else "stopped",
         "summary": summary
@@ -1560,7 +1562,12 @@ async def unified_health_check():
             services["ws_bridge"] = {"status": "not_initialized", "ready": False}
             overall_status = "degraded"
         else:
-            summary = ws_bridge.summary()
+            # 2026-11-04: ws_bridge.summary() block-waits a Future on the
+            # ws-io thread — py-spy caught this endpoint parked in
+            # Future.result() on the uvicorn loop while the API timed out.
+            summary = await asyncio.get_running_loop().run_in_executor(
+                None, ws_bridge.summary
+            )
             # Bridge status hierarchy:
             #   1. Forwarder active (summary.running) -> running / ready
             #   2. Forwarder down but REST polling active -> degraded / ready (fallback)
@@ -1781,7 +1788,11 @@ async def data_flow_validation():
             }
             overall_health = "degraded"
         else:
-            ws_summary = ws_bridge.summary()
+            # 2026-11-04: same Future.result() loop-block as unified-health;
+            # offload the cross-thread summary call.
+            ws_summary = await asyncio.get_running_loop().run_in_executor(
+                None, ws_bridge.summary
+            )
             ws_running = ws_summary.get("running", False)
             
             # Check if market state store has recent data for the configured

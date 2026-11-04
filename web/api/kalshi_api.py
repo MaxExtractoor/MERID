@@ -4645,7 +4645,11 @@ async def ws_status() -> Dict[str, Any]:
     bridge = _get_bridge()
     if bridge:
         try:
-            return bridge.summary()
+            # 2026-11-04: bridge.summary() block-waits a Future on the
+            # ws-io thread; keep the wait off the uvicorn loop.
+            return await asyncio.get_running_loop().run_in_executor(
+                None, bridge.summary
+            )
         except Exception as exc:
             logger.warning(f"WS bridge summary failed: {exc}")
     return {"running": False, "events_forwarded": 0, "subscribed_tickers": 0}
@@ -4709,7 +4713,9 @@ async def health_check() -> Dict[str, Any]:
     bridge = _get_bridge()
     if bridge:
         try:
-            ws_data = bridge.summary()
+            ws_data = await asyncio.get_running_loop().run_in_executor(
+                None, bridge.summary
+            )
         except Exception as _e:
             logger.debug("ws_bridge summary skipped: %s", _e)
     # WS not running is just informational, not an error
