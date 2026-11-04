@@ -732,6 +732,266 @@ def validate_trade_snapshot(
     return failures
 
 
+# 2026-11-03: bounded veto attribution.  validate_trade_snapshot reports
+# WHICH freshness bound tripped; this diagnostic reports WHERE the time
+# went (venue wire vs bridge queue vs ticker queue vs apply vs candidate
+# eval) so a veto like ``ORDERBOOK_STALE:7014ms,RTI_BOOK_TIME_SKEW`` is
+# self-explaining instead of needing a log-archaeology pass.  One
+# structured line per ticker per interval; suppressed vetoes are counted.
+_SNAPSHOT_REJECT_DIAG_MIN_INTERVAL_S = float(
+    os.getenv("MERID_SNAPSHOT_REJECT_DIAG_MIN_INTERVAL_S", "2.0")
+)
+_snapshot_reject_diag_last_ts: Dict[str, float] = {}
+_snapshot_reject_diag_suppressed: Dict[str, int] = {}
+_snapshot_reject_diag_lock = threading.Lock()
+
+
+def _ms_round(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return round(float(v), 1)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _snapshot_reject_diag(
+    market_state_store: Any,
+    asset: str,
+    ticker: str,
+    market_state: Any,
+    cfb_observation: Optional[Any],
+    failures: List[str],
+    *,
+    eval_t0_mono_ns: Optional[int] = None,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the structured latency-attribution record for a snapshot veto.
+
+    Diagnostic only — never gates.  Every operand is read live at veto time
+    from the same state the validator evaluated, plus the pipeline
+    bookkeeping the store already maintains (sid frame age, queue depths,
+    untrusted/resync markers).
+    """
+    now_wall_ms = time.time() * 1000.0
+    now_mono_ns = time.monotonic_ns()
+    st = market_state
+
+    def _mono_age_ms(ts: Any) -> Optional[float]:
+        try:
+            if ts:
+                return max(0.0, (now_mono_ns - float(ts)) / 1e6)
+        except Exception:
+            pass
+        return None
+
+    rti_age_ms = _rti_age_ms(cfb_observation)
+    quote_age_ms = _quote_age_ms(st)
+    skew_ms = (
+        abs(rti_age_ms - quote_age_ms)
+        if rti_age_ms is not None and quote_age_ms is not None
+        else None
+    )
+    try:
+        _live_cfg = get_resolved_live_config(allow_unresolved=True)
+        book_exec_age_ms = _live_cfg.book_execution_max_age_ms
+        rti_exec_age_ms = _live_cfg.rti_execution_max_age_ms
+        skew_max_ms = _live_cfg.rti_book_skew_ms
+    except Exception:
+        book_exec_age_ms = rti_exec_age_ms = skew_max_ms = None
+
+    book_apply_age_ms = _mono_age_ms(getattr(st, "ws_last_apply_mono_ns", 0))
+    rest_quote_age_ms = _mono_age_ms(getattr(st, "last_rest_quote_update_ts", 0))
+    eval_ms = _mono_age_ms(eval_t0_mono_ns)
+
+    sid = None
+    sid_frame_age_ms = None
+    pending_deltas = None
+    resync_in_flight = None
+    needs_snapshot_resync = None
+    stale_marked = None
+    stale_mark_age_s = None
+    store = market_state_store
+    if store is not None:
+        try:
+            sid = getattr(store, "_ticker_sid", {}).get(ticker)
+        except Exception:
+            sid = None
+        try:
+            _sfa = getattr(store, "sid_frame_age_ms", None)
+            if callable(_sfa):
+                sid_frame_age_ms = _sfa(ticker)
+        except Exception:
+            sid_frame_age_ms = None
+        try:
+            _dq = getattr(store, "_delta_queues", {}).get(ticker)
+            if _dq is not None:
+                pending_deltas = len(_dq)
+        except Exception:
+            pending_deltas = None
+        try:
+            _nsr = getattr(store, "_needs_snapshot_resync", None)
+            if callable(_nsr):
+                needs_snapshot_resync = bool(_nsr(ticker))
+        except Exception:
+            needs_snapshot_resync = None
+        try:
+            _ri = getattr(store, "_recovery_inflight_since", {}).get(ticker)
+            resync_in_flight = bool(_ri) or bool(needs_snapshot_resync)
+        except Exception:
+            resync_in_flight = needs_snapshot_resync
+        try:
+            _us = getattr(store, "_untrusted_since", {})
+            if ticker in _us:
+                stale_marked = True
+                stale_mark_age_s = round(time.monotonic() - _us[ticker], 1)
+            else:
+                stale_marked = False
+        except Exception:
+            stale_marked = None
+
+    rti_source_age_ms = None
+    rti_recv_age_mono_ms = None
+    if cfb_observation is not None:
+        _src = getattr(cfb_observation, "source_ts_ms", None)
+        if _src:
+            try:
+                rti_source_age_ms = max(0.0, now_wall_ms - float(_src))
+            except Exception:
+                rti_source_age_ms = None
+        rti_recv_age_mono_ms = _mono_age_ms(
+            getattr(cfb_observation, "observed_ts_mono_ns", None)
+        )
+
+    # Stage attribution per the freshness-pipeline taxonomy: separate
+    # "applied old data" (upstream/wire/queue lag) from "nothing applied
+    # recently" (consumer stall, selective ticker silence, or dead feed).
+    attribution = "unattributed"
+    book_stale = quote_age_ms is not None and (
+        book_exec_age_ms is None or quote_age_ms > book_exec_age_ms
+    )
+    ws_event_age = getattr(st, "ws_last_event_age_ms", None)
+    if book_stale:
+        if book_apply_age_ms is not None and book_apply_age_ms > (
+            book_exec_age_ms or 1000
+        ):
+            if sid_frame_age_ms is not None and sid_frame_age_ms <= 500.0:
+                attribution = (
+                    "ticker_quiet_or_selective: sid live, no applies for ticker"
+                )
+            elif sid_frame_age_ms is not None and sid_frame_age_ms > 1000.0:
+                attribution = "subscription_stalled: no sequenced frames on sid"
+            elif (pending_deltas or 0) > 0:
+                attribution = "consumer_backlog: deltas queued, not applied"
+            else:
+                attribution = "feed_silent_ticker: no applies, sid state unknown"
+        elif ws_event_age is not None and book_exec_age_ms is not None and (
+            ws_event_age > book_exec_age_ms
+        ):
+            attribution = "upstream_lag: applied promptly, event arrived old"
+        elif book_apply_age_ms is None:
+            attribution = "no_apply_recorded: book has no WS apply stamp"
+    elif (
+        skew_ms is not None
+        and skew_max_ms is not None
+        and skew_ms > skew_max_ms
+    ):
+        attribution = "rti_book_as_of_misaligned"
+    elif rti_age_ms is not None and rti_exec_age_ms is not None and (
+        rti_age_ms > rti_exec_age_ms
+    ):
+        attribution = "rti_feed_lag"
+
+    diag: Dict[str, Any] = {
+        "v": 1,
+        "kind": "trade_snapshot_reject_diag",
+        "asset": asset,
+        "ticker": ticker,
+        "run_id": run_id,
+        "failures": list(failures),
+        "attribution": attribution,
+        "validation_wall_ms": int(now_wall_ms),
+        "eval_ms": _ms_round(eval_ms),
+        "quote_age_ms": quote_age_ms,
+        "rti_age_ms": rti_age_ms,
+        "skew_ms": skew_ms,
+        "budgets_ms": {
+            "book_exec_age": book_exec_age_ms,
+            "rti_exec_age": rti_exec_age_ms,
+            "rti_book_skew": skew_max_ms,
+        },
+        "book": {
+            "apply_age_ms": _ms_round(book_apply_age_ms),
+            "event_age_ms": _ms_round(ws_event_age),
+            "event_age_src": getattr(st, "ws_last_event_age_src", None),
+            "event_age_status": getattr(st, "ws_last_event_age_status", None),
+            "queue_wait_ms": _ms_round(getattr(st, "ws_last_queue_wait_ms", None)),
+            "queue_depth": getattr(st, "ws_queue_depth", None),
+            "pending_deltas": pending_deltas,
+            "seq": getattr(st, "ws_last_seq", None),
+            "sid": sid,
+            "sid_frame_age_ms": _ms_round(sid_frame_age_ms),
+            "initialized": getattr(st, "book_initialized", None),
+            "live_sequence_confirmed": getattr(st, "live_sequence_confirmed", None),
+            "snapshot_complete": getattr(st, "snapshot_complete", None),
+            "executable": getattr(st, "executable", None),
+            "data_quality": getattr(st, "data_quality", None),
+            "transition": getattr(st, "transition", None),
+            "book_health": getattr(st, "book_health", None),
+            "data_source": getattr(st, "data_source", None),
+            "quote_owner": getattr(st, "quote_owner", None),
+            "invalidation_cause": getattr(st, "invalidation_cause", None),
+            "recovery_required_source": getattr(st, "recovery_required_source", None),
+            "book_gap_total": getattr(st, "book_gap_total", None),
+            "book_resync_total": getattr(st, "book_resync_total", None),
+            "rest_quote_age_ms": _ms_round(rest_quote_age_ms),
+        },
+        "rti": {
+            "recv_age_ms": rti_age_ms,
+            "recv_age_mono_ms": _ms_round(rti_recv_age_mono_ms),
+            "source_age_ms": _ms_round(rti_source_age_ms),
+            "transit_ms": _ms_round(
+                getattr(cfb_observation, "age_ms", None)
+            ),
+            "event_loop_lag_ms": getattr(cfb_observation, "event_loop_lag_ms", None),
+            "source_ts_ms": getattr(cfb_observation, "source_ts_ms", None),
+            "observed_ts_ms": getattr(cfb_observation, "observed_ts_ms", None),
+            "sequence": getattr(cfb_observation, "sequence", None),
+            "timestamp_quality": getattr(cfb_observation, "timestamp_quality", None),
+            "execution_eligible": getattr(cfb_observation, "execution_eligible", None),
+        },
+        "resync_in_flight": resync_in_flight,
+        "needs_snapshot_resync": needs_snapshot_resync,
+        "stale_marked": stale_marked,
+        "stale_mark_age_s": stale_mark_age_s,
+    }
+    return diag
+
+
+def _emit_snapshot_reject_diag(ticker: str, diag: Dict[str, Any]) -> None:
+    """Emit one bounded structured line per ticker for a snapshot veto."""
+    try:
+        now = time.monotonic()
+        with _snapshot_reject_diag_lock:
+            last = _snapshot_reject_diag_last_ts.get(ticker, 0.0)
+            if now - last < _SNAPSHOT_REJECT_DIAG_MIN_INTERVAL_S:
+                _snapshot_reject_diag_suppressed[ticker] = (
+                    _snapshot_reject_diag_suppressed.get(ticker, 0) + 1
+                )
+                return
+            suppressed = _snapshot_reject_diag_suppressed.get(ticker, 0)
+            _snapshot_reject_diag_suppressed[ticker] = 0
+            _snapshot_reject_diag_last_ts[ticker] = now
+        if suppressed:
+            diag["suppressed"] = suppressed
+        logger.warning(
+            "[TRADE-SNAPSHOT-REJECT-DIAG] %s",
+            json.dumps(diag, sort_keys=True, default=str),
+        )
+    except Exception as _diag_exc:
+        logger.debug("[TRADE-SNAPSHOT-REJECT-DIAG] emit failed: %s", _diag_exc)
+
+
 def _record_decision_audit(
     decision: Any,
     market_state: Any,
@@ -8146,6 +8406,10 @@ class LeanAgent15m:
         is emitted only when the calibrated net edge exceeds the minimum
         required edge; otherwise the decision is ``no_trade``.
         """
+        # Signal-eval start stamp: lets a snapshot veto report the
+        # candidate/eval age (function entry -> validation) separately
+        # from book/RTI pipeline ages.
+        _eval_t0_mono_ns = time.monotonic_ns()
         if not spot_price or spot_price <= 0:
             logger.warning("[TRADE-DECISION] asset=%s invalid spot_price=%s", asset, spot_price)
             self._record_signal_rejection(
@@ -8519,7 +8783,18 @@ class LeanAgent15m:
         )
         if snapshot_failures:
             reason = "trade_snapshot_validation_failed:" + ",".join(snapshot_failures)
+            _sdiag = _snapshot_reject_diag(
+                self.market_state_store,
+                asset,
+                ticker,
+                market_state,
+                cfb_observation,
+                snapshot_failures,
+                eval_t0_mono_ns=_eval_t0_mono_ns,
+                run_id=getattr(self, "run_id", None),
+            )
             logger.warning("[TRADE-SNAPSHOT-REJECT] asset=%s %s", asset, reason)
+            _emit_snapshot_reject_diag(ticker, _sdiag)
             self._record_signal_rejection(
                 reason,
                 **self._build_trade_decision_rejection_context(
@@ -8530,6 +8805,7 @@ class LeanAgent15m:
                     seconds_to_expiry,
                     extra={
                         "snapshot_failures": snapshot_failures,
+                        "snapshot_diag": _sdiag,
                         "settlement_reference_price": settlement_input_price,
                     },
                 )

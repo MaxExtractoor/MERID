@@ -823,6 +823,11 @@ class KalshiMarketStateStore:
         self._sid_last_seq: Dict[Any, int] = {}
         self._sid_tickers: Dict[Any, set] = {}
         self._ticker_sid: Dict[str, Any] = {}
+        # Arrival stamp of the last sequenced frame per sid, in the same
+        # arrival-order critical section as ``_sid_last_seq``.  Lets veto
+        # diagnostics distinguish "subscription stalled" (sid frame age
+        # large) from "ticker quiet, feed alive" (sid fresh, no applies).
+        self._sid_last_frame_mono_ns: Dict[Any, int] = {}
         self._sid_seq_lock = threading.Lock()
         self._ws_book_requires_snapshot: set = set()
         self._last_sid_gap_log_ts: Dict[Any, float] = {}
@@ -5110,6 +5115,7 @@ class KalshiMarketStateStore:
             self._sid_last_seq.clear()
             self._sid_tickers.clear()
             self._ticker_sid.clear()
+            self._sid_last_frame_mono_ns.clear()
             self._sid_frame_drops.clear()
             self._sid_frame_drop_overflow.clear()
         with self._lock:
@@ -6887,6 +6893,7 @@ class KalshiMarketStateStore:
         if sid is None or seq is None:
             return 0
         with self._sid_seq_lock:
+            self._sid_last_frame_mono_ns[sid] = time.monotonic_ns()
             last = self._sid_last_seq.get(sid)
             if last is not None and seq <= last:
                 return -1
@@ -6921,6 +6928,21 @@ class KalshiMarketStateStore:
                 self._sid_frame_drop_overflow.add(sid)
                 return
             lst.append((s, ticker))
+
+    def sid_frame_age_ms(self, ticker: str) -> Optional[float]:
+        """Age in ms of the last sequenced frame on this ticker's sid.
+
+        Diagnostic discriminator for staleness vetoes: a large book age with
+        a small sid frame age means the subscription is alive but no delta
+        has applied to *this* ticker (quiet book or selective lag); a large
+        sid frame age means the whole stream is stalled.
+        """
+        with self._sid_seq_lock:
+            sid = self._ticker_sid.get(ticker)
+            ts = self._sid_last_frame_mono_ns.get(sid) if sid is not None else None
+        if ts is None:
+            return None
+        return max(0.0, (time.monotonic_ns() - ts) / 1e6)
 
     def apply_orderbook_sequence_control(self, event: Dict[str, Any]) -> None:
         """Advance a SID for an ordered subscription-control response."""
