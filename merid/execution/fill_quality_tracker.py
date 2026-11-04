@@ -711,12 +711,22 @@ def _impl_shortfall_stats(basis: str) -> Dict[str, Dict[str, Any]]:
     stats: Dict[str, Dict[str, Any]] = {}
     try:
         path = _logs_path()
-        rows = []
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                rows.append(line)
-                if len(rows) > _IMPL_TAIL_ROWS:
-                    rows.pop(0)
+        # 2026-11-04 (eval stall): this used to iterate the entire fills
+        # log line-by-line keeping the last _IMPL_TAIL_ROWS — a full
+        # multi-hundred-MB scan on the decision path every TTL expiry
+        # (py-spy: signal-eval_0 parked in the read; EVAL heartbeat
+        # 20s+).  Read a bounded tail window instead; fill-quality
+        # events are ~1-4KB so 16 MiB comfortably covers 2000 rows.
+        _tail_bytes = 16 * 1024 * 1024
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            _size = fh.tell()
+            fh.seek(max(0, _size - _tail_bytes))
+            _data = fh.read()
+        if _size > _tail_bytes:
+            # Drop the first (possibly partial) line of the window.
+            _data = _data.split(b"\n", 1)[-1]
+        rows = _data.decode("utf-8", errors="replace").splitlines()[-_IMPL_TAIL_ROWS:]
         by_key: Dict[str, list] = {}
         for line in rows:
             try:

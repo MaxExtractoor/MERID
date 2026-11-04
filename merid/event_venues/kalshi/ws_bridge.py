@@ -794,6 +794,9 @@ class KalshiWebSocketBridge:
 
         # Per-type counters
         self._type_counts: Dict[str, int] = defaultdict(int)
+        # Per-ticker prometheus child cache — avoids .labels() (parent
+        # metric lock) on the per-frame drain path.
+        self._book_wait_metric_children: Dict[str, Any] = {}
 
         # DUAL-QUEUE BRIDGE PATTERN (2026 best practice):
         # - queue.Queue for thread-safe producer (WebSocket client)
@@ -4866,23 +4869,30 @@ class KalshiWebSocketBridge:
             )
 
         now_mono = _time.monotonic()
-        with self._total_events_processed_lock:
-            self._total_events_processed += 1
-            self._events_forwarded += 1
-            self._type_counts[event_type] += 1
-            if _ws_forward_first_event_ts == 0.0:
-                _ws_forward_first_event_ts = now_mono
-            _ws_forward_last_event_ts = now_mono
-            self._last_message_at = replay_time()
-            if ticker != "unknown" and ticker not in self._first_orderbook_seen:
-                self._first_orderbook_seen[ticker] = replay_time()
-                if len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
-                    for _ in range(len(self._first_orderbook_seen) // 2):
+        # 2026-11-04 (drain convoy): this bookkeeping acquired
+        # _total_events_processed_lock on every frame (~2000/s across
+        # the shard drain threads) — py-spy caught all drains parked
+        # on the acquire while book age climbed to 15s+.  The counters
+        # and timestamps are approximate telemetry; update them without
+        # the lock (a rare lost increment is acceptable) and take it
+        # only for the OrderedDict mutation on first-seen tickers.
+        self._total_events_processed += 1
+        self._events_forwarded += 1
+        self._type_counts[event_type] += 1
+        if _ws_forward_first_event_ts == 0.0:
+            _ws_forward_first_event_ts = now_mono
+        _ws_forward_last_event_ts = now_mono
+        self._last_message_at = replay_time()
+        if ticker != "unknown" and ticker not in self._first_orderbook_seen:
+            with self._total_events_processed_lock:
+                if ticker not in self._first_orderbook_seen:
+                    self._first_orderbook_seen[ticker] = replay_time()
+                    while len(self._first_orderbook_seen) > self._first_orderbook_seen_max:
                         self._first_orderbook_seen.popitem(last=False)
-                logger.info(
-                    "[WS-FIRST-ORDERBOOK] ticker=%s event_type=%s",
-                    ticker, event_type
-                )
+            logger.info(
+                "[WS-FIRST-ORDERBOOK] ticker=%s event_type=%s",
+                ticker, event_type
+            )
 
         try:
             from merid.event_venues.kalshi.market_state import (
@@ -4899,7 +4909,17 @@ class KalshiWebSocketBridge:
                 try:
                     _wait_ms = (_time.monotonic_ns() - float(_recv_ns)) / 1e6
                     if ws_book_bridge_wait_ms is not None:
-                        ws_book_bridge_wait_ms.labels(ticker=str(ticker)).set(_wait_ms)
+                        # 2026-11-04: .labels() takes the parent metric's
+                        # lock per call (~2000/s across drain threads —
+                        # py-spy caught drains inside metrics.py:203).
+                        # Cache the labelled child per ticker once.
+                        _child = self._book_wait_metric_children.get(ticker)
+                        if _child is None:
+                            _child = ws_book_bridge_wait_ms.labels(
+                                ticker=str(ticker)
+                            )
+                            self._book_wait_metric_children[ticker] = _child
+                        _child.set(_wait_ms)
                 except Exception:
                     pass
 
