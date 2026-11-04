@@ -1863,6 +1863,43 @@ class KalshiMarketStateStore:
         except Exception as e:
             logger.error("[BOOK-UNTRUSTED] failed for %s (%s): %s", ticker, reason, e)
 
+    def _mark_book_stale_for_trading(self, ticker: str, reason: str, **diag) -> None:
+        """Mark a book as serving lagged data WITHOUT invalidating it.
+
+        Freshness-vs-integrity separation (2026-11-03): a lagged but
+        seq-contiguous delta is honest book data.  The previous behaviour —
+        drop + INVALID + FULL_SNAPSHOT — converted recoverable consumer lag
+        into mandatory reconstruction and was the measured dominant cause of
+        non-executable time (BOOK_UPSTREAM_LAG/BOOK_EVENT_TOO_OLD storms
+        resyncing every book every few minutes).  Now the frame is still
+        enqueued and applied; ``_sync_book_fields`` backdates
+        ``last_book_update_ts`` by the measured event age so
+        ``is_market_execution_ready`` vetoes entries while the served data is
+        old, and the mark here feeds the sustained-degradation halt ladder
+        via ``_untrusted_since``.  The mark clears on the next applied delta
+        whose event age is back inside budget.  Genuine integrity loss
+        (sequence gaps, queue overflow, crossed/duality books) still takes
+        the INVALID + resync path via ``_mark_book_untrusted_and_resync``.
+        """
+        try:
+            self._untrusted_since.setdefault(ticker, time.monotonic())
+            self._maybe_escalate_session_book_untrusted()
+            _now_log = time.monotonic()
+            if _now_log - self._last_untrusted_log_ts.get(ticker, 0.0) >= 1.0:
+                suppressed = self._untrusted_log_suppressed.get(ticker, 0)
+                self._last_untrusted_log_ts[ticker] = _now_log
+                self._untrusted_log_suppressed[ticker] = 0
+                logger.error(
+                    "[BOOK-STALE] ticker=%s reason=%s diag=%s suppressed=%d",
+                    ticker, reason, diag, suppressed,
+                )
+            else:
+                self._untrusted_log_suppressed[ticker] = (
+                    self._untrusted_log_suppressed.get(ticker, 0) + 1
+                )
+        except Exception as e:
+            logger.error("[BOOK-STALE] failed for %s (%s): %s", ticker, reason, e)
+
     def _maybe_escalate_session_book_untrusted(self) -> None:
         """Escalate sustained session-wide book degradation to an entries halt.
 
@@ -2003,6 +2040,13 @@ class KalshiMarketStateStore:
         # book — drain the stale backlog and resync from a fresh snapshot
         # instead of partially replaying historical deltas.
         event_age_ms, upstream_wait_ms, hop_diag = self._book_event_timing(msg)
+        # 2026-11-03 (freshness != integrity): a lagged but seq-contiguous
+        # delta is still valid book data.  Stale-mark the book (entries stay
+        # vetoed on honest data-age; sustained staleness still escalates to
+        # the session halt ladder) and KEEP the frame for in-order apply so
+        # the book catches up instead of forcing a FULL_SNAPSHOT resync.
+        # The seq drop-record is retained only as belt-and-suspenders
+        # attribution in case a later stage discards this frame.
         if upstream_wait_ms is not None and upstream_wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS:
             try:
                 self.record_sid_frame_drop(
@@ -2010,13 +2054,12 @@ class KalshiMarketStateStore:
                 )
             except Exception:
                 pass
-            self._mark_book_untrusted_and_resync(
+            self._mark_book_stale_for_trading(
                 ticker,
                 "BOOK_UPSTREAM_LAG",
                 upstream_wait_ms=round(upstream_wait_ms, 1),
                 **hop_diag,
             )
-            return False
         if event_age_ms is not None and event_age_ms > _BOOK_MAX_EVENT_AGE_MS:
             try:
                 self.record_sid_frame_drop(
@@ -2024,13 +2067,12 @@ class KalshiMarketStateStore:
                 )
             except Exception:
                 pass
-            self._mark_book_untrusted_and_resync(
+            self._mark_book_stale_for_trading(
                 ticker,
                 "BOOK_EVENT_TOO_OLD",
                 event_age_ms=round(event_age_ms, 1),
                 **hop_diag,
             )
-            return False
         msg["_t_delta_enq_ns"] = time.monotonic_ns()
 
         # Ensure the queue and its lock exist under the global dict lock.
@@ -2577,8 +2619,23 @@ class KalshiMarketStateStore:
         self._sync_book_fields(
             state, self._ob.get_book(ticker), ticker, via="bridge_queue",
             channel="orderbook_delta",
+            applied_event_age_ms=_ev_age_ms,
         )
         self._sync_unified_book(ticker, state)
+
+        # Stale-mark recovery (2026-11-03): a book marked stale at the enqueue
+        # freshness gates re-attests here, as soon as an applied delta's
+        # measured event age is back inside budget — no snapshot required.
+        # Books INVALID for genuine integrity loss never reach this line (the
+        # FULL_SNAPSHOT apply gate or seq-gap invalidation keeps them out).
+        if (
+            _ev_age_ms is not None
+            and _ev_age_ms <= _BOOK_MAX_EVENT_AGE_MS
+            and state.data_quality != "INVALID"
+            and ticker in self._untrusted_since
+        ):
+            self._untrusted_since.pop(ticker, None)
+            self._maybe_recover_session_book_untrusted()
 
         state.data_source = "WS_ORDERBOOK_DELTA_LIVE"
 
@@ -7371,6 +7428,7 @@ class KalshiMarketStateStore:
     def _sync_book_fields(
         self, state: KalshiMarketState, ob: LocalOrderbook, ticker: str, via: str = "unknown",
         channel: Optional[str] = None,
+        applied_event_age_ms: Optional[float] = None,
     ) -> None:
         """Copy the book-owned fields from a ``LocalOrderbook`` into *state*.
 
@@ -7406,8 +7464,15 @@ class KalshiMarketStateStore:
         # CRITICAL FIX (2026-08-22): Use a single monotonic clock for in-process
         # staleness.  ``ob._snapshot_ts`` and any exchange ``ts`` are logged via
         # wall-clock fields but are not safe for ``time.monotonic()`` subtraction.
-        state.last_book_update_ts = time.monotonic()
-        state.last_book_update_wall_ts = time.time()
+        # 2026-11-03 (honest data-age): when the applied event's venue age was
+        # measured, backdate the freshness stamp by it.  A lagged-but-contiguous
+        # delta that is applied to catch the book up must NOT refresh the
+        # entry-readiness clock to apply-recency — ``is_market_execution_ready``
+        # and the coherence gate must see the served data's true age so stale
+        # books stay vetoed while the backlog drains.
+        _data_age_s = max(0.0, (applied_event_age_ms or 0.0) / 1000.0)
+        state.last_book_update_ts = time.monotonic() - _data_age_s
+        state.last_book_update_wall_ts = time.time() - _data_age_s
         ob_ts = getattr(ob, '_last_exchange_ts', None) or getattr(ob, '_snapshot_ts', None)
         if ob_ts is not None:
             logger.debug(f"[BOUNDARY-3-LOCAL→STATE] ticker={ticker} snapshot_applied exchange_ts={ob_ts} local_ts={state.last_book_update_ts}")

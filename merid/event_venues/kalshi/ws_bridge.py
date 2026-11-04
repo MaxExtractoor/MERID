@@ -4677,26 +4677,14 @@ class KalshiWebSocketBridge:
                 except Exception:
                     pass
 
-            # 2026-10-28 backlog fast-path: a delta that already waited past
-            # the upstream freshness bound is rejected by _enqueue_delta's
-            # BOOK_UPSTREAM_LAG gate anyway.  Running it through the full
-            # apply gauntlet first just keeps the drain thread saturated
-            # (observed ~1.5-2.5s residence during rollover floods).  Skip the
-            # apply and go straight to the same invalidate+resync the gate
-            # performs — identical outcome, ~10x cheaper.  Snapshots are
-            # exempt: a stale snapshot still establishes book state and the
-            # downstream sequence/age checks decide its validity.
-            if (
-                event_type == "orderbook_delta"
-                and _wait_ms is not None
-                and _wait_ms > _BOOK_MAX_UPSTREAM_WAIT_MS
-            ):
-                store.mark_book_untrusted_for_bridge(
-                    ticker,
-                    "BOOK_UPSTREAM_LAG",
-                    upstream_wait_ms=round(_wait_ms, 1),
-                )
-                return
+            # 2026-11-03: the former BOOK_UPSTREAM_LAG fast-path (invalidate +
+            # resync + drop) is removed.  A lagged but seq-contiguous delta is
+            # honest book data — it now flows through apply_orderbook_message
+            # to _enqueue_delta, which stale-marks the book (entries stay
+            # vetoed on honest data-age; sustained staleness still escalates
+            # to the halt ladder) and enqueues the frame for in-order apply.
+            # Invalidation is reserved for genuine integrity loss (sequence
+            # gaps, queue overflow, crossed/duality books).
             store.apply_orderbook_message(event, "bridge_queue")
         except Exception as apply_exc:
             now = _time.monotonic()
