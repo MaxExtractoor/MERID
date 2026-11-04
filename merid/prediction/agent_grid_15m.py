@@ -23481,21 +23481,28 @@ def _append_candidate_lifecycle_event(
             return
         from merid.execution.decision_audit_ledger import get_decision_audit_ledger
 
-        get_decision_audit_ledger().append_decision_event(
-            decision_id=str(decision_id),
-            candidate_id=candidate.get("candidate_id"),
-            event_type=event_type,
-            stage=stage,
-            reason_code=reason,
-            reason_detail={
-                "side": candidate.get("side"),
-                "edge_pct": candidate.get("edge_pct"),
-                **(dict(extra) if extra else {}),
-            },
-            trace_id=str(candidate.get("candidate_id") or decision_id),
-            run_id=candidate.get("run_id"),
-            ticker=candidate.get("ticker"),
-            asset=candidate.get("asset"),
+        # 2026-11-04: route through the non-blocking writer queue —
+        # the direct sync call parked ~4min on the uvicorn loop inside
+        # _ensure_db (self._lock behind a stalled write txn).
+        _ledger = get_decision_audit_ledger()
+        _ledger.submit_write(
+            lambda: _ledger.append_decision_event(
+                decision_id=str(decision_id),
+                candidate_id=candidate.get("candidate_id"),
+                event_type=event_type,
+                stage=stage,
+                reason_code=reason,
+                reason_detail={
+                    "side": candidate.get("side"),
+                    "edge_pct": candidate.get("edge_pct"),
+                    **(dict(extra) if extra else {}),
+                },
+                trace_id=str(candidate.get("candidate_id") or decision_id),
+                run_id=candidate.get("run_id"),
+                ticker=candidate.get("ticker"),
+                asset=candidate.get("asset"),
+            ),
+            priority="normal",
         )
     except Exception:
         pass
