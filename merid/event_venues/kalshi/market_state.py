@@ -1411,10 +1411,17 @@ class KalshiMarketStateStore:
                 return
 
             # Queue-residence freshness gate: the oldest message in
-            # the batch gives the worst-case wait.  A breach means
-            # the stream is execution-useless even though it is
-            # sequence-contiguous — invalidate, drain, and resync
-            # rather than applying historical deltas.
+            # the batch gives the worst-case wait.
+            # 2026-11-03 (freshness != integrity, drain side): a lagged batch
+            # is still seq-contiguous book data.  The old path dropped the
+            # batch unapplied AND unrecorded — manufacturing an unexplained
+            # sequence gap that invalidated every sibling book on the sid,
+            # then forcing this book into FULL_SNAPSHOT.  250ms of drain lag
+            # became a mandatory rebuild: the dominant resync-loop driver.
+            # Now: stale-mark (entries stay vetoed on honest data-age, the
+            # halt ladder still covers sustained lag) and apply the batch in
+            # order so the book catches up.  Genuine overload still ends at
+            # the queue cap -> attributed overflow -> resync.
             _oldest_enq = batch[0].get("_t_delta_enq_ns") if isinstance(batch[0], dict) else None
             if _oldest_enq:
                 _wait_ms = (time.monotonic_ns() - float(_oldest_enq)) / 1e6
@@ -1424,13 +1431,12 @@ class KalshiMarketStateStore:
                     _qstate.ws_queue_depth = len(batch)
                 _set_book_metric(_book_queue_wait_ms, ticker, _wait_ms)
                 if _wait_ms > _BOOK_MAX_QUEUE_WAIT_MS:
-                    self._mark_book_untrusted_and_resync(
+                    self._mark_book_stale_for_trading(
                         ticker,
                         "BOOK_DELTA_QUEUE_LAG",
                         queue_wait_ms=round(_wait_ms, 1),
                         depth=len(batch),
                     )
-                    return
 
             # Apply the batch under the orderbook ticker lock.
             ticker_lock = self._get_ticker_lock(ticker)
