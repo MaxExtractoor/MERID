@@ -431,6 +431,7 @@ except ImportError:
 
 import asyncio
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -9902,6 +9903,30 @@ async def _run_one_cycle(self, tick: int) -> None:
                 "[15m-LOOP] EV shadow summary failed: %s", _ev_sum_exc
             )
 
+# 2026-11-04: dedicated executor loop for the agent-grid tick.  run_cycle's
+# synchronous sections (REST/RSA auth, SQLite, audit writes) ran on the
+# uvicorn loop — py-spy showed multi-minute MainThread parks that
+# GIL-starved the ws-io/drain threads, re-aging books into ORDERBOOK_STALE
+# rejections.  The coroutine is submitted via run_coroutine_threadsafe and
+# re-wrapped into a main-loop Task so timeout/cancel/orphan semantics are
+# unchanged.  Same pattern as ws_bridge._ws_thread_main.
+_GRID_CYCLE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_GRID_CYCLE_LOOP_LOCK = threading.Lock()
+
+
+def _get_grid_cycle_loop() -> asyncio.AbstractEventLoop:
+    global _GRID_CYCLE_LOOP
+    with _GRID_CYCLE_LOOP_LOCK:
+        if _GRID_CYCLE_LOOP is None:
+            _GRID_CYCLE_LOOP = asyncio.new_event_loop()
+            threading.Thread(
+                target=_GRID_CYCLE_LOOP.run_forever,
+                name="agent-grid-cycle-loop",
+                daemon=True,
+            ).start()
+        return _GRID_CYCLE_LOOP
+
+
 async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = True, allow_new_entries: bool = True) -> list[dict]:
     # Run agent grid cycle with proper error handling and return candidates.
     # This is the SINGLE canonical path for running the agent grid.
@@ -10154,7 +10179,7 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                 )
                 return []
 
-            cycle_task = asyncio.create_task(
+            _grid_cycle_fut = asyncio.run_coroutine_threadsafe(
                 self.agent_grid.run_cycle(
                     tick,
                     allow_new_entries=allow_new_entries,
@@ -10162,7 +10187,14 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     coinbase_velocity=coinbase_velocity,
                     feature_snapshot=feature_snapshot,
                 ),
-                name=f"agent_grid_run_cycle_{tick}",
+                _get_grid_cycle_loop(),
+            )
+
+            async def _await_grid_cycle():
+                return await asyncio.wrap_future(_grid_cycle_fut)
+
+            cycle_task = asyncio.create_task(
+                _await_grid_cycle(), name=f"agent_grid_run_cycle_{tick}"
             )
             _cycle_dump_timer = None
             if hang_dump_s > 0:
