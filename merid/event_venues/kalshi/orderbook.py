@@ -24,6 +24,7 @@ HARDENING-FIX: Thresholds now read from threshold_config.py instead of hardcoded
 
 from __future__ import annotations
 
+import heapq
 import time
 from collections import defaultdict
 from decimal import Decimal
@@ -629,10 +630,10 @@ class LocalOrderbook:
         levels = self.yes_levels if side == "yes" else self.no_levels
 
         # Both yes_levels and no_levels store bids; the best bid is the
-        # highest price on each side.
-        sorted_levels = sorted(levels.items(), key=lambda x: x[0], reverse=True)
-
-        return sorted_levels[:top_n]
+        # highest price on each side.  nlargest is O(n + top_n log top_n)
+        # versus O(n log n) for a full sort — this ran twice per delta at
+        # ~2.5k deltas/s and was the dominant apply-side allocation.
+        return heapq.nlargest(top_n, levels.items())
 
     def get_yes_book_dollars(self, top_n: int = 10) -> List[Tuple[Decimal, int]]:
         """Get yes side book in dollar prices.

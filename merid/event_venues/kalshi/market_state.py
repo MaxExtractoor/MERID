@@ -819,6 +819,9 @@ class KalshiMarketStateStore:
         # 2026-11-04: per-ticker rate limit for the enqueue-side
         # _book_event_timing call (drain-thread cost control).
         self._last_enq_timing_ts: Dict[str, float] = {}
+        # 2026-11-04: per-ticker rate limit for the per-delta prometheus
+        # gauge write (labels() + set() under the client lock per delta).
+        self._last_book_metric_ts: Dict[str, float] = {}
         self._overflow_log_suppressed: Dict[str, int] = {}
         self._last_pending_full_log_ts: Dict[str, float] = {}
         # 2026-10-30: per-subscription (sid) sequence tracking.  Kalshi's WS
@@ -2151,14 +2154,20 @@ class KalshiMarketStateStore:
             )
         msg["_t_delta_enq_ns"] = time.monotonic_ns()
 
-        # Ensure the queue and its lock exist under the global dict lock.
-        with self._ticker_locks_lock:
-            if ticker not in self._delta_queues:
-                self._delta_queues[ticker] = deque()
-            if ticker not in self._delta_queue_locks:
-                self._delta_queue_locks[ticker] = threading.Lock()
-            queue = self._delta_queues[ticker]
-            queue_lock = self._delta_queue_locks[ticker]
+        # Fast path: the queue/lock pair is stable once created, so a lock-free
+        # dict read serves every enqueue except a ticker's first message.  The
+        # sole drain thread used to take _ticker_locks_lock per delta here —
+        # a global acquire per frame on the serial ingest path.
+        queue = self._delta_queues.get(ticker)
+        queue_lock = self._delta_queue_locks.get(ticker)
+        if queue is None or queue_lock is None:
+            with self._ticker_locks_lock:
+                if ticker not in self._delta_queues:
+                    self._delta_queues[ticker] = deque()
+                if ticker not in self._delta_queue_locks:
+                    self._delta_queue_locks[ticker] = threading.Lock()
+                queue = self._delta_queues[ticker]
+                queue_lock = self._delta_queue_locks[ticker]
 
         overflowed = False
         overflow_queue_len = 0
@@ -2199,24 +2208,45 @@ class KalshiMarketStateStore:
                 # _check_sid_delta_sequence — attribute each drop (including
                 # the incoming msg, which is never appended) so the gap only
                 # invalidates this book.
+                # 2026-11-04 (drain-thread stall): the attribution loop used to
+                # call record_sid_frame_drop per queued frame — a _sid_seq_lock
+                # acquire + list append per item.  With tens-of-thousands-deep
+                # queues a single overflow cost ~50-150ms on the sole drain
+                # thread, repeatedly, during exactly the floods that overflow.
+                # Collect (sid, seq) pairs lock-free first, then extend under
+                # one _sid_seq_lock hold; identical attribution coverage.
                 _drop_sid = msg.get("_sid") or msg.get("sid")
+                _drop_pairs: List[tuple] = []
                 try:
-                    self.record_sid_frame_drop(_drop_sid, msg.get("seq"), ticker)
-                except Exception:
+                    _s0 = int(msg.get("seq"))
+                    _drop_pairs.append((_drop_sid, _s0))
+                except (TypeError, ValueError):
                     pass
                 for _q in queue:
                     try:
-                        self.record_sid_frame_drop(
+                        _drop_pairs.append((
                             _q.get("_sid") or _q.get("sid") or _drop_sid,
-                            _q.get("seq"),
-                            ticker,
-                        )
-                    except Exception:
+                            int(_q.get("seq")),
+                        ))
+                    except (TypeError, ValueError):
                         pass
                 queue.clear()
             else:
                 queue.append(msg)
                 self._batch_worker_event.set()
+
+        # Attribute the cleared frames + the incoming frame in a single
+        # _sid_seq_lock hold, outside queue_lock; an already-overflow-marked
+        # sid needs no further records (record_sid_frame_drop discards them).
+        if overflowed and _drop_pairs:
+            with self._sid_seq_lock:
+                if _drop_sid not in self._sid_frame_drop_overflow:
+                    _lst = self._sid_frame_drops.setdefault(_drop_sid, [])
+                    _lst.extend((_s, ticker) for _sd, _s in _drop_pairs)
+                    if len(_lst) >= _SID_FRAME_DROP_CAP:
+                        _lst.clear()
+                        self._sid_frame_drops.pop(_drop_sid, None)
+                        self._sid_frame_drop_overflow.add(_drop_sid)
 
         if overflowed:
             # Rate-limit: a sustained burst re-overflows continuously; one line
@@ -2690,7 +2720,12 @@ class KalshiMarketStateStore:
             # STATUS_ANOMALY_NEGATIVE_AGE upstream (never stored here).
             _ev_age_ms = max(0.0, _ev_age_ms)
             state.ws_last_event_age_ms = _ev_age_ms
-            _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
+            # Gauge visibility does not need per-delta resolution at ~250/s
+            # per ticker; the rollup retains full-resolution stats.
+            _mnow = time.monotonic()
+            if _mnow - self._last_book_metric_ts.get(ticker, 0.0) >= 0.25:
+                self._last_book_metric_ts[ticker] = _mnow
+                _set_book_metric(_book_event_age_ms, ticker, _ev_age_ms)
         state.ws_last_event_age_status = _hops.get("venue_age_status")
         state.ws_last_event_age_src = _hops.get("event_age_src")
         if state.ws_last_queue_wait_ms is not None:
@@ -4074,15 +4109,17 @@ class KalshiMarketStateStore:
         # P0 FIX: Skip validation for nested payload format - let LocalOrderbook handle it
         # The validation functions expect flat message structure, but Kalshi WS uses nested msg
         # We'll rely on LocalOrderbook's internal validation instead
-        try:
-            from merid.event_venues.kalshi.orderbook import (
-                validate_orderbook_snapshot,
-                validate_orderbook_delta,
-                KalshiOrderbookShapeError
-            )
+        # 2026-11-04: guard the whole block — the import itself ran per frame
+        # on the sole drain thread (~2.5k/s) even though nested WS messages
+        # always skip validation.
+        if "msg" not in msg:
+            try:
+                from merid.event_venues.kalshi.orderbook import (
+                    validate_orderbook_snapshot,
+                    validate_orderbook_delta,
+                    KalshiOrderbookShapeError
+                )
 
-            # Only validate if message is flat (no nested msg)
-            if "msg" not in msg:
                 if "snapshot" in channel.lower() or (channel == "" and "yes" in msg and "no" in msg):
                     validate_orderbook_snapshot(msg)
                 elif "delta" in channel.lower():
@@ -4092,18 +4129,18 @@ class KalshiMarketStateStore:
                     #     "[market-state] Delta validation passed for ticker=%s channel=%s",
                     #     ticker, channel
                     # )
-        except KalshiOrderbookShapeError as e:
-            logger.error(
-                f"[ORDERBOOK-SHAPE-ERROR] KalshiMarketStateStore rejecting malformed orderbook message: {e}. "
-                f"ticker={ticker}, channel={channel}, msg_keys={list(msg.keys()) if isinstance(msg, dict) else 'N/A'}"
-            )
-            return None
-        except Exception as e:
-            logger.error(
-                f"[ORDERBOOK-SHAPE-ERROR] Unexpected error during orderbook shape validation: {e}. "
-                f"ticker={ticker}, channel={channel}"
-            )
-            return None
+            except KalshiOrderbookShapeError as e:
+                logger.error(
+                    f"[ORDERBOOK-SHAPE-ERROR] KalshiMarketStateStore rejecting malformed orderbook message: {e}. "
+                    f"ticker={ticker}, channel={channel}, msg_keys={list(msg.keys()) if isinstance(msg, dict) else 'N/A'}"
+                )
+                return None
+            except Exception as e:
+                logger.error(
+                    f"[ORDERBOOK-SHAPE-ERROR] Unexpected error during orderbook shape validation: {e}. "
+                    f"ticker={ticker}, channel={channel}"
+                )
+                return None
 
         # PERFORMANCE FIX: Removed delta throttling to eliminate sequence gaps
         # Research shows any throttling causes sequence gaps in high-frequency trading

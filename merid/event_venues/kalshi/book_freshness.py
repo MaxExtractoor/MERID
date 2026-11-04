@@ -228,35 +228,54 @@ class BookFreshnessTracker:
     def __init__(self, staleness_threshold_seconds: float = 15.0):
         self.staleness_threshold_seconds = staleness_threshold_seconds
         self._states: Dict[str, BookFreshnessState] = {}
+        # 2026-11-04: mutations are per-ticker; a single global RLock ran on
+        # every applied delta and serialized all 8 book-drain workers on one
+        # acquire chain.  _lock now guards only state/lock creation; updates
+        # take the ticker's own lock so distinct tickers proceed in parallel
+        # while same-ticker writers (WS batch worker vs REST sync) still
+        # serialize exactly as before.
         self._lock = __import__('threading').RLock()
-    
-    def get_state(self, ticker: str) -> BookFreshnessState:
-        """Get freshness state for a ticker."""
+        self._ticker_locks: Dict[str, Any] = {}
+
+    def _state_and_lock(self, ticker: str):
+        state = self._states.get(ticker)
+        if state is not None:
+            return state, self._ticker_locks[ticker]
         with self._lock:
-            if ticker not in self._states:
-                self._states[ticker] = BookFreshnessState(
+            state = self._states.get(ticker)
+            if state is None:
+                state = BookFreshnessState(
                     staleness_threshold_seconds=self.staleness_threshold_seconds
                 )
-            return self._states[ticker]
-    
-    def update_from_ws(self, ticker: str, exchange_ts: Optional[float], 
+                # Publish the lock before the state so lock-free readers can
+                # never observe a state without its lock.
+                self._ticker_locks[ticker] = __import__('threading').Lock()
+                self._states[ticker] = state
+            return state, self._ticker_locks[ticker]
+
+    def get_state(self, ticker: str) -> BookFreshnessState:
+        """Get freshness state for a ticker."""
+        state, _ = self._state_and_lock(ticker)
+        return state
+
+    def update_from_ws(self, ticker: str, exchange_ts: Optional[float],
                        received_ts: Optional[float]) -> None:
         """Update state from WebSocket message."""
-        with self._lock:
-            state = self.get_state(ticker)
+        state, lock = self._state_and_lock(ticker)
+        with lock:
             state.update_from_ws(exchange_ts, received_ts)
-    
-    def update_from_rest(self, ticker: str, received_ts: Optional[float], 
+
+    def update_from_rest(self, ticker: str, received_ts: Optional[float],
                         is_fallback: bool = False) -> None:
         """Update state from REST snapshot."""
-        with self._lock:
-            state = self.get_state(ticker)
+        state, lock = self._state_and_lock(ticker)
+        with lock:
             state.update_from_rest(received_ts, is_fallback)
-    
+
     def mark_connection_lost(self, ticker: str) -> None:
         """Mark connection as lost for a ticker."""
-        with self._lock:
-            state = self.get_state(ticker)
+        state, lock = self._state_and_lock(ticker)
+        with lock:
             state.mark_connection_lost()
     
     def is_tradable(self, ticker: str) -> bool:
