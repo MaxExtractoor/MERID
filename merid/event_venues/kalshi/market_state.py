@@ -1471,7 +1471,14 @@ class KalshiMarketStateStore:
                 applied_batch = coalesced if coalesced is not None else batch
                 for msg in applied_batch:
                     try:
-                        self._apply_delta_internal(ticker, msg, defer_unified_sync=True)
+                        if isinstance(msg, dict) and msg.get("_queued_ws_snapshot"):
+                            self._apply_orderbook_snapshot_locked(
+                                ticker, msg,
+                                msg.get("_queued_via", "bridge_queue"),
+                                "orderbook_snapshot",
+                            )
+                        else:
+                            self._apply_delta_internal(ticker, msg, defer_unified_sync=True)
                         batch_count += 1
                     except Exception as e:
                         logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
@@ -2048,6 +2055,28 @@ class KalshiMarketStateStore:
             logger.error(
                 "[BOOK-UNTRUSTED-RECOVERED] recovery attempt failed: %s", exc
             )
+
+    def _enqueue_snapshot(self, ticker: str, msg: Dict[str, Any]) -> bool:
+        """Enqueue an orderbook_snapshot for FIFO apply on the batch worker.
+
+        2026-11-04: snapshots are the *recovery* event — they must never be
+        rejected by freshness gates (a lagged snapshot is still authoritative),
+        so this appends unconditionally and only relies on the per-ticker FIFO
+        to order it correctly relative to queued deltas.  Overflow is ignored:
+        one frame past the cap is harmless and dropping a recovery frame would
+        deadlock book recovery.
+        """
+        with self._ticker_locks_lock:
+            if ticker not in self._delta_queues:
+                self._delta_queues[ticker] = deque()
+            if ticker not in self._delta_queue_locks:
+                self._delta_queue_locks[ticker] = threading.Lock()
+            queue = self._delta_queues[ticker]
+            queue_lock = self._delta_queue_locks[ticker]
+        with queue_lock:
+            queue.append(msg)
+            self._batch_worker_event.set()
+        return True
 
     def _enqueue_delta(self, ticker: str, msg: Dict[str, Any]) -> bool:
         """Enqueue a delta message for batch processing.
@@ -4354,231 +4383,254 @@ class KalshiMarketStateStore:
             if _sid_check > 0:
                 self._handle_sid_sequence_gap(_s_sid, _s_seq, _sid_check, ticker)
 
-        # Apply snapshots directly under lock (they're infrequent)
+        # Apply snapshots via the per-ticker queue.  2026-11-04: ALL snapshot
+        # vias are routed through the queue so no event loop (drain thread,
+        # uvicorn REST poller, forwarder resync) ever blocks on ticker_lock
+        # for a full-book apply.  Batch workers apply them in FIFO order
+        # relative to deltas; the original via is preserved for freshness /
+        # quote-ownership semantics.
         if channel == "orderbook_snapshot":
-            ticker_lock = self._get_ticker_lock(ticker)
-            with ticker_lock:
-                payload = msg.get("msg", msg)
-
-                # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
-                # Check if snapshot has any orderbook data
-                yes_levels = payload.get("yes", [])
-                no_levels = payload.get("no", [])
-                yes_count = len(yes_levels) if yes_levels else 0
-                no_count = len(no_levels) if no_levels else 0
-
-                # A sequenced WS snapshot replaces the book even when empty.
-                # Legacy REST/bootstrap paths retain their existing empty policy.
-                ob = self._ob.get_book(ticker)
-                if yes_count == 0 and no_count == 0 and ob.initialized and via != "bridge_queue":
-                    logger.warning(
-                        "[EMPTY-BOOK-REJECTION] Ignoring empty snapshot for %s: existing book already initialized",
-                        ticker,
-                    )
-                    return None
-
-                # Apply snapshot (empty snapshots are accepted for uninitialized books)
-                self._ob.apply_snapshot(ticker, payload)
-                if via == "bridge_queue":
-                    with self._sid_seq_lock:
-                        self._ws_book_requires_snapshot.discard(ticker)
-
-                # Log book state after snapshot for validation
-                book = self._ob.get_book(ticker)
-                if book and yes_count == 0 and no_count == 0:
-                    logger.info(
-                        "[EMPTY-BOOK-INIT] %s initialized with empty orderbook; expecting deltas to populate",
-                        ticker,
-                    )
-
-                # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
-                # The snapshot is the source of truth - replaying pending deltas can apply stale data
-                # to fresh state, causing orderbook corruption. Deltas received after the snapshot
-                # will be processed normally through the batch worker.
-                with self._ticker_locks_lock:
-                    pending_count = len(self._pending_deltas.get(ticker, []))
-                    if pending_count > 0:
-                        logger.info(
-                            "[SNAPSHOT-DELTA-CLEAR] ticker=%s cleared %d pending deltas after snapshot (preventing stale data application)",
-                            ticker, pending_count
-                        )
-                        self._pending_deltas.pop(ticker, None)
-
-                # Sync state and mark as recovered (only if the snapshot is clean).
-                # A clean snapshot is authoritative: reset any previous SUSPECT/INVALID
-                # state, then let _sync_book_fields downgrade again if the new book still
-                # violates duality or is crossed/locked.
-                state = self._get_or_create(ticker)
-                prior_quality = state.data_quality
-                prior_transition = state.transition
-
-                source = self._resolve_book_source(via, "orderbook_snapshot")
-                state.data_source = source
-
-                self._sync_book_fields(
-                    state, self._ob.get_book(ticker), ticker, via,
-                    channel="orderbook_snapshot",
-                )
-                _ws_snapshot_one_sided = via == "bridge_queue" and (
-                    not book.yes_levels or not book.no_levels
-                )
-                if _ws_snapshot_one_sided:
-                    # An older REST BBO must not replace a newer empty WS side.
-                    state.best_bid_cents = None
-                    state.best_ask_cents = None
-                    state.yes_bids = []
-                    state.no_bids = []
-                    state.quote_owner = "NONE_UNTRUSTED"
-                    state.degraded_mode = False
-                    state.last_rest_bid_cents = None
-                    state.last_rest_ask_cents = None
-                    state.last_rest_yes_bids = None
-                    state.last_rest_no_bids = None
-                    state.last_rest_quote_update_ts = 0.0
-                self._sync_unified_book(ticker, state)
-
-                # A clean, authoritative snapshot can lift a circuit breaker;
-                # a bootstrap-only snapshot (unconfirmed WS snapshot) cannot.
-                if state.data_quality not in ("SUSPECT", "INVALID"):
-                    self._attest_state_recovery(
-                        state,
-                        source,
-                        prior_quality=prior_quality,
-                        prior_transition=prior_transition,
-                    )
-                    # A successful snapshot resets the inversion counter.
-                    if hasattr(self, "_book_inversion_counts"):
-                        self._book_inversion_counts.pop(ticker, None)
-                else:
-                    # _sync_book_fields already set the appropriate SUSPECT/INVALID
-                    # data_quality and executable flag; nothing to attest.
-                    pass
-                if _ws_snapshot_one_sided:
-                    state.executable = False
-
-                # Update explicit BookHealth state machine.
-                if state.data_quality in ("SUSPECT", "INVALID"):
-                    self._set_book_health(
-                        ticker,
-                        BookHealth.INVALID,
-                        f"snapshot_quality={state.data_quality} transition={state.transition}",
-                    )
-                    if state.recovery_required_source:
-                        self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "invalid_snapshot_requires_resync")
-                elif state.recovery_attested and state.live_sequence_confirmed:
-                    self._set_book_health(ticker, BookHealth.LIVE, "snapshot_recovered_with_live_sequence")
-                elif state.recovery_attested:
-                    self._set_book_health(ticker, BookHealth.RECOVERED, "authoritative_snapshot_restored")
-                else:
-                    self._set_book_health(ticker, BookHealth.SNAPSHOT_RECEIVED, f"source={source}")
-
-                # 2026-08-24: Persist or reset the snapshot completion flag.  A clean
-                # full-book snapshot sets it; an invalid snapshot clears it so entries
-                # remain blocked until the next clean snapshot.
-                if state.data_quality in ("SUSPECT", "INVALID"):
-                    self._set_snapshot_complete(
-                        ticker, False, f"ws_orderbook_snapshot_invalid source={source}"
-                    )
-                    self._check_snapshot_timeout(ticker)
-                else:
-                    self._set_snapshot_complete(
-                        ticker, True, f"ws_orderbook_snapshot_applied source={source}"
-                    )
-
-                # Re-derive effective-quote ownership after attestation and the
-                # snapshot_complete flag settle — _sync_book_fields evaluated the
-                # owner before those were final.  REST ownership is preserved.
-                if (
-                    via == "bridge_queue"
-                    and state.quote_owner != "REST_VERIFIED_DEGRADED"
-                ):
-                    state.quote_owner = self._derive_ws_quote_owner(state)
-                self._note_book_state(ticker, state, f"ws_orderbook_apply:{via}")
-
-                # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
-                # This aligns with the data_source being WS-based
-                if via == "bridge_queue":
-                    state.transport_mode = "ws"
-                elif via.startswith("rest"):
-                    state.transport_mode = "rest"
-
-                # CRITICAL FIX (2026-08-02): Update book freshness tracker from orderbook data
-                # This prevents the DEAD state from blocking all trading when valid data exists
-                try:
-                    from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
-                    freshness_tracker = get_book_freshness_tracker()
-
-                    # Extract timestamp from message
-                    timestamp_str = payload.get("timestamp") or msg.get("timestamp")
-                    received_ts = None
-                    if timestamp_str:
-                        try:
-                            from datetime import datetime
-                            # Parse ISO format timestamp
-                            if isinstance(timestamp_str, str):
-                                received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
-                        except Exception as ts_error:
-                            logger.debug("[BOOK-FRESHNESS] Failed to parse timestamp for %s: %s", ticker, ts_error)
-
-                    # Update freshness state based on data source
-                    if via == "bridge_queue":
-                        # WebSocket data
-                        freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
-                    else:
-                        # REST data (bootstrap, fallback, polling)
-                        is_fallback = via in ("ws_fallback", "rest_polling")
-                        freshness_tracker.update_from_rest(ticker, received_ts=received_ts, is_fallback=is_fallback)
-
-                    if logger.isEnabledFor(10):
-                        logger.debug(
-                            "[BOOK-FRESHNESS] Updated state for %s via=%s state=%s",
-                            ticker,
-                            via,
-                            freshness_tracker.get_state(ticker).state.value,
-                        )
-                except ImportError:
-                    logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
-                except Exception as e:
-                    logger.error("[BOOK-FRESHNESS] Failed to update freshness state for %s: %s", ticker, e)
-
-                # Log raw book after snapshot
-                book = self._ob.get_book(ticker)
-                if book and book.initialized:
-                    try:
-                        yes_levels = list(book.yes_levels) if book.yes_levels and not isinstance(book.yes_levels, slice) else []
-                        no_levels = list(book.no_levels) if book.no_levels and not isinstance(book.no_levels, slice) else []
-                    except (TypeError, AttributeError):
-                        yes_levels = []
-                        no_levels = []
-                    yes_raw = yes_levels[:5] if yes_levels else []
-                    no_raw = no_levels[:5] if no_levels else []
-                    logger.debug(
-                        "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=%s source=WS",
-                        ticker, yes_raw, no_raw, channel
-                    )
-
-                # Log parsed book after computing top prices
-                if state.best_bid_cents is not None or state.best_ask_cents is not None:
-                    logger.debug(
-                        "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
-                        ticker, state.best_bid_cents, state.best_ask_cents
-                    )
-
-                # CRITICAL FIX: Return the updated state after snapshot application
-                self._note_book_state(ticker, state, f"apply_orderbook_end:{via}")
-                # 2026-10-05: notify subscribers after the snapshot settles so the
-                # hard-lock fast path sees fresh book state immediately (the
-                # batch worker does the same for delta batches).
-                try:
-                    self._notify_subscribers(ticker, state)
-                except Exception as _ns_exc:
-                    logger.debug(
-                        "[market-state] subscriber notify failed after snapshot for %s: %s",
-                        ticker, _ns_exc
-                    )
-                return state
+            msg["_queued_ws_snapshot"] = True
+            msg["_queued_via"] = via
+            self._enqueue_snapshot(ticker, msg)
+            return None
         else:
             return None
+
+    def _apply_orderbook_snapshot_locked(
+        self,
+        ticker: str,
+        msg: Dict[str, Any],
+        via: str,
+        channel: str,
+    ) -> Optional[KalshiMarketState]:
+        """Apply an orderbook snapshot to the local book + state.
+
+        2026-11-04: extracted from ``apply_orderbook_message`` so bridge_queue
+        snapshots can be applied on the per-ticker batch worker (FIFO vs
+        deltas) instead of stalling the sole drain thread.
+
+        Must be called with ``ticker_lock`` held.
+        """
+        payload = msg.get("msg", msg)
+
+        # CRITICAL FIX (2026-08-01): Validate snapshot BEFORE applying to prevent state corruption
+        # Check if snapshot has any orderbook data
+        yes_levels = payload.get("yes", [])
+        no_levels = payload.get("no", [])
+        yes_count = len(yes_levels) if yes_levels else 0
+        no_count = len(no_levels) if no_levels else 0
+
+        # A sequenced WS snapshot replaces the book even when empty.
+        # Legacy REST/bootstrap paths retain their existing empty policy.
+        ob = self._ob.get_book(ticker)
+        if yes_count == 0 and no_count == 0 and ob.initialized and via != "bridge_queue":
+            logger.warning(
+                "[EMPTY-BOOK-REJECTION] Ignoring empty snapshot for %s: existing book already initialized",
+                ticker,
+            )
+            return None
+
+        # Apply snapshot (empty snapshots are accepted for uninitialized books)
+        self._ob.apply_snapshot(ticker, payload)
+        if via == "bridge_queue":
+            with self._sid_seq_lock:
+                self._ws_book_requires_snapshot.discard(ticker)
+
+        # Log book state after snapshot for validation
+        book = self._ob.get_book(ticker)
+        if book and yes_count == 0 and no_count == 0:
+            logger.info(
+                "[EMPTY-BOOK-INIT] %s initialized with empty orderbook; expecting deltas to populate",
+                ticker,
+            )
+
+        # CRITICAL FIX (2026-08-01): Clear pending deltas after snapshot application
+        # The snapshot is the source of truth - replaying pending deltas can apply stale data
+        # to fresh state, causing orderbook corruption. Deltas received after the snapshot
+        # will be processed normally through the batch worker.
+        with self._ticker_locks_lock:
+            pending_count = len(self._pending_deltas.get(ticker, []))
+            if pending_count > 0:
+                logger.info(
+                    "[SNAPSHOT-DELTA-CLEAR] ticker=%s cleared %d pending deltas after snapshot (preventing stale data application)",
+                    ticker, pending_count
+                )
+                self._pending_deltas.pop(ticker, None)
+
+        # Sync state and mark as recovered (only if the snapshot is clean).
+        # A clean snapshot is authoritative: reset any previous SUSPECT/INVALID
+        # state, then let _sync_book_fields downgrade again if the new book still
+        # violates duality or is crossed/locked.
+        state = self._get_or_create(ticker)
+        prior_quality = state.data_quality
+        prior_transition = state.transition
+
+        source = self._resolve_book_source(via, "orderbook_snapshot")
+        state.data_source = source
+
+        self._sync_book_fields(
+            state, self._ob.get_book(ticker), ticker, via,
+            channel="orderbook_snapshot",
+        )
+        _ws_snapshot_one_sided = via == "bridge_queue" and (
+            not book.yes_levels or not book.no_levels
+        )
+        if _ws_snapshot_one_sided:
+            # An older REST BBO must not replace a newer empty WS side.
+            state.best_bid_cents = None
+            state.best_ask_cents = None
+            state.yes_bids = []
+            state.no_bids = []
+            state.quote_owner = "NONE_UNTRUSTED"
+            state.degraded_mode = False
+            state.last_rest_bid_cents = None
+            state.last_rest_ask_cents = None
+            state.last_rest_yes_bids = None
+            state.last_rest_no_bids = None
+            state.last_rest_quote_update_ts = 0.0
+        self._sync_unified_book(ticker, state)
+
+        # A clean, authoritative snapshot can lift a circuit breaker;
+        # a bootstrap-only snapshot (unconfirmed WS snapshot) cannot.
+        if state.data_quality not in ("SUSPECT", "INVALID"):
+            self._attest_state_recovery(
+                state,
+                source,
+                prior_quality=prior_quality,
+                prior_transition=prior_transition,
+            )
+            # A successful snapshot resets the inversion counter.
+            if hasattr(self, "_book_inversion_counts"):
+                self._book_inversion_counts.pop(ticker, None)
+        else:
+            # _sync_book_fields already set the appropriate SUSPECT/INVALID
+            # data_quality and executable flag; nothing to attest.
+            pass
+        if _ws_snapshot_one_sided:
+            state.executable = False
+
+        # Update explicit BookHealth state machine.
+        if state.data_quality in ("SUSPECT", "INVALID"):
+            self._set_book_health(
+                ticker,
+                BookHealth.INVALID,
+                f"snapshot_quality={state.data_quality} transition={state.transition}",
+            )
+            if state.recovery_required_source:
+                self._set_book_health(ticker, BookHealth.RESYNC_REQUESTED, "invalid_snapshot_requires_resync")
+        elif state.recovery_attested and state.live_sequence_confirmed:
+            self._set_book_health(ticker, BookHealth.LIVE, "snapshot_recovered_with_live_sequence")
+        elif state.recovery_attested:
+            self._set_book_health(ticker, BookHealth.RECOVERED, "authoritative_snapshot_restored")
+        else:
+            self._set_book_health(ticker, BookHealth.SNAPSHOT_RECEIVED, f"source={source}")
+
+        # 2026-08-24: Persist or reset the snapshot completion flag.  A clean
+        # full-book snapshot sets it; an invalid snapshot clears it so entries
+        # remain blocked until the next clean snapshot.
+        if state.data_quality in ("SUSPECT", "INVALID"):
+            self._set_snapshot_complete(
+                ticker, False, f"ws_orderbook_snapshot_invalid source={source}"
+            )
+            self._check_snapshot_timeout(ticker)
+        else:
+            self._set_snapshot_complete(
+                ticker, True, f"ws_orderbook_snapshot_applied source={source}"
+            )
+
+        # Re-derive effective-quote ownership after attestation and the
+        # snapshot_complete flag settle — _sync_book_fields evaluated the
+        # owner before those were final.  REST ownership is preserved.
+        if (
+            via == "bridge_queue"
+            and state.quote_owner != "REST_VERIFIED_DEGRADED"
+        ):
+            state.quote_owner = self._derive_ws_quote_owner(state)
+        self._note_book_state(ticker, state, f"ws_orderbook_apply:{via}")
+
+        # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
+        # This aligns with the data_source being WS-based
+        if via == "bridge_queue":
+            state.transport_mode = "ws"
+        elif via.startswith("rest"):
+            state.transport_mode = "rest"
+
+        # CRITICAL FIX (2026-08-02): Update book freshness tracker from orderbook data
+        # This prevents the DEAD state from blocking all trading when valid data exists
+        try:
+            from merid.event_venues.kalshi.book_freshness import get_book_freshness_tracker
+            freshness_tracker = get_book_freshness_tracker()
+
+            # Extract timestamp from message
+            timestamp_str = payload.get("timestamp") or msg.get("timestamp")
+            received_ts = None
+            if timestamp_str:
+                try:
+                    from datetime import datetime
+                    # Parse ISO format timestamp
+                    if isinstance(timestamp_str, str):
+                        received_ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
+                except Exception as ts_error:
+                    logger.debug("[BOOK-FRESHNESS] Failed to parse timestamp for %s: %s", ticker, ts_error)
+
+            # Update freshness state based on data source
+            if via == "bridge_queue":
+                # WebSocket data
+                freshness_tracker.update_from_ws(ticker, exchange_ts=None, received_ts=received_ts)
+            else:
+                # REST data (bootstrap, fallback, polling)
+                is_fallback = via in ("ws_fallback", "rest_polling")
+                freshness_tracker.update_from_rest(ticker, received_ts=received_ts, is_fallback=is_fallback)
+
+            if logger.isEnabledFor(10):
+                logger.debug(
+                    "[BOOK-FRESHNESS] Updated state for %s via=%s state=%s",
+                    ticker,
+                    via,
+                    freshness_tracker.get_state(ticker).state.value,
+                )
+        except ImportError:
+            logger.warning("[BOOK-FRESHNESS] book_freshness module not available, skipping freshness update")
+        except Exception as e:
+            logger.error("[BOOK-FRESHNESS] Failed to update freshness state for %s: %s", ticker, e)
+
+        # Log raw book after snapshot
+        book = self._ob.get_book(ticker)
+        if book and book.initialized:
+            try:
+                yes_levels = list(book.yes_levels) if book.yes_levels and not isinstance(book.yes_levels, slice) else []
+                no_levels = list(book.no_levels) if book.no_levels and not isinstance(book.no_levels, slice) else []
+            except (TypeError, AttributeError):
+                yes_levels = []
+                no_levels = []
+            yes_raw = yes_levels[:5] if yes_levels else []
+            no_raw = no_levels[:5] if no_levels else []
+            logger.debug(
+                "[KALSHI-RAW-BOOK] ticker=%s yes_raw=%s no_raw=%s side=%s source=WS",
+                ticker, yes_raw, no_raw, channel
+            )
+
+        # Log parsed book after computing top prices
+        if state.best_bid_cents is not None or state.best_ask_cents is not None:
+            logger.debug(
+                "[KALSHI-PARSED-BOOK] ticker=%s yes_best=%s no_best=%s source=WS",
+                ticker, state.best_bid_cents, state.best_ask_cents
+            )
+
+        # CRITICAL FIX: Return the updated state after snapshot application
+        self._note_book_state(ticker, state, f"apply_orderbook_end:{via}")
+        # 2026-10-05: notify subscribers after the snapshot settles so the
+        # hard-lock fast path sees fresh book state immediately (the
+        # batch worker does the same for delta batches).
+        try:
+            self._notify_subscribers(ticker, state)
+        except Exception as _ns_exc:
+            logger.debug(
+                "[market-state] subscriber notify failed after snapshot for %s: %s",
+                ticker, _ns_exc
+            )
+        return state
 
     # ── REST path ──────────────────────────────────────────────────────
 
