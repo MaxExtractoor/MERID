@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import random
 import threading
 import time
@@ -366,6 +367,10 @@ _SID_FRAME_DROP_CAP = int(os.getenv("MERID_SID_FRAME_DROP_CAP", "8192"))
 # Raw WS-vs-REST parity tolerance (ticks/cents).  Measured on the raw
 # delta-derived BBO, never on a REST-substituted effective quote.
 _WS_REST_PARITY_CENTS = int(os.getenv("MERID_WS_REST_PARITY_CENTS", "4"))
+# 2026-11-04: env reads hoisted out of the ~2000/s delta hot path.
+_MERID_DEV_MODE = os.getenv("MERID_DEV_MODE", "false").lower() in ("true", "1", "yes")
+_REST_BBO_MAX_AGE_S = float(os.getenv("MERID_REST_BBO_MAX_AGE_S", "3.0"))
+_REST_BBO_MIN_DIV_CENTS = int(os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3"))
 # 2026-10-04: consecutive in-parity WS deltas required to reclaim quote
 # ownership from REST_VERIFIED_DEGRADED (promotion hysteresis).
 _WS_PROMOTE_STREAK = int(os.getenv("MERID_WS_PROMOTE_STREAK", "5"))
@@ -1466,12 +1471,22 @@ class KalshiMarketStateStore:
                 applied_batch = coalesced if coalesced is not None else batch
                 for msg in applied_batch:
                     try:
-                        self._apply_delta_internal(ticker, msg)
+                        self._apply_delta_internal(ticker, msg, defer_unified_sync=True)
                         batch_count += 1
                     except Exception as e:
                         logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
 
                 if batch_count > 0:
+                    # 2026-11-04: unified-book mirror + recompute_derived ran once
+                    # PER DELTA (level-tuple rebuild both sides + unconditional
+                    # INFO log) — the dominant per-delta CPU sink at ~2000/s.
+                    # The mirror only needs the post-batch state; sync once.
+                    _batch_state = self._states.get(ticker)
+                    if _batch_state is not None:
+                        try:
+                            self._sync_unified_book(ticker, _batch_state)
+                        except Exception as _us_exc:
+                            logger.debug("[BATCH-WORKER] unified sync failed for %s: %s", ticker, _us_exc)
                     batch_duration_ms = (time.monotonic() - batch_start) * 1000
                     with self._ticker_locks_lock:
                         self._last_batch_duration_ms[ticker] = batch_duration_ms
@@ -2384,7 +2399,13 @@ class KalshiMarketStateStore:
         except Exception:
             pass
 
-    def _apply_delta_internal(self, ticker: str, msg: Dict[str, Any]) -> None:
+    def _apply_delta_internal(
+        self,
+        ticker: str,
+        msg: Dict[str, Any],
+        *,
+        defer_unified_sync: bool = False,
+    ) -> None:
         """Internal method to apply a delta message (called by batch worker).
 
         This method assumes the ticker lock is already held.
@@ -2632,7 +2653,8 @@ class KalshiMarketStateStore:
             channel="orderbook_delta",
             applied_event_age_ms=_ev_age_ms,
         )
-        self._sync_unified_book(ticker, state)
+        if not defer_unified_sync:
+            self._sync_unified_book(ticker, state)
 
         # Stale-mark recovery (2026-11-03): a book marked stale at the enqueue
         # freshness gates re-attests here, as soon as an applied delta's
@@ -2681,8 +2703,11 @@ class KalshiMarketStateStore:
         self._note_book_state(ticker, state, "ws_delta_apply")
 
         # Log raw book after delta (rate-limited to avoid spam)
+        # 2026-11-04: gate the whole O(levels) diagnostic block — the list()
+        # copies and size loops ran unconditionally per delta even though the
+        # output is debug-only.
         book = self._ob.get_book(ticker)
-        if book and book.initialized:
+        if book and book.initialized and logger.isEnabledFor(logging.DEBUG):
             try:
                 yes_levels = list(book.yes_levels) if book.yes_levels and not isinstance(book.yes_levels, slice) else []
                 no_levels = list(book.no_levels) if book.no_levels and not isinstance(book.no_levels, slice) else []
@@ -3925,12 +3950,12 @@ class KalshiMarketStateStore:
         # The ws_bridge forwards events with nested msg field containing market_ticker
         payload = msg.get("msg", msg) if "msg" in msg else msg
         ticker = payload.get("market_ticker") or payload.get("ticker") or payload.get("series_ticker") or ""
-        msg_keys = list(msg.keys()) if isinstance(msg, dict) else "N/A"
-
+        # 2026-11-04: dev-mode flag + msg_keys were computed per message —
+        # hoisted/lazified; msg_keys only materializes on the warn path.
         # P0 FIX: Use explicit via parameter for provenance tracking
         # Dev mode: warn on unknown via values to catch missing provenance tags
-        _DEV_MODE = os.getenv("MERID_DEV_MODE", "false").lower() in ("true", "1", "yes")
-        if _DEV_MODE and via == "unknown":
+        if _MERID_DEV_MODE and via == "unknown":
+            msg_keys = list(msg.keys()) if isinstance(msg, dict) else "N/A"
             logger.warning(
                 "[WS-MSTATE-INGEST] apply_orderbook_message called with via=unknown: ticker=%s, channel=%s, msg_keys=%s",
                 ticker,
@@ -6752,6 +6777,13 @@ class KalshiMarketStateStore:
         # The catalog already filters to only allowed markets (BTC/ETH/SOL/XRP/DOGE 15m)
         # The state store should accept any ticker that the catalog feeds it
         # This ensures expiry data is persisted for all 5 markets
+        # 2026-11-04: double-checked lookup — the per-delta hot path hit
+        # _global_lock 2-4x/delta against long-hold readers.  Existing
+        # tickers take an uncontended dict.get; the lock is only needed
+        # on first registration.
+        state = self._states.get(ticker)
+        if state is not None:
+            return state
         # RACE CONDITION FIX: Use global lock to prevent concurrent creation of same ticker state
         # This method is called from multiple code paths with different locks held, so we need
         # to ensure atomic check-and-create to avoid duplicate state objects
@@ -7667,12 +7699,8 @@ class KalshiMarketStateStore:
             # When a recent REST BBO exists, prefer it over a divergent
             # delta-derived BBO; the router still fetches REST at submit, so REST
             # remains the ground truth either way.
-            rest_pref_max_age_s = float(
-                os.getenv("MERID_REST_BBO_MAX_AGE_S", "3.0")
-            )
-            rest_pref_min_div_c = int(
-                os.getenv("MERID_REST_BBO_MIN_DIV_CENTS", "3")
-            )
+            rest_pref_max_age_s = _REST_BBO_MAX_AGE_S
+            rest_pref_min_div_c = _REST_BBO_MIN_DIV_CENTS
             rest_age_s = (
                 now - state.last_rest_quote_update_ts
                 if state.last_rest_quote_update_ts > 0
