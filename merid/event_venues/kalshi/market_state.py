@@ -1501,7 +1501,11 @@ class KalshiMarketStateStore:
                                 "orderbook_snapshot",
                             )
                         else:
-                            self._apply_delta_internal(ticker, msg, defer_unified_sync=True)
+                            self._apply_delta_internal(
+                                ticker, msg,
+                                defer_unified_sync=True,
+                                defer_field_sync=True,
+                            )
                         batch_count += 1
                     except Exception as e:
                         logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
@@ -1511,7 +1515,21 @@ class KalshiMarketStateStore:
                     # PER DELTA (level-tuple rebuild both sides + unconditional
                     # INFO log) — the dominant per-delta CPU sink at ~2000/s.
                     # The mirror only needs the post-batch state; sync once.
+                    # Same for _sync_book_fields (2x nlargest + best/mid/spread
+                    # + duality + ~20 field writes per delta): run it once on
+                    # the post-batch book, which is also the semantically
+                    # correct duality check point (no mid-batch flapping).
                     _batch_state = self._states.get(ticker)
+                    _batch_ob = self._ob.get_book(ticker)
+                    if _batch_state is not None and _batch_ob is not None:
+                        try:
+                            self._sync_book_fields(
+                                _batch_state, _batch_ob, ticker,
+                                via="bridge_queue",
+                                channel="orderbook_delta",
+                            )
+                        except Exception as _fs_exc:
+                            logger.debug("[BATCH-WORKER] field sync failed for %s: %s", ticker, _fs_exc)
                     if _batch_state is not None:
                         try:
                             self._sync_unified_book(ticker, _batch_state)
@@ -2515,6 +2533,7 @@ class KalshiMarketStateStore:
         msg: Dict[str, Any],
         *,
         defer_unified_sync: bool = False,
+        defer_field_sync: bool = False,
     ) -> None:
         """Internal method to apply a delta message (called by batch worker).
 
@@ -2763,11 +2782,12 @@ class KalshiMarketStateStore:
         _hops["apply_ms"] = round(_apply_ms, 2)
         self._timing_rollup_record(_hops)
 
-        self._sync_book_fields(
-            state, self._ob.get_book(ticker), ticker, via="bridge_queue",
-            channel="orderbook_delta",
-            applied_event_age_ms=_ev_age_ms,
-        )
+        if not defer_field_sync:
+            self._sync_book_fields(
+                state, self._ob.get_book(ticker), ticker, via="bridge_queue",
+                channel="orderbook_delta",
+                applied_event_age_ms=_ev_age_ms,
+            )
         if not defer_unified_sync:
             self._sync_unified_book(ticker, state)
 
