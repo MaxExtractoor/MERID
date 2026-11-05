@@ -1,0 +1,103 @@
+{
+  "incident": "2026-11-05 orderbook_delta SID never learned -> ws_subscribed=False -> all_markets_unready -> ENTRIES_DISABLED",
+  "source": "logs/full.log.1, logs/full.log.2, logs/full.log.4 ([WS-SUB-CONFIRM] lines); sanitized",
+  "note": "Internal timing fields (_t_ws_recv_ns, _t_ws_recv_wall_ms) removed. Market tickers are public identifiers. Captured frames establish observed deployment behavior; per Kalshi changelog, repeated `subscribe` calls add markets to the existing orderbook_delta SID, which is why batch-subscribe `ok` acks carry no sid at all.",
+  "frames": [
+    {
+      "name": "subscribed_orderbook_delta_2026-11-04",
+      "observed": "2026-11-04T13:53:12Z, full.log.4 — initial subscribe on fresh connection",
+      "frame": {
+        "type": "subscribed",
+        "id": 1,
+        "msg": {"channel": "orderbook_delta", "sid": 1}
+      }
+    },
+    {
+      "name": "subscribed_fill_2026-11-04",
+      "observed": "2026-11-04T13:53:14Z, full.log.4",
+      "frame": {
+        "type": "subscribed",
+        "id": 3,
+        "msg": {"channel": "fill", "sid": 2}
+      }
+    },
+    {
+      "name": "ok_batch_subscribe_orderbook_delta_2026-11-05",
+      "observed": "2026-11-05T14:09:02Z, full.log.1 — dominant shape all day; EVERY orderbook_delta batch subscribe ack on 2026-11-05 had this shape with NO sid anywhere in the frame",
+      "frame": {
+        "type": "ok",
+        "id": 19,
+        "msg": {
+          "market_tickers": [
+            "KXBTC15M-26NOV050915-15", "KXBTC15M-26NOV050930-30",
+            "KXDOGE15M-26NOV050915-15", "KXDOGE15M-26NOV050930-30",
+            "KXETH15M-26NOV050915-15", "KXETH15M-26NOV050930-30",
+            "KXSOL15M-26NOV050915-15", "KXSOL15M-26NOV050930-30",
+            "KXXRP15M-26NOV050915-15", "KXXRP15M-26NOV050930-30"
+          ]
+        }
+      }
+    },
+    {
+      "name": "ok_list_subscriptions",
+      "observed": "Kalshi-documented response to list_subscriptions command ([WS-LIST-SUBS] sent 2026-11-05T12:25:55Z); array-of-{channel,sid} shape documented in Kalshi WS docs",
+      "frame": {
+        "type": "ok",
+        "id": 2,
+        "msg": [
+          {"channel": "orderbook_delta", "sid": 1},
+          {"channel": "fill", "sid": 2},
+          {"channel": "order_group_updates", "sid": 3},
+          {"channel": "trade", "sid": 4},
+          {"channel": "ticker", "sid": 5}
+        ]
+      }
+    },
+    {
+      "name": "ok_with_top_level_sid",
+      "observed": "Kalshi-documented single-subscription ok ack; ws.py:3712 already reads data['sid'] from ok frames for sequence control",
+      "frame": {
+        "type": "ok",
+        "id": 7,
+        "sid": 1,
+        "msg": {"market_tickers": ["KXBTC15M-26NOV050915-15"]}
+      }
+    },
+    {
+      "name": "orderbook_delta_frame_for_bootstrap",
+      "observed": "Live data frames carry the sid at top level; Kalshi only streams orderbook frames for subscribed markets, so a frame for a claimed ticker proves the subscription",
+      "frame": {
+        "type": "orderbook_delta",
+        "sid": 1,
+        "seq": 4521,
+        "msg": {
+          "market_ticker": "KXBTC15M-26NOV050915-15",
+          "price": 67,
+          "delta": -2,
+          "side": "yes"
+        }
+      }
+    },
+    {
+      "name": "error_response_clears_pending",
+      "observed": "Kalshi error frame shape; a subscribe error must drop the pending cmd-id mapping so a later unrelated ok cannot bind the wrong channel",
+      "frame": {
+        "type": "error",
+        "id": 8,
+        "msg": {"code": 11, "msg": "subscription failed"}
+      }
+    }
+  ],
+  "funnel_evidence": {
+    "enabled_window_utc": "2026-11-05 12:26 -> 15:26 (pid 12664, run 20261105122539_12664_265753c1)",
+    "cycles": 1587,
+    "scorecard_candidates_generated": 0,
+    "enter_selected_route_rows": 1261,
+    "unique_candidates_approx": 315,
+    "allocator_stage_decisions": 24,
+    "allocator_outcome": "all 24 ENTRIES_DISABLED; entries_block_reason: all_markets_unready:ws_subscribed=5 (23), audit_writer_unhealthy (1), ws_forwarder_stalled (1 post-halt)",
+    "router_gate_duplicate": "order_router.py applies the same is_orderbook_subscription_confirmed check",
+    "last_order_attempt_utc": "2026-11-04 ~01:11 (REJECTED)",
+    "last_fill_utc": "2026-11-03T22:49:41"
+  }
+}

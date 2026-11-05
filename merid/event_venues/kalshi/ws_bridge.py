@@ -2812,15 +2812,14 @@ class KalshiWebSocketBridge:
         """Re-enable live entries after a confirmed WS data-plane recovery.
 
         Follows the contract recovery path
-        LIVE_ENTRIES_HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED via a
-        preflight completion.  Per-decision entry gates (queue_healthy,
-        quote_fresh, sequence confirmation) still independently validate that
-        fresh, sequenced data is actually flowing before any entry submits.
+        LIVE_ENTRIES_HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED via
+        ``complete_runtime_recovery`` with probed subsystem evidence.
+        Per-decision entry gates (queue_healthy, quote_fresh, sequence
+        confirmation) still independently validate that fresh, sequenced data
+        is actually flowing before any entry submits.
         """
         try:
             from merid.observability.live_runtime_state import get_live_runtime_state
-            from merid.config.auto_execution import is_auto_execution_enabled
-            from merid.config.observe_only import is_observe_only
 
             live_state = get_live_runtime_state()
             if live_state.live_entries_enabled():
@@ -2833,19 +2832,44 @@ class KalshiWebSocketBridge:
                 return
             if not self._ws_data_plane_alive():
                 return
+            orig_reason = getattr(live_state, "_reason", None) or "ws_data_plane_dead"
+            orig_codes = sorted(reason_codes)
+            # 2026-11-05: verified recovery, not feed-only preflight.  The old
+            # path called complete_preflight(auto_enable=True) from
+            # RECOVERY_RUNNING, which refuses by design and overwrote the
+            # recoverable reason codes with RECOVERY_VERIFICATION_REQUIRED —
+            # permanently parking the process halted until restart.
+            from merid.observability.live_runtime_state import (
+                collect_runtime_recovery_evidence,
+                runtime_recovery_evidence_missing,
+            )
+
+            evidence = collect_runtime_recovery_evidence(resolved_failure=True)
+            evidence["recovery"] = "ws_data_plane_reconnect"
+            missing = runtime_recovery_evidence_missing(evidence)
+            if missing:
+                logger.warning(
+                    "[WS-RUNTIME-RECOVERY] recovery evidence incomplete (%s) "
+                    "— staying halted; retry on next data-plane check",
+                    missing,
+                )
+                return
             live_state.transition(
                 "RECOVERY_RUNNING",
                 "ws_data_plane_recovered",
                 reason_codes=["WS_RECOVERED"],
             )
-            auto_enable = is_auto_execution_enabled() and not is_observe_only()
-            live_state.complete_preflight(
-                auto_enable=auto_enable,
-                preflight_context={
-                    "recovery": "ws_data_plane_reconnect",
-                    "auto_execution_enabled": auto_enable,
-                },
-            )
+            if not live_state.complete_runtime_recovery(
+                "ws_data_plane_recovered", evidence
+            ):
+                # Race: evidence decayed between probe and commit.  Return to
+                # halted with the ORIGINAL reason codes so recoverable-reason
+                # matching keeps working and a later retry can succeed.
+                live_state.transition(
+                    "LIVE_ENTRIES_HALTED",
+                    orig_reason,
+                    orig_codes,
+                )
             logger.info(
                 "[WS-RUNTIME-RECOVERY] live entries state=%s after WS recovery",
                 live_state.state,

@@ -33,13 +33,30 @@ def delta(sid=4, ticker=TICKER):
     }
 
 
-def test_ack_and_current_ticker_observation_are_both_required(ws):
+def test_claimed_ticker_frame_adopts_sid_and_confirms(ws):
+    """Kalshi only streams orderbook frames for subscribed markets, so the
+    first live frame for a claimed ticker both adopts the sid and proves the
+    ticker is streaming (the ack that never arrives as type=subscribed)."""
     assert not ws.is_orderbook_subscription_confirmed(TICKER)
-    ws._note_orderbook_subscription_observation(delta())
+    ws._note_orderbook_subscription_observation(delta(sid=4))
+    assert ws._subscription_ids["orderbook_delta"] == 4
+    assert ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_unclaimed_ticker_frame_adopts_no_sid(ws):
+    """Frames for markets we never subscribed prove nothing."""
+    ws._orderbook_tickers.discard(TICKER)
+    ws._note_orderbook_subscription_observation(delta(sid=4))
+    assert ws._subscription_ids.get("orderbook_delta") is None
     assert not ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_mismatched_sid_frame_is_not_evidence(ws):
+    """Once a sid is known, frames under a different sid neither overwrite it
+    nor count as this ticker's observation."""
     ws._record_subscription_confirmation(ack())
-    assert not ws.is_orderbook_subscription_confirmed(TICKER)
     ws._note_orderbook_subscription_observation(delta(sid=9))
+    assert ws._subscription_ids["orderbook_delta"] == 4
     assert not ws.is_orderbook_subscription_confirmed(TICKER)
     ws._note_orderbook_subscription_observation(delta())
     assert ws.is_orderbook_subscription_confirmed(TICKER)
@@ -88,6 +105,62 @@ def test_subscription_removal_revokes_matching_sid_only(ws):
     assert ws.is_orderbook_subscription_confirmed(TICKER)
     ws._record_subscription_removal({"type": "unsubscribed", "sid": 4})
     assert not ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_ok_frame_learns_sid_via_pending_cmd_map(ws):
+    """Kalshi answers orderbook subscribes with type=ok — learn the sid anyway."""
+    ws._track_pending_subscribe(
+        {"id": 7, "cmd": "subscribe",
+         "params": {"channels": ["orderbook_delta"], "market_tickers": [TICKER]}}
+    )
+    ws._record_ok_confirmation(
+        {"type": "ok", "id": 7, "sid": 6, "msg": {"market_tickers": [TICKER]}}
+    )
+    assert ws._subscription_ids.get("orderbook_delta") == 6
+    ws._note_orderbook_subscription_observation(delta(sid=6))
+    assert ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_ok_frame_list_msg_learns_all_channels(ws):
+    """list_subscriptions responds msg=[{channel, sid}] — record every entry."""
+    ws._record_ok_confirmation(
+        {"type": "ok", "id": 2,
+         "msg": [{"channel": "orderbook_delta", "sid": 1},
+                 {"channel": "ticker", "sid": 2}]}
+    )
+    assert ws._subscription_ids["orderbook_delta"] == 1
+    assert ws._subscription_ids["ticker"] == 2
+    ws._note_orderbook_subscription_observation(delta(sid=1))
+    assert ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_frame_traffic_bootstraps_unknown_orderbook_sid(ws):
+    """Live orderbook frames for a claimed ticker are themselves the ack."""
+    ws._note_orderbook_subscription_observation(delta(sid=3))
+    assert ws._subscription_ids.get("orderbook_delta") == 3
+    assert ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_ok_frame_without_sid_leaves_gate_closed(ws):
+    ws._track_pending_subscribe(
+        {"id": 7, "cmd": "subscribe",
+         "params": {"channels": ["orderbook_delta"], "market_tickers": [TICKER]}}
+    )
+    ws._record_ok_confirmation(
+        {"type": "ok", "id": 7, "msg": {"market_tickers": [TICKER]}}
+    )
+    assert ws._subscription_ids.get("orderbook_delta") is None
+    assert not ws.is_orderbook_subscription_confirmed(TICKER)
+
+
+def test_error_response_consumes_pending_channel(ws):
+    ws._track_pending_subscribe(
+        {"id": 9, "cmd": "subscribe",
+         "params": {"channels": ["orderbook_delta"], "market_tickers": [TICKER]}}
+    )
+    ws._pending_subscribe_channels.pop(9, None)
+    ws._record_ok_confirmation({"type": "ok", "id": 9, "sid": 2, "msg": {}})
+    assert ws._subscription_ids.get("orderbook_delta") is None
 
 
 @pytest.mark.asyncio

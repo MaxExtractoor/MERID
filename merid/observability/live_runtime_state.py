@@ -801,3 +801,142 @@ def live_entries_enabled() -> bool:
 def can_submit_live_entry() -> bool:
     """Convenience: can a new live entry order be submitted?"""
     return get_live_runtime_state().can_submit_live_entry()
+
+
+_RUNTIME_RECOVERY_REQUIRED_KEYS = (
+    "resolved_failure",
+    "fresh_reconciliation",
+    "no_critical_discrepancy",
+    "exits_available",
+    "router_available",
+    "production_live",
+)
+
+
+def collect_runtime_recovery_evidence(
+    *,
+    resolved_failure: bool,
+    fill_watermark_at_halt: Any = None,
+) -> Dict[str, Any]:
+    """Probe live subsystems for the evidence ``complete_runtime_recovery`` requires.
+
+    Every key is positively verified; anything unverifiable is left falsy so
+    the recovery gate fails closed.  Feed/book recoveries call this instead of
+    ``complete_preflight(auto_enable=True)``, which is designed to refuse
+    auto-enable from ``RECOVERY_RUNNING`` (the pre-2026-11-05 dead end that
+    left the process permanently halted on
+    ``runtime_recovery_verification_required``).
+    """
+    ev: Dict[str, Any] = {"resolved_failure": bool(resolved_failure)}
+
+    # fresh_reconciliation — the fills poller's last reconcile must be recent
+    # and not broken/error.
+    try:
+        from merid.event_venues.kalshi.fills_poller import get_fills_poller
+
+        health = get_fills_poller().get_health()
+        last_recon = health.get("last_reconcile_time")
+        report = health.get("reconciliation") or {}
+        fresh = False
+        if last_recon:
+            try:
+                last_dt = datetime.fromisoformat(str(last_recon))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                fresh = (
+                    datetime.now(timezone.utc) - last_dt
+                ).total_seconds() < 300.0
+            except Exception:
+                fresh = False
+        ev["fresh_reconciliation"] = bool(
+            fresh and report.get("status") not in ("broken", "error")
+        )
+        if last_recon:
+            ev["reconciliation_snapshot_id"] = f"recon_{last_recon}"
+    except Exception:
+        ev["fresh_reconciliation"] = False
+
+    # fill_watermark — circuit-breaker watermark with fills-ledger fallback
+    # (mirrors _startup_telemetry_fields).
+    watermark: Any = None
+    try:
+        from merid.governance.trading_circuit_breaker import (
+            get_trading_circuit_breaker,
+        )
+
+        watermark = getattr(
+            get_trading_circuit_breaker(), "_http_fill_watermark", None
+        )
+    except Exception:
+        pass
+    if watermark is None:
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+
+            _fills = getattr(get_fills_ledger(), "_fills", {}) or {}
+            if _fills:
+                watermark = max(
+                    getattr(f, "created_time", None)
+                    for f in _fills.values()
+                    if getattr(f, "created_time", None) is not None
+                )
+        except Exception:
+            pass
+    ev["fill_watermark"] = watermark
+    ev["fill_watermark_at_halt"] = fill_watermark_at_halt
+
+    # no_critical_discrepancy — canonical portfolio must be authoritative.
+    try:
+        from merid.event_venues.kalshi.canonical_portfolio import (
+            get_canonical_portfolio_store,
+        )
+
+        pf = get_canonical_portfolio_store().current()
+        ev["no_critical_discrepancy"] = bool(
+            pf is not None and getattr(pf, "is_authoritative", False)
+        )
+    except Exception:
+        ev["no_critical_discrepancy"] = False
+
+    # exits_available — reduce-only exits flow through the order router to
+    # the Kalshi REST client; both must be present.
+    try:
+        from merid.event_venues.kalshi.client import get_kalshi_client
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+
+        ev["exits_available"] = bool(
+            get_position_cache() is not None and get_kalshi_client() is not None
+        )
+    except Exception:
+        ev["exits_available"] = False
+
+    # router_available — the canonical live router is the order_router module
+    # itself; importable means selected.
+    try:
+        from merid.event_venues.kalshi import order_router as _or  # noqa: F401
+
+        ev["router_available"] = True
+    except Exception:
+        ev["router_available"] = False
+
+    # production_live — durable operator authorization + live mode, and not
+    # the emergency read-only switch.
+    try:
+        from merid.config.auto_execution import is_auto_execution_enabled
+        from merid.config.observe_only import is_observe_only
+
+        ev["production_live"] = bool(
+            is_auto_execution_enabled() and not is_observe_only()
+        )
+    except Exception:
+        ev["production_live"] = False
+
+    return ev
+
+
+def runtime_recovery_evidence_missing(evidence: Dict[str, Any]) -> List[str]:
+    """Mirror of the ``complete_runtime_recovery`` refusal check (pre-screen)."""
+    missing = [k for k in _RUNTIME_RECOVERY_REQUIRED_KEYS if not evidence.get(k)]
+    if evidence.get("fill_watermark") is None:
+        missing.append("fill_watermark_missing")
+    return missing

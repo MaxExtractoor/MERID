@@ -290,6 +290,11 @@ class KalshiWebSocket(EventVenueStream):
         self._subscription_ids: Dict[str, int] = {}  # channel -> sid
         self._subscription_evidence_lock = threading.Lock()
         self._observed_orderbook_subscriptions: Dict[str, tuple] = {}
+        # 2026-11-05: cmd-id -> channel for ``subscribe`` requests awaiting a
+        # response.  Kalshi answers orderbook_delta subscribes with ``type=ok``
+        # frames (no ``channel`` field), so the channel must be recovered from
+        # the command we sent.  Bounded — a lost response evicts the oldest.
+        self._pending_subscribe_channels: Dict[int, str] = {}
 
         # ── Callback handling with PHASE 1 safety ───────────────────────────
         # PHASE 1 FIX: Initialize with safe no-op async callback to prevent NoneType errors
@@ -1075,9 +1080,10 @@ class KalshiWebSocket(EventVenueStream):
             self._subscriptions.add(f"event:{event_ticker}")
             self._event_ticker_subscriptions.add(event_ticker)  # BUG-6: track event tickers
 
+        self._track_pending_subscribe(message)
         await self._ws.send(json.dumps(message))
         # P0-1 WS UPSTREAM: Add WS-SUB-STATE log for subscription lifecycle
-        logger.info("[WS-SUB-STATE] channel=ticker markets=%d event=%s", 
+        logger.info("[WS-SUB-STATE] channel=ticker markets=%d event=%s",
                    len(market_ids) if market_ids else 0, event_ticker or "N/A")
 
     async def subscribe_trades(
@@ -1108,6 +1114,7 @@ class KalshiWebSocket(EventVenueStream):
             "params": params,
         }
 
+        self._track_pending_subscribe(message)
         await self._ws.send(json.dumps(message))
         logger.info(f"Subscribed to Kalshi trades" +
                    (f" for event={event_ticker}" if event_ticker else ""))
@@ -1139,6 +1146,7 @@ class KalshiWebSocket(EventVenueStream):
             "params": params,
         }
 
+        self._track_pending_subscribe(message)
         await self._ws.send(json.dumps(message))
         logger.info(
             "Subscribed to Kalshi fill channel%s",
@@ -1188,6 +1196,7 @@ class KalshiWebSocket(EventVenueStream):
         }
 
         self._orderbook_tickers.add(market_id)
+        self._track_pending_subscribe(message)
         payload = json.dumps(message)
         logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
         try:
@@ -1252,6 +1261,7 @@ class KalshiWebSocket(EventVenueStream):
                     "cmd": "subscribe",
                     "params": _params,
                 }
+                self._track_pending_subscribe(message)
                 payload = json.dumps(message)
                 logger.info("[WS-SUBSCRIPTION-PAYLOAD] sending JSON: %s", payload)
                 logger.info("[WS-SUBSCRIPTION-SENT] chunk=%d markets=%s", len(chunk), chunk)
@@ -1469,11 +1479,22 @@ class KalshiWebSocket(EventVenueStream):
         with self._subscription_evidence_lock:
             self._subscription_ids.clear()
             self._observed_orderbook_subscriptions.clear()
+            self._pending_subscribe_channels.clear()
 
     def _forget_orderbook_subscription_observation(self, tickers: List[str]) -> None:
         with self._subscription_evidence_lock:
             for ticker in tickers:
                 self._observed_orderbook_subscriptions.pop(ticker, None)
+
+    def _record_subscription_sid(self, channel: str, sid: Any) -> None:
+        """Record ``channel -> sid``; a new orderbook sid revokes ticker evidence."""
+        if not channel or sid is None:
+            return
+        with self._subscription_evidence_lock:
+            if channel == "orderbook_delta" and self._subscription_ids.get(channel) != sid:
+                self._observed_orderbook_subscriptions.clear()
+            self._subscription_ids[channel] = sid
+        logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
 
     def _record_subscription_confirmation(self, data: Dict[str, Any]) -> None:
         body = data.get("msg")
@@ -1482,11 +1503,59 @@ class KalshiWebSocket(EventVenueStream):
         sid = body.get("sid") if body.get("sid") is not None else data.get("sid")
         if not channel or sid is None:
             return
-        with self._subscription_evidence_lock:
-            if channel == "orderbook_delta" and self._subscription_ids.get(channel) != sid:
-                self._observed_orderbook_subscriptions.clear()
-            self._subscription_ids[channel] = sid
-        logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
+        self._record_subscription_sid(channel, sid)
+
+    def _record_ok_confirmation(self, data: Dict[str, Any]) -> None:
+        """Learn subscription sids from ``type=ok`` acknowledgements.
+
+        Kalshi answers orderbook_delta ``subscribe`` batches and
+        ``list_subscriptions`` with ``ok`` frames — no ``type=subscribed``
+        arrives.  The sid then sits at the frame's top level or inside
+        ``msg`` entries while ``channel`` is absent, so
+        ``_record_subscription_confirmation`` alone never learned it and
+        ``is_orderbook_subscription_confirmed`` stayed False for the life of
+        the process (observed 2026-11-05: ``ws_subscribed`` blocked every
+        entry all day while orderbook data flowed normally).
+        """
+        try:
+            body = data.get("msg")
+            if isinstance(body, list):
+                # list_subscriptions response: msg=[{"channel":..,"sid":..},..]
+                for item in body:
+                    if isinstance(item, dict):
+                        self._record_subscription_sid(
+                            item.get("channel"), item.get("sid")
+                        )
+                return
+            channel = None
+            sid = None
+            pending_channel = None
+            cmd_id = data.get("id")
+            if isinstance(cmd_id, int) and not isinstance(cmd_id, bool):
+                pending_channel = self._pending_subscribe_channels.pop(cmd_id, None)
+            if isinstance(body, dict):
+                channel = body.get("channel")
+                sid = body.get("sid")
+            if sid is None:
+                sid = data.get("sid")
+            if channel is None:
+                channel = pending_channel
+            if channel is not None and sid is not None:
+                self._record_subscription_sid(channel, sid)
+        except Exception:
+            logger.debug("[WS-SUB-ID-TRACK] ok-frame sid learn failed", exc_info=True)
+
+    def _track_pending_subscribe(self, message: Dict[str, Any]) -> None:
+        """Map a ``subscribe`` cmd id to its channel for ``ok``-frame sid recovery."""
+        try:
+            params = message.get("params") or {}
+            channels = params.get("channels") or []
+            if len(channels) == 1 and isinstance(message.get("id"), int):
+                if len(self._pending_subscribe_channels) > 256:
+                    self._pending_subscribe_channels.clear()
+                self._pending_subscribe_channels[message["id"]] = channels[0]
+        except Exception:
+            pass
 
     def _record_subscription_removal(self, data: Dict[str, Any]) -> None:
         sid = data.get("sid")
@@ -1507,9 +1576,26 @@ class KalshiWebSocket(EventVenueStream):
         sid = data.get("sid")
         seq = data.get("seq")
         with self._subscription_evidence_lock:
+            if not (
+                ticker and ticker in self._orderbook_tickers
+                and isinstance(sid, int) and not isinstance(sid, bool)
+            ):
+                return
+            known_sid = self._subscription_ids.get("orderbook_delta")
+            if known_sid is None:
+                # Kalshi only streams orderbook frames for subscribed markets,
+                # so live traffic for a claimed ticker IS the acknowledgement.
+                # When neither a `subscribed` nor an `ok` ack taught us the
+                # sid (Kalshi answers batch subscribes with bare `ok` frames),
+                # adopt the frame's sid — otherwise the confirmation gate
+                # stays false forever while data flows normally.
+                self._subscription_ids["orderbook_delta"] = sid
+                logger.info(
+                    "[WS-SUB-ID-TRACK] learned orderbook_delta sid=%s from live frame traffic",
+                    sid,
+                )
             if (
-                ticker and ticker in self._orderbook_tickers and sid is not None
-                and sid == self._subscription_ids.get("orderbook_delta")
+                sid == self._subscription_ids["orderbook_delta"]
                 and isinstance(seq, int) and not isinstance(seq, bool)
             ):
                 self._observed_orderbook_subscriptions[ticker] = (
@@ -1559,6 +1645,7 @@ class KalshiWebSocket(EventVenueStream):
             "params": {"channels": ["order_group_updates"]},
         }
 
+        self._track_pending_subscribe(message)
         await self._ws.send(json.dumps(message))
         self._order_group_updates_enabled = True
         logger.info("Subscribed to Kalshi order_group_updates")
@@ -2075,6 +2162,9 @@ class KalshiWebSocket(EventVenueStream):
 
                     # ── Handle error-type messages ─────────────────────
                     if data.get("type") == "error":
+                        _err_id = data.get("id")
+                        if isinstance(_err_id, int) and not isinstance(_err_id, bool):
+                            self._pending_subscribe_channels.pop(_err_id, None)
                         self._handle_error_message(data)
                         continue
 
@@ -2085,6 +2175,10 @@ class KalshiWebSocket(EventVenueStream):
                         self._record_subscription_confirmation(data)
                     if msg_type == "unsubscribed":
                         self._record_subscription_removal(data)
+                    if msg_type == "ok":
+                        # orderbook_delta subscribe / list_subscriptions /
+                        # update_subscription acks land here — learn the sid.
+                        self._record_ok_confirmation(data)
                     self._note_orderbook_subscription_observation(data)
 
                     # ── Enqueue for async processing ───────────────────

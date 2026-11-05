@@ -2054,9 +2054,10 @@ class KalshiMarketStateStore:
         events that pop an entry) or died with its market — the degraded-feed
         condition that tripped the halt is resolved.  Follows the contract
         path LIVE_ENTRIES_HALTED -> RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED
-        via ``complete_preflight``, the same mechanism the WS-reconnect
-        recovery uses; per-decision entry gates still independently require
-        fresh verified quotes before any order submits.
+        via ``complete_runtime_recovery`` with probed subsystem evidence, the
+        same mechanism the WS-reconnect recovery uses; per-decision entry
+        gates still independently require fresh verified quotes before any
+        order submits.
         """
         if self._untrusted_since:
             return
@@ -2072,21 +2073,40 @@ class KalshiMarketStateStore:
             reason_codes = set(getattr(live_state, "_reason_codes", []) or [])
             if "BOOK_FEED_DEGRADED" not in reason_codes:
                 return
-            from merid.config.auto_execution import is_auto_execution_enabled
-            from merid.config.observe_only import is_observe_only
+            from merid.observability.live_runtime_state import (
+                collect_runtime_recovery_evidence,
+                runtime_recovery_evidence_missing,
+            )
+
+            orig_reason = getattr(live_state, "_reason", None) or "book_feed_degraded"
+            orig_codes = sorted(reason_codes)
+            # 2026-11-05: verified recovery via complete_runtime_recovery, not
+            # feed-only preflight — the old complete_preflight(auto_enable=True)
+            # call always refused from RECOVERY_RUNNING and overwrote the
+            # BOOK_FEED_DEGRADED codes, permanently parking the process halted.
+            evidence = collect_runtime_recovery_evidence(resolved_failure=True)
+            evidence["recovery"] = "book_untrusted_sustained_resolved"
+            missing = runtime_recovery_evidence_missing(evidence)
+            if missing:
+                logger.warning(
+                    "[BOOK-UNTRUSTED-RECOVERY] recovery evidence incomplete (%s) "
+                    "— staying halted",
+                    missing,
+                )
+                return
             live_state.transition(
                 "RECOVERY_RUNNING",
                 "book_untrusted_sustained_resolved",
                 reason_codes=["BOOK_FEED_RECOVERED"],
             )
-            auto_enable = is_auto_execution_enabled() and not is_observe_only()
-            live_state.complete_preflight(
-                auto_enable=auto_enable,
-                preflight_context={
-                    "recovery": "book_untrusted_sustained_resolved",
-                    "auto_execution_enabled": auto_enable,
-                },
-            )
+            if not live_state.complete_runtime_recovery(
+                "book_untrusted_sustained_resolved", evidence
+            ):
+                live_state.transition(
+                    "LIVE_ENTRIES_HALTED",
+                    orig_reason,
+                    orig_codes,
+                )
             logger.critical(
                 "[BOOK-UNTRUSTED-RECOVERED] live entries state=%s after all "
                 "books re-attested",
