@@ -413,13 +413,28 @@ def test_identical_timestamp_conflict_is_rejected():
         acc.add_observation(ts, Decimal(101))
 
 
-def test_future_latest_reference_rejected():
+def test_future_latest_reference_within_feed_skew_tolerated():
+    """The publisher's clock legitimately leads ours (right-edge second
+    stamping + NTP lead); skew <=2s is feed skew, not a corrupt reference."""
     state = _state_at(-60)
     from dataclasses import replace
-    with pytest.raises(ValueError, match="Future"):
-        compute_settlement_distribution(
-            replace(state, latest_rti_ts=state.now_ts + timedelta(milliseconds=1)), 0.6,
+    for skew_ms in (1, 500, 900, 2000):
+        dist = compute_settlement_distribution(
+            replace(state, latest_rti_ts=state.now_ts + timedelta(milliseconds=skew_ms)),
+            0.6,
         )
+        assert dist.phase == "pre_window"
+
+
+def test_future_latest_reference_beyond_feed_skew_rejected():
+    state = _state_at(-60)
+    from dataclasses import replace
+    for skew_ms in (2001, 5000, 60000):
+        with pytest.raises(ValueError, match="Future"):
+            compute_settlement_distribution(
+                replace(state, latest_rti_ts=state.now_ts + timedelta(milliseconds=skew_ms)),
+                0.6,
+            )
 
 
 def test_missing_source_timestamp_is_not_local_arrival_time():

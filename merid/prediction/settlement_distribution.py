@@ -18,6 +18,12 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 _SECONDS_PER_YEAR = 365.0 * 24.0 * 60.0 * 60.0
 _SETTLEMENT_WINDOW_SECONDS = 60.0
 _MODEL_VERSION = "settlement-average-normal-v2-discrete"
+# The CF RTI source clock legitimately leads the local wall clock: stamps are
+# right-edge of the published one-second interval plus ordinary NTP lead
+# (observed ~0.9s on 2026-11-05, blocking every entry as "Future settlement
+# reference").  Mirror cf_rti_adapter's _FUTURE_SKEW_LIMIT_MS=2000 convention:
+# only an unbounded future offset means a corrupt reference.
+_MAX_FUTURE_REFERENCE_SKEW_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -336,7 +342,9 @@ def compute_settlement_distribution(
         raise ValueError("Settlement timestamps require a whole-second expiry")
     if abs((state.expiry_ts - state.now_ts).total_seconds() - tte) > 1e-6:
         raise ValueError("Inconsistent settlement timestamps")
-    if state.latest_rti_ts is not None and state.latest_rti_ts > state.now_ts:
+    if state.latest_rti_ts is not None and (
+        state.latest_rti_ts - state.now_ts
+    ).total_seconds() > _MAX_FUTURE_REFERENCE_SKEW_SECONDS:
         raise ValueError("Future settlement reference")
     schedule = [state.expiry_ts - timedelta(seconds=i) for i in range(59, -1, -1)]
     expected_samples = {ts for ts in schedule if ts <= state.now_ts}
