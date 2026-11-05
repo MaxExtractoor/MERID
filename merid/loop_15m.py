@@ -7193,6 +7193,22 @@ async def _run_loop(self) -> None:
                                     if _shard is None and getattr(self, "_catalog", None):
                                         _cm = self._catalog.get_market(ticker)
                                         _shard = getattr(_cm, "exchange_index", None)
+                                    if _shard is None:
+                                        # 2026-11-05: when neither candidate nor
+                                        # catalog carries exchange_index, fall
+                                        # back to the configured trading shard
+                                        # (15m crypto markets are single-shard).
+                                        # Previously _shard=None skipped the
+                                        # stake cap entirely, letting uncapped
+                                        # count_fp=6 intents reach the router
+                                        # to be rejected instead of resized.
+                                        try:
+                                            from merid.event_venues.kalshi.shard_funding import (
+                                                resolve_trading_shard as _resolve_trading_shard,
+                                            )
+                                            _shard = _resolve_trading_shard(getattr(self, "_catalog", None))
+                                        except Exception:
+                                            _shard = None
                                     if _shard is not None and not isinstance(_shard, bool):
                                         _cash = fresh_cached_shard_cash(int(_shard))
                                         if _cash is None:
@@ -7212,6 +7228,28 @@ async def _run_loop(self) -> None:
                                             _lr = _shard_last_result()
                                             if _lr is not None and _lr.shard_balances:
                                                 _cash = _lr.shard_balances.get(int(_shard))
+                                        if _cash is None:
+                                            # 2026-11-05: last resort — read the
+                                            # router's own throttled shard-balance
+                                            # cache so the sizer and the submit
+                                            # gate see the SAME spendable number.
+                                            # get_shard_balances_cached shares the
+                                            # module-level _bal_cache; at most one
+                                            # REST call per max_age_s across all
+                                            # callers, so this is not a hot-path
+                                            # network read.
+                                            try:
+                                                from merid.event_venues.kalshi.shard_funding import (
+                                                    get_shard_balances_cached as _gsbc,
+                                                )
+                                                from merid.event_venues.kalshi.client import (
+                                                    get_kalshi_client as _gkc,
+                                                )
+                                                _bal = await _gsbc(_gkc(), max_age_s=15.0)
+                                                if _bal:
+                                                    _cash = _bal.get(int(_shard))
+                                            except Exception:
+                                                _cash = None
                                         if _cash is not None:
                                             _stake_cap_usd = shard_stake_cap_usd(
                                                 _cash,

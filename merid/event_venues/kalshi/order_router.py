@@ -15910,15 +15910,95 @@ async def _route_live(
                             Decimal("0.0001")
                         )
                         if _stake > _stake_cap:
-                            latency = (_time.monotonic() - t0) * 1000
-                            _reason = (
-                                f"stake_at_risk_cap:pct={_stake_pct:.2f}"
-                                f":stake=${_stake:.4f}:cap=${_stake_cap}"
-                                f":shard_cash=${_shard_cash:.4f}:shard={_resolved_exchange_index}"
+                            # 2026-11-05: resize to the largest admissible
+                            # centi-contract quantity instead of forfeiting the
+                            # opportunity (Nov 1-5 audit: 74 attempt records /
+                            # 41 unique (ticker,side) opportunities rejected at
+                            # count_fp=6.0 while ~4-5 lots fit the same cap).
+                            # Bound by BOTH the stake cap and spendable cash
+                            # incl. the exact taker fee, and snap DOWN to the
+                            # 0.01-contract grid so fees and rounding can never
+                            # push the order over budget.  Reject only when no
+                            # permitted positive quantity remains.
+                            _requested_fp = _gate_count_fp
+                            if _gate_price > 0:
+                                _max_centi_stake = int(
+                                    (_stake_cap * Decimal(10000)) / Decimal(_gate_price)
+                                )
+                                _max_centi_cash = int(
+                                    (_shard_cash * Decimal(10000)) / Decimal(_gate_price)
+                                )
+                                _req_centi = int(
+                                    (_requested_fp * 100).to_integral_value(rounding=ROUND_FLOOR)
+                                )
+                                _clipped_centi = min(_req_centi, _max_centi_stake, _max_centi_cash)
+                                _clipped_fp: Optional[Decimal] = None
+                                while _clipped_centi > 0:
+                                    _cand_fp = Decimal(_clipped_centi) / Decimal(100)
+                                    _cand_fee = kalshi_fee_cents_exact(
+                                        _gate_price / 100.0, _cand_fp, "taker"
+                                    )
+                                    if (
+                                        Decimal(_gate_price) * _cand_fp / 100 <= _stake_cap
+                                        and (Decimal(_gate_price) * _cand_fp + _cand_fee) / 100
+                                        <= _shard_cash
+                                    ):
+                                        _clipped_fp = _cand_fp
+                                        break
+                                    _clipped_centi -= 1
+                            else:
+                                _clipped_fp = None
+                            if _clipped_fp is None or _clipped_fp < Decimal("0.01"):
+                                latency = (_time.monotonic() - t0) * 1000
+                                _reason = (
+                                    f"stake_at_risk_cap:no_admissible_qty:pct={_stake_pct:.2f}"
+                                    f":stake=${_stake:.4f}:cap=${_stake_cap}"
+                                    f":shard_cash=${_shard_cash:.4f}:shard={_resolved_exchange_index}"
+                                )
+                                logger.warning("[order-router] %s ticker=%s intent_id=%s", _reason, _wire_ticker, intent.intent_id)
+                                _release_gate_record(intent, _reason)
+                                return OrderResult(status="rejected", mode=mode, reason=_reason, latency_ms=round(latency, 2))
+                            # Mutate the intent BEFORE the wire request is built
+                            # so the submitted quantity is the clipped one, then
+                            # re-derive the gate economics used below.
+                            intent.count_fp = _clipped_fp
+                            intent.count = float(_clipped_fp)
+                            _gate_count_fp = _clipped_fp
+                            _gate_fee_cents = kalshi_fee_cents_exact(
+                                _gate_price / 100.0, _clipped_fp, "taker"
                             )
-                            logger.warning("[order-router] %s ticker=%s intent_id=%s", _reason, _wire_ticker, intent.intent_id)
-                            _release_gate_record(intent, _reason)
-                            return OrderResult(status="rejected", mode=mode, reason=_reason, latency_ms=round(latency, 2))
+                            _need = (Decimal(_gate_price) * _clipped_fp + _gate_fee_cents) / 100
+                            logger.warning(
+                                "[order-router] stake_at_risk_clip ticker=%s intent_id=%s requested_fp=%s clipped_fp=%s "
+                                "pct=%.2f cap=$%s shard_cash=$%.4f shard=%s",
+                                _wire_ticker, intent.intent_id, _requested_fp, _clipped_fp,
+                                _stake_pct, _stake_cap, _shard_cash, _resolved_exchange_index,
+                            )
+                            # Keep the durable attempt record truthful about the
+                            # quantity actually submitted: the fingerprint was
+                            # minted pre-clip (requested economics), but the
+                            # persisted order payload must show the wire spec.
+                            try:
+                                _att_id = getattr(intent, "order_attempt_id", None)
+                                if _att_id:
+                                    from merid.event_venues.kalshi.order_attempt_store import (
+                                        OrderAttemptStore as _OAS,
+                                    )
+                                    _oas = _OAS()
+                                    _rec = _oas.get_by_order_attempt_id(_att_id)
+                                    if _rec is not None and getattr(_rec, "payload_json", None):
+                                        import json as _json
+                                        _pl = _json.loads(_rec.payload_json)
+                                        _ord = _pl.setdefault("order", {})
+                                        _ord["stake_cap_clipped_from_count_fp"] = str(_requested_fp)
+                                        _ord["count_fp"] = str(_clipped_fp)
+                                        _ord["count"] = float(_clipped_fp)
+                                        _oas.update_payload(_att_id, _pl)
+                            except Exception as _pl_exc:
+                                logger.debug(
+                                    "[order-router] stake-clip attempt-payload update failed: %s",
+                                    _pl_exc,
+                                )
                     if _shard_cash < _need:
                         latency = (_time.monotonic() - t0) * 1000
                         _funding = last_result()
