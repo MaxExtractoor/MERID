@@ -703,7 +703,9 @@ async def get_live_readiness(request: Request) -> Dict[str, Any]:
         checks["guard_active"] = False
         ready = False
 
-    # Check WS feed
+    # Check WS feed — the legacy spot-price feed.  Informational only for the
+    # Kalshi-only execution policy: it never gates `ready`, and it is NOT the
+    # Kalshi market-data plane (whose health gates entries inside the loop).
     try:
         ws = _ws_feed()
         ws_st = ws.status() if hasattr(ws, "status") else {}
@@ -714,6 +716,36 @@ async def get_live_readiness(request: Request) -> Dict[str, Any]:
         checks["ws_feed_connected"] = False
     except RuntimeError:
         checks["ws_feed_connected"] = False
+
+    deps: Dict[str, Any] = {
+        "spot_price_ws": {
+            "connected": checks["ws_feed_connected"],
+            "required_for_current_policy": False,
+            "status": "informational",
+            "reason": "legacy spot feed; Kalshi-only policy gates on the "
+                      "Kalshi data plane, not this feed",
+        }
+    }
+    # The dependency that actually gates live entries: Kalshi data-plane
+    # health via the WS bridge forward loop.
+    try:
+        bridge = getattr(_loop(request), "_ws_bridge", None)
+        bh = bridge.get_forward_loop_health() if bridge else {}
+        deps["kalshi_market_data"] = {
+            "connected": bool(bh.get("healthy", False)),
+            "queue_size": bh.get("queue_size"),
+            "last_event_age_s": bh.get("time_since_last_event"),
+            "required_for_current_policy": True,
+            "status": "required",
+        }
+    except Exception as exc:
+        deps["kalshi_market_data"] = {
+            "connected": None,
+            "required_for_current_policy": True,
+            "status": "unknown",
+            "reason": f"bridge health unavailable: {exc}",
+        }
+    checks["dependencies"] = deps
 
     # Check trade mode
     try:

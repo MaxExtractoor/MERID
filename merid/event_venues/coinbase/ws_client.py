@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -100,6 +101,14 @@ class CoinbaseWebSocketClient:
         self._reconnect_count = 0
         self._last_message_at: Optional[float] = None
 
+        # TLS context is built ONCE off the event loop and reused across
+        # reconnects.  websockets.connect() otherwise constructs a fresh
+        # SSLContext inside the loop thread on every attempt — measured as
+        # a multi-second block on this host (cert-store loads), which wedged
+        # the whole FastAPI loop during a reconnect storm (2026-11-05).
+        self._ssl_context: Optional[ssl.SSLContext] = None
+        self._ssl_init_lock: Optional[asyncio.Lock] = None
+
         # Message and velocity diagnostics (never reset, monotonically increasing)
         self._messages_received = 0
         self._ticks_accepted = 0
@@ -188,6 +197,30 @@ class CoinbaseWebSocketClient:
             self._reconnect_count, self._running,
         )
 
+    async def _ensure_ssl_context(self) -> ssl.SSLContext:
+        """Build the client TLS context once, off the event loop.
+
+        `asyncio.to_thread` keeps the cert-store load off the loop; the
+        lock serializes construction so racing connects don't build
+        duplicate contexts.  Verification settings are the ssl module
+        defaults (CERT_REQUIRED + hostname check).
+        """
+        if self._ssl_context is not None:
+            return self._ssl_context
+        if self._ssl_init_lock is None:
+            self._ssl_init_lock = asyncio.Lock()
+        async with self._ssl_init_lock:
+            if self._ssl_context is None:
+                t0 = time.monotonic()
+                self._ssl_context = await asyncio.to_thread(
+                    ssl.create_default_context
+                )
+                logger.info(
+                    "[COINBASE-WS-TLS-INIT] duration_ms=%.1f",
+                    (time.monotonic() - t0) * 1000.0,
+                )
+        return self._ssl_context
+
     async def connect(self) -> None:
         """Connect to Coinbase WebSocket and subscribe to price feeds."""
         self._connection_state = "connecting"
@@ -195,10 +228,12 @@ class CoinbaseWebSocketClient:
                     self.WS_URL, [asset.value for asset in self.assets])
 
         try:
+            ssl_ctx = await self._ensure_ssl_context()
             self._ws = await websockets.connect(
                 self.WS_URL,
                 ping_interval=20,
                 ping_timeout=20,
+                ssl=ssl_ctx,
             )
             self._connection_state = "connected"
             logger.info("[COINBASE-WS-CONNECTED] url=%s", self.WS_URL)

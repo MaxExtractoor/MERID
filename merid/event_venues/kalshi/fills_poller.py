@@ -140,6 +140,7 @@ class FillsPoller:
         self._fills_ingestion_errors = 0  # NEW: Track fill ingestion failures
         self._reconcile_errors = 0  # NEW: Track reconciliation errors
         self._last_poll_time: Optional[datetime] = None
+        self._last_poll_attempt_time: Optional[datetime] = None
         self._last_reconcile_time: Optional[datetime] = None
         self._last_error: Optional[str] = None
 
@@ -327,6 +328,7 @@ class FillsPoller:
             "recovery_attempts": self._recovery_attempts,
             "polls_completed": self._polls_completed,
             "polls_failed": self._polls_failed,
+            "fill_sync": self._fill_sync_health(),
             "last_poll_time": self._last_poll_time.isoformat() if self._last_poll_time else None,
             "last_poll_fill_count": self._last_poll_fill_count,
             "last_poll_stages": dict(self._last_poll_stages),
@@ -348,6 +350,41 @@ class FillsPoller:
             },
         }
     
+    def _fill_sync_health(self) -> Dict[str, Any]:
+        """Separate fill-event age from fill-ingestion health.
+
+        An old `last_fill_event_at` with a fresh
+        `last_successful_fill_sync_at` means "no new fills" — healthy.
+        An old event timestamp plus failed/missing sync means degraded.
+        """
+        wm = None
+        try:
+            from merid.governance.trading_circuit_breaker import (
+                get_trading_circuit_breaker,
+            )
+            wm = getattr(
+                get_trading_circuit_breaker(), "_http_fill_watermark", None
+            )
+        except Exception:
+            pass
+        att, ok = self._last_poll_attempt_time, self._last_poll_time
+        if att is None:
+            status = "unknown"
+        elif ok is None or att > ok:
+            status = "error"
+        else:
+            status = "ok"
+        return {
+            "last_fill_event_at": str(wm) if wm is not None else None,
+            "last_fill_sync_attempt_at": (
+                att.isoformat() if att else None
+            ),
+            "last_successful_fill_sync_at": (
+                ok.isoformat() if ok else None
+            ),
+            "fill_sync_status": status,
+        }
+
     # ── Polling loops ─────────────────────────────────────────────────────────
     
     async def _poll_loop(self) -> None:
@@ -367,6 +404,7 @@ class FillsPoller:
                     _lag,
                 )
             try:
+                self._last_poll_attempt_time = datetime.now(timezone.utc)
                 await self._do_poll()
                 self._polls_completed += 1
                 self._last_poll_time = datetime.now(timezone.utc)
@@ -1441,6 +1479,7 @@ class FillsPoller:
             "fills_ingested": self._fills_ingested,
             "fills_ingestion_errors": self._fills_ingestion_errors,  # NEW
             "reconcile_errors": self._reconcile_errors,  # NEW
+            "fill_sync": self._fill_sync_health(),
             "last_poll_time": self._last_poll_time.isoformat() if self._last_poll_time else None,
             "last_reconcile_time": self._last_reconcile_time.isoformat() if self._last_reconcile_time else None,
             "last_error": self._last_error,
