@@ -429,6 +429,16 @@ def evaluate_all_gates(
             observed={
                 "net_edge_cents": net_edge_cents,
                 "gross_edge_cents": gross_edge_cents,
+                # 2026-11-05: decompose the gross->net cost adder so audits can
+                # attribute it (fee vs reserves vs slippage) instead of seeing
+                # an unexplained 1.47-7.09c variable charge.  Fields come from
+                # the indicators dict when the decision path produced them;
+                # absent keys surface as null rather than fabricated 0.0.
+                "entry_price_cents": _to_float(ind.get(f"{side}_entry_price_cents")),
+                "entry_fee_cents": _to_float(ind.get(f"{side}_entry_fee_cents")),
+                "exit_cost_reserve_cents": _to_float(ind.get(f"{side}_exit_cost_reserve_cents")),
+                "model_risk_reserve_cents": _to_float(ind.get(f"{side}_model_risk_reserve_cents")),
+                "policy_giveback_reserve_cents": _to_float(ind.get(f"{side}_policy_giveback_reserve_cents")),
             },
             threshold={"min_net_edge_cents": 0.0},
         )
