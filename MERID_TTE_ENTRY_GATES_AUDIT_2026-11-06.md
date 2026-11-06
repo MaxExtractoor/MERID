@@ -458,6 +458,53 @@ BTC/ETH-NO pockets (settle-basis counterfactual), ≥90c disabled tail +
 pf floor 94 (model-overconfidence evidence, not bug-era), NO ≥90c
 late-window (−14c settle counterfactual), the TTE floor stack (Part I).
 
+## 9d. Per-restriction evidence-vintage matrix (every cohort dated vs the fix wave)
+
+Fix boundary — confirmed commit dates (the evidence-contamination window
+is wider than "Nov-2"): the fee model was wrong until **10-31**
+(`41bf589e`: phantom volume tiers under-charged ~28% on ≥100-ct orders →
+every pre-10-31 net-EV audit used wrong fees); fill direction semantics
+were wrong until **11-01** (`f68e7ccb`: maker buy_no on the YES ask
+recorded as "sell yes" → every pre-11-01 per-side cohort audit has
+side-label contamination); the exit-path cluster landed **11-01/02**
+(`6343cf0f` attribution/wedge gaps, `e63bac2a` never-dispatched
+terminalize, `142b5419` P2/P3, `67cec276` canonical-fill contract, ~30
+reconcile/execution repairs); ws/orderbook/ledger through **11-04**;
+schema-v2 durable economics **11-05**.  **Clean era ≈ fills from 11-05/06.**
+
+Contamination classes: (a) exit-path-dependent evidence — broken until
+~11-02; (b) fill-record per-side P&L — wrong fees AND wrong direction
+labels until 10-31/11-01; (c) settle-basis counterfactuals — robust to
+exit bugs, mildly affected by record errors; (d) structural/model claims —
+calibration curves, microstructure mechanism, count-based asymmetry —
+mostly robust.
+
+| Restriction / cohort | Established | Evidence path | Verdict |
+|---|---|---|---|
+| `MIN_SECONDS_TO_EXPIRY=180` + ≤30s final-minute | 09-23 | markout mechanism + external replication | **KEEP** — structural, not exit-dependent |
+| `bounded_domain_tte` ≤840 | ~Oct | window policy | **KEEP** — structural |
+| Moneyness side caps YES@75 / NO@50 | ~10-11 | (b) pre-fix fills, wrong fees/direction | **STALE → probed** (`PRICE_CAP_EXCEPT`, shipped) |
+| Per-asset caps BTC-NO79 / ETH-NO89 / DOGE,SOL-NO75 | ~10-11 | (b) | **STALE → probed** where armed |
+| XRP-NO@1, XRP-YES 76-79 | ~Oct | settled −$9.54 structural claim | **KEEP** — unpriceable down-moves |
+| BTC/ETH-NO 51-64c pockets | ~10-11/14 | (c) settle-basis counterfactual | **KEEP** — robust to exit bugs |
+| pf floor 76/82→90 | 10-24 | (b)+(d) fills + asymmetry | superseded by 94 |
+| pf floor 90→92 | 10-28 | (b) fills | superseded by 94 |
+| pf floor 92→94 | 10-31 | fills through boundary day; asymmetry leg is (d) count-based | **PARTIALLY STALE** — kept; clean-era 60-180s probe now measures it |
+| pf `min_p` 0.90 | ~10-24 | (b) fill evidence | **STALE — vetoes 79% of 85-91c shadow**; next probe candidate after cap data lands |
+| pf `min_EV` −12c | ~Oct | config parameter | parameter, not evidence |
+| Settlement lane p≥0.84 / observed≥8 / 15-60s | ~10-12 | banked settlement sample stats | **KEEP** — (d) robust |
+| `tail_LCB` ≥80c | ~Oct | calibration artifact | **KEEP** — (d) robust |
+| Adverse-selection reserve | 10-01 | mechanism parameter | **KEEP** — structural |
+| `side_suspended_manual_review`, `cost_basis_override` | 10-31+ | live incident throttles | **KEEP** — current mechanism |
+| `no_positive_executable_edge` (82% of vetoes) | continuous | EV gate — correct NOW, but every pre-10-31 EV audit used wrong fees | gate correct; **historical EV-cohort conclusions suspect** |
+
+Net: the cohorts the operator suspected (moneyness caps, pf min_p, pf
+floor-94 fills leg) ARE bug-era-vintage (b).  The cohorts resting on
+settle-basis or structural claims (51-64c pockets, XRP, settlement lane,
+tail_LCB, TTE floor mechanism) survive the dating test.  The shipped
+probes target exactly the (b)-contaminated restrictions — nothing else
+needs relaxing until clean-era fills accumulate.
+
 ## 10. Combined bottom line (Parts I + II)
 
 Two real unlocks exist, both bounded and evidence-backed:
