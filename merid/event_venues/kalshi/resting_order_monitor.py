@@ -248,6 +248,17 @@ class RestingOrderRecord:
     last_reprice_monotonic: Optional[float] = None
     decision_lane: str = ""
 
+    # 2026-11-06 (chase economics observability): the admission-time inputs
+    # that produced reprice_cap_cents, stamped at registration so every
+    # requote can be audited against the economics that bounded it.  These
+    # are admission-snapshot values — the monitor does not refresh the model.
+    economic_cap_cents: Optional[int] = None  # EV>=required price bound
+    lane_band_hi_cents: Optional[int] = None  # lane admission band ceiling
+    global_ceil_cents: Optional[int] = None  # MERID_RESTING_REPRICE_MAX_CENTS
+    admission_p_selected: Optional[float] = None  # decision-time p (0-1)
+    admission_ev_net_cents_per_contract: Optional[float] = None
+    admission_min_required_edge: Optional[float] = None
+
     # Status tracking (from portfolio endpoint)
     status: str = ""  # Set at registration time, not as default
     last_sync_at: Optional[datetime] = None
@@ -1152,13 +1163,50 @@ class RestingOrderMonitor:
                                             float(_ceil),
                                         ))
                                         if _new_px > _lim and _new_px < _side_ask:
+                                            # 2026-11-06: emit the economics
+                                            # that authorized the chase — cap
+                                            # decomposition + recomputed edge
+                                            # at the new price under the
+                                            # ADMISSION probability (the
+                                            # monitor does not re-run the
+                                            # model; labeled as such).
+                                            _cap_src = (
+                                                "economic_cap"
+                                                if record.economic_cap_cents is not None
+                                                and int(record.economic_cap_cents) == int(_cap)
+                                                else (
+                                                    "lane_band_hi"
+                                                    if record.lane_band_hi_cents is not None
+                                                    and int(record.lane_band_hi_cents) == int(_cap)
+                                                    else (
+                                                        "global_ceil"
+                                                        if record.global_ceil_cents is not None
+                                                        and int(record.global_ceil_cents) == int(_cap)
+                                                        else "unknown"
+                                                    )
+                                                )
+                                            )
+                                            _edge_new_c = (
+                                                round(
+                                                    float(record.admission_p_selected) * 100.0
+                                                    - float(_new_px), 2
+                                                )
+                                                if record.admission_p_selected is not None
+                                                else None
+                                            )
                                             logger.info(
                                                 "[RESTING-ORDER-CHASE] kalshi_order_id=%s ticker=%s "
                                                 "side=%s limit=%dc -> %dc side_ask=%.1fc gap=%.1fc "
-                                                "cap=%dc age=%.1fs reprice#%d lane=%s",
+                                                "cap=%dc cap_src=%s cap_decomp=econ:%s/band:%s/ceil:%s "
+                                                "edge_at_new_px_admission_p=%sc age=%.1fs reprice#%d lane=%s",
                                                 record.kalshi_order_id, record.ticker,
                                                 record.side, _lim, _new_px, _side_ask, _gap,
-                                                int(_cap), _age_s, record.reprice_count + 1,
+                                                int(_cap), _cap_src,
+                                                record.economic_cap_cents,
+                                                record.lane_band_hi_cents,
+                                                record.global_ceil_cents,
+                                                _edge_new_c,
+                                                _age_s, record.reprice_count + 1,
                                                 record.decision_lane or "?",
                                             )
                                             return RecheckResult(
@@ -1168,6 +1216,7 @@ class RestingOrderMonitor:
                                                 reason=(
                                                     f"chase_requote:limit={_lim}->new={_new_px}:"
                                                     f"side_ask={_side_ask:.1f}:gap={_gap:.1f}:cap={int(_cap)}"
+                                                    f":cap_src={_cap_src}:edge_new_c={_edge_new_c}"
                                                 ),
                                                 current_regime=regime,
                                                 current_vol_tier=window_vol_tier,

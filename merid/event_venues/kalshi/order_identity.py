@@ -180,6 +180,106 @@ def _build_record(
         "decision_lane": getattr(intent, "decision_lane", None),
         "liquidity_role": getattr(intent, "liquidity_role", None),
     }
+    # 2026-11-06 (payload schema v2): the attempt row previously preserved only
+    # generic diagnostic economics (canonical gross edge / taker-basis net_ev),
+    # which read as "EV gate ALLOWS net_ev<0" on bounded-lane admissions.  The
+    # block below records the route-specific economics that actually authorized
+    # the order, plus the authority that enforced them, so an audit never has
+    # to reconstruct admitting EV from surrounding log lines.  All *_cents /
+    # *_cents_per_contract fields are per-contract unless suffixed _order.
+    # Missing inputs stay None — never backfilled to zero.
+    payload["payload_schema_version"] = "2"
+    try:
+        _pi = getattr(intent, "probability_inputs", None) or {}
+        _p_sel = _pi.get("p_selected")
+        _px_c = getattr(intent, "price_cents", None)
+        _lane = getattr(intent, "decision_lane", None)
+        _bounded = bool(_lane) or bool(
+            getattr(intent, "threshold_cell_id", None)
+        ) or bool(getattr(intent, "provisional_cell_id", None))
+        _role = getattr(intent, "liquidity_role", None)
+        _post_only = getattr(intent, "post_only", None)
+        _basis = (
+            "bid" if (_role == "maker" or _post_only)
+            else ("ask" if _role == "taker" else None)
+        )
+        try:
+            from merid.event_venues.kalshi.order_router import (
+                _execution_contract,
+            )
+            _contract = dict(_execution_contract(intent) or {})
+        except Exception:
+            _contract = {}
+        try:
+            from merid.prediction.current_build_provisional import (
+                current_build_sha,
+            )
+            _bsha = getattr(intent, "build_sha", None) or current_build_sha()
+        except Exception:
+            _bsha = getattr(intent, "build_sha", None)
+        _gross_c = (
+            round(float(_p_sel) * 100.0 - float(_px_c), 4)
+            if (_p_sel is not None and _px_c is not None)
+            else None
+        )
+        payload["build_sha"] = _bsha
+        payload["admitting_economics"] = {
+            "units": "cents_per_contract",
+            "admitting_authority": (
+                "bounded_lane" if _bounded else "generic_gate"
+            ),
+            "admitting_lane": _lane,
+            "admission_owner": getattr(intent, "admission_owner", None),
+            "threshold_cell_id": getattr(intent, "threshold_cell_id", None),
+            "provisional_cell_id": getattr(intent, "provisional_cell_id", None),
+            "admitting_route": _contract.get("admission_lane") or _role,
+            "resolved_execution_mode": _contract.get("resolved_execution_mode"),
+            "price_basis": _basis,
+            "liquidity_role": _role,
+            "post_only": _post_only,
+            "time_in_force": getattr(intent, "time_in_force", None),
+            "selected_probability": _p_sel,
+            "probability_model": _pi.get("model"),
+            "p_yes_calibrated": _pi.get("p_yes_calibrated"),
+            "p_no_calibrated": _pi.get("p_no_calibrated"),
+            "entry_price_cents": _px_c,
+            "gross_edge_cents_per_contract": _gross_c,
+            "candidate_ev_net_cents_per_contract": getattr(
+                intent, "ev_net_cents", None
+            ),
+            "entry_fee_cents_per_contract": getattr(intent, "fee_cents", None),
+            "slippage_cents_per_contract": getattr(
+                intent, "slippage_cents", None
+            ),
+            "all_in_cost_cents": getattr(intent, "all_in_cost_cents", None),
+            "min_required_edge": getattr(intent, "min_required_edge", None),
+            "economic_cap_cents": _contract.get("economic_cap"),
+            "chase_cap_cents": _contract.get("chase_cap"),
+            "time_to_expiry_seconds": getattr(
+                intent, "time_to_expiry_seconds", None
+            ),
+            "quote_owner": getattr(intent, "quote_owner", None),
+            "degraded_mode": bool(getattr(intent, "degraded_mode", False)),
+            "policy_epoch": getattr(intent, "policy_epoch", None),
+            "directional_regime": getattr(intent, "directional_regime", None),
+            "snapshot_ts": getattr(intent, "snapshot_ts", None),
+            "decision_id": getattr(intent, "decision_id", None),
+            "exchange_index": getattr(intent, "exchange_index", None),
+        }
+        # Generic diagnostics carried on the intent (mid/canonical basis) —
+        # explicitly marked non-authoritative whenever a bounded lane or cell
+        # admitted the candidate under its own economics.
+        payload["generic_economics"] = {
+            "units": "diagnostic_mixed",
+            "edge_net_of_fees_pct": getattr(intent, "edge_net_of_fees_pct", None),
+            "estimated_fee_cents": getattr(intent, "estimated_fee_cents", None),
+            "authoritative": not _bounded,
+        }
+        payload["generic_economics_authoritative"] = not _bounded
+    except Exception:
+        # Schema-v2 fields are observability-only; never fail identity
+        # finalization over them.
+        payload.setdefault("payload_schema_version", "2")
     return OrderAttemptRecord(
         order_attempt_id=order_attempt_id,
         client_order_id=client_order_id,

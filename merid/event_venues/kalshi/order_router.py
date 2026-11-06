@@ -19196,7 +19196,11 @@ async def _route_live(
                         ):
                             _reprice_cap = None  # chase applies to buy entries only
 
-                        # Create resting order record
+                        # 2026-11-06: stamp the admission-time economics that
+                        # produced the reprice cap so every chase requote is
+                        # auditable against them (cap decomposition + the
+                        # decision-snapshot probability/EV).
+                        _rq_pi = getattr(intent, "probability_inputs", None) or {}
                         resting_record = RestingOrderRecord(
                             kalshi_order_id=kalshi_order_id,
                             intent_id=intent.intent_id,
@@ -19210,6 +19214,21 @@ async def _route_live(
                             price_cents=intent.price_cents,
                             asset=asset,
                             reprice_cap_cents=_reprice_cap,
+                            economic_cap_cents=(
+                                int(_rq_econ) if _rq_econ is not None else None
+                            ),
+                            lane_band_hi_cents=(
+                                int(_rq_band_hi)
+                                if _rq_band_hi is not None else None
+                            ),
+                            global_ceil_cents=int(_rq_ceil),
+                            admission_p_selected=_rq_pi.get("p_selected"),
+                            admission_ev_net_cents_per_contract=getattr(
+                                intent, "ev_net_cents", None
+                            ),
+                            admission_min_required_edge=getattr(
+                                intent, "min_required_edge", None
+                            ),
                             decision_lane=_rq_lane,
                             # Risk contract linkage
                             window_resolution_id=intent.window_resolution_id,
@@ -21809,6 +21828,38 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             try:
                 intent._submit_prob_age_ms = _dec.prob_age_ms
                 intent._submit_book_age_ms = _dec.book_age_ms
+                # 2026-11-06 (schema v2): persist the revalidated economics on
+                # the durable attempt — this is the authoritative net-EV
+                # authorization for the submission, previously only in logs.
+                _att_id = getattr(intent, "order_attempt_id", None)
+                if _att_id:
+                    try:
+                        from merid.event_venues.kalshi.order_attempt_store import (
+                            OrderAttemptStore as _OAS,
+                        )
+                        _oas = _OAS()
+                        _rec = _oas.get_by_order_attempt_id(_att_id)
+                        if _rec is not None:
+                            import json as _json
+                            _pl = (
+                                _json.loads(_rec.payload_json)
+                                if getattr(_rec, "payload_json", None) else {}
+                            )
+                            _pl["submit_revalidation"] = {
+                                "ev_order_cents": _dec.ev_order_cents,
+                                "ev_per_contract_cents":
+                                    _dec.ev_per_contract_cents,
+                                "prob_age_ms": _dec.prob_age_ms,
+                                "book_age_ms": _dec.book_age_ms,
+                                "book_source_at_refresh": getattr(
+                                    intent, "_book_source_at_refresh", None
+                                ),
+                                "outcome": getattr(_dec, "outcome", None),
+                                "reval_ms": _rev_ms,
+                            }
+                            _oas.update_payload(_att_id, _pl)
+                    except Exception:
+                        pass
                 marks = getattr(intent, "exec_stage_marks_ns", None)
                 if isinstance(marks, dict):
                     marks["submit_revalidation_end"] = _time.monotonic_ns()

@@ -1220,13 +1220,40 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
                         continue
         if bound is None:
             bound = float(thr) if thr is not None else None
+        if best_side is None:
+            best_side = "yes" if yes_ev is not None else "no"
         if best_ev is not None and yes_ev is not None and no_ev is not None:
             if abs(float(best_ev) - max(float(yes_ev), float(no_ev))) > 0.51:
                 violations.append(
                     f"best_executable_ev_cents={best_ev} != max(yes,no)= "
                     f"{max(float(yes_ev), float(no_ev))}"
                 )
-        if best_ev is not None and bound is not None and shortfall is not None:
+        # 2026-11-06 (admitting-authority surface): when the record carries
+        # the post-mutation route economics — the EV and bound the admitting
+        # gate actually compared — check that enforced identity instead of
+        # the generic cross-side shortfall, which mixes price bases and
+        # false-flagged every bounded-lane emit (observed 2026-11-06: DOGE
+        # pinned_fav maker entry flagged with shortfall=2.83 vs bound=-12).
+        gate_ev = record.get(f"{best_side}_gate_ev_cents")
+        route_bound = record.get(f"{best_side}_route_required_edge_cents")
+        true_short = record.get(f"{best_side}_true_shortfall_cents")
+        if gate_ev is not None and route_bound is not None:
+            if true_short is not None and abs(
+                float(true_short)
+                - max(0.0, float(route_bound) - float(gate_ev))
+            ) > 0.51:
+                violations.append(
+                    f"{best_side}_true_shortfall={true_short} != "
+                    f"route_bound({route_bound}) - gate_ev({gate_ev})"
+                )
+            if code == "CANDIDATE_EMITTED" and (
+                float(gate_ev) < float(route_bound) - 0.51
+            ):
+                violations.append(
+                    f"CANDIDATE_EMITTED but gate_ev={gate_ev} < "
+                    f"route_bound={route_bound} (side={best_side})"
+                )
+        elif best_ev is not None and bound is not None and shortfall is not None:
             if abs(float(shortfall) - max(0.0, bound - float(best_ev))) > 0.51:
                 violations.append(
                     f"edge_shortfall_cents={shortfall} != "
