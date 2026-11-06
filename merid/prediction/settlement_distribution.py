@@ -342,12 +342,28 @@ def compute_settlement_distribution(
         raise ValueError("Settlement timestamps require a whole-second expiry")
     if abs((state.expiry_ts - state.now_ts).total_seconds() - tte) > 1e-6:
         raise ValueError("Inconsistent settlement timestamps")
+    # 2026-11-06 (host-clock drift): ``latest_rti_ts`` is stamped on Kalshi's
+    # ``received_at`` wrapper clock when the feed provides it, so compare it
+    # against the venue-calibrated now (local + server-minus-local offset)
+    # when valid.  A drifted host clock (observed: local ~4.1s behind with
+    # w32time stopped) otherwise turns the feed's stable lead into "Future
+    # settlement reference" and vetoes every in-window eval.  Uncalibrated
+    # offset falls back to raw local — fail closed, same as before.
+    _future_ref_ts = state.now_ts
+    try:
+        from merid.event_venues.kalshi.venue_clock import get_venue_clock
+
+        _vc = get_venue_clock("kalshi").offset_state()
+        if _vc.valid and _vc.offset_seconds is not None:
+            _future_ref_ts = state.now_ts + timedelta(seconds=_vc.offset_seconds)
+    except Exception:
+        pass
     if state.latest_rti_ts is not None and (
-        state.latest_rti_ts - state.now_ts
+        state.latest_rti_ts - _future_ref_ts
     ).total_seconds() > _MAX_FUTURE_REFERENCE_SKEW_SECONDS:
         raise ValueError("Future settlement reference")
     schedule = [state.expiry_ts - timedelta(seconds=i) for i in range(59, -1, -1)]
-    expected_samples = {ts for ts in schedule if ts <= state.now_ts}
+    expected_samples = {ts for ts in schedule if ts <= _future_ref_ts}
     actual_samples = dict(state.observed_samples)
     if (len(actual_samples) != state.observed_count
             or len(state.observed_samples) != state.observed_count

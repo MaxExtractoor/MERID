@@ -434,6 +434,7 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         return None
 
     source_ts_ms = None
+    source_ts_field: Optional[str] = None
     timestamp_quality = "source"
     # Kalshi's cfbenchmarks_value feed wraps the raw CF Benchmarks payload and
     # provides ``received_at`` as the wall-clock time the tick was received.
@@ -446,6 +447,7 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
             if parsed is not None:
                 if _is_valid_epoch_ms(parsed):
                     source_ts_ms = parsed
+                    source_ts_field = field
                     break
                 timestamp_quality = "invalid"
             else:
@@ -485,14 +487,49 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
     # a clamped-to-zero age masquerade as a fresh tick.  Modest skew (hundreds
     # of ms) is tolerated: receive-side freshness is measured from
     # ``observed_ts_ms``, not the source clock.
+    #
+    # 2026-11-06 (host-clock drift): ``received_at`` is stamped on Kalshi's
+    # wrapper clock, so compare it against the venue-calibrated wall time
+    # (local + measured server-minus-local offset) when the calibration is
+    # valid.  A drifted host clock — observed today: w32time stopped, local
+    # ~4.1s behind — turned the feed's healthy stable lead into
+    # ``invalid_future`` and failed ``rti_stream_fresh`` closed.  CF-native
+    # fields keep the raw-local check: different clock domain, no shared
+    # calibration (venue_clock scope rule).  An uncalibrated/expired offset
+    # falls back to raw local — fail closed, same as before.
     _FUTURE_SKEW_LIMIT_MS = 2000
-    if source_ts_ms is not None and source_ts_ms - observed_wall_ms > _FUTURE_SKEW_LIMIT_MS:
+    _skew_ref_ms = observed_wall_ms
+    _skew_ref_basis = "local"
+    if source_ts_field == "received_at":
+        try:
+            from merid.event_venues.kalshi.venue_clock import get_venue_clock
+
+            _vc = get_venue_clock("kalshi").offset_state()
+            if _vc.valid and _vc.offset_seconds is not None:
+                _skew_ref_ms = observed_wall_ms + _vc.offset_seconds * 1000.0
+                _skew_ref_basis = "kalshi_calibrated"
+        except Exception:
+            pass
+    if source_ts_ms is not None and source_ts_ms - _skew_ref_ms > _FUTURE_SKEW_LIMIT_MS:
         timestamp_quality = "invalid_future"
         logger.warning(
             "[CF-RTI-ADAPTER] cfb_rti_future_skew asset=%s cfb_symbol=%s "
-            "source_ts_ms=%s observed_ts_ms=%s skew_ms=%s",
+            "source_ts_ms=%s observed_ts_ms=%s skew_ms=%s basis=%s",
             asset, cfb_symbol, source_ts_ms, observed_wall_ms,
-            source_ts_ms - observed_wall_ms,
+            source_ts_ms - _skew_ref_ms, _skew_ref_basis,
+        )
+    elif (
+        source_ts_field == "received_at"
+        and _skew_ref_basis == "kalshi_calibrated"
+        and source_ts_ms - observed_wall_ms > _FUTURE_SKEW_LIMIT_MS
+    ):
+        logger.warning(
+            "[CF-RTI-ADAPTER] cfb_rti_future_skew_tolerated asset=%s "
+            "cfb_symbol=%s source_ts_ms=%s observed_ts_ms=%s "
+            "raw_lead_ms=%s calibrated_lead_ms=%s — host clock drift "
+            "absorbed by venue calibration; resync the OS clock",
+            asset, cfb_symbol, source_ts_ms, observed_wall_ms,
+            source_ts_ms - observed_wall_ms, source_ts_ms - _skew_ref_ms,
         )
     execution_eligible = source_ts_ms is not None and timestamp_quality != "invalid_future"
     market_digits = get_asset_settlement_digits(asset)
