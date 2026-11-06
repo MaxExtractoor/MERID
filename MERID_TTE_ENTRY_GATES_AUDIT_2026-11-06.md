@@ -593,3 +593,27 @@ window) and P1 (pf maker 60-180s, armed, awaiting an in-band bid with p-edge
 that clears the reserve stack). Both are flowing candidates; the binding
 constraints downstream (positive net EV, snapshot freshness, basket coherence)
 are all protective and correct.
+
+## Part IV — NO_POSITIVE_EXECUTABLE_EDGE reserve-stack audit (2026-11-06 ~22:45 UTC)
+
+Dominant gate (202 records vs 82 band kills). Live decomposition of a pf-band
+reject (SOL NO@97.7c, p=0.988, gross +1.07c -> net -3.95c): fee .04 +
+model_risk 2.0 + ASR 1.5 + exit .01 + giveback ~1.4 ~ 5.0c reserves.  At
+>=95.5c the stack exceeds the maximum possible gross edge (p=1.0 ceiling),
+so the entire upper pf band was structurally unbeatable.
+
+Provenance per component vs the 2026-11-02..05 fix wave:
+
+| component | charge | source | vintage verdict |
+|---|---|---|---|
+| entry_fee | .04c | flat fee post-41bf589e | clean |
+| model_risk_reserve | 2.0c | model_uncertainty input + freshness bumps | input-driven, clean |
+| adverse_selection_reserve | 1.5c | MERID_MAKER_BID_ADV_SEL_CENTS prior (provisional outcome store empty -> no measured contamination) | bounded prior, superseded when marks exist |
+| policy_giveback_reserve | ~1.4c | exit_markouts tail | BUG-ERA: 145/157 profit-path 60s marks predate 2026-11-02 (wedged-exit era); only 2 post-2026-11-05 |
+| impl_shortfall / edge_bias | 0 | live_entry_evidence 4h window, empty cohorts | clean |
+| evidence sparse uplift | 1-3.4c | already relaxed 2026-10-13 (uplift 1c, LCB .25, challenge mode) | structural, conservative |
+
+Fix shipped (7fdd9c4f): MERID_POLICY_GIVEBACK_EPOCH_TS=1793836800
+(2026-11-05 00:00 UTC) excludes pre-epoch marks; verified charge drops
+5.43c -> 1.0c floor per trigger (sparse-clean -> designed floor, not zero),
+re-measuring automatically once >=3 post-epoch marks exist.
