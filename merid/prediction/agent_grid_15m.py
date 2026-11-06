@@ -12864,9 +12864,21 @@ class LeanAgent15m:
         # Backfill vol/strike telemetry for early rejections (e.g. canonical price
         # filter) that fire before compute_trade_decision resolves the Bachelier
         # context, so logs stop showing annualized_vol=0.0000 vol_source=N/A.
+        # 2026-11-06: treat placeholder values as missing — callers pass
+        # ``float(_ind.get("annualized_vol", 0.0))``/``"unknown"`` when the
+        # engine returned at a Layer-1 gate (e.g. min_tte) before vol
+        # resolution, so ``is None`` alone never triggers the backfill and
+        # the late-window shadow records stayed vol=0.0/unknown.
         vol_ctx = getattr(self, "_last_signal_vol_context", None) or {}
         for key in ("annualized_vol", "annualized_vol_source", "z_score", "log_moneyness", "bachelier_spot", "strike"):
-            if (context.get(key) is None or key not in context) and key in vol_ctx:
+            _cur = context.get(key)
+            _missing = (
+                _cur is None
+                or key not in context
+                or (key == "annualized_vol" and _cur == 0.0)
+                or (key == "annualized_vol_source" and str(_cur).strip().lower() in ("", "unknown", "n/a"))
+            )
+            if _missing and key in vol_ctx:
                 context[key] = vol_ctx[key]
 
         self._last_signal_rejection = {
