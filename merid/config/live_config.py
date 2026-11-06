@@ -711,6 +711,7 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_MBAND_",       # marginal-band lane caps/suspension/cohort knobs (bounded admission tunables)
     "MERID_PINNED_FAV_",  # pinned-favorite lane band/tte/floor/cap knobs (bounded admission tunables)
     "MERID_PRICE_CAP_EXCEPT_",  # scoped cap-exception probe flags/bounds (2026-11-06; bounded re-measurement tunables, kill-switched per flag)
+    "MERID_POLICY_GIVEBACK_",  # give-back reserve bounds + evidence-epoch floor (2026-11-06; bounded [floor,cap] measured-cost tunables)
     "MERID_PRE_EXPIRY_CANCEL_",  # lane-scoped pre-expiry resting-cancel floors (bounded lane tunables)
     "MERID_LATE_SHADOW_",  # observe-only late-window shadow instrumentation bounds
     "MERID_EXIT_ANCIENT_",  # ancient unresolved-intent reconcile cadence knobs (2026-11-06)

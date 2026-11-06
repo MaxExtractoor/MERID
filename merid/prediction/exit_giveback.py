@@ -65,6 +65,23 @@ def _min_samples() -> int:
         return 3
 
 
+def _epoch_ts() -> float:
+    """Evidence-vintage cutoff: markouts recorded before this unix ts are
+    excluded from the give-back mean.
+
+    2026-11-06: the markout tail is populated overwhelmingly by the pre-fix
+    exit stack — wedged ``held_unmarketable`` exits and the lifecycle defects
+    repaired in the 2026-10-31..11-05 fix wave produce inflated give-back on
+    every candidate (measured: all 478 tail marks pre-date the boundary).
+    An epoch floor lets the reserve re-measure on the clean era only; with
+    too few post-epoch marks it degrades to ``floor_cents`` by design rather
+    than charging bug-era numbers.  Default 0 disables the filter."""
+    try:
+        return max(0.0, float(os.environ.get("MERID_POLICY_GIVEBACK_EPOCH_TS", "0")))
+    except Exception:
+        return 0.0
+
+
 def _floor_cents() -> float:
     try:
         return max(0.0, float(os.environ.get("MERID_POLICY_GIVEBACK_FLOOR_CENTS", "1.0")))
@@ -122,9 +139,16 @@ def _compute() -> Tuple[Dict[str, float], Dict[str, int]]:
     mean so provenance can name exactly which cohort supplied a charge.
     """
     sums: Dict[str, list] = {}
+    epoch = _epoch_ts()
     for r in _read_tail_rows():
         if r.get("event") != "exit_markout":
             continue
+        if epoch > 0:
+            try:
+                if float(r.get("ts") or 0.0) < epoch:
+                    continue
+            except (TypeError, ValueError):
+                continue
         try:
             if float(r.get("horizon_s") or 0.0) != 60.0:
                 continue
