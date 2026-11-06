@@ -237,6 +237,15 @@ def describe_price_band(price_cents: int) -> Dict[str, Any]:
     elif 91 <= price_cents <= 99:
         _band = "disabled_tail_high"
         _lo, _hi = 91, 99
+    elif 90 < price_cents < 91:
+        # 2026-11-06: the 90-91c crack — skewed_high caps at 90 and the
+        # disabled tail starts at 91, so a price here matched no band and was
+        # mislabeled 'above_ceiling'.  It is dead by evidence (the pf post-
+        # floor 90-91c cohort ran 73% win / -1405c), so it reports as the
+        # disabled tail it operationally is; classify_market_regime already
+        # returns None there and is unchanged.
+        _band = "disabled_tail_high"
+        _lo, _hi = 91, 99
     elif price_cents < 1:
         _band = "below_floor"
         _lo, _hi = None, 0

@@ -516,3 +516,80 @@ Two real unlocks exist, both bounded and evidence-backed:
 What the data does NOT support: blanket floor lowering (TTE or price),
 90-93c reopening, maker-vehicle entries in the 75-93c zone, or any
 late-window (<180s) favorite buying.
+
+## 11. Part III — `NO_ELIGIBLE_PRICE_BAND` deep audit (2026-11-06, live run e581d3e5)
+
+Operator claim: "`NO_ELIGIBLE_PRICE_BAND` is the #1 killer of trading activity;
+validated candidates are being vetoed." Verified against live run
+`20261106202048_9300_577fb372` plus the full emit→submit chain.
+
+### 11a. Where it actually sits
+
+`classify_market_regime(price, tte)` returns a `SkewRegime` only when the
+own-side price lands in an *enabled* band inside its TTE window:
+
+| band | price | TTE window |
+|---|---|---|
+| balanced | 25-75c | 90-1800s |
+| transition_low / transition_high | 15-24 / 76-85c | 90-1500s |
+| skewed_low / skewed_high | 10-14 / 86-90c | 90-1200s |
+| disabled_tail | 1-9c, 91-99c | never |
+
+(`MERID_REGIME_MIN_TTE_FLOOR_S=90` clamps every enabled floor to 90s.)
+
+The gate emits `no_eligible_price_band` only when **BOTH** sides classify to
+None — it is the "decided market" gate, not a per-side veto. A side in an
+enabled band or a lane pseudo-regime (`pinned_fav`, `settlement_convergence`,
+`trend_yes_hi`) always reaches the engine.
+
+### 11b. What it killed in the live window — the honest split
+
+82 records, post-20:20 UTC run:
+
+- **~75% dying-window convergence** — YES 0.0-0.6c / NO 99.6-100c at TTE<2min
+  on the expiring 1530 market. Settled prices; nothing tradeable exists.
+- **Deliberate dead zones** — XRP NO@91.9 (hard block + 91-93 pocket),
+  ETH YES@92.9 (blocked pocket), DOGE YES@90.4 (see gap below).
+- **The `rejected_candidates` counterfactual check**: of every band kill in the
+  run, **zero** carried `gross_edge > +2c` — the model itself showed no edge on
+  any vetoed record. The gate did not veto a single validated opportunity.
+
+### 11c. The one real artifact found: the 90-91c crack
+
+`skewed_high` caps at 90c and `describe_price_band` labels 91-99c
+`disabled_tail_high`. Prices in `90 < px < 91` match **no band at all** and get
+mislabeled `above_ceiling` (lo=100) — an audit lie about which rule killed the
+price. Observed: DOGE YES@90.4c, TTE 2.16min.
+
+Disposition: **keep closed, label honestly.** The 90-91c pocket is inside the
+measured-negative pf cohort (post-floor 90-91 ran 73% win / -1405c — every
+post-floor loss), so it belongs to the disabled tail by evidence, not by
+boundary accident. Fixed `describe_price_band` to report `disabled_tail_high`
+for 90-91c instead of `above_ceiling` — classifier behavior unchanged
+(`classify` already returns None there); only the audit label changed.
+
+### 11d. The emit→submit chain traced (the candidates that DID pass)
+
+The gate is upstream of validation, but post-emit kills explain why activity
+still lands near zero even when a candidate emits:
+
+1. DOGE NO@98c, TTE 387s, `CANDIDATE_EMITTED` → sized 6cc/$5.88 →
+   `window_plan_basket_dissenter` (basket leader BTC-YES; a DOGE-NO is a
+   conflicting direction inside the same window basket).
+2. SOL NO@98c, `maker_bid` → order decision written → router
+   `stale_snapshot:age=92.7s` — the expiring market's book froze ~1.5min before
+   the attempt. Protective kill, correct.
+3. SOL economics carried through: all_in=100.05c vs par=100 — at 98c the
+   reserve stack exceeds payout headroom. Effective pf-band ceiling ≈97.9c.
+4. `no_positive_executable_edge` remains the dominant gate (202 records) —
+   reserve-stacked net EV; honest economics, not plumbing.
+
+### 11e. Verdict
+
+`NO_ELIGIBLE_PRICE_BAND` is not the activity killer the name suggests — it is
+the accounting of already-decided markets and evidence-backed dead zones. The
+real unlocks remain R1 (cap-exception probes, armed, awaiting the 75-89c price
+window) and P1 (pf maker 60-180s, armed, awaiting an in-band bid with p-edge
+that clears the reserve stack). Both are flowing candidates; the binding
+constraints downstream (positive net EV, snapshot freshness, basket coherence)
+are all protective and correct.

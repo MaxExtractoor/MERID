@@ -3168,9 +3168,26 @@ class PositionMonitor:
         for k, t in list(scheduled.items()):
             if now - t > 900.0:
                 scheduled.pop(k, None)
+        # 2026-11-06: age-scaled cadence.  Intents >4h unresolved are
+        # definitionally on expired/archived positions (15m markets live
+        # ~15min) — the reconcile can never produce new information, yet the
+        # flat 45s cadence logged a sweep warning every cycle forever
+        # (observed: 3 intents at ~310k seconds looping nightly).  Retention
+        # is unchanged — the record stays unresolved and still reconciles —
+        # but at hourly cadence instead of 45s.
+        _ANCIENT_S = float(os.environ.get("MERID_EXIT_ANCIENT_INTENT_S", "14400"))
+        _ANCIENT_CADENCE_S = float(
+            os.environ.get("MERID_EXIT_ANCIENT_RECONCILE_S", "3600")
+        )
         for record in unresolved:
             key = record.client_order_id or record.attempt_id
-            if now - scheduled.get(key, 0.0) < reconcile_age:
+            _age = now - record.created_at
+            _cadence = (
+                max(reconcile_age, _ANCIENT_CADENCE_S)
+                if _age >= _ANCIENT_S
+                else reconcile_age
+            )
+            if now - scheduled.get(key, 0.0) < _cadence:
                 continue
             scheduled[key] = now
             try:

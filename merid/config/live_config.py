@@ -464,6 +464,10 @@ _ENV_OVERRIDES.update({
         ("MERID_CALIBRATION_EVIDENCE_MARGIN", "decimal", 0, 1),
         ("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "float", 0, None),
         ("MERID_HARD_MIN_ENTRY_TTE_S", "int", 0, None),
+        # 2026-11-06: global regime-classifier floor clamp (2026-10-23 knob,
+        # onboarded — it loosens every enabled band's min-TTE toward the
+        # engine floor, same safety class as the entry floors above).
+        ("MERID_REGIME_MIN_TTE_FLOOR_S", "float", 0, None),
         ("MERID_FLB_LONGSHOT_SLOPE", "decimal", 0, None),
         ("MERID_MARKET_ANCHOR_MIN_W", "decimal", 0, 1),
         ("MERID_MARKET_ANCHOR_MAX_W", "decimal", 0, 1),
@@ -706,6 +710,10 @@ _ALLOWED_NON_SAFETY_PREFIXES = {
     "MERID_THRESHOLD_CELL_",  # threshold-cell lane caps/suspension/probation tunables (bounded admission policy)
     "MERID_MBAND_",       # marginal-band lane caps/suspension/cohort knobs (bounded admission tunables)
     "MERID_PINNED_FAV_",  # pinned-favorite lane band/tte/floor/cap knobs (bounded admission tunables)
+    "MERID_PRICE_CAP_EXCEPT_",  # scoped cap-exception probe flags/bounds (2026-11-06; bounded re-measurement tunables, kill-switched per flag)
+    "MERID_PRE_EXPIRY_CANCEL_",  # lane-scoped pre-expiry resting-cancel floors (bounded lane tunables)
+    "MERID_LATE_SHADOW_",  # observe-only late-window shadow instrumentation bounds
+    "MERID_EXIT_ANCIENT_",  # ancient unresolved-intent reconcile cadence knobs (2026-11-06)
     "MERID_EMPIRICAL_",   # empirical price-calibration overlay mode/path/age knobs (bounded admission policy)
     "MERID_TRADE_DECISION_ALLOW_HYBRID_",
     "MERID_MIN_REGIME_POSTERIOR",
