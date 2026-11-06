@@ -1198,7 +1198,8 @@ class RestingOrderMonitor:
                                                 "[RESTING-ORDER-CHASE] kalshi_order_id=%s ticker=%s "
                                                 "side=%s limit=%dc -> %dc side_ask=%.1fc gap=%.1fc "
                                                 "cap=%dc cap_src=%s cap_decomp=econ:%s/band:%s/ceil:%s "
-                                                "edge_at_new_px_admission_p=%sc age=%.1fs reprice#%d lane=%s",
+                                                "edge_at_new_px_admission_p=%sc auth=%s model_revalidated=%s "
+                                                "age=%.1fs reprice#%d lane=%s",
                                                 record.kalshi_order_id, record.ticker,
                                                 record.side, _lim, _new_px, _side_ask, _gap,
                                                 int(_cap), _cap_src,
@@ -1206,6 +1207,8 @@ class RestingOrderMonitor:
                                                 record.lane_band_hi_cents,
                                                 record.global_ceil_cents,
                                                 _edge_new_c,
+                                                "admission_economic_cap",
+                                                False,
                                                 _age_s, record.reprice_count + 1,
                                                 record.decision_lane or "?",
                                             )
@@ -1217,6 +1220,7 @@ class RestingOrderMonitor:
                                                     f"chase_requote:limit={_lim}->new={_new_px}:"
                                                     f"side_ask={_side_ask:.1f}:gap={_gap:.1f}:cap={int(_cap)}"
                                                     f":cap_src={_cap_src}:edge_new_c={_edge_new_c}"
+                                                    f":auth=admission_economic_cap:model_revalidated=false"
                                                 ),
                                                 current_regime=regime,
                                                 current_vol_tier=window_vol_tier,
@@ -1662,6 +1666,24 @@ class RestingOrderMonitor:
                     new_price_cents=_new_px,
                     reprice_count=record.reprice_count,
                     decision_lane=record.decision_lane or None,
+                    # 2026-11-06: the chase is authorized solely by the fixed
+                    # admission-time economic cap — the monitor does not
+                    # re-run the model.  Stated explicitly so the durable
+                    # record cannot be misread as fresh-EV revalidation.
+                    reprice_authorization="admission_economic_cap",
+                    model_revalidated=False,
+                    edge_at_new_px_admission_p_cents=(
+                        round(
+                            float(record.admission_p_selected) * 100.0
+                            - float(_new_px), 2
+                        )
+                        if record.admission_p_selected is not None else None
+                    ),
+                    reprice_cap_cents=record.reprice_cap_cents,
+                    economic_cap_cents=record.economic_cap_cents,
+                    lane_band_hi_cents=record.lane_band_hi_cents,
+                    global_ceil_cents=record.global_ceil_cents,
+                    admission_p_selected=record.admission_p_selected,
                 )
             else:
                 self._keep_count += 1
