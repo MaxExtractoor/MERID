@@ -16451,6 +16451,7 @@ class LeanAgent15m:
                 _lwf_yb = locals().get("best_bid") or (100.0 - float(no_price_cents or 0))
                 _lwf_ya = locals().get("best_ask") or float(yes_price_cents or 0)
                 _lwf_vol = _lwf_vsrc = None
+                _lwf_strike = locals().get("_strike")
                 if _LWF_LO < float(seconds_to_expiry or 0.0) <= _LWF_HI:
                     self._compute_signal_vol_context(
                         asset, spot_price, market,
@@ -16460,6 +16461,8 @@ class LeanAgent15m:
                     _vctx = getattr(self, "_last_signal_vol_context", None) or {}
                     _lwf_vol = _vctx.get("annualized_vol")
                     _lwf_vsrc = _vctx.get("annualized_vol_source")
+                    if _lwf_strike is None:
+                        _lwf_strike = _vctx.get("strike")
                 log_lwf_shadow(
                     run_id=_lwf_run_id,
                     decision_id=f"{_lwf_cid}:pre",
@@ -16472,7 +16475,7 @@ class LeanAgent15m:
                     no_ask_cents=float(no_price_cents or 0),
                     yes_depth_cc=float(getattr(market_state, "min_depth_no", 0) or 0) * 100.0,
                     no_depth_cc=float(getattr(market_state, "min_depth_yes", 0) or 0) * 100.0,
-                    strike=locals().get("_strike"),
+                    strike=_lwf_strike,
                     strike_source="market_metadata",
                     ref_price=None,          # module resolves live RTI itself
                     ref_source=None,
