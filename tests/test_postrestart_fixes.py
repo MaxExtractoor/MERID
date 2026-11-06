@@ -195,6 +195,84 @@ class TestPinnedFavMoneynessCaps:
         )
 
 
+class TestMoneynessCapException:
+    """2026-11-06 generalized cap-exception probes (Experiment B -> scoped
+    flags).  Fail-closed by default; scoped flag + window + EV floor."""
+
+    @pytest.fixture
+    def _clean(self, monkeypatch):
+        for side in ("YES", "NO"):
+            monkeypatch.delenv(f"MERID_PRICE_CAP_EXCEPT_{side}", raising=False)
+            for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                monkeypatch.delenv(
+                    f"MERID_PRICE_CAP_EXCEPT_{asset}_{side}", raising=False
+                )
+            for base in (
+                "MERID_PRICE_CAP_EXCEPT_LO_CENTS",
+                "MERID_PRICE_CAP_EXCEPT_HI_CENTS",
+                "MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS",
+            ):
+                monkeypatch.delenv(f"{base}_{side}", raising=False)
+        for base in (
+            "MERID_PRICE_CAP_EXCEPT_LO_CENTS",
+            "MERID_PRICE_CAP_EXCEPT_HI_CENTS",
+            "MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS",
+        ):
+            monkeypatch.delenv(base, raising=False)
+        return monkeypatch
+
+    def test_default_off(self, _clean):
+        assert dr._moneyness_cap_exception("yes", "BTC", 82.0, 5.0) is False
+
+    def test_legacy_btc_no_flag(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_BTC_NO", "1")
+        assert dr._moneyness_cap_exception("no", "BTC", 86.0, 3.0) is True
+        assert dr._moneyness_cap_exception("no", "BTC", 86.0, 1.0) is False
+
+    def test_side_wide_yes_flag(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_YES", "1")
+        assert dr._moneyness_cap_exception("yes", "ETH", 82.0, 2.5) is True
+        # NO side untouched by the YES-side flag.
+        assert dr._moneyness_cap_exception("no", "ETH", 82.0, 5.0) is False
+
+    def test_per_asset_flag_scopes_asset(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_DOGE_NO", "1")
+        assert dr._moneyness_cap_exception("no", "DOGE", 80.0, 3.0) is True
+        # Same side, different asset -> not covered.
+        assert dr._moneyness_cap_exception("no", "SOL", 80.0, 3.0) is False
+
+    def test_window_bounds(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_YES", "1")
+        # LO bound is exclusive, HI inclusive (legacy Experiment-B window).
+        assert dr._moneyness_cap_exception("yes", "BTC", 75.0, 5.0) is False
+        assert dr._moneyness_cap_exception("yes", "BTC", 75.01, 5.0) is True
+        assert dr._moneyness_cap_exception("yes", "BTC", 89.99, 5.0) is True
+        assert dr._moneyness_cap_exception("yes", "BTC", 90.0, 5.0) is False
+
+    def test_scoped_window_override(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_YES", "1")
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_HI_CENTS_YES", "84.99")
+        assert dr._moneyness_cap_exception("yes", "BTC", 82.0, 5.0) is True
+        assert dr._moneyness_cap_exception("yes", "BTC", 88.0, 5.0) is False
+        # Asset-scoped override beats side-scoped.
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_HI_CENTS_BTC_YES", "89.99")
+        assert dr._moneyness_cap_exception("yes", "BTC", 88.0, 5.0) is True
+        assert dr._moneyness_cap_exception("yes", "ETH", 88.0, 5.0) is False
+
+    def test_min_ev_floor_scoped(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_SOL_NO", "1")
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS_SOL_NO", "4.0")
+        assert dr._moneyness_cap_exception("no", "SOL", 80.0, 3.5) is False
+        assert dr._moneyness_cap_exception("no", "SOL", 80.0, 4.0) is True
+
+    def test_fail_closed_inputs(self, _clean):
+        _clean.setenv("MERID_PRICE_CAP_EXCEPT_YES", "1")
+        assert dr._moneyness_cap_exception("yes", "BTC", None, 5.0) is False
+        assert dr._moneyness_cap_exception("yes", "BTC", 80.0, None) is False
+        assert dr._moneyness_cap_exception(None, "BTC", 80.0, 5.0) is False
+        assert dr._moneyness_cap_exception("bad", "BTC", 80.0, 5.0) is False
+
+
 class TestExitConversionPricing:
     """Sell exits convert at bid >= limit; buy-to-close at ask <= limit."""
 

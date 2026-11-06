@@ -28,6 +28,12 @@ Forecast provenance (probability_status):
                       contemporaneous cushion
     INPUTS_MISSING  — no usable probability and/or inputs absent
     UNKNOWN         — probability exists but provenance markers absent
+    RECOMPUTED_ENDPOINT — engine declined to produce p (TTE floor); the
+                      record's own endpoint-normal Bachelier recomputation
+                      (``q_phi_diagnostic``) is used as p_effective.  The
+                      value is labeled recomputed, never presented as
+                      engine output; ``model_evaluation_completed`` stays
+                      false for this cohort.
 
 w7/w8 economics are PASS/FAIL only when the forecast is COMPUTED_VALID;
 otherwise NOT_EVALUABLE.  A missing-input probability is never reported as
@@ -119,8 +125,8 @@ _HIST_MAX_KEYS = 1024
 #     (when write_errors == 0)
 # process_id + counters_reset_utc delimit the accounting period so restarts
 # cannot mix windows.
-SCHEMA_VERSION = 3
-LANE_REVISION = "lwf_shadow_v3_provenance_counters"
+SCHEMA_VERSION = 4
+LANE_REVISION = "lwf_shadow_v4_recomputed_probability"
 _PROCESS_ID = f"pid{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
 _COUNTERS_RESET_UTC = datetime.now(timezone.utc).isoformat()
 _stats = {
@@ -236,6 +242,7 @@ def _phi(z: float) -> float:
 def _probability_status(
     *,
     p_cal: Optional[float],
+    p_recomputed: Optional[float] = None,
     ref: Optional[float],
     K: Optional[float],
     vol: Optional[float],
@@ -273,7 +280,17 @@ def _probability_status(
     )
 
     if p_cal is None:
-        status = "INPUTS_MISSING"
+        # 2026-11-06: the engine floor rejects this cohort BEFORE producing
+        # a probability (p_cal is None on ~100% of records — the lane's
+        # entire population).  When the record's own endpoint-normal
+        # recomputation exists, label it RECOMPUTED_ENDPOINT so w7/w8
+        # economics evaluate on a declared basis instead of being
+        # permanently not_evaluable.
+        status = (
+            "RECOMPUTED_ENDPOINT"
+            if (p_recomputed is not None and not missing)
+            else "INPUTS_MISSING"
+        )
     elif missing and not side_markers:
         status = "INPUTS_MISSING"
     elif missing:
@@ -283,7 +300,9 @@ def _probability_status(
     else:
         status = "UNKNOWN"
 
-    if settle_p:
+    if p_cal is None and p_recomputed is not None and status == "RECOMPUTED_ENDPOINT":
+        source = "recomputed_endpoint"
+    elif settle_p:
         source = "settlement_distribution"
     elif side_markers:
         source = "bachelier_pipeline"
@@ -458,10 +477,14 @@ def log_lwf_shadow(
                 trend = ("expanding" if chg > tol
                          else "shrinking" if chg < -tol else "flat")
 
+            # Effective probability for this record's economics: engine p
+            # when the engine ran, else the record's own recomputed
+            # endpoint-normal value (labeled RECOMPUTED_ENDPOINT below).
+            p_eff = p_cal if p_cal is not None else q_phi
             fee = _taker_fee_cents(float(ask) / 100.0)
             margin_fee = (
-                float(p_cal) * 100.0 - float(ask) - fee
-                if p_cal is not None else None
+                float(p_eff) * 100.0 - float(ask) - fee
+                if p_eff is not None else None
             )
             margin_lane = (
                 margin_fee - (ADVERSE_SEL_RESERVE + MODEL_UNCERTAINTY_RESERVE) * 100.0
@@ -470,7 +493,8 @@ def log_lwf_shadow(
 
             p_status, p_source, missing_inputs, model_completed = (
                 _probability_status(
-                    p_cal=p_cal, ref=ref, K=K, vol=annualized_vol,
+                    p_cal=p_cal, p_recomputed=q_phi, ref=ref, K=K,
+                    vol=annualized_vol,
                     vol_source=vol_source, ind=ind,
                     decision_reason=decision_reason,
                     decision_lane=decision_lane,
@@ -491,12 +515,17 @@ def log_lwf_shadow(
             trend_ok = trend in ("expanding", "flat")
             depth_ok = float(depth or 0.0) >= 100.0
             bf_ok = bf is None
+            # Evaluable probability bases: engine output (COMPUTED_VALID)
+            # or the record's own recomputed endpoint value
+            # (RECOMPUTED_ENDPOINT).  INPUTS_MISSING/FALLBACK_PRIOR/UNKNOWN
+            # keep the economics stages not_evaluable.
+            _evaluable_p = p_status in ("COMPUTED_VALID", "RECOMPUTED_ENDPOINT")
             model_ok = (
-                p_status == "COMPUTED_VALID" and margin_fee is not None
+                _evaluable_p and margin_fee is not None
                 and margin_fee > 0.0
             )
             econ_ok = (
-                p_status == "COMPUTED_VALID" and margin_lane is not None
+                _evaluable_p and margin_lane is not None
                 and margin_lane > 0.0
             )
 
@@ -515,10 +544,10 @@ def log_lwf_shadow(
                 "w5_depth_ok": st(depth_ok),
                 "w6_bookflow_clear": st(bf_ok),
                 "w7_model_margin_positive": st(
-                    model_ok, p_status == "COMPUTED_VALID"
+                    model_ok, _evaluable_p
                 ),
                 "w8_econ_admission_lane": st(
-                    econ_ok, p_status == "COMPUTED_VALID"
+                    econ_ok, _evaluable_p
                 ),
             }
             lane_pass = all(v == "pass" for v in stages.values())
@@ -587,6 +616,7 @@ def log_lwf_shadow(
                 "model_input_snapshot_id": decision_id,
                 "p_calibrated_side": p_cal,
                 "p_raw_side": p_raw,
+                "p_effective": p_eff,
                 "q_phi_diagnostic": q_phi,
                 "z_score_model": ind_get("z_score"),
                 "log_moneyness": ind_get("log_moneyness"),

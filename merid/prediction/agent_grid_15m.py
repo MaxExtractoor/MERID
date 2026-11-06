@@ -12997,7 +12997,9 @@ class LeanAgent15m:
         — no provider or metadata fetches.
         """
         try:
-            from merid.prediction.lwf_shadow_lane import log_lwf_shadow
+            from merid.prediction.lwf_shadow_lane import (
+                log_lwf_shadow, TTE_LO_S as _LWF_LO, TTE_HI_S as _LWF_HI,
+            )
 
             run_id, cid = self._candidate_identity(
                 asset, current_window_ticker, tick
@@ -13028,6 +13030,19 @@ class LeanAgent15m:
             sc = self._spot_cache.get(asset)
             if sc is not None and time.monotonic() - sc[0] < self._spot_cache_ttl_sec:
                 spot = sc[1]
+            # 2026-11-06: resolve strike+vol for in-window evals so the
+            # recomputed-endpoint basis can fire (same observational helper
+            # the signal path uses; market=None falls through to catalog).
+            _lwf_vol = _lwf_vsrc = None
+            if _LWF_LO < float(tte or 0.0) <= _LWF_HI and spot is not None:
+                self._compute_signal_vol_context(
+                    asset, spot, None, (float(tte) / 60.0) if tte else None
+                )
+                _vctx = getattr(self, "_last_signal_vol_context", None) or {}
+                _lwf_vol = _vctx.get("annualized_vol")
+                _lwf_vsrc = _vctx.get("annualized_vol_source")
+                if strike is None:
+                    strike = _vctx.get("strike")
             log_lwf_shadow(
                 run_id=run_id,
                 decision_id=f"{cid}:held",
@@ -13050,13 +13065,13 @@ class LeanAgent15m:
                 p_no_calibrated=None,
                 p_yes_raw=None,
                 p_no_raw=None,
-                net_edge_taker_yes=None,
                 net_edge_taker_no=None,
+                net_edge_taker_yes=None,
                 tte_seconds=tte,
                 quote_age_ms=getattr(ms, "quote_age_ms", None),
                 book_is_executable=getattr(ms, "book_is_executable", None),
-                annualized_vol=None,
-                vol_source=None,
+                annualized_vol=_lwf_vol,
+                vol_source=_lwf_vsrc,
                 regime=None,
                 decision_reason="position_limit",
                 was_selected=False,
@@ -16410,14 +16425,29 @@ class LeanAgent15m:
 
             # late_window_trend_favorite shadow (observe-only): the
             # band-disabled / TTE-cutoff population never reaches the
-            # decision engine, so it is recorded here with provenance
-            # marked INPUTS_MISSING — the model produced no forecast for
-            # these candidates and the funnel must not count one.
+            # decision engine, so no engine forecast exists — but the
+            # record can still be evaluable on the recomputed-endpoint
+            # basis when strike+vol are supplied.  2026-11-06: resolve the
+            # signal vol context for in-window evals so q_phi is computable
+            # (previously annualized_vol=None forced INPUTS_MISSING on the
+            # lane's entire population).
             try:
-                from merid.prediction.lwf_shadow_lane import log_lwf_shadow
+                from merid.prediction.lwf_shadow_lane import (
+                    log_lwf_shadow, TTE_LO_S as _LWF_LO, TTE_HI_S as _LWF_HI,
+                )
                 _lwf_run_id, _lwf_cid = self._candidate_identity(asset, ticker, tick)
                 _lwf_yb = locals().get("best_bid") or (100.0 - float(no_price_cents or 0))
                 _lwf_ya = locals().get("best_ask") or float(yes_price_cents or 0)
+                _lwf_vol = _lwf_vsrc = None
+                if _LWF_LO < float(seconds_to_expiry or 0.0) <= _LWF_HI:
+                    self._compute_signal_vol_context(
+                        asset, spot_price, market,
+                        (float(seconds_to_expiry) / 60.0)
+                        if seconds_to_expiry is not None else None,
+                    )
+                    _vctx = getattr(self, "_last_signal_vol_context", None) or {}
+                    _lwf_vol = _vctx.get("annualized_vol")
+                    _lwf_vsrc = _vctx.get("annualized_vol_source")
                 log_lwf_shadow(
                     run_id=_lwf_run_id,
                     decision_id=f"{_lwf_cid}:pre",
@@ -16451,8 +16481,8 @@ class LeanAgent15m:
                         getattr(market_state, "book_is_executable", None)
                         if market_state else None
                     ),
-                    annualized_vol=None,
-                    vol_source=None,
+                    annualized_vol=_lwf_vol,
+                    vol_source=_lwf_vsrc,
                     regime=None,
                     decision_reason=(
                         "tte_entry_cutoff" if _regime_reject_cause == "tte_floor"

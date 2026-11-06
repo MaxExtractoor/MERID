@@ -3662,17 +3662,17 @@ def _assemble_side_verdict(
     }
 
 
-# ── Experiment B: cohort-scoped 75c cap exception (2026-10-09 audit) ──────
-# BTC NO 80-89c candidates may pass the global entry-price cap ONLY when each
-# candidate individually clears its cell's conservative-EV bound at the fresh
-# executable price.  This is exploration authorization, not production
-# promotion: downstream the candidate still rides the current-build
-# provisional lane (1 contract, post-only, lane caps + suspension state), and
-# every other veto (depth, tail, regime, conviction, throttle, strip,
-# bookflow, coinflip, evidence) is untouched.  Off unless explicitly enabled.
-MERID_PRICE_CAP_EXCEPT_BTC_NO = os.environ.get(
-    "MERID_PRICE_CAP_EXCEPT_BTC_NO", "0"
-).strip().lower() in ("1", "true", "yes")
+# ── Cap-exception probes (generalized 2026-11-06) ──────────────────────────
+# Above-cap candidates may pass the moneyness entry-price cap ONLY under a
+# scoped flag — MERID_PRICE_CAP_EXCEPT_{ASSET}_{SIDE} (BTC_NO keeps the
+# legacy Experiment-B name) or the side-wide MERID_PRICE_CAP_EXCEPT_{SIDE}
+# — and only when the individual candidate's reserve-stacked net EV at the
+# fresh executable price clears MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS[_SCOPE]
+# (default +2.0c) inside the LO/HI window (default 75 < px <= 89.99).  This
+# is exploration authorization, not production promotion: every other veto
+# (depth, tail, regime, conviction, throttle, strip, bookflow, coinflip,
+# evidence, blocked bands) is untouched.  Off unless explicitly enabled;
+# the resolver lives in directional_regime._moneyness_cap_exception.
 
 
 def compute_trade_decision(
@@ -3945,7 +3945,39 @@ def _compute_trade_decision_impl(
     # out of that tail.  Exits are unaffected.  The settlement-convergence
     # lane is exempt because its probability claim rests on banked settlement
     # samples rather than on a live-price forecast.
-    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY and not settlement_lane:
+    #
+    # 2026-11-06: pinned-favorite maker TTE-floor exemption.  The lane's
+    # configured window (maker TTE 90-840s) was dead-lettered by this floor:
+    # its 90-180s slice could never reach admission.  The measured-positive
+    # late cohort is the resting-bid converged favorite — an own-side bid
+    # inside the lane band.  The exemption only hands the candidate to the
+    # lane's own strict gates (band, lane TTE, min_p, min EV, moneyness
+    # caps, daily budget) plus every downstream veto; it is not a generic
+    # relaxation.  ``MERID_PINNED_FAV_TTE_FLOOR_EXEMPT=0`` restores the
+    # floor for the whole cohort.  Fail-closed on any missing input.
+    _pf_maker_tte_exempt = False
+    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY:
+        try:
+            from merid.prediction import directional_regime as _dr_pf_tte
+            _pf_maker_tte_exempt = (
+                _dr_pf_tte.pinned_fav_tte_floor_exempt()
+                and _dr_pf_tte.pinned_fav_enabled()
+                and _dr_pf_tte.pinned_fav_maker_mode()
+                and seconds_to_expiry > exit_only_cutoff
+                and (
+                    _dr_pf_tte.pinned_fav_band_match(yes_bid_cents)
+                    or _dr_pf_tte.pinned_fav_band_match(no_bid_cents)
+                )
+            )
+        except Exception:
+            _pf_maker_tte_exempt = False
+        if _pf_maker_tte_exempt:
+            indicators["pf_maker_tte_exempt"] = True
+    if (
+        seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY
+        and not settlement_lane
+        and not _pf_maker_tte_exempt
+    ):
         return _no_trade("min_tte_entry_disabled")
 
     # Layer-2: data and regime gates.
@@ -6326,24 +6358,48 @@ def _compute_trade_decision_impl(
                 _yes_price_cap_block = _cap_blk
             else:
                 _no_price_cap_block = _cap_blk
-    # Experiment B cohort exception: BTC NO above the 75c cap is permitted
-    # only when the individual candidate's conservative (reserve-stacked)
-    # net EV at the fresh executable ask clears the cell bound (+2.0c) and
-    # the side lane is otherwise open.  Exploration authorization only.
-    if (
-        _no_price_cap_block is not None
-        and MERID_PRICE_CAP_EXCEPT_BTC_NO
-        and str(asset).upper() == "BTC"
-        and no_price_cents is not None
-        and 75.0 < float(no_price_cents) <= 89.99
-        and no_breakdown is not None
-        and float(no_breakdown.net_edge) * 100.0 >= 2.0
-        and _no_throttle_block is None
-    ):
-        indicators["no_price_cap_exception"] = (
-            "btc_no_80_89_cons_ev>=%.1f" % (float(no_breakdown.net_edge) * 100.0)
+    # Cap-exception probes (2026-11-06 generalization of Experiment B): a
+    # scoped flag (MERID_PRICE_CAP_EXCEPT_{ASSET}_{SIDE} or the side-wide
+    # _{SIDE}) lets an above-cap candidate through only when its
+    # reserve-stacked net EV at the fresh executable price clears the
+    # configured floor (default +2.0c).  Blocked-band vetoes ('_band_'
+    # reasons) are never cleared and the side's throttle suspension still
+    # binds.  Every other veto is untouched — exploration authorization
+    # for the stale-evidence cohort, not production promotion.
+    for _exc_side in ("yes", "no"):
+        _exc_px = yes_price_cents if _exc_side == "yes" else no_price_cents
+        _exc_bd = yes_breakdown if _exc_side == "yes" else no_breakdown
+        _exc_thr = (
+            _yes_throttle_block if _exc_side == "yes" else _no_throttle_block
         )
-        _no_price_cap_block = None
+        _exc_blk = (
+            _yes_price_cap_block if _exc_side == "yes" else _no_price_cap_block
+        )
+        if (
+            _exc_blk is not None
+            and "_band_" not in str(_exc_blk)
+            and _exc_px is not None
+            and _exc_bd is not None
+            and _exc_thr is None
+            and _dr._moneyness_cap_exception(
+                _exc_side,
+                asset,
+                float(_exc_px),
+                (
+                    float(_exc_bd.net_edge) * 100.0
+                    if _exc_bd.net_edge is not None
+                    else None
+                ),
+            )
+        ):
+            indicators[f"{_exc_side}_price_cap_exception"] = (
+                "%s_%s_cons_ev>=%.1f"
+                % (str(asset).lower(), _exc_side, float(_exc_bd.net_edge) * 100.0)
+            )
+            if _exc_side == "yes":
+                _yes_price_cap_block = None
+            else:
+                _no_price_cap_block = None
     # 91-94c YES window: the lane's strict-gate failure (armed) or the
     # reserved-window price with the lane off both own the terminal reason.
     _yes_lane_terminal = (

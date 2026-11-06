@@ -1672,6 +1672,19 @@ def pinned_fav_enabled() -> bool:
     return _env_flag("MERID_PINNED_FAV_ENABLED", False)
 
 
+def pinned_fav_tte_floor_exempt() -> bool:
+    """2026-11-06: scoped exemption from the generic engine TTE floor.
+
+    The lane's configured window (maker TTE 90-840s) was dead-lettered by
+    MERID_ENTRY_MIN_SECONDS_TO_EXPIRY=180 — its 90-180s slice could never
+    reach the admission gate that owns it.  When this flag is on (default),
+    the engine floor passes an own-side bid inside the maker band so the
+    lane's strict gate decides.  ``=0`` restores the generic floor for the
+    whole cohort without disabling the lane itself.
+    """
+    return _env_flag("MERID_PINNED_FAV_TTE_FLOOR_EXEMPT", True)
+
+
 def pinned_fav_maker_mode() -> bool:
     """Maker-mode switch: the lane rests post-only bids instead of taking asks.
 
@@ -1882,30 +1895,72 @@ def _moneyness_max_entry_price_cents(
     return float(per_asset) if per_asset is not None else None
 
 
+def _cap_except_scoped_float(base: str, asset: str, side: str, default: float) -> float:
+    """``{BASE}_{ASSET}_{SIDE}`` > ``{BASE}_{SIDE}`` > ``{BASE}`` > default."""
+    for key in (f"{base}_{asset}_{side}", f"{base}_{side}", base):
+        raw = os.getenv(key)
+        if raw in (None, ""):
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
 def _moneyness_cap_exception(
     held_side: Optional[str],
     asset: Optional[str],
     side_price_cents: float,
     net_ev_cents: Optional[float],
 ) -> bool:
-    """BTC-NO 75-89.99c escape hatch — mirrors the economics-path exception.
+    """Bounded cap-exception probe — Experiment B generalized (2026-11-06).
 
-    ``MERID_PRICE_CAP_EXCEPT_BTC_NO`` authorizes exploration of the BTC-NO
-    pocket between the shared 50c baseline and the 90c ceiling only when the
-    conservative net-EV claim is >= +2c/contract.
+    An above-cap candidate may pass the moneyness entry-price cap only when:
+
+      1. ``MERID_PRICE_CAP_EXCEPT_{ASSET}_{SIDE}`` or the side-wide
+         ``MERID_PRICE_CAP_EXCEPT_{SIDE}`` flag is on (``BTC_NO`` keeps the
+         legacy Experiment-B flag name).
+      2. The own-side price sits inside the exception window
+         ``LO_CENTS < px <= HI_CENTS`` (defaults 75.0 / 89.99 — the stale-
+         evidence zone between the audited caps and the >=90c disabled
+         tail), via ``MERID_PRICE_CAP_EXCEPT_{LO,HI}_CENTS[_SCOPE]``.
+      3. The candidate's reserve-stacked net EV clears
+         ``MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS[_SCOPE]`` (default +2c) —
+         the gate that keeps the probe a +EV-only cohort.
+
+    Scope precedence is ``_{ASSET}_{SIDE}`` > ``_{SIDE}`` > global for each
+    tunable.  The exception exists to re-measure the stale-evidence cohort
+    under the post-2026-11-02 execution stack with bounded, kill-switched
+    exposure — it never weakens a veto for candidates that don't carry a
+    proven-edge claim.  Fail-closed on any missing input.
     """
-    if (held_side or "").strip().lower() != "no":
+    side = (held_side or "").strip().lower()
+    if side not in ("yes", "no"):
         return False
-    if (asset or "").strip().upper() != "BTC":
-        return False
-    if os.getenv("MERID_PRICE_CAP_EXCEPT_BTC_NO", "0").strip().lower() not in (
-        "1", "true", "yes", "on",
+    a = (asset or "").strip().upper()
+    S = side.upper()
+    for flag_key in (
+        f"MERID_PRICE_CAP_EXCEPT_{a}_{S}",
+        f"MERID_PRICE_CAP_EXCEPT_{S}",
     ):
-        return False
-    if not (75.0 < float(side_price_cents) <= 89.99):
+        if os.getenv(flag_key, "0").strip().lower() in ("1", "true", "yes", "on"):
+            break
+    else:
         return False
     try:
-        return float(net_ev_cents) >= 2.0
+        px = float(side_price_cents)
+    except (TypeError, ValueError):
+        return False
+    lo = _cap_except_scoped_float("MERID_PRICE_CAP_EXCEPT_LO_CENTS", a, S, 75.0)
+    hi = _cap_except_scoped_float("MERID_PRICE_CAP_EXCEPT_HI_CENTS", a, S, 89.99)
+    if not (lo < px <= hi):
+        return False
+    ev_req = _cap_except_scoped_float(
+        "MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS", a, S, 2.0
+    )
+    try:
+        return float(net_ev_cents) >= ev_req
     except (TypeError, ValueError):
         return False
 

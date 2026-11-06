@@ -933,10 +933,29 @@ class RestingOrderMonitor:
                 )
             
             # 4. Pre-expiry cancel rule: cancel resting orders near settlement
-            if minutes_to_expiry is not None and minutes_to_expiry < PRE_EXPIRY_CANCEL_THRESHOLD_MIN:
+            # 2026-11-06: lane-scoped floor.  pinned_fav maker entries are
+            # admitted inside the generic 120s floor by design — the lane's
+            # converged-favorite cohort settles at expiry, so a fill inside
+            # its window is the intended terminal, not a stranded position.
+            # Cancelling them at 120s guaranteed the lane's 90-180s entries
+            # could never rest long enough to fill.  Their floor is
+            # MERID_PRE_EXPIRY_CANCEL_MIN_S_PINNED_FAV (default 45s, safely
+            # above the 30s final-minute entry cutoff); every other lane
+            # keeps the generic 120s bound.
+            _pre_expiry_min = PRE_EXPIRY_CANCEL_THRESHOLD_MIN
+            if (record.decision_lane or "") == "pinned_fav":
+                try:
+                    _pre_expiry_min = float(
+                        os.environ.get(
+                            "MERID_PRE_EXPIRY_CANCEL_MIN_S_PINNED_FAV", "45"
+                        )
+                    ) / 60.0
+                except (TypeError, ValueError):
+                    _pre_expiry_min = PRE_EXPIRY_CANCEL_THRESHOLD_MIN
+            if minutes_to_expiry is not None and minutes_to_expiry < _pre_expiry_min:
                 logger.warning(
-                    "[RESTING-CANCEL-BEFORE-EXPIRY] ticker=%s kalshi_order_id=%s tte=%.1fmin < %dmin - cancelling resting order",
-                    record.ticker, record.kalshi_order_id, minutes_to_expiry, PRE_EXPIRY_CANCEL_THRESHOLD_MIN
+                    "[RESTING-CANCEL-BEFORE-EXPIRY] ticker=%s kalshi_order_id=%s tte=%.1fmin < %.2fmin - cancelling resting order",
+                    record.ticker, record.kalshi_order_id, minutes_to_expiry, _pre_expiry_min
                 )
                 return RecheckResult(
                     intent_id=record.intent_id,
