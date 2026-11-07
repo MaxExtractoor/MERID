@@ -987,7 +987,68 @@ class OrderAttemptStore:
                     actor,
                 ),
             )
-            return ExitOrderAttemptRecord.from_row(updated_row)
+            updated_record = ExitOrderAttemptRecord.from_row(updated_row)
+        # The ``with conn:`` block above has committed.  Mirror terminal exit
+        # states onto the legacy ``order_attempts`` identity row on a separate
+        # connection — exits that fill asynchronously otherwise leave that row
+        # ACKNOWLEDGED forever and wedge the firewall's in-flight-exit check.
+        if new_state_enum in EXIT_TERMINAL_STATES:
+            self._propagate_exit_terminal_to_order_attempt(
+                record.client_order_id, new_state_enum
+            )
+        return updated_record
+
+    # Terminal exit-FSM states -> legacy ``order_attempts`` lifecycle status.
+    # ``order_attempts`` has no partial/resting vocabulary; every non-FILLED /
+    # non-REJECTED terminal maps to CANCELED ("obligation closed; the fills
+    # ledger owns fill truth").
+    _EXIT_TERMINAL_TO_ATTEMPT_STATUS: Dict[str, str] = {
+        ExitOrderAttemptState.FILLED.value: "FILLED",
+        ExitOrderAttemptState.REJECTED_EXCHANGE.value: "REJECTED",
+        ExitOrderAttemptState.NOT_ACCEPTED_CONFIRMED.value: "REJECTED",
+    }
+
+    def _propagate_exit_terminal_to_order_attempt(
+        self, client_order_id: str, new_state: ExitOrderAttemptState
+    ) -> None:
+        """Best-effort mirror of a terminal exit-attempt state onto the legacy
+        ``order_attempts`` identity row.
+
+        ``order_attempts`` is the identity/dedup ledger consumed by the
+        execution firewall's in-flight-exit check.  Exits that fill
+        asynchronously (order accepted, fill lands via WS/HTTP poll seconds
+        later) never reached a terminal status there, so the firewall kept
+        rejecting every later exit on the ticker as ``in_flight_exit`` —
+        observed live 2026-11-07 on the XRP-1145/0745 ratchet runners.  The
+        exit FSM is authoritative; mirror its terminal verdict so the
+        identity ledger stops reporting a dead order as in-flight.
+        """
+        try:
+            attempt = self.get_by_client_order_id(client_order_id)
+            if attempt is None or attempt.status in (
+                "FILLED",
+                "REJECTED",
+                "CANCELED",
+            ):
+                return
+            target = self._EXIT_TERMINAL_TO_ATTEMPT_STATUS.get(
+                new_state.value, "CANCELED"
+            )
+            self.update_status(
+                attempt.order_attempt_id,
+                target,
+                payload={
+                    "terminalized_by": "exit_attempt_fsm",
+                    "exit_attempt_state": new_state.value,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "[EXIT-ORDER-ATTEMPT-STORE] order_attempts terminal mirror "
+                "failed for coid=%s state=%s",
+                client_order_id,
+                new_state.value,
+            )
 
     def get_exit_attempt_by_wire_client_order_id(
         self, client_order_id: str
@@ -1092,6 +1153,9 @@ class OrderAttemptStore:
             fill_evidence.setdefault("price_cents", price_cents)
         payload_json_str = json.dumps(fill_evidence, default=str, sort_keys=True)
 
+        mirror_terminal: Optional[ExitOrderAttemptState] = None
+        mirror_coid: Optional[str] = None
+        result: Optional[ExitOrderAttemptRecord] = None
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
@@ -1166,6 +1230,9 @@ class OrderAttemptStore:
                         actor,
                     ),
                 )
+                if target in EXIT_TERMINAL_STATES:
+                    mirror_terminal = target
+                    mirror_coid = record.client_order_id
             else:
                 if target is not None:
                     logger.warning(
@@ -1204,4 +1271,16 @@ class OrderAttemptStore:
                         actor,
                     ),
                 )
-            return self.get_exit_attempt(attempt_id)
+        # The ``with conn:`` block above has committed.  Read the post-commit
+        # record on a fresh connection (an in-transaction read would return
+        # the pre-update snapshot), then mirror a terminal fill-driven state
+        # onto the legacy ``order_attempts`` identity row — same contract as
+        # ``transition_exit_attempt``: this path bypasses that method, so
+        # without the mirror an async fill would leave the identity row
+        # ACKNOWLEDGED and wedge the firewall's in-flight check.
+        result = self.get_exit_attempt(attempt_id)
+        if mirror_terminal is not None and mirror_coid:
+            self._propagate_exit_terminal_to_order_attempt(
+                mirror_coid, mirror_terminal
+            )
+        return result

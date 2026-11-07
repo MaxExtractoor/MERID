@@ -4046,6 +4046,31 @@ async def _execute_exit_order(
             )
 
             store = OrderAttemptStore()
+            # A client_order_id whose identity record already reached a terminal
+            # state is permanently consumed — finalize_order_identity will mint a
+            # fresh wire id for it, which then mismatches the durable exit attempt
+            # created below and orphans that attempt in SUBMITTING (observed
+            # 2026-11-07 XRP-0745: exit_0746… wedged RESOLVING_ON_EXCHANGE after an
+            # identity-mismatch reject).  Mint the fresh exit id up front so the
+            # FSM record and the wire identity agree.
+            _identity_row = store.get_by_client_order_id(client_order_id)
+            if _identity_row is not None and _identity_row.status in (
+                "FILLED", "REJECTED", "CANCELED",
+            ):
+                _consumed_coid = client_order_id
+                _salt = hashlib.sha256(
+                    f"client_order_id:{exit_parent_id}:{exit_reason_str}:{_consumed_coid}".encode()
+                ).hexdigest()[:20]
+                client_order_id = f"exit_{_salt}"
+                intent.client_order_id = client_order_id
+                intent.client_tag = client_order_id
+                intent.order_attempt_id = None
+                logger.warning(
+                    "[EXIT-ORDER-IDENTITY] client_order_id=%s consumed by terminal "
+                    "attempt (status=%s); minting fresh %s for position=%s",
+                    _consumed_coid[:12], _identity_row.status,
+                    client_order_id[:12], position.position_id[:8],
+                )
             durable_exit_attempt = store.get_exit_attempt_by_client_order_id(client_order_id)
             preexisting_exit_attempt = durable_exit_attempt is not None
             if durable_exit_attempt is not None and OrderAttemptStore.is_terminal_state(durable_exit_attempt.state):
@@ -4180,6 +4205,40 @@ async def _execute_exit_order(
                 position.market_id,
                 identity_err,
             )
+            # The durable exit attempt was already marked SUBMITTING but this
+            # reject happens before any wire dispatch — terminalize it as
+            # never_dispatched or it wedges SUBMITTING -> SUBMISSION_UNKNOWN ->
+            # RESOLVING_ON_EXCHANGE and blocks every later exit on the position.
+            _terminal_ok = False
+            if self._position_monitor:
+                _terminal_ok = self._position_monitor._mark_exit_intent_reconciled(
+                    position.position_id,
+                    "never_dispatched",
+                    client_order_id=(
+                        durable_exit_attempt.client_order_id
+                        if durable_exit_attempt is not None else None
+                    ),
+                    raw_payload={
+                        "never_dispatched_evidence": "identity_finalize_exception",
+                        "identity_error": str(identity_err)[:200],
+                    },
+                )
+            if _terminal_ok:
+                try:
+                    with self._position_monitor._lock:
+                        self._position_monitor._exit_intent_in_flight.pop(
+                            position.position_id, None
+                        )
+                    self._position_monitor._save_exit_intent_in_flight()
+                except Exception:
+                    logger.exception(
+                        "[EXIT-ORDER] in-flight cleanup after identity failure failed"
+                    )
+            elif self._position_monitor:
+                self._position_monitor._mark_exit_intent_submission_unknown(
+                    position.position_id,
+                    f"identity_finalize_transition_refused:{identity_err}",
+                )
             _clear_in_flight()
             self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
             return
@@ -4191,10 +4250,44 @@ async def _execute_exit_order(
                 position.position_id[:8], durable_exit_attempt.client_order_id,
                 intent.client_order_id,
             )
-            self._position_monitor._mark_exit_intent_reconciliation_required(
-                position.position_id, "exit_identity_mismatch",
-                "durable exit and canonical order client IDs differ",
-            )
+            # Same never-dispatched obligation as above: the mismatch is
+            # detected before routing, so the durable attempt provably never
+            # reached the wire.  Terminalize it and re-arm — the next cycle
+            # mints a fresh exit id (terminal identity rows are consumed) and
+            # dispatches cleanly.  Leaving it SUBMITTING wedged the attempt in
+            # RESOLVING_ON_EXCHANGE and blocked all later exits on the position
+            # (XRP-0745 runner, 2026-11-07).
+            _terminal_ok = False
+            if self._position_monitor:
+                _terminal_ok = self._position_monitor._mark_exit_intent_reconciled(
+                    position.position_id,
+                    "never_dispatched",
+                    client_order_id=durable_exit_attempt.client_order_id,
+                    raw_payload={
+                        "never_dispatched_evidence": "exit_router_identity_mismatch",
+                        "exit_client_order_id": durable_exit_attempt.client_order_id,
+                        "router_client_order_id": intent.client_order_id,
+                    },
+                )
+            if _terminal_ok:
+                try:
+                    with self._position_monitor._lock:
+                        self._position_monitor._exit_intent_in_flight.pop(
+                            position.position_id, None
+                        )
+                    self._position_monitor._save_exit_intent_in_flight()
+                except Exception:
+                    logger.exception(
+                        "[EXIT-ORDER] in-flight cleanup after identity mismatch failed"
+                    )
+                self._rearm_position_after_failed_exit(
+                    position, exit_reason, contracts_to_close
+                )
+            elif self._position_monitor:
+                self._position_monitor._mark_exit_intent_reconciliation_required(
+                    position.position_id, "exit_identity_mismatch",
+                    "durable exit and canonical order client IDs differ",
+                )
             return
 
         # Register the attempt with the exit-attempt resolver so a fill that

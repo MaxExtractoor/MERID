@@ -222,6 +222,89 @@ def test_superseded_attempt_releases_client_order_id(tmp_path):
     assert final.state == ExitOrderAttemptState.FILLED.value
 
 
+def test_terminal_exit_state_mirrors_to_order_attempts(tmp_path):
+    """2026-11-07 XRP-1145: an exit that fills asynchronously leaves its
+    ``order_attempts`` identity row ACKNOWLEDGED forever, which wedged the
+    firewall's in-flight-exit check against every later exit on the ticker.
+    Terminal exit-FSM states must mirror onto the identity row."""
+    store = OrderAttemptStore(str(tmp_path / "mirror.db"))
+
+    def _identity(coid):
+        from merid.event_venues.kalshi.order_attempt_store import OrderAttemptRecord
+        import time as _t
+        return OrderAttemptRecord(
+            order_attempt_id=f"oa-{coid}", client_order_id=coid,
+            decision_id=None, replaces_order_attempt_id=None,
+            intent_id=f"intent-{coid}", client_tag=coid, run_id=None,
+            process_id=None, fingerprint=coid, status="ACKNOWLEDGED",
+            created_at=_t.time(), updated_at=_t.time(), payload_json="{}",
+        )
+
+    # FILLED mirrors to FILLED.
+    store.persist_attempt(_identity("co-filled"))
+    ex = store.create_exit_attempt(
+        exit_intent_id="xi-f", position_key="pos-f", ticker="KXXRP15M-T",
+        reason="ratchet_trim", client_order_id="co-filled",
+        requested_quantity=300, attempt_id="xa-f",
+    )
+    store.transition_exit_attempt("xa-f", "SUBMITTING", actor="t", reason="t")
+    store.transition_exit_attempt("xa-f", "ACKNOWLEDGED", actor="t", reason="t")
+    store.transition_exit_attempt("xa-f", "FILLED", actor="t", reason="t")
+    assert store.get_by_client_order_id("co-filled").status == "FILLED"
+
+    # TERMINAL_UNFILLED (never dispatched) mirrors to CANCELED.
+    store.persist_attempt(_identity("co-never"))
+    ex2 = store.create_exit_attempt(
+        exit_intent_id="xi-n", position_key="pos-n", ticker="KXXRP15M-T",
+        reason="loss_cap", client_order_id="co-never",
+        requested_quantity=100, attempt_id="xa-n",
+    )
+    store.transition_exit_attempt("xa-n", "SUBMITTING", actor="t", reason="t")
+    store.transition_exit_attempt("xa-n", "TERMINAL_UNFILLED", actor="t", reason="never_dispatched")
+    assert store.get_by_client_order_id("co-never").status == "CANCELED"
+
+    # Non-terminal transitions leave the identity row untouched.
+    store.persist_attempt(_identity("co-resting"))
+    ex3 = store.create_exit_attempt(
+        exit_intent_id="xi-r", position_key="pos-r", ticker="KXXRP15M-T",
+        reason="trail", client_order_id="co-resting",
+        requested_quantity=100, attempt_id="xa-r",
+    )
+    store.transition_exit_attempt("xa-r", "SUBMITTING", actor="t", reason="t")
+    store.transition_exit_attempt("xa-r", "ACKNOWLEDGED", actor="t", reason="t")
+    store.transition_exit_attempt("xa-r", "RESTING", actor="t", reason="t")
+    assert store.get_by_client_order_id("co-resting").status == "ACKNOWLEDGED"
+
+    # Missing identity row is a no-op, not an error.
+    ex4 = store.create_exit_attempt(
+        exit_intent_id="xi-m", position_key="pos-m", ticker="KXXRP15M-T",
+        reason="trail", client_order_id="co-orphan",
+        requested_quantity=100, attempt_id="xa-m",
+    )
+    store.transition_exit_attempt("xa-m", "SUBMITTING", actor="t", reason="t")
+    store.transition_exit_attempt("xa-m", "CANCELED", actor="t", reason="t")
+    assert store.get_by_client_order_id("co-orphan") is None
+
+    # An already-terminal identity row is left alone.
+    from merid.event_venues.kalshi.order_attempt_store import OrderAttemptRecord
+    import time as _t2
+    store.persist_attempt(OrderAttemptRecord(
+        order_attempt_id="oa-done", client_order_id="co-done",
+        decision_id=None, replaces_order_attempt_id=None,
+        intent_id="intent-co-done", client_tag="co-done", run_id=None,
+        process_id=None, fingerprint="co-done", status="FILLED",
+        created_at=_t2.time(), updated_at=_t2.time(), payload_json="{}",
+    ))
+    ex5 = store.create_exit_attempt(
+        exit_intent_id="xi-d", position_key="pos-d", ticker="KXXRP15M-T",
+        reason="trail", client_order_id="co-done",
+        requested_quantity=100, attempt_id="xa-d",
+    )
+    store.transition_exit_attempt("xa-d", "SUBMITTING", actor="t", reason="t")
+    store.transition_exit_attempt("xa-d", "REJECTED_EXCHANGE", actor="t", reason="t")
+    assert store.get_by_client_order_id("co-done").status == "FILLED"
+
+
 def test_expired_market_sweep_preserves_unproven_outcomes(tmp_path, monkeypatch):
     """An expired market and an empty local ledger cannot prove cancellation."""
     import asyncio

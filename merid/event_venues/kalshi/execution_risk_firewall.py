@@ -1457,18 +1457,37 @@ class ExecutionRiskFirewall:
         Returns the most recent matching ``OrderAttemptRecord`` or ``None``.
         This is intentionally defensive: it also rejects an ``ACKNOWLEDGED`` resting
         exit because two concurrent exits can over-close a position.
+
+        2026-11-07: ``order_attempts`` is the identity/dedup ledger, not the exit
+        lifecycle authority — ``exit_order_attempts`` is.  An exit whose durable
+        FSM record is terminal (FILLED/CANCELED/…) is finished on the wire even
+        when its identity row was never terminalized: async fill acks leave it
+        ACKNOWLEDGED forever, which wedged every later exit on the ticker as
+        ``in_flight_exit`` (observed live blocking a LOSS_CAP exit on the
+        XRP-1145 runner ~3min after the ratchet trim filled).  Skip those stale
+        rows; a missing or nonterminal FSM record still blocks.
         """
         from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
 
-        attempts = OrderAttemptStore().get_unresolved(lookback_seconds=None)
+        store = OrderAttemptStore()
+        attempts = store.get_unresolved(lookback_seconds=None)
         for attempt in reversed(attempts):
             if (
                 attempt.client_order_id == canonical.client_order_id
                 and attempt.intent_id == canonical.intent_id
             ):
                 continue
-            if self._attempt_is_exit_for(attempt, canonical.market_ticker):
-                return attempt
+            if not self._attempt_is_exit_for(attempt, canonical.market_ticker):
+                continue
+            try:
+                exit_rec = store.get_exit_attempt_by_wire_client_order_id(
+                    attempt.client_order_id
+                )
+            except Exception:
+                exit_rec = None
+            if exit_rec is not None and store.is_terminal_state(exit_rec.state):
+                continue
+            return attempt
         return None
 
     def _attempt_is_exit_for(
