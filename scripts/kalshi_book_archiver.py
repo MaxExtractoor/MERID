@@ -116,6 +116,12 @@ _HEARTBEAT_S = float(os.environ.get("MERID_BOOK_HEARTBEAT_S", "15"))
 _SILENCE_RECONNECT_S = float(os.environ.get("MERID_BOOK_SILENCE_RECONNECT_S", "45"))
 _PRUNE_EVERY_S = 14400.0  # 4h — a 24h retention window does not need 15min sweeps
 _STATS_EVERY_S = 60.0
+# Hard WAL ceiling for the checkpoint escalation above (Litestream-style
+# emergency brake): beyond this the ckpt thread switches PASSIVE -> TRUNCATE
+# even while the writer drains, so one pinned reader can't grow the WAL
+# without bound again (21.6GB/24GB incidents, 2026-11).
+_WAL_CEILING_BYTES = int(
+    os.environ.get("MERID_BOOK_WAL_CEILING_MB", "512")) * 1024 * 1024
 _WRITER_POLL_S = 0.25
 # Discovery looks back far enough to keep just-closed windows under grace
 # coverage, and forward covers upcoming windows Kalshi already lists.
@@ -739,26 +745,56 @@ def main() -> int:
         # PASSIVE checkpoints on a second connection run concurrently with
         # writer commits, so the WAL stays bounded without stalling the
         # drain. Skips trivial WALs; the shutdown TRUNCATE covers exits.
+        #
+        # 2026-11-07 tiering (Litestream 3-tier scheme, wal.html): PASSIVE is
+        # routine-only — it backfills up to the oldest reader's end-mark and
+        # can never reclaim ground while a stray reader pins the wal-index
+        # (observed: 21.6GB WAL on live2, 24GB on live.db, 9.9GB preserved).
+        # When the WAL crosses _WAL_CEILING_BYTES escalate to TRUNCATE even
+        # mid-drain — it waits out the pin bounded by busy_timeout, then
+        # rewinds the file.  Never RESTART-only: blocking writers on slow
+        # readers stalled the drain before.  journal_size_limit only bounds
+        # the file once resets resume; it cannot fix starvation by itself.
         try:
-            ck = sqlite3.connect(_DB_PATH, timeout=5)
+            ck = sqlite3.connect(_DB_PATH, timeout=30)
+            ck.execute("PRAGMA busy_timeout = 15000")
         except Exception:
             return
+        _starve_log_at = [0.0]
         try:
             while not stop.is_set():
                 stop.wait(60)
                 try:
                     wal = _DB_PATH + "-wal"
-                    if (not os.path.exists(wal)
-                            or os.path.getsize(wal) < 8 * 1024 * 1024):
+                    if not os.path.exists(wal):
                         continue
-                    # TRUNCATE while idle: resets the WAL file so a quiet
-                    # gap bounds both file size and crash-recovery cost to
-                    # "since the last quiet gap". PASSIVE while draining —
-                    # it can run concurrently with writer commits.
-                    mode = "TRUNCATE" if not ingest.depth else "PASSIVE"
-                    ck.execute(f"PRAGMA wal_checkpoint({mode})")
-                except Exception:
-                    pass
+                    wal_sz = os.path.getsize(wal)
+                    if wal_sz < 8 * 1024 * 1024:
+                        continue
+                    mode = (
+                        "TRUNCATE"
+                        if (not ingest.depth or wal_sz >= _WAL_CEILING_BYTES)
+                        else "PASSIVE"
+                    )
+                    busy, log_f, ckpt_f = ck.execute(
+                        f"PRAGMA wal_checkpoint({mode})"
+                    ).fetchone() or (1, -1, -1)
+                    if (
+                        wal_sz >= _WAL_CEILING_BYTES
+                        and (busy or ckpt_f < log_f)
+                        and time.monotonic() - _starve_log_at[0] >= 60
+                    ):
+                        _starve_log_at[0] = time.monotonic()
+                        print(
+                            f"[book-archiver] WAL ceiling: checkpoint "
+                            f"starved busy={busy} log_frames={log_f} "
+                            f"ckpt_frames={ckpt_f} wal={wal_sz/1e6:.0f}MB — "
+                            f"a reader is pinning the wal-index",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(f"[book-archiver] checkpoint error: {exc}",
+                          flush=True)
         finally:
             try:
                 ck.close()

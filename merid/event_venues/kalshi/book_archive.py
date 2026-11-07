@@ -838,6 +838,15 @@ class BookArchiveDB:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=536870912")
         self.conn.execute("PRAGMA wal_autocheckpoint=0")
+        # Backstop high-water bound: engages only when the WAL resets after
+        # a completed checkpoint (pragma.html — it cannot fix starvation,
+        # which is why the archiver also runs a ceiling-escalated ckpt loop).
+        _journal_limit_mb = int(
+            os.environ.get("MERID_BOOK_JOURNAL_LIMIT_MB", "1024")
+        )
+        self.conn.execute(
+            "PRAGMA journal_size_limit=%d" % (_journal_limit_mb * 1024 * 1024)
+        )
         self.conn.executescript(SCHEMA)
         self.conn.commit()
         self.write_errors: int = 0
