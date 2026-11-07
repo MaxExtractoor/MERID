@@ -923,6 +923,81 @@ MERID_MARGINAL_BAND_MIN_TTE_S = float(
     os.environ.get("MERID_MARGINAL_BAND_MIN_TTE_S", "180")
 )
 
+# 2026-11-06 (counterfactual-verified negative-floor probe): every existing
+# relief mechanism floors the effective bound at max(0.0, ...) — the
+# no_positive_executable_edge check (edge <= 0) still kills marginal
+# candidates no matter how much slack/relief is armed.  The settle-joined
+# near-miss cohort inside 70-89.99c ran +16..+23c counterfactual net across
+# both sides (logs/nearmiss_cf_monitor.jsonl; bounded-MFE check: in-window
+# excursions +17..+37c the exit policy captures) while 50-60c averaged
+# -11.6c — reserve-stacked net~0 under-prices favorites in this band.
+# Inside the armed window the side floor becomes
+# -MERID_EV_PROBE_NEG_FLOOR_CENTS (bounded-lane semantics: the honest miss
+# label is edge_below_lane_floor; min_p, evidence, moneyness caps,
+# structural gates, and router economics all unchanged).  Requires a real
+# model claim (gross edge >= MIN_GROSS) and MIN_TTE — no tail-lottery
+# admissions.  Outside the window or ENABLED=0 the floor is untouched;
+# settlement lane keeps its own economics.  Kill via flag -> 0.
+MERID_EV_PROBE_ENABLED = os.environ.get(
+    "MERID_EV_PROBE_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes")
+MERID_EV_PROBE_BAND_LO_CENTS = float(
+    os.environ.get("MERID_EV_PROBE_BAND_LO_CENTS", "70")
+)
+MERID_EV_PROBE_BAND_HI_CENTS = float(
+    os.environ.get("MERID_EV_PROBE_BAND_HI_CENTS", "89.99")
+)
+MERID_EV_PROBE_NEG_FLOOR_CENTS = float(
+    os.environ.get("MERID_EV_PROBE_NEG_FLOOR_CENTS", "1.5")
+)
+MERID_EV_PROBE_MIN_GROSS_CENTS = float(
+    os.environ.get("MERID_EV_PROBE_MIN_GROSS_CENTS", "2.0")
+)
+MERID_EV_PROBE_SIDES = frozenset(
+    s.strip().lower()
+    for s in os.environ.get("MERID_EV_PROBE_SIDES", "yes,no").split(",")
+    if s.strip()
+)
+MERID_EV_PROBE_ASSETS = frozenset(
+    s.strip().upper()
+    for s in os.environ.get(
+        "MERID_EV_PROBE_ASSETS", "BTC,ETH,SOL,XRP,DOGE"
+    ).split(",")
+    if s.strip()
+)
+MERID_EV_PROBE_MIN_TTE_S = float(
+    os.environ.get("MERID_EV_PROBE_MIN_TTE_S", "180")
+)
+
+
+def _ev_probe_neg_floor_prob(
+    side: str,
+    asset: str,
+    price_cents: float,
+    seconds_to_expiry: float,
+    gross_edge_cents: float,
+) -> float:
+    """Negative min-edge floor (prob units) inside the armed
+    counterfactual probe window; 0.0 elsewhere."""
+    if not MERID_EV_PROBE_ENABLED:
+        return 0.0
+    if side not in MERID_EV_PROBE_SIDES:
+        return 0.0
+    if str(asset).upper() not in MERID_EV_PROBE_ASSETS:
+        return 0.0
+    if not (
+        MERID_EV_PROBE_BAND_LO_CENTS
+        <= float(price_cents)
+        <= MERID_EV_PROBE_BAND_HI_CENTS
+    ):
+        return 0.0
+    if float(seconds_to_expiry) < MERID_EV_PROBE_MIN_TTE_S:
+        return 0.0
+    if float(gross_edge_cents) < MERID_EV_PROBE_MIN_GROSS_CENTS:
+        return 0.0
+    return -MERID_EV_PROBE_NEG_FLOOR_CENTS / 100.0
+
+
 # 2026-10-14 (veto counterfactual, TTE×miss-depth split): the dynamic bound
 # itself — not just the 0-1c marginal band — over-rejects NO-side mid-window.
 # Settled counterfactual on ~22.3k `no_edge_below_threshold` rejects:
@@ -4977,6 +5052,29 @@ def _compute_trade_decision_impl(
             no_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
         indicators["settlement_lane_favored_side"] = _lane_favored
         indicators["settlement_lane_min_edge"] = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+    if not settlement_lane and entry_price_basis == "bid":
+        # 2026-11-06 counterfactual probe: inside the armed 70-89.99c window
+        # the side floor goes negative (bounded-lane semantics downstream —
+        # min_p, evidence, caps, structural gates all still bind).  Maker
+        # basis only — the measured near-miss cohort was bid-priced; taker
+        # economics at these prices were never evidenced.  A side already
+        # owned by a negative-floor lane keeps its own bound.
+        _yes_ev_probe = _ev_probe_neg_floor_prob(
+            "yes", asset, float(yes_price_cents), float(seconds_to_expiry),
+            (float(yes_breakdown.p_selected)
+             - float(yes_breakdown.executable_entry_price)) * 100.0,
+        )
+        _no_ev_probe = _ev_probe_neg_floor_prob(
+            "no", asset, float(no_price_cents), float(seconds_to_expiry),
+            (float(no_breakdown.p_selected)
+             - float(no_breakdown.executable_entry_price)) * 100.0,
+        )
+        if _yes_ev_probe < 0.0 and yes_min_edge >= 0.0:
+            yes_min_edge = _yes_ev_probe
+            indicators["yes_ev_probe_floor_cents"] = _yes_ev_probe * 100.0
+        if _no_ev_probe < 0.0 and no_min_edge >= 0.0:
+            no_min_edge = _no_ev_probe
+            indicators["no_ev_probe_floor_cents"] = _no_ev_probe * 100.0
     indicators["yes_min_edge"] = yes_min_edge
     indicators["no_min_edge"] = no_min_edge
     # Threshold decomposition (probability points) — lets the audit answer
