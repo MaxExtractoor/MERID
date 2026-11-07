@@ -66,7 +66,10 @@ function TopBar({ onMenuClick, onNavigate, onOpenSearch }: TopBarProps) {
   const hasData = portfolio.lastOk != null;
   const dailyPnl = portfolio.daily_pnl;
   const pnlPositive = dailyPnl >= 0;
-  const balanceUsd = portfolio.portfolio_value || portfolio.cash || null;
+  // Account balance = equity (available cash + positions), NOT
+  // portfolio.portfolio_value — that field is positions-value-only, so the
+  // chip collapsed to just the new position's mark the moment a fill landed.
+  const balanceUsd = portfolio.balance || portfolio.cash || null;
 
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">

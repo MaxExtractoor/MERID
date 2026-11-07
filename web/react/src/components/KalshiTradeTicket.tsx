@@ -41,13 +41,6 @@ interface TradeTicketProps {
   mode?: 'paper' | 'live';
   kellyFraction?: number;
   positionLimitPct?: number;
-  orderGroupId?: string;
-  availableGroups?: Array<{
-    order_group_id: string;
-    name: string;
-    status: 'active' | 'triggered' | 'canceled' | 'pending';
-    utilization_pct: number;
-  }>;
   lastUpdated?: string | number;
   enhanced?: boolean;
   balance?: { available: number; total: number };
@@ -107,8 +100,6 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   mode = 'live',
   kellyFraction,
   positionLimitPct,
-  orderGroupId: initialGroupId,
-  availableGroups = [],
   lastUpdated,
   enhanced = false,
   balance,
@@ -149,7 +140,6 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [tradeError, setTradeError] = useState<TradeError | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [selectedGroupId, setSelectedGroupId] = useState<string>(initialGroupId || '');
   const retryCountRef = useRef(0);
   // Live-order confirmation: one ConfirmModal ack per order INTENT. Params
   // changing invalidates the ack; retries of the same intent don't re-ask.
@@ -256,7 +246,6 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         price_cents: String(priceCents),
         order_type: useLimit ? 'limit' : 'market',
         mode,
-        ...(selectedGroupId ? { order_group_id: selectedGroupId } : {}),
       });
       await postJson<unknown>(`${API_ENDPOINTS.KALSHI_ORDERS}?${params}`);
 
@@ -268,7 +257,6 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         side,
         contracts: effectiveContracts,
         price_cents: priceCents,
-        order_group_id: selectedGroupId,
       });
       onOrderPlaced?.();
       submitGuardRef.current = false;
@@ -310,7 +298,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     } finally {
       setSubmitting(false);
     }
-  }, [ticker, side, effectiveContracts, priceCents, useLimit, mode, selectedGroupId, onOrderPlaced, enhanced, reconcileSubmission]);
+  }, [ticker, side, effectiveContracts, priceCents, useLimit, mode, onOrderPlaced, enhanced, reconcileSubmission]);
 
   const handleSubmit = useCallback(async () => {
     if (submitGuardRef.current) return;
@@ -523,36 +511,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         )}
       </div>
 
-      {/* Order Group Selector */}
-      {availableGroups.length > 0 && (
-        <div className="space-y-2">
-          <label htmlFor="order-group-select" className="text-xs text-gray-400">Order Group (optional)</label>
-          <select
-            aria-label="Order group"
-            id="order-group-select"
-            value={selectedGroupId}
-            onChange={(e) => setSelectedGroupId(e.target.value)}
-            className="w-full bg-slate-700 rounded-lg px-3 py-2 text-sm text-white border border-slate-600 focus:border-orange-500 focus:outline-none"
-          >
-            <option value="">— No Group —</option>
-            {availableGroups.map((group) => (
-              <option 
-                key={group.order_group_id} 
-                value={group.order_group_id}
-                disabled={group.status !== 'active'}
-              >
-                {group.name || group.order_group_id} 
-                {group.status === 'active' ? `(${group.utilization_pct}% used)` : `[${group.status}]`}
-              </option>
-            ))}
-          </select>
-          {selectedGroupId && (
-            <p className="text-[10px] text-gray-500">
-              Order will be assigned to group: {availableGroups.find(g => g.order_group_id === selectedGroupId)?.name || selectedGroupId}
-            </p>
-          )}
-        </div>
-      )}
+      {/* Order-group assignment deliberately removed: POST /api/v1/kalshi/orders
+          does not accept order_group_id, so the selector silently dropped the
+          operator's choice. Re-add only with a backend param. */}
 
       {/* Cost / Payout Summary */}
       <div className="bg-slate-900 rounded-lg p-3 space-y-2">
