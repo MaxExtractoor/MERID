@@ -493,6 +493,48 @@ def test_daily_roll_resets_counters():
 
 
 # ---------------------------------------------------------------------------
+# Probation TTL: strike-free episodes auto-complete (2026-11-07)
+# ---------------------------------------------------------------------------
+
+def _seed_cbp_probation(cell_id: str, age_s: float) -> None:
+    import time as _time
+    st = cbp._load_state()
+    st["cell_states"][cell_id] = {
+        "state": "PROBATION",
+        "on_probation": True,
+        "probation_started_ts": _time.time() - age_s,
+        "probation_fills": 0,
+        "probation_loss_cents": 0.0,
+        "probation_count": 1,
+        "since_ts": _time.time() - age_s,
+        "reason": "probation_release test",
+        "suspension_class": "economic",
+    }
+    cbp._save_state()
+
+
+def test_probation_timeout_expires_to_observation():
+    """A strike-free probation older than the TTL graduates to OBSERVATION
+    on the next state touch — cells that can never fill must not sit on
+    probation forever."""
+    c = _prov_cell()
+    _seed_cbp_probation(c.cell_id, age_s=7200.0)
+    assert cbp.get_cell_state(c.cell_id) == "OBSERVATION"
+    rec = cbp._load_state()["cell_states"][c.cell_id]
+    assert rec["on_probation"] is False
+    assert "probation_timeout" in str(rec["reason"])
+    assert rec["probation_count"] == 1  # history preserved
+    kinds = [t["kind"] for t in cbp._load_state()["transitions"]]
+    assert "probation_timeout" in kinds
+
+
+def test_probation_timeout_respects_recent_episode():
+    c = _prov_cell()
+    _seed_cbp_probation(c.cell_id, age_s=60.0)
+    assert cbp.get_cell_state(c.cell_id) == "PROBATION"
+
+
+# ---------------------------------------------------------------------------
 # Suspension rules
 # ---------------------------------------------------------------------------
 
@@ -1227,6 +1269,10 @@ def test_domain_gate_end_to_end_tte_ceiling(monkeypatch):
     # .env widened the live domain to 840s; pin the 600s bound this test
     # asserts (TTE 823 must clear the ceiling).
     monkeypatch.setattr(_td, "MERID_LIVE_ENTRY_MAX_TTE_S", 600.0)
+    # .env hard-blocks XRP-NO at 1c (audited -9.54 USD); that cap vetoes
+    # before the domain gate is reached.  Lift it so the TTE ceiling is
+    # the gate under test.
+    monkeypatch.setenv("MERID_MONEYNESS_MAX_ENTRY_PRICE_CENTS_NO_XRP", "0")
     d = _decision(
         asset="XRP",
         spot_price=1.4863, strike_price=1.4886,

@@ -990,6 +990,7 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
                 _STATE_CACHE["funnel"] = {s: 0 for s in FUNNEL_STAGES}
                 _STATE_CACHE["funnel_by_cell"] = {}
                 _persist_state_locked(p, _STATE_CACHE)
+            _expire_probation_locks(_STATE_CACHE, now)
             return _STATE_CACHE
         rec: Dict[str, Any] = {}
         try:
@@ -1044,6 +1045,7 @@ def _load_state(now: Optional[float] = None, path: Optional[str] = None) -> Dict
                 state["funnel_by_cell"] = rec["funnel_by_cell"]
         _STATE_CACHE = state
         _STATE_CACHE_PATH = p
+        _expire_probation_locks(state, now)
         return _STATE_CACHE
 
 
@@ -1072,6 +1074,78 @@ def reset_provisional_state_cache() -> None:
     with _state_lock:
         _STATE_CACHE = None
         _STATE_CACHE_PATH = None
+
+
+def _expire_probation_locks(state: Dict[str, Any], now: float) -> None:
+    """Auto-complete strike-free PROBATION episodes past the TTL.
+
+    Mirrors ``threshold_cells._expire_probation_locks``: runs inside
+    ``_load_state`` on every state touch so expired probation resolves even
+    for cells whose candidates never reach admission.  Completion needs
+    clean post-release observations, which need fills — a cell starved by
+    upstream gates can never accrue them and would sit on probation
+    indefinitely.  Any strike re-suspends first, so only episodes with no
+    disqualifying evidence expire; the landing state is OBSERVATION, the
+    same as ``probation_passed``.  Journaled as ``probation_timeout``.
+    ``<= 0`` TTL disables.
+    """
+    timeout_s = probation_timeout_s()
+    if timeout_s <= 0.0:
+        return
+    expired: List[Tuple[str, Dict[str, Any], float]] = []
+    for cid, rec in (state.get("cell_states") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("state") != CELL_STATE_PROBATION:
+            continue
+        start = float(
+            rec.get("probation_started_ts") or rec.get("since_ts") or 0.0
+        )
+        if start <= 0.0:
+            continue
+        age_s = now - start
+        if age_s >= timeout_s:
+            expired.append((cid, rec, age_s))
+    if not expired:
+        return
+    journal = state.setdefault("transitions", [])
+    for cid, rec, age_s in expired:
+        prev_state = rec.get("state")
+        prev_reason = rec.get("reason")
+        fills = int(rec.get("probation_fills") or 0)
+        reason = (
+            f"probation_timeout age_s={int(age_s)} "
+            f"fills={fills} timeout_s={int(timeout_s)}"
+        )
+        rec["state"] = CELL_STATE_OBSERVATION
+        rec["since_ts"] = now
+        rec["reason"] = reason
+        rec["on_probation"] = False
+        journal.append({
+            "cell_id": cid,
+            "kind": "probation_timeout",
+            "previous_state": prev_state,
+            "new_state": CELL_STATE_OBSERVATION,
+            "reason": reason,
+            "suspension_context_reason": prev_reason,
+            "suspension_class": rec.get("suspension_class"),
+            "ts": now,
+            "policy_version": _policy_epoch(),
+            "counters_reset": [],
+            "probation_budget": None,
+        })
+        logger.info(
+            "[CBP-PROBATION-TIMEOUT] cell=%s age_s=%d fills=%d -> OBSERVATION",
+            cid, int(age_s), fills,
+        )
+        emit_provisional_lifecycle(
+            "probation_timeout",
+            provisional_cell_id=cid,
+            terminal_state=CELL_STATE_OBSERVATION,
+            reason=reason,
+        )
+    del journal[:-500]
+    _save_state()
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1316,19 @@ def probation_loss_budget_cents() -> float:
 def probation_pass_observations() -> int:
     """Clean observations needed for PROBATION -> OBSERVATION."""
     return _env_int("MERID_CBP_PROBATION_PASS_OBS", 2)
+
+
+def probation_timeout_s() -> float:
+    """Maximum age of a PROBATION episode before strike-free auto-complete.
+
+    Mirrors ``threshold_cells.probation_timeout_s``: probation is bounded
+    re-verification, not quarantine — an episode that cannot produce fills
+    inside the window can never accrue the clean observations completion
+    needs, so the TTL graduates it to OBSERVATION (rolling suspension rules
+    and normal lane caps still apply).  Default is two 15m market windows;
+    ``<= 0`` restores unbounded probation.
+    """
+    return _env_float("MERID_CBP_PROBATION_TIMEOUT_S", 2.0 * 900.0)
 
 
 def _recovery_allowlist() -> Optional[frozenset]:

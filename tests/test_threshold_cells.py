@@ -81,6 +81,7 @@ def _disable_market_anchor(monkeypatch, tmp_path):
         "MERID_THRESHOLD_CELL_PROBATION_MAX_FILLS",
         "MERID_THRESHOLD_CELL_PROBATION_LOSS_BUDGET_CENTS",
         "MERID_THRESHOLD_CELL_PROBATION_PASS_OBS",
+        "MERID_THRESHOLD_CELL_PROBATION_TIMEOUT_S",
     ):
         monkeypatch.delenv(_v, raising=False)
     # Provisional-lane env overrides must not leak from .env â€” these tests
@@ -556,6 +557,78 @@ def test_probation_resuspend_uses_longer_cooldown(monkeypatch):
     moved, block = probation_reset_cell(cell.cell_id)
     assert moved is False
     assert block.startswith("probation_cooldown")
+
+
+# ---------------------------------------------------------------------------
+# Probation TTL: strike-free episodes auto-complete (2026-11-07)
+# ---------------------------------------------------------------------------
+
+def _seed_probation(cell_id: str, age_s: float) -> None:
+    """Put a cell record into PROBATION with a controlled episode age."""
+    import time as _time
+    from merid.prediction import threshold_cells as _tc
+    st = _tc._load_state()
+    st["cell_states"][cell_id] = {
+        "state": "PROBATION",
+        "on_probation": True,
+        "probation_started_ts": _time.time() - age_s,
+        "probation_fills": 0,
+        "probation_loss_cents": 0.0,
+        "probation_count": 1,
+        "since_ts": _time.time() - age_s,
+        "reason": "probation_release test",
+        "suspension_class": "economic",
+    }
+    _tc._save_state()
+
+
+def test_probation_timeout_expires_to_observation():
+    """A strike-free probation older than the TTL graduates to OBSERVATION
+    on the next state touch — cells that can never fill must not sit on
+    probation forever."""
+    from merid.prediction import threshold_cells as _tc
+    cell = _cell()
+    _seed_probation(cell.cell_id, age_s=7200.0)
+    assert get_cell_state(cell.cell_id) == "OBSERVATION"
+    rec = _tc._load_state()["cell_states"][cell.cell_id]
+    assert rec["on_probation"] is False
+    assert "probation_timeout" in str(rec["reason"])
+    assert rec["probation_count"] == 1  # history preserved
+    kinds = [t["kind"] for t in _tc._load_state()["transitions"]]
+    assert "probation_timeout" in kinds
+    # Admission is restored under normal lane caps.
+    ok, blocked = cell_admission(cell.cell_id)
+    assert ok is True and blocked is None
+
+
+def test_probation_timeout_respects_recent_episode():
+    cell = _cell()
+    _seed_probation(cell.cell_id, age_s=60.0)
+    assert get_cell_state(cell.cell_id) == "PROBATION"
+
+
+def test_probation_timeout_disabled_by_zero(monkeypatch):
+    from merid.prediction import threshold_cells as _tc
+    cell = _cell()
+    monkeypatch.setenv("MERID_THRESHOLD_CELL_PROBATION_TIMEOUT_S", "0")
+    _seed_probation(cell.cell_id, age_s=7200.0)
+    assert get_cell_state(cell.cell_id) == "PROBATION"
+
+
+def test_probation_timeout_does_not_rescue_strike():
+    """A probation strike re-suspends first; the TTL sweep only touches
+    records still in PROBATION, so SUSPENDED stays fail-closed even when
+    its probation timestamps are ancient."""
+    import time as _time
+    from merid.prediction import threshold_cells as _tc
+    cell = _cell()
+    _seed_probation(cell.cell_id, age_s=60.0)  # inside the TTL window
+    record_cell_router_reject(cell.cell_id)  # one strike -> SUSPENDED
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
+    st = _tc._load_state()
+    st["cell_states"][cell.cell_id]["probation_started_ts"] = _time.time() - 99999
+    _tc._save_state()
+    assert get_cell_state(cell.cell_id) == "SUSPENDED"
 
 
 def test_funnel_counters():
