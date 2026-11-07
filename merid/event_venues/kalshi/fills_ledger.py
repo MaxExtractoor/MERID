@@ -5552,6 +5552,117 @@ class KalshiFillsLedger:
                 pass
         return repaired
 
+    def _repair_settlement_proceeds_persisted(self) -> int:
+        """Correct settlement pseudo-fill proceeds booked from gross counts.
+
+        2026-11-07: ``record_settlement_proceeds`` originally derived payout
+        as ``gross_exchange_count * $1`` — but the exchange ``yes_count`` /
+        ``no_count`` fields are gross per-side-form quantities, not residual
+        holdings ($84.99 verified phantom across the 39 revenue-documented
+        settled markets; fully-exited markets booked a full notional payout
+        on $0.00 revenue).  Each row's ``raw_payload`` retains the
+        venue-authoritative ``exchange_revenue_dollars`` and ``outcome``, so
+        the correct proceeds are derivable: the leg whose ``held_side``
+        matches the outcome carries the revenue; every other leg carries 0.
+
+        Idempotent — only divergent rows are rewritten — and runs at the top
+        of ``load_from_db`` before fills are read, so restored in-memory
+        proceeds match the repaired DB and the periodic flush cannot
+        re-persist the buggy values.  ``MERID_SETTLEMENT_PROCEEDS_REPAIR=0``
+        disables.  Returns rows repaired.
+        """
+        if os.environ.get("MERID_SETTLEMENT_PROCEEDS_REPAIR", "1") in (
+            "0", "false", "no",
+        ):
+            return 0
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=15)
+            conn.execute("PRAGMA busy_timeout=15000")
+            try:
+                rows = conn.execute(
+                    "SELECT fill_id, market_ticker, side, proceeds_dollars, "
+                    "raw_payload FROM kalshi_fills WHERE fill_id LIKE 'settlement:%'"
+                ).fetchall()
+            except Exception:
+                rows = []
+            if not rows:
+                conn.close()
+                return 0
+            # Group legs per market; each leg's raw_payload carries the
+            # market outcome + venue revenue (identical on both legs).
+            per_market: Dict[str, Dict[str, Any]] = {}
+            for fill_id, mt, side, proc, raw in rows:
+                try:
+                    rp = json.loads(raw) if isinstance(raw, str) and raw else {}
+                except Exception:
+                    rp = {}
+                if not isinstance(rp, dict):
+                    rp = {}
+                outcome = str(rp.get("outcome") or "").strip().lower()
+                rev_raw = rp.get("exchange_revenue_dollars")
+                try:
+                    revenue = float(rev_raw) if rev_raw is not None else None
+                except Exception:
+                    revenue = None
+                m = per_market.setdefault(mt, {"outcome": outcome, "revenue": revenue, "legs": []})
+                # Prefer a non-null revenue/outcome if a sibling leg has it.
+                if m["revenue"] is None and revenue is not None:
+                    m["revenue"] = revenue
+                if not m["outcome"] and outcome:
+                    m["outcome"] = outcome
+                m["legs"].append((fill_id, side, proc, rp))
+            repaired = 0
+            for mt, m in per_market.items():
+                outcome = m["outcome"]
+                revenue = m["revenue"]
+                if outcome not in ("yes", "no") or revenue is None:
+                    continue  # cannot derive truth — leave untouched
+                for fill_id, side, proc, rp in m["legs"]:
+                    expected = revenue if side == outcome else 0.0
+                    try:
+                        stored = float(proc) if proc is not None else None
+                    except Exception:
+                        stored = None
+                    if stored is not None and abs(stored - expected) <= 0.005:
+                        continue
+                    rp = dict(rp)
+                    rp["payout_dollars"] = expected
+                    rp["proceeds_repaired_reason"] = (
+                        "gross_count_booking_corrected_to_exchange_revenue"
+                    )
+                    conn.execute(
+                        "UPDATE kalshi_fills SET proceeds_dollars = ?, "
+                        "raw_payload = ? WHERE fill_id = ?",
+                        (expected, json.dumps(rp, default=str), fill_id),
+                    )
+                    mem = self._fills.get(fill_id)
+                    if mem is not None:
+                        try:
+                            mem.proceeds_dollars = Decimal(str(expected))
+                            mem.raw_payload = rp
+                        except Exception:
+                            pass
+                    repaired += 1
+            conn.commit()
+            conn.close()
+            if repaired:
+                logger.warning(
+                    "[SETTLEMENT-PROCEEDS-REPAIR] corrected %d settlement "
+                    "pseudo-fill row(s) to exchange revenue (gross-count "
+                    "booking inflated realized PnL)",
+                    repaired,
+                )
+            return repaired
+        except Exception as exc:
+            logger.debug(
+                "[SETTLEMENT-PROCEEDS-REPAIR] persisted repair failed: %s", exc
+            )
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return 0
+
     def _replay_market_position(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Rebuild the open-position record for a market by replaying its fills.
 
@@ -7502,6 +7613,7 @@ class KalshiFillsLedger:
         *,
         yes_count: float = 0.0,
         no_count: float = 0.0,
+        residual_yes_cc: Optional[int] = None,
         revenue_dollars: Optional[float] = None,
         settlement_time: Optional[Any] = None,
     ) -> int:
@@ -7521,12 +7633,24 @@ class KalshiFillsLedger:
         ``_market_fill_totals``/position reconstruction stay consistent, and
         ``created_time`` is stamped settled_time+1s so the pre-settlement
         residual reconstruction (``asof_ts``) remains uncorrupted.
+
+        2026-11-07: ``yes_count``/``no_count`` exchange fields are GROSS
+        per-side-form quantities, not residual holdings — both are nonzero
+        on fully closed lifecycles (KXXRP15M-26OCT171530-30; XRP-1145/0745
+        runners).  Booking ``gross_count * $1`` inflated realized PnL by
+        $84.99 across the 39 revenue-documented settled markets (~$63 in
+        the last two days alone).  ``residual_yes_cc`` (local ledger
+        reconstruction as of settlement_time) is now the held-position
+        source and ``revenue_dollars`` the cash source; gross counts remain
+        only as a no-information fallback.
         """
         planned = self._settlement_proceeds_plan(
             market_ticker,
             outcome,
             yes_count=yes_count,
             no_count=no_count,
+            residual_yes_cc=residual_yes_cc,
+            revenue_dollars=revenue_dollars,
             settlement_time=settlement_time,
         )
         if planned is None:
@@ -7556,6 +7680,7 @@ class KalshiFillsLedger:
         *,
         yes_count: float = 0.0,
         no_count: float = 0.0,
+        residual_yes_cc: Optional[int] = None,
         revenue_dollars: Optional[float] = None,
         settlement_time: Optional[Any] = None,
         timeout_s: Optional[float] = None,
@@ -7579,6 +7704,8 @@ class KalshiFillsLedger:
             outcome,
             yes_count=yes_count,
             no_count=no_count,
+            residual_yes_cc=residual_yes_cc,
+            revenue_dollars=revenue_dollars,
             settlement_time=settlement_time,
         )
         if planned is None:
@@ -7715,25 +7842,48 @@ class KalshiFillsLedger:
         *,
         yes_count: float = 0.0,
         no_count: float = 0.0,
+        residual_yes_cc: Optional[int] = None,
+        revenue_dollars: Optional[float] = None,
         settlement_time: Optional[Any] = None,
     ):
         """Pure compute for a settlement-proceeds booking — no I/O.
 
         Returns ``(legs, row_ts, now_iso, outcome_norm, settle_time_str)``
         where each leg is ``(side, contracts, fill_id, won, payout,
-        qty_cc, yes_delta_cc, price_c, yes_px, no_px)``, or ``None`` when
-        there is nothing to book.  Safe to run on the event loop.
+        qty_cc, yes_delta_cc, price_c, yes_px, no_px, held_basis)``, or
+        ``None`` when there is nothing to book.  Safe to run on the event
+        loop.
+
+        Held exposure comes from ``residual_yes_cc`` (the local ledger's
+        signed-YES reconstruction as of settlement_time), never from the
+        exchange ``yes_count``/``no_count`` fields — those are gross
+        per-side-form quantities that stay nonzero on fully closed
+        lifecycles.  Cash comes from ``revenue_dollars`` (the exchange's
+        own settlement revenue) whenever it is reported; gross counts are
+        the last-resort fallback only when neither observation exists.
         """
         outcome_norm = (outcome or "").strip().lower()
         if outcome_norm not in ("yes", "no"):
             return None
-        legs_in = (
-            ("yes", float(yes_count or 0.0)),
-            ("no", float(no_count or 0.0)),
-        )
-        held = [(s, c) for s, c in legs_in if c > 0]
-        if not held:
-            return None
+
+        held: List[Tuple[str, float, str]] = []  # (side, contracts, basis)
+        if residual_yes_cc is not None and residual_yes_cc != 0:
+            _held_side = "yes" if residual_yes_cc > 0 else "no"
+            held = [(_held_side, abs(residual_yes_cc) / 100.0, "ledger_residual")]
+        elif revenue_dollars is not None and revenue_dollars > 0:
+            # Residual unknown or contradicted by cash: book the exchange
+            # payout as an implied position on the winning side.  Delta
+            # stays 0 — no local exposure is fabricated for a position the
+            # ledger cannot reconstruct.
+            held = [(outcome_norm, float(revenue_dollars), "exchange_revenue_implied")]
+        elif residual_yes_cc is None and revenue_dollars is None:
+            held = [
+                (s, float(c or 0.0), "exchange_counts_legacy")
+                for s, c in (("yes", yes_count), ("no", no_count))
+                if float(c or 0.0) > 0
+            ]
+        # residual == 0 with no revenue, or revenue <= 0: verified flat —
+        # nothing was held at settlement and nothing is booked.
 
         try:
             if isinstance(settlement_time, str) and settlement_time:
@@ -7760,11 +7910,25 @@ class KalshiFillsLedger:
             if isinstance(settlement_time, str) and settlement_time
             else row_ts.isoformat()
         )
+        revenue_f = (
+            float(revenue_dollars) if revenue_dollars is not None else None
+        )
         legs = []
-        for side, contracts in held:
+        for side, contracts, basis in held:
             won = side == outcome_norm
-            payout = contracts * (1.0 if won else 0.0)
+            # Cash truth: when the exchange reported settlement revenue,
+            # the winning leg carries exactly that — never gross_count*$1.
+            if won and revenue_f is not None:
+                payout = revenue_f
+            else:
+                payout = contracts * (1.0 if won else 0.0)
             qty_cc = int(round(contracts * 100))
+            # Residual legs carry the delta that zeroes the local signed-YES
+            # reconstruction; implied/legacy legs do not fabricate exposure.
+            yes_delta_cc = (
+                (-qty_cc if side == "yes" else qty_cc)
+                if basis == "ledger_residual" else 0
+            )
             legs.append(
                 (
                     side,
@@ -7773,10 +7937,34 @@ class KalshiFillsLedger:
                     won,
                     payout,
                     qty_cc,
-                    -qty_cc if side == "yes" else qty_cc,
+                    yes_delta_cc,
                     100 if won else 0,
-                    (payout / contracts) if side == "yes" else None,
-                    (payout / contracts) if side == "no" else None,
+                    (1.0 if won else 0.0) if side == "yes" else None,
+                    (1.0 if won else 0.0) if side == "no" else None,
+                    basis,
+                )
+            )
+        if (
+            revenue_f is not None
+            and revenue_f > 0
+            and not any(leg[3] for leg in legs)
+        ):
+            # Exchange paid out but no held leg covers the winning side
+            # (residual pointed at the loser, or was flat): record the cash
+            # as an implied leg so proceeds reconcile to revenue.
+            legs.append(
+                (
+                    outcome_norm,
+                    revenue_f,
+                    f"settlement:{market_ticker}:{outcome_norm}",
+                    True,
+                    revenue_f,
+                    int(round(revenue_f * 100)),
+                    0,
+                    100,
+                    1.0 if outcome_norm == "yes" else None,
+                    1.0 if outcome_norm == "no" else None,
+                    "exchange_revenue_implied",
                 )
             )
         return (legs, row_ts, now_iso, outcome_norm, settle_time_str)
@@ -7829,13 +8017,14 @@ class KalshiFillsLedger:
         for _attempt in range(6):
             try:
                 for (side, contracts, fill_id, _won, payout, _q,
-                     yes_delta_cc, price_c, yes_px, no_px) in legs:
+                     yes_delta_cc, price_c, yes_px, no_px, basis) in legs:
                     raw = {
                         "kind": "settlement",
                         "market_ticker": market_ticker,
                         "outcome": outcome,
                         "held_side": side,
                         "held_contracts": contracts,
+                        "held_basis": basis,
                         "payout_dollars": payout,
                         "exchange_revenue_dollars": revenue_dollars,
                         "settlement_time": settle_time_str,
@@ -7914,7 +8103,7 @@ class KalshiFillsLedger:
         loop for the async path), never on the settlement worker.
         """
         for (side, contracts, fill_id, _won, payout, qty_cc,
-             yes_delta_cc, price_c, yes_px, no_px) in legs:
+             yes_delta_cc, price_c, yes_px, no_px, basis) in legs:
             if fill_id in self._fills:
                 continue
             try:
@@ -7924,6 +8113,7 @@ class KalshiFillsLedger:
                     "outcome": outcome,
                     "held_side": side,
                     "held_contracts": contracts,
+                    "held_basis": basis,
                     "payout_dollars": payout,
                     "exchange_revenue_dollars": revenue_dollars,
                 }
@@ -11051,6 +11241,18 @@ class KalshiFillsLedger:
             # Ensure DB is initialized first
             if not self._db_initialized:
                 await self._init_db()
+
+            # 2026-11-07: repair settlement pseudo-fill proceeds booked from
+            # gross exchange counts BEFORE rows are read — restored in-memory
+            # fills then carry exchange-revenue proceeds and the periodic
+            # flush cannot re-persist the inflated values.
+            try:
+                self._repair_settlement_proceeds_persisted()
+            except Exception as _repair_exc:
+                logger.debug(
+                    "[SETTLEMENT-PROCEEDS-REPAIR] load-time repair skipped: %s",
+                    _repair_exc,
+                )
 
             _rq = _time.monotonic()
             async with aiosqlite.connect(self._db_path) as db:

@@ -1966,7 +1966,25 @@ class SettlementToGradingBridge:
                     if settlement.exchange_revenue_cents is not None
                     else None
                 )
-                if _yes_c > 0 or _no_c > 0:
+                # 2026-11-07: exchange yes/no counts are GROSS per-side-form
+                # quantities, not residual holdings — booking payout from
+                # them inflated realized PnL ($84.99 verified phantom across
+                # the 39 revenue-documented settled markets; ~$63 of it in
+                # the last two days).  The held position is the local ledger
+                # residual (trusted only when local history is complete);
+                # revenue is the exchange-authoritative cash.  Gross counts
+                # remain only as the no-information fallback inside the
+                # ledger.
+                _residual_cc = (
+                    settlement.ledger_residual_yes_cc
+                    if settlement.local_history_complete
+                    else None
+                )
+                if (
+                    _residual_cc
+                    or (_rev is not None and _rev > 0)
+                    or (_yes_c > 0 or _no_c > 0)
+                ):
                     # 2026-10-31 stall fix: the DB write runs on the bounded
                     # settlement executor, not the event loop — a contended
                     # sqlite retry loop previously blocked the loop for tens
@@ -1978,6 +1996,7 @@ class SettlementToGradingBridge:
                         outcome,
                         yes_count=_yes_c,
                         no_count=_no_c,
+                        residual_yes_cc=_residual_cc,
                         revenue_dollars=_rev,
                         settlement_time=settlement.settlement_time,
                     )
