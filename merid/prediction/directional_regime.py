@@ -1965,6 +1965,56 @@ def _moneyness_cap_exception(
         return False
 
 
+def _pinned_fav_maker_min_p_exception(
+    held_side: Optional[str],
+    asset: Optional[str],
+    p_selected: float,
+) -> bool:
+    """Bounded probe floor for the maker-mode reachability filter.
+
+    ``MERID_PINNED_FAV_MAKER_MIN_P=0.90`` rests on bug-era fill evidence
+    (2026-11-06 vintage matrix, class b) and vetoes ~79% of the 85-91c
+    shadow cohort.  This exception — the scoped-flag counterpart of
+    ``_moneyness_cap_exception`` — lets a candidate with
+    ``probe_floor <= p_selected < min_p`` through instead of vetoing
+    ``pinned_fav_maker_low_p`` when armed:
+
+      1. ``MERID_PINNED_FAV_MAKER_MIN_P_EXCEPT_{ASSET}_{SIDE}`` >
+         ``_{SIDE}`` > ``MERID_PINNED_FAV_MAKER_MIN_P_EXCEPT`` flag on.
+      2. ``p_selected`` clears ``MERID_PINNED_FAV_MAKER_MIN_P_PROBE``
+         (scope precedence ``_{ASSET}_{SIDE}`` > ``_{SIDE}`` > global,
+         default 0.85) — below the probe floor the veto stands.
+
+    Every other lane gate (band, TTE, moneyness caps, EV floor, daily cap,
+    post-only, engine economics) still binds; the exception only widens the
+    p floor for the re-measurement cohort.  Disarmed by default — arm
+    per asset/side only after the clean-era cap-probe fills land, per the
+    audit's sequencing.  Fail-closed on any missing input.
+    """
+    side = (held_side or "").strip().lower()
+    if side not in ("yes", "no"):
+        return False
+    a = (asset or "").strip().upper()
+    S = side.upper()
+    for flag_key in (
+        f"MERID_PINNED_FAV_MAKER_MIN_P_EXCEPT_{a}_{S}",
+        f"MERID_PINNED_FAV_MAKER_MIN_P_EXCEPT_{S}",
+        "MERID_PINNED_FAV_MAKER_MIN_P_EXCEPT",
+    ):
+        if os.getenv(flag_key, "0").strip().lower() in ("1", "true", "yes", "on"):
+            break
+    else:
+        return False
+    try:
+        pf = float(p_selected)
+    except (TypeError, ValueError):
+        return False
+    floor = _cap_except_scoped_float(
+        "MERID_PINNED_FAV_MAKER_MIN_P_PROBE", a, S, 0.85
+    )
+    return pf >= floor
+
+
 def pinned_fav_block(
     side_price_cents: Optional[float],
     net_ev_cents: Optional[float],
@@ -2023,7 +2073,9 @@ def pinned_fav_block(
             _p = None
         if _p is None or not math.isfinite(_p):
             return "pinned_fav_maker_no_p"
-        if _p < _pinned_fav_maker_min_p():
+        if _p < _pinned_fav_maker_min_p() and not _pinned_fav_maker_min_p_exception(
+            held_side, asset, _p
+        ):
             return "pinned_fav_maker_low_p"
     if net_ev_cents is None or float(net_ev_cents) < _pinned_fav_min_ev_cents():
         return "pinned_fav_low_ev"
