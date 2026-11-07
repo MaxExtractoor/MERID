@@ -702,6 +702,18 @@ class OrderAttemptStore:
                     ON exit_order_attempts(exchange_order_id);
                 CREATE INDEX IF NOT EXISTS idx_exit_order_attempt_events_attempt_id
                     ON exit_order_attempt_events(attempt_id);
+                CREATE TABLE IF NOT EXISTS order_attempt_fill_events (
+                    event_id TEXT PRIMARY KEY,
+                    order_attempt_id TEXT NOT NULL,
+                    fill_id TEXT NOT NULL,
+                    quantity_cc INTEGER NOT NULL,
+                    observed_at REAL NOT NULL,
+                    actor TEXT,
+                    evidence_json TEXT,
+                    UNIQUE(order_attempt_id, fill_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_attempt_fill_events_attempt
+                    ON order_attempt_fill_events(order_attempt_id);
             """
             )
             conn.commit()
@@ -1284,3 +1296,228 @@ class OrderAttemptStore:
                 mirror_coid, mirror_terminal
             )
         return result
+
+    # ------------------------------------------------------------------
+    # Entry-side fill mirror (order_attempts identity rows)
+    # ------------------------------------------------------------------
+    # ``order_attempts`` has no partial-fill vocabulary: FILLED means the
+    # venue-confirmed fill quantity reached the requested count.  Fill events
+    # are recorded exactly-once per (attempt, fill_id) so replays and
+    # duplicate fill notifications cannot double-count coverage.
+
+    _ENTRY_TERMINAL_STATUSES = frozenset({"FILLED", "REJECTED", "CANCELED"})
+
+    @staticmethod
+    def _requested_quantity_cc(payload: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Best-effort requested quantity in centi-contracts from attempt payload."""
+        if not isinstance(payload, dict):
+            return None
+        order = payload.get("order")
+        if not isinstance(order, dict):
+            order = payload
+        for key in ("count_fp", "count"):
+            raw = order.get(key)
+            if raw is None:
+                continue
+            try:
+                from decimal import Decimal
+                qty = Decimal(str(raw))
+                if qty <= 0:
+                    continue
+                return int(qty * 100)
+            except Exception:
+                continue
+        return None
+
+    def entry_confirmed_quantity_cc(self, order_attempt_id: str) -> int:
+        """Venue-confirmed fill quantity (centi-contracts) mirrored onto an
+        entry attempt via :meth:`apply_entry_fill`."""
+        conn = self._get_conn()
+        return self._confirmed_entry_quantity_cc(conn, order_attempt_id)
+
+    def _confirmed_entry_quantity_cc(self, conn: Any, order_attempt_id: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(quantity_cc), 0) AS total "
+            "FROM order_attempt_fill_events WHERE order_attempt_id = ?",
+            (order_attempt_id,),
+        ).fetchone()
+        return int(row["total"] or 0) if row else 0
+
+    def apply_entry_fill(
+        self,
+        client_order_id: str,
+        fill_id: str,
+        quantity_cc: int,
+        exchange_order_id: Optional[str] = None,
+        actor: str = "fills_ledger",
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> Optional[OrderAttemptRecord]:
+        """Mirror a trusted entry fill onto the ``order_attempts`` identity row.
+
+        Exit attempts have a full FSM; entry attempts previously had none, so
+        an order that filled asynchronously left its identity row ACKNOWLEDGED
+        forever.  This records the fill exactly-once and promotes the attempt
+        to FILLED once venue-confirmed quantity reaches the requested count.
+        Partial coverage leaves the attempt nonterminal with the confirmed
+        quantity stamped into the payload for audit.
+
+        Returns the updated record, or ``None`` when no attempt owns the
+        ``client_order_id``.
+        """
+        if not client_order_id or not fill_id:
+            return None
+        try:
+            quantity_cc = int(quantity_cc)
+        except (TypeError, ValueError):
+            return None
+        if quantity_cc <= 0:
+            return None
+
+        conn = self._get_conn()
+        now = self._now()
+        evidence_json = json.dumps(evidence or {}, default=str, sort_keys=True)
+
+        with conn:
+            cur = conn.execute(
+                "SELECT * FROM order_attempts WHERE client_order_id = ?",
+                (client_order_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            record = OrderAttemptRecord.from_row(row)
+            order_attempt_id = record.order_attempt_id
+
+            # Exactly-once per (attempt, fill_id).
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO order_attempt_fill_events (
+                    event_id, order_attempt_id, fill_id, quantity_cc,
+                    observed_at, actor, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    order_attempt_id,
+                    fill_id,
+                    quantity_cc,
+                    now,
+                    actor,
+                    evidence_json,
+                ),
+            )
+            if cur.rowcount == 0:
+                # Duplicate notification for this attempt — idempotent.
+                return record
+
+            # Guard: the same fill_id must not already be owned by a
+            # different attempt (would indicate misattributed linkage).
+            other = conn.execute(
+                "SELECT order_attempt_id FROM order_attempt_fill_events "
+                "WHERE fill_id = ? AND order_attempt_id != ? LIMIT 1",
+                (fill_id, order_attempt_id),
+            ).fetchone()
+            if other is not None:
+                logger.warning(
+                    "[ORDER-ATTEMPT-STORE] fill_id=%s already linked to attempt %s; "
+                    "refusing to also link to %s",
+                    fill_id, other["order_attempt_id"], order_attempt_id,
+                )
+                conn.rollback()
+                return record
+
+            confirmed_cc = self._confirmed_entry_quantity_cc(conn, order_attempt_id)
+            try:
+                payload = json.loads(record.payload_json or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload = dict(payload)
+            payload["confirmed_quantity_cc"] = confirmed_cc
+            payload["last_entry_fill_id"] = fill_id
+            if exchange_order_id:
+                payload["exchange_order_id"] = exchange_order_id
+
+            requested_cc = self._requested_quantity_cc(payload)
+            promote = (
+                requested_cc is not None
+                and requested_cc > 0
+                and confirmed_cc >= requested_cc
+                and record.status != "FILLED"
+            )
+            new_status = "FILLED" if promote else record.status
+            if promote:
+                payload["terminalized_by"] = "entry_fill_mirror"
+                payload["terminal_reason"] = "fill_coverage_complete"
+
+            payload_json_str = json.dumps(payload, default=str, sort_keys=True)
+            conn.execute(
+                """
+                UPDATE order_attempts
+                SET status = CASE WHEN status = 'FILLED' THEN status ELSE ? END,
+                    updated_at = ?, payload_json = ?
+                WHERE order_attempt_id = ?
+                """,
+                (new_status, now, payload_json_str, order_attempt_id),
+            )
+
+        return self.get_by_order_attempt_id(order_attempt_id)
+
+    def terminalize_entry_attempt(
+        self,
+        order_attempt_id: str,
+        status: str,
+        actor: str,
+        reason: str,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Guardedly terminalize an entry attempt from reconciliation evidence.
+
+        Only nonterminal rows (PERSISTED/SUBMITTING/SUBMISSION_UNKNOWN/
+        ACKNOWLEDGED) may be terminalized here — a concurrent fill mirror or
+        live status update always wins.  ``status`` must be a terminal value
+        (FILLED/REJECTED/CANCELED).  Evidence is merged into the payload for
+        audit.  Returns True when the row was updated.
+        """
+        if status not in self._ENTRY_TERMINAL_STATUSES:
+            raise ValueError(
+                f"terminalize_entry_attempt requires terminal status, got {status!r}"
+            )
+        conn = self._get_conn()
+        now = self._now()
+        evidence = dict(evidence or {})
+        evidence["terminalized_by"] = actor
+        evidence["terminal_reason"] = reason
+        evidence["terminalized_at"] = now
+
+        with conn:
+            cur = conn.execute(
+                "SELECT payload_json, status FROM order_attempts WHERE order_attempt_id = ?",
+                (order_attempt_id,),
+            )
+            row = cur.fetchone()
+            if not row or row["status"] in self._ENTRY_TERMINAL_STATUSES:
+                return False
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["reconciliation_evidence"] = evidence
+            cur = conn.execute(
+                """
+                UPDATE order_attempts
+                SET status = ?, updated_at = ?, payload_json = ?
+                WHERE order_attempt_id = ?
+                  AND status NOT IN ('FILLED', 'REJECTED', 'CANCELED')
+                """,
+                (
+                    status,
+                    now,
+                    json.dumps(payload, default=str, sort_keys=True),
+                    order_attempt_id,
+                ),
+            )
+            return cur.rowcount > 0

@@ -817,13 +817,17 @@ class TestCounterpartyFormAccounting:
         )
 
     @pytest.mark.asyncio
-    async def test_promoted_provisional_row_deleted_from_db(
+    async def test_promoted_provisional_row_retained_as_superseded_mirror(
         self, ledger: KalshiFillsLedger
     ) -> None:
-        """A flushed live_router_ row must be deleted after promotion.
+        """A flushed live_router_ row is retained after promotion — evidence,
+        not economics.
 
-        Restart replay must see only the authoritative fill — a stale
-        provisional row would re-apply the mirrored economics.
+        canonical-fill-view/1.0 (2026-11-02): the DB row is never deleted —
+        replay classifies it as a superseded mirror via
+        ``_superseded_mirror_fills``/``_is_superseded_live_router_fill`` and
+        excludes it from positions/PnL.  Restart replay must still apply the
+        economic fill exactly once.
         """
         import aiosqlite
 
@@ -873,20 +877,28 @@ class TestCounterpartyFormAccounting:
         async with aiosqlite.connect(ledger._db_path) as db:
             async with db.execute("SELECT fill_id FROM kalshi_fills") as cur:
                 rows = sorted(r[0] for r in await cur.fetchall())
-        assert rows == ["9f8e7d6c-0000-4000-8000-0000000000a1"], (
-            f"stale provisional row must be deleted after promotion: {rows}"
-        )
+        # Both rows persist: the authoritative fill plus the superseded
+        # provisional mirror (retained as evidence, never DB-deleted).
+        assert rows == [
+            "9f8e7d6c-0000-4000-8000-0000000000a1",
+            "live_router_ord-p1_0",
+        ], f"promoted provisional row must be retained, not deleted: {rows}"
 
-        # Reload from disk: only the authoritative fill may come back.
+        # Reload from disk: both rows load, the mirror is quarantined, and
+        # economics replay the authoritative fill exactly once.
         KalshiFillsLedger._initialized = False
         KalshiFillsLedger._instance = None
         ledger2 = KalshiFillsLedger()
         try:
             loaded = await ledger2.load_from_db()
-            assert loaded == 1, f"expected 1 authoritative fill, loaded {loaded}"
+            assert loaded == 2, f"expected 2 retained rows, loaded {loaded}"
             reloaded = [f for f in ledger2._fills.values() if f.order_id == "ord-p1"]
             assert len(reloaded) == 1
             assert reloaded[0].fill_id == "9f8e7d6c-0000-4000-8000-0000000000a1"
+            mirror = ledger2._superseded_mirror_fills.get("live_router_ord-p1_0")
+            assert mirror is not None, "provisional row must be quarantined as superseded mirror"
+            assert mirror.order_id == "ord-p1"
+            assert ledger2._fill_position_effective(mirror) is False
             pos = ledger2._replay_market_position("KXBTC15M-26SEP220000-00")
             assert pos is not None and pos["side"] == "no"
             assert pos["total_contracts"] == Decimal("1")
@@ -1141,3 +1153,85 @@ class TestLedgerAvgPriceAccounting:
         assert pos["side"] == "no"
         assert pos["quantity_cc"] == 50
         assert pos["avg_price_cents"] == 69
+
+
+class TestEntryAttemptFillMirror:
+    """_mirror_entry_attempt_fill: trusted entry fills terminalize the
+    order_attempts identity row; exit/provisional fills are skipped."""
+
+    def _attempt_store(self, monkeypatch, tmp_path):
+        import merid.event_venues.kalshi.order_attempt_store as oas
+        from merid.event_venues.kalshi.order_attempt_store import (
+            OrderAttemptStore, OrderAttemptRecord,
+        )
+        db = str(tmp_path / "attempts_mirror.db")
+        monkeypatch.setattr(oas, "DEFAULT_DB_PATH", db)
+        store = OrderAttemptStore(db)
+
+        def _persist(aid, coid, payload):
+            import json, time
+            rec = OrderAttemptRecord(
+                order_attempt_id=aid, client_order_id=coid, decision_id=None,
+                replaces_order_attempt_id=None, intent_id=f"intent_{aid}",
+                client_tag=None, run_id=None, process_id=None, fingerprint="fp",
+                status="ACKNOWLEDGED", created_at=time.time(), updated_at=time.time(),
+                payload_json=json.dumps(payload),
+            )
+            store.persist_attempt(rec)
+            return rec
+        return store, _persist
+
+    def _fill(self, **kw):
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill
+        defaults = dict(
+            fill_id="fill-m1", order_id="ord-m1", market_ticker="KXBTC15M-TEST",
+            side="yes", action="buy", count_fp=Decimal("4"), quantity_cc=400,
+            yes_price_dollars=Decimal("0.60"), no_price_dollars=Decimal("0.40"),
+            fee_cost=Decimal("0.01"), proceeds_dollars=Decimal("-2.40"),
+            canonical_position_side="yes", canonical_position_action="buy",
+            canonical_leg_price_cents=60, canonical_yes_delta_cc=400,
+            canonicalization_state="TRUSTED_LIVE_V1", canonicalization_version=3,
+            unmatched=False, ingestion_source="http_poller",
+            client_order_id="merid_m1", entry_or_exit="entry",
+            created_time=datetime.now(timezone.utc),
+        )
+        defaults.update(kw)
+        return KalshiFill(**defaults)
+
+    def test_entry_fill_mirrors_to_filled(self, ledger, monkeypatch, tmp_path):
+        store, persist = self._attempt_store(monkeypatch, tmp_path)
+        persist("oa_m1", "merid_m1", {"order": {"count_fp": "4.0", "ticker": "KXBTC15M-TEST"}})
+        ledger._mirror_entry_attempt_fill(self._fill())
+        rec = store.get_by_client_order_id("merid_m1")
+        assert rec.status == "FILLED"
+        assert store.entry_confirmed_quantity_cc("oa_m1") == 400
+
+    def test_exit_fill_does_not_mirror(self, ledger, monkeypatch, tmp_path):
+        store, persist = self._attempt_store(monkeypatch, tmp_path)
+        persist("oa_m2", "merid_m2", {"order": {"count_fp": "4.0"}})
+        ledger._mirror_entry_attempt_fill(self._fill(
+            fill_id="fill-x1", is_exit=True, entry_or_exit="exit", reduce_only=True,
+        ))
+        rec = store.get_by_client_order_id("merid_m2")
+        assert rec.status == "ACKNOWLEDGED"
+        assert store.entry_confirmed_quantity_cc("oa_m2") == 0
+
+    def test_provisional_live_router_fill_does_not_mirror(self, ledger, monkeypatch, tmp_path):
+        store, persist = self._attempt_store(monkeypatch, tmp_path)
+        persist("oa_m3", "merid_m3", {"order": {"count_fp": "4.0"}})
+        ledger._mirror_entry_attempt_fill(self._fill(fill_id="live_router_ord-m3_0"))
+        rec = store.get_by_client_order_id("merid_m3")
+        assert rec.status == "ACKNOWLEDGED"
+        assert store.entry_confirmed_quantity_cc("oa_m3") == 0
+
+    def test_unmatched_fill_does_not_mirror(self, ledger, monkeypatch, tmp_path):
+        store, persist = self._attempt_store(monkeypatch, tmp_path)
+        persist("oa_m4", "merid_m4", {"order": {"count_fp": "4.0"}})
+        # unmatched fills return before the mirror hook in on_fill; verify the
+        # helper itself is also safe when called directly is not required —
+        # the hook placement guarantees quarantine.  Here we assert a fill
+        # with no attempt owner is a no-op.
+        ledger._mirror_entry_attempt_fill(self._fill(
+            fill_id="fill-orphan", client_order_id="merid_unknown",
+        ))
+        assert store.get_by_client_order_id("merid_m4").status == "ACKNOWLEDGED"

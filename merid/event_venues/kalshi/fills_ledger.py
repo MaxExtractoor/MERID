@@ -2174,6 +2174,7 @@ class KalshiFillsLedger:
                         "[FILLS-LEDGER-HTTP] Promoted provisional live-router fill %s for order_id=%s; skipping duplicate row",
                         promoted_id, fill.order_id,
                     )
+                    self._mirror_entry_attempt_fill(fill)
                     continue
 
                 # 2026-08-16: Quarantined fills (side conflict, unknown, untrusted) are
@@ -2639,6 +2640,7 @@ class KalshiFillsLedger:
                     "[FILLS-LEDGER-WS] Promoted provisional live-router fill %s for order_id=%s; skipping duplicate row",
                     promoted_id, fill.order_id,
                 )
+                self._mirror_entry_attempt_fill(fill)
                 return False
 
             # 2026-08-12: Validate the canonical position side/action.  The raw
@@ -6275,6 +6277,84 @@ class KalshiFillsLedger:
                 logger.info("[FILLS-LEDGER-BACKFILL] quarantined stale live-router row %s (DB row retained)", _fill_id)
         return deleted
 
+    def _mirror_entry_attempt_fill(self, fill: KalshiFill) -> None:
+        """Best-effort mirror of a trusted entry fill onto ``order_attempts``.
+
+        Entry attempts have no FSM equivalent of ``exit_order_attempts`` —
+        without this mirror an order that filled asynchronously stays
+        ACKNOWLEDGED forever and keeps capturing fingerprint dedup.  Exit
+        fills are owned by the exit FSM and provisional ``live_router_*``
+        rows are router estimates (their authoritative twin performs the
+        mirror), so both are skipped here.  Never raises: fill processing
+        must not depend on bookkeeping.
+        """
+        try:
+            fid = str(fill.fill_id or "")
+            if fid.startswith("live_router_") or fid.startswith("settlement:"):
+                return
+            if (fill.fill_source or "") == "settlement":
+                return
+            if fill.is_exit or fill.reduce_only or (fill.entry_or_exit or "").lower() == "exit":
+                return
+
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            store = OrderAttemptStore()
+
+            coid = fill.client_order_id or fill.client_tag
+            attempt = None
+            if coid:
+                attempt = store.get_by_client_order_id(coid)
+            if attempt is None and fill.intent_id:
+                def _is_entry_attempt(r) -> bool:
+                    try:
+                        p = json.loads(r.payload_json or "{}")
+                    except Exception:
+                        p = {}
+                    return not (isinstance(p, dict) and p.get("type") == "exit_order_attempt")
+                candidates = [r for r in store.get_by_intent_id(fill.intent_id) if _is_entry_attempt(r)]
+                if len(candidates) == 1:
+                    attempt = candidates[0]
+            if attempt is None:
+                return
+
+            # Exit-owned identity rows are mirrored by the exit FSM — skip.
+            try:
+                attempt_payload = json.loads(attempt.payload_json or "{}")
+            except Exception:
+                attempt_payload = {}
+            if not isinstance(attempt_payload, dict):
+                attempt_payload = {}
+            if attempt_payload.get("type") == "exit_order_attempt" or attempt_payload.get("entry_or_exit") == "exit":
+                return
+            wire_coid = attempt.client_order_id or coid
+            if wire_coid and store.get_exit_attempt_by_wire_client_order_id(wire_coid):
+                return
+
+            qty_cc = int(fill.quantity_cc or 0)
+            if qty_cc <= 0 and fill.count_fp:
+                qty_cc = int(fill.count_fp * Decimal("100"))
+            if qty_cc <= 0:
+                return
+            store.apply_entry_fill(
+                client_order_id=wire_coid,
+                fill_id=fill.fill_id,
+                quantity_cc=qty_cc,
+                exchange_order_id=fill.order_id,
+                actor="fills_ledger",
+                evidence={
+                    "ticker": fill.market_ticker,
+                    "side": fill.canonical_position_side,
+                    "action": fill.canonical_position_action,
+                    "price_cents": fill.price_cents,
+                    "source": "fills_ledger",
+                },
+            )
+        except Exception as exc:
+            logger.debug(
+                "[FILLS-LEDGER] entry attempt fill mirror failed (non-fatal) fill_id=%s: %s",
+                getattr(fill, "fill_id", None), exc,
+            )
+
     def _promote_live_router_fill(self, fill: KalshiFill) -> Optional[str]:
         """If ``fill`` matches a provisional live-router fill, promote it.
 
@@ -6902,6 +6982,12 @@ class KalshiFillsLedger:
             )
             self._processed_fill_ids.add(fill.fill_id)
             return
+
+        # 2026-11-07: Mirror trusted entry fills onto the order_attempts
+        # identity row so asynchronously-filled entries reach a terminal
+        # status instead of sitting ACKNOWLEDGED forever.  Sits before the
+        # promotion early-return so promoted authoritative fills mirror too.
+        self._mirror_entry_attempt_fill(fill)
 
         # 2026-08-27: Live-router provisional fills carry a synthetic id that must
         # be promoted (not duplicated) when the authoritative HTTP/WS fill arrives.

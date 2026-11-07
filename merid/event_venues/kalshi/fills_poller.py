@@ -11,6 +11,7 @@ from __future__ import annotations
 import os as _os  # Alias to prevent scope shadowing
 import asyncio
 import json
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -583,6 +584,7 @@ class FillsPoller:
             from merid.event_venues.kalshi.position_cache import _is_expired_ticker
 
             store = OrderAttemptStore()
+            ledger = None
 
             try:
                 from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
@@ -679,6 +681,307 @@ class FillsPoller:
                 logger.warning(
                     "[EXPIRED-SWEEP] terminalized %d fully filled exit attempts on expired markets",
                     exit_swept,
+                )
+
+            # ------------------------------------------------------------------
+            # Entry-side pass: ``order_attempts`` rows for ENTRY orders have no
+            # FSM — an order that filled asynchronously stays ACKNOWLEDGED
+            # forever and keeps capturing fingerprint dedup.  Terminalize on
+            # proven fill coverage (FILLED), on proven non-fill once the
+            # market is dead (CANCELED — a fill on the ticker would be
+            # visible), or on legacy age-out for ticker-less rows whose
+            # markets are certainly dead.  Anything ambiguous is preserved:
+            # the fills ledger owns fill truth and ``apply_entry_fill`` can
+            # still resurrect a CANCELED row to FILLED on late coverage.
+            # Exit-owned rows are skipped — the exit FSM above owns them.
+            # ------------------------------------------------------------------
+            entry_fill_index: Dict[str, Any] = {
+                "coid": {}, "tag": {}, "intent": {}, "ticker": {},
+            }
+            # Broader per-ticker ENTRY-activity index for the proven-non-fill
+            # check: only entry fills can be our order's fill, so exit fills
+            # stay excluded; trust state does not matter — even an untrusted
+            # recorded fill means the market saw entry executions, so absence
+            # of plausible fills is the only safe non-fill proof.
+            # Settlement/provisional rows are not order executions either.
+            ticker_activity: Dict[str, List[Dict[str, Any]]] = {}
+            auth_fills: List[Any] = []
+            try:
+                if ledger is not None:
+                    auth_fills = list(ledger.get_canonical_fills().authoritative)
+            except Exception as _afe:
+                logger.debug("[EXPIRED-SWEEP] canonical fills view unavailable: %s", _afe)
+                auth_fills = []
+            for fill in auth_fills:
+                fid = str(getattr(fill, "fill_id", "") or "")
+                if (
+                    not fid
+                    or fid.startswith(("settlement:", "live_router_"))
+                    or getattr(fill, "fill_source", None) == "settlement"
+                    or str(getattr(fill, "ingestion_source", "") or "").lower()
+                    in ("settlement_rest", "order_router")
+                    or getattr(fill, "is_exit", False)
+                    or getattr(fill, "reduce_only", False)
+                    or (getattr(fill, "entry_or_exit", "") or "").lower() == "exit"
+                ):
+                    continue
+                ft = getattr(fill, "market_ticker", "") or ""
+                if ft:
+                    ticker_activity.setdefault(ft, []).append({
+                        "side": getattr(fill, "canonical_position_side", None),
+                        "action": getattr(fill, "canonical_position_action", None),
+                        "ts": getattr(fill, "created_time", None)
+                        or getattr(fill, "created_at", None)
+                        or getattr(fill, "ingested_at", None),
+                    })
+                qty = getattr(fill, "quantity_cc", None)
+                if (
+                    getattr(fill, "unmatched", True)
+                    or getattr(fill, "canonicalization_state", None)
+                    not in ("TRUSTED_LIVE_V1", "TRUSTED_BACKFILLED_V1")
+                    or getattr(fill, "is_exit", False)
+                    or getattr(fill, "reduce_only", False)
+                    or (getattr(fill, "entry_or_exit", "") or "").lower() == "exit"
+                    or not isinstance(qty, int)
+                    or isinstance(qty, bool)
+                    or qty <= 0
+                ):
+                    continue
+                entry = {
+                    "fill_id": fid,
+                    "quantity_cc": qty,
+                    "market_ticker": ft,
+                    "side": getattr(fill, "canonical_position_side", None),
+                    "action": getattr(fill, "canonical_position_action", None),
+                    "ts": getattr(fill, "created_time", None)
+                    or getattr(fill, "created_at", None)
+                    or getattr(fill, "ingested_at", None),
+                }
+                for key, attr in (
+                    ("coid", "client_order_id"),
+                    ("tag", "client_tag"),
+                    ("intent", "intent_id"),
+                ):
+                    val = getattr(fill, attr, None)
+                    if val:
+                        entry_fill_index[key].setdefault(str(val), {})[fid] = entry
+                if ft:
+                    entry_fill_index["ticker"].setdefault(ft, []).append(entry)
+
+            def _attempt_payload(rec) -> Dict[str, Any]:
+                try:
+                    p = json.loads(rec.payload_json or "{}")
+                except Exception:
+                    p = {}
+                return p if isinstance(p, dict) else {}
+
+            def _payload_order(payload: Dict[str, Any]) -> Dict[str, Any]:
+                order = payload.get("order")
+                return order if isinstance(order, dict) else payload
+
+            _TAG_TICKER_RE = re.compile(r"^15m_(KX[A-Z0-9]+15M-[0-9A-Z-]+?)_[0-9a-f]{4,}$")
+
+            def _attempt_ticker(payload: Dict[str, Any], order: Dict[str, Any], tag: Optional[str]) -> str:
+                for candidate in (
+                    order.get("ticker"),
+                    payload.get("ticker"),
+                    payload.get("market_ticker"),
+                    payload.get("market_id"),
+                ):
+                    if candidate:
+                        return str(candidate)
+                if tag:
+                    m = _TAG_TICKER_RE.match(str(tag))
+                    if m:
+                        return m.group(1)
+                return ""
+
+            def _order_side_action(order: Dict[str, Any]):
+                side = str(order.get("side") or "").lower()
+                action = str(order.get("action") or "").lower()
+                # ``side`` encodes both legs: buy_yes / sell_no etc.
+                if side.startswith("buy_") or side.startswith("sell_"):
+                    want_action = "buy" if side.startswith("buy_") else "sell"
+                    want_side = side.split("_", 1)[1]
+                    return want_side, want_action
+                return (side or None), (action or None)
+
+            entry_swept = 0
+            try:
+                unresolved = store.get_unresolved(lookback_seconds=None)
+            except Exception as _ue:
+                logger.debug("[EXPIRED-SWEEP] entry unresolved query failed: %s", _ue)
+                unresolved = []
+            # Fail-closed evidence guard: an empty authoritative fills view
+            # (ledger still restoring, DB unavailable) cannot prove coverage
+            # OR non-fill — terminalizing on it would mislabel live orders.
+            if unresolved and not auth_fills:
+                logger.warning(
+                    "[EXPIRED-SWEEP] skipping entry pass: %d unresolved attempts "
+                    "but canonical fills view is empty (ledger unavailable?)",
+                    len(unresolved),
+                )
+                unresolved = []
+            for rec in unresolved:
+                if entry_swept >= max_per_cycle:
+                    break
+                try:
+                    age_s = now - (rec.created_at or 0)
+                    if age_s < grace_s:
+                        continue
+                    # Only venue-acked attempts are safe to terminalize here:
+                    # SUBMITTING/SUBMISSION_UNKNOWN rows belong to the dedicated
+                    # submission-reconcile path, same as the exit pass above.
+                    if rec.status != "ACKNOWLEDGED":
+                        continue
+                    payload = _attempt_payload(rec)
+                    order = _payload_order(payload)
+                    # Exit-owned identity rows belong to the exit FSM.  Many
+                    # legacy exit orders (exit-guard/stop_candidate) predate
+                    # the FSM and carry no payload marker — their
+                    # decision_id/coid vocabulary is the only signal, and a
+                    # wrong entry-verdict would mislabel a protective exit.
+                    _blob = " ".join(
+                        str(x or "").lower()
+                        for x in (
+                            rec.decision_id, rec.client_order_id,
+                            rec.client_tag, rec.intent_id,
+                        )
+                    )
+                    if (
+                        payload.get("type") == "exit_order_attempt"
+                        or order.get("entry_or_exit") == "exit"
+                        or order.get("is_exit")
+                        or order.get("reduce_only")
+                        or "exit" in (rec.decision_id or "").lower()
+                        or "exit_" in _blob
+                        or "stop_candidate" in _blob
+                        or "stopcand" in _blob
+                        or "flatten" in _blob
+                    ):
+                        continue
+
+                    ticker = _attempt_ticker(payload, order, rec.client_tag)
+                    if ticker:
+                        if not _is_expired_ticker(ticker):
+                            continue
+                    elif age_s < 7 * 86400.0:
+                        # Ticker-less legacy row: only sweep once the market
+                        # is certainly dead (15m markets never live a week).
+                        continue
+
+                    # Authoritative exit-FSM check for rows about to be
+                    # terminalized (cheap payload check already applied).
+                    wire_coid = rec.client_order_id or rec.client_tag
+                    if wire_coid and store.get_exit_attempt_by_wire_client_order_id(wire_coid):
+                        continue
+
+                    requested_cc = OrderAttemptStore._requested_quantity_cc(payload)
+
+                    # Confirmed coverage: mirrored fill events plus fills-ledger
+                    # linkage by client_order_id / client_tag / intent_id.
+                    events_cc = store.entry_confirmed_quantity_cc(rec.order_attempt_id)
+                    matched: Dict[str, Dict[str, Any]] = {}
+                    for key, val in (
+                        ("coid", rec.client_order_id),
+                        ("tag", rec.client_tag),
+                        ("intent", rec.intent_id),
+                    ):
+                        if not val:
+                            continue
+                        for fid, f in entry_fill_index[key].get(str(val), {}).items():
+                            if ticker and f["market_ticker"] and f["market_ticker"] != ticker:
+                                continue
+                            matched[fid] = f
+                    ledger_cc = sum(f["quantity_cc"] for f in matched.values())
+                    covered_cc = max(events_cc, ledger_cc)
+
+                    if (
+                        requested_cc is not None
+                        and requested_cc > 0
+                        and covered_cc >= requested_cc
+                    ):
+                        new_status = "FILLED"
+                        reason = "expired_market_sweep_fill_coverage"
+                    elif covered_cc > 0:
+                        # Partial/unproven coverage on a dead market: the
+                        # remainder can never fill — CANCELED with the covered
+                        # quantity preserved for audit.
+                        new_status = "CANCELED"
+                        reason = "expired_market_sweep_partial_fill_dead_market"
+                    elif ticker:
+                        # Proven non-fill requires zero plausible fills on the
+                        # ticker at/after the attempt — our own fill would be
+                        # visible there.  Ambiguous => preserve.  Uses the
+                        # broad activity index: even an untrusted fill means
+                        # the market saw executions.  If NO fill carries a
+                        # market_ticker at all, plausible cannot be evaluated.
+                        want_side, want_action = _order_side_action(order)
+                        plausible = False
+                        if not ticker_activity:
+                            continue
+                        for f in ticker_activity.get(ticker, []):
+                            fts = f.get("ts")
+                            fts_f = None
+                            if fts is not None:
+                                try:
+                                    fts_f = float(fts)
+                                except (TypeError, ValueError):
+                                    try:
+                                        fts_f = datetime.fromisoformat(
+                                            str(fts).replace("Z", "+00:00")
+                                        ).timestamp()
+                                    except Exception:
+                                        fts_f = None
+                            if fts_f is not None and fts_f < (rec.created_at or 0) - 120.0:
+                                continue
+                            if want_side and f.get("side") and f.get("side") != want_side:
+                                continue
+                            if want_action and f.get("action") and f.get("action") != want_action:
+                                continue
+                            plausible = True
+                            break
+                        if plausible:
+                            continue
+                        new_status = "CANCELED"
+                        reason = "expired_market_sweep_no_fill_on_ticker"
+                    elif age_s >= 7 * 86400.0:
+                        # Ticker-less legacy row, market certainly dead, no
+                        # fill linkage by any key.  The order is dead
+                        # bookkeeping; fill truth lives in the fills ledger.
+                        new_status = "CANCELED"
+                        reason = "expired_market_sweep_legacy_dead_market"
+                    else:
+                        continue
+
+                    evidence = {
+                        "ticker": ticker or None,
+                        "age_days": round(age_s / 86400.0, 2),
+                        "requested_quantity_cc": requested_cc,
+                        "confirmed_quantity_cc": covered_cc,
+                        "coverage_source": "fill_events" if events_cc >= ledger_cc else "fills_ledger",
+                        "linked_fill_ids": sorted(matched.keys())[:20],
+                    }
+                    if store.terminalize_entry_attempt(
+                        rec.order_attempt_id,
+                        new_status,
+                        actor="fills_poller",
+                        reason=reason,
+                        evidence=evidence,
+                    ):
+                        entry_swept += 1
+                        logger.info(
+                            "[EXPIRED-SWEEP] terminalized entry attempt=%s status=%s ticker=%s covered_cc=%s requested_cc=%s",
+                            rec.order_attempt_id[:8], new_status, ticker or "-",
+                            covered_cc, requested_cc,
+                        )
+                except Exception as _ee:
+                    logger.debug("[EXPIRED-SWEEP] entry attempt=%s failed: %s", rec.order_attempt_id, _ee)
+
+            if entry_swept:
+                logger.warning(
+                    "[EXPIRED-SWEEP] terminalized %d entry attempts on expired markets",
+                    entry_swept,
                 )
         except Exception as _e:
             logger.warning("[EXPIRED-SWEEP] sweep failed: %s", _e)
