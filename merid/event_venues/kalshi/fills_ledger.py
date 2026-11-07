@@ -4149,7 +4149,6 @@ class KalshiFillsLedger:
         signed_yes = 0
         total_fees = Decimal("0")
         avg_price_cents = 0
-        thesis_side: Optional[str] = None
         excluded_from_live_replay = 0
         # Generation id of the CURRENT exposure episode: the fill that moved
         # exposure off zero (or flipped its sign).  The firewall binds exit
@@ -4197,30 +4196,52 @@ class KalshiFillsLedger:
                 )
                 continue
 
-            # Determine the price in the current thesis side's price space.
-            # Use the stored YES/NO leg prices; never derive via 100 - side_price
-            # and never fall back to the raw execution price for the held side.
-            this_fill_held_side, _ = from_signed_yes_exposure(fill_yes)
-            _price_side = thesis_side if thesis_side is not None else this_fill_held_side
-            fill_price = _fill_position_side_price_cents(fill, _price_side)
-            if fill_price is None or fill_price <= 0:
-                logger.warning(
-                    "[FILLS-LEDGER-COMPUTE] Cannot determine %s-side price for %s fill_id=%s; skipping fill",
-                    _price_side, market_ticker, fill.fill_id,
-                )
-                excluded_from_live_replay += 1
-                continue
+            # Classify the fill's effect on exposure before mutating state.
+            # Average-cost basis (same model as _update_position_with_fill and
+            # position_cache._recompute_position_from_fills, and Kalshi's
+            # market_exposure): only exposure-INCREASING fills move
+            # avg_price_cents; a pure reduction releases basis at the running
+            # average so residual contracts keep their entry price; a flip
+            # re-anchors the residual to the flipping fill's price in the NEW
+            # side's space.  Blending an exit fill's price into the remaining
+            # position's average diverged from the exchange-reported basis by
+            # the exit-vs-entry spread on every partial close and halted
+            # entries via RECONCILIATION_DIVERGENCE (2026-11-07 incident:
+            # 4 NO @69c entry, 3 NO @84c exit -> ledger avg 75c vs Kalshi 69c).
+            prev_signed = signed_yes
+            is_increase = prev_signed == 0 or (prev_signed > 0) == (fill_yes > 0)
+            is_flip = (not is_increase) and abs(fill_yes) > abs(prev_signed)
+
+            # The held-side leg price is required only when the fill moves the
+            # cost basis (open/add, or the flip residual's fresh epoch).  A
+            # pure reduction never re-prices the remainder, so a missing leg
+            # price must not drop its exposure delta from the replay.
+            fill_price: Optional[int] = None
+            if is_increase or is_flip:
+                price_side, _ = from_signed_yes_exposure(fill_yes)
+                # Use the stored YES/NO leg prices in the delta's direction;
+                # never derive via 100 - side_price and never fall back to the
+                # raw execution price for the held side.
+                fill_price = _fill_position_side_price_cents(fill, price_side)
+                if fill_price is None or fill_price <= 0:
+                    logger.warning(
+                        "[FILLS-LEDGER-COMPUTE] Cannot determine %s-side price for %s fill_id=%s; skipping fill",
+                        price_side, market_ticker, fill.fill_id,
+                    )
+                    excluded_from_live_replay += 1
+                    continue
 
             total_fees += fill.fee_cost
 
-            abs_exposure = abs(signed_yes)
-            prev_signed = signed_yes
-            if abs_exposure == 0:
+            if is_increase:
+                if prev_signed == 0:
+                    avg_price_cents = fill_price
+                else:
+                    # Weighted average of remaining cost and the new fill's cost.
+                    total_cost = abs(prev_signed) * avg_price_cents + count * fill_price
+                    avg_price_cents = int(total_cost // (abs(prev_signed) + count))
+            elif is_flip:
                 avg_price_cents = fill_price
-            else:
-                # Weighted average of remaining cost and the new fill's cost.
-                total_cost = abs_exposure * avg_price_cents + count * fill_price
-                avg_price_cents = int(total_cost // (abs_exposure + count))
 
             signed_yes += fill_yes
 
@@ -4231,11 +4252,6 @@ class KalshiFillsLedger:
                 prev_signed == 0 or (signed_yes > 0) != (prev_signed > 0)
             ):
                 episode_opener_fill_id = fill.fill_id
-
-            # Set thesis side from first non-zero exposure so subsequent fill prices
-            # are interpreted in the same price space.
-            if thesis_side is None and signed_yes != 0:
-                thesis_side, _ = from_signed_yes_exposure(signed_yes)
 
         if signed_yes == 0:
             return None

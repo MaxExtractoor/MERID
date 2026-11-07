@@ -874,12 +874,22 @@ def collect_runtime_recovery_evidence(
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
 
             _fills = getattr(get_fills_ledger(), "_fills", {}) or {}
-            if _fills:
-                watermark = max(
-                    getattr(f, "created_time", None)
-                    for f in _fills.values()
-                    if getattr(f, "created_time", None) is not None
-                )
+            _wms = []
+            for _f in _fills.values():
+                _ct = getattr(_f, "created_time", None)
+                if _ct is None:
+                    continue
+                # Normalize naive timestamps to UTC — a single naive
+                # created_time would make max() raise TypeError and leave
+                # the watermark unset, permanently failing recovery.
+                if getattr(_ct, "tzinfo", None) is None:
+                    try:
+                        _ct = _ct.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+                _wms.append(_ct)
+            if _wms:
+                watermark = max(_wms)
         except Exception:
             pass
     ev["fill_watermark"] = watermark

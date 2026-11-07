@@ -947,3 +947,197 @@ class TestCounterpartyFormAccounting:
             f"superseded provisional double-applied: {pos['total_contracts']}"
         )
         assert pos["avg_price_cents"] == 40  # authoritative held-side basis
+
+
+class TestLedgerAvgPriceAccounting:
+    """Average-cost basis in ``compute_position_from_fills``.
+
+    Regression coverage for the 2026-11-07 RECONCILIATION_DIVERGENCE halt:
+    a partial exit blended its own execution price into the remaining
+    position's average, so the ledger reported 75c where Kalshi's
+    market_exposure basis was 69c and every reconcile cycle halted entries.
+    The replay must match ``_update_position_with_fill`` and Kalshi
+    average-cost semantics: adds blend, reduces keep the running average,
+    flips re-anchor the residual.
+    """
+
+    @staticmethod
+    def _fill(**kw) -> "KalshiFill":
+        from merid.event_venues.kalshi.fills_ledger import KalshiFill
+
+        defaults = dict(
+            fill_id="fill-x",
+            order_id="ord-x",
+            market_ticker="KXBTC15M-TEST",
+            side="yes",
+            action="sell",
+            count_fp=Decimal("1"),
+            quantity_cc=100,
+            yes_price_dollars=Decimal("0.31"),
+            no_price_dollars=Decimal("0.69"),
+            fee_cost=Decimal("0.0"),
+            proceeds_dollars=Decimal("-0.69"),
+            canonical_position_side="yes",
+            canonical_position_action="sell",
+            canonical_leg_price_cents=31,
+            canonical_yes_delta_cc=-100,
+            canonicalization_state="TRUSTED_LIVE_V1",
+            canonicalization_version=3,
+            unmatched=False,
+            ingestion_source="http_poller",
+            created_time=datetime.now(timezone.utc),
+        )
+        defaults.update(kw)
+        return KalshiFill(**defaults)
+
+    def test_partial_exit_preserves_avg_price(self, ledger: KalshiFillsLedger) -> None:
+        # Exact 2026-11-07 incident fills on KXXRP15M-26NOV061930-30:
+        # entry sell-YES 4.00 @ YES31/NO69 (long 4 NO @69c), then
+        # exit buy-YES 3.00 @ YES16/NO84 (sell 3 NO @84c) leaving 1 NO.
+        entry = self._fill(
+            fill_id="fill-entry-xrp",
+            order_id="ord-entry-xrp",
+            count_fp=Decimal("4"),
+            quantity_cc=400,
+            canonical_yes_delta_cc=-400,
+        )
+        exit_fill = self._fill(
+            fill_id="fill-exit-xrp",
+            order_id="ord-exit-xrp",
+            side="yes",
+            action="buy",
+            count_fp=Decimal("3"),
+            quantity_cc=300,
+            yes_price_dollars=Decimal("0.16"),
+            no_price_dollars=Decimal("0.84"),
+            canonical_position_side="yes",
+            canonical_position_action="buy",
+            canonical_leg_price_cents=16,
+            canonical_yes_delta_cc=300,
+            is_exit=True,
+            entry_or_exit="exit",
+            created_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+        ledger.on_fill(entry)
+        ledger.on_fill(exit_fill)
+
+        pos = ledger.compute_position_from_fills("KXBTC15M-TEST")
+        assert pos is not None
+        assert pos["side"] == "no"
+        assert pos["quantity_cc"] == 100
+        # Remaining contract keeps its 69c entry basis — the buggy replay
+        # blended the 84c exit into the average and reported 75c.
+        assert pos["avg_price_cents"] == 69
+
+    def test_add_after_partial_close_blends_on_remainder(self, ledger: KalshiFillsLedger) -> None:
+        t0 = datetime.now(timezone.utc)
+        fills = [
+            # Long 2 NO @60c (buy NO form).
+            self._fill(
+                fill_id="f1", order_id="o1", side="no", action="buy",
+                count_fp=Decimal("2"), quantity_cc=200,
+                yes_price_dollars=Decimal("0.40"), no_price_dollars=Decimal("0.60"),
+                canonical_position_side="no", canonical_position_action="buy",
+                canonical_leg_price_cents=60, canonical_yes_delta_cc=-200,
+                created_time=t0,
+            ),
+            # Long 2 more NO @80c.
+            self._fill(
+                fill_id="f2", order_id="o2", side="no", action="buy",
+                count_fp=Decimal("2"), quantity_cc=200,
+                yes_price_dollars=Decimal("0.20"), no_price_dollars=Decimal("0.80"),
+                canonical_position_side="no", canonical_position_action="buy",
+                canonical_leg_price_cents=80, canonical_yes_delta_cc=-200,
+                created_time=t0 + timedelta(seconds=10),
+            ),
+            # Sell 3 NO @90c -> 1 NO remains at unchanged 70c average basis.
+            self._fill(
+                fill_id="f3", order_id="o3", side="no", action="sell",
+                count_fp=Decimal("3"), quantity_cc=300,
+                yes_price_dollars=Decimal("0.10"), no_price_dollars=Decimal("0.90"),
+                canonical_position_side="no", canonical_position_action="sell",
+                canonical_leg_price_cents=90, canonical_yes_delta_cc=300,
+                is_exit=True, entry_or_exit="exit",
+                created_time=t0 + timedelta(seconds=20),
+            ),
+            # Add 1 NO @90c -> (70*1 + 90*1) / 2 = 80c.
+            self._fill(
+                fill_id="f4", order_id="o4", side="no", action="buy",
+                count_fp=Decimal("1"), quantity_cc=100,
+                yes_price_dollars=Decimal("0.10"), no_price_dollars=Decimal("0.90"),
+                canonical_position_side="no", canonical_position_action="buy",
+                canonical_leg_price_cents=90, canonical_yes_delta_cc=-100,
+                created_time=t0 + timedelta(seconds=30),
+            ),
+        ]
+        for f in fills:
+            ledger.on_fill(f)
+
+        pos = ledger.compute_position_from_fills("KXBTC15M-TEST")
+        assert pos is not None
+        assert pos["side"] == "no"
+        assert pos["quantity_cc"] == 200
+        assert pos["avg_price_cents"] == 80
+
+    def test_flip_reanchors_avg_to_new_side(self, ledger: KalshiFillsLedger) -> None:
+        t0 = datetime.now(timezone.utc)
+        fills = [
+            # Long 1 YES @40c.
+            self._fill(
+                fill_id="f1", order_id="o1", side="yes", action="buy",
+                count_fp=Decimal("1"), quantity_cc=100,
+                yes_price_dollars=Decimal("0.40"), no_price_dollars=Decimal("0.60"),
+                canonical_position_side="yes", canonical_position_action="buy",
+                canonical_leg_price_cents=40, canonical_yes_delta_cc=100,
+                created_time=t0,
+            ),
+            # Sell 2 YES @55c -> flips to long 1 NO; residual basis is the
+            # flip fill's NO leg (45c), not a blend of the old 40c basis.
+            self._fill(
+                fill_id="f2", order_id="o2", side="yes", action="sell",
+                count_fp=Decimal("2"), quantity_cc=200,
+                yes_price_dollars=Decimal("0.55"), no_price_dollars=Decimal("0.45"),
+                canonical_position_side="yes", canonical_position_action="sell",
+                canonical_leg_price_cents=55, canonical_yes_delta_cc=-200,
+                is_exit=True, entry_or_exit="exit",
+                created_time=t0 + timedelta(seconds=10),
+            ),
+        ]
+        for f in fills:
+            ledger.on_fill(f)
+
+        pos = ledger.compute_position_from_fills("KXBTC15M-TEST")
+        assert pos is not None
+        assert pos["side"] == "no"
+        assert pos["quantity_cc"] == 100
+        assert pos["avg_price_cents"] == 45
+
+    def test_reduce_fill_without_leg_price_still_applies_exposure(
+        self, ledger: KalshiFillsLedger
+    ) -> None:
+        # A reducing fill carries no cost-basis information; dropping it for a
+        # missing leg price would corrupt the position's quantity.  The replay
+        # must still apply its signed exposure delta.
+        t0 = datetime.now(timezone.utc)
+        entry = self._fill(
+            fill_id="f1", order_id="o1",
+            created_time=t0,
+        )
+        reduce_fill = self._fill(
+            fill_id="f2", order_id="o2",
+            side="yes", action="buy",
+            count_fp=Decimal("0.5"), quantity_cc=50,
+            yes_price_dollars=None, no_price_dollars=None,
+            canonical_position_side="yes", canonical_position_action="buy",
+            canonical_leg_price_cents=None, canonical_yes_delta_cc=50,
+            is_exit=True, entry_or_exit="exit",
+            created_time=t0 + timedelta(seconds=10),
+        )
+        ledger.on_fill(entry)
+        ledger.on_fill(reduce_fill)
+
+        pos = ledger.compute_position_from_fills("KXBTC15M-TEST")
+        assert pos is not None
+        assert pos["side"] == "no"
+        assert pos["quantity_cc"] == 50
+        assert pos["avg_price_cents"] == 69

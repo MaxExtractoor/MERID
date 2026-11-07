@@ -1073,14 +1073,26 @@ class FillsPoller:
             # operator contract the transition goes through RECOVERY_RUNNING
             # and completes only with verified evidence plus a durable
             # ``live_runtime_recovery_passed`` record — verified inside
-            # complete_runtime_recovery().  Kill-switch:
-            # MERID_RECON_AUTO_RECOVERY=0 restores manual-restart behavior.
+            # complete_runtime_recovery().  Evidence is probed (never assumed)
+            # and pre-screened BEFORE entering RECOVERY_RUNNING: an incomplete
+            # probe leaves the machine halted so the next reconcile cycle
+            # retries.  On a commit-time refusal the machine returns to
+            # LIVE_ENTRIES_HALTED with the original reason codes so the
+            # RECONCILIATION_DIVERGENCE matcher keeps working — the previous
+            # unconditional transition parked the process in RECOVERY_RUNNING
+            # forever (fill_watermark_missing when no unmatched fill had ever
+            # initialized the circuit-breaker watermark), which is why every
+            # reconciliation halt required a manual restart.
+            # Kill-switch: MERID_RECON_AUTO_RECOVERY=0 restores
+            # manual-restart behavior.
             try:
                 if _os.environ.get("MERID_RECON_AUTO_RECOVERY", "1").lower() not in (
                     "0", "false", "off",
                 ):
                     from merid.observability.live_runtime_state import (
+                        collect_runtime_recovery_evidence,
                         get_live_runtime_state,
+                        runtime_recovery_evidence_missing,
                     )
                     _lrs = get_live_runtime_state()
                     _lrs_dict = _lrs.to_dict()
@@ -1089,38 +1101,44 @@ class FillsPoller:
                         and "RECONCILIATION_DIVERGENCE"
                         in (_lrs_dict.get("reason_codes") or [])
                     ):
-                        _lrs.transition(
-                            "RECOVERY_RUNNING",
-                            "reconciliation_recovery_evaluation",
-                            ["RECOVERY_EVALUATION"],
+                        _orig_reason = (
+                            _lrs_dict.get("reason")
+                            or "fills_reconciliation_failed"
                         )
-                        try:
-                            from merid.governance.trading_circuit_breaker import (
-                                get_trading_circuit_breaker,
-                            )
-                            _cur_wm = getattr(
-                                get_trading_circuit_breaker(),
-                                "_http_fill_watermark",
-                                None,
-                            )
-                        except Exception:
-                            _cur_wm = None
-                        _lrs.complete_runtime_recovery(
-                            "reconciliation_recheck_passed",
-                            {
-                                "resolved_failure": True,
-                                "fresh_reconciliation": True,
-                                "reconciliation_snapshot_id": f"recon_{rest_started_at:.0f}",
-                                "fill_watermark": _cur_wm,
-                                "fill_watermark_at_halt": getattr(
-                                    self, "_halted_fill_watermark", None
-                                ),
-                                "no_critical_discrepancy": True,
-                                "exits_available": True,
-                                "router_available": True,
-                                "production_live": True,
-                            },
+                        _orig_codes = list(
+                            _lrs_dict.get("reason_codes") or []
                         )
+                        evidence = collect_runtime_recovery_evidence(
+                            resolved_failure=True,
+                            fill_watermark_at_halt=getattr(
+                                self, "_halted_fill_watermark", None
+                            ),
+                        )
+                        evidence["recovery"] = "reconciliation_recheck_passed"
+                        evidence["reconciliation_snapshot_id"] = (
+                            f"recon_{rest_started_at:.0f}"
+                        )
+                        missing = runtime_recovery_evidence_missing(evidence)
+                        if missing:
+                            logger.warning(
+                                "[RECONCILE] recovery evidence incomplete (%s) "
+                                "— staying halted; retry next reconcile cycle",
+                                missing,
+                            )
+                        else:
+                            _lrs.transition(
+                                "RECOVERY_RUNNING",
+                                "reconciliation_recovery_evaluation",
+                                ["RECOVERY_EVALUATION"],
+                            )
+                            if not _lrs.complete_runtime_recovery(
+                                "reconciliation_recheck_passed", evidence
+                            ):
+                                _lrs.transition(
+                                    "LIVE_ENTRIES_HALTED",
+                                    _orig_reason,
+                                    _orig_codes,
+                                )
             except Exception as _rec_exc:
                 logger.warning(
                     "[RECONCILE] auto-recovery evaluation failed: %s", _rec_exc
@@ -1140,6 +1158,11 @@ class FillsPoller:
         try:
             # Capture the trusted fill watermark at halt time — the recovery
             # path requires the watermark to be current and non-regressing.
+            # The circuit-breaker watermark only exists after an unmatched
+            # fill initializes it, so fall back to the fills ledger's newest
+            # fill timestamp (same fallback collect_runtime_recovery_evidence
+            # uses) — otherwise the at-halt baseline is always None and the
+            # non-regression check can never run.
             try:
                 from merid.governance.trading_circuit_breaker import (
                     get_trading_circuit_breaker,
@@ -1149,6 +1172,29 @@ class FillsPoller:
                 )
             except Exception:
                 self._halted_fill_watermark = None
+            if self._halted_fill_watermark is None:
+                try:
+                    from merid.event_venues.kalshi.fills_ledger import (
+                        get_fills_ledger,
+                    )
+                    _ledger_fills = getattr(
+                        get_fills_ledger(), "_fills", {}
+                    ) or {}
+                    _ledger_wm = []
+                    for _lf in _ledger_fills.values():
+                        _ct = getattr(_lf, "created_time", None)
+                        if _ct is None:
+                            continue
+                        if getattr(_ct, "tzinfo", None) is None:
+                            try:
+                                _ct = _ct.replace(tzinfo=timezone.utc)
+                            except Exception:
+                                continue
+                        _ledger_wm.append(_ct)
+                    if _ledger_wm:
+                        self._halted_fill_watermark = max(_ledger_wm)
+                except Exception:
+                    pass
             from merid.observability.live_runtime_state import get_live_runtime_state
             get_live_runtime_state().halt_entries(
                 f"fills_reconciliation_failed: {detail}", ["RECONCILIATION_DIVERGENCE"]
