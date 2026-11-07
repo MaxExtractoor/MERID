@@ -58,6 +58,12 @@ def _isolate_lane(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_FLOOR_C", raising=False)
     monkeypatch.delenv("MERID_PROVISIONAL_MIN_EV_C", raising=False)
     monkeypatch.delenv("MERID_CBP_MID_BAND_RELIEF_NO_CENTS", raising=False)
+    # conftest disables the conviction and moneyness gates globally; without
+    # the pins the .env-armed defaults veto the sweep — conviction kills the
+    # p=0.50 point (|p-0.5| < 0.02) and moneyness_coin_flip kills every point
+    # at spot == strike (the coinflip tests re-enable the gate explicitly).
+    monkeypatch.setenv("MERID_CONVICTION_GATE_ENABLED", "0")
+    monkeypatch.setenv("MERID_MONEYNESS_GATE_ENABLED", "0")
     for _a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
         for _s in ("YES", "NO"):
             monkeypatch.delenv(
