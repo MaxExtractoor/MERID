@@ -47,6 +47,8 @@ os.close(_fd)
 
 @pytest.fixture(autouse=True)
 def _configure_lane(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERID_DRIFT_LANE_ENABLED", "0")
+    monkeypatch.setenv("MERID_CHEAP_NO_LANE_ENABLED", "0")
     monkeypatch.setattr(_td, "MERID_TAIL_CALIBRATION_ENABLED", False)
     monkeypatch.setattr(_td, "MERID_ORDER_DECISION_LEDGER_ENABLED", False)
     monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
@@ -140,9 +142,10 @@ def test_ask_route_stamps_entry_lane_for_cell():
         assert d.indicators.get("entry_lane") == "threshold_cell"
 
 
-def test_generic_bid_route_still_stamps_maker_bid():
+def test_generic_bid_route_still_stamps_maker_bid(monkeypatch):
     """Unstamped candidates on the bid route keep the maker_bid identity —
     the fix only preserves lanes that already own the admission."""
+    monkeypatch.setenv("MERID_PROVISIONAL_LANE", "0")
     d = _cell_decision(
         decision_id="test-generic-bid",
         asset="ETH",
@@ -200,6 +203,9 @@ def _floor_decision(entry_lane, side="no"):
         p_yes_calibrated=Decimal("0.53"),
         p_yes_uncertainty=Decimal("0.01"),
         p_no_calibrated=Decimal("0.47"),
+        data_state="healthy",
+        regime="normal",
+        regime_label="normal",
         selected_outcome=side,
         selected_action="buy",
         selected_outcome_price=Decimal(str(price)),
@@ -245,6 +251,84 @@ def test_model_edge_floor_still_binds_generic_entries(monkeypatch, lane):
     out = apply_model_edge_floor_gate(d)
     assert out.selected_outcome is None
     assert "model_edge_floor" in (out.no_trade_reason or "")
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+def test_drift_rescue_keeps_admitting_owner_over_provisional(monkeypatch, side):
+    from merid.prediction import drift_lane as dl
+
+    monkeypatch.setattr(dl, "drift_enabled", lambda: True)
+    monkeypatch.setattr(dl, "drift_band_match", lambda price: True)
+    monkeypatch.setattr(dl, "drift_block", lambda **kwargs: None)
+    monkeypatch.setattr(dl, "drift_min_ev_cents", lambda: -6.0)
+    monkeypatch.setattr(dl, "cheap_no_enabled", lambda: False)
+    d = _cell_decision(
+        asset="DOGE",
+        ticker="KXDOGE15M-TEST",
+        spot_price=100.01 if side == "yes" else 99.7,
+        strike_price=100.0,
+        yes_bid_cents=50.0,
+        yes_ask_cents=52.0,
+        no_bid_cents=50.0,
+        no_ask_cents=52.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.0,
+        model_uncertainty=0.0,
+    )
+    assert d.selected_outcome == side, d.no_trade_reason
+    assert d.indicators[f"{side}_effective_required_source"] == "lane_floor:drift_fav"
+    assert d.indicators["decision_lane"] == "drift_fav"
+    assert d.indicators["entry_lane"] == "drift_fav"
+    assert d.indicators.get("provisional_cell_id") is None
+    assert d.indicators.get("threshold_cell_id") is None
+
+
+def test_selected_no_exports_its_probability_when_yes_is_ungated_best(monkeypatch):
+    from merid.prediction import drift_lane as dl, streaming_calibration
+
+    monkeypatch.setattr(
+        streaming_calibration,
+        "streaming_bound_detail",
+        lambda asset, side, price, tte: {"bound": 0.4, "source": "test"} if side == "no" else None,
+    )
+    monkeypatch.setattr(dl, "drift_enabled", lambda: True)
+    monkeypatch.setattr(dl, "drift_band_match", lambda price: True)
+    monkeypatch.setattr(dl, "drift_block", lambda **kwargs: None)
+    monkeypatch.setattr(dl, "drift_min_ev_cents", lambda: -50.0)
+    monkeypatch.setattr(dl, "cheap_no_enabled", lambda: False)
+    d = _cell_decision(
+        asset="DOGE",
+        ticker="KXDOGE15M-TEST",
+        spot_price=100.01,
+        yes_bid_cents=50.0,
+        yes_ask_cents=52.0,
+        no_bid_cents=50.0,
+        no_ask_cents=52.0,
+        yes_depth_cc=0.0,
+        entry_price_basis="bid",
+        adverse_selection_reserve=0.0,
+    )
+    assert d.selected_outcome == "no", d.no_trade_reason
+    assert d.best_side == "yes"
+    assert d.yes_edge_breakdown.net_edge > d.no_edge_breakdown.net_edge
+    assert d.no_edge_breakdown.p_selected != pytest.approx(d.yes_edge_breakdown.p_opposite)
+    assert float(d.p_no_calibrated) == pytest.approx(d.no_edge_breakdown.p_selected)
+    assert float(d.p_yes_calibrated) == pytest.approx(d.no_edge_breakdown.p_opposite)
+
+
+def test_realized_vol_provenance_is_not_silently_dropped(monkeypatch):
+    from types import SimpleNamespace
+    from merid.prediction import realized_vol
+
+    estimate = SimpleNamespace(last_tick_ts=1794154100.0, samples=120, span_s=119.0)
+    tracker = SimpleNamespace(annualized_vol=lambda asset: estimate)
+    monkeypatch.setattr(_td, "_fetch_realized_vol", lambda asset: 0.6)
+    monkeypatch.setattr(realized_vol, "get_realized_vol_tracker", lambda: tracker)
+    d = _cell_decision()
+    assert d.indicators["sigma_source"].startswith("realized")
+    assert d.indicators["sigma_asof"] == estimate.last_tick_ts
+    assert d.indicators["sigma_lookback_samples"] == estimate.samples
+    assert d.indicators["sigma_lookback_span_s"] == estimate.span_s
 
 
 def test_lane_entry_band_cents_covers_bounded_lanes():

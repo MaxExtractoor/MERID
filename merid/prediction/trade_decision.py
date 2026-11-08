@@ -4167,6 +4167,8 @@ def _compute_trade_decision_impl(
     # realized-vol tracker; other sources carry no lookback to report.
     if str(vol_source).startswith("realized"):
         try:
+            from merid.prediction.realized_vol import get_realized_vol_tracker
+
             _rv_est = get_realized_vol_tracker().annualized_vol(asset)
             if _rv_est is not None:
                 indicators["sigma_asof"] = float(_rv_est.last_tick_ts)
@@ -8559,10 +8561,11 @@ def _compute_trade_decision_impl(
     # Calibrated p_yes/p_no are now side-specific.  Export the selected side's
     # probabilities; for no-trade telemetry use the best-side (most plausible)
     # pair so p_yes_calibrated reflects the tail cap on a cheap YES candidate.
-    if selected_outcome == "yes" or best_side == "yes":
+    _probability_side = selected_outcome or best_side
+    if _probability_side == "yes":
         p_yes_calibrated = p_yes_for_yes
         p_no_calibrated = p_no_for_yes
-    elif selected_outcome == "no" or best_side == "no":
+    elif _probability_side == "no":
         p_yes_calibrated = p_yes_for_no
         p_no_calibrated = p_no_for_no
     else:
@@ -8607,6 +8610,15 @@ def _compute_trade_decision_impl(
             indicators["decision_lane"] = "trend_yes_hi"
             indicators["entry_lane"] = "trend_yes_hi"
         _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
+        _admitting_source = indicators.get(f"{selected_outcome}_effective_required_source", "")
+        _admitting_lane = _admitting_source.removeprefix("lane_floor:")
+        if (
+            _admitting_lane in ("drift_fav", "cheap_no_settle")
+            and not indicators.get("decision_lane")
+        ):
+            indicators["decision_lane"] = _admitting_lane
+            indicators["entry_lane"] = _admitting_lane
+            indicators[f"{selected_outcome}_admission_owner"] = _admitting_lane
         if _sel_thr.cell_id is not None and not indicators.get("decision_lane"):
             indicators["decision_lane"] = "threshold_cell"
             indicators["entry_lane"] = "threshold_cell"
@@ -8703,10 +8715,13 @@ def _compute_trade_decision_impl(
                     else "maker_bid"
                 )
 
-        if _sel_thr.cell_id is not None:
+        if _sel_thr.cell_id is not None and indicators.get("decision_lane") == "threshold_cell":
             indicators["threshold_cell_id"] = _sel_thr.cell_id
             indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
-        if _sel_thr.provisional_cell_id is not None:
+        if (
+            _sel_thr.provisional_cell_id is not None
+            and indicators.get("decision_lane") == "current_build_provisional"
+        ):
             indicators["provisional_cell_id"] = _sel_thr.provisional_cell_id
             indicators["provisional_cell_min_ev_cents"] = (
                 _sel_thr.provisional_min_ev_cents

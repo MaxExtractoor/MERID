@@ -833,3 +833,22 @@ validated as profitable.
   min_p 0.90, min EV -12c, moneyness caps, 480/day budget, 6-contract cap)
   unchanged.  Treat 60-180s pf fills as a measured probe cohort — kill via
   the exemption flag, not by raising the floor for other lanes.
+
+## Admission lineage and side-export verification
+
+- A selected side's `effective_required_source=lane_floor:drift_fav` or
+  `lane_floor:cheap_no_settle` must retain that admission owner through
+  `decision_lane` and `entry_lane`. A matching provisional/threshold cell
+  is not evidence that its own admission bound passed. Do not attach its
+  execution cell ID to a rescue owned by another lane: lane identity drives
+  sizing caps, lifecycle budgets, and position-specific exit handling.
+- Export calibrated probabilities from `selected_outcome` first; consult
+  `best_side` only when there is no selection. The ungated edge leader can
+  legitimately differ from the qualified side, and their held-side
+  calibration pairs need not match.
+- Targeted offline verification: `.venv/Scripts/python.exe -m pytest
+  --noconftest tests/test_lane_identity_repairs_2026_11_08.py
+  tests/test_side_mapping_properties.py tests/test_exit_order_side_mapping.py
+  tests/test_agent_grid_side_mapping.py -q`.
+- Use indexed decision-ID joins for `strategy_decision_events` investigations;
+  an unindexed time-range aggregation can scan the entire large events table.
