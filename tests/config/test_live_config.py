@@ -93,7 +93,7 @@ def test_stop_loss_detection_decoupled_from_stop_candidate_execution(monkeypatch
     """The 2026-10-20 loss-exit posture disables entry-relative stop
     detection entirely (ride-or-profit doctrine); candidate submission and
     unprotected entries stay off with it."""
-    monkeypatch.delenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", raising=False)
+    monkeypatch.setenv("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", "0")
     monkeypatch.setenv("MERID_ALLOW_UNPROTECTED_ENTRIES", "0")
     resolved = resolve_live_config()
     assert not resolved.stop_loss_enabled
@@ -183,7 +183,8 @@ def test_schema_rejects_unknown_safety_env_var(monkeypatch):
     ("MERID_CALIBRATION_EVIDENCE_MARGIN", "0.01", "0.02"),
     ("MERID_CALIBRATION_CAP_FULL_RANGE", "1", "0"),
     ("MERID_ENTRY_MAKER_ENABLED", "0", "1"),
-    ("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180", "200"),
+    ("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "120", "180"),
+    ("MERID_MONEYNESS_EV_RELIEF_ENABLED", "0", "1"),
     ("MERID_SETTLEMENT_LANE_MIN_P", "0.84", "0.85"),
     ("MERID_DISABLE_EXIT_POLICY", "0", "1"),
 ])

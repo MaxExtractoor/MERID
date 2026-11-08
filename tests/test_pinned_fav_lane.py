@@ -40,6 +40,32 @@ def _iso(tmp_path, monkeypatch):
     # The repo .env arms maker mode for live; this file pins the taker-mode
     # semantics explicitly so the suite is .env-independent.
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "0")
+    for key, value in {
+        "MERID_PINNED_FAV_ENABLED": "0",
+        "MERID_PINNED_FAV_PRICE_LO": "92",
+        "MERID_PINNED_FAV_PRICE_HI": "98",
+        "MERID_PINNED_FAV_MIN_TTE_S": "300",
+        "MERID_PINNED_FAV_MAX_TTE_S": "840",
+        "MERID_PINNED_FAV_MIN_EV_CENTS": "2",
+        "MERID_MONEYNESS_EV_RELIEF_ENABLED": "0",
+        "MERID_MONEYNESS_GATE_ENABLED": "0",
+        "MERID_CONVICTION_GATE_ENABLED": "0",
+        "MERID_EVIDENCE_CHALLENGE_MIN_RECENT_N": "3",
+        "MERID_STREAM_CAL_ENABLED": "0",
+        "MERID_EMPIRICAL_CAL_MODE": "off",
+    }.items():
+        monkeypatch.setenv(key, value)
+    for side in ("YES", "NO"):
+        monkeypatch.setenv(f"MERID_PRICE_CAP_EXCEPT_{side}", "0")
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            monkeypatch.delenv(f"MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{side}_{asset}", raising=False)
+            monkeypatch.setenv(f"MERID_PRICE_CAP_EXCEPT_{asset}_{side}", "0")
+    monkeypatch.setenv("MERID_PROVISIONAL_STATE_PATH", str(tmp_path / "provisional.json"))
+    monkeypatch.setenv("MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {}))
+    monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MIN_W", 0)
+    monkeypatch.setattr(_td, "MERID_MARKET_ANCHOR_MAX_W", 0)
+    monkeypatch.setattr(_td, "MERID_USE_REALIZED_VOL", False)
+    monkeypatch.setattr(_td, "MERID_ANCHOR_VOL_TO_MARKET", False)
     yield
 
 
@@ -1019,6 +1045,9 @@ def test_measured_pf_admission_skips_late_window(
         ind.get("no_admission_decision"),
         reason,
         ind.get("no_evidence_binding_gate"),
+        (d.no_edge_breakdown.net_edge, d.no_edge_breakdown.model_risk_reserve,
+         d.no_edge_breakdown.exit_cost_reserve, d.no_edge_breakdown.adverse_selection_reserve),
+        dr._pinned_fav_min_ev_cents(),
     )
     assert ind.get("no_pinned_fav_qualifies") is True, (
         ind.get("no_pinned_fav_block"), ind.get("no_pf_block_reason")

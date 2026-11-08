@@ -477,7 +477,7 @@ def _walkforward_calibrate_p_yes(asset: str, seconds_to_expiry: float, p_yes: fl
 # of a 15m window and the market is most efficient there).  New entries must
 # have at least this many seconds remaining; exits are unaffected.
 MERID_ENTRY_MIN_SECONDS_TO_EXPIRY = float(
-    os.environ.get("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180")
+    os.environ.get("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "120")
 )
 
 # 2026-09-27: Operator kill switch — when the automatic exit policy is
@@ -6557,6 +6557,21 @@ def _compute_trade_decision_impl(
                 _yes_price_cap_block = None
             else:
                 _no_price_cap_block = None
+    if not settlement_lane:
+        for _relief_side, _relief_px, _relief_bd, _relief_block in (
+            ("yes", yes_price_cents, yes_breakdown, _yes_price_cap_block),
+            ("no", no_price_cents, no_breakdown, _no_price_cap_block),
+        ):
+            if _relief_block is not None and _relief_bd is not None and _dr.moneyness_ev_relief(
+                _relief_side, asset, _relief_px,
+                float(_relief_bd.net_edge) * 100.0 if _relief_bd.net_edge is not None else None,
+            ):
+                indicators[f"{_relief_side}_legacy_price_veto"] = _relief_block
+                indicators[f"{_relief_side}_moneyness_ev_relief"] = True
+                if _relief_side == "yes":
+                    _yes_price_cap_block = None
+                else:
+                    _no_price_cap_block = None
     # 91-94c YES window: the lane's strict-gate failure (armed) or the
     # reserved-window price with the lane off both own the terminal reason.
     _yes_lane_terminal = (

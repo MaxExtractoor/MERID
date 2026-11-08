@@ -1444,10 +1444,10 @@ class KalshiRiskManager:
                     if not is_closing_trade:
                         try:
                             _min_tte_s = float(os.environ.get(
-                                "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180"
+                                "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "120"
                             ))
                         except Exception:
-                            _min_tte_s = 180.0
+                            _min_tte_s = 120.0
                         if minutes_to_expiry * 60.0 < _min_tte_s:
                             reason = (
                                 f"entry_tte_floor:{minutes_to_expiry:.1f}min<"

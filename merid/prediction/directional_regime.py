@@ -979,12 +979,10 @@ def entry_price_cap_block_reason(
     if not moneyness_gate_enabled():
         return None
     cap = moneyness_max_entry_price_cents(side, asset)
-    if cap <= 0.0:
-        return None
     px = _finite_or_none(entry_price_cents)
     if px is None:
         return None
-    if px > cap:
+    if cap > 0.0 and px > cap:
         return f"entry_price_cap_{px:.0f}c_gt_{cap:.0f}c"
     band = moneyness_blocked_band_cents(side, asset)
     if band is not None and band[0] <= px <= band[1]:
@@ -2023,6 +2021,23 @@ def _moneyness_max_entry_price_cents(
     return float(per_asset) if per_asset is not None else None
 
 
+def moneyness_ev_relief(
+    held_side: Optional[str],
+    asset: Optional[str],
+    side_price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+) -> bool:
+    if not _env_flag("MERID_MONEYNESS_EV_RELIEF_ENABLED", False):
+        return False
+    if held_side not in ("yes", "no") or (asset or "").upper() not in (
+        "BTC", "ETH", "SOL", "XRP", "DOGE",
+    ):
+        return False
+    px = _finite_or_none(side_price_cents)
+    ev = _finite_or_none(net_ev_cents)
+    return px is not None and ev is not None and 10.0 <= px <= 89.99 and ev >= 2.0
+
+
 def _cap_except_scoped_float(base: str, asset: str, side: str, default: float) -> float:
     """``{BASE}_{ASSET}_{SIDE}`` > ``{BASE}_{SIDE}`` > ``{BASE}`` > default."""
     for key in (f"{base}_{asset}_{side}", f"{base}_{side}", base):
@@ -2072,7 +2087,10 @@ def _moneyness_cap_exception(
         f"MERID_PRICE_CAP_EXCEPT_{a}_{S}",
         f"MERID_PRICE_CAP_EXCEPT_{S}",
     ):
-        if os.getenv(flag_key, "0").strip().lower() in ("1", "true", "yes", "on"):
+        raw_flag = os.getenv(flag_key)
+        if raw_flag not in (None, ""):
+            if raw_flag.strip().lower() not in ("1", "true", "yes", "on"):
+                return False
             break
     else:
         return False
@@ -2088,7 +2106,8 @@ def _moneyness_cap_exception(
         "MERID_PRICE_CAP_EXCEPT_MIN_EV_CENTS", a, S, 2.0
     )
     try:
-        return float(net_ev_cents) >= ev_req
+        ev = float(net_ev_cents)
+        return all(math.isfinite(v) for v in (px, lo, hi, ev, ev_req)) and ev >= ev_req
     except (TypeError, ValueError):
         return False
 
@@ -2185,7 +2204,8 @@ def pinned_fav_block(
     ):
         _cap = _moneyness_max_entry_price_cents(held_side, asset)
         if _cap is not None and float(side_price_cents) > _cap and not (
-            _moneyness_cap_exception(
+            moneyness_ev_relief(held_side, asset, side_price_cents, net_ev_cents)
+            or _moneyness_cap_exception(
                 held_side, asset, float(side_price_cents), net_ev_cents
             )
         ):
@@ -2205,7 +2225,8 @@ def pinned_fav_block(
             held_side, asset, _p
         ):
             return "pinned_fav_maker_low_p"
-    if net_ev_cents is None or float(net_ev_cents) < _pinned_fav_min_ev_cents():
+    ev = _finite_or_none(net_ev_cents)
+    if ev is None or ev < _pinned_fav_min_ev_cents():
         return "pinned_fav_low_ev"
     if pinned_fav_cap_remaining() <= 0:
         return "pinned_fav_daily_cap"

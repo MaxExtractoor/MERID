@@ -449,6 +449,7 @@ _ENV_OVERRIDES.update({
         "MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER",
         # 2026-10-27: bounded resting-order chase/requote toggle.
         "MERID_RESTING_REPRICE_ENABLED",
+        "MERID_MONEYNESS_EV_RELIEF_ENABLED",
     )
 })
 _ENV_OVERRIDES.update({

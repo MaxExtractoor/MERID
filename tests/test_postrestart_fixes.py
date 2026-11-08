@@ -32,6 +32,7 @@ import watchdog_15m as wd
 def _pf_env(monkeypatch):
     """Pinned-fav lane armed in maker mode with a clean daily budget."""
     monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_MONEYNESS_EV_RELIEF_ENABLED", "0")
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MODE", "1")
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_LO", "76")
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_HI", "91")

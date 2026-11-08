@@ -879,10 +879,10 @@ class RestingOrderMonitor:
             # be rejected (MERID_ENTRY_MIN_SECONDS_TO_EXPIRY, default 180s).
             try:
                 _min_entry_tte_s = float(os.environ.get(
-                    "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "180"
+                    "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "120"
                 ))
             except Exception:
-                _min_entry_tte_s = 180.0
+                _min_entry_tte_s = 120.0
             window_allowed = (
                 minutes_to_expiry is None
                 or (minutes_to_expiry * 60.0) >= _min_entry_tte_s

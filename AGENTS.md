@@ -852,3 +852,59 @@ validated as profitable.
   tests/test_agent_grid_side_mapping.py -q`.
 - Use indexed decision-ID joins for `strategy_decision_events` investigations;
   an unindexed time-range aggregation can scan the entire large events table.
+
+## 2026-11-08 operator-directed legacy-price relief and late-entry policy
+
+The operator requested reopening stale moneyness restrictions under current
+execution economics. `MERID_MONEYNESS_EV_RELIEF_ENABLED=1` in local `.env`
+allows BTC/ETH/SOL/XRP/DOGE, independently on YES and NO, to overcome the
+normal-path legacy price caps and blocked pockets only at executable held
+prices 10-89.99c with finite reserve-stacked net edge >=2c/contract. The
+original veto is retained as `{side}_legacy_price_veto`, with
+`{side}_moneyness_ev_relief` marking the policy change. This is an
+operator-directed policy change, not a claim of demonstrated profitability
+or a promotion of historical counterfactual fills. The feature defaults off
+without explicit configuration; `=0` restores legacy price vetoes. Its value
+participates in the resolved live configuration hash.
+
+Coin-flip, calibrated probability, evidence, tail-LCB, book freshness/depth,
+structural, throttle, final executable-cost, position, collateral, startup,
+and risk gates still bind. The relief does not widen the disabled 90c+ tail
+or the settlement-convergence lane's own price limits. Pinned-fav may use
+the same positive-EV relief when configured within its domain; its existing
+94-98c production domain and immutable maker policy are unchanged.
+
+The generic entry floor is now 120s, consistently in engine/risk/resting
+monitor defaults and local `.env`; candidates with 150s remaining can reach
+normal economics. At <=120s the engine still refuses generic entries; the
+existing pinned-fav/settlement exceptions keep their own contracts. Drift,
+cheap-NO and marginal rescue lane minimums are not lowered. Existing generic
+pre-expiry resting cancellation remains 120s. No live process restart or
+exchange mutation is part of this offline change. `.env` is ignored by Git:
+deployments must explicitly set the relief flag and the desired entry floor.
+
+Offline verification (full conftest may stall with the production server
+running): `.venv/Scripts/python.exe -m pytest --noconftest
+ tests/test_moneyness_ev_relief.py tests/test_directional_regime.py
+ tests/test_pinned_fav_lane.py tests/test_postrestart_fixes.py
+ tests/test_settlement_lane.py -q`.
+
+Research basis: Kalshi market lifecycle documentation identifies `close_time`
+as the trading boundary, independently of expected settlement time; Kalshi's
+Crypto Markets help and CRYPTO15M terms confirm final-minute CF index
+averaging. Lalor/Swishchuk, *Market Simulation under Adverse Selection*
+(arXiv:2409.12721v3), supports retaining execution/adverse-selection reserves
+rather than treating unfilled historical bids as guaranteed profitable fills.
+
+Read-only runtime audit: `scripts/window_funnel_report.py --days 0.05` scanned
+10,072 recent evaluations / 2,954 episodes on 2026-11-08, reporting 183
+emitted episodes and no joined wire attempts. Indexed decision-ID event joins
+found `entries_block_reason=audit_writer_unhealthy` plus entry-trap vetoes;
+server heartbeat samples showed 3,200-3,600 pending writes with oldest age
+>1,200s. These are separate from moneyness/TTE policy. Do not bypass writer
+readiness or erase queued/failure evidence to restore entries. Live recovery
+requires writer health and the normal fresh reconciliation/recovery contract.
+Counterfactual rows in the funnel are not guaranteed fills or independent
+profitable trades. Pinned-fav offline fixtures must redirect
+`MERID_PROVISIONAL_STATE_PATH` too: otherwise production markout history
+(e.g. a 21.5c ASR) changes unrelated admission-test economics.

@@ -138,6 +138,9 @@ def _lane_enabled(monkeypatch):
     monkeypatch.setattr(td, "MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", 97.0)
     monkeypatch.setattr(td, "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", 180.0)
     monkeypatch.setenv("MERID_EXIT_ONLY_CUTOFF_S", "30")
+    monkeypatch.setenv("MERID_MONEYNESS_EV_RELIEF_ENABLED", "0")
+    monkeypatch.setenv("MERID_PRICE_CAP_EXCEPT_NO", "0")
+    monkeypatch.setenv("MERID_PRICE_CAP_EXCEPT_BTC_NO", "0")
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MIN_W", 0.0)
     monkeypatch.setattr(td, "MERID_MARKET_ANCHOR_MAX_W", 0.0)
 

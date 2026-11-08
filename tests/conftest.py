@@ -86,6 +86,7 @@ _os.environ["MERID_CONVICTION_GATE_ENABLED"] = "0"
 # off here so legacy decision tests keep their expected terminal reasons;
 # it is exercised explicitly in tests/test_directional_regime.py.
 _os.environ["MERID_MONEYNESS_GATE_ENABLED"] = "0"
+_os.environ["MERID_MONEYNESS_EV_RELIEF_ENABLED"] = "0"
 # 2026-11 (pinned-favorite lane): production .env arms the bounded 92-98c
 # favorite lane; pin it off here so legacy decision tests keep their
 # expected terminal reasons.  Exercised explicitly in

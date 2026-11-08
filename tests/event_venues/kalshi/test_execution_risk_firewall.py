@@ -232,7 +232,10 @@ async def test_reject_missing_parent_when_required():
 
     canonical = _make_canonical(parent_entry_fill_id=None)
 
-    with patch.dict(os.environ, {"MERID_REQUIRE_EXIT_PARENTAGE": "1"}):
+    with patch.dict(os.environ, {
+        "MERID_REQUIRE_EXIT_PARENTAGE": "1",
+        "MERID_EXIT_PARENTAGE_EXCHANGE_POSITION_OK": "0",
+    }):
         decision = await ExecutionRiskFirewall.get_instance().validate_exit(canonical)
 
     assert decision.status in ("rejected", "observe_only")
