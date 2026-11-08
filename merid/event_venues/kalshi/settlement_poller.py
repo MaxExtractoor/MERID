@@ -1027,6 +1027,22 @@ class KalshiSettlementPoller:
         # minutes to drain — orphan outcomes must not queue behind it.
         await self._sweep_orphaned_decision_outcomes()
 
+        # 2026-11-07: calibration-artifact maintenance — freshness telemetry
+        # plus detached refits for stale artifacts (tail calibrator went
+        # ~23d stale while refits stayed manual).  Rate-limited internally
+        # (default 300s check / 24h per-artifact refit interval); the refit
+        # itself runs as a subprocess and can never block this poll cycle.
+        try:
+            from merid.prediction.calibration_health import (
+                maybe_run_scheduled_refits,
+            )
+
+            maybe_run_scheduled_refits()
+        except Exception as exc:
+            logger.debug(
+                "[SETTLEMENT-POLLER] calibration maintenance failed: %s", exc
+            )
+
         # Calculate lookback window
         now = datetime.now(timezone.utc)
         start_time = now - timedelta(hours=self.config.lookback_hours)
@@ -1180,6 +1196,63 @@ class KalshiSettlementPoller:
                 f"Settlement callbacks failed for {len(failed_callbacks)} settlement(s)"
             )
 
+    def _maybe_start_fill_outcomes_reconcile(self, ledger) -> None:
+        """Kick off the one-shot fill-outcome reconcile as a detached task.
+
+        2026-11-07: previously awaited inline ahead of the orphan sweep —
+        a full-table keyset scan over the audit DB (tens of minutes cold)
+        that put EVERY settlement behind it on each restart and starved
+        the counterfactual evidence cohort for ~7.5h.  Detached: the poll
+        loop never waits on it, and the ledger's durable resume watermark
+        makes a mid-scan kill safe to retry on the next boot.  Failures
+        retry after MERID_RECONCILE_RETRY_AFTER_S (default 300s) instead of
+        skipping the heal for the whole process lifetime.
+        """
+        if getattr(self, "_fill_outcomes_reconciled", False):
+            return
+        task = getattr(self, "_fill_outcomes_reconcile_task", None)
+        if task is not None and not task.done():
+            return
+        retry_after = float(
+            getattr(self, "_fill_outcomes_reconcile_retry_after", 0.0) or 0.0
+        )
+        if _time.time() < retry_after:
+            return
+        self._fill_outcomes_reconciled = True
+
+        async def _run() -> None:
+            try:
+                healed = await asyncio.to_thread(ledger.reconcile_fill_outcomes)
+                if healed:
+                    logger.info(
+                        "[SETTLEMENT-POLLER] fill-outcome reconcile healed %d rows",
+                        healed,
+                    )
+            except asyncio.CancelledError:
+                # Shutdown mid-scan: the ledger's resume_rowid watermark
+                # makes the next boot's restart cheap — allow a retry if
+                # this poller instance keeps running.
+                self._fill_outcomes_reconciled = False
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[SETTLEMENT-POLLER] fill-outcome reconcile failed: %s", exc
+                )
+                self._fill_outcomes_reconciled = False
+                self._fill_outcomes_reconcile_retry_after = (
+                    _time.time()
+                    + float(os.getenv("MERID_RECONCILE_RETRY_AFTER_S", "300"))
+                )
+
+        try:
+            self._fill_outcomes_reconcile_task = asyncio.create_task(_run())
+        except Exception as exc:
+            self._fill_outcomes_reconciled = False
+            logger.debug(
+                "[SETTLEMENT-POLLER] fill-outcome reconcile could not start: %s",
+                exc,
+            )
+
     async def _sweep_orphaned_decision_outcomes(self) -> None:
         """Settle pending decision outcomes on markets the account never held.
 
@@ -1190,122 +1263,241 @@ class KalshiSettlementPoller:
         entered markets only.  This sweeps those tickers via direct
         ``/markets/{ticker}`` lookups and joins the definitive exchange result
         into both the audit ledger and the durable settlement-outcome log.
+
+        2026-11-07 (settlement-starvation fix): the one-shot
+        ``reconcile_fill_outcomes`` heal scan no longer runs inline ahead
+        of this sweep — it is a full-table keyset scan (tens of minutes
+        cold) and awaiting it put EVERY settlement behind it on each
+        restart.  It now runs as a detached task; settlement lookups never
+        queue behind batch maintenance.  A slow deep lane drains PENDING
+        rows older than the hot lookback (BUG C: they would otherwise stay
+        PENDING forever and be permanently excluded from the SETTLED-only
+        evidence cohort), and a bounded recheck lane re-resolves UNRESOLVED
+        rows whose terminal mark was a transient lookup failure rather than
+        venue ambiguity (BUG D).
         """
         if os.getenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1") != "1":
             return
         try:
             from merid.execution.decision_audit_ledger import get_decision_audit_ledger
             ledger = get_decision_audit_ledger()
-            # 2026-10-01: one-shot reconcile at startup — SETTLED outcome rows
-            # whose entry fill predates the fills->audit bridge (or was missed)
-            # get fill price + realized PnL healed from kalshi_fills, then the
-            # lane settlement attribution that the original pass skipped.
-            if not getattr(self, "_fill_outcomes_reconciled", False):
-                self._fill_outcomes_reconciled = True
-                try:
-                    healed = await asyncio.to_thread(ledger.reconcile_fill_outcomes)
-                    if healed:
-                        logger.info(
-                            "[SETTLEMENT-POLLER] fill-outcome reconcile healed %d rows",
-                            healed,
-                        )
-                except Exception as exc:
-                    logger.debug(
-                        "[SETTLEMENT-POLLER] fill-outcome reconcile failed: %s", exc
-                    )
+        except Exception as exc:
+            logger.debug("[SETTLEMENT-POLLER] orphan sweep ledger unavailable: %s", exc)
+            return
+        self._maybe_start_fill_outcomes_reconcile(ledger)
+
+        unresolved_grace_s = float(
+            os.getenv("MERID_SETTLEMENT_UNRESOLVED_GRACE_S", "3600")
+        )
+        lookback_s = float(
+            os.getenv("MERID_SETTLEMENT_SWEEP_LOOKBACK_S", str(12 * 3600))
+        )
+        swept = 0
+        # Hot lane every cycle: recent PENDING tickers first.
+        try:
             # Synchronous sqlite3 JOIN over ~200k decision rows — run off the
             # event loop so the query cannot stall WS deltas or order routing.
             pending = await asyncio.to_thread(
                 ledger.pending_unsettled_tickers,
                 grace_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_GRACE_S", "180")),
-                lookback_s=float(os.getenv("MERID_SETTLEMENT_SWEEP_LOOKBACK_S", str(12 * 3600))),
+                lookback_s=lookback_s,
                 limit=int(os.getenv("MERID_SETTLEMENT_SWEEP_LIMIT", "40")),
             )
         except Exception as exc:
             logger.debug("[SETTLEMENT-POLLER] orphan sweep query failed: %s", exc)
-            return
-        if not pending:
-            return
+            pending = []
+        for ticker, close_ts in pending or []:
+            swept += await self._settle_orphan_ticker(
+                ledger, ticker, close_ts, unresolved_grace_s
+            )
 
-        from merid.analysis.settlement_outcome_exporter import (
-            DEFAULT_OUT_PATH,
-            normalize_market_record,
-            record_outcome,
+        # Slow lanes on their own cadence so their per-ticker REST lookups
+        # never crowd the hot lane's rate budget within a poll cycle.
+        deep_interval_s = float(
+            os.getenv("MERID_SETTLEMENT_DEEP_SWEEP_INTERVAL_S", "1800")
         )
-
-        # Terminal bound on ambiguity: once a market stays unresolved for
-        # longer than the unresolved grace, its pending outcomes transition to
-        # UNRESOLVED (with the last-observed exchange status as the reason)
-        # instead of being re-fetched forever.  This keeps the report's
-        # unresolved appendix honest and bounded.
-        unresolved_grace_s = float(
-            os.getenv("MERID_SETTLEMENT_UNRESOLVED_GRACE_S", "3600")
-        )
-        swept = 0
-        for ticker, close_ts in pending:
+        now = _time.time()
+        if now - float(getattr(self, "_last_deep_sweep_ts", 0.0) or 0.0) >= deep_interval_s:
+            self._last_deep_sweep_ts = now
+            # Deep PENDING lane: rows older than the hot lookback would
+            # otherwise stay PENDING forever.
             try:
-                resp = await self._api_call_with_retry(
-                    method="GET",
-                    endpoint=f"/markets/{ticker}",
-                    params=None,
+                deep_pending = await asyncio.to_thread(
+                    ledger.pending_unsettled_tickers_aged,
+                    older_than_s=lookback_s,
+                    limit=int(os.getenv("MERID_SETTLEMENT_DEEP_SWEEP_LIMIT", "30")),
                 )
-                market = resp.get("market", resp) if isinstance(resp, dict) else {}
-                event = normalize_market_record(market)
-                if event is None:
-                    # still open, voided, or ambiguous — try next poll unless
-                    # the unresolved grace has already been exhausted.
-                    try:
-                        age_s = _time.time() - float(close_ts)
-                    except Exception:
-                        age_s = 0.0
-                    if age_s > unresolved_grace_s:
-                        status = str(
-                            (market or {}).get("status") or "unknown"
-                        ).strip().lower()
-                        await asyncio.to_thread(
-                            ledger.mark_outcome_unresolved,
-                            ticker,
-                            float(close_ts),
-                            reason=f"market_status_{status}_after_{int(age_s)}s",
-                        )
-                        logger.warning(
-                            "[SETTLEMENT-POLLER] %s unresolved after %.0fs "
-                            "(status=%s) - outcomes marked UNRESOLVED",
-                            ticker, age_s, status,
-                        )
-                    continue
-                settled_yes = event.outcome == "yes"
-                await asyncio.to_thread(
-                    ledger.record_settlement,
-                    ticker=ticker,
-                    close_ts=close_ts,
-                    settled_yes=settled_yes,
-                    settlement_value_cents=100 if settled_yes else 0,
-                )
-                await asyncio.to_thread(record_outcome, event, out_path=DEFAULT_OUT_PATH)
-                swept += 1
             except Exception as exc:
-                logger.debug(
-                    "[SETTLEMENT-POLLER] orphan sweep failed for %s: %s", ticker, exc
+                logger.debug("[SETTLEMENT-POLLER] deep sweep query failed: %s", exc)
+                deep_pending = []
+            for ticker, close_ts in deep_pending or []:
+                swept += await self._settle_orphan_ticker(
+                    ledger, ticker, close_ts, unresolved_grace_s
                 )
-                # Persistent lookup failure past the unresolved grace is also
-                # terminal — otherwise one bad ticker retries forever.
-                try:
-                    if (_time.time() - float(close_ts)) > unresolved_grace_s:
-                        await asyncio.to_thread(
-                            ledger.mark_outcome_unresolved,
-                            ticker,
-                            float(close_ts),
-                            reason="lookup_failed_after_grace",
-                        )
-                except Exception:
-                    pass
+            # Bounded UNRESOLVED recheck: requeue only on a definitive
+            # exchange result; ambiguous lookups consume one attempt.
+            try:
+                recheck = await asyncio.to_thread(
+                    ledger.unresolved_recheck_candidates,
+                    max_age_s=float(os.getenv(
+                        "MERID_SETTLEMENT_RECHECK_MAX_AGE_S", str(7 * 86400)
+                    )),
+                    max_rechecks=int(os.getenv(
+                        "MERID_SETTLEMENT_RECHECK_MAX_ATTEMPTS", "3"
+                    )),
+                    limit=int(os.getenv("MERID_SETTLEMENT_RECHECK_LIMIT", "20")),
+                )
+            except Exception as exc:
+                logger.debug("[SETTLEMENT-POLLER] unresolved recheck query failed: %s", exc)
+                recheck = []
+            for ticker, close_ts, reason in recheck or []:
+                swept += await self._recheck_unresolved_ticker(
+                    ledger, ticker, close_ts, reason
+                )
         if swept:
             logger.info(
                 "[SETTLEMENT-POLLER] swept %d orphaned decision outcomes "
                 "(markets evaluated but never entered)",
                 swept,
             )
+
+    async def _settle_orphan_ticker(
+        self, ledger, ticker: str, close_ts: float, unresolved_grace_s: float
+    ) -> int:
+        """Resolve one orphan-sweep ticker via ``/markets/{ticker}``.
+
+        Returns 1 when a definitive settlement was joined, else 0.  Markets
+        still ambiguous past ``unresolved_grace_s`` mark their PENDING
+        outcomes UNRESOLVED (terminal); persistent lookup failures do the
+        same so one bad ticker cannot retry forever.
+        """
+        from merid.analysis.settlement_outcome_exporter import (
+            DEFAULT_OUT_PATH,
+            normalize_market_record,
+            record_outcome,
+        )
+        try:
+            resp = await self._api_call_with_retry(
+                method="GET",
+                endpoint=f"/markets/{ticker}",
+                params=None,
+            )
+            market = resp.get("market", resp) if isinstance(resp, dict) else {}
+            event = normalize_market_record(market)
+            if event is None:
+                # still open, voided, or ambiguous — try next poll unless
+                # the unresolved grace has already been exhausted.
+                try:
+                    age_s = _time.time() - float(close_ts)
+                except Exception:
+                    age_s = 0.0
+                if age_s > unresolved_grace_s:
+                    status = str(
+                        (market or {}).get("status") or "unknown"
+                    ).strip().lower()
+                    await asyncio.to_thread(
+                        ledger.mark_outcome_unresolved,
+                        ticker,
+                        float(close_ts),
+                        reason=f"market_status_{status}_after_{int(age_s)}s",
+                    )
+                    logger.warning(
+                        "[SETTLEMENT-POLLER] %s unresolved after %.0fs "
+                        "(status=%s) - outcomes marked UNRESOLVED",
+                        ticker, age_s, status,
+                    )
+                return 0
+            settled_yes = event.outcome == "yes"
+            await asyncio.to_thread(
+                ledger.record_settlement,
+                ticker=ticker,
+                close_ts=close_ts,
+                settled_yes=settled_yes,
+                settlement_value_cents=100 if settled_yes else 0,
+            )
+            await asyncio.to_thread(record_outcome, event, out_path=DEFAULT_OUT_PATH)
+            return 1
+        except Exception as exc:
+            logger.debug(
+                "[SETTLEMENT-POLLER] orphan sweep failed for %s: %s", ticker, exc
+            )
+            # Persistent lookup failure past the unresolved grace is also
+            # terminal — otherwise one bad ticker retries forever.
+            try:
+                if (_time.time() - float(close_ts)) > unresolved_grace_s:
+                    await asyncio.to_thread(
+                        ledger.mark_outcome_unresolved,
+                        ticker,
+                        float(close_ts),
+                        reason="lookup_failed_after_grace",
+                    )
+            except Exception:
+                pass
+            return 0
+
+    async def _recheck_unresolved_ticker(
+        self, ledger, ticker: str, close_ts: float, reason: str
+    ) -> int:
+        """Bounded re-resolution for UNRESOLVED decision outcomes.
+
+        DLQ-style requeue (2026-11-07): ``mark_outcome_unresolved`` is
+        terminal by design, but rows marked during settlement-sweep
+        starvation (lookup failures while the poller was blocked) are
+        sweep-gap casualties, not venue ambiguity.  The ledger only
+        requeues rows whose ``unresolved_reason`` matches a transient
+        pattern and whose attempt budget is unspent; the requeue itself
+        preserves ``unresolved_recheck_count`` so a settle that fails
+        again stays bounded.  Only a definitive exchange result triggers
+        the requeue — ambiguous or failed lookups consume one attempt via
+        ``bump_outcome_recheck``.  Returns rows requeued.
+        """
+        from merid.analysis.settlement_outcome_exporter import (
+            DEFAULT_OUT_PATH,
+            normalize_market_record,
+            record_outcome,
+        )
+        event = None
+        try:
+            resp = await self._api_call_with_retry(
+                method="GET",
+                endpoint=f"/markets/{ticker}",
+                params=None,
+            )
+            market = resp.get("market", resp) if isinstance(resp, dict) else {}
+            event = normalize_market_record(market)
+        except Exception as exc:
+            logger.debug(
+                "[SETTLEMENT-POLLER] unresolved recheck lookup failed for %s: %s",
+                ticker,
+                exc,
+            )
+        if event is None:
+            await asyncio.to_thread(
+                ledger.bump_outcome_recheck, ticker, float(close_ts)
+            )
+            return 0
+        requeued = await asyncio.to_thread(
+            ledger.requeue_unresolved_outcomes, ticker, float(close_ts)
+        )
+        if not requeued:
+            return 0
+        settled_yes = event.outcome == "yes"
+        await asyncio.to_thread(
+            ledger.record_settlement,
+            ticker=ticker,
+            close_ts=close_ts,
+            settled_yes=settled_yes,
+            settlement_value_cents=100 if settled_yes else 0,
+        )
+        await asyncio.to_thread(record_outcome, event, out_path=DEFAULT_OUT_PATH)
+        logger.info(
+            "[SETTLEMENT-POLLER] re-resolved %d UNRESOLVED outcome(s) for %s "
+            "(prior_reason=%s)",
+            requeued,
+            ticker,
+            reason,
+        )
+        return requeued
 
     async def _fetch_settlements(
         self,

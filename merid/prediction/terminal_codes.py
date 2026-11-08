@@ -130,8 +130,19 @@ def canonical_terminal_code(
     *,
     regime_reject_cause: Optional[str] = None,
     candidate_present: bool = False,
+    gate_ev_cents: Optional[float] = None,
 ) -> str:
-    """Map a raw rejection reason to its canonical :class:`TerminalCode` value."""
+    """Map a raw rejection reason to its canonical :class:`TerminalCode` value.
+
+    ``best_ev_cents`` is the reserve-stacked net executable EV used by the
+    evaluated-economics fallback.  ``gate_ev_cents`` is the EPC-LCB-adjusted
+    quantity the economics gate actually compared against its bound — when
+    supplied it disambiguates ``edge_below_threshold`` misses whose raw net
+    EV stayed <= 0 only because the empirical bound (not the model edge)
+    carried the side over zero (2026-11-07: those collapsed to
+    NO_POSITIVE_EXECUTABLE_EDGE even though the first blocker was the
+    dynamic threshold).
+    """
     rl = (rejection_reason or "").strip().lower()
 
     if "lifecycle" in rl or "no_trade_without_exit" in rl:
@@ -252,6 +263,24 @@ def canonical_terminal_code(
         return TerminalCode.EVIDENCE_HARD_BLOCK.value
     if rl.startswith("pinned_fav"):
         return TerminalCode.STRUCTURAL_RISK_VETO.value
+    # 2026-11-07: bounded rescue-lane (drift_fav / cheap_no_settle) reasons.
+    # These surface via the per-side block fields and lane-level rejects;
+    # without explicit mappings they fell into the evaluated-economics
+    # fallback and collapsed to NO_POSITIVE_EXECUTABLE_EDGE even when the
+    # lane's own EV floor — a dynamic threshold — was the first blocker.
+    if rl.startswith("drift_tte") or rl.startswith("cheap_no_tte"):
+        return TerminalCode.TTE_ENTRY_CUTOFF.value
+    if rl.startswith("drift_low_ev") or rl.startswith("cheap_no_low_ev"):
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    if rl in ("drift_attempts_exhausted", "cheap_no_attempts_exhausted"):
+        # Lane attempt-budget exhaustion — bounded capacity, same
+        # visibility treatment as pinned_fav_daily_cap / escape_cap.
+        return TerminalCode.EVIDENCE_HARD_BLOCK.value
+    if rl.startswith("drift_") or rl.startswith("cheap_no_"):
+        # drift_disabled/band/asset/side/complement/basis_not_bid and the
+        # cheap_no mirrors are lane-domain guards — structural vetoes,
+        # not economics failures.
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
     if (
         rl.startswith("countertrend_")
         or rl.startswith("bookflow_")
@@ -268,7 +297,12 @@ def canonical_terminal_code(
         "ev_extreme_price",
         "kelly_filter",
     ):
-        if best_ev_cents is not None and best_ev_cents <= 0.0:
+        # The producer's ``*_edge_below_threshold`` label already means the
+        # gate EV cleared zero but missed the dynamic bound; disambiguate on
+        # the gate EV when the caller supplies it so an EPC-LCB-carried side
+        # is not relabelled a non-positive-EV rejection.
+        _thr_ev = gate_ev_cents if gate_ev_cents is not None else best_ev_cents
+        if _thr_ev is not None and _thr_ev <= 0.0:
             return TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
         return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
 

@@ -306,6 +306,10 @@ DECISION_EVENT_ORDER_SUBMITTED = "ORDER_SUBMITTED"
 DECISION_EVENT_ORDER_FILLED = "ORDER_FILLED"
 DECISION_EVENT_SETTLEMENT_RESOLVED = "SETTLEMENT_RESOLVED"
 DECISION_EVENT_OUTCOME_UNRESOLVED = "OUTCOME_UNRESOLVED"
+# 2026-11-07: a bounded recheck lane flipped retryable UNRESOLVED rows back
+# to PENDING after the exchange returned a definitive result — the attempt
+# budget (unresolved_recheck_count) is preserved across the requeue.
+DECISION_EVENT_OUTCOME_RECHECK_REQUEUED = "OUTCOME_RECHECK_REQUEUED"
 DECISION_EVENT_INSTRUMENTATION_GAP = "INSTRUMENTATION_GAP"
 
 # Lifecycle stages.
@@ -1165,6 +1169,15 @@ class DecisionAuditLedger:
         # Terminal failure bookkeeping for outcomes that never resolve.
         _add_column(conn, "strategy_decision_outcomes", "unresolved_reason", "TEXT")
         _add_column(conn, "strategy_decision_outcomes", "unresolved_at", "REAL")
+        # 2026-11-07: bounded recheck budget for the UNRESOLVED requeue lane —
+        # incremented per ambiguous lookup so a permanently unresolvable
+        # ticker cannot be re-fetched forever (DLQ attempt-counter pattern).
+        _add_column(
+            conn,
+            "strategy_decision_outcomes",
+            "unresolved_recheck_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
 
         # One-time data backfills for rows written before the columns above
         # existed.  On the production DB (hundreds of MB) the selected=1
@@ -2562,11 +2575,31 @@ class DecisionAuditLedger:
                     int(state.get("complete_through_rowid") or 0),
                 )
                 started_full = last_rowid == 0
+                # 2026-11-07: high-water bound.  ``complete_through_rowid``
+                # used to persist the last *candidate* rowid — with an empty
+                # heal cohort (the normal case) that stayed 0, so every
+                # restart re-ran the full-table predicate scan (45min-3.6h
+                # observed 2026-11-07, starving orphan settlements and the
+                # evidence cohort behind it).  The frontier is MAX(rowid)
+                # captured at scan start: the scan examines every SETTLED
+                # row in (floor, frontier], so the whole range is provably
+                # clean on completion.  Rows inserted mid-scan land above
+                # the frontier and are covered by the next incremental
+                # pass; rows below it that become candidates later (fills
+                # backfill, late PENDING->SETTLED) are caught by the 24h
+                # ``full_due`` rescan, same contract as before.
+                scan_frontier_rowid = int(
+                    scan_conn.execute(
+                        "SELECT MAX(rowid) FROM strategy_decision_outcomes"
+                    ).fetchone()[0]
+                    or 0
+                )
                 logger.info(
                     "[DECISION-AUDIT-LEDGER] reconcile_fill_outcomes starting "
-                    "at rowid %d (full_scan=%s)",
+                    "at rowid %d (full_scan=%s frontier=%d)",
                     last_rowid,
                     started_full,
+                    scan_frontier_rowid,
                 )
                 _last_progress_log = 0.0
                 while True:
@@ -2584,6 +2617,7 @@ class DecisionAuditLedger:
                         WHERE o.outcome_status = 'SETTLED'
                           AND o.realized_net_pnl_cents IS NULL
                           AND o.rowid > ?
+                          AND o.rowid <= ?
                           AND (
                               o.actual_fill_price_cents IS NOT NULL
                               OR f.decision_trace_id IS NOT NULL
@@ -2591,7 +2625,7 @@ class DecisionAuditLedger:
                         ORDER BY o.rowid
                         LIMIT 500
                         """,
-                        (last_rowid,),
+                        (last_rowid, scan_frontier_rowid),
                     ).fetchall()
                     if not rows:
                         break
@@ -2654,7 +2688,9 @@ class DecisionAuditLedger:
                         )
                 self._reconcile_state_save(
                     resume_rowid=last_rowid,
-                    complete_through_rowid=last_rowid,
+                    complete_through_rowid=max(
+                        scan_frontier_rowid, last_rowid
+                    ),
                     last_full_scan_ts=(
                         time.time()
                         if started_full
@@ -3776,6 +3812,236 @@ class DecisionAuditLedger:
                 "[DECISION-AUDIT-LEDGER] pending_unsettled_tickers failed: %s", exc
             )
             return []
+
+    # 2026-11-07: retryable ``unresolved_reason`` predicate shared by the
+    # recheck candidates query, the attempt bump, and the requeue UPDATE.
+    # Column names are deliberately unqualified so the fragment works both
+    # in the SELECTs below (outcomes aliased ``o``) and in the single-table
+    # UPDATE.  Retryable = transient lookup failures and non-terminal
+    # market statuses; permanently voided/cancelled markets and the
+    # contract-less ``no_contract_at_decision`` mark are excluded — those
+    # can never produce a definitive yes/no and re-fetching them is waste.
+    _UNRESOLVED_RECHECK_REASON_PREDICATE = (
+        "("
+        "unresolved_reason LIKE 'lookup_failed%'"
+        " OR ("
+        "     unresolved_reason LIKE 'market_status_%'"
+        "     AND unresolved_reason NOT LIKE 'market_status_voided%'"
+        "     AND unresolved_reason NOT LIKE 'market_status_cancelled%'"
+        "     AND unresolved_reason NOT LIKE 'market_status_canceled%'"
+        " )"
+        ")"
+    )
+
+    def pending_unsettled_tickers_aged(
+        self,
+        now: Optional[float] = None,
+        older_than_s: float = 12 * 3600.0,
+        limit: int = 30,
+    ) -> List[Tuple[str, float]]:
+        """PENDING tickers older than the hot sweep's lookback window.
+
+        The hot lane (``pending_unsettled_tickers``) only scans
+        ``close_ts > now - lookback_s``; anything older would stay PENDING
+        forever — permanently excluded from the SETTLED-only evidence
+        cohort after any starvation window longer than the lookback
+        (observed 2026-11-07: a ~7.5h settlement outage).  This deep-drain
+        lane returns the OLDEST such tickers first so a slow trickle can
+        work multi-day backlogs without ever crowding the hot lane's
+        per-cycle budget.  The boundary is complementary: hot covers
+        ``close_ts > floor``, deep covers ``close_ts <= floor``.
+        """
+        if not _is_enabled():
+            return []
+        self._ensure_db()
+        now_ts = now if now is not None else time.time()
+        floor = now_ts - older_than_s
+        try:
+            # 2026-10-28: pure read on the dedicated read connection.
+            rows = self._read().execute(
+                """
+                SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
+                FROM strategy_decisions d
+                JOIN strategy_decision_outcomes o
+                  ON d.decision_id = o.decision_id
+                WHERE o.outcome_status = 'PENDING'
+                  AND d.close_ts <= ?
+                  AND d.ticker IS NOT NULL
+                  AND d.ticker != ''
+                GROUP BY d.ticker
+                ORDER BY close_ts ASC
+                LIMIT ?
+                """,
+                (floor, int(limit)),
+            ).fetchall()
+            return [(r["ticker"], float(r["close_ts"])) for r in rows]
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] pending_unsettled_tickers_aged failed: %s",
+                exc,
+            )
+            return []
+
+    def unresolved_recheck_candidates(
+        self,
+        now: Optional[float] = None,
+        max_age_s: float = 7 * 86400.0,
+        max_rechecks: int = 3,
+        limit: int = 20,
+    ) -> List[Tuple[str, float, str]]:
+        """UNRESOLVED tickers eligible for bounded re-resolution.
+
+        Returns ``(ticker, close_ts, reason)`` triples, most recently
+        unresolved first.  Eligibility requires a transient
+        ``unresolved_reason`` (lookup failure or a non-terminal market
+        status), an ``unresolved_at`` inside ``max_age_s``, and fewer than
+        ``max_rechecks`` prior recheck attempts.  This is the DLQ-style
+        requeue lane for sweep-gap casualties — rows whose terminal mark
+        was venue ambiguity (voided/cancelled) or missing contract binding
+        are never eligible.
+        """
+        if not _is_enabled():
+            return []
+        self._ensure_db()
+        now_ts = now if now is not None else time.time()
+        try:
+            # 2026-10-28: pure read on the dedicated read connection.
+            rows = self._read().execute(
+                f"""
+                SELECT d.ticker AS ticker,
+                       MAX(d.close_ts) AS close_ts,
+                       MAX(o.unresolved_at) AS unresolved_at,
+                       MAX(o.unresolved_reason) AS reason
+                FROM strategy_decisions d
+                JOIN strategy_decision_outcomes o
+                  ON d.decision_id = o.decision_id
+                WHERE o.outcome_status = 'UNRESOLVED'
+                  AND o.unresolved_at IS NOT NULL
+                  AND o.unresolved_at >= ?
+                  AND COALESCE(o.unresolved_recheck_count, 0) < ?
+                  AND {self._UNRESOLVED_RECHECK_REASON_PREDICATE}
+                  AND d.ticker IS NOT NULL
+                  AND d.ticker != ''
+                GROUP BY d.ticker
+                ORDER BY unresolved_at DESC
+                LIMIT ?
+                """,
+                (now_ts - max_age_s, int(max_rechecks), int(limit)),
+            ).fetchall()
+            return [
+                (r["ticker"], float(r["close_ts"]), str(r["reason"] or ""))
+                for r in rows
+            ]
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] unresolved_recheck_candidates failed: %s",
+                exc,
+            )
+            return []
+
+    def bump_outcome_recheck(self, ticker: str, close_ts: float) -> int:
+        """Consume one recheck attempt on retryable UNRESOLVED rows.
+
+        Called by the settlement poller's recheck lane when the market
+        lookup did not return a definitive result — bounds the lane so a
+        permanently ambiguous ticker cannot be re-fetched forever.
+        Returns the number of outcome rows bumped.
+        """
+        if not _is_enabled():
+            return 0
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute(
+                    f"""
+                    UPDATE strategy_decision_outcomes
+                    SET unresolved_recheck_count =
+                        COALESCE(unresolved_recheck_count, 0) + 1
+                    WHERE outcome_status = 'UNRESOLVED'
+                      AND decision_id IN (
+                          SELECT d.decision_id
+                          FROM strategy_decisions d
+                          WHERE d.ticker = ?
+                            AND ABS(d.close_ts - ?) <= 900.0
+                      )
+                      AND {self._UNRESOLVED_RECHECK_REASON_PREDICATE}
+                    """,
+                    (ticker, float(close_ts)),
+                )
+                return int(cur.rowcount or 0)
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] bump_outcome_recheck failed for %s: %s",
+                ticker,
+                exc,
+            )
+            return 0
+
+    def requeue_unresolved_outcomes(self, ticker: str, close_ts: float) -> int:
+        """Flip retryable UNRESOLVED outcomes back to PENDING for settling.
+
+        Called only after the exchange returned a definitive result, so the
+        canonical ``record_settlement`` path can join the outcome on the
+        next call.  ``unresolved_recheck_count`` is preserved — the attempt
+        budget survives the requeue, keeping the lane bounded across
+        settle-fail -> re-mark cycles.  Emits one
+        ``OUTCOME_RECHECK_REQUEUED`` event per row carrying the prior
+        unresolved reason.  Returns the number of rows requeued.
+        """
+        if not _is_enabled():
+            return 0
+        self._ensure_db()
+        try:
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    f"""
+                    SELECT d.decision_id, d.asset, d.run_id, o.unresolved_reason
+                    FROM strategy_decisions d
+                    JOIN strategy_decision_outcomes o
+                      ON d.decision_id = o.decision_id
+                    WHERE d.ticker = ?
+                      AND o.outcome_status = 'UNRESOLVED'
+                      AND ABS(d.close_ts - ?) <= 900.0
+                      AND {self._UNRESOLVED_RECHECK_REASON_PREDICATE}
+                    """,
+                    (ticker, float(close_ts)),
+                ).fetchall()
+                now = time.time()
+                for row in rows:
+                    conn.execute(
+                        """
+                        UPDATE strategy_decision_outcomes
+                        SET outcome_status = 'PENDING',
+                            unresolved_reason = NULL,
+                            unresolved_at = NULL
+                        WHERE decision_id = ?
+                        """,
+                        (row["decision_id"],),
+                    )
+                    self._append_decision_event_locked(
+                        conn,
+                        decision_id=row["decision_id"],
+                        event_type=DECISION_EVENT_OUTCOME_RECHECK_REQUEUED,
+                        stage=DECISION_STAGE_OUTCOME,
+                        event_ts=now,
+                        reason_detail={
+                            "prior_unresolved_reason": row["unresolved_reason"],
+                        },
+                        run_id=row["run_id"],
+                        ticker=ticker,
+                        asset=row["asset"],
+                    )
+                return len(rows)
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] requeue_unresolved_outcomes failed "
+                "for %s: %s",
+                ticker,
+                exc,
+            )
+            return 0
 
     def record_data_gap(
         self,

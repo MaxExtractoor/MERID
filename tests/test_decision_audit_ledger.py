@@ -1268,3 +1268,190 @@ def test_side_ev_missing_component_snapshot_stays_null(tmp_db: Path) -> None:
         assert yes["reserve_estimator_version"] is None
         assert yes["formula_gate_passed"] is None
         assert yes["effective_edge_gate_passed"] == 1
+
+
+# ── Settlement sweep lanes (2026-11-07 starvation fix) ─────────────────────
+
+
+def test_reconcile_persists_scan_frontier_when_no_rows_healed(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """BUG A: a completed scan with an empty heal cohort must persist the
+    scan frontier (MAX(rowid) at scan start) as complete_through_rowid —
+    not the last *candidate* rowid (0), which used to force a full-table
+    rescan on every restart."""
+    import json
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    fills_db = tmp_path / "kalshi_fills.db"
+    _make_fills_db(fills_db, [])
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+    monkeypatch.setenv(
+        "MERID_RECONCILE_STATE_PATH", str(tmp_path / "reconcile_state.json")
+    )
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "dec_frontier"
+    ledger.record_trade_decision(dec)
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        max_rid = conn.execute(
+            "SELECT MAX(rowid) FROM strategy_decision_outcomes"
+        ).fetchone()[0]
+        assert max_rid > 0
+
+    # No entry fill -> not a heal candidate -> healed == 0.
+    assert ledger.reconcile_fill_outcomes() == 0
+
+    state = json.loads((tmp_path / "reconcile_state.json").read_text())
+    assert state["complete_through_rowid"] == max_rid
+    assert state.get("last_full_scan_ts")
+
+
+def test_pending_unsettled_tickers_aged_covers_beyond_hot_lookback(
+    tmp_db: Path,
+) -> None:
+    """BUG C: PENDING rows older than the hot sweep's lookback must surface
+    on the deep lane — the hot query's floor previously stranded them
+    PENDING forever (permanently excluded from SETTLED-only evidence)."""
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "dec_aged_pending"
+    dec.ticker = "KXBTC15M-AGED-TEST"
+    dec.timestamp_utc = datetime.now(timezone.utc) - timedelta(days=2)
+    dec.seconds_to_expiry = Decimal("60")
+    ledger.record_trade_decision(dec)
+
+    now = time.time()
+    hot = ledger.pending_unsettled_tickers(
+        now=now, grace_s=120.0, lookback_s=12 * 3600.0, limit=100
+    )
+    assert all(t != dec.ticker for t, _ in hot)
+
+    deep = ledger.pending_unsettled_tickers_aged(
+        now=now, older_than_s=12 * 3600.0, limit=100
+    )
+    assert dec.ticker in [t for t, _ in deep]
+
+
+def test_unresolved_recheck_requeue_and_resurrection(tmp_db: Path) -> None:
+    """BUG D: a transiently-marked UNRESOLVED outcome requeues to PENDING on
+    a definitive exchange result and settles through the canonical path —
+    with the prior reason preserved on the audit event."""
+    import time
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "dec_recheck"
+    dec.ticker = "KXBTC15M-RECHECK-TEST"
+    ledger.record_trade_decision(dec)
+    close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+
+    assert ledger.mark_outcome_unresolved(
+        dec.ticker, close_ts, reason="lookup_failed_after_grace"
+    ) == 1
+
+    candidates = ledger.unresolved_recheck_candidates(
+        now=time.time(), max_age_s=7 * 86400.0, max_rechecks=3, limit=50
+    )
+    match = [c for c in candidates if c[0] == dec.ticker]
+    assert match and match[0][2] == "lookup_failed_after_grace"
+
+    assert ledger.requeue_unresolved_outcomes(dec.ticker, close_ts) == 1
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT outcome_status, unresolved_reason, unresolved_at, "
+            "unresolved_recheck_count FROM strategy_decision_outcomes "
+            "WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()
+        assert row["outcome_status"] == "PENDING"
+        assert row["unresolved_reason"] is None
+        assert row["unresolved_at"] is None
+        evt = conn.execute(
+            "SELECT reason_detail_json FROM strategy_decision_events "
+            "WHERE decision_id = ? AND event_type = 'OUTCOME_RECHECK_REQUEUED'",
+            (dec.decision_id,),
+        ).fetchone()
+        assert evt is not None
+        assert "lookup_failed_after_grace" in evt["reason_detail_json"]
+
+    # Canonical settle path now resurrects the row.
+    ledger.record_settlement(
+        ticker=dec.ticker,
+        close_ts=close_ts,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+    with sqlite3.connect(str(tmp_db)) as conn:
+        status = conn.execute(
+            "SELECT outcome_status FROM strategy_decision_outcomes "
+            "WHERE decision_id = ?",
+            (dec.decision_id,),
+        ).fetchone()[0]
+        assert status == "SETTLED"
+
+
+def test_unresolved_recheck_excludes_permanent_reasons_and_bounds_attempts(
+    tmp_db: Path,
+) -> None:
+    """Permanently-voided markets and exhausted recheck budgets are never
+    requeued."""
+    import time
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    # Permanently voided market: reason matches market_status_voided_*.
+    dec_void = _no_trade_decision("no_edge_below_threshold")
+    dec_void.decision_id = "dec_recheck_void"
+    dec_void.ticker = "KXBTC15M-VOID-TEST"
+    ledger.record_trade_decision(dec_void)
+    close_void = (
+        dec_void.timestamp_utc.timestamp() + float(dec_void.seconds_to_expiry)
+    )
+    ledger.mark_outcome_unresolved(
+        dec_void.ticker, close_void, reason="market_status_voided_after_4000s"
+    )
+
+    # Retryable reason but attempt budget already exhausted.
+    dec_max = _no_trade_decision("no_edge_below_threshold")
+    dec_max.decision_id = "dec_recheck_max"
+    dec_max.ticker = "KXBTC15M-MAXTRY-TEST"
+    ledger.record_trade_decision(dec_max)
+    close_max = (
+        dec_max.timestamp_utc.timestamp() + float(dec_max.seconds_to_expiry)
+    )
+    ledger.mark_outcome_unresolved(
+        dec_max.ticker, close_max, reason="lookup_failed_after_grace"
+    )
+    ledger.bump_outcome_recheck(dec_max.ticker, close_max)
+    ledger.bump_outcome_recheck(dec_max.ticker, close_max)
+    ledger.bump_outcome_recheck(dec_max.ticker, close_max)
+
+    candidates = ledger.unresolved_recheck_candidates(
+        now=time.time(), max_age_s=7 * 86400.0, max_rechecks=3, limit=50
+    )
+    tickers = [c[0] for c in candidates]
+    assert dec_void.ticker not in tickers
+    assert dec_max.ticker not in tickers
+
+    # The budget bounds API calls in the candidates query, not the requeue
+    # itself: once the exchange has answered definitively, settling every
+    # retryable row in the window is correct — the attempt counter is
+    # preserved so a settle that fails again stays bounded.
+    assert ledger.requeue_unresolved_outcomes(dec_max.ticker, close_max) == 1

@@ -141,6 +141,9 @@ class TestSweepOffloadsSyncWork:
         poller = _make_poller(monkeypatch, tmp_path)
         # _poll_once stubs the sweep; here we test the real method
         del poller._sweep_orphaned_decision_outcomes
+        # Skip the detached reconcile task and the slow lanes for this test.
+        poller._fill_outcomes_reconciled = True
+        poller._last_deep_sweep_ts = float("inf")
 
         seen_threads: list[threading.Thread] = []
         ledger = MagicMock()
@@ -160,6 +163,217 @@ class TestSweepOffloadsSyncWork:
 
         assert len(seen_threads) == 1
         assert seen_threads[0] is not threading.main_thread()
+
+
+class TestSweepLanes:
+    """2026-11-07 settlement-starvation fixes: the orphan sweep must never
+    queue behind the fill-outcome reconcile, and slow lanes drain PENDING
+    rows beyond the hot lookback plus re-resolve transiently-UNRESOLVED rows.
+    """
+
+    def _ledger(self, monkeypatch: pytest.MonkeyPatch, **overrides) -> MagicMock:
+        ledger = MagicMock()
+        ledger.pending_unsettled_tickers = lambda **kw: []
+        ledger.pending_unsettled_tickers_aged = lambda **kw: []
+        ledger.unresolved_recheck_candidates = lambda **kw: []
+        for key, value in overrides.items():
+            setattr(ledger, key, value)
+        monkeypatch.setattr(
+            "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+            lambda: ledger,
+        )
+        return ledger
+
+    async def test_sweep_does_not_await_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """BUG B: pending_unsettled_tickers + market lookups run while the
+        one-shot reconcile is still blocked — settlements never queue
+        behind the batch heal scan."""
+        import asyncio as _aio
+        import time as _t
+
+        monkeypatch.setenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1")
+        poller = _make_poller(monkeypatch, tmp_path)
+        del poller._sweep_orphaned_decision_outcomes
+        poller._last_deep_sweep_ts = float("inf")
+
+        release = threading.Event()
+        reconcile_started = threading.Event()
+
+        def _blocking_reconcile():
+            reconcile_started.set()
+            release.wait(timeout=10)
+            return 0
+
+        pending_called = []
+
+        def _pending(**kwargs):
+            pending_called.append(_t.time())
+            return []
+
+        ledger = self._ledger(
+            monkeypatch,
+            reconcile_fill_outcomes=_blocking_reconcile,
+            pending_unsettled_tickers=_pending,
+        )
+
+        sweep = _aio.ensure_future(poller._sweep_orphaned_decision_outcomes())
+        # The detached reconcile starts on a worker thread; the sweep must
+        # still complete its pending query + return without waiting on it.
+        # wait_for IS the assertion: the reconcile is blocked until release.
+        await _aio.wait_for(sweep, timeout=5.0)
+        assert pending_called, "hot-lane pending query never ran"
+        release.set()
+        task = getattr(poller, "_fill_outcomes_reconcile_task", None)
+        if task is not None:
+            await _aio.wait_for(task, timeout=5.0)
+
+    async def test_deep_lane_settles_pending_older_than_lookback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """BUG C: tickers surfaced by pending_unsettled_tickers_aged get the
+        same /markets/{ticker} resolution path as the hot lane."""
+        monkeypatch.setenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1")
+        poller = _make_poller(monkeypatch, tmp_path)
+        del poller._sweep_orphaned_decision_outcomes
+        poller._fill_outcomes_reconciled = True
+        poller._last_deep_sweep_ts = 0.0  # force deep lane this cycle
+
+        settled_calls = []
+
+        def _settle(ticker, close_ts, **kw):
+            settled_calls.append((ticker, kw))
+
+        ledger = self._ledger(
+            monkeypatch,
+            record_settlement=_settle,
+            pending_unsettled_tickers_aged=lambda **kw: [
+                ("KXBTC15M-DEEP-TEST", 1_700_000_000.0)
+            ],
+        )
+        poller._api_call_with_retry = AsyncMock(
+            return_value={
+                "market": {
+                    "ticker": "KXBTC15M-DEEP-TEST",
+                    "status": "settled",
+                    "result": "yes",
+                    "settlement_time": "2026-11-01T00:00:00Z",
+                }
+            }
+        )
+        monkeypatch.setattr(
+            "merid.analysis.settlement_outcome_exporter.record_outcome",
+            lambda *a, **k: None,
+        )
+
+        await poller._sweep_orphaned_decision_outcomes()
+
+        assert settled_calls and settled_calls[0][0] == "KXBTC15M-DEEP-TEST"
+        assert settled_calls[0][1]["settled_yes"] is True
+
+    async def test_recheck_lane_requeues_then_settles_on_definitive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """BUG D: an UNRESOLVED ticker whose exchange result is now
+        definitive is requeued and settled through record_settlement."""
+        monkeypatch.setenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1")
+        poller = _make_poller(monkeypatch, tmp_path)
+        del poller._sweep_orphaned_decision_outcomes
+        poller._fill_outcomes_reconciled = True
+        poller._last_deep_sweep_ts = 0.0
+
+        events = []
+
+        def _requeue(ticker, close_ts):
+            events.append(("requeue", ticker))
+            return 1
+
+        def _settle(ticker, close_ts, **kw):
+            events.append(("settle", ticker, kw.get("settled_yes")))
+
+        def _bump(ticker, close_ts):
+            events.append(("bump", ticker))
+            return 0
+
+        ledger = self._ledger(
+            monkeypatch,
+            requeue_unresolved_outcomes=_requeue,
+            record_settlement=_settle,
+            bump_outcome_recheck=_bump,
+            unresolved_recheck_candidates=lambda **kw: [
+                ("KXBTC15M-UNRES-TEST", 1_700_000_000.0, "lookup_failed_after_grace")
+            ],
+        )
+        poller._api_call_with_retry = AsyncMock(
+            return_value={
+                "market": {
+                    "ticker": "KXBTC15M-UNRES-TEST",
+                    "status": "finalized",
+                    "result": "no",
+                    "settlement_time": "2026-11-01T00:00:00Z",
+                }
+            }
+        )
+        monkeypatch.setattr(
+            "merid.analysis.settlement_outcome_exporter.record_outcome",
+            lambda *a, **k: None,
+        )
+
+        await poller._sweep_orphaned_decision_outcomes()
+
+        assert ("requeue", "KXBTC15M-UNRES-TEST") in events
+        assert ("settle", "KXBTC15M-UNRES-TEST", False) in events
+        assert not any(e[0] == "bump" for e in events)
+
+    async def test_recheck_lane_ambiguous_lookup_consumes_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """BUG D bound: a non-definitive lookup bumps the attempt counter
+        and never requeues — permanently ambiguous tickers cannot loop."""
+        monkeypatch.setenv("MERID_SETTLEMENT_SWEEP_ENABLED", "1")
+        poller = _make_poller(monkeypatch, tmp_path)
+        del poller._sweep_orphaned_decision_outcomes
+        poller._fill_outcomes_reconciled = True
+        poller._last_deep_sweep_ts = 0.0
+
+        events = []
+
+        def _requeue(ticker, close_ts):
+            events.append(("requeue", ticker))
+            return 1
+
+        def _settle(ticker, close_ts, **kw):
+            events.append(("settle", ticker))
+
+        def _bump(ticker, close_ts):
+            events.append(("bump", ticker))
+            return 1
+
+        ledger = self._ledger(
+            monkeypatch,
+            requeue_unresolved_outcomes=_requeue,
+            record_settlement=_settle,
+            bump_outcome_recheck=_bump,
+            unresolved_recheck_candidates=lambda **kw: [
+                ("KXBTC15M-AMBIG-TEST", 1_700_000_000.0, "market_status_determined_after_4000s")
+            ],
+        )
+        poller._api_call_with_retry = AsyncMock(
+            return_value={
+                "market": {
+                    "ticker": "KXBTC15M-AMBIG-TEST",
+                    "status": "determined",
+                    "result": "",
+                }
+            }
+        )
+
+        await poller._sweep_orphaned_decision_outcomes()
+
+        assert ("bump", "KXBTC15M-AMBIG-TEST") in events
+        assert not any(e[0] == "requeue" for e in events)
+        assert not any(e[0] == "settle" for e in events)
 
 
 async def test_batch_audit_joins_every_settlement(monkeypatch, tmp_path):

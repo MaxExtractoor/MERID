@@ -229,6 +229,65 @@ def test_structural_gate_reasons_are_counterfactual_logged():
     assert not should_log("no market available from market state store")
 
 
+def test_gate_ev_disambiguates_epc_carried_threshold_miss():
+    """2026-11-07: ``*_edge_below_threshold`` means the gate EV cleared zero
+    but missed the dynamic bound.  When the EPC-LCB bound — not the
+    reserve-stacked net EV — carried the side over zero, raw net EV stays
+    <= 0 and the record must still resolve to EDGE_BELOW_DYNAMIC_THRESHOLD,
+    not collapse to NO_POSITIVE_EXECUTABLE_EDGE."""
+    # net EV <= 0 but gate EV (EPC-adjusted) positive: threshold miss.
+    assert canonical_terminal_code(
+        "yes_edge_below_threshold", -2.0, gate_ev_cents=1.5
+    ) == TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    assert canonical_terminal_code(
+        "no_edge_below_threshold", -4.0, gate_ev_cents=0.5
+    ) == TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    # Gate EV itself non-positive: honest no-positive-edge label.
+    assert canonical_terminal_code(
+        "yes_edge_below_threshold", 1.0, gate_ev_cents=-0.5
+    ) == TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+    # Backward compatibility: no gate_ev supplied -> net EV decides, as before.
+    assert canonical_terminal_code(
+        "yes_edge_below_threshold", -2.0
+    ) == TerminalCode.NO_POSITIVE_EXECUTABLE_EDGE.value
+    assert canonical_terminal_code(
+        "yes_edge_below_threshold", 3.0
+    ) == TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+
+
+def test_rescue_lane_reasons_map_off_ev_fallback():
+    """drift_fav / cheap_no_settle lane reasons must not fall into the
+    evaluated-economics fallback — the lane's own floor is a dynamic
+    threshold, its domain guards are structural, TTE is timing, and attempt
+    exhaustion is bounded capacity."""
+    for raw in ("drift_low_ev", "cheap_no_low_ev"):
+        assert canonical_terminal_code(raw, -3.0) == (
+            TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+        ), raw
+    for raw in ("drift_tte", "cheap_no_tte"):
+        assert canonical_terminal_code(raw, -3.0) == (
+            TerminalCode.TTE_ENTRY_CUTOFF.value
+        ), raw
+    for raw in ("drift_attempts_exhausted", "cheap_no_attempts_exhausted"):
+        assert canonical_terminal_code(raw, -3.0) == (
+            TerminalCode.EVIDENCE_HARD_BLOCK.value
+        ), raw
+    for raw in (
+        "drift_disabled",
+        "drift_band",
+        "drift_asset",
+        "drift_basis_not_bid",
+        "cheap_no_disabled",
+        "cheap_no_band",
+        "cheap_no_side",
+        "cheap_no_complement",
+        "cheap_no_basis_not_bid",
+    ):
+        assert canonical_terminal_code(raw, -3.0) == (
+            TerminalCode.STRUCTURAL_RISK_VETO.value
+        ), raw
+
+
 # --------------------------------------------------------------------------
 # compute_trade_decision: identical inputs -> identical outcome across assets
 # --------------------------------------------------------------------------

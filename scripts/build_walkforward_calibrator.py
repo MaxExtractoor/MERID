@@ -136,7 +136,14 @@ def _fit_cell(fit_p, fit_y, pooled):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=14.0)
+    ap.add_argument(
+        "--out", default=OUT,
+        help="Output path (default: the live artifact path).  The "
+             "calibration-health scheduler passes a tmp sibling which it "
+             "atomically promotes after exit 0.",
+    )
     args = ap.parse_args()
+    out_path = args.out
     since = time.time() - args.days * 86400
 
     db = sqlite3.connect(DB)
@@ -221,10 +228,10 @@ def main():
                                       "brier_raw": b0, "brier_cal": b1}
         print(f"{key:18} {n:6d} {model['method']:>13} {b0:7.4f} {b1:7.4f} {l0:6.4f} {l1:6.4f} {str(accept):>8}")
 
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w") as f:
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(artifact, f, indent=1)
-    print(f"\nwrote {OUT}  cells={len(artifact['cells'])}")
+    print(f"\nwrote {out_path}  cells={len(artifact['cells'])}")
 
 
 if __name__ == "__main__":

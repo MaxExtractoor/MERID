@@ -386,15 +386,23 @@ class TailProbabilityCalibrator:
 
 
 _cached_calibrator: Optional[TailProbabilityCalibrator] = None
+_cached_calibrator_mtime: Optional[float] = None
+_cached_calibrator_path: Optional[str] = None
 
 
 def load_tail_calibrator(
     path: Optional[Path] = None,
 ) -> Optional[TailProbabilityCalibrator]:
-    """Load a tail calibrator from disk.  Uses a process-level cache."""
-    global _cached_calibrator
-    if _cached_calibrator is not None:
-        return _cached_calibrator
+    """Load a tail calibrator from disk.
+
+    2026-11-07: mtime-aware cache (same contract as the walk-forward
+    calibrator loader).  The artifact used to be cached for the process
+    lifetime, so a scheduled/manual refit never took effect until restart —
+    the 23-day-stale artifact kept gating live decisions.  A refit now
+    hot-loads on the next call; a torn/invalid rewrite simply fails to
+    parse and the previous curve stays cached.
+    """
+    global _cached_calibrator, _cached_calibrator_mtime, _cached_calibrator_path
 
     if path is None:
         env_path = os.environ.get("MERID_TAIL_CALIBRATION_PATH")
@@ -403,14 +411,34 @@ def load_tail_calibrator(
         else:
             path = _default_calibration_path()
 
-    if not path.exists():
-        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _cached_calibrator
 
-    with open(path, "r") as f:
-        data = json.load(f)
+    if (
+        _cached_calibrator is not None
+        and _cached_calibrator_mtime == mtime
+        and _cached_calibrator_path == str(path)
+    ):
+        return _cached_calibrator
 
-    _cached_calibrator = TailProbabilityCalibrator.from_dict(data)
-    if _cached_calibrator.no_curve_is_dual:
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        calibrator = TailProbabilityCalibrator.from_dict(data)
+    except Exception as exc:
+        logger.warning(
+            "[TAIL-CALIBRATOR] reload of %s failed (%s); keeping prior curve",
+            path,
+            exc,
+        )
+        return _cached_calibrator
+
+    _cached_calibrator = calibrator
+    _cached_calibrator_mtime = mtime
+    _cached_calibrator_path = str(path)
+    if calibrator.no_curve_is_dual:
         logger.warning(
             "[TAIL-CALIBRATOR] NO curve is the YES dual (1 - p_yes) from %s; "
             "treat NO-side tail caps as provisional until re-fit on real NO-held data.",
@@ -420,5 +448,7 @@ def load_tail_calibrator(
 
 
 def clear_tail_calibrator_cache() -> None:
-    global _cached_calibrator
+    global _cached_calibrator, _cached_calibrator_mtime, _cached_calibrator_path
     _cached_calibrator = None
+    _cached_calibrator_mtime = None
+    _cached_calibrator_path = None

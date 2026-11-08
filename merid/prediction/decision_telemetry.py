@@ -177,11 +177,26 @@ def _terminal_code(
     # All raw reasons funnel through one precedence-ordered cascade so every
     # asset resolves to the same code for the same normalized inputs.
     from merid.prediction.terminal_codes import canonical_terminal_code
+    # 2026-11-07: the economics gate compares the EPC-LCB-adjusted gate EV
+    # (``*_gate_ev_cents``), not the reserve-stacked net EV.  Supplying it
+    # keeps ``edge_below_threshold`` honest when the empirical bound — not
+    # the model edge — carried the side over zero; without it those records
+    # collapsed to NO_POSITIVE_EXECUTABLE_EDGE.
+    _yes_g = _first_float(
+        _resolve(candidate, decision, ["yes_gate_ev_cents"], ["yes_gate_ev_cents"])
+    )
+    _no_g = _first_float(
+        _resolve(candidate, decision, ["no_gate_ev_cents"], ["no_gate_ev_cents"])
+    )
+    _gate_ev = max(
+        (v for v in (_yes_g, _no_g) if v is not None), default=None
+    )
     return canonical_terminal_code(
         rl,
         best_ev_cents,
         regime_reject_cause=(decision or {}).get("regime_reject_cause"),
         candidate_present=candidate is not None,
+        gate_ev_cents=_gate_ev,
     )
 
 
