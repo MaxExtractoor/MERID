@@ -13,6 +13,7 @@ live trading path.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import json
 import logging
@@ -381,7 +382,15 @@ class DecisionAuditLedger:
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else _DB_PATH
-        self._lock = threading.Lock()
+        # 2026-11-08: RLock so queued write items may re-enter the lock when
+        # they run inside a writer batch — the writer thread already holds it
+        # across the whole group commit (see _write_tx / _run_queued_batch).
+        self._lock = threading.RLock()
+        # Writer-thread-local batch state: when a group commit is in flight,
+        # _write_tx yields the shared conn under a per-item SAVEPOINT instead
+        # of committing per item.
+        self._batch = threading.local()
+        self._last_batch_size = 1
         # 2026-11-04: separate lock for writer-thread startup.  ``self._lock``
         # serializes every shared-connection write txn; _submit_write used it
         # just to spawn the writer thread, so each audit submitter parked
@@ -529,7 +538,9 @@ class DecisionAuditLedger:
         """
         if reason not in self._sample_reasons:
             return False
-        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "1500"))
+        # Same soft-depth default as _shed_admit — a 1500 fallback here left
+        # noise-class rejections unsampled across the 700-1500 depth band.
+        soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "700"))
         if self._write_queue.qsize() < soft:
             return False
         minute = int(time.time() // 60)
@@ -650,93 +661,220 @@ class DecisionAuditLedger:
             return
         self._write_queue.put_nowait((fn, time.monotonic(), priority))
 
-    def _writer_main(self) -> None:
-        from merid.observability import latency_budget as _lat
-        while True:
-            fn, enqueued_mono, _prio = self._write_queue.get()
-            # In-flight accounting: queue[0] no longer sees this item once
-            # dequeued — a stalled required item with an empty queue must still
-            # read as unhealthy.  Non-"low" priority is required evidence.
-            self._inflight = (enqueued_mono, time.monotonic(), _prio)
+    @contextlib.contextmanager
+    def _write_tx(self):
+        """Serialized write transaction on the shared connection.
+
+        Non-batch callers (synchronous paths, single queued items) keep the
+        historical behavior: ``self._lock`` + per-call commit via
+        ``with conn:``.  Inside a writer batch the writer thread already
+        holds the lock and one outer ``BEGIN IMMEDIATE``; this yields the
+        shared conn wrapped in a per-item SAVEPOINT instead, so each queued
+        item keeps its own atomic rollback boundary while the whole batch
+        shares a single commit — group commit, the standard fix for
+        commit-bound writer throughput on slow disks (each per-item commit
+        is a WAL append + journal barrier; batching removes N-1 of them).
+        """
+        _b = getattr(self, "_batch", None)
+        if _b is not None and getattr(_b, "in_batch", False):
+            conn = self._conn()
+            _b.sp_seq = getattr(_b, "sp_seq", 0) + 1
+            sp = "awsp_%d" % _b.sp_seq
+            conn.execute("SAVEPOINT %s" % sp)
             try:
-                _lat.record(
-                    "audit_write_wait_ms",
-                    (time.monotonic() - enqueued_mono) * 1000.0,
-                )
-                _t0 = time.monotonic()
-                fn()
-                _lat.record(
-                    "audit_write_exec_ms",
-                    (time.monotonic() - _t0) * 1000.0,
-                )
-            except Exception as exc:  # defensive; impls already swallow
-                # 2026-11-02: a cached writer connection poisoned by
-                # SQLITE_READONLY(_RECOVERY) never self-heals — without
-                # invalidation every subsequent task reuses it and fails
-                # forever (1529 writes dropped in one session on 2026-11-02).
-                # Drop the handle so the next task reconnects; recovery
-                # reruns on the fresh connection.  The failed item keeps its
-                # durable failure record below — it is not silently retried.
-                if "readonly" in str(exc).lower():
-                    self._drop_shared_conn()
-                if _prio != "low":
-                    self._failed_required_writes = (
-                        getattr(self, "_failed_required_writes", 0) + 1
-                    )
-                    # Durable record: a restart must not masquerade as
-                    # recovery of lost evidence.  Reconciliation is explicit.
+                yield conn
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK TO %s" % sp)
+                finally:
                     try:
-                        import json as _json
-                        import uuid as _uuid
-                        _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
-                        with open(_fpath, "a", encoding="utf-8") as _fh:
-                            _fh.write(_json.dumps({
-                                "kind": "failure",
-                                "failure_id": _uuid.uuid4().hex[:12],
-                                "run_id": getattr(self, "_run_id", None)
-                                          or os.environ.get("MERID_RUN_ID"),
-                                "item_enqueued_mono": enqueued_mono,
-                                "ts": time.time(), "priority": _prio,
-                                "error": str(exc)[:200],
-                            }) + "\n")
-                    except Exception:
-                        # Failure-ledger write failed: drop a sentinel via a
-                        # different path so a later startup cannot silently
-                        # report healthy without explicit reconciliation.
-                        try:
-                            (self.db_path.parent
-                             / "decision_audit_writer_failures.DEGRADED"
-                             ).write_text(str(time.time()))
-                        except Exception:
-                            pass
-                logger.warning("[DECISION-AUDIT-LEDGER] writer error: %s", exc)
-            finally:
-                self._inflight = None
-                self._write_queue.task_done()
-                # Commit-observability heartbeat (2026-11-01 audit F0): a
-                # growing queue with zero visible commits is indistinguishable
-                # from a stalled writer without it.  Records last-service time,
-                # queue depth, and oldest-queued age for readiness checks.
-                self._last_commit_mono = time.monotonic()
-                _hb = getattr(self, "_last_writer_heartbeat_mono", 0.0)
-                if self._last_commit_mono - _hb >= 60.0:
-                    self._last_writer_heartbeat_mono = self._last_commit_mono
-                    _oldest_age = 0.0
-                    try:
-                        with self._write_queue.mutex:
-                            if self._write_queue.queue:
-                                _oldest_age = (
-                                    self._last_commit_mono
-                                    - self._write_queue.queue[0][1]
-                                )
+                        conn.execute("RELEASE %s" % sp)
                     except Exception:
                         pass
-                    logger.info(
-                        "[DECISION-AUDIT-LEDGER] writer heartbeat: "
-                        "queue_depth=%d oldest_queued_age_s=%.1f",
-                        self._write_queue.qsize(),
-                        _oldest_age,
-                    )
+                raise
+            try:
+                conn.execute("RELEASE %s" % sp)
+            except Exception:
+                # An inner ``with conn:`` may already have committed the
+                # batch txn (releasing all savepoints) — the item's writes
+                # are durable either way, so this is not a failure.
+                pass
+            return
+        with self._lock, self._conn() as conn:
+            yield conn
+
+    def _writer_main(self) -> None:
+        batch_max = max(
+            1, int(os.environ.get("MERID_AUDIT_WRITER_BATCH", "128"))
+        )
+        while True:
+            fn, enqueued_mono, _prio = self._write_queue.get()
+            items = [(fn, enqueued_mono, _prio)]
+            if batch_max > 1:
+                # Group commit: drain everything already queued — nothing
+                # waits to form a batch, so a lone write on an idle store is
+                # still its own transaction and no latency is traded.
+                try:
+                    while len(items) < batch_max:
+                        items.append(self._write_queue.get_nowait())
+                except queue.Empty:
+                    pass
+            self._last_batch_size = len(items)
+            if len(items) == 1:
+                self._service_item(fn, enqueued_mono, _prio)
+            else:
+                self._run_queued_batch(items)
+
+    def _run_queued_batch(self, items: List[Tuple[Callable[[], None], float, str]]) -> None:
+        """Service queued writes inside one outer BEGIN IMMEDIATE/COMMIT.
+
+        Per-item SAVEPOINTs (via _write_tx) preserve each item's atomicity;
+        a failure rolls back only that item and the batch continues.  If the
+        outer commit itself fails, every required-priority item gets the
+        same durable failure record a standalone failure would — a restart
+        must reconcile the lost batch explicitly, never masquerade as
+        recovery.
+        """
+        _b = getattr(self, "_batch", None)
+        if _b is None:
+            _b = self._batch = threading.local()
+        _b.in_batch = True
+        _b.sp_seq = 0
+        conn = None
+        serviced = 0
+        try:
+            # Schema init uses its own isolation_level=None connection; run it
+            # before the batch txn so a queued _ensure_db item cannot sit in
+            # busy-timeout against the write txn the batch itself holds.
+            try:
+                self._ensure_db()
+            except Exception:
+                pass
+            with self._lock:
+                conn = self._conn()
+                if conn.in_transaction:
+                    conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                for fn, enq, prio in items:
+                    self._service_item(fn, enq, prio)
+                    serviced += 1
+                if conn.in_transaction:
+                    conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] batch commit failed (%d items, "
+                "%d serviced): %s",
+                len(items), serviced, exc,
+            )
+            try:
+                if conn is not None and conn.in_transaction:
+                    conn.rollback()
+            except Exception:
+                pass
+            if "readonly" in str(exc).lower() or "closed" in str(exc).lower():
+                self._drop_shared_conn()
+            # Every required-priority item in the batch needs a durable
+            # failure record — serviced items rolled back with the txn,
+            # unserviced ones never ran.  Unserviced items also still owe
+            # task_done or drain_write_queue's queue.join() would hang.
+            for _idx, (_fn, _enq, _prio) in enumerate(items):
+                if _idx >= serviced:
+                    self._inflight = None
+                    self._write_queue.task_done()
+                if _prio != "low":
+                    self._record_write_failure(_enq, _prio, "batch_commit: %s" % exc)
+        finally:
+            _b.in_batch = False
+
+    def _record_write_failure(self, enqueued_mono: float, prio: str, error: str) -> None:
+        """Durable record of a lost required write (shared by item/batch paths)."""
+        self._failed_required_writes = (
+            getattr(self, "_failed_required_writes", 0) + 1
+        )
+        try:
+            import json as _json
+            import uuid as _uuid
+            _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
+            with open(_fpath, "a", encoding="utf-8") as _fh:
+                _fh.write(_json.dumps({
+                    "kind": "failure",
+                    "failure_id": _uuid.uuid4().hex[:12],
+                    "run_id": getattr(self, "_run_id", None)
+                              or os.environ.get("MERID_RUN_ID"),
+                    "item_enqueued_mono": enqueued_mono,
+                    "ts": time.time(), "priority": prio,
+                    "error": str(error)[:200],
+                }) + "\n")
+        except Exception:
+            # Failure-ledger write failed: drop a sentinel via a
+            # different path so a later startup cannot silently
+            # report healthy without explicit reconciliation.
+            try:
+                (self.db_path.parent
+                 / "decision_audit_writer_failures.DEGRADED"
+                 ).write_text(str(time.time()))
+            except Exception:
+                pass
+
+    def _service_item(self, fn: Callable[[], None], enqueued_mono: float, _prio: str) -> None:
+        from merid.observability import latency_budget as _lat
+        # In-flight accounting: queue[0] no longer sees this item once
+        # dequeued — a stalled required item with an empty queue must still
+        # read as unhealthy.  Non-"low" priority is required evidence.
+        self._inflight = (enqueued_mono, time.monotonic(), _prio)
+        try:
+            _lat.record(
+                "audit_write_wait_ms",
+                (time.monotonic() - enqueued_mono) * 1000.0,
+            )
+            _t0 = time.monotonic()
+            fn()
+            _lat.record(
+                "audit_write_exec_ms",
+                (time.monotonic() - _t0) * 1000.0,
+            )
+        except Exception as exc:  # defensive; impls already swallow
+            # 2026-11-02: a cached writer connection poisoned by
+            # SQLITE_READONLY(_RECOVERY) never self-heals — without
+            # invalidation every subsequent task reuses it and fails
+            # forever (1529 writes dropped in one session on 2026-11-02).
+            # Drop the handle so the next task reconnects; recovery
+            # reruns on the fresh connection.  The failed item keeps its
+            # durable failure record below — it is not silently retried.
+            if "readonly" in str(exc).lower():
+                self._drop_shared_conn()
+            if _prio != "low":
+                self._record_write_failure(enqueued_mono, _prio, str(exc))
+            logger.warning("[DECISION-AUDIT-LEDGER] writer error: %s", exc)
+        finally:
+            self._inflight = None
+            self._write_queue.task_done()
+            # Commit-observability heartbeat (2026-11-01 audit F0): a
+            # growing queue with zero visible commits is indistinguishable
+            # from a stalled writer without it.  Records last-service time,
+            # queue depth, and oldest-queued age for readiness checks.
+            self._last_commit_mono = time.monotonic()
+            _hb = getattr(self, "_last_writer_heartbeat_mono", 0.0)
+            if self._last_commit_mono - _hb >= 60.0:
+                self._last_writer_heartbeat_mono = self._last_commit_mono
+                _oldest_age = 0.0
+                try:
+                    with self._write_queue.mutex:
+                        if self._write_queue.queue:
+                            _oldest_age = (
+                                self._last_commit_mono
+                                - self._write_queue.queue[0][1]
+                            )
+                except Exception:
+                    pass
+                logger.info(
+                    "[DECISION-AUDIT-LEDGER] writer heartbeat: "
+                    "queue_depth=%d oldest_queued_age_s=%.1f "
+                    "last_batch_size=%d",
+                    self._write_queue.qsize(),
+                    _oldest_age,
+                    self._last_batch_size,
+                )
 
     def writer_health(self) -> Dict[str, Any]:
         """Live writer-queue observability for readiness/lag gates."""
@@ -817,6 +955,7 @@ class DecisionAuditLedger:
                 self, "_failures_integrity_ok", True),
             "unhealthy": unhealthy,
             "lag_budget_s": lag_budget,
+            "last_batch_size": getattr(self, "_last_batch_size", 1),
         }
 
     def acknowledge_failed_writes(
@@ -1456,9 +1595,10 @@ class DecisionAuditLedger:
             }
             _pre_failed = ["pre_decision_pipeline"]
 
-            with self._lock, self._conn() as conn:
+            with self._write_tx() as conn:
                 # Atomic bundle for pre-decision rejections: decision + snapshot + pending outcome.
-                conn.execute("BEGIN IMMEDIATE")
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     INSERT INTO strategy_decisions (
@@ -1749,8 +1889,9 @@ class DecisionAuditLedger:
 
         def _write() -> None:
             try:
-                with self._lock, self._conn() as conn:
-                    conn.execute("BEGIN IMMEDIATE")
+                with self._write_tx() as conn:
+                    if not conn.in_transaction:
+                        conn.execute("BEGIN IMMEDIATE")
                     _result["event_id"] = self._append_decision_event_locked(
                         conn,
                         decision_id=decision_id,
@@ -1811,8 +1952,9 @@ class DecisionAuditLedger:
             return 0
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
+            with self._write_tx() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     """
                     SELECT d.decision_id, d.asset, d.run_id
@@ -1875,7 +2017,7 @@ class DecisionAuditLedger:
 
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
+            with self._write_tx() as conn:
                 conn.execute(
                     """
                     UPDATE strategy_decision_outcomes
@@ -1980,7 +2122,7 @@ class DecisionAuditLedger:
 
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
+            with self._write_tx() as conn:
                 return self._record_entry_fill_locked(
                     conn,
                     decision_id=decision_id,
@@ -2647,7 +2789,7 @@ class DecisionAuditLedger:
                                 "settlement_value_cents"
                             ],
                         )
-                        with self._lock, self._conn() as conn:
+                        with self._write_tx() as conn:
                             before = conn.execute(
                                 "SELECT actual_fill_price_cents, realized_net_pnl_cents "
                                 "FROM strategy_decision_outcomes WHERE decision_id = ?",
@@ -2832,7 +2974,7 @@ class DecisionAuditLedger:
                 int(os.environ.get("MERID_SETTLEMENT_WRITE_BATCH", "25")),
             )
             for _b0 in range(0, len(prepared), _settle_batch):
-                with self._lock, self._conn() as conn:
+                with self._write_tx() as conn:
                     self._settle_prepared_batch(
                         conn,
                         prepared[_b0:_b0 + _settle_batch],
@@ -3951,8 +4093,9 @@ class DecisionAuditLedger:
             return 0
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
+            with self._write_tx() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute(
                     f"""
                     UPDATE strategy_decision_outcomes
@@ -3993,8 +4136,9 @@ class DecisionAuditLedger:
             return 0
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
+            with self._write_tx() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     f"""
                     SELECT d.decision_id, d.asset, d.run_id, o.unresolved_reason
@@ -4063,7 +4207,7 @@ class DecisionAuditLedger:
             return
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
+            with self._write_tx() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO decision_audit_gaps (
@@ -4109,7 +4253,7 @@ class DecisionAuditLedger:
             return
         self._ensure_db()
         try:
-            with self._lock, self._conn() as conn:
+            with self._write_tx() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO decision_audit_heartbeats (
@@ -4617,9 +4761,10 @@ class DecisionAuditLedger:
             exclusion_reason = getattr(decision, "no_trade_reason", None) or primary_reason
 
         # Insert core decision row.
-        with self._lock, self._conn() as conn:
+        with self._write_tx() as conn:
             # One atomic bundle: decision, snapshot, both side-EV rows, pending outcome.
-            conn.execute("BEGIN IMMEDIATE")
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             shadow_cohort = (indicators or {}).get("shadow_cohort")
             shadow_cohort_json = json.dumps(shadow_cohort, default=str) if shadow_cohort is not None else None
 

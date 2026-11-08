@@ -908,3 +908,15 @@ Counterfactual rows in the funnel are not guaranteed fills or independent
 profitable trades. Pinned-fav offline fixtures must redirect
 `MERID_PROVISIONAL_STATE_PATH` too: otherwise production markout history
 (e.g. a 21.5c ASR) changes unrelated admission-test economics.
+
+2026-11-08 writer-throughput repair: the audit writer now group-commits —
+`_writer_main` drains everything already queued (up to
+`MERID_AUDIT_WRITER_BATCH`, default 128) into one `BEGIN IMMEDIATE`/commit
+via `_write_tx` per-item SAVEPOINTs, so per-item commits no longer bound
+drain rate on the spindle. A failed batch still records durable
+`decision_audit_writer_failures.jsonl` entries per required item; the
+`audit_writer_unhealthy` entry gate, lag budget, and reconciliation
+contract are unchanged — readiness is earned by draining, not by relaxing
+the gate. The `MERID_AUDIT_SHED_DEPTH` fallback in
+`_sampled_out_rejection` was also aligned to `_shed_admit`'s 700 so
+noise-class rejection sampling engages inside the 700–1500 band.
