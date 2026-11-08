@@ -281,6 +281,15 @@ def canonical_terminal_code(
         # cheap_no mirrors are lane-domain guards — structural vetoes,
         # not economics failures.
         return TerminalCode.STRUCTURAL_RISK_VETO.value
+    # 2026-11-08: reversal-scalp lane codes — TTE window miss is a timing
+    # cutoff, the EV floor miss is a threshold failure, and the price-band /
+    # disabled residuals are structural lane vetoes.
+    if rl.startswith("reversal_scalp_tte"):
+        return TerminalCode.TTE_ENTRY_CUTOFF.value
+    if rl.startswith("reversal_scalp_low_ev"):
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    if rl.startswith("reversal_scalp"):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
     if (
         rl.startswith("countertrend_")
         or rl.startswith("bookflow_")

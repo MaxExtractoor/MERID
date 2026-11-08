@@ -564,6 +564,134 @@ def trendside_entry_block(
             )
     return None
 
+
+# ---------------------------------------------------------------------------
+# Reversal-scalp lane (2026-11-08)
+# ---------------------------------------------------------------------------
+#
+# The trend-side whipsaw guard above treats the confirmed-regime + opposite
+# fast-leg signature purely as a *veto*: a V-bottomed selloff or a
+# blow-off-topped rally blocks the exhausted trend side but the countertrend
+# side remains vetoed by ``regime_entry_block`` /
+# ``countertrend_lane_block`` — so the system sat out exactly the moments
+# where momentum had measurably flipped.  External evidence agrees the
+# salvage is real but conditional: naive momentum-following loses after
+# fees (Windmill 2026-10: -3.35c/contract pooled), while momentum entries
+# restricted to a strong confirmed move, a mid-window TTE, and a bounded
+# price are the cohort that measured positive.  The lane therefore admits
+# the *countertrend* side only when all of:
+#
+#   * the regime is ``*_CONFIRMED`` and the caller-side is the side the
+#     countertrend veto would block (``reversal_scalp_match``),
+#   * the fast RTI leg has reversed against the regime by at least
+#     ``MERID_REVERSAL_MIN_BOUNCE_BP`` (default 15bp — strictly stronger
+#     than the 10bp trend-guard veto arm, so admission requires the bounce
+#     to be established, not just present),
+#   * the executable own-side price is inside the lane band (defaults
+#     5-60c: a reversal candidate still cheap enough to carry the scalp's
+#     asymmetric payoff; >=60c means the flip is already priced in),
+#   * TTE is inside ``MERID_REVERSAL_TTE_{LO,HI}_S`` (defaults 120-600s —
+#     the measured late-convergence window; earlier bounces are noise and
+#     sub-2-minute books are liquidity-collapsed), and
+#   * reserve-stacked net EV clears ``MERID_REVERSAL_MIN_EV_CENTS``.
+#
+# The lane exempts ONLY the countertrend regime veto, the countertrend
+# cold-start lane, conviction, and the generic price cap (its own band is
+# stricter).  Depth, tail guard, evidence, side throttle, book flow, the
+# coin-flip veto, the trend-side guard, and the counter-model veto (unless
+# explicitly exempted by the caller lane semantics) all still bind.
+# ``decision_lane="reversal_scalp"`` keeps its fills/vetoes in a separate
+# evidence pool; built OFF (``MERID_REVERSAL_SCALP_ENABLED=0``) so enabling
+# stays a measured operator decision.
+
+
+def reversal_scalp_enabled() -> bool:
+    return _env_flag("MERID_REVERSAL_SCALP_ENABLED", False)
+
+
+def _rev_min_bounce_frac() -> float:
+    # Stronger than the 10bp trend-guard veto arm by default: a 10bp bounce
+    # vetoes the trend side; >=15bp is the admission-grade flip.
+    return _env_float("MERID_REVERSAL_MIN_BOUNCE_BP", 15.0) / 10000.0
+
+
+def _rev_price_lo() -> float:
+    return _env_float("MERID_REVERSAL_PRICE_LO_CENTS", 5.0)
+
+
+def _rev_price_hi() -> float:
+    return _env_float("MERID_REVERSAL_PRICE_HI_CENTS", 60.0)
+
+
+def _rev_min_tte() -> float:
+    return _env_float("MERID_REVERSAL_MIN_TTE_S", 120.0)
+
+
+def _rev_max_tte() -> float:
+    return _env_float("MERID_REVERSAL_MAX_TTE_S", 600.0)
+
+
+def _rev_min_ev_cents() -> float:
+    return _env_float("MERID_REVERSAL_MIN_EV_CENTS", 1.0)
+
+
+def reversal_scalp_match(
+    side: str,
+    regime: Optional[DirectionalRegime],
+    rti_fast: Optional[float],
+) -> bool:
+    """Arm condition — flag-independent, like ``pinned_fav_band_match``.
+
+    True when the regime is confirmed AND ``side`` is the countertrend side
+    AND the fast RTI leg has reversed against the regime by at least the
+    admission bounce.  ``compute_trade_decision`` consults this
+    unconditionally so a matched-but-disarmed candidate records the
+    ``reversal_scalp_disabled`` label for the near-miss cohort.
+    """
+    if regime is None or rti_fast is None or not math.isfinite(rti_fast):
+        return False
+    thr = _rev_min_bounce_frac()
+    if regime.label == "SELL_OFF_CONFIRMED" and side == "yes":
+        return rti_fast >= thr
+    if regime.label == "RALLY_CONFIRMED" and side == "no":
+        return rti_fast <= -thr
+    return False
+
+
+def reversal_scalp_block(
+    price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+) -> Optional[str]:
+    """Strict economics gate for a matched reversal-scalp candidate.
+
+    Applies only when ``reversal_scalp_match`` already holds; each failure
+    names the violated condition.  Missing price/EV/TTE fail closed — a
+    momentum scalp with an unmeasurable cost basis is a veto, not a pass.
+    """
+    if not reversal_scalp_enabled():
+        return None
+    px = _finite_or_none(price_cents)
+    if px is None or not (_rev_price_lo() <= px <= _rev_price_hi()):
+        return (
+            f"reversal_scalp_price:{px if px is not None else 'none'}"
+            f"_outside_{_rev_price_lo():.0f}-{_rev_price_hi():.0f}c"
+        )
+    tte = _finite_or_none(tte_seconds)
+    if tte is None or not (_rev_min_tte() <= tte <= _rev_max_tte()):
+        return (
+            f"reversal_scalp_tte:{tte if tte is not None else 'none'}"
+            f"_outside_{_rev_min_tte():.0f}-{_rev_max_tte():.0f}s"
+        )
+    ev = _finite_or_none(net_ev_cents)
+    if ev is None or ev < _rev_min_ev_cents():
+        return (
+            f"reversal_scalp_low_ev:{ev if ev is not None else 'none'}"
+            f"<{_rev_min_ev_cents():.1f}c"
+        )
+    return None
+
+
 _CONVICTION_DEFAULTS = {"BTC": 0.06, "ETH": 0.06, "SOL": 0.07, "XRP": 0.07, "DOGE": 0.08}
 
 

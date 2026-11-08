@@ -61,6 +61,10 @@ def _src(path: Path) -> str:
 # H1 — Provider timestamp used; wall-clock only as fallback
 # =============================================================================
 
+@pytest.mark.skipif(
+    not MARKET_DATA_STREAM_SRC.exists(),
+    reason="streams/market_data_stream.py removed — legacy market stream gone",
+)
 class TestH1_TimestampClobber:
     """_create_market_event must parse the provider's timestamp field and use
     it for both MarketTick.timestamp and EventEnvelope.timestamp.  The

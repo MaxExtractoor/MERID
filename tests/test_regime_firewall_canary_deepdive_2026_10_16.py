@@ -313,7 +313,18 @@ async def test_forced_exit_resizes_to_available_depth():
     _mock_position_and_book(
         no_bids=[(45, 1), (44, 1)], yes_exposure_cc=-500
     )  # 2 contracts depth vs 5 requested
-    canonical = _canonical(qty_cc=500, expected_position_before=-500)
+    # 2026-10-17 structured authorization: a bare reason string cannot mint
+    # forced-exit authority — supply the same tuple a real stop_candidate
+    # hard_stop carries (class + type + issuer + generation binding to the
+    # position's resolved parent fill "fill_entry_1").
+    canonical = _canonical(
+        qty_cc=500,
+        expected_position_before=-500,
+        exit_class="emergency",
+        emergency_type="GENERIC_EMERGENCY",
+        authorization_source="stop_candidate",
+        position_generation_id="fill_entry_1",
+    )
     decision = await ExecutionRiskFirewall.get_instance().validate_exit(
         canonical
     )

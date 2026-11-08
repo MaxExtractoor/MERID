@@ -90,6 +90,9 @@ _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     ("router_rejected", "router"),
     ("entry_trap_veto", "entry_trap"),
     ("net_edge_non_positive", "ev_gate"),
+    # 2026-11-08: reversal-scalp lane vetoes (price band / TTE / EV floor /
+    # disabled near-miss) attribute to their own gate, not a generic lane.
+    ("reversal_scalp", "reversal_lane"),
 )
 
 

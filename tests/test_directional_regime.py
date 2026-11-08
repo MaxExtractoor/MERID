@@ -1,4 +1,5 @@
 """Tests for merid.prediction.directional_regime — post-drawdown controls."""
+import dataclasses
 import os
 import sys
 import types
@@ -311,6 +312,8 @@ def throttle_path(tmp_path, monkeypatch):
     monkeypatch.delenv("MERID_SIDE_THROTTLE_SUSPEND_S", raising=False)
     monkeypatch.delenv("MERID_SIDE_THROTTLE_REVIEW_COUNT", raising=False)
     monkeypatch.delenv("MERID_SIDE_THROTTLE_LOSS_WINDOW_S", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_CAUTION_S", raising=False)
+    monkeypatch.delenv("MERID_SIDE_THROTTLE_CAUTION_EV_CENTS", raising=False)
     dr._throttle_cache = (0.0, {})
     yield str(p)
     dr._throttle_cache = (0.0, {})
@@ -686,3 +689,124 @@ def test_trend_yes_hi_strict_gate(regime_state, throttle_path, monkeypatch):
     # Out-of-window prices fail closed when armed (95-99c never admitted).
     assert dr.trend_yes_hi_block("BTC", 95.0, 0.97, 5.0, 200.0, reg, snap) == "trend_yes_hi_band"
     assert dr.trend_yes_hi_block("BTC", 89.0, 0.97, 5.0, 200.0, reg, snap) == "trend_yes_hi_band"
+
+
+# --------------------------------------------------- reversal-scalp lane ----
+#
+# 2026-11-08: the whipsaw signature that vetoes the exhausted trend side is
+# the admission signature for the countertrend momentum flip.  The lane is
+# bounded (price band / TTE window / EV floor), env-gated OFF by default,
+# and measured under decision_lane="reversal_scalp".
+
+
+def _confirmed_regime(direction, monkeypatch):
+    """Drive the regime EMA to a confirmed label."""
+    if direction == "selloff":
+        snap = _snap_map(BTC=-0.001, ETH=-0.002, SOL=-0.001, XRP=-0.0005, DOGE=0.001)
+    else:
+        snap = _snap_map(BTC=0.001, ETH=0.002, SOL=0.001, XRP=0.0005, DOGE=-0.001)
+    return _drive(snap, ticks=3)
+
+
+def _synth_regime(label):
+    """Directly constructed confirmed regime — the hysteresis state machine
+    is covered by the regime tests above; lane tests need the label only."""
+    return dr.DirectionalRegime(
+        label=label,
+        breadth60_pos=4,
+        breadth60_total=5,
+        btc_r60=-0.001 if label.startswith("SELL") else 0.001,
+        asset_r60={},
+        ts=0.0,
+    )
+
+
+def test_reversal_scalp_disabled_by_default(regime_state, monkeypatch):
+    monkeypatch.delenv("MERID_REVERSAL_SCALP_ENABLED", raising=False)
+    assert dr.reversal_scalp_enabled() is False
+    reg = _confirmed_regime("selloff", monkeypatch)
+    # Match is flag-independent — the disarmed near-miss cohort is still
+    # measurable — but the block gate is inert.
+    assert dr.reversal_scalp_match("yes", reg, 0.002) is True
+    assert dr.reversal_scalp_block(30.0, 5.0, 300.0) is None
+
+
+def test_reversal_scalp_match_requires_confirmed_and_bounce(regime_state, monkeypatch):
+    reg = _confirmed_regime("selloff", monkeypatch)
+    assert reg.label == "SELL_OFF_CONFIRMED"
+    # Countertrend YES with a >=15bp up-bounce matches; smaller bounces and
+    # the trend side do not.
+    assert dr.reversal_scalp_match("yes", reg, 0.0020) is True
+    assert dr.reversal_scalp_match("yes", reg, 0.0010) is False  # < default 15bp
+    assert dr.reversal_scalp_match("yes", reg, -0.0030) is False  # wrong direction
+    assert dr.reversal_scalp_match("no", reg, 0.0030) is False   # trend side
+    # Mirror: RALLY_CONFIRMED + down-bounce matches NO.  (A confirmed→
+    # confirmed flip cannot occur in one tick under hysteresis — covered by
+    # test_regime_no_whipsaw_on_single_tick — so build the label directly.)
+    reg_r = _synth_regime("RALLY_CONFIRMED")
+    assert dr.reversal_scalp_match("no", reg_r, -0.0020) is True
+    assert dr.reversal_scalp_match("no", reg_r, -0.0010) is False
+    assert dr.reversal_scalp_match("yes", reg_r, -0.0030) is False
+    # Non-confirmed labels never match; missing leg degrades to no-match.
+    neutral = _drive(_snap_all(0.0), start=2_000_000.0)
+    assert dr.reversal_scalp_match("yes", neutral, 0.005) is False
+    assert dr.reversal_scalp_match("yes", reg, None) is False
+    assert dr.reversal_scalp_match("yes", None, 0.005) is False
+
+
+def test_reversal_scalp_bounce_threshold_env(regime_state, monkeypatch):
+    reg = _confirmed_regime("selloff", monkeypatch)
+    monkeypatch.setenv("MERID_REVERSAL_MIN_BOUNCE_BP", "25")
+    assert dr.reversal_scalp_match("yes", reg, 0.0020) is False
+    assert dr.reversal_scalp_match("yes", reg, 0.0030) is True
+
+
+def test_reversal_scalp_strict_gate(regime_state, monkeypatch):
+    monkeypatch.setenv("MERID_REVERSAL_SCALP_ENABLED", "1")
+    monkeypatch.setenv("MERID_REVERSAL_PRICE_LO_CENTS", "5")
+    monkeypatch.setenv("MERID_REVERSAL_PRICE_HI_CENTS", "60")
+    monkeypatch.setenv("MERID_REVERSAL_MIN_TTE_S", "120")
+    monkeypatch.setenv("MERID_REVERSAL_MAX_TTE_S", "600")
+    monkeypatch.setenv("MERID_REVERSAL_MIN_EV_CENTS", "1.0")
+    # Clean pass inside the bounded domain.
+    assert dr.reversal_scalp_block(30.0, 2.5, 300.0) is None
+    # Each strict condition vetoes with a named reason.
+    blk = dr.reversal_scalp_block(70.0, 2.5, 300.0)
+    assert blk and blk.startswith("reversal_scalp_price")
+    blk = dr.reversal_scalp_block(2.0, 2.5, 300.0)
+    assert blk and blk.startswith("reversal_scalp_price")
+    blk = dr.reversal_scalp_block(30.0, 2.5, 60.0)
+    assert blk and blk.startswith("reversal_scalp_tte")
+    blk = dr.reversal_scalp_block(30.0, 2.5, 700.0)
+    assert blk and blk.startswith("reversal_scalp_tte")
+    blk = dr.reversal_scalp_block(30.0, 0.5, 300.0)
+    assert blk and blk.startswith("reversal_scalp_low_ev")
+    blk = dr.reversal_scalp_block(30.0, -4.0, 300.0)
+    assert blk and blk.startswith("reversal_scalp_low_ev")
+
+
+def test_reversal_scalp_missing_inputs_fail_closed(regime_state, monkeypatch):
+    """A momentum scalp with unmeasurable cost basis vetoes, not passes."""
+    monkeypatch.setenv("MERID_REVERSAL_SCALP_ENABLED", "1")
+    blk = dr.reversal_scalp_block(None, 2.5, 300.0)
+    assert blk and blk.startswith("reversal_scalp_price")
+    blk = dr.reversal_scalp_block(30.0, None, 300.0)
+    assert blk and blk.startswith("reversal_scalp_low_ev")
+    blk = dr.reversal_scalp_block(30.0, 2.5, None)
+    assert blk and blk.startswith("reversal_scalp_tte")
+
+
+def test_reversal_scalp_bounce_stronger_than_veto_arm(regime_state, monkeypatch):
+    """The 10bp trend-guard veto arm may fire on a bounce too weak to admit
+    — the scalp admission floor defaults strictly above it so a marginal
+    flicker blocks the trend side without opening the flip."""
+    monkeypatch.delenv("MERID_REVERSAL_MIN_BOUNCE_BP", raising=False)
+    reg = dataclasses.replace(_synth_regime("SELL_OFF_CONFIRMED"), label_age_s=120.0)
+    veto_arm = dr._trend_bounce_frac()
+    admit_arm = dr._rev_min_bounce_frac()
+    assert admit_arm > veto_arm
+    # Between the two thresholds: trend side vetoed AND no scalp match.
+    mid = (veto_arm + admit_arm) / 2.0
+    blk = dr.trendside_entry_block(reg, "no", -1.0, 40.0, mid)
+    assert blk and blk.startswith("trend_bounce_detected")
+    assert dr.reversal_scalp_match("yes", reg, mid) is False

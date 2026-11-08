@@ -41,6 +41,18 @@ from merid.prediction import directional_regime as dr
 from merid.prediction.agent_grid_15m import _probe_restricted_evidence
 
 
+@pytest.fixture(autouse=True)
+def _envelope_env_pinned(monkeypatch):
+    """Pin the envelope arm knobs to their code defaults — the production
+    .env relaxes MERID_EXIT_ENVELOPE_PROFIT_LOCK_C (5c) and these tests
+    assert the audited 10c arm regardless of operator configuration."""
+    monkeypatch.delenv("MERID_EXIT_ENVELOPE_PROFIT_LOCK_C", raising=False)
+    monkeypatch.delenv("MERID_EXIT_ENVELOPE_TRAIL_LOCK_C", raising=False)
+    monkeypatch.delenv("MERID_EXIT_ENVELOPE_PROBE_LOCK_C", raising=False)
+    monkeypatch.delenv("MERID_EXIT_ENVELOPE_BID_CENTS", raising=False)
+    monkeypatch.delenv("MERID_EXIT_ENVELOPE_TTE_S", raising=False)
+
+
 # ---------------------------------------------------------------- A --------
 # Locked-gain envelope arm.
 
@@ -216,12 +228,13 @@ def test_probe_not_restricted_on_clean_evidence() -> None:
     assert not restricted
 
 
-def test_probe_max_contracts_default_three(monkeypatch) -> None:
-    # 2026-10-19: probe cap aligned to the 3-contract order/exposure caps
-    # (MERID_MAX_CONTRACTS_PER_ORDER=3, MERID_BOUNDED_LANE_MAX_CONTRACTS=3).
+def test_probe_max_contracts_default_six(monkeypatch) -> None:
+    # 2026-10-27: probe cap default tracks MERID_MAX_CONTRACTS_PER_ORDER=6
+    # under the $6.00 global exposure cap (was 3 under the 2026-10-19 caps).
+    # Production may still pin MERID_PROBE_LANE_MAX_CONTRACTS lower.
     monkeypatch.delenv("MERID_PROBE_LANE_MAX_CONTRACTS", raising=False)
     from merid.prediction.agent_grid_15m import _probe_lane_max_contracts
-    assert _probe_lane_max_contracts() == 3.0
+    assert _probe_lane_max_contracts() == 6.0
 
 
 # ---------------------------------------------------------------- C --------

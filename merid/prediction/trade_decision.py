@@ -798,6 +798,12 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # attempt counter.  Post-only is the measured edge itself.
     "drift_fav",
     "cheap_no_settle",
+    # 2026-11-08: reversal-scalp lane — bounded countertrend admission on a
+    # confirmed-regime + opposite fast-leg momentum flip.  Stamped-floor
+    # economics like every bounded lane; follows the evaluated route (a
+    # taker-evaluated bounce crosses as IOC — post-only would rest a
+    # countertrend bid that fills exactly when the flip fails).
+    "reversal_scalp",
 })
 
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
@@ -6364,6 +6370,39 @@ def _compute_trade_decision_impl(
     )
     _yes_ct_lane_block = _dr.countertrend_lane_block(asset, "yes", _dir_reg, z)
     _no_ct_lane_block = _dr.countertrend_lane_block(asset, "no", _dir_reg, z)
+    # 2026-11-08 (reversal-scalp lane): the same confirmed-regime +
+    # opposite fast-leg signature that vetoes the exhausted trend side is
+    # the momentum-flip signature that admits the countertrend side — the
+    # whipsaw the defense layer detects is monetized, not just dodged.
+    # ``*_rev_match`` is flag-independent (near-miss cohort telemetry); the
+    # lane's own band/TTE/EV gate is the admission bound, and every shared
+    # integrity gate still wraps the qualify clause.
+    _yes_rev_match = _dr.reversal_scalp_match("yes", _dir_reg, _rti_fast)
+    _no_rev_match = _dr.reversal_scalp_match("no", _dir_reg, _rti_fast)
+    _yes_rev_block = _dr.reversal_scalp_block(
+        price_cents=float(yes_price_cents) if yes_price_cents else None,
+        net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+    ) if _yes_rev_match else None
+    _no_rev_block = _dr.reversal_scalp_block(
+        price_cents=float(no_price_cents) if no_price_cents else None,
+        net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+    ) if _no_rev_match else None
+    _yes_rev_qualifies = (
+        _yes_rev_match and _dr.reversal_scalp_enabled() and _yes_rev_block is None
+    )
+    _no_rev_qualifies = (
+        _no_rev_match and _dr.reversal_scalp_enabled() and _no_rev_block is None
+    )
+    indicators["yes_reversal_scalp_match"] = bool(_yes_rev_match)
+    indicators["no_reversal_scalp_match"] = bool(_no_rev_match)
+    indicators["yes_reversal_scalp_block"] = _yes_rev_block
+    indicators["no_reversal_scalp_block"] = _no_rev_block
     # 2026-10-04: the book-flow confirmation gate exists to protect RESTING
     # (passive) entries from being picked off into adverse flow — an IOC
     # taker pays the ask once and never rests in the book, so the veto does
@@ -7127,6 +7166,16 @@ def _compute_trade_decision_impl(
     if _no_drift_qualifies and _no_dir_veto is not None:
         indicators["no_counter_model_drift_exempt"] = _no_dir_veto
         _no_dir_veto = None
+    # 2026-11-08: a lane-admitted reversal scalp is countertrend by
+    # construction — its p_selected sits below the counter-model floor for
+    # the same reason cheap_no's does.  The measured bounce + lane EV floor
+    # is the admission instrument; the would-be veto stays in telemetry.
+    if _yes_rev_qualifies and _yes_dir_veto is not None:
+        indicators["yes_counter_model_reversal_exempt"] = _yes_dir_veto
+        _yes_dir_veto = None
+    if _no_rev_qualifies and _no_dir_veto is not None:
+        indicators["no_counter_model_reversal_exempt"] = _no_dir_veto
+        _no_dir_veto = None
     if _yes_dir_veto is not None:
         indicators["directional_veto_yes"] = _yes_dir_veto
     if _no_dir_veto is not None:
@@ -7148,6 +7197,7 @@ def _compute_trade_decision_impl(
             _yes_pf_qualifies
             or _yes_trend_hi_qualifies
             or _yes_drift_qualifies
+            or _yes_rev_qualifies
             or (
                 not _yes_pf_price
                 and not _yes_hi_price
@@ -7177,6 +7227,7 @@ def _compute_trade_decision_impl(
             _no_pf_qualifies
             or _no_drift_qualifies
             or _no_cheap_qualifies
+            or _no_rev_qualifies
             or (
                 not _no_pf_price
                 and _no_eff_edge >= _no_edge_eff_bound
@@ -7224,8 +7275,22 @@ def _compute_trade_decision_impl(
         drift_block_s: Optional[str] = None,
         cheap_price_applies_s: bool = False,
         cheap_block_s: Optional[str] = None,
+        rev_match_s: bool = False,
+        rev_block_s: Optional[str] = None,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
+        # 2026-11-08 (reversal-scalp): a matched candidate is owned by the
+        # lane's gate — a lane-blocked one reports the lane's specific
+        # failure, a disarmed one the disabled label (the near-miss cohort
+        # the enable/disable counterfactual measures), and an admitted one
+        # skips the generic economics labels (the lane's own EV floor is
+        # its bound).  Unlike pinned_fav the lane does not own the price
+        # window, so only a MATCH arms this branch.
+        _rev_rescued_s = (
+            rev_match_s
+            and rev_block_s is None
+            and _dr.reversal_scalp_enabled()
+        )
         if not depth_ok_s:
             return f"insufficient_depth_{side}"
         if tail_violation_s:
@@ -7246,7 +7311,10 @@ def _compute_trade_decision_impl(
             # Lane gate passed — skip the formula-bound economics labels
             # (the lane's own 2c floor is its bound, not thr.total) and
             # continue to the structural gates below.
-        else:
+        elif rev_match_s and not _rev_rescued_s:
+            # Lane-blocked (specific reason) or lane-disarmed near-miss.
+            return rev_block_s or "reversal_scalp_disabled"
+        elif not _rev_rescued_s:
             # 2026-09-30: economics first — a side that never had positive
             # executable EV is an EV rejection, not an evidence-policy block.
             # Evidence only owns the terminal code when the economics cleared.
@@ -7384,6 +7452,8 @@ def _compute_trade_decision_impl(
             dir_veto_s=_yes_dir_veto,
             drift_price_applies_s=_yes_drift_price,
             drift_block_s=_yes_drift_block,
+            rev_match_s=bool(_yes_rev_match),
+            rev_block_s=_yes_rev_block,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -7407,6 +7477,8 @@ def _compute_trade_decision_impl(
             drift_block_s=_no_drift_block,
             cheap_price_applies_s=_no_cheap_price,
             cheap_block_s=_no_cheap_block,
+            rev_match_s=bool(_no_rev_match),
+            rev_block_s=_no_rev_block,
         ),
     })
 
@@ -7886,28 +7958,43 @@ def _compute_trade_decision_impl(
                 # terminal tuple dropped it, so whipsaw-guard vetoes surfaced
                 # as the no_qualifying_side catch-all and hid the guard's
                 # true suppression rate from the audit funnel.
+                # 2026-11-08 (reversal-scalp): a matched-but-blocked/disarmed
+                # lane candidate owns its lane reason, not the countertrend
+                # veto it exists to bypass; a lane-ADMITTED side that still
+                # fails an integrity gate skips the exempted vetoes entirely
+                # so the honest failure (evidence/depth/tail) surfaces.
+                _rev_yes_reason = (
+                    (_yes_rev_block or "reversal_scalp_disabled")
+                    if (_yes_rev_match and not _yes_rev_qualifies) else None
+                )
+                _rev_no_reason = (
+                    (_no_rev_block or "reversal_scalp_disabled")
+                    if (_no_rev_match and not _no_rev_qualifies) else None
+                )
                 _gate_blocks = (
                     (
-                        _eff_regime_yes,
+                        _rev_yes_reason,
+                        _eff_regime_yes if not _yes_rev_qualifies else None,
                         _yes_trendside_block,
-                        _yes_conv_block,
+                        _yes_conv_block if not _yes_rev_qualifies else None,
                         _yes_throttle_block,
-                        _yes_ct_lane_block,
+                        _yes_ct_lane_block if not _yes_rev_qualifies else None,
                         _yes_bookflow_block,
                         _yes_coinflip_eff,
-                        None if _yes_trend_hi_qualifies else _yes_price_cap_block,
+                        None if (_yes_trend_hi_qualifies or _yes_rev_qualifies) else _yes_price_cap_block,
                         _yes_lane_terminal,
                     )
                     if best_side == "yes"
                     else (
-                        _eff_regime_no,
+                        _rev_no_reason,
+                        _eff_regime_no if not _no_rev_qualifies else None,
                         _no_trendside_block,
-                        _no_conv_block,
+                        _no_conv_block if not _no_rev_qualifies else None,
                         _no_throttle_block,
-                        _no_ct_lane_block,
+                        _no_ct_lane_block if not _no_rev_qualifies else None,
                         _no_bookflow_block,
                         _no_coinflip_eff,
-                        _no_price_cap_block,
+                        None if _no_rev_qualifies else _no_price_cap_block,
                         None,
                     )
                 )
@@ -8656,6 +8743,17 @@ def _compute_trade_decision_impl(
             elif _no_cheap_qualifies and not indicators.get("decision_lane"):
                 indicators["decision_lane"] = "cheap_no_settle"
                 indicators["entry_lane"] = "cheap_no_settle"
+
+        # 2026-11-08: reversal-scalp admissions stamp AFTER every
+        # cell/lane owner — a normal admission inside the bounce window
+        # keeps its own identity — so the lane's fills/vetoes stay in a
+        # separate evidence pool and cannot contaminate the other lanes.
+        _sel_rev = (
+            _yes_rev_qualifies if selected_outcome == "yes" else _no_rev_qualifies
+        )
+        if _sel_rev and not indicators.get("decision_lane"):
+            indicators["decision_lane"] = "reversal_scalp"
+            indicators["entry_lane"] = "reversal_scalp"
 
         # Generic evidence escape lane: a pass resting on sparse/pooled cell
         # evidence is admissible only as a bounded post-only canary entry —
