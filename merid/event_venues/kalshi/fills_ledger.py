@@ -84,6 +84,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -1483,9 +1484,9 @@ class KalshiFillsLedger:
         self._durable_intent_index: Dict[str, Dict[str, Any]] = {}
         # TEST-ISOLATION: env-overridable so tests can redirect writes away
         # from the production data/ directory (same pattern as MERID_FILLS_DB_PATH).
-        self._durable_index_path = Path(os.getenv(
-            "MERID_FILLS_INTENT_INDEX_PATH", "data/kalshi_fills_intent_index.json"
-        ))
+        self._durable_index_path = durable_state_path(
+            "MERID_FILLS_INTENT_INDEX_PATH", "kalshi_fills_intent_index.json"
+        )
         self._load_durable_intent_index()
 
         # Pending orders: recently submitted but not-yet-persisted intents.
@@ -1544,7 +1545,7 @@ class KalshiFillsLedger:
         # Fallback to SQLite if PostgreSQL not available
         # TEST-ISOLATION FIX (2026-07-19): Path is env-overridable so tests can
         # redirect writes away from the production database.
-        self._db_path = os.getenv("MERID_FILLS_DB_PATH", "data/kalshi_fills.db")
+        self._db_path = str(durable_state_path("MERID_FILLS_DB_PATH", "kalshi_fills.db"))
 
         # TEST-ISOLATION GUARD (2026-10-09): fail fast at construction too —
         # the same check in _init_db guards the write path, but a test that
@@ -1599,7 +1600,9 @@ class KalshiFillsLedger:
         self._schema_error_log_count: int = 0
 
         # DEFENSIVE-FIX-003: Dead Letter Queue (DLQ) for failed fills
-        self._dlq_db_path = "data/kalshi_fills_dlq.db"
+        self._dlq_db_path = str(durable_state_path(
+            "MERID_FILLS_DLQ_DB_PATH", "kalshi_fills_dlq.db"
+        ))
         self._dlq_buffer: List[Dict[str, Any]] = []
         self._dlq_buffer_max = 50  # Flush buffer at this size
 
@@ -5043,10 +5046,8 @@ class KalshiFillsLedger:
 
             # Store in data directory
             import json
-            import os
-            from pathlib import Path
-            session_file = Path(
-                os.environ.get("MERID_SESSION_METADATA_PATH", "data/kalshi_session_metadata.json")
+            session_file = durable_state_path(
+                "MERID_SESSION_METADATA_PATH", "kalshi_session_metadata.json"
             )
             session_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -5139,10 +5140,8 @@ class KalshiFillsLedger:
                 # No event loop, safe to do blocking I/O
                 pass
 
-            import os
-            from pathlib import Path
-            session_file = Path(
-                os.environ.get("MERID_SESSION_METADATA_PATH", "data/kalshi_session_metadata.json")
+            session_file = durable_state_path(
+                "MERID_SESSION_METADATA_PATH", "kalshi_session_metadata.json"
             )
 
             if not session_file.exists():

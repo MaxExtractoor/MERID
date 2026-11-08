@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import threading
 import time
@@ -20,13 +19,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.order_attempt_store")
 
-DEFAULT_DB_PATH = os.environ.get(
-    "MERID_KALSHI_ORDER_ATTEMPT_DB", "data/kalshi_order_attempts.db"
-)
+DEFAULT_DB_PATH = str(durable_state_path(
+    "MERID_KALSHI_ORDER_ATTEMPT_DB", "kalshi_order_attempts.db"
+))
 
 
 @dataclass(frozen=True)

@@ -39,6 +39,7 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 # Import version constants from formulas module for TRACE logging
@@ -88,7 +89,7 @@ def _get_kill_switch_path() -> Path:
     """
     if _KILL_SWITCH_FILE is not None:
         return Path(_KILL_SWITCH_FILE)
-    return Path(os.environ.get("MERID_RISK_KS_FILE", "data/risk_kill_switch.json"))
+    return durable_state_path("MERID_RISK_KS_FILE", "risk_kill_switch.json")
 
 
 logger = get_logger("merid.risk.kill_switches")

@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 logger = get_logger("risk.risk_guard")
@@ -239,8 +240,8 @@ class RiskGuard:
         self._hourly_trades: List[float] = []
 
         # T-054: Persist drawdown state
-        self._risk_state_path = Path(
-            os.environ.get("MERID_RISK_STATE_PATH", "data/risk_state.json")
+        self._risk_state_path = durable_state_path(
+            "MERID_RISK_STATE_PATH", "risk_state.json"
         )
         self._load_risk_state()
 

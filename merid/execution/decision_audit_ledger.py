@@ -30,11 +30,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 logger = get_logger("merid.execution.decision_audit_ledger")
 
-_DB_PATH = Path(os.environ.get("MERID_DECISION_AUDIT_DB_PATH", "data/decision_audit.db"))
+_DB_PATH = durable_state_path("MERID_DECISION_AUDIT_DB_PATH", "decision_audit.db")
 _WAL = os.environ.get("MERID_DECISION_AUDIT_LEDGER_WAL", "1").strip().lower() in (
     "1",
     "true",

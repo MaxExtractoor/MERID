@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any
 from decimal import Decimal
 from enum import Enum
 
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 logger = get_logger("merid.risk.profiles.kalshi_crypto_15m_risk_envelope")
@@ -77,7 +78,9 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
 }
 
 # FIX 10: Persistent risk envelope state file path
-_WINDOW_STATE_FILE = os.getenv("MERID_WINDOW_STATE_FILE", "data/window_exposure_state.json")
+_WINDOW_STATE_FILE = str(durable_state_path(
+    "MERID_WINDOW_STATE_FILE", "window_exposure_state.json"
+))
 
 # ── Profile YAML parse cache (2026-09-27 loop-lag fix) ─────────────────────
 # compute_kalshi_crypto_15m_risk_envelope() runs per candidate per cycle, and

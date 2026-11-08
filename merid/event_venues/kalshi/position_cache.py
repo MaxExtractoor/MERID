@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from merid.data.ingress_replay import replay_start_time, replay_time
 from merid.event_venues.kalshi.fees import validate_exit_policy_targets
+from utils.durable_paths import durable_state_path
 from utils.logger import get_logger
 
 try:
@@ -1489,8 +1490,8 @@ class KalshiPositionCache:
         self._applied_fill_ids_max = 10000  # Max fill_ids to track (fills are unique and don't expire)
         # 2026-08-23: Persist applied fill ids so a process restart does not re-apply
         # durable fills and double-count exposure / PnL.
-        self._applied_fill_ids_path = Path(
-            os.environ.get("MERID_APPLIED_FILL_IDS_PATH", "data/kalshi_applied_fill_ids.json")
+        self._applied_fill_ids_path = durable_state_path(
+            "MERID_APPLIED_FILL_IDS_PATH", "kalshi_applied_fill_ids.json"
         )
         self._load_applied_fill_ids()
 
@@ -1548,8 +1549,8 @@ class KalshiPositionCache:
         # provenance survives a process restart.  Without this, rest_sync positions
         # rebuilt from the fills_ledger cannot recover AT_FILL spread-stop invariants
         # and model-invalidation exits are blocked.
-        self._pending_tp_targets_path = Path(
-            os.environ.get("MERID_PENDING_TP_TARGETS_PATH", "data/kalshi_pending_tp_targets.json")
+        self._pending_tp_targets_path = durable_state_path(
+            "MERID_PENDING_TP_TARGETS_PATH", "kalshi_pending_tp_targets.json"
         )
         self._load_pending_tp_targets()
         # 2026-08-25: Watermark for this process instance. Fills whose ledger
@@ -1560,8 +1561,8 @@ class KalshiPositionCache:
         # PRODUCTION FIX: Map Kalshi order_id -> client_tag for fill-to-intent linkage
         # This is needed because HTTP fills don't include client_order_id from Kalshi API
         self._order_id_to_client_tag: Dict[str, str] = {}
-        self._order_id_to_client_tag_path = Path(
-            os.environ.get("MERID_ORDER_ID_CLIENT_TAG_PATH", "data/kalshi_order_id_to_client_tag.json")
+        self._order_id_to_client_tag_path = durable_state_path(
+            "MERID_ORDER_ID_CLIENT_TAG_PATH", "kalshi_order_id_to_client_tag.json"
         )
         self._load_order_id_to_client_tag()
         # Task 2: Add fills_ledger reference for authoritative fill_source lookup
