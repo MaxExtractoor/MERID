@@ -137,9 +137,22 @@ def _apply_active_window(store, monkeypatch, w: WindowFixture) -> str:
     store.apply_orderbook_message(
         _snapshot(w.market_id, [[0.55, 5]], [[0.45, 5]]), via="rest_bootstrap"
     )
+    # 2026-11-04 onward: ALL orderbook_snapshot vias are routed through the
+    # per-ticker batch worker (_enqueue_snapshot), so the apply lands
+    # asynchronously.  Wait for it — otherwise is_market_entry_ready races
+    # the worker and returns BOOK-NOT-INITIALIZED, blocking entries at
+    # loop_state before the gate under test is ever reached.
+    import time as _time
+
+    _deadline = _time.monotonic() + 10.0
     s = store.get(w.market_id)
-    if s is not None:
-        s.snapshot_complete = True
+    while s is not None and not s.book_initialized and _time.monotonic() < _deadline:
+        _time.sleep(0.01)
+        s = store.get(w.market_id)
+    assert s is not None and s.book_initialized, (
+        "orderbook snapshot was never applied by the batch worker"
+    )
+    s.snapshot_complete = True
 
     def _current_for_asset(asset: str):
         return w.catalog_market() if asset == "BTC" else None
