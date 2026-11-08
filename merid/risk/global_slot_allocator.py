@@ -80,6 +80,11 @@ class PositionSlot:
 # Backwards-compatible alias used by legacy test suites.
 Slot = PositionSlot
 
+# Lane price domains are defined on the executable ASK; a post-only bid
+# rests up to the spread below it.  Ten cents covers the widest observed
+# own-side spread on these books while still bounding the sanity check.
+_LANE_BID_SPREAD_ALLOWANCE_CENTS = 10
+
 
 def _lane_entry_band_cents(decision_lane: Optional[str]) -> Optional[Tuple[int, int]]:
     """Bounded admission lanes carry their own verified price band, wider
@@ -105,6 +110,66 @@ def _lane_entry_band_cents(decision_lane: Optional[str]) -> Optional[Tuple[int, 
             return (
                 GlobalSlotAllocator.MIN_ENTRY_CENTS,
                 int(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS),
+            )
+        if decision_lane == "current_build_provisional":
+            # 2026-11-08: the provisional lane's approved domain is
+            # 20-89c executable ask — wider than the profile 25-80c band.
+            # Lane-owned admissions above 80c were dying here as
+            # slot_allocation_failed despite clearing their own gates.
+            # The domain bounds the ASK; a bid-priced (post-only) order
+            # rests below it, so the lower bound carries a spread
+            # allowance — admission already enforced the ask domain.
+            from merid.prediction.current_build_provisional import (
+                domain_price_max_cents,
+                domain_price_min_cents,
+            )
+            return (
+                max(1, int(domain_price_min_cents()) - _LANE_BID_SPREAD_ALLOWANCE_CENTS),
+                int(domain_price_max_cents()) - 1,
+            )
+        if decision_lane == "threshold_cell":
+            # Union of the registered cell price bands (half-open max, so
+            # the allocator bound is max-1) minus the same bid-basis
+            # spread allowance.  The specific cell's own [min,max) band
+            # was already enforced at admission; this is the lane-domain
+            # sanity bound, same trust model as the settlement lane's
+            # MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS.
+            from merid.prediction.threshold_cells import THRESHOLD_CELLS
+            if not THRESHOLD_CELLS:
+                return None
+            return (
+                max(
+                    1,
+                    min(int(c.price_min_cents) for c in THRESHOLD_CELLS)
+                    - _LANE_BID_SPREAD_ALLOWANCE_CENTS,
+                ),
+                max(int(c.price_max_cents) for c in THRESHOLD_CELLS) - 1,
+            )
+        if decision_lane == "evidence_cell_escape":
+            # Escape admissions live inside the same bounded live-entry
+            # domain as the provisional lane (20-89c ask); they carry no
+            # narrower verified band of their own.
+            from merid.prediction.current_build_provisional import (
+                domain_price_max_cents,
+                domain_price_min_cents,
+            )
+            return (
+                max(1, int(domain_price_min_cents()) - _LANE_BID_SPREAD_ALLOWANCE_CENTS),
+                int(domain_price_max_cents()) - 1,
+            )
+        if decision_lane == "marginal_band":
+            # 50-89c executable (ask) band per the rescue contract; the
+            # emm route rests at the bid below it.
+            return (50 - _LANE_BID_SPREAD_ALLOWANCE_CENTS, 89)
+        if decision_lane == "trend_yes_hi":
+            from merid.prediction import directional_regime as _dr_tcb
+            return (
+                max(
+                    1,
+                    int(_dr_tcb._trend_yes_hi_lo())
+                    - _LANE_BID_SPREAD_ALLOWANCE_CENTS,
+                ),
+                int(_dr_tcb._trend_yes_hi_hi()),
             )
     except Exception:
         return None

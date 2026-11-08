@@ -10965,6 +10965,19 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     return _dr_loop.pinned_fav_band_match(_px)
                 except Exception:
                     return False
+            # 2026-11-08: remaining bounded lanes resolve through the shared
+            # lane-band map (threshold_cell, current_build_provisional,
+            # evidence_cell_escape, marginal_band, trend_yes_hi,
+            # settlement_convergence, drift_fav, cheap_no_settle).
+            try:
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents as _loop_lane_band,
+                )
+                _loop_band = _loop_lane_band(candidate.get("decision_lane"))
+                if _loop_band is not None:
+                    return int(_loop_band[0]) <= int(_px) <= int(_loop_band[1])
+            except Exception:
+                pass
             return False
         if (
             approved_price_cents is not None

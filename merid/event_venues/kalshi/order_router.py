@@ -10376,6 +10376,27 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
             _in_range = _dr_otm.pinned_fav_band_match(float(intent.price_cents))
         except Exception:
             _in_range = False
+    if not _in_range:
+        # 2026-11-08: remaining bounded lanes resolve through the shared
+        # lane-band map — settlement_convergence (<=97c),
+        # current_build_provisional / evidence_cell_escape (20-89c ask
+        # domain), threshold_cell (registered-cell union), marginal_band,
+        # trend_yes_hi.  Lane-owned orders outside the canonical side-aware
+        # range (e.g. cbp NO@20-24c, settlement NO@96-97c) were rejected
+        # here as deep-OTM despite clearing their own admission gates.
+        try:
+            from merid.risk.global_slot_allocator import (
+                _lane_entry_band_cents as _otm_lane_band,
+            )
+            _otm_band = _otm_lane_band(getattr(intent, "decision_lane", None))
+            if _otm_band is not None:
+                _in_range = (
+                    int(_otm_band[0])
+                    <= int(intent.price_cents)
+                    <= int(_otm_band[1])
+                )
+        except Exception:
+            pass
 
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
     logger.info(
@@ -11267,6 +11288,24 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                 )
             except Exception:
                 _in_canonical = False
+        if not _in_canonical:
+            # 2026-11-08: shared lane-band map for the remaining bounded
+            # lanes (see the deep-OTM gate for the lane list).
+            try:
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents as _crng_lane_band,
+                )
+                _crng_band = _crng_lane_band(
+                    getattr(intent, "decision_lane", None)
+                )
+                if _crng_band is not None:
+                    _in_canonical = (
+                        int(_crng_band[0])
+                        <= int(adjusted_price)
+                        <= int(_crng_band[1])
+                    )
+            except Exception:
+                pass
 
         if not _in_canonical:
             logger.warning(
@@ -12412,6 +12451,22 @@ def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
             _in_range = _dr_dep.pinned_fav_band_match(float(intent.price_cents))
         except Exception:
             _in_range = False
+    if not _in_range:
+        # 2026-11-08: shared lane-band map for the remaining bounded lanes
+        # (see the deep-OTM gate for the lane list).
+        try:
+            from merid.risk.global_slot_allocator import (
+                _lane_entry_band_cents as _dep_lane_band,
+            )
+            _dep_band = _dep_lane_band(getattr(intent, "decision_lane", None))
+            if _dep_band is not None:
+                _in_range = (
+                    int(_dep_band[0])
+                    <= int(intent.price_cents)
+                    <= int(_dep_band[1])
+                )
+        except Exception:
+            pass
     if not _in_range:
         # Allow deep OTM/ITM only if edge is exceptional (> threshold)
         if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):

@@ -9685,7 +9685,24 @@ class LeanAgent15m:
                             ).get(f"{_emm_side}_rescued")
                         )
                     )
-                    if _emm_side is not None and _emm_rescued:
+                    # 2026-11-08: a lane-owned admission (threshold_cell,
+                    # current_build_provisional, evidence_cell_escape, ...) evaluated on
+                    # this route keeps its lane id and was admitted by that
+                    # lane's own bound — it does not need the marginal-band
+                    # δ-slack flag, and it must not burn the emm daily
+                    # counter (its own lane counters apply at the
+                    # bounded-lane emission stage).  Same contract as the
+                    # maker_bid lane-owned pass above.
+                    _emm_lane = (decision_emm.indicators or {}).get(
+                        "decision_lane"
+                    )
+                    _emm_lane_owned = bool(_emm_lane) and _emm_lane not in (
+                        "maker_bid",
+                        "empirical_marginal_maker",
+                    )
+                    if _emm_side is not None and (
+                        _emm_rescued or _emm_lane_owned
+                    ):
                         _emm_spread = (
                             (float(no_ask) - float(no_bid))
                             if _emm_side == "no"
@@ -9699,13 +9716,22 @@ class LeanAgent15m:
                             time_in_force = "gtc"
                             execution_mode = "maker"
                             fee_cents = maker_fee_cents
-                            _n_emm = _record_emm_submission(asset, ticker)
+                            _n_emm = (
+                                None
+                                if _emm_lane_owned
+                                else _record_emm_submission(asset, ticker)
+                            )
                             logger.info(
                                 "[EMM-LANE] asset=%s side=%s spread=%.1fc "
-                                "net_edge=%.2fc lane submissions today=%d",
+                                "net_edge=%.2fc lane=%s submissions today=%s",
                                 asset, _emm_side, _emm_spread,
                                 float(decision_emm.net_edge or 0) * 100.0,
-                                _n_emm,
+                                _emm_lane or "empirical_marginal_maker",
+                                (
+                                    str(_n_emm)
+                                    if _n_emm is not None
+                                    else "lane-counter"
+                                ),
                             )
                         else:
                             decision.indicators["emm_block"] = (
@@ -11811,6 +11837,29 @@ class LeanAgent15m:
             try:
                 from merid.prediction import window_quota as _wq_canon
                 _canon_ok = _wq_canon.quota_band_match(price_cents)
+            except Exception:
+                _canon_ok = False
+        if not _canon_ok:
+            # 2026-11-08: remaining bounded lanes resolve through the same
+            # shared lane-band map the slot allocator and order_gate use —
+            # threshold_cell, current_build_provisional, evidence_cell_
+            # escape, marginal_band, trend_yes_hi (and drift_fav /
+            # cheap_no_settle, already inside canonical).  Lane-owned
+            # entry_lane stamps now accompany every bounded admission, so
+            # an admitted candidate is checked against its own verified
+            # band instead of dying on the legacy canonical collar (e.g.
+            # cbp NO@20-24c or a doge_no_20_30 cell fill).
+            try:
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents as _canon_lane_band,
+                )
+                _canon_band = _canon_lane_band(_ind.get("entry_lane"))
+                if _canon_band is not None:
+                    _canon_ok = (
+                        int(_canon_band[0])
+                        <= int(price_cents)
+                        <= int(_canon_band[1])
+                    )
             except Exception:
                 _canon_ok = False
         if not _canon_ok:

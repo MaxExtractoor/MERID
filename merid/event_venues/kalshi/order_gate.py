@@ -68,6 +68,19 @@ def _lane_band_match(decision_lane: Optional[str], price_cents: int) -> bool:
         if decision_lane == "window_quota":
             from merid.prediction import window_quota as _wq
             return bool(_wq.quota_band_match(price_cents))
+        # 2026-11-08: every other bounded lane resolves through the shared
+        # lane-band map (global_slot_allocator._lane_entry_band_cents) —
+        # settlement_convergence (<=97c), current_build_provisional
+        # (20-89c), threshold_cell (registered-cell union), evidence_cell_
+        # escape, marginal_band (50-89c), trend_yes_hi.  Previously only
+        # pinned_fav/window_quota escaped the canonical range here, so
+        # lane-admitted orders outside YES 10-95 / NO 25-95 died as
+        # price_guard rejects after clearing their own gates (e.g. a
+        # doge_no_20_30 cell NO@20-24c, or settlement NO@96-97c).
+        from merid.risk.global_slot_allocator import _lane_entry_band_cents
+        _band = _lane_entry_band_cents(decision_lane)
+        if _band is not None:
+            return int(_band[0]) <= int(price_cents) <= int(_band[1])
     except Exception:
         pass
     return False

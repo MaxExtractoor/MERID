@@ -2108,6 +2108,24 @@ def apply_model_edge_floor_gate(decision: TradeDecision) -> TradeDecision:
         # below the universal 4c floor by construction).  Same exemption
         # contract as pinned_fav.
         return decision
+    if _floor_lane in (
+        "threshold_cell",
+        "current_build_provisional",
+        "evidence_cell_escape",
+        "trend_yes_hi",
+    ):
+        # 2026-11-08: cell/evidence-owned lanes carry their own audited
+        # admission bound (cell min_net_ev, provisional per-cell floor,
+        # escape budget) — the same contract as the EPC-LCB substitute
+        # below, which already bounds empirical-cell probability claims
+        # at the executable price.  The raw pre-EPC model gap is ~0 by
+        # construction on these cohorts, so the formula-fitted 4c floor
+        # was an effective ban, not an information check (identical
+        # failure mode documented for pinned_fav above).  Generic
+        # maker_bid/empirical_marginal_maker/marginal_band selections
+        # keep the floor: their admission is the formula path's raw
+        # claim, where the 4c bound remains the fitted evidence bar.
+        return decision
     # 2026-10-24 (EPC reconciliation): a validated empirical cell supplied
     # this side's probability — bound the cell's price-adjusted LCB instead
     # of the raw pre-EPC model gap (which is ~0 by construction here).  The
@@ -8587,9 +8605,11 @@ def _compute_trade_decision_impl(
             and not indicators.get("decision_lane")
         ):
             indicators["decision_lane"] = "trend_yes_hi"
+            indicators["entry_lane"] = "trend_yes_hi"
         _sel_thr = _yes_edge_thr if selected_outcome == "yes" else _no_edge_thr
         if _sel_thr.cell_id is not None and not indicators.get("decision_lane"):
             indicators["decision_lane"] = "threshold_cell"
+            indicators["entry_lane"] = "threshold_cell"
             indicators["threshold_cell_id"] = _sel_thr.cell_id
             indicators["threshold_cell_min_ev_cents"] = _sel_thr.cell_min_ev_cents
         elif (
@@ -8601,6 +8621,7 @@ def _compute_trade_decision_impl(
             # an unregistered region with no provisional admission falls
             # through to the formula lane.
             indicators["decision_lane"] = "current_build_provisional"
+            indicators["entry_lane"] = "current_build_provisional"
             indicators["provisional_cell_id"] = _sel_thr.provisional_cell_id
             indicators["provisional_cell_min_ev_cents"] = (
                 _sel_thr.provisional_min_ev_cents
@@ -8639,6 +8660,7 @@ def _compute_trade_decision_impl(
             and not _sel_thr.provisional_cap_exhausted
         ):
             indicators["decision_lane"] = "evidence_cell_escape"
+            indicators["entry_lane"] = "evidence_cell_escape"
 
         # 2026-10-02: a bid-priced (queue-maker) decision is its own lane —
         # it was admitted on resting economics the ask-priced passes never
@@ -8656,18 +8678,25 @@ def _compute_trade_decision_impl(
             # 2026-10-21: drift_fav/cheap_no_settle keep their stamps the
             # same way — the lane drives the per-position lock target and
             # the settle-hold exit contract downstream.
+            # 2026-11-08: EVERY lane-owned admission keeps its lane id on
+            # the bid-priced routes — threshold_cell,
+            # current_build_provisional, evidence_cell_escape,
+            # trend_yes_hi included.  agent_grid_15m treats only
+            # unstamped/maker_bid-stamped selections as generic maker_bid
+            # budget; clobbering a lane-owned candidate here burned the
+            # generic cap, skipped the lane's own emission/counter stage
+            # (candidate_emitted never fired), and misattributed fills to
+            # the maker_bid cohort.  settlement_convergence is the sole
+            # exception: its contract is taker IOC in-window, so a
+            # bid-priced evaluation must not keep the lane identity.
             _lane_s = indicators.get("decision_lane")
-            _pf_bid_lane = _lane_s in ("drift_fav", "cheap_no_settle") or (
-                _lane_s == "pinned_fav"
-            )
-            try:
-                _pf_bid_lane = _pf_bid_lane and (
-                    _lane_s != "pinned_fav"
-                    or bool(_dr.pinned_fav_maker_mode())
-                )
-            except Exception:
-                _pf_bid_lane = _lane_s in ("drift_fav", "cheap_no_settle")
-            if not _pf_bid_lane:
+            _keep_bid_lane = bool(_lane_s) and _lane_s != "settlement_convergence"
+            if _lane_s == "pinned_fav":
+                try:
+                    _keep_bid_lane = bool(_dr.pinned_fav_maker_mode())
+                except Exception:
+                    _keep_bid_lane = False
+            if not _keep_bid_lane:
                 indicators["decision_lane"] = (
                     "empirical_marginal_maker"
                     if route == "empirical_marginal_maker"
