@@ -25,7 +25,7 @@ export function ExecutionBlockedBanner() {
   const warningReasons = reasons.filter(r => r.severity === 'warning');
 
   return (
-    <div className="bg-red-950/95 border-b-2 border-red-600/70 px-4 py-3 space-y-2">
+    <div role="alert" className="bg-red-950/95 border-b-2 border-red-600/70 px-4 py-3 space-y-2">
       {/* Main banner line */}
       <div className="flex items-center justify-center gap-2 text-red-200 font-semibold text-sm">
         <ShieldOff className="w-5 h-5 text-red-400 animate-pulse" />

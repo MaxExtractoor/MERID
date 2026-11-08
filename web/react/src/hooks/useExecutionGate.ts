@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useKalshiStore, selectRisk, selectSystem, selectConnected } from '../store';
 
 export interface BlockReason {
@@ -24,7 +25,22 @@ export function useExecutionGate() {
   const system = useKalshiStore(selectSystem);
   const connected = useKalshiStore(selectConnected);
 
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const reasons: BlockReason[] = [];
+  if ([risk, system].some(slice => !slice.lastOk || slice.error || now - slice.lastOk > 60_000) || !system.live) {
+    reasons.push({
+      source: 'freshness',
+      severity: 'warning',
+      message: 'Risk or runtime state unavailable or stale',
+      details: risk.error || system.error || null,
+      hint: null,
+    });
+  }
   if (system.live?.entry_halted) {
     reasons.push({
       source: 'runtime',

@@ -49,7 +49,7 @@ export function RealtimeDisconnectedBanner() {
   if (lastUpdate === 0 && now - mountedAt.current < MOUNT_GRACE_MS) return null;
 
   return (
-    <div className="bg-red-900/90 border-b border-red-600/50 px-4 py-2 flex items-center justify-center gap-2 text-red-200 text-sm font-medium">
+    <div role="alert" className="bg-red-900/90 border-b border-red-600/50 px-4 py-2 flex items-center justify-center gap-2 text-red-200 text-sm font-medium">
       <WifiOff className="w-4 h-4 flex-shrink-0 animate-pulse" />
       <span>
         Backend unreachable ({elapsed}) — balances, positions, and risk data may be stale. Retrying automatically...

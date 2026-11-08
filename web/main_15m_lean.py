@@ -190,7 +190,7 @@ import os
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 logger.info("[MAIN-15M-LEAN] Before FastAPI import")
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 logger.info("[MAIN-15M-LEAN] After FastAPI import")
 
@@ -307,7 +307,7 @@ except Exception as e:
 # OPTIONAL: auth_router - not critical for trading
 try:
     logger.info("[MAIN-15M-LEAN] Attempting to import auth_router (OPTIONAL)")
-    from web.api.auth import router as auth_router
+    from web.api.auth import router as auth_router, get_current_session
     logger.info("[MAIN-15M-LEAN] Imported auth_router")
 except ImportError as e:
     logger.warning(f"[MAIN-15M-LEAN] ImportError importing auth_router: {e}")
@@ -315,6 +315,13 @@ except ImportError as e:
 except Exception as e:
     logger.warning(f"[MAIN-15M-LEAN] Unexpected error importing auth_router: {e}")
     auth_router = None
+
+if auth_router is None:
+    # Fail closed: without the auth module, session-gated entry points must
+    # never pass — same posture the kalshi router's ZT6-01 gate takes.
+    async def get_current_session():  # type: ignore[no-redef]
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="auth module unavailable")
 
 # OPTIONAL: health_snapshot_router - not critical for trading
 try:
@@ -1443,7 +1450,9 @@ async def readiness_check():
     
     ready = startup_completed and loop_alive and safety_ok
     
-    return {
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=200 if ready else 503, content={
         "status": "ready" if ready else "not_ready",
         "api_version": "15m_v2",
         "health_impl": "health_v6_20260717_split_probes",
@@ -1454,7 +1463,7 @@ async def readiness_check():
         "error": startup_state.error,
         "started_at": startup_state.started_at.isoformat() if startup_state.started_at else None,
         "completed_at": startup_state.completed_at.isoformat() if startup_state.completed_at else None,
-    }
+    })
 
 
 @app.get("/api/v1/startup")
@@ -2590,14 +2599,15 @@ async def internal_spot_prices(assets: str = None):
 
 
 @app.post("/api/internal/v1/kalshi/place-order")
-async def internal_place_order(order_data: dict):
+async def internal_place_order(order_data: dict, session: dict = Depends(get_current_session)):
     """Internal endpoint to place orders through the order router.
     
     This endpoint accepts an OrderIntent dict and routes it through the same
     internal order router that the 15m trading loop uses.
-    
-    The endpoint is internal-only and should be guarded by appropriate auth
-    in production (e.g., shared secret header, VPN-only access).
+
+    Requires an operator session (same get_current_session gate as
+    /api/v1/kalshi/*) — previously this was an unauthenticated live order
+    path; scripts must mint a session via /api/v1/auth/register.
     """
     from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
     from fastapi import HTTPException

@@ -38,6 +38,8 @@ export default function ConnectionStatusIndicator() {
       className="relative"
       onMouseEnter={() => setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}
+      onFocus={() => setShowTooltip(true)}
+      onBlur={() => setShowTooltip(false)}
     >
       <button type="button"
         onClick={() => void refreshAll()}
@@ -48,7 +50,7 @@ export default function ConnectionStatusIndicator() {
       </button>
 
       {showTooltip && (
-        <div className="absolute right-0 top-full mt-2 w-48 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 z-50">
+        <div role="tooltip" className="absolute right-0 top-full mt-2 w-48 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 z-50">
           <div className="flex items-center gap-2 mb-2">
             <div className={`w-2 h-2 rounded-full ${
               state === 'connected' ? 'bg-emerald-400' : state === 'degraded' ? 'bg-yellow-400' : 'bg-red-400'

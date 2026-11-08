@@ -1861,6 +1861,58 @@ async def get_positions(
     return result
 
 
+def _normalize_ui_order(order: Dict[str, Any], source: str) -> Dict[str, Any]:
+    def number(*fields):
+        for field in fields:
+            value = order.get(field)
+            if value is None or value == "":
+                continue
+            try:
+                result = Decimal(str(value))
+            except (ArithmeticError, ValueError, TypeError):
+                continue
+            if result.is_finite():
+                return result
+        return None
+
+    filled = number("fill_count_fp", "filled_count_fp", "fill_count", "filled_count")
+    if filled is None:
+        filled = Decimal(0)
+    remaining = number("remaining_count_fp", "remaining_count")
+    size = number("initial_count_fp", "count_fp", "initial_count", "count")
+    if size is None:
+        size = filled + (remaining if remaining is not None else Decimal(0))
+    side = str(order.get("side", "")).lower()
+    leg = side if side in ("yes", "no") else "yes"
+    price = number(f"{leg}_price_dollars")
+    if price is None:
+        cents = number(f"{leg}_price")
+        if cents is not None:
+            price = cents / Decimal(100)
+    if price is None and side in ("yes", "no"):
+        other = "no" if leg == "yes" else "yes"
+        opposite = number(f"{other}_price_dollars")
+        if opposite is None:
+            cents = number(f"{other}_price")
+            if cents is not None:
+                opposite = cents / Decimal(100)
+        if opposite is not None:
+            price = Decimal(1) - opposite
+    return {
+        "order_id": order.get("order_id", ""),
+        "ticker": order.get("ticker", ""),
+        "side": order.get("side", ""),
+        "size": float(size),
+        "price": float(price) if price is not None else 0.0,
+        "filled": float(filled),
+        "remaining": float(remaining) if remaining is not None else None,
+        "status": order.get("status", ""),
+        "created_at": order.get("created_time", None),
+        "source": source,
+        "synthetic": False,
+    }
+
+
 @router.get("/orders")
 async def get_orders(
     include_scanning: bool = Query(False, description="Include synthetic scanning/signal orders for debugging"),
@@ -1882,23 +1934,7 @@ async def get_orders(
         try:
             raw = await executor.get_orders(status="resting")
             real_orders = [
-                {
-                    "order_id": o.get("order_id", ""),
-                    "ticker": o.get("ticker", ""),
-                    "side": o.get("side", ""),
-                    "size": int(_safe_float_val(o.get("remaining_count", o.get("count", 0)), 0)),
-                    "price": _safe_float_val(o.get("yes_price") or o.get("no_price") or 0) / 100.0,
-                    "filled": int(_safe_float_val(o.get("filled_count", 0), 0)),
-                    "remaining": (
-                        None
-                        if o.get("remaining_count") is None
-                        else int(_safe_float_val(o.get("remaining_count"), 0))
-                    ),
-                    "status": o.get("status", ""),
-                    "created_at": o.get("created_time", None),
-                    "source": "executor",
-                    "synthetic": False,
-                }
+                _normalize_ui_order(o, "executor")
                 for o in raw
             ]
             for o in real_orders:
@@ -1915,19 +1951,7 @@ async def get_orders(
             try:
                 raw_orders = await asyncio.to_thread(rest.get_orders, status="resting")
                 real_orders = [
-                    {
-                        "order_id": o.get("order_id", ""),
-                        "ticker": o.get("ticker", ""),
-                        "side": o.get("side", ""),
-                        "size": int(_safe_float_val(o.get("remaining_count", o.get("count", 0)), 0)),
-                        "price": _safe_float_val(o.get("yes_price") or o.get("no_price") or 0) / 100.0,
-                        "filled": int(_safe_float_val(o.get("filled_count", 0), 0)),
-                        "remaining": int(_safe_float_val(o.get("remaining_count", 0), 0)),
-                        "status": o.get("status", ""),
-                        "created_at": o.get("created_time", None),
-                        "source": "rest_client",
-                        "synthetic": False,
-                    }
+                    _normalize_ui_order(o, "rest_client")
                     for o in raw_orders
                 ]
                 for o in real_orders:
@@ -4600,6 +4624,7 @@ async def get_kill_switch_status(session: dict = Depends(get_current_session)) -
     
     return {
         "kill_switch": risk.kill_switch_active,
+        "kill_switch_reason": getattr(risk, "kill_switch_reason", None),
         "status": "active" if risk.kill_switch_active else "inactive"
     }
 

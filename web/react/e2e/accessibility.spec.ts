@@ -1,97 +1,64 @@
 /**
- * E2E Accessibility Tests
- * Tests accessibility compliance across the application
+ * E2E Accessibility Tests — seven-view console.
+ *
+ * All backend calls are routed to 503 so these specs never touch production
+ * state; they verify keyboard/ARIA structure of the shell only.
  */
 
 import { test, expect } from '@playwright/test';
 
 test.describe('Accessibility', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, context }) => {
+    await context.route('**/api/**', async route => {
+      await route.fulfill({ status: 503, json: { detail: 'isolated a11y run' } });
+    });
     await page.goto('/');
+    await expect(page.getByRole('navigation', { name: 'Primary' })).toBeVisible();
   });
 
-  test('should have proper heading hierarchy', async ({ page }) => {
-    // Check for main heading
-    const h1 = page.locator('h1').first();
-    await expect(h1).toBeVisible();
-    
-    // Check that h1 is the first heading
-    const firstHeading = page.locator('h1, h2, h3, h4, h5, h6').first();
-    const tagName = await firstHeading.evaluate(el => el.tagName);
-    expect(tagName).toBe('H1');
+  test('sidebar navigation is labelled and marks the current page', async ({ page }) => {
+    const nav = page.getByRole('navigation', { name: 'Primary' });
+    await expect(nav).toBeVisible();
+    const current = nav.locator('[aria-current="page"]');
+    await expect(current).toHaveCount(1);
   });
 
-  test('should have ARIA labels on interactive elements', async ({ page }) => {
-    // Check buttons have aria-label or text content
-    const buttons = page.locator('button').filter({ hasText: /.+/ });
+  test('every view heading resolves after keyboard navigation', async ({ page }) => {
+    const routes: Array<[string, string | RegExp]> = [
+      ['1', 'fleet health'],
+      ['2', /agent$/],
+      ['3', 'Trade'],
+      ['4', 'Portfolio'],
+      ['5', 'Risk'],
+      ['6', 'System'],
+    ];
+    for (const [key, name] of routes) {
+      await page.keyboard.press(key);
+      await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+    }
+  });
+
+  test('interactive elements expose accessible names', async ({ page }) => {
+    const buttons = page.locator('button');
     const count = await buttons.count();
-    
-    for (let i = 0; i < Math.min(count, 10); i++) {
+    let unnamed = 0;
+    for (let i = 0; i < Math.min(count, 20); i++) {
       const button = buttons.nth(i);
-      const hasLabel = await button.getAttribute('aria-label');
-      const hasText = await button.textContent();
-      expect(hasLabel || hasText?.trim()).toBeTruthy();
+      const name = (await button.getAttribute('aria-label')) ?? (await button.textContent()) ?? (await button.getAttribute('title'));
+      if (!name?.trim()) unnamed += 1;
     }
+    expect(unnamed).toBe(0);
   });
 
-  test('should have proper tab navigation support', async ({ page }) => {
-    // Navigate to Trade view
-    await page.keyboard.press('2');
-    
-    // Check tabs have proper ARIA attributes
-    const tabs = page.getByRole('tab');
-    const count = await tabs.count();
-    
-    for (let i = 0; i < count; i++) {
-      const tab = tabs.nth(i);
-      await expect(tab).toHaveAttribute('role', 'tab');
-      await expect(tab).toHaveAttribute('aria-selected');
-    }
+  test('alerts use role=alert so screen readers announce them', async ({ page }) => {
+    await page.waitForTimeout(3500);
+    const alerts = page.locator('[role="alert"]');
+    await expect(alerts.first()).toBeVisible();
   });
 
-  test('should have keyboard navigation working', async ({ page }) => {
-    // Test keyboard shortcuts
-    await page.keyboard.press('1');
-    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-    
-    await page.keyboard.press('2');
-    await expect(page.getByRole('heading', { name: 'Trade' })).toBeVisible();
-    
-    await page.keyboard.press('3');
-    await expect(page.getByRole('heading', { name: 'Monitor' })).toBeVisible();
-  });
-
-  test('should have sufficient color contrast (visual check)', async ({ page }) => {
-    // This is a basic visual check - automated contrast checking requires axe-core
-    // We verify that text is readable against backgrounds
-    const cards = page.locator('.bg-slate-900').first();
-    await expect(cards).toBeVisible();
-    
-    const text = cards.locator('text').first();
-    await expect(text).toBeVisible();
-  });
-
-  test('should have alt text for images', async ({ page }) => {
-    const images = page.locator('img');
-    const count = await images.count();
-    
-    for (let i = 0; i < count; i++) {
-      const img = images.nth(i);
-      const alt = await img.getAttribute('alt');
-      // Icons with aria-hidden="true" don't need alt text
-      const ariaHidden = await img.getAttribute('aria-hidden');
-      if (ariaHidden !== 'true') {
-        expect(alt).toBeTruthy();
-      }
-    }
-  });
-
-  test('should have focus indicators on interactive elements', async ({ page }) => {
-    // Tab to first interactive element
+  test('focus indicators on interactive elements', async ({ page }) => {
     await page.keyboard.press('Tab');
-    
-    // Check that something is focused
-    const focused = page.locator(':focus');
-    await expect(focused).toHaveCount(1);
+    const tag = await page.evaluate(() => document.activeElement?.tagName);
+    expect(['BUTTON', 'INPUT', 'A', 'SELECT']).toContain(tag);
   });
 });

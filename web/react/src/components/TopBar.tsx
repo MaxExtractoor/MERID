@@ -12,7 +12,7 @@ export interface TopBarProps {
 
 /** Seconds until the next 15m market window boundary (:00/:15/:30/:45). */
 function secsToWindowClose(nowMs: number): number {
-  const next = Math.ceil(nowMs / 900_000) * 900_000;
+  const next = (Math.floor(nowMs / 900_000) + 1) * 900_000;
   return Math.max(0, Math.round((next - nowMs) / 1000));
 }
 

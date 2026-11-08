@@ -242,6 +242,7 @@ export interface LiveRuntimeState {
   entry_halted?: boolean;
   reason?: string;
   reason_code?: string;
+  reason_codes?: string[];
   updated_ts?: string;
   history?: Array<{ ts: string; state: string; reason?: string }>;
 }

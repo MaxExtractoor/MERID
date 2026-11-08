@@ -103,7 +103,7 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
   // Scroll selected item into view
   useEffect(() => {
     if (listRef.current) {
-      const el = listRef.current.children[selectedIndex] as HTMLElement;
+      const el = listRef.current.querySelectorAll<HTMLElement>('[data-palette-item]')[selectedIndex];
       el?.scrollIntoView({ block: 'nearest' });
     }
   }, [selectedIndex]);
@@ -183,6 +183,7 @@ export default function CommandPalette({ onNavigate, onOpen }: CommandPalettePro
                 return (
                   <button type="button"
                     key={cmd.id}
+                    data-palette-item
                     onClick={() => handleSelect(cmd)}
                     onMouseEnter={() => setSelectedIndex(idx)}
                     className={`w-full flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors ${

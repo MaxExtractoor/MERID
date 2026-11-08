@@ -51,7 +51,7 @@ export default class KalshiErrorBoundary extends React.Component<
     if (this.props.onGoHome) {
       this.props.onGoHome();
     } else {
-      window.location.hash = '#/overview';
+      window.location.hash = '#/agent-wall';
     }
   };
 
@@ -108,7 +108,7 @@ export default class KalshiErrorBoundary extends React.Component<
               className="flex items-center gap-2 rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600 transition-colors"
             >
               <Home className="h-4 w-4" />
-              Go to Overview
+              Back to Agent Wall
             </button>
           </div>
           

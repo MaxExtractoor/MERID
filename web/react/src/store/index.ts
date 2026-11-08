@@ -356,6 +356,8 @@ const initialSystem: SystemData = {
 
 // ── Store Creation ───────────────────────────────────────────────────────────
 
+let refreshGeneration = 0;
+
 export const useKalshiStore = create<KalshiStore>()(
   subscribeWithSelector((set, get) => ({
     // Initial state
@@ -391,7 +393,7 @@ export const useKalshiStore = create<KalshiStore>()(
      * `connected` is true when ANY core fetch succeeds.
      */
     refreshAll: async () => {
-      const now = Date.now();
+      const generation = ++refreshGeneration;
 
       const [
         [balance, balanceErr],
@@ -411,12 +413,14 @@ export const useKalshiStore = create<KalshiStore>()(
         probe(() => getJson<{ orders?: ServerOrder[] }>(AGENT_ENDPOINTS.ORDERS)),
         probe(() => getJson<{ fills?: ServerFill[]; meta?: { reconciliation_status?: { status?: string } } }>(`${AGENT_ENDPOINTS.FILLS}?since_hours=24&limit=100`)),
         probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.RISK)),
-        probe(() => getJson<{ kill_switch?: boolean; status?: string }>(AGENT_ENDPOINTS.KILL_SWITCH)),
+        probe(() => getJson<{ kill_switch?: boolean; kill_switch_reason?: string; status?: string }>(AGENT_ENDPOINTS.KILL_SWITCH)),
         probe(() => getJson<Record<string, unknown>>(AGENT_ENDPOINTS.UNIFIED_HEALTH)),
         probe(() => fetchLiveRuntimeState()),
         probe(() => getJson<{ ticks?: ServerTick[] }>(`${AGENT_ENDPOINTS.TICK_LOG}?limit=50`)),
       ]);
 
+      if (generation !== refreshGeneration) return;
+      const now = Date.now();
       const portfolioErr = balanceErr ?? pnlErr ?? posErr ?? ordErr ?? fillsErr;
 
       // ── Portfolio slice (balance + pnl + positions + orders + fills) ──
@@ -467,7 +471,7 @@ export const useKalshiStore = create<KalshiStore>()(
           // /risk carries the risk_controller view of the same flag.
           kill_switch_active: killRes?.kill_switch ?? (riskRes?.kill_switch_active as boolean | undefined) ?? get().risk.kill_switch_active,
           kill_switch_reason: killRes?.kill_switch
-            ? (riskRes?.kill_switch_reason as string | undefined ?? '')
+            ? ((killRes?.kill_switch_reason as string | undefined) ?? (riskRes?.kill_switch_reason as string | undefined) ?? '')
             : (riskRes?.kill_switch_reason as string | undefined ?? get().risk.kill_switch_reason),
           limits: (riskRes?.limits as RiskLimits | undefined) ?? get().risk.limits,
           open_market_count: riskRes ? num(riskRes.open_market_count) : get().risk.open_market_count,
@@ -505,7 +509,11 @@ export const useKalshiStore = create<KalshiStore>()(
           ? {
               state: String(liveRes.state),
               entry_halted: liveRes.entry_halted === true,
-              reason: liveRes.reason ?? liveRes.reason_code,
+              reason: liveRes.reason ?? (
+                Array.isArray(liveRes.reason_codes) && liveRes.reason_codes.length > 0
+                  ? String(liveRes.reason_codes[0])
+                  : undefined
+              ),
             }
           : get().system.live;
         const ticksRaw: unknown = tickRes?.ticks;

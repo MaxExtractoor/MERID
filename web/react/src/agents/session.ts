@@ -24,17 +24,20 @@ const OPERATOR_USERNAME = 'operator';
 
 /** The only router gated by get_current_session is /api/v1/kalshi. */
 export const isSessionScopedPath = (path: string): boolean =>
-  path.startsWith('/api/v1/kalshi');
+  path === '/api/v1/kalshi' || path.startsWith('/api/v1/kalshi/');
+
+let memoryToken: string | null = null;
 
 export function getSessionId(): string | null {
   try {
-    return localStorage.getItem(SESSION_TOKEN_KEY);
+    return localStorage.getItem(SESSION_TOKEN_KEY) ?? memoryToken;
   } catch {
-    return null;
+    return memoryToken;
   }
 }
 
 export function clearSession(): void {
+  memoryToken = null;
   try {
     localStorage.removeItem(SESSION_TOKEN_KEY);
   } catch { /* noop */ }
@@ -48,15 +51,17 @@ export function clearSessionIf(expected: string | null): void {
 
 let mintPromise: Promise<string> | null = null;
 
-async function mintSession(): Promise<string> {
+async function mintSession(signal?: AbortSignal): Promise<string> {
   const res = await fetch(apiUrl(REGISTER_PATH), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: OPERATOR_USERNAME }),
+    signal: signal ?? null,
   });
   if (!res.ok) throw new Error(`session mint failed (${res.status})`);
   const data = (await res.json()) as { session_id?: string };
   if (!data.session_id) throw new Error('session mint returned no session_id');
+  memoryToken = data.session_id;
   try {
     localStorage.setItem(SESSION_TOKEN_KEY, data.session_id);
   } catch { /* noop */ }
@@ -68,13 +73,13 @@ async function mintSession(): Promise<string> {
  * stored (the stored one may be a dead post-restart token). Concurrent calls
  * share one in-flight mint so a 401 storm produces a single register.
  */
-export function ensureSession(force = false): Promise<string> {
+export function ensureSession(force = false, signal?: AbortSignal): Promise<string> {
   if (!force) {
     const existing = getSessionId();
     if (existing) return Promise.resolve(existing);
   }
   if (!mintPromise) {
-    mintPromise = mintSession().finally(() => {
+    mintPromise = mintSession(signal ?? undefined).finally(() => {
       mintPromise = null;
     });
   }

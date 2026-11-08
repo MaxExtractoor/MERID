@@ -77,6 +77,7 @@ function NavItem({ item, current, onChange, collapsed, stageColor, isLive }: Nav
     <button
       type="button"
       onClick={() => onChange(item.href)}
+      aria-current={isActive ? 'page' : undefined}
       title={collapsed ? item.name : undefined}
       className={`
         w-full flex items-center ${collapsed ? 'justify-center' : 'gap-3'} px-3 py-2 text-sm font-medium rounded-lg transition-all duration-150
@@ -200,8 +201,14 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
         )}
       </div>
 
+      {collapsed && (
+        <div className="flex justify-center pb-3" title={statusInfo.label}>
+          <div className={`w-2 h-2 rounded-full animate-pulse ${statusInfo.dot}`} aria-label={statusInfo.label} role="status" />
+        </div>
+      )}
+
       {/* Navigation */}
-      <nav className="flex-1 p-3 space-y-4 overflow-y-auto">
+      <nav className="flex-1 p-3 space-y-4 overflow-y-auto" aria-label="Primary">
         {SECTIONS.map((section) => (
           <div key={section[0].stage} className="space-y-3">
             {section.map((stage) => (

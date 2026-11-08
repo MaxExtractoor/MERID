@@ -47,8 +47,10 @@ export function usePoll<T = unknown>(
   const [error, setError] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [lastOk, setLastOk] = useState<number | undefined>(undefined);
-  const inFlight = useRef(false);
-  const mounted = useRef(true);
+  const inFlight = useRef<number | null>(null);
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  const sourceKey = typeof source === 'string' ? source : typeof source === 'object' ? source.path : undefined;
 
   // Stable ref to the source so callers can pass inline lambdas without
   // retriggering the interval every render.
@@ -58,8 +60,10 @@ export function usePoll<T = unknown>(
   mapRef.current = map;
 
   const poll = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
+    if (!mounted.current || inFlight.current === generation.current) return;
+    const requestGeneration = generation.current;
+    const transform = mapRef.current;
+    inFlight.current = requestGeneration;
     try {
       const src = sourceRef.current;
       const raw: unknown =
@@ -72,24 +76,29 @@ export function usePoll<T = unknown>(
               : src.path
                 ? await getJson(src.path)
                 : undefined;
-      if (!mounted.current) return;
-      const out = mapRef.current ? mapRef.current(raw) : (raw as T);
+      if (!mounted.current || requestGeneration !== generation.current) return;
+      const out = transform ? transform(raw) : (raw as T);
       setData(out);
       setError(undefined);
       setLastOk(Date.now());
       setLoading(false);
     } catch (e) {
-      if (!mounted.current) return;
+      if (!mounted.current || requestGeneration !== generation.current) return;
       setError(e instanceof Error ? e.message : String(e));
       setLoading(false);
       // Keep last-good data — a failed poll must not blank the view.
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === requestGeneration) inFlight.current = null;
     }
   }, []);
 
   useEffect(() => {
-    mounted.current = true;
+    generation.current += 1;
+    mounted.current = enabled;
+    setData(undefined);
+    setError(undefined);
+    setLastOk(undefined);
+    setLoading(enabled);
     if (!enabled) {
       setLoading(false);
       return () => { mounted.current = false; };
@@ -101,7 +110,7 @@ export function usePoll<T = unknown>(
       mounted.current = false;
       if (id != null) window.clearInterval(id);
     };
-  }, [poll, ms, enabled]);
+  }, [poll, ms, enabled, sourceKey]);
 
   const refresh = useCallback(() => void poll(), [poll]);
   return { data, error, loading, lastOk, refresh };

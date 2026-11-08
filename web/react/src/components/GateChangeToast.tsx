@@ -15,7 +15,8 @@ let _nextId = 0;
 
 /**
  * Detects execution gate state transitions and shows a temporary toast.
- * Renders fixed in the bottom-right corner.
+ * Renders fixed in the top-right corner (below the TopBar, clear of the
+ * bottom-right ToastProvider stack).
  */
 export function GateChangeToast() {
   const { blocked, blockSummary, topHint } = useExecutionGate();
@@ -73,11 +74,11 @@ export function GateChangeToast() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 space-y-2 max-w-sm">
+    <div className="fixed top-20 right-4 z-50 space-y-2 max-w-sm">
       {toasts.map(toast => (
         <div
           key={toast.id}
-          className={`flex items-start gap-2.5 rounded-lg border px-4 py-3 shadow-xl animate-in slide-in-from-right-5 ${
+          className={`flex items-start gap-2.5 rounded-lg border px-4 py-3 shadow-xl animate-slide-in-right ${
             toast.type === 'blocked'
               ? 'bg-red-950/95 border-red-700/50 text-red-200'
               : 'bg-emerald-950/95 border-emerald-700/50 text-emerald-200'

@@ -34,14 +34,14 @@ export function authHeaders(extra?: HeadersInit): HeadersInit {
  */
 async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const scoped = isSessionScopedPath(path);
-  if (scoped) await ensureSession();
+  if (scoped) await ensureSession(false, init.signal ?? undefined);
   const sent = getSessionId();
   let res = await fetch(apiUrl(path), { ...init, headers: authHeaders(init.headers) });
   if (res.status === 401 && scoped) {
     // Only clear if the stored token is still the one that failed — a
     // concurrent retry may have already minted a fresh session.
     clearSessionIf(sent);
-    await ensureSession(true);
+    await ensureSession(true, init.signal ?? undefined);
     res = await fetch(apiUrl(path), { ...init, headers: authHeaders(init.headers) });
   }
   return res;

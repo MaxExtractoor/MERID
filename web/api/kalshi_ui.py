@@ -11,7 +11,8 @@ Purpose: Eliminate UI-side mocks/fallbacks by providing all truth sources in one
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from web.api.auth import get_current_session
 from typing import Any, Dict, List, Optional
 
 from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
@@ -22,7 +23,7 @@ from merid.reconciliation.venue_reconciler import get_kalshi_reconciler
 from utils.logger import get_logger
 
 logger = get_logger("web.api.kalshi_ui")
-router = APIRouter(prefix="/api/v1/kalshi", tags=["kalshi-ui"])
+router = APIRouter(prefix="/api/v1/kalshi", tags=["kalshi-ui"], dependencies=[Depends(get_current_session)])
 
 
 @router.get("/ui-summary")
@@ -59,8 +60,15 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
         import time
         import os
         
-        # Production stack: get mode from environment variable instead of legacy paper_config
-        mode = os.getenv("MERID_PM_TRADING_MODE", "paper")
+        # Venue mode comes from the canonical live runtime state machine, not
+        # the env var — the env var can disagree with the resolved state.
+        try:
+            from merid.observability.live_runtime_state import get_live_runtime_state as _glrs
+            _state = str(_glrs().state)
+            mode = "live" if _state.startswith("LIVE_") else "paper"
+        except Exception as _e:
+            logger.debug("live runtime state unavailable for ui-summary mode: %s", _e)
+            mode = os.getenv("MERID_PM_TRADING_MODE", "paper")
         
         summary: Dict[str, Any] = {
             "timestamp": time.time(),
@@ -198,8 +206,8 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
         except Exception as exc:
             logger.warning(f"Failed to compute risk summary: {exc}")
             summary["risk"] = {
-                "kill_switch_active": False,
-                "kill_switch_reason": None,
+                "kill_switch_active": True,
+                "kill_switch_reason": "monitoring_failure: risk summary unavailable",
                 "daily_pnl_usd": 0.0,
                 "total_notional_usd": 0.0,
                 "total_unrealized_pnl_usd": 0.0,
@@ -325,16 +333,10 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             
             grid = get_agent_grid()
             
-            # Aggregate PnL from paper session
+            # Grid PnL is reported by the canonical /api/v1/kalshi/pnl surface;
+            # the legacy paper_session module is not part of the production stack.
             _pnl_total = 0.0
             _pnl_today = 0.0
-            try:
-                from merid.prediction.paper_session import get_paper_session as _gps
-                _sess = _gps()
-                _pnl_total = float(getattr(_sess, "total_pnl_cents", 0.0)) / 100.0
-                _pnl_today = float(getattr(_sess, "session_pnl_cents", 0.0)) / 100.0
-            except Exception as _e:
-                logger.debug("paper_session pnl skipped: %s", _e)
 
             summary["grid"] = {
                 "status": "running" if grid.is_running else "stopped",

@@ -71,11 +71,12 @@ const ViewRenderer = React.memo(({ view, onNavigate, agentAsset, onAssetChange }
   if (view === "agent-detail") {
     return (
       <div className="flex flex-col gap-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" role="group" aria-label="Select asset">
           {ASSETS.map((a) => (
             <button
               key={a}
               onClick={() => onAssetChange(a)}
+              aria-pressed={a === agentAsset}
               className={`px-3 py-1 rounded-md text-sm font-semibold transition-colors ${
                 a === agentAsset
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
@@ -136,6 +137,15 @@ export default function App() {
     setSidebarOpen(false);
   }, []);
 
+  useEffect(() => {
+    if (!sidebarOpen) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSidebarOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOpen]);
+
   // Keyboard shortcuts for navigation
   const shortcuts: KeyboardShortcut[] = [
     { key: '0', description: 'Navigate to Agent Wall', action: () => handleNavigate('agent-wall') },
@@ -177,11 +187,18 @@ export default function App() {
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Close sidebar"
               />
-              <Sidebar
-                current={view}
-                onChange={handleNavigate}
-                className="fixed inset-y-0 left-0 z-50 w-64 md:hidden shadow-2xl"
-              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Navigation"
+                className="fixed inset-y-0 left-0 z-50 md:hidden"
+              >
+                <Sidebar
+                  current={view}
+                  onChange={handleNavigate}
+                  className="w-64 h-full shadow-2xl"
+                />
+              </div>
             </>
           )}
         </ErrorBoundary>

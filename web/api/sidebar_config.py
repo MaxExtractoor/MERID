@@ -1,4 +1,15 @@
-"""Sidebar Configuration — Canonical workflow mapping and endpoint contracts.
+"""Sidebar Configuration — DORMANT legacy contract, do not consume.
+
+WARNING: This router is only mounted by the legacy ``web/main.py`` stub — it is
+NOT registered on the production lean app (``web/main_15m_lean.py``). Its
+``SIDEBAR_SECTIONS`` describes the pre-consolidation multi-page UI and lists
+endpoints that do not exist on the lean app (e.g. ``/api/portfolio/summary``,
+``/api/v1/kalshi-grid/matrix``, ``/api/v1/kalshi/continuous-trader/status``),
+and its ``/mode-indicator`` reads legacy ``venue_gate``/``risk`` modules that
+can report ``mode: "sim"`` on a live process. The active seven-view sidebar
+schema lives in ``web/react/src/components/Sidebar.tsx`` and navigation tests
+in ``tests/test_sidebar_wiring.py`` must not be trusted as live-contract
+evidence while this file drifts.
 
 Defines the restructured sidebar with logical groupings, workflow links,
 and backend endpoint dependencies for every view.

@@ -17,13 +17,20 @@ export function HelpPopover({ title, children, className = '' }: HelpPopoverProp
 
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
+    const onMouse = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onMouse);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onMouse);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [open]);
 
   return (
@@ -34,12 +41,14 @@ export function HelpPopover({ title, children, className = '' }: HelpPopoverProp
         className="p-0.5 rounded-full text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 transition-colors"
         title={`Help: ${title}`}
         aria-label={`Help: ${title}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
       >
         <HelpCircle className="w-3.5 h-3.5" />
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full mt-1 right-0 w-72 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 text-xs text-slate-300 space-y-2">
+        <div role="dialog" aria-label={title} className="absolute z-50 top-full mt-1 right-0 w-72 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 text-xs text-slate-300 space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-semibold text-slate-200">{title}</span>
             <button

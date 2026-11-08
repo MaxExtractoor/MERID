@@ -168,6 +168,7 @@ function ToastContainer({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss:
               onClick={() => onDismiss(t.id)}
               className="flex-shrink-0 text-slate-500 hover:text-slate-300 transition-colors"
               title="Dismiss notification"
+              aria-label="Dismiss notification"
             >
               <X className="w-4 h-4" />
             </button>
