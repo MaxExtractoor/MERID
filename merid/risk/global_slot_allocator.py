@@ -323,10 +323,16 @@ class GlobalSlotAllocator:
             position_cache = get_position_cache()
             actual_positions = position_cache.get_all_positions()
             now = time.time()
-            # 2026-08-22: Allow 10-minute buffer after a 15m market's parsed expiry
+            # 2026-08-22: Allow a bounded buffer after a 15m market's parsed expiry
             # before treating a slot as stale.  This prevents us from holding
             # exposure for contracts that should have settled/closed.
-            EXPIRY_BUFFER_SECONDS = 600.0
+            # 2026-11-09: 600s held the per-asset slot ~10min into the NEXT 15m
+            # window after settlement (~3s post-close), starving that asset's
+            # next entries.  Settlement posts seconds after close; 120s covers
+            # close lag without blocking the following window.
+            EXPIRY_BUFFER_SECONDS = float(
+                os.environ.get("MERID_SLOT_EXPIRY_BUFFER_SECONDS", "120")
+            )
 
             def _slot_market_expired(ticker: str) -> bool:
                 expiry_ts = parse_expiry_from_ticker(ticker)

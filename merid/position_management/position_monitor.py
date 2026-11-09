@@ -199,6 +199,72 @@ _NEAR_PRE_FILL_SPREAD_BUFFER_CENTS = int(
 )
 
 
+def _residual_runner_floor_enabled() -> bool:
+    """Post-partial residual breakeven floor (default on).
+
+    Once a partial exit has banked profit the residual runner must never
+    round-trip into a loss: a floor at max(entry, peak - trail) emits a
+    mandatory-risk LOSS_CAP on breach.  ``MERID_RESIDUAL_RUNNER_FLOOR=0``
+    restores the pre-fix hold-to-settlement behavior.
+    """
+    try:
+        return os.environ.get("MERID_RESIDUAL_RUNNER_FLOOR", "1") != "0"
+    except Exception:
+        return True
+
+
+def _residual_runner_trail_cents() -> int:
+    """Trail distance below the residual's own-side peak for the floor."""
+    try:
+        return max(0, int(os.environ.get("MERID_RESIDUAL_RUNNER_TRAIL_CENTS", "8")))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _residual_runner_floor_price(
+    position: "Position", current_price_cents: Optional[int]
+) -> Optional[int]:
+    """Breakeven floor for a post-partial residual, or None when not breached.
+
+    Arms once a partial exit flag is set (``ratchet_trimmed`` /
+    ``scale_out_triggered`` — persisted on the Position and in
+    ``PositionExitStateStore``).  Tracks the residual's own-side peak in
+    ``position._residual_runner_peak_cents``; the floor is
+    ``max(entry_basis, peak - trail)``.  Returns the floor price when the
+    current own-side bid is at or below it — a mandatory-risk LOSS_CAP
+    breach — else None.
+    """
+    if not _residual_runner_floor_enabled():
+        return None
+    if current_price_cents is None:
+        return None
+    if not (
+        getattr(position, "ratchet_trimmed", False)
+        or getattr(position, "scale_out_triggered", False)
+    ):
+        return None
+    entry_basis = (
+        getattr(position, "all_in_entry_basis_cents", None)
+        or getattr(position, "entry_fill_price_cents", None)
+        or getattr(position, "avg_entry_price_cents", None)
+        or 0
+    )
+    try:
+        entry_basis = int(entry_basis)
+    except (TypeError, ValueError):
+        entry_basis = 0
+    if entry_basis <= 0:
+        return None
+    peak = getattr(position, "_residual_runner_peak_cents", None)
+    if peak is None or current_price_cents > peak:
+        peak = int(current_price_cents)
+    position._residual_runner_peak_cents = peak
+    floor = max(entry_basis, int(peak) - _residual_runner_trail_cents())
+    if int(current_price_cents) <= floor:
+        return floor
+    return None
+
+
 def _is_forced_exit_reason(exit_reason: ExitReason) -> bool:
     """Return True if the exit reason is safety/forced and may override a stale in-flight lock."""
     if exit_reason is None:
@@ -2745,6 +2811,19 @@ class PositionMonitor:
                 and existing.get("client_order_id") == client_order_id
                 and existing.get("state") == "EXECUTION_PENDING"
             )
+            # Pre-exit size snapshot so a terminal *partial* fill can prove the
+            # residual was reconciled and release the in-flight lock (the
+            # reconcile path otherwise retains it forever — the "bought 4,
+            # exited 3, residual rode to zero" wedge).
+            _pre_size_cc: Optional[int] = existing.get("pre_exit_size_cc")
+            try:
+                _pos_for_size = self._open_positions.get(position_id)
+                if _pos_for_size is not None:
+                    _pre_size_cc = int(
+                        round(Decimal(str(_pos_for_size.size)) * Decimal(100))
+                    )
+            except Exception:
+                pass
             updated = {
                 "state": "EXECUTION_PENDING",
                 "timestamp": existing.get("timestamp", time.time()) if _same_obligation else time.time(),
@@ -2752,6 +2831,7 @@ class PositionMonitor:
                 "reason": reason if reason is not None else existing.get("reason"),
                 "task": task if task is not None else existing.get("task"),
                 "attempt_id": attempt_id if attempt_id is not None else existing.get("attempt_id"),
+                "pre_exit_size_cc": _pre_size_cc,
             }
             # Carry forward any other diagnostic keys (exchange_order_id, etc.)
             for key, value in existing.items():
@@ -3489,6 +3569,31 @@ class PositionMonitor:
                                 order_price_cents = None
 
                         if status in ("filled", "executed"):
+                            # 2026-11-09 residual re-arm: a terminal filled order
+                            # that closed only part of the position leaves a live
+                            # residual.  Once the durable attempt's confirmed fills
+                            # are reflected in position.size, the order's obligation
+                            # is COMPLETE — retaining the lock here stranded every
+                            # residual to settlement (bought 4, trimmed 3, rode 1
+                            # to zero on 091200/091030).  Release so the residual
+                            # re-arms the full exit stack.
+                            if self._partial_exit_residual_reconciled(
+                                position_id, position, wire_client_order_id or client_order_id
+                            ):
+                                logger.warning(
+                                    "[EXIT-INTENT-RECONCILE] Order %s is terminal-filled for position=%s "
+                                    "with a reconciled residual; releasing lock so residual exits re-arm",
+                                    client_order_id[:8], position_id[:8]
+                                )
+                                if not self._release_stale_exit_flags(
+                                    position_id, "order_filled", client_order_id,
+                                    exchange_order_id=order.order_id, raw_payload=raw,
+                                ):
+                                    logger.error(
+                                        "[EXIT-INTENT-RECONCILE] Residual release failed for %s; retaining lock",
+                                        client_order_id[:8],
+                                    )
+                                return
                             logger.warning(
                                 "[EXIT-INTENT-RECONCILE] Order %s is executed for position=%s; "
                                 "retaining lock until its fills and position are reconciled",
@@ -3509,6 +3614,28 @@ class PositionMonitor:
                             except Exception:
                                 zero_fill = False
                             if not zero_fill:
+                                # Same residual rule as the filled branch: a
+                                # terminal order with posted partial fills has
+                                # completed its obligation; the residual re-arms.
+                                if self._partial_exit_residual_reconciled(
+                                    position_id, position, wire_client_order_id or client_order_id
+                                ):
+                                    logger.warning(
+                                        "[EXIT-INTENT-RECONCILE] Terminal order %s for position=%s "
+                                        "has reconciled partial fills; releasing lock for residual",
+                                        client_order_id[:8], position_id[:8]
+                                    )
+                                    if not self._release_stale_exit_flags(
+                                        position_id,
+                                        "order_rejected" if status == "rejected" else "order_canceled",
+                                        client_order_id,
+                                        exchange_order_id=order.order_id, raw_payload=raw,
+                                    ):
+                                        logger.error(
+                                            "[EXIT-INTENT-RECONCILE] Residual release failed for %s; retaining lock",
+                                            client_order_id[:8],
+                                        )
+                                    return
                                 logger.warning(
                                     "[EXIT-INTENT-RECONCILE] Terminal order %s has unknown or nonzero fills; "
                                     "retaining lock until fill reconciliation",
@@ -3604,6 +3731,14 @@ class PositionMonitor:
             if not unresolved_replacement and await self._resolve_exchange_confirmed_flat(
                 position_id, position.market_id, client_order_id,
                 evidence_context="order_lookup_inconclusive",
+            ):
+                return
+            # Dead-wire release: the order is absent from the exchange and has
+            # produced no confirmed fills after the IOC dead-after bound — the
+            # attempt can never resolve, so retaining the lock would wedge
+            # every later exit on a live residual.
+            if not unresolved_replacement and self._exit_attempt_dead_release(
+                position_id, client_order_id
             ):
                 return
             # Fallback: leave in SUBMISSION_UNKNOWN and alert; a later fill callback should reconcile.
@@ -3835,6 +3970,109 @@ class PositionMonitor:
             del self._exit_intent_in_flight[position_id]
         self._save_exit_intent_in_flight()
         return True
+
+    def _partial_exit_residual_reconciled(
+        self,
+        position_id: str,
+        position: "Position",
+        client_order_id: Optional[str],
+    ) -> bool:
+        """True when a terminal exit order was a *partial* close whose fills
+        are already reflected in ``position.size``.
+
+        ``pre_exit_size_cc`` is stamped on the in-flight record at mark time.
+        Expected residual = pre-size − confirmed fills.  When the live
+        position size is at or below that residual, the exchange order's
+        obligation is complete and the remaining position is a fresh
+        exposure that must re-arm the exit stack.  Any missing evidence
+        (no flight snapshot, no durable attempt, unposted fills) fails
+        closed — the lock is retained for another reconcile pass.
+        """
+        if not client_order_id:
+            return False
+        with self._lock:
+            flight = self._exit_intent_in_flight.get(position_id, {})
+        pre_cc = flight.get("pre_exit_size_cc")
+        if pre_cc is None:
+            return False
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+            )
+            att = OrderAttemptStore().get_exit_attempt_by_client_order_id(client_order_id)
+        except Exception:
+            att = None
+        if att is None:
+            return False
+        filled_cc = getattr(att, "confirmed_quantity", None)
+        if filled_cc is None:
+            return False
+        try:
+            filled_cc = int(filled_cc)
+        except (TypeError, ValueError):
+            return False
+        expected_residual_cc = int(pre_cc) - filled_cc
+        if expected_residual_cc <= 0:
+            # Full close — the flat/settlement path owns it, not this release.
+            return False
+        try:
+            size_cc = int(round(Decimal(str(position.size)) * Decimal(100)))
+        except Exception:
+            return False
+        return size_cc <= expected_residual_cc
+
+    def _exit_attempt_dead_release(
+        self,
+        position_id: str,
+        client_order_id: Optional[str],
+    ) -> bool:
+        """Terminalize a durable exit attempt whose wire is provably dead.
+
+        Reached only after the exchange order lookup found no order (or was
+        inconclusive) AND inventory could not be confirmed flat.  An order
+        that does not exist on the exchange and has produced no confirmed
+        fills after ``MERID_EXIT_IOC_DEAD_AFTER_S`` cannot hurt us — the
+        fills ledger is the authoritative execution source.  Retaining the
+        lock here wedged every later exit (the 091030 EDGE_DECAY attempt
+        sat RESOLVING_ON_EXCHANGE through the whole 99c window).
+        """
+        if not client_order_id:
+            return False
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+            )
+            att = OrderAttemptStore().get_exit_attempt_by_client_order_id(client_order_id)
+        except Exception:
+            att = None
+        if att is None:
+            return False
+        try:
+            _dead_after = float(os.environ.get("MERID_EXIT_IOC_DEAD_AFTER_S", "90"))
+        except (TypeError, ValueError):
+            _dead_after = 90.0
+        created = getattr(att, "created_at", None)
+        if created is None or created > time.time() - _dead_after:
+            return False
+        confirmed = getattr(att, "confirmed_quantity", None)
+        try:
+            if confirmed and float(confirmed) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        try:
+            req = float(getattr(att, "requested_quantity", 0) or 0)
+        except (TypeError, ValueError):
+            req = 0.0
+        logger.warning(
+            "[EXIT-INTENT-RECONCILE] attempt=%s position=%s: order absent from "
+            "exchange for >%.0fs with zero confirmed fills — terminalizing "
+            "not_accepted_confirmed and releasing residual exits",
+            getattr(att, "attempt_id", "")[:8], position_id[:8], _dead_after,
+        )
+        return self._release_stale_exit_flags(
+            position_id, "not_accepted_confirmed", client_order_id,
+        )
 
     # ── Durable exit-intent persistence (2026-09-01) ───────────────────────────
 
@@ -4297,6 +4535,32 @@ class PositionMonitor:
         # Update runtime state using the executable liquidation bid
         position.update_runtime_state(current_price_cents)
 
+        # 2026-11-09: stale-flag re-arm.  A terminal flag pair
+        # (exit_triggered/exit_reason) with no in-flight intent means the last
+        # exit completed or died without re-arming the position — the exact
+        # wedge that disabled AUTO_EXIT_99C, hard locks and every later trigger
+        # on post-partial residuals (bought 4, trimmed 3, rode 1 to zero).
+        # The emission-time stale-clear at _emit_exit_intent only runs when a
+        # trigger already fired; this sweep clears the flags so triggers can
+        # fire in the first place.  ``exited_at`` proves a genuine close.
+        if (
+            (position.exit_triggered or position.exit_reason)
+            and position.exited_at is None
+            and not self._is_exit_intent_in_flight(position.position_id)
+        ):
+            logger.info(
+                "[EXIT-TRIGGER-REARM] position=%s market=%s had stale "
+                "exit_triggered=%s exit_reason=%s with no in-flight intent - "
+                "re-arming exit triggers",
+                position.position_id[:8],
+                position.market_id,
+                position.exit_triggered,
+                position.exit_reason,
+            )
+            position.exit_triggered = False
+            position.exit_reason = None
+            position.exit_price_cents = None
+
         candidates: List[ExitDecision] = []
 
         # 2026-10-21 (drift-lane epoch): cheap_no_settle positions carry a
@@ -4417,6 +4681,54 @@ class PositionMonitor:
             )
             _add_candidate(ExitReason.LOSS_CAP, current_price_cents)
             # Continue evaluating candidates; the central resolver will choose the final exit.
+
+        # 2026-11-09: Residual-runner breakeven floor.  Once a partial exit has
+        # banked profit (ratchet_trim / scale_out), the residual is a free
+        # runner — but it must never round-trip into a loss and ride to zero
+        # (the 4->3->1 incident: trim at 78c banked, residual NO@67 watched
+        # bids of 70-84c pass unsold, then settled 0).  Arm a floor at
+        # max(entry_basis, residual_peak - trail); a breach emits LOSS_CAP —
+        # a mandatory-risk class that bypasses the discretionary EV gate, the
+        # winning-side hold veto, and the profit floor while still selling
+        # only at executable bids.  The floor ratchets UP with the residual's
+        # own-side peak so winners keep room to run.
+        try:
+            _floor = _residual_runner_floor_price(position, current_price_cents)
+            if _floor is not None:
+                _peak = position._residual_runner_peak_cents
+                _entry_basis = int(
+                    position.all_in_entry_basis_cents
+                    or position.entry_fill_price_cents
+                    or position.avg_entry_price_cents
+                    or 0
+                )
+                logger.warning(
+                    "[POSITION-MONITOR] RESIDUAL-RUNNER-FLOOR triggered: "
+                    "position=%s side=%s bid=%dc floor=%dc peak=%dc entry=%dc "
+                    "- breakeven stop on post-partial residual",
+                    position.position_id[:8],
+                    position.side.value,
+                    current_price_cents,
+                    _floor,
+                    _peak,
+                    int(_entry_basis),
+                )
+                _add_candidate(
+                    ExitReason.LOSS_CAP,
+                    current_price_cents,
+                    None,
+                    metadata={
+                        "residual_runner_floor": True,
+                        "floor_price_cents": _floor,
+                        "residual_peak_cents": _peak,
+                        "trail_cents": _residual_runner_trail_cents(),
+                    },
+                )
+        except Exception as _rrf_exc:
+            logger.warning(
+                "[POSITION-MONITOR] residual-runner floor check failed: %s",
+                _rrf_exc,
+            )
 
         # 2026-10-07: Tail-loss floor — catastrophic salvage for deep-tail losses.
         # Independent of the armed SL (disabled under profit_only_v1): fires when

@@ -909,6 +909,41 @@ profitable trades. Pinned-fav offline fixtures must redirect
 `MERID_PROVISIONAL_STATE_PATH` too: otherwise production markout history
 (e.g. a 21.5c ASR) changes unrelated admission-test economics.
 
+## 2026-11-09 post-partial residual-stranding repairs
+
+Forensic basis (live XRP 091200/091030 markets): `ratchet_trim` closed 3 of
+4 contracts by design, then the residual runner (a) could strand because
+`position.exit_reason`/`exit_triggered` stayed set, (b) could wedge behind
+a dead `RESOLVING_ON_EXCHANGE` attempt, and (c) had no dedicated floor —
+EDGE_DECAY EV-vetoed, HARD_STOP shadowed, settlement-guard premium-gated —
+so it rode to a 0 settlement.
+
+- **Residual-runner breakeven floor** (`MERID_RESIDUAL_RUNNER_FLOOR`,
+  default 1): once `ratchet_trimmed` or `scale_out_triggered` is set, the
+  monitor tracks the residual's own-side peak and emits a mandatory-risk
+  `LOSS_CAP` when the bid breaches `max(entry_basis, peak -
+  MERID_RESIDUAL_RUNNER_TRAIL_CENTS)` (default 8c).  LOSS_CAP bypasses the
+  discretionary EV gate, the winning-side hold veto, the profit floor, and
+  the price-stop shadow; a banked winner can never round-trip to zero.
+- **Terminal partial release**: `_reconcile_exit_intent` now releases the
+  in-flight lock on `filled`/`executed` (and canceled/rejected-with-fills)
+  orders once the attempt's confirmed fills are reflected in
+  `position.size` (pre-size snapshot is stamped on the in-flight record at
+  mark time).  Full closes still resolve via the flat path.
+- **Dead-wire release**: an exit attempt absent from the exchange with
+  zero confirmed fills for `MERID_EXIT_IOC_DEAD_AFTER_S` (90s)
+  terminalizes `not_accepted_confirmed` and releases the lock instead of
+  retaining `SUBMISSION_UNKNOWN` forever.
+- **Stale-flag re-arm**: at the top of `_check_position`,
+  `exit_triggered`/`exit_reason` are cleared when no in-flight intent
+  exists — re-arms `auto_exit_99c`, hard locks, and every other trigger on
+  residuals without weakening the in-flight dedupe itself.
+- **Slot expiry buffer**: `MERID_SLOT_EXPIRY_BUFFER_SECONDS` (default
+  120s, was hardcoded 600s) frees a settled position's per-asset slot
+  inside the next 15m window instead of ~10min after close.
+
+Tests: `tests/test_residual_runner_repairs_2026_11_09.py`.
+
 2026-11-08 writer-throughput repair: the audit writer now group-commits —
 `_writer_main` drains everything already queued (up to
 `MERID_AUDIT_WRITER_BATCH`, default 128) into one `BEGIN IMMEDIATE`/commit

@@ -959,7 +959,10 @@ class TestPositionMonitorStartupLoading:
         # survive CachedPosition.__post_init__ validation under any
         # test-order env state.
         assert btc_position.take_profit_price_cents == 70
-        assert btc_position.stop_loss_price_cents == 40
+        # profit_only_v1: the armed stop-loss is stripped on load — protective
+        # coverage is LOSS_CAP / tail-loss, not an armed price SL.  The cached
+        # SL=40 must not silently re-arm a disabled stop policy.
+        assert btc_position.stop_loss_price_cents is None
         
         # Verify ETH position
         eth_position = monitor.get_position_by_market("KXETH15M-5678")
