@@ -217,7 +217,8 @@ def test_mismatched_generation_denies_and_keeps_floor(monkeypatch):
 # ── 2. Fills-ledger generation propagation ──────────────────────────────────
 
 
-def _fill(fill_id, ticker, action, side, qty_cc, price_dollars, fee="0.001"):
+def _fill(fill_id, ticker, action, side, qty_cc, price_dollars, fee="0.001",
+          no_price_dollars=None):
     from merid.event_venues.kalshi.fills_ledger import KalshiFill
 
     return KalshiFill(
@@ -227,6 +228,9 @@ def _fill(fill_id, ticker, action, side, qty_cc, price_dollars, fee="0.001"):
         canonical_position_side=side,
         quantity_cc=qty_cc,
         yes_price_dollars=Decimal(price_dollars),
+        no_price_dollars=(
+            Decimal(no_price_dollars) if no_price_dollars is not None else None
+        ),
         fee_cost=Decimal(fee),
         canonicalization_state="TRUSTED_LIVE_V1",
     )
@@ -291,7 +295,11 @@ def test_ledger_episode_opener_tracks_sign_flip_fill():
     """One oversized fill flipping the sign opens a new episode itself."""
     ledger = _bare_ledger()
     f1 = _fill("f1", BTC_TICKER, "buy", "yes", 50, "0.90")
-    f2 = _fill("f2", BTC_TICKER, "sell", "yes", 98, "0.70")
+    # Sign-flip residual re-anchors to the NEW side's leg price: the NO leg
+    # of a 70c YES fill is 30c and must arrive as stored fill data — the
+    # ledger deliberately never synthesizes it via 100 - yes_price.
+    f2 = _fill("f2", BTC_TICKER, "sell", "yes", 98, "0.70",
+               no_price_dollars="0.30")
     for f in (f1, f2):
         ledger._fills[f.fill_id] = f
 

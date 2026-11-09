@@ -313,3 +313,65 @@ class TestOrderIntentRiskContractFields:
             post_only=False,
         )
         assert intent.post_only is False
+
+
+class TestRegistersEntryProvenance:
+    """2026-11-08 (DOGE-1830): TP-less lane entries must still register
+    position provenance (risk contract / lane / edge claims) — the old
+    TP/SL-only gate silently dropped them, leaving positions with no
+    ``entry_authorized_net_edge_c`` and degrading the no-edge salvage
+    classifier to UNKNOWN (chase floor = entry+1 -> lock never dispatched
+    -> settlement-0 loss)."""
+
+    def _intent(self, **kw):
+        from types import SimpleNamespace
+        defaults = dict(
+            client_tag="merid_testcoid",
+            client_order_id="merid_testcoid",
+            take_profit_price_cents=None,
+            take_profit_r_multiple=None,
+            stop_loss_price_cents=None,
+            stop_loss_enabled=False,
+            entry_or_exit="entry",
+        )
+        defaults.update(kw)
+        return SimpleNamespace(**defaults)
+
+    def test_tp_less_entry_registers(self):
+        from merid.event_venues.kalshi.order_router import (
+            _registers_entry_provenance,
+        )
+        assert _registers_entry_provenance(self._intent()) is True
+
+    def test_exit_without_tp_sl_skips(self):
+        from merid.event_venues.kalshi.order_router import (
+            _registers_entry_provenance,
+        )
+        assert _registers_entry_provenance(
+            self._intent(entry_or_exit="exit")
+        ) is False
+
+    def test_missing_client_tag_skips(self):
+        from merid.event_venues.kalshi.order_router import (
+            _registers_entry_provenance,
+        )
+        assert _registers_entry_provenance(
+            self._intent(client_tag=None, client_order_id=None)
+        ) is False
+
+    def test_tp_entry_registers(self):
+        from merid.event_venues.kalshi.order_router import (
+            _registers_entry_provenance,
+        )
+        assert _registers_entry_provenance(
+            self._intent(take_profit_price_cents=99)
+        ) is True
+
+    def test_sl_only_entry_registers(self):
+        """Pre-existing SL-only behavior is preserved."""
+        from merid.event_venues.kalshi.order_router import (
+            _registers_entry_provenance,
+        )
+        assert _registers_entry_provenance(
+            self._intent(stop_loss_price_cents=80, stop_loss_enabled=True)
+        ) is True

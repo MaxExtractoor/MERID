@@ -143,6 +143,11 @@ EXIT_REASON_CANONICAL_MAP: Dict[str, str] = {
     "dynamic_take_profit": "take_profit",
     "continuation_stop": "signal_reversal",
     "hard_profit_lock": "hard_profit_lock",
+    # 2026-11-08 (DOGE-1830): the intent-contract spelling must canonicalize
+    # to the same emergency reason — otherwise classify_exit_reason returns
+    # UNKNOWN/ordinary and the structured emergency tuple (emergency_type,
+    # exit_class) is never derived for the witnessed lock obligation.
+    "exit_hard_profit_lock": "hard_profit_lock",
     "settlement_guard": "expiry_liquidation",
     "ratchet_floor": "take_profit",
     "loss_cut_40pct": "stop_loss",

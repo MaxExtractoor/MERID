@@ -87,6 +87,12 @@ def _make_state(*, no_bid=None, no_ask=None, yes_bid=None, yes_ask=None,
     state.best_bid_cents = yes_bid
     state.best_ask_cents = yes_ask
     state.book = None
+    # Mock auto-attributes defeat ``getattr(state, x, None) is not None``
+    # probes in the EV evaluator — ``float(Mock)`` raises and the whole
+    # evaluation is recorded as ev_evaluation_error instead.
+    state.implied_prob = None
+    state.calibrated_fair_value = None
+    state.calibrated_prob = None
     return state
 
 
@@ -578,11 +584,14 @@ class TestHardLockChasePricing:
         assert record["limit_cents"] == 83
         assert price == 83
 
-    def test_no_edge_chase_floors_at_tail_drop(self):
+    def test_no_edge_chase_floors_at_tail_drop(self, monkeypatch):
         """No-edge bounded-lane entry 89 (pinned_fav: entry_edge_pct=-2.89,
         gross entry_edge=+0.0062): chase floor = entry - drop_no_edge = 75;
         limit = max(75, 87-4) = 83.  The net claim — not the gross stamp —
         selects the deeper salvage floor."""
+        # Pin the salvage depth: the repo .env sets a deeper drop (28c)
+        # for live; this test asserts the documented default-14 math.
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
         position = _make_position(
             avg_entry_price_cents=89,
             entry_edge_pct=-2.89,
@@ -615,10 +624,11 @@ class TestHardLockChasePricing:
         assert record["limit_cents"] == 83
         assert price == 83
 
-    def test_no_edge_chase_loss_bound_admits_priced_depth(self):
+    def test_no_edge_chase_loss_bound_admits_priced_depth(self, monkeypatch):
         """A chase limit below entry projects a bounded loss; the priced
         limit IS the bound (not the generic 3c cap), so the salvage is not
         vetoed as max_loss_exceeded."""
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
         position = _make_position(
             avg_entry_price_cents=89,
             entry_edge_pct=-2.89,
@@ -682,3 +692,197 @@ class TestHardLockChasePricing:
         assert approved is True
         assert "lock_chase" not in record
         assert record["limit_cents"] == 87
+
+
+class TestDoge1830Regression:
+    """2026-11-08 DOGE-1830 loss-to-zero regression.
+
+    Live incident: KXDOGE15M-26NOV081830-30 YES entry @98c (6 contracts,
+    pinned_fav lane, authorized net EV ≈ -5.5c).  The hard lock latched at
+    the 98c fav threshold while the held-side bid sat at 98-99c, but every
+    protective exit died before dispatch:
+
+      * the guard's threshold-sweep branch floored the IOC limit at
+        entry+min_profit = 99c (``_profit_floor``) even for a no-edge
+        bounded-lane claim whose salvage bound is entry - tail-drop;
+      * the position carried no risk contract (TP-less entry skipped
+        ``register_tp_targets``), so the no-edge classifier read UNKNOWN
+        and the monitor's own chase floor degraded to entry+1 = 99c;
+      * the arbiter treated ``exit_hard_profit_lock`` as an ordinary
+        proposal and clamped it to the ~99c fee-adjusted floor ->
+        ``held_unmarketable`` -> ``never_dispatched``;
+      * the bid collapsed to 69c at 23:28:41 and the position settled 0.
+
+    These tests pin the guard-side fixes: sweep-branch pricing respects
+    the no-edge salvage floor, and a transiently empty preferred
+    market-state view cannot veto a quote the alternate trusted view
+    can price.
+    """
+
+    def test_no_edge_threshold_bid_prices_salvage_not_breakeven(self, monkeypatch):
+        """DOGE replay: entry 98, no-edge claim, bid == 98c threshold.
+
+        The sweep branch must floor at ``_chase_floor`` (entry - tail-drop
+        = 84c), not ``_profit_floor`` (entry+1 = 99c): limit =
+        max(84, 98-3) = 95c — marketable against the 98c bid.  Before the
+        fix the limit was 99c: unmarketable, arbiter-held, never sent.
+        """
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
+        monkeypatch.setenv("MERID_HARD_LOCK_SWEEP_CENTS", "3")
+        monkeypatch.setenv("MERID_HARD_LOCK_MIN_PROFIT_CENTS", "1")
+        position = _make_position(
+            avg_entry_price_cents=98,
+            entry_edge_pct=-5.0,   # authorized net claim <= 0 -> no-edge
+            outcome_side="yes",
+            thesis_side="yes",
+        )
+        from merid.event_venues.kalshi.position_cache import (
+            CachedPosition,
+            get_position_cache,
+        )
+
+        get_position_cache()._positions["KXBTC15M-26AUG100000-00"] = (
+            CachedPosition(
+                market_id="KXBTC15M-26AUG100000-00",
+                agent_id="test",
+                contracts=6,
+                side="yes",
+                thesis_side="yes",
+                avg_price_cents=98,
+            )
+        )
+        state = _make_state(yes_bid=98, yes_ask=99, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=98, state=state
+        )
+
+        assert approved is True
+        assert record["limit_cents"] == 95
+        assert price == 95
+        assert record["lock_threshold_cents"] == 98
+
+    def test_model_edge_threshold_bid_keeps_profit_floor(self, monkeypatch):
+        """Same shape with a model-edge claim: entry+min_profit still binds
+        — the salvage floor must not leak into edge positions."""
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
+        monkeypatch.setenv("MERID_HARD_LOCK_SWEEP_CENTS", "3")
+        monkeypatch.setenv("MERID_HARD_LOCK_MIN_PROFIT_CENTS", "1")
+        position = _make_position(
+            avg_entry_price_cents=98,
+            outcome_side="yes",
+            thesis_side="yes",
+        )
+        from merid.event_venues.kalshi.position_cache import (
+            CachedPosition,
+            get_position_cache,
+        )
+
+        get_position_cache()._positions["KXBTC15M-26AUG100000-00"] = (
+            CachedPosition(
+                market_id="KXBTC15M-26AUG100000-00",
+                agent_id="test",
+                contracts=6,
+                side="yes",
+                thesis_side="yes",
+                avg_price_cents=98,
+            )
+        )
+        state = _make_state(yes_bid=98, yes_ask=99, age_ms=80)
+
+        approved, price, record, _did = _run_guard(
+            position, "hard_profit_lock", exit_price_cents=98, state=state
+        )
+
+        assert approved is True
+        # No edge stamps -> model-edge -> _chase_floor == _profit_floor == 99.
+        assert record["limit_cents"] == 99
+        assert price == 99
+
+    def test_preferred_state_gap_falls_back_to_unified_quote(self):
+        """ks present but held-side book empty; us carries the live bid.
+
+        Live divergence: the evaluator priced bid=99 from the unified
+        state while the guard rejected 'no_executable_bid' on the same
+        tick because ``ks or us`` pinned the empty kalshi view.  The guard
+        must fill the gap from the alternate trusted state — freshness and
+        provenance gates still bind on the selected quote.
+        """
+        position = _make_position()  # entry 74, held side "no"
+        ks = _make_state(
+            no_bid=None, no_ask=None, yes_bid=None, yes_ask=None,
+            age_ms=80, source="ws",
+        )
+        us = _make_state(no_bid=92, no_ask=93, age_ms=90, source="unified")
+
+        def _two_state(_ticker):
+            return (ks, us)
+
+        from merid.loop_15m import _run_exit_price_guard
+        with patch(
+            "merid.event_venues.kalshi.stop_candidate._get_market_state",
+            _two_state,
+        ):
+            approved, price, record, _did = _run_exit_price_guard(
+                position, "hard_profit_lock", 92, 1
+            )
+
+        assert approved is True
+        assert record["best_bid_cents"] == 92
+        assert record["quote_source"] == "unified"
+        assert record["limit_cents"] == 87
+        assert price == 87
+
+    def test_preferred_state_live_bid_never_overridden(self):
+        """A populated preferred-state bid always wins — the fallback only
+        fills genuine gaps, it never overrides a live quote with the
+        alternate view's number."""
+        position = _make_position()
+        ks = _make_state(no_bid=91, no_ask=92, age_ms=80, source="ws")
+        us = _make_state(no_bid=95, no_ask=96, age_ms=90, source="unified")
+
+        def _two_state(_ticker):
+            return (ks, us)
+
+        from merid.loop_15m import _run_exit_price_guard
+        with patch(
+            "merid.event_venues.kalshi.stop_candidate._get_market_state",
+            _two_state,
+        ):
+            approved, _price, record, _did = _run_exit_price_guard(
+                position, "hard_profit_lock", 91, 1
+            )
+
+        assert approved is True
+        assert record["best_bid_cents"] == 91  # ks wins, not us's 95
+        assert record["quote_source"] == "ws"
+
+    def test_both_states_without_bid_still_rejects(self):
+        """Fallback must not manufacture a quote: when neither trusted view
+        carries an executable held-side bid the guard still fails closed
+        with ``no_executable_bid``."""
+        position = _make_position()
+        ks = _make_state(
+            no_bid=None, no_ask=None, yes_bid=None, yes_ask=None,
+            age_ms=80, source="ws",
+        )
+        us = _make_state(
+            no_bid=None, no_ask=None, yes_bid=None, yes_ask=None,
+            age_ms=90, source="unified",
+        )
+
+        def _two_state(_ticker):
+            return (ks, us)
+
+        from merid.loop_15m import _run_exit_price_guard
+        with patch(
+            "merid.event_venues.kalshi.stop_candidate._get_market_state",
+            _two_state,
+        ):
+            approved, _price, record, _did = _run_exit_price_guard(
+                position, "hard_profit_lock", 91, 1
+            )
+
+        assert approved is False
+        assert record["reject_reason"] == "no_executable_bid"
+        assert record["best_bid_cents"] is None

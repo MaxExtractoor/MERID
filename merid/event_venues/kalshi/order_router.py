@@ -1281,6 +1281,32 @@ def _resolve_execution_mode(intent: OrderIntent) -> str:
     return _resolve_execution_mode_with_reason(intent)[0]
 
 
+def _registers_entry_provenance(intent: "OrderIntent") -> bool:
+    """Whether ``register_tp_targets`` should run for this intent.
+
+    2026-11-08 (DOGE-1830): every entry-side intent registers, not just
+    TP/SL-carrying ones.  TP-less lane entries (pinned_fav) previously
+    skipped registration entirely, so the position cache never received
+    the risk contract / lane / edge provenance.  Without
+    ``entry_authorized_net_edge_c`` the no-edge salvage classifier read
+    the position as UNKNOWN and the hard-lock chase floor degraded to
+    entry+1 (99c for a 98c entry), terminalizing the lock obligation
+    while the bid still sat at the 98c threshold — the position then rode
+    to a settlement-0 loss that a bounded salvage IOC could have avoided.
+    Exit intents (``entry_or_exit="exit"``) still skip: they carry no
+    position-opening provenance.
+    """
+    if not getattr(intent, "client_tag", None):
+        return False
+    if (
+        getattr(intent, "take_profit_price_cents", None)
+        or getattr(intent, "take_profit_r_multiple", None)
+        or getattr(intent, "stop_loss_price_cents", None) is not None
+    ):
+        return True
+    return str(getattr(intent, "entry_or_exit", "") or "").lower() == "entry"
+
+
 def _position_risk_contract(intent: "OrderIntent") -> Optional[dict]:
     """Build the persisted position risk contract for a submitted intent.
 
@@ -16620,11 +16646,9 @@ async def _route_live(
         # 2026-10-02: also register when the intent carries only an SL — the
         # TP-only gate silently dropped stop-loss params for SL-only intents,
         # leaving the CachedPosition without risk params for REST syncs.
-        if intent.client_tag and (
-            intent.take_profit_price_cents
-            or intent.take_profit_r_multiple
-            or intent.stop_loss_price_cents is not None
-        ):
+        # 2026-11-08 (DOGE-1830): register every entry-side intent, not just
+        # TP/SL-carrying ones — see _registers_entry_provenance.
+        if _registers_entry_provenance(intent):
             try:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
                 

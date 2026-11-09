@@ -229,7 +229,9 @@ class TestCandidateFloorEntryEdge:
 class TestChaseFloor:
     """``_hard_lock_chase_floor_cents`` — the deepest bid a chase may take."""
 
-    def test_no_edge_floor_is_tail_drop(self):
+    def test_no_edge_floor_is_tail_drop(self, monkeypatch):
+        # Pin the drop: the repository .env overrides the 14c code default.
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
         pos = SimpleNamespace(
             avg_entry_price_cents=89, entry_edge_pct=-2.89, entry_edge=0.0062
         )
@@ -380,6 +382,8 @@ class TestHardLockChaseEndToEnd:
         """Bid below the no-edge salvage floor (89-14=75): nothing
         salvageable -> the tail LOSS_CAP band owns the exit and the lock
         obligation terminalizes."""
+        # Pin the drop: the repository .env overrides the 14c code default.
+        monkeypatch.setenv("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", "14")
         monitor, emitted = self._monitor(monkeypatch)
         position = self._position()
         monitor.add_position(position)

@@ -240,7 +240,7 @@ def context_from_position(
 # ---------------------------------------------------------------------------
 
 _PROFIT_LOCK_REASONS = frozenset({
-    "take_profit", "hard_profit_lock", "ratchet_trim", "scale_out",
+    "take_profit", "ratchet_trim", "scale_out",
     "auto_exit_99c", "extreme_profit", "dynamic_take_profit",
     "settlement_guard",
 })
@@ -250,12 +250,34 @@ _EMERGENCY_REASONS = frozenset({
     "market_expired", "expiry_liquidation", "stale_data",
     "position_mismatch", "emergency", "hard_risk", "operational_risk",
     "external_exit", "reconciliation", "reconcile",
+    # 2026-11-08 (DOGE-1830): the witnessed hard-profit-lock obligation is a
+    # mechanical emergency liquidation — the shared taxonomy already
+    # classes ``hard_profit_lock`` EMERGENCY.  Both spellings must reach
+    # that kind: the arbiter's breakeven floor clamps ordinary proposals,
+    # which held every sub-breakeven chase IOC as ``held_unmarketable``
+    # (never_dispatched) while a 98c entry rode to a settlement-0 loss.
+    "hard_profit_lock", "exit_hard_profit_lock",
 })
+
+
+def _canonical_reason_key(reason: Any) -> str:
+    """Normalize producer reason spellings onto the canonical taxonomy.
+
+    Strips a single leading ``exit:`` / ``exit_`` transport prefix so the
+    intent-contract spelling (``exit_hard_profit_lock``) and the monitor
+    spelling (``hard_profit_lock``) classify identically.  Only a leading
+    prefix is removed — embedded occurrences are left alone.
+    """
+    r = str(getattr(reason, "value", reason) or "").lower().strip()
+    for prefix in ("exit:", "exit_"):
+        if r.startswith(prefix):
+            return r[len(prefix):]
+    return r
 
 
 def kind_for_reason(reason: Any, exit_class: Optional[str] = None) -> str:
     """Map a producer reason/classification onto ProposalKind."""
-    r = str(getattr(reason, "value", reason) or "").lower()
+    r = _canonical_reason_key(reason)
     if (exit_class or "").strip().lower() == "emergency" \
             or r in _EMERGENCY_REASONS:
         return ProposalKind.EMERGENCY.value
@@ -302,7 +324,7 @@ def proposal_from_intent(
                 _REASON_TO_EMERGENCY_TYPE,
             )
             etype = _REASON_TO_EMERGENCY_TYPE.get(
-                str(reason).lower().replace("exit_", ""))
+                _canonical_reason_key(reason))
             if etype is not None:
                 intent.emergency_type = etype
         except Exception:

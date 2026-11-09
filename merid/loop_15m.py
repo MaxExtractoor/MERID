@@ -2429,6 +2429,25 @@ def _run_exit_price_guard(
 
     ks, us = _get_market_state(getattr(position, "market_id", ""))
     state = ks or us
+    best_bid = _get_executable_exit_cents(state, held_outcome) if state is not None else None
+    best_ask = _get_executable_ask_cents(state, held_outcome)
+    # 2026-11-08 (DOGE-1830): ``ks or us`` pins the preferred state object
+    # even when its held-side book is transiently empty while the alternate
+    # trusted view carries a live quote — the EV evaluator receives both
+    # states and priced bid=99 on the same tick the guard rejected
+    # "no_executable_bid".  When the preferred view has no executable
+    # held-side bid, re-select the alternate view as a whole so bid, ask,
+    # quote age, TTE, and source all come from the state that actually
+    # supplied the price — never a cross-state mix.  A populated preferred
+    # bid always wins; this only fills a genuine gap.
+    if state is not None and best_bid is None:
+        _alt_state = us if state is ks else ks
+        if _alt_state is not None and _alt_state is not state:
+            _alt_bid = _get_executable_exit_cents(_alt_state, held_outcome)
+            if _alt_bid is not None:
+                state = _alt_state
+                best_bid = _alt_bid
+                best_ask = _get_executable_ask_cents(_alt_state, held_outcome)
     quote_age_ms = _book_age_ms(state) if state is not None else None
     seconds_to_expiry = _seconds_to_expiry(state) if state is not None else None
     quote_source = (
@@ -2436,8 +2455,6 @@ def _run_exit_price_guard(
         or getattr(state, "source", None)
         or ("ws" if ks else ("unified" if us else None))
     )
-    best_bid = _get_executable_exit_cents(state, held_outcome) if state is not None else None
-    best_ask = _get_executable_ask_cents(state, held_outcome)
 
     record.update({
         "quote_age_ms": quote_age_ms,
@@ -2790,8 +2807,18 @@ def _run_exit_price_guard(
                 record["lock_chase"] = True
                 record["chase_floor_cents"] = _chase_floor
             elif _lock_sweep > 0:
+                # 2026-11-08 (DOGE-1830): floor the threshold-sweep limit at
+                # the position's salvage bound (_chase_floor), not
+                # entry+min_profit.  For no-edge bounded-lane claims
+                # _chase_floor is entry - tail-drop; binding _profit_floor
+                # here priced the IOC at entry+1 (99c for a 98c entry)
+                # against a bid sitting exactly at the 98c threshold —
+                # unmarketable, arbiter-held, never dispatched, and the
+                # position settled 0.  Edge claims keep
+                # _chase_floor == _profit_floor, so their pricing is
+                # unchanged.
                 limit_cents = max(
-                    1, min(99, max(_profit_floor, _lock_floor - _lock_sweep))
+                    1, min(99, max(_chase_floor, _lock_floor - _lock_sweep))
                 )
         record["lock_threshold_cents"] = _lock_floor
         record["lock_sweep_cents"] = _lock_sweep
@@ -4452,8 +4479,21 @@ async def _execute_exit_order(
                         intent.price_cents = max(_min_fl, _live_liq - _slip_buf)
                 elif _live_liq >= _be_fl:
                     intent.price_cents = max(_be_fl, _live_liq - _slip_buf)
+            # 2026-11-08 (DOGE-1830): hard_profit_lock is emergency-class;
+            # if its structured authorization is denied (generation/issuer/
+            # token), degrade to the floored ordinary kind so the proposal
+            # keeps today's floor-clamped semantics instead of being
+            # suppressed outright.  Scoped to the lock reason only — other
+            # emergencies keep fail-closed denial.
+            _fallback_kind = (
+                "profit_lock"
+                if str(getattr(intent, "exit_reason", "") or "").lower()
+                in ("exit_hard_profit_lock", "hard_profit_lock")
+                else None
+            )
             _prepared = approve_intent(
                 intent, _arb_ctx, issuer="position_monitor",
+                fallback_kind=_fallback_kind,
             )
             if not _prepared.approved:
                 # 2026-10-19: a live but unmarketable resting exit wedges

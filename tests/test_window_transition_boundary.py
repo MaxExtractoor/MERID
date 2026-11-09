@@ -167,6 +167,65 @@ def _snapshot(ticker: str, yes: list, no: list) -> dict[str, Any]:
     return {"type": "orderbook_snapshot", "ticker": ticker, "yes": yes, "no": no}
 
 
+def _apply_book_snapshot(
+    store: KalshiMarketStateStore,
+    ticker: str,
+    yes: list | None = None,
+    no: list | None = None,
+) -> None:
+    """Apply the standard rest_bootstrap snapshot and wait for the per-ticker
+    batch worker to land it.
+
+    Since 2026-11-04 every ``orderbook_snapshot`` is routed through the async
+    batch worker (``_enqueue_snapshot``), so the apply lands after
+    ``apply_orderbook_message`` returns.  Asserting immediately races the
+    worker and reads ``book_initialized=False`` / ``last_book_update_ts=0``.
+    The wait is iteration-bounded rather than clock-bounded because these
+    tests freeze ``time.monotonic``/``time.time`` process-wide.
+    """
+    store.apply_orderbook_message(
+        _snapshot(ticker, yes or [[0.55, 5]], no or [[0.45, 5]]),
+        via="rest_bootstrap",
+    )
+    state = store.get(ticker)
+    for _ in range(1000):  # ~10s at 10ms
+        if state is not None and state.book_initialized:
+            break
+        time.sleep(0.01)
+        state = store.get(ticker)
+    else:
+        raise AssertionError(
+            f"orderbook snapshot for {ticker} was never applied by the batch worker"
+        )
+    # ``book_initialized`` lands before quote-owner promotion: the gate
+    # state still reads NONE_UNTRUSTED until the REST-verified degraded
+    # owner is assigned inside the same async apply.  Wait for a trusted
+    # owner too — entry readiness asserts downstream of this helper.
+    for _ in range(1000):
+        if _quote_owner_trusted(store, ticker):
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        f"quote owner for {ticker} never reached a trusted state"
+    )
+
+
+def _quote_owner_trusted(store: KalshiMarketStateStore, ticker: str) -> bool:
+    """Mirror of loop_15m._entry_quote_owner_trusted for test waits."""
+    try:
+        qgate = store.get_quote_gate_state(ticker)
+    except Exception:
+        return False
+    owner = qgate.get("quote_owner", "NONE_UNTRUSTED")
+    if owner == "WS_FRESH_VERIFIED":
+        return bool(qgate.get("ws_fresh"))
+    if owner == "REST_VERIFIED_DEGRADED":
+        return bool(
+            qgate.get("degraded_entry_enabled") and qgate.get("rest_fresh")
+        )
+    return False
+
+
 def test_state_store_maintains_per_window_metadata(windows, monkeypatch):
     """Rest metadata (strike, expiry) for old and new windows co-exist."""
     fake_clock = FakeClock(start=1_000_000.0)
@@ -210,9 +269,8 @@ def test_quote_does_not_refresh_initialized_book(windows, monkeypatch):
 
     # Initialize via REST + orderbook snapshot at time T
     store.apply_rest_market(old.rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(old.market_id, [[0.55, 5], [0.54, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
+    _apply_book_snapshot(
+        store, old.market_id, yes=[[0.55, 5], [0.54, 5]], no=[[0.45, 5]]
     )
 
     old_state = store.get(old.market_id)
@@ -272,9 +330,8 @@ def test_new_window_quote_does_not_touch_other_window(windows, monkeypatch):
     new = windows[1]
 
     store.apply_rest_market(old.rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(old.market_id, [[0.55, 5], [0.54, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
+    _apply_book_snapshot(
+        store, old.market_id, yes=[[0.55, 5], [0.54, 5]], no=[[0.45, 5]]
     )
     old_ts = store.get(old.market_id).last_book_update_ts
 
@@ -307,10 +364,7 @@ def test_entry_ready_requires_metadata(windows, monkeypatch):
     data.pop("cap_strike")
     store.apply_rest_market(data)
 
-    store.apply_orderbook_message(
-        _snapshot(new.market_id, [[0.55, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
-    )
+    _apply_book_snapshot(store, new.market_id)
 
     ready, reason = store.is_market_entry_ready(new.market_id, max_age_seconds=60)
     assert not ready
@@ -331,10 +385,7 @@ def test_entry_ready_with_rest_bootstrap(windows, monkeypatch):
     new = windows[1]
 
     store.apply_rest_market(new.rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(new.market_id, [[0.55, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
-    )
+    _apply_book_snapshot(store, new.market_id)
 
     ready, reason = store.is_market_entry_ready(new.market_id, max_age_seconds=60)
     assert ready, f"expected ready, got {reason}"
@@ -446,10 +497,7 @@ def test_three_window_uninterrupted_chain(windows, monkeypatch):
     assert ticker_a == windows[0].market_id
 
     store.apply_rest_market(windows[0].rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(ticker_a, [[0.55, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
-    )
+    _apply_book_snapshot(store, ticker_a)
     assert store.is_market_entry_ready(ticker_a, max_age_seconds=60)[0]
 
     intent_a = _open_intent(ticker_a, client_order_id="coid-a")
@@ -468,10 +516,7 @@ def test_three_window_uninterrupted_chain(windows, monkeypatch):
     assert store.get(ticker_a).floor_strike == windows[0].strike
 
     store.apply_rest_market(windows[1].rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(ticker_b, [[0.55, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
-    )
+    _apply_book_snapshot(store, ticker_b)
     assert store.is_market_entry_ready(ticker_b, max_age_seconds=60)[0]
 
     # A rejected order in A must not block a new order in B.
@@ -493,10 +538,7 @@ def test_three_window_uninterrupted_chain(windows, monkeypatch):
     assert ticker_c not in (ticker_a, ticker_b)
 
     store.apply_rest_market(windows[2].rest_market_dict())
-    store.apply_orderbook_message(
-        _snapshot(ticker_c, [[0.55, 5]], [[0.45, 5]]),
-        via="rest_bootstrap",
-    )
+    _apply_book_snapshot(store, ticker_c)
     assert store.is_market_entry_ready(ticker_c, max_age_seconds=60)[0]
 
     intent_c = _open_intent(ticker_c, client_order_id="coid-c")
@@ -530,6 +572,25 @@ def test_loop_15m_entry_readiness_across_three_windows(windows, monkeypatch, cap
     # Make the loop think the platform is healthy and a strip is expected.
     monkeypatch.setattr("merid.event_venues.kalshi.kalshi_config.KALSHI_READY", True)
     monkeypatch.setattr("merid.loop_15m.markets_expected_now", lambda: True)
+    # Post-2026-11 readiness gates the per-ticker path now enforces:
+    # live-entry capability, observe-only off, authoritative portfolio,
+    # healthy WS bridge with confirmed orderbook subscription, and a
+    # serviceable decision-audit writer.
+    monkeypatch.setattr("merid.loop_15m.can_submit_live_entry", lambda: True)
+    monkeypatch.setattr("merid.loop_15m.is_observe_only", lambda: False)
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.canonical_portfolio.get_canonical_portfolio_store",
+        lambda: SimpleNamespace(current=lambda: SimpleNamespace(
+            is_authoritative=True, age_ms=0,
+            reconciliation_status="MATCHED", reconciliation_reason="MATCHED",
+        )),
+    )
+    monkeypatch.setattr(
+        "merid.execution.decision_audit_ledger.get_decision_audit_ledger",
+        lambda: SimpleNamespace(
+            writer_health=lambda: {"unhealthy": False}
+        ),
+    )
 
     loop = Kalshi15mLoop(
         agent_grid=MagicMock(),
@@ -540,13 +601,18 @@ def test_loop_15m_entry_readiness_across_three_windows(windows, monkeypatch, cap
     store = KalshiMarketStateStore()
     loop.market_state_store = store
     loop._risk_envelope = None
+    loop._ws_bridge = SimpleNamespace(
+        get_forward_loop_health=lambda: {
+            "healthy": True, "queue_size": 0, "events_per_sec": 1,
+            "first_event_ts": fake_clock.t - 1, "last_event_ts": fake_clock.t,
+            "time_since_last_event": 0.01,
+        },
+        is_orderbook_subscription_confirmed=lambda ticker: True,
+    )
 
     def _apply_window(w: WindowFixture) -> str:
         store.apply_rest_market(w.rest_market_dict())
-        store.apply_orderbook_message(
-            _snapshot(w.market_id, [[0.55, 5]], [[0.45, 5]]),
-            via="rest_bootstrap",
-        )
+        _apply_book_snapshot(store, w.market_id)
         # The loop's readiness gate checks for a complete WS/REST bootstrap
         # snapshot; rest_bootstrap attests recovery but does not set the
         # snapshot_complete bootstrap flag.

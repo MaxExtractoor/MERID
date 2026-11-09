@@ -130,9 +130,13 @@ class TestOrphanedPositionExitE2E:
         )
 
     def _orphan_position(self):
+        # Non-parseable window body: the arbiter's market-terminal check
+        # reads the embedded close time, and the original 26OCT281300
+        # ticker expired 2026-10-28 — every approve_intent call now returns
+        # market_terminal before reaching the gate under test.
         return SimpleNamespace(
-            market_id="KXDOGE15M-26OCT281300-00",
-            position_id="KXDOGE15M-26OCT281300-00",
+            market_id="KXDOGE15M-DOGEORPHAN-00",
+            position_id="KXDOGE15M-DOGEORPHAN-00",
             side="no",
             size=6,
             avg_entry_price_cents=90,
@@ -150,7 +154,7 @@ class TestOrphanedPositionExitE2E:
         pos = self._orphan_position()
         ctx = context_from_position(pos, remaining_cc=600)
         assert ctx is not None
-        assert ctx.generation_id == "position:KXDOGE15M-26OCT281300-00"
+        assert ctx.generation_id == "position:KXDOGE15M-DOGEORPHAN-00"
 
         arb = self._arbiter(tmp_path)
         intent = SimpleNamespace(
@@ -170,7 +174,7 @@ class TestOrphanedPositionExitE2E:
         assert intent.position_generation_id == ctx.generation_id
 
         # Router-side gate: same key construction as order_router.
-        key = f"KXDOGE15M-26OCT281300-00|{intent.position_generation_id}"
+        key = f"KXDOGE15M-DOGEORPHAN-00|{intent.position_generation_id}"
         attempt = arb.validate_attempt_token(key, intent.exit_attempt_id)
         assert attempt is not None
         assert attempt.state == AttemptState.SUBMITTING
@@ -183,6 +187,150 @@ class TestOrphanedPositionExitE2E:
         ctx = context_from_position(pos, remaining_cc=600)
         assert ctx is not None
         assert ctx.generation_id == "07278edf-8911-8eaa-25aa-f302e089abc1"
+
+
+class TestHardProfitLockEmergencyAuthorization:
+    """2026-11-08 (DOGE-1830): the witnessed hard-profit-lock obligation is
+    a mechanical emergency liquidation bound to its position generation.
+
+    Live failure chain: a 98c pinned_fav entry latched the 98c fav
+    threshold; the guard priced the salvage IOC at 95c, but the intent's
+    ``exit_hard_profit_lock`` reason was unclassified downstream — the
+    arbiter treated it as an ordinary proposal, clamped the limit to the
+    ~99c fee-adjusted breakeven floor, and held every attempt as
+    ``held_unmarketable`` (``never_dispatched``) while the bid collapsed
+    98 -> 69 -> settlement 0.
+
+    The canonical taxonomy already classes ``hard_profit_lock`` EMERGENCY;
+    these tests pin the intent-contract spelling, the emergency-type
+    derivation, and the arbiter's authorized below-floor submission.
+    """
+
+    def _arbiter(self, tmp_path) -> ExitArbiter:
+        return ExitArbiter(
+            state_store=PositionExitStateStore(tmp_path / "exit_state.json"),
+            attempt_store=ExitAttemptStore(tmp_path / "exit_attempts.json"),
+        )
+
+    def _doge_position(self):
+        # Unparseable window body keeps the arbiter's market-terminal check
+        # from short-circuiting the test as the calendar moves past the
+        # real 26NOV081830 close — the DOGE-1830 identity stays in the id.
+        return SimpleNamespace(
+            market_id="KXDOGE15M-DOGE1830-00",
+            position_id="KXDOGE15M-DOGE1830-00",
+            side="yes",
+            size=6,
+            avg_entry_price_cents=98,
+            entry_fill_id="07274888-39a1-82db-43c0-bf2b380f1f00",
+            parent_entry_fill_id="07274888-39a1-82db-43c0-bf2b380f1f00",
+            entry_order_id=None,
+            entry_intent_id=None,
+            client_order_id=None,
+            entry_signal_id=None,
+            fill_source="ws_fill",
+            trailing_param=None,
+        )
+
+    def _doge_intent(self):
+        return SimpleNamespace(
+            intent_id="intent_exit_doge1830",
+            price_cents=95,
+            count=6, count_fp=6, qty_cc=None,
+            # The exact wire spelling the monitor emits — previously
+            # unclassified -> ordinary -> floor-clamped -> held_unmarketable.
+            exit_reason="exit_hard_profit_lock",
+            reason="exit:hard_profit_lock",
+            source="position_monitor_exit", agent_id="DOGE_15M",
+            exit_class=None, emergency_type=None,
+            authorization_source=None,
+            position_generation_id=None, exit_attempt_id=None,
+        )
+
+    def test_exit_spelling_classifies_emergency(self):
+        from merid.position_management.exit_pipeline import kind_for_reason
+
+        assert kind_for_reason("exit_hard_profit_lock") == "emergency"
+        assert kind_for_reason("hard_profit_lock") == "emergency"
+        # Ordinary profit exits keep their kind — no taxonomy drift.
+        assert kind_for_reason("take_profit") == "profit_lock"
+        assert kind_for_reason("trailing_stop") == "trailing_profit"
+
+    def test_wire_spelling_derives_emergency_tuple(self):
+        """normalize_order must derive exit_class=emergency +
+        emergency_type=GENERIC_EMERGENCY for the intent-contract spelling —
+        the tuple the firewall's min-proceeds exemption requires."""
+        from merid.event_venues.kalshi.order_intent_contract import (
+            normalize_order,
+        )
+
+        intent = SimpleNamespace(
+            ticker="KXDOGE15M-26NOV081830-30",
+            side="sell_yes", action=None, price_cents=95,
+            count=6, count_fp=None, qty_cc=None,
+            reduce_only=True, entry_or_exit="exit",
+            exit_reason="exit_hard_profit_lock", reason="exit:hard_profit_lock",
+            source="position_monitor_exit", agent_id="DOGE_15M",
+            exit_class=None, emergency_type=None, authorization_source=None,
+            position_generation_id="fill-gen-1",
+            client_order_id="exit-coid-1", intent_id="intent-norm-1",
+            time_in_force="ioc",
+        )
+        canon = normalize_order(intent)
+        assert canon.exit_class == "emergency"
+        assert canon.emergency_type == "GENERIC_EMERGENCY"
+        assert canon.authorization_source == "position_monitor_exit"
+        assert canon.position_generation_id == "fill-gen-1"
+
+    def test_authorized_lock_submits_below_breakeven_floor(self, tmp_path):
+        """DOGE replay end-to-end: 98c entry -> floor ~99c+, book bid 98c,
+        guard-priced salvage limit 95c.  Authorized emergency must submit
+        at 95c with the exception recorded — not clamp to the floor and
+        die as held_unmarketable."""
+        pos = self._doge_position()
+        ctx = context_from_position(
+            pos, remaining_cc=600,
+            book=ExitBook(held_side="yes", liquidation_cents=98,
+                          qty_cc=600, age_ms=50),
+        )
+        assert ctx is not None
+        assert ctx.generation_id == pos.parent_entry_fill_id
+
+        arb = self._arbiter(tmp_path)
+        intent = self._doge_intent()
+        prepared = approve_intent(
+            intent, ctx, issuer="position_monitor", arbiter=arb,
+        )
+
+        assert prepared.approved is True
+        # Below-floor bound preserved: the IOC asks >=95c, the 98c book
+        # decides the actual fill — never repriced to the dead 99c floor.
+        assert intent.price_cents == 95
+        assert prepared.result.submitted_limit_cents == 95
+        assert prepared.result.exception is not None
+        assert "GENERIC_EMERGENCY" in prepared.result.exception
+
+    def test_unauthorized_lock_denied_falls_back_to_floor(self, tmp_path):
+        """If the structured tuple cannot authorize (e.g. spoofed issuer),
+        the fallback keeps today's floor-clamped ordinary semantics — the
+        proposal is held, never silently liquidated below breakeven."""
+        pos = self._doge_position()
+        ctx = context_from_position(
+            pos, remaining_cc=600,
+            book=ExitBook(held_side="yes", liquidation_cents=98,
+                          qty_cc=600, age_ms=50),
+        )
+        arb = self._arbiter(tmp_path)
+        intent = self._doge_intent()
+        intent.source = "untrusted_producer"   # not an allowlisted issuer
+        prepared = approve_intent(
+            intent, ctx, issuer="position_monitor",
+            fallback_kind="profit_lock", arbiter=arb,
+        )
+        # Denied emergency degrades to floored ordinary: limit clamps to
+        # the ~99c floor, which exceeds the 98c book -> held_unmarketable.
+        assert prepared.approved is False
+        assert prepared.result.status == "held_unmarketable"
 
 
 # ---------------------------------------------------------------------------

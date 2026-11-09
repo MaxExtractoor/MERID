@@ -974,6 +974,13 @@ _REASON_TO_EMERGENCY_TYPE: Dict[str, str] = {
     "emergency": "GENERIC_EMERGENCY",
     "hard_risk": "GENERIC_EMERGENCY",
     "hard_stop": "GENERIC_EMERGENCY",
+    # 2026-11-08 (DOGE-1830): the witnessed hard-profit-lock obligation is a
+    # mechanical emergency liquidation bound to its position generation —
+    # without a loss-authorized type the arbiter floor and the firewall
+    # min-proceeds check clamp every sub-breakeven chase IOC into
+    # held_unmarketable / min_proceeds_unattainable while the position
+    # rides to settlement.
+    "hard_profit_lock": "GENERIC_EMERGENCY",
 }
 
 

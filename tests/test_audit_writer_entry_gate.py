@@ -152,6 +152,26 @@ def _apply_active_window(store, monkeypatch, w: WindowFixture) -> str:
     assert s is not None and s.book_initialized, (
         "orderbook snapshot was never applied by the batch worker"
     )
+    # book_initialized lands before quote-owner promotion: the entry gate's
+    # quote_owner_trusted check still reads NONE_UNTRUSTED until the async
+    # apply assigns REST_VERIFIED_DEGRADED.  Wait for a trusted owner too.
+    def _trusted_owner() -> bool:
+        try:
+            qg = store.get_quote_gate_state(w.market_id)
+        except Exception:
+            return False
+        owner = qg.get("quote_owner", "NONE_UNTRUSTED")
+        if owner == "WS_FRESH_VERIFIED":
+            return bool(qg.get("ws_fresh"))
+        if owner == "REST_VERIFIED_DEGRADED":
+            return bool(qg.get("degraded_entry_enabled") and qg.get("rest_fresh"))
+        return False
+
+    while not _trusted_owner() and _time.monotonic() < _deadline:
+        _time.sleep(0.01)
+    assert _trusted_owner(), (
+        f"quote owner for {w.market_id} never reached a trusted state"
+    )
     s.snapshot_complete = True
 
     def _current_for_asset(asset: str):
@@ -274,6 +294,10 @@ def test_unavailable_ticker_cache_halt_check_blocks_entries(monkeypatch, unavail
         lambda: _writer_stub(unhealthy=False),
     )
 
+    from merid.event_venues.kalshi import position_cache as _pc_mod
+
+    _real_get_position_cache = _pc_mod.get_position_cache
+
     def unavailable_cache():
         if unavailable == "error":
             raise OSError("cache unavailable")
@@ -285,6 +309,14 @@ def test_unavailable_ticker_cache_halt_check_blocks_entries(monkeypatch, unavail
     )
     assert loop._compute_allow_new_entries(cycle_bankroll=1000.0) is False
     assert loop._entries_block_reason == "reconciliation_halt_latch"
+    # conftest's position-cache reset fixture calls get_position_cache()
+    # during teardown while this patch is still live; the [error]
+    # parametrization would raise OSError there.  Restore the real accessor
+    # before teardown — monkeypatch.undo() still nets out to the original.
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.position_cache.get_position_cache",
+        _real_get_position_cache,
+    )
 
 
 @pytest.mark.parametrize("unavailable", ["missing", "error", "empty", "malformed", "starting"])
