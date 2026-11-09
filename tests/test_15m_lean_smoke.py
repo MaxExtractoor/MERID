@@ -134,7 +134,20 @@ class Test15mLeanSmoke:
         
         # Check that no legacy routers are included
         # This is a simple check - we verify the app.routes don't include legacy paths
-        routes = [route.path for route in app.routes]
+        def _collect_paths(routes):
+            paths = []
+            for route in routes:
+                path = getattr(route, "path", None)
+                if path is not None:
+                    paths.append(path)
+                else:
+                    # FastAPI >=0.16x wraps included routers as _IncludedRouter
+                    inner = getattr(getattr(route, "original_router", None), "routes", None)
+                    if inner:
+                        paths.extend(_collect_paths(inner))
+            return paths
+
+        routes = _collect_paths(app.routes)
         
         # Known legacy paths that should NOT be present
         legacy_paths = [
@@ -157,11 +170,17 @@ class Test15mLeanSmoke:
     def test_bankroll_service_mode_flags(self):
         """Test BankrollServiceV2 has is_demo/is_live properties."""
         from merid.event_venues.kalshi.bankroll_service_v2 import BankrollServiceV2
-        
-        service = BankrollServiceV2()
-        
+
+        # Inject a stub client: BankrollServiceV2() with no client builds a
+        # real KalshiClientV2, which fails closed without live credentials.
+        client = MagicMock()
+        client.config.env = "demo"
+        service = BankrollServiceV2(client=client)
+
         assert hasattr(service, 'is_demo')
         assert hasattr(service, 'is_live')
+        assert service.is_demo is True
+        assert service.is_live is False
 
     def test_runtime_check_module_exists(self):
         """Verify kalshi_15m_runtime_check module exists and has required functions."""

@@ -96,7 +96,7 @@ jobs:
         MERID_PROFILE: kalshi_crypto_15m_v2
         MERID_TEST_MODE: 1
       run: |
-        pytest tests/test_thesis_side_invariant.py -v --tb=short
+        pytest tests/test_thesis_side_domain.py tests/test_intent_thesis_side_invariant.py tests/test_full_lifecycle_thesis_invariant.py tests/test_rest_sync_thesis_preservation.py -v --tb=short
     
     - name: Run lifecycle thesis trace tests
       env:

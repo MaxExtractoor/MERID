@@ -508,8 +508,13 @@ def _get_merid_positions(venue_name: str = "") -> List[Dict[str, Any]]:
     This prevents cross-domain false positives in reconciliation.
     """
     try:
-        from trading.paper_trading import get_paper_engine
-        engine = get_paper_engine()
+        # BUG-0324-0007: use the KALSHI_ONLY-aware factory.  get_paper_engine()
+        # would instantiate (and reset) the paper engine as a side effect of
+        # reconciliation even when the deployment runs Kalshi-only.
+        from trading.paper_trading import get_paper_trading_engine
+        engine = get_paper_trading_engine()
+        if engine is None:
+            return []
         positions = engine.get_positions()
         result = []
         for pos in positions:
@@ -672,10 +677,15 @@ def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[s
         from trading.paper_trading import (
             PaperPosition,
             _save_paper_state,
-            get_paper_engine,
+            get_paper_trading_engine,
         )
 
-        engine = get_paper_engine()
+        # BUG-0324-0007: force-align mutates paper state, so it must use the
+        # KALSHI_ONLY-aware factory — never instantiate the paper engine in
+        # Kalshi-only mode.
+        engine = get_paper_trading_engine()
+        if engine is None:
+            return {"error": "Paper trading engine unavailable in KALSHI_ONLY mode"}
     except Exception as e:
         return {"error": f"Paper engine unavailable: {e}"}
 

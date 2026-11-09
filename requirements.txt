@@ -2,31 +2,32 @@
 # Python 3.11+
 
 # ── Core Framework ──────────────────────────────────────────────
-fastapi==0.135.1
-uvicorn[standard]==0.41.0
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
 pydantic[email]==2.12.5
-pydantic-settings==2.13.1
-python-multipart==0.0.22
-starlette==0.52.1
+pydantic-settings==2.16.2
+python-multipart==0.0.33
+starlette==1.10.0
 
 # ── Social Media / Notification Bots ───────────────────────────
-tweepy>=4.14,<5                  # X/Twitter OAuth 1.0a posting
+# X/Twitter OAuth 1.0a posting
 python-telegram-bot>=20,<22      # Telegram Bot API
 
 # ── HTTP Clients ────────────────────────────────────────────────
 httpx==0.28.1
-aiohttp==3.10.11
-requests==2.32.5
-websockets==14.2
-websocket-client==1.9.0
+aiohttp==3.14.5
+requests==2.34.2
+websockets==17.3
+websocket-client==1.9.2
 
 # ── News / RSS Feed Parsing ────────────────────────────────────
 feedparser>=6.0,<7                 # RSS/Atom feed parsing for news_stream
 
 # ── Data & Numerics ────────────────────────────────────────────
-numpy==2.4.4
-pandas==3.0.1
+numpy==2.4.6
+pandas==3.1.0
 scipy==1.17.1
+scikit-learn==1.8.0                  # Isotonic/logistic calibration (core/merid_metrics.py)
 
 # ── Logging ─────────────────────────────────────────────────────
 structlog==25.5.0
@@ -35,9 +36,10 @@ loguru==0.7.3
 asgi-correlation-id==4.3.1
 
 # ── Configuration & Environment ─────────────────────────────────
-python-dotenv==1.0.1
+python-dotenv==1.2.4
 python-dateutil==2.9.0
 pytz==2024.2
+pyyaml==6.0.3                       # config/risk YAML loading (module-level imports across merid/)
 
 # ── Resilience & Retry ─────────────────────────────────────────
 tenacity==9.1.4
@@ -48,8 +50,7 @@ pybreaker>=1.0,<2                  # Circuit breaker (used by core/resilience.py
 celery>=5.3,<6                     # Distributed task queue (core/celery_tasks.py)
 
 # ── Security & Auth ─────────────────────────────────────────────
-cryptography==44.0.0
-python-jose[cryptography]==3.5.0
+cryptography==50.0.2
 passlib[bcrypt]==1.7.4
 email-validator==2.3.0
 
@@ -61,7 +62,7 @@ cachetools==5.5.0
 # ── System Monitoring ───────────────────────────────────────────
 psutil==7.2.2
 # ── Additional Observability ───────────────────────────────────
-prometheus-fastapi-instrumentator==7.0.0
+prometheus-fastapi-instrumentator==8.1.0
 
 # ── CLI ─────────────────────────────────────────────────────────
 click==8.3.1
@@ -69,7 +70,7 @@ rich==14.3.3
 typer==0.24.1
 
 # ── Async Utilities ─────────────────────────────────────────────
-anyio==4.7.0
+anyio==4.16.0
 asyncio-throttle==1.0.2
 
 # ── Database ─────────────────────────────────────────────────────
@@ -81,28 +82,33 @@ jsonschema==4.23.0
 ormsgpack==1.12.2
 
 # ── Testing ───────────────────────────────────────────────────────
-pytest==8.3.5
-pytest-asyncio==0.25.0
-pytest-timeout==2.3.1
-hypothesis==6.130.5
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+pytest-timeout==2.5.0
+pytest-mock==3.15.1
+hypothesis==6.170.14
 httpx-ws==0.9.0
+respx==0.22.0                        # httpx mock transport for venue client tests
+freezegun==1.5.5                     # time freezing for session/expiry tests
 
 # ── Code Quality ────────────────────────────────────────────────
-black==24.10.0
+black==26.10.1
 flake8==7.1.1
 mypy==1.19.1
 
 # ── Observability (OpenTelemetry for distributed tracing) ───
-opentelemetry-api==1.24.0
-opentelemetry-sdk==1.24.0
-opentelemetry-exporter-jaeger==1.21.0
-opentelemetry-instrumentation-fastapi==0.45b0
-opentelemetry-instrumentation-httpx==0.45b0
-opentelemetry-instrumentation-asyncio==0.45b0
-opentelemetry-semantic-conventions==0.45b0
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-jaeger-thrift==1.21.0
+opentelemetry-instrumentation-fastapi==0.66b2
+opentelemetry-instrumentation-httpx==0.66b2
+opentelemetry-instrumentation-asyncio==0.66b2
+opentelemetry-semantic-conventions==0.66b2
 
 # ── Optional: Graph DB (install if using Neo4j) ────────────────
 # neo4j==6.1.0
 
-# ── Optional: Cache/PubSub (install if using Redis) ────────────
-# redis==7.2.1
+# ── Cache/PubSub ───────────────────────────────────────────────
+redis==7.4.0                          # lazy-imported cache/resilience; tests patch redis.Redis
+pip==26.2.2
+pip-audit==2.9.0

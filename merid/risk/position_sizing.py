@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from collections import deque
 
 from utils.logger import get_logger
+from merid.formulas import kelly_fraction_payoff
 
 logger = get_logger("risk.position_sizing")
 
@@ -610,11 +611,8 @@ class PositionSizer:
             avg_win = position.volatility * position.current_price * 3  # 3x volatility
             avg_loss = position.volatility * position.current_price * 1  # 1x volatility
             
-            # Kelly fraction
-            if avg_loss > 0:
-                kelly_fraction = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_loss
-            else:
-                kelly_fraction = 0.0
+            # Kelly fraction (canonical implementation from merid.formulas)
+            kelly_fraction = kelly_fraction_payoff(win_rate, avg_win, avg_loss)
             
             # Apply Kelly fraction with safety factor (half-Kelly)
             # CRITICAL FIX: Cap at 2% - aligned with profile (was 25%)

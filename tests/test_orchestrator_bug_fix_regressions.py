@@ -411,12 +411,12 @@ class TestBugH7HealthEndpointLive:
         mock_kc.get_circuit_status = MagicMock(return_value={})
 
         mock_loop = MagicMock()
-        mock_loop.status.return_value = {"running": True, "metrics": {}}
+        mock_loop.summary.return_value = {"running": True, "tick": 1, "error_count": 0}
 
         with patch("merid.execution_guard.get_execution_guard", return_value=mock_guard), \
              patch("merid.event_venues.kalshi.client.get_kalshi_client",
                    return_value=mock_kc), \
-             patch("merid.loop.get_merid_loop", return_value=mock_loop):
+             patch.object(client.app.state, "loop_15m", mock_loop, create=True):
             resp = client.get("/api/health")
 
         assert resp.status_code == 503, (
@@ -439,12 +439,12 @@ class TestBugH7HealthEndpointLive:
         mock_kc.get_circuit_status = MagicMock(return_value={"state": "open"})
 
         mock_loop = MagicMock()
-        mock_loop.status.return_value = {"running": True, "metrics": {}}
+        mock_loop.summary.return_value = {"running": True, "tick": 1, "error_count": 0}
 
         with patch("merid.execution_guard.get_execution_guard", return_value=mock_guard), \
              patch("merid.event_venues.kalshi.client.get_kalshi_client",
                    return_value=mock_kc), \
-             patch("merid.loop.get_merid_loop", return_value=mock_loop):
+             patch.object(client.app.state, "loop_15m", mock_loop, create=True):
             resp = client.get("/api/health")
 
         assert resp.status_code == 503, (
@@ -465,12 +465,12 @@ class TestBugH7HealthEndpointLive:
         mock_kc.get_circuit_status = MagicMock(return_value={})
 
         mock_loop = MagicMock()
-        mock_loop.status.return_value = {"running": False, "metrics": {}}
+        mock_loop.summary.return_value = {"running": False, "tick": 0, "error_count": 0}
 
         with patch("merid.execution_guard.get_execution_guard", return_value=mock_guard), \
              patch("merid.event_venues.kalshi.client.get_kalshi_client",
                    return_value=mock_kc), \
-             patch("merid.loop.get_merid_loop", return_value=mock_loop):
+             patch.object(client.app.state, "loop_15m", mock_loop, create=True):
             resp = client.get("/api/health")
 
         assert resp.status_code == 503, (

@@ -41,9 +41,9 @@ FORBIDDEN_PATTERNS = [
 
 # Files to check for forbidden patterns
 CHECK_PATHS = [
-    'merid/prediction/trading_agent.py',
+    'merid/preflight/p0.py',
     'merid/prediction/strategy.py',
-    'merid/prediction/consensus_bridge.py',
+    'merid/observability/live_runtime_state.py',
     'merid/event_venues/kalshi/order_router.py',
     'config/profiles/',
 ]
@@ -79,10 +79,11 @@ def check_no_fallbacks() -> Tuple[bool, List[str]]:
 def check_fail_closed_logic() -> Tuple[bool, List[str]]:
     """Verify fail-closed logic is present in key files."""
     checks = [
-        ('merid/prediction/trading_agent.py', r'missing avg_price', 'Price fail-closed (quarantine)'),
+        ('merid/preflight/p0.py', r'position has unknown outcome side', 'Position identity fail-closed'),
         ('merid/prediction/strategy.py', r'rejecting sizing request', 'Bankroll fail-closed (return 0)'),
-        ('merid/prediction/trading_agent.py', r'session_equity_cents\s*=\s*None', 'Equity UNKNOWN state'),
-        ('merid/prediction/consensus_bridge.py', r'_get_consensus_thresholds', 'Consensus threshold wiring'),
+        ('merid/preflight/p0.py', r'summary.state == BalanceState.FRESH and summary.equity_usd is not None', 'Fresh known equity required'),
+        ('merid/event_venues/kalshi/order_router.py', r'can_submit_live_entry', 'Canonical runtime entry gate'),
+        ('merid/preflight/p0.py', r'_check\("exchange_reconciliation", False', 'Reconciliation failure blocks preflight'),
     ]
     
     errors = []
@@ -117,9 +118,10 @@ def check_strict_group_id() -> Tuple[bool, List[str]]:
 def check_risk_event_emissions() -> Tuple[bool, List[str]]:
     """Verify all 4 critical risk events are wired."""
     required_events = {
-        'risk.position_sync_failed': 'merid/prediction/trading_agent.py',
+        'exchange_reconciliation': 'merid/preflight/p0.py',
         'risk.bankroll_unavailable': 'merid/prediction/strategy.py',
-        'risk.equity_feed_lost': 'merid/prediction/trading_agent.py',
+        'bankroll_service_fresh': 'merid/preflight/p0.py',
+        'reason_codes': 'merid/observability/live_runtime_state.py',
     }
     
     errors = []

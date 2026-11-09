@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 15
     services:
       redis:
-        image: redis:7-alpine@sha256:024f2975c7427644ace025e2ad2a6b5e440723766b0ce81b7b0f09af7184b71c
+        image: redis:7-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
         ports:
           - 6379:6379
         options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=5
@@ -305,7 +305,7 @@ jobs:
     timeout-minutes: 45
     services:
       redis:
-        image: redis:7-alpine@sha256:024f2975c7427644ace025e2ad2a6b5e440723766b0ce81b7b0f09af7184b71c
+        image: redis:7-alpine@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b
         ports:
           - 6379:6379
         options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=5

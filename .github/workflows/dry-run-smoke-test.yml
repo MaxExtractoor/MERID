@@ -32,46 +32,44 @@ jobs:
           MERID_ENABLE_RESEARCH_AGENTS: "false"
         run: |
           python -c "
-          import asyncio
-          import json
           import os
-          from merid.agents.bootstrap import bootstrap_canonical_agents
           from merid.settings import settings as _settings
-          
-          # Bootstrap agents
-          n_agents = bootstrap_canonical_agents()
-          print(f'Bootstrap: {n_agents} agents registered')
-          
+
           # Verify DRY_RUN flag is set
           assert _settings.MERID_LOOP_DRY_RUN == True, 'DRY_RUN flag not set'
           print('DRY_RUN flag verified')
-          
+
           # Verify research agents disabled
           assert _settings.MERID_ENABLE_RESEARCH_AGENTS == False, 'Research agents should be disabled'
           print('Research agents disabled')
-          
-          # Verify no legacy agents in registry
+
+          # Verify the 15m agent grid loads with all five crypto agents enabled
+          from merid.prediction.agent_grid_config import load_agent_grid_config
+          grid = load_agent_grid_config()
+          enabled_agents = [a for a in grid.agents if a.enabled]
+          enabled_names = {a.name for a in enabled_agents}
+          expected_agents = {'BTC_15M', 'ETH_15M', 'SOL_15M', 'XRP_15M', 'DOGE_15M'}
+          missing = expected_agents - enabled_names
+          assert not missing, f'Missing enabled 15m agents: {sorted(missing)}'
+          grid_assets = set()
+          for a in enabled_agents:
+              grid_assets.update(a.assets)
+          expected_assets = {'BTC', 'ETH', 'SOL', 'XRP', 'DOGE'}
+          assert expected_assets <= grid_assets, f'Missing grid assets: {sorted(expected_assets - grid_assets)}'
+          print(f'Agent grid verified: {len(enabled_agents)} enabled agents, assets={sorted(grid_assets)}')
+
+          # Verify canonical agent bootstrap runs and registers no legacy agents
+          from merid.agents.bootstrap import bootstrap_canonical_agents
           from merid.agents.base import get_canonical_registry
-          registry = get_canonical_registry()
-          
+          n_agents = bootstrap_canonical_agents()
+          print(f'Bootstrap: {n_agents} agents registered')
+
           legacy_agent_types = ['PredictionMarketAgentV2', 'MarketResearchAgent', 'CryptoSignalsAgent']
-          agents = registry.get_all_agents()
+          agents = list(get_canonical_registry().all().values())
           legacy_found = [a for a in agents if a.__class__.__name__ in legacy_agent_types]
-          
-          if legacy_found:
-              print(f'ERROR: Found {len(legacy_found)} legacy agents in registry')
-              for agent in legacy_found:
-                  print(f'  - {agent.__class__.__name__}: {agent.agent_id}')
-              raise AssertionError('Legacy agents found in DRY_RUN registry')
-          
+          assert not legacy_found, f'Legacy agents found in DRY_RUN registry: {[a.agent_id for a in legacy_found]}'
           print('No legacy agents in registry')
-          
-          # Verify KalshiTradingAgent is present
-          kalshi_agents = [a for a in agents if a.__class__.__name__ == 'KalshiTradingAgent']
-          if not kalshi_agents:
-              raise AssertionError('No KalshiTradingAgent found in registry')
-          print(f'Found {len(kalshi_agents)} KalshiTradingAgent instances')
-          
+
           print('DRY_RUN smoke test passed')
           "
       

@@ -1,8 +1,15 @@
 import logging
 import multiprocessing as mp
+import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import pytest
+
+# Tests must never write interpreter bytecode caches into the repo tree:
+# tests/conftest.py fingerprints data/ before/after the session and fails on
+# any created entries, including data/__pycache__ produced by importing the
+# data.* spot modules.  Disabling bytecode writes keeps the tree clean.
+sys.dont_write_bytecode = True
 
 
 def pytest_configure(config):

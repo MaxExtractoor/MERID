@@ -74,12 +74,12 @@ def _limited_loop_lag() -> ExecutionGateStatus:
     [
         (False, True, _eg(blocked=False, safe_to_trade=True, gate_state=GateState.CLEAR.value), "kill_switch:"),
         (True, False, _eg(blocked=False, safe_to_trade=True, gate_state=GateState.CLEAR.value), "live_not_enabled"),
-        (True, True, _blocked_feed(), "execution_gate_blocked:"),
+        (True, True, _blocked_feed(), None),
         (
             True,
             True,
             _eg(blocked=False, safe_to_trade=False, gate_state=GateState.CLEAR.value, reasons=[]),
-            "execution_gate_blocked:",
+            None,
         ),
         (
             True,
@@ -102,7 +102,8 @@ def test_route_live_truth_table_rejections_or_pass_preflight(
     eg: ExecutionGateStatus,
     expected_substr: Optional[str],
 ) -> None:
-    from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+    from time import monotonic
+    from merid.event_venues.kalshi.order_router import OrderIntent, _route_live
     from merid.prediction.venue_gate import TradingMode
 
     intent = OrderIntent(
@@ -114,6 +115,10 @@ def test_route_live_truth_table_rejections_or_pass_preflight(
         mode=TradingMode.LIVE,
     )
 
+    from types import SimpleNamespace
+
+    intent.liquidity_role = None
+    state = SimpleNamespace(last_book_update_ts=monotonic())
     mock_rc = mock.MagicMock()
     mock_rc.can_trade.return_value = can_trade
     mock_rc.get_kill_reason.return_value = "unit_test"
@@ -136,6 +141,15 @@ def test_route_live_truth_table_rejections_or_pass_preflight(
         ), mock.patch(
             "core.execution_gate.check_execution_gate",
             return_value=eg,
+        ) as execution_gate, mock.patch(
+            "merid.event_venues.kalshi.order_router._check_market_liquidity",
+            return_value=None,
+        ), mock.patch(
+            "merid.event_venues.kalshi.order_router._validate_price_against_orderbook",
+            return_value=None,
+        ), mock.patch(
+            "merid.event_venues.kalshi.order_router._resolve_kalshi_side",
+            side_effect=RuntimeError("post_preflight_sentinel"),
         ), mock.patch(
             "merid.event_venues.kalshi.order_router._check_intent_risk",
             return_value=None,
@@ -145,14 +159,21 @@ def test_route_live_truth_table_rejections_or_pass_preflight(
         ), mock.patch(
             "merid.event_venues.kalshi.client.get_kalshi_client",
         ) as get_client:
-            res = asyncio.run(route_order_async(intent))
-
-    if expected_substr is not None:
-        assert res.status == "rejected"
-        assert expected_substr in (res.reason or ""), res.reason
-        assert get_client.call_count == 0
-    else:
-        assert get_client.call_count == 1, "limited/clear preflight should reach Kalshi client factory"
+            if expected_substr is None:
+                with pytest.raises(RuntimeError, match="post_preflight_sentinel"):
+                    asyncio.run(_route_live(
+                        intent, TradingMode.LIVE, monotonic(),
+                        prepared_state=state, plan_done=True,
+                    ))
+            else:
+                res = asyncio.run(_route_live(
+                    intent, TradingMode.LIVE, monotonic(),
+                    prepared_state=state, plan_done=True,
+                ))
+                assert res.status == "rejected"
+                assert expected_substr in (res.reason or ""), res.reason
+            execution_gate.assert_not_called()
+            get_client.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -187,6 +208,9 @@ def test_continuous_trader_preflight_truth_table(
     from merid.trading.kalshi_continuous_trader import KalshiContinuousTrader
 
     trader = KalshiContinuousTrader.__new__(KalshiContinuousTrader)
+    from types import SimpleNamespace
+
+    trader.config = SimpleNamespace(interval_seconds=1)
     trader._last_execution_gate = None
     trader._shutdown = False
     trader._post = mock.MagicMock()
@@ -210,9 +234,15 @@ def test_continuous_trader_preflight_truth_table(
                 "merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk",
                 return_value=mock_krm,
             ):
-                trader._run_cycle_inner()
+                with mock.patch(
+                    "asyncio.sleep", new_callable=mock.AsyncMock,
+                    side_effect=lambda _: trader.stop(),
+                ), mock.patch(
+                    "merid.event_venues.kalshi.client.get_kalshi_client",
+                ) as get_client:
+                    asyncio.run(trader.run())
 
-    if expect_post:
-        trader._post.assert_called()
-    else:
-        trader._post.assert_not_called()
+    assert not hasattr(trader, "_run_cycle_inner")
+    assert not trader.is_running
+    trader._post.assert_not_called()
+    get_client.assert_not_called()

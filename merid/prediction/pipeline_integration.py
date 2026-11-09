@@ -326,12 +326,12 @@ async def manual_refresh() -> Dict[str, Any]:
 
 async def example_main():
     """Example of how to wire everything together."""
-    # Mock kalshi client (replace with real one)
-    class MockKalshiClient:
+    # Example client (replace with real one)
+    class ExampleKalshiClient:
         async def request(self, method, endpoint, params=None):
             return {"settlements": []}
-    
-    client = MockKalshiClient()
+
+    client = ExampleKalshiClient()
     
     # Initialize integration
     integration = initialize_pipeline_integration(client)

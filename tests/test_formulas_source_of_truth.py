@@ -229,6 +229,25 @@ class TestClassifyStance:
         assert classify_stance(-0.12) == "strong_no"
 
 
+@pytest.mark.parametrize(
+    "probability,avg_win,avg_loss,expected",
+    [
+        (0.5, 3.0, 1.0, 1.0),
+        (0.6, 1.0, 1.0, 0.2),
+        (0.2, 2.0, 1.0, -0.4),
+        (1.0, 3.0, 1.0, 1.0),
+        (0.5, 1.0, 0.0, 0.0),
+        (0.5, 0.0, 1.0, 0.0),
+        (-0.1, 1.0, 1.0, 0.0),
+        (1.1, 1.0, 1.0, 0.0),
+    ],
+)
+def test_kelly_fraction_payoff(probability, avg_win, avg_loss, expected):
+    from merid.formulas import kelly_fraction_payoff
+
+    assert kelly_fraction_payoff(probability, avg_win, avg_loss) == pytest.approx(expected)
+
+
 class TestBrierScore:
     """Test suite for brier_score() — AGENT_AUDIT: 4.2.3"""
 

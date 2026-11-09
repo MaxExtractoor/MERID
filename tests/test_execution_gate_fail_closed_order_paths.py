@@ -13,7 +13,7 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def _pass_upstream_gates():
+def _pass_upstream_gates(monkeypatch):
     """Pass the gates upstream of the execution-gate checks under test.
 
     The router's P0 startup state machine (can_submit_live_entry), the intent
@@ -21,6 +21,8 @@ def _pass_upstream_gates():
     before the execution gate.  These tests target the execution gate itself,
     so upstream gates are patched through.
     """
+    monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
+    monkeypatch.setattr("merid.event_venues.kalshi.order_router.is_observe_only", lambda: False)
     with mock.patch(
         "merid.event_venues.kalshi.order_router.can_submit_live_entry",
         return_value=True,

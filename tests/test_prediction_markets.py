@@ -602,13 +602,21 @@ class TestKalshiStrategy:
         assert len(signals) >= 1
         assert signals[0].action == SignalAction.SELL_YES
 
-    def test_evaluate_exits_stop_loss(self):
+    def test_evaluate_exits_stop_loss(self, monkeypatch):
         pos = PositionState(
             market_id="STOP-MKT", side="yes", contracts=10,
             avg_entry_cents=Decimal("50"),
             opened_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         self.strategy.register_position(pos)
+
+        # Stop loss no longer emits a direct SELL signal — it records a
+        # StopCandidate for the stop-candidate review pipeline instead.
+        recorded = []
+        monkeypatch.setattr(
+            "merid.prediction.strategy.record_stop_candidate",
+            lambda c: recorded.append(c),
+        )
 
         implied = self.model.implied_probabilities(
             yes_bid=Decimal("40"), yes_ask=Decimal("42")
@@ -620,8 +628,10 @@ class TestKalshiStrategy:
             time_to_expiry_hours=Decimal("12"),
         )
         signals = self.strategy.evaluate_exits({"STOP-MKT": snap})
-        assert len(signals) >= 1
-        assert "Stop loss" in signals[0].reason
+        assert not any("Stop loss" in s.reason for s in signals)
+        assert len(recorded) == 1
+        assert recorded[0].market_ticker == "STOP-MKT"
+        assert recorded[0].trigger_reason == "MODEL_INVALIDATION"
 
     def test_evaluate_exits_market_closing(self):
         pos = PositionState(

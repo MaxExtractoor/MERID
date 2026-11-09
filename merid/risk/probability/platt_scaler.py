@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from merid.formulas import mean_brier_score
+
 logger = logging.getLogger(__name__)
 
 
@@ -211,8 +213,10 @@ class PlattScaler:
         # Get calibrated probabilities
         calibrated_probs = self.predict(logits)
         
-        # Calculate Brier score (mean squared error)
-        brier_score = np.mean((np.array(calibrated_probs) - np.array(outcomes)) ** 2)
+        # Calculate Brier score via canonical merid.formulas implementation
+        brier_score = mean_brier_score(
+            [(float(p), int(o)) for p, o in zip(calibrated_probs, outcomes)]
+        )
         
         # Calculate Expected Calibration Error (ECE)
         ece = self._calculate_ece(calibrated_probs, outcomes, num_bins)

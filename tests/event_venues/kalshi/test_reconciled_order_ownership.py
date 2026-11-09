@@ -56,12 +56,23 @@ def test_partial_terminal_order_releases_only_dead_remainder(status):
     assert result.remaining_quantity_cc == 75
 
 
-@pytest.mark.parametrize("status", ["pending", "partially_filled", "unfilled", "unknown"])
+@pytest.mark.parametrize("status", ["pending", "partially_filled", "unknown"])
 def test_nonterminal_ioc_snapshot_does_not_imply_zero_fill_terminal(status):
     result = router._order_snapshot_to_reconciled_result(
         _order(status, "0", "1.00", "IOC"), _intent(), TradingMode.LIVE, 1
     )
     assert not result.is_terminal
+
+
+@pytest.mark.parametrize("tif,status", [("IOC", "unfilled"), ("IOC", "canceled"), ("IOC", "expired")])
+def test_terminal_zero_fill_ioc_releases_reservations(tif, status):
+    # A zero-fill terminal IOC report must be terminal so the gate slot and
+    # exposure reservations are released instead of leaking forever.
+    result = router._order_snapshot_to_reconciled_result(
+        _order(status, "0", "1.00", tif), _intent(), TradingMode.LIVE, 1
+    )
+    assert result.status == "unfilled_ioc"
+    assert result.is_terminal and not result.is_resting
 
 
 def test_working_partial_reconciliation_keeps_attempt_and_fractional_gate(monkeypatch):

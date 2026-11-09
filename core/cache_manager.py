@@ -399,7 +399,7 @@ def cached(
                 key_parts.extend(str(arg) for arg in args)
                 key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
                 key_str = "|".join(key_parts)
-                key = hashlib.md5(key_str.encode()).hexdigest()
+                key = hashlib.md5(key_str.encode(), usedforsecurity=False).hexdigest()
             
             # Try to get from cache
             result = cache.get(key)

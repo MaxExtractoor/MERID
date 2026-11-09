@@ -49,8 +49,12 @@ class TestLiveProfileGuardInvariants:
     """
     
     @pytest.fixture
-    def live_profile(self):
+    def live_profile(self, monkeypatch):
         """Ensure LIVE profile is detected."""
+        # Hermetic: the conftest clears .env-loaded MERID_PROFILE for non-15m
+        # tests, so set the expected profile explicitly rather than relying on
+        # the CI job environment.
+        monkeypatch.setenv("MERID_PROFILE", "kalshi-only")
         profile = os.getenv("MERID_PROFILE", "")
         is_live = "live" in profile.lower() or profile == "prod"
         return {"profile": profile, "is_live": is_live}

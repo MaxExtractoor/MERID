@@ -3318,10 +3318,29 @@ def check_kalshi_15m_isolation() -> None:
         # core.kalshi_orchestrator removed from forbidden list - consensus stubbed, module safe to import
     ]
 
+    # Approved modules that live under an otherwise-forbidden namespace.
+    # merid.governance.trading_circuit_breaker and merid.governance.adaptive_risk_limits
+    # are current fail-closed safety controls imported lazily by the sealed 15m
+    # stack (order_router, fills_ledger, fills_poller, loop_15m, position_cache,
+    # live_runtime_state) — they are not legacy governance subsystems.  The bare
+    # "merid.governance" package __init__ is pulled in by those submodule imports.
+    # Other merid.governance.* modules (e.g. voting) remain forbidden.
+    allowed_module_names = {
+        "merid.governance",
+        "merid.governance.trading_circuit_breaker",
+        "merid.governance.adaptive_risk_limits",
+    }
+    allowed_module_prefixes = (
+        "merid.governance.trading_circuit_breaker.",
+        "merid.governance.adaptive_risk_limits.",
+    )
+
     # Check sys.modules for forbidden imports
     violations = []
     for module_name in sys.modules:
         if module_name is None:
+            continue
+        if module_name in allowed_module_names or module_name.startswith(allowed_module_prefixes):
             continue
         for forbidden_prefix in forbidden_module_prefixes:
             if module_name.startswith(forbidden_prefix):

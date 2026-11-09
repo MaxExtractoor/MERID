@@ -69,7 +69,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Versioning — Any change to formulas or invariants requires bumping this
 # ═══════════════════════════════════════════════════════════════════════════
 
-FORMULAS_VERSION: str = "2026-03-K1"
+FORMULAS_VERSION: str = "2026-11-K1"
 """Version of the formula implementations.
 
 Bump when:
@@ -545,6 +545,35 @@ def kelly_fraction_from_edge(
     return kelly_fraction(KellyInputs(win_prob, win_odds))
 
 
+def kelly_fraction_payoff(
+    win_probability: float,
+    avg_win: float,
+    avg_loss: float,
+) -> float:
+    """Kelly fraction from average win/loss payoffs (payoff-ratio form).
+
+    Math:
+        $$f = \\frac{p \\cdot W - (1-p) \\cdot L}{L}$$
+
+    This is the payoff form used by the legacy ``PositionSizer``: with
+    ``b = W / L`` it equals ``b`` times the standard Kelly fraction
+    ``(p*b - q)/b``.  Retained so legacy sizing callers share one
+    implementation instead of re-deriving the formula inline.
+
+    Args:
+        win_probability: Probability of winning [0, 1]
+        avg_win: Average gain per unit when winning (must be > 0)
+        avg_loss: Average loss per unit when losing (must be > 0)
+
+    Returns:
+        Kelly fraction clamped to [-1, 1]; 0.0 for invalid inputs
+    """
+    if not (0.0 <= win_probability <= 1.0) or avg_win <= 0 or avg_loss <= 0:
+        return 0.0
+    kelly = (win_probability * avg_win - (1.0 - win_probability) * avg_loss) / avg_loss
+    return max(-1.0, min(1.0, kelly))
+
+
 def quarter_kelly_size(
     inputs: PositionSizingInputs,
 ) -> Tuple[float, float, Optional[str]]:
@@ -896,6 +925,7 @@ __all__ = [
     # Sizing
     "kelly_fraction",
     "kelly_fraction_from_edge",
+    "kelly_fraction_payoff",
     "quarter_kelly_size",
     "apply_sizing_constraints",
     # Risk/Protection

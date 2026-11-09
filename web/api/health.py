@@ -12,10 +12,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-from agents.registry import load_agents
 from core.settings import OLLAMA_BASE_URL, OLLAMA_GENERATE_ENDPOINT
-from data.live_price_feed import get_live_price_feed
-from monitoring.health_checker import get_health_checker
 
 # OLLAMA test-endpoint constants — use env vars if set, else fall back to sensible defaults.
 _OLLAMA_MODEL_INTERFACE = os.environ.get("OLLAMA_MODEL_INTERFACE", "llama3")
@@ -81,11 +78,13 @@ async def get_global_health(request: Request) -> dict:
     _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
     try:
         # LEGACY REMOVAL: Use 15m loop instead of legacy merid.loop
-        from merid.loop_15m import get_merid_loop_15m
-        loop = get_merid_loop_15m()
-        loop_status = loop.status()
+        loop = getattr(request.app.state, "loop_15m", None)
+        loop_status = loop.summary() if loop is not None else {}
         running = loop_status.get("running", False)
-        metrics = loop_status.get("metrics", {})
+        metrics = {
+            "total_ticks": loop_status.get("tick", 0),
+            "tick_errors": loop_status.get("error_count", 0),
+        }
         checks["merid_loop"] = {
             "running": running,
             "total_ticks": metrics.get("total_ticks", 0),
@@ -361,6 +360,8 @@ async def test_agent_selftest(agent_id: str) -> dict:
     
     try:
         # Load agents and find the requested one
+        from agents.registry import load_agents
+
         agents = load_agents()
         target_agent = None
         

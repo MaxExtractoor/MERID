@@ -494,7 +494,7 @@ class DatabaseSafetyBackupManager:
         if not os.path.exists(file_path):
             return ""
         
-        hash_func = hashlib.sha256() if algorithm == "sha256" else hashlib.md5()
+        hash_func = hashlib.sha256() if algorithm == "sha256" else hashlib.md5(usedforsecurity=False)
         
         with open(file_path, 'rb') as f:
             while chunk := f.read(chunk_size):

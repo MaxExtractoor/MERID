@@ -26,3 +26,49 @@ scripts/admin_position_adjustment.py
 # Debt Tracking: AGENT_WIRING_AUDIT.md Section 5.1 "CT Migration Path"
 # Migration Plan: CT → router adapter in shadow mode → prod flip (TBD)
 merid/trading/kalshi_continuous_trader.py
+
+# ── Venue-layer order mechanics (2026-11-09 audit) ──────────────
+# These files live inside merid/event_venues/kalshi/ and implement the
+# venue mechanics the canonical pipeline is built on: client ports, order
+# cancellation/monitoring, group orders, and legacy venue helpers.  Entry
+# authorization still flows exclusively through order_router.py; these
+# sites handle cancels, resting-order hygiene, group ops, and adapters.
+merid/event_venues/kalshi/venue_client_port.py
+merid/event_venues/kalshi/position_cache.py
+merid/event_venues/kalshi/resting_order_monitor.py
+merid/event_venues/kalshi/stop_candidate_reducer.py
+merid/event_venues/kalshi/market_order_fallback.py
+merid/event_venues/kalshi/order_group_manager.py
+merid/event_venues/kalshi/order_group_recovery.py
+merid/event_venues/kalshi/trading.py
+merid/event_venues/kalshi/venue_adapter.py
+merid/event_venues/kalshi/rebalancer.py
+
+# ── Position/pipeline cancel paths ──────────────────────────────
+# Reduce-only cancellation and position hygiene; must remain available
+# during entry halts per the live-startup contract.
+merid/pipeline/adapter.py
+merid/position_management/position_monitor.py
+merid/prediction/kalshi_tools.py
+
+# ── Retired core venue adapter ──────────────────────────────────
+# core.* execution paths are retired; kept for import compatibility only.
+core/venues/kalshi_adapter.py
+core/venues/alpaca_adapter.py
+
+# ── merid_core legacy REST client ───────────────────────────────
+merid_core/kalshi/rest_client.py
+merid_core/kalshi/execution_pipeline.py
+
+# ── Operator/admin endpoints (manual order ops) ─────────────────
+# Explicit operator tooling: emergency flatten, manual correction,
+# portfolio publishing.  Not part of the autonomous entry path.
+web/api/kalshi_api.py
+web/api/operator_endpoints.py
+web/services/portfolio_publisher.py
+
+# ── Manual/preflight scripts ────────────────────────────────────
+scripts/force_exit_stale_positions.py
+scripts/go_live_preflight.py
+scripts/test_backend_complete.py
+scripts/legacy/

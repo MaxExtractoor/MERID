@@ -1,0 +1,2 @@
+{"v":1,"capture_seq":1,"source":"kalshi_ws","received_at_ns":1755000000000000000,"metadata":{"ticker":"KXBTC"},"payload":"{\"type\":\"orderbook_snapshot\",\"ticker\":\"KXBTC\"}","encoding":"utf-8"}
+{"v":1,"capture_seq":2,"source":"kalshi_rest","received_at_ns":1755000001000000000,"metadata":{"path":"/markets"},"payload":"{\"markets\":[]}","encoding":"utf-8"}

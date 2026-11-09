@@ -16,25 +16,28 @@ jobs:
       - name: Search for FakeKalshi imports
         run: |
           echo "Checking for FakeKalshiClient imports outside tests..."
-          if grep -r "FakeKalshiClient" --include="*.py" merid/ web/ 2>/dev/null; then
+          # Word-boundary match skips underscore-private stubs (e.g. _FakeKalshiClient
+          # replay helpers); startup_validations.py is excluded because it is the
+          # enforcement module that must name the forbidden types.
+          if grep -rEn "\bFakeKalshiClient\b" --include="*.py" --exclude="startup_validations.py" merid/ web/ 2>/dev/null; then
             echo "❌ Found FakeKalshiClient imports in production code"
             exit 1
           fi
           echo "✅ No FakeKalshiClient imports found"
-      
+
       - name: Search for DummyCatalog imports
         run: |
           echo "Checking for DummyMarketCatalog imports outside tests..."
-          if grep -r "DummyMarketCatalog" --include="*.py" merid/ web/ 2>/dev/null; then
+          if grep -rEn "\bDummyMarketCatalog\b" --include="*.py" --exclude="startup_validations.py" merid/ web/ 2>/dev/null; then
             echo "❌ Found DummyMarketCatalog imports in production code"
             exit 1
           fi
           echo "✅ No DummyMarketCatalog imports found"
-      
+
       - name: Search for MockKalshi imports
         run: |
           echo "Checking for MockKalshiClient imports outside tests..."
-          if grep -r "MockKalshiClient" --include="*.py" merid/ web/ 2>/dev/null; then
+          if grep -rEn "\bMockKalshiClient\b" --include="*.py" --exclude="startup_validations.py" merid/ web/ 2>/dev/null; then
             echo "❌ Found MockKalshiClient imports in production code"
             exit 1
           fi
@@ -68,13 +71,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Check for build_kalshi_catalog usage
+      - name: Check for production wiring validation
         run: |
-          echo "Checking that build_kalshi_catalog is used in startup_validations..."
-          if grep -q "build_kalshi_catalog" merid/startup_validations.py; then
-            echo "✅ build_kalshi_catalog used in startup_validations"
+          echo "Checking that validate_production_wiring is invoked in the 15m startup sequence..."
+          if grep -qE "^\s+validate_production_wiring\(\)\s*$" merid/startup_validations.py; then
+            echo "✅ validate_production_wiring invoked in startup_validations"
           else
-            echo "❌ build_kalshi_catalog not found in startup_validations"
+            echo "❌ validate_production_wiring() call not found in startup_validations"
+            exit 1
+          fi
+
+      - name: Check for real Kalshi catalog class
+        run: |
+          echo "Checking that KalshiMarketCatalog exists (no fake catalog builder)..."
+          if grep -q "class KalshiMarketCatalog" merid/event_venues/kalshi/market_catalog.py; then
+            echo "✅ KalshiMarketCatalog present in market_catalog.py"
+          else
+            echo "❌ KalshiMarketCatalog not found in market_catalog.py"
             exit 1
           fi
       
@@ -101,7 +114,10 @@ jobs:
       - name: Check for legacy module imports in production
         run: |
           echo "Checking that IS_LEGACY_MODULE modules are not imported from production packages..."
-          if grep -r "from legacy" --include="*.py" merid/ web/ 2>/dev/null; then
+          # Anchor to real import statements so comments/docstrings mentioning
+          # "from legacy" do not false-positive; both `from legacy.x import y`
+          # and `import legacy.x` forms are covered.
+          if grep -rEn "^\s*(from|import)\s+legacy(\.|\s|$)" --include="*.py" merid/ web/ 2>/dev/null; then
             echo "❌ Found imports from legacy/ in production code"
             exit 1
           fi

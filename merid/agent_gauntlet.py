@@ -780,13 +780,11 @@ if __name__ == "__main__":
 
     # Ensure agents are registered
     try:
-        try:
-            from legacy.merid.agents.research import PredictionMarketAgentV2, CryptoSignalsAgent, MarketResearchAgent
-        except ImportError:
-            # Fallback if legacy module structure differs
-            PredictionMarketAgentV2 = None
-            CryptoSignalsAgent = None
-            MarketResearchAgent = None
+        # legacy.merid.agents.research no longer exports these agent classes;
+        # registration falls through to the canonical merid.agents modules below.
+        PredictionMarketAgentV2 = None
+        CryptoSignalsAgent = None
+        MarketResearchAgent = None
         from merid.agents.strategy import StrategyDesignerAgent, ArbitrageAgent
         from merid.agents.risk_agents import RiskManagerAgent
         from merid.agents.coordination import ConsensusCoordinatorAgent

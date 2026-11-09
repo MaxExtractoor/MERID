@@ -80,7 +80,11 @@ jobs:
         MERID_PROFILE: kalshi_crypto_15m_v2
         MERID_TEST_MODE: 1
       run: |
-        pytest tests/reconciliation/ tests/risk/ -m kalshi_risk -v --tb=short
+        # The kalshi_risk marker is vestigial: its only decorated file
+        # (tests/risk/test_kalshi_crypto_risk.py) is collect_ignore'd as stale,
+        # so `-m kalshi_risk` selected zero tests and exited 5.  Run the live
+        # reconciliation + risk suites unfiltered instead.
+        pytest tests/reconciliation/ tests/risk/ -v --tb=short
 
   thesis-side-invariant-tests:
     name: Thesis Side Invariant Verification
@@ -104,7 +108,7 @@ jobs:
         MERID_PROFILE: kalshi_crypto_15m_v2
         MERID_TEST_MODE: 1
       run: |
-        pytest tests/test_thesis_side_invariant.py -v --tb=short
+        pytest tests/test_thesis_side_domain.py tests/test_intent_thesis_side_invariant.py tests/test_full_lifecycle_thesis_invariant.py tests/test_rest_sync_thesis_preservation.py -v --tb=short
     
     - name: Run lifecycle thesis trace tests
       env:

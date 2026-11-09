@@ -31,6 +31,16 @@ _SECRET_PATTERNS = (
 )
 
 
+REPLAY_PROTECTED_KEYS = frozenset({
+    "MERID_REPLAY_TAPE", "MERID_INGRESS_RECORDING", "TRADING_ENABLED",
+    "MERID_PM_LIVE_ENABLED", "MERID_ALLOW_LIVE_TRADES", "MERID_EXECUTION_MODE",
+    "MERID_LOOP_DRY_RUN", "MERID_ALLOW_CT_SCRIPT_BYPASS", "MERID_REQUIRE_EXIT_PARENTAGE",
+    "MERID_EXIT_FIREWALL_OBSERVE_ONLY", "MERID_CIRCUIT_BREAKER_DISABLED",
+    "MERID_PM_TRADING_MODE", "MERID_TRADE_MODE", "MERID_AUTO_EXECUTION_MODE",
+    "MERID_OBSERVE_ONLY", "ALLOW_DIRECT_EXECUTION", "DEBUG_ALLOW_MANUAL_ORDERS",
+})
+
+
 def _looks_secret(key: str) -> bool:
     upper = key.upper()
     return any(p in upper for p in _SECRET_PATTERNS)
@@ -133,13 +143,13 @@ def apply_snapshot(tape_dir: Path, protected_keys: Optional[set] = None) -> bool
     ``protected_keys`` are environment keys we must not overwrite (e.g. replay
     safety latches that were already set by the caller).
     """
-    protected = protected_keys or set()
+    protected = REPLAY_PROTECTED_KEYS | (protected_keys or set())
     snapshot = load_snapshot(tape_dir)
     if snapshot is None:
         return False
 
     for key, val in snapshot.get("environ", {}).items():
-        if key in protected or val is None:
+        if key in protected or _looks_secret(key) or val is None:
             continue
         os.environ[key] = val
 
@@ -150,6 +160,8 @@ def apply_snapshot(tape_dir: Path, protected_keys: Optional[set] = None) -> bool
 
         captured_settings = snapshot.get("settings", {})
         for field in type(settings).model_fields:
+            if field in protected or _looks_secret(field):
+                continue
             if field in captured_settings:
                 captured = captured_settings[field]
                 current = getattr(settings, field)

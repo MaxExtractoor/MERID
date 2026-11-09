@@ -1508,11 +1508,12 @@ def _snapshot_durable_state() -> _Dict[str, _Tuple]:
                 st = e.stat()
             except OSError:
                 continue
-            if st.st_mtime_ns > newest:
+            is_directory = e.is_dir(follow_symlinks=False)
+            if not is_directory and st.st_mtime_ns > newest:
                 newest = st.st_mtime_ns
             if detailed:
-                detail[e.name] = (st.st_size, st.st_mtime_ns)
-            if e.is_dir(follow_symlinks=False):
+                detail[e.name] = (0, 0) if is_directory else (st.st_size, st.st_mtime_ns)
+            if is_directory:
                 subdirs.append(e.path)
         if detailed:
             snap[root] = (len(entries), newest, detail)

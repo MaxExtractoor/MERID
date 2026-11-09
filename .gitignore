@@ -38,6 +38,8 @@ data/audit/audit_log.jsonl
 web/react/jest_output.txt
 web/react/jest_results.txt
 *.jsonl
+!tests/data/golden/replay_state_diff_golden.jsonl
+!tests/data/golden/replay_tape/ingress_20260827T120000Z_0001_0001.jsonl
 data/*.jsonl
 logs/*.log
 *.log

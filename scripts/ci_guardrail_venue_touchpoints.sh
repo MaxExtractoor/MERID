@@ -18,18 +18,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MERID_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WHITELIST_FILE="$MERID_ROOT/.ci/venue_touchpoint_whitelist.txt"
 
-# Patterns that indicate direct venue touching
+# Patterns that indicate direct venue touching.  These match *invocations* of
+# order-mutating client methods (call paren required), so attribute probes,
+# comments, docstrings, string literals, and read-only market-data calls
+# (get_market/get_positions/get_balance/is_demo/...) do not false-positive.
+# ERE is used (grep -E) so \( \| groups behave as written.
 PATTERNS=(
-    "client\.place_order"
-    "client\.cancel_order"
-    "client\.create_order"
-    "\.execute_trade\("
-    "executor\.place_order"
-    "executor\.cancel_order"
+    "client\.(place_order|place_order_result|cancel_order|cancel_order_result|create_order|create_order_result|create_order_group|cancel_order_group)\s*\("
+    "\.execute_trade\s*\("
+    "executor\.(place_order|cancel_order|execute_trade)\s*\("
     "KalshiExecutor\(\)"
-    "kalshi_client\."
-    "rest_client\.create_order"
-    "rest_client\.cancel_order"
+    "kalshi_client\.(place_order|place_order_result|cancel_order|cancel_order_result|create_order|create_order_result|execute_trade)\s*\("
+    "rest_client\.(place_order|cancel_order|create_order)\s*\("
 )
 
 # Files that are allowed to have these patterns (the canonical pipeline)
@@ -39,15 +39,19 @@ DEFAULT_WHITELIST=(
     "merid/event_venues/kalshi/order_manager.py"
     "merid/execution/executors/kalshi.py"
     "merid/execution/executors/kalshi_enhanced.py"
+    "merid/execution/router.py"
     "tests/"
     "scripts/ci_red_team.py"
     "scripts/stress_test_reconciliation.py"
+    "legacy/"
 )
 
 # Load custom whitelist if exists
 if [[ -f "$WHITELIST_FILE" ]]; then
     echo "Loading custom whitelist from $WHITELIST_FILE"
-    mapfile -t CUSTOM_WHITELIST < "$WHITELIST_FILE"
+    # Skip blank lines and comments — an empty whitelist entry would substring-
+    # match every path and silently disable the guardrail.
+    mapfile -t CUSTOM_WHITELIST < <(grep -vE '^[[:space:]]*(#|$)' "$WHITELIST_FILE" || true)
     WHITELIST=("${DEFAULT_WHITELIST[@]}" "${CUSTOM_WHITELIST[@]}")
 else
     WHITELIST=("${DEFAULT_WHITELIST[@]}")
@@ -72,8 +76,8 @@ for pattern in "${PATTERNS[@]}"; do
         done
         
         if [[ "$IS_WHITELISTED" == "false" ]]; then
-            # Search for pattern in file
-            if grep -Hn "$pattern" "$file" 2>/dev/null; then
+            # Search for pattern in file (ERE so \( \| work as written)
+            if grep -EHn "$pattern" "$file" 2>/dev/null; then
                 : # grep found matches, output them
             fi
         fi

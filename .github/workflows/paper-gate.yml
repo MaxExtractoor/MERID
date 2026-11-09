@@ -36,7 +36,7 @@ jobs:
 
       - name: Run dry-run paper gate
         run: |
-          python scripts/run_paper_gate.py --dry-run --output-dir ./results
+          python scripts/run_offline_gate.py --output-dir ./results
 
       - name: Upload dry-run results
         if: always()
@@ -67,18 +67,19 @@ jobs:
 
       - name: Set gate ID
         id: gate
+        env:
+          GATE_LABEL: ${{ inputs.gate_id }}
         run: |
-          if [ -n "${{ github.event.inputs.gate_id }}" ]; then
-            echo "GATE_ID=${{ github.event.inputs.gate_id }}" >> $GITHUB_OUTPUT
-          else
-            echo "GATE_ID=ci_${{ github.run_id }}" >> $GITHUB_OUTPUT
-          fi
+          GATE_ID="${GATE_LABEL:-ci_${GITHUB_RUN_ID}}"
+          [[ "$GATE_ID" =~ ^[A-Za-z0-9_-]+$ ]] || exit 1
+          echo "GATE_ID=$GATE_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Run full paper gate
+      - name: Run full offline gate
+        env:
+          GATE_DURATION: ${{ inputs.gate_duration || '1800' }}
         run: |
-          python scripts/run_paper_gate.py \
-            --duration ${{ github.event.inputs.gate_duration || 1800 }} \
-            --gate-id ${{ steps.gate.outputs.GATE_ID }} \
+          python scripts/run_offline_gate.py \
+            --soak-seconds "$GATE_DURATION" \
             --output-dir ./results
 
       - name: Upload gate results
@@ -89,24 +90,12 @@ jobs:
           path: ./results/
           retention-days: 30
 
-      - name: Comment on PR (if triggered from PR)
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = './results';
-            const files = fs.readdirSync(path).filter(f => f.endsWith('.json'));
-            
-            if (files.length > 0) {
-              const report = JSON.parse(fs.readFileSync(`${path}/${files[0]}`, 'utf8'));
-              const verdict = report.verdict || 'UNKNOWN';
-              const emoji = verdict.startsWith('PASS') ? '✅' : '❌';
-              
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: `${emoji} **Paper Gate**: ${verdict}\n- Gate ID: ${report.gate_id}\n- Duration: ${report.duration_seconds // 60} minutes\n- P95 max: ${report.p95_max?.toFixed(0) || 'N/A'}ms\n- [View artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`
-              });
-            }
+      - name: Summarize offline gate
+        if: always()
+        run: |
+          if [ -f results/offline_gate.json ]; then
+            echo '### Canonical offline acceptance (not live-trading authorization)' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat results/offline_gate.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi

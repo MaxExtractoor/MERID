@@ -503,7 +503,7 @@ class DataSafetyIntegrityChecker:
     
     def _calculate_checksum(self, file_path: str, algorithm: str = "sha256") -> str:
         """Calculate checksum of a file."""
-        hash_func = hashlib.sha256() if algorithm == "sha256" else hashlib.md5()
+        hash_func = hashlib.sha256() if algorithm == "sha256" else hashlib.md5(usedforsecurity=False)
         
         with open(file_path, 'rb') as f:
             while chunk := f.read(8192):

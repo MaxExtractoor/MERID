@@ -85,6 +85,7 @@ jobs:
 
       - name: Validate wiring fixes
         run: |
+          mkdir -p reports
           python scripts/validate_wiring_ci.py --json > reports/wiring_validation.json
           cat reports/wiring_validation.json
           

@@ -39,7 +39,7 @@ async def fetch_live_prices():
         
         # Use sync client in thread pool to avoid event loop SSL issues
         def sync_fetch():
-            with httpx.Client(timeout=30.0, verify=False) as client:
+            with httpx.Client(timeout=30.0) as client:
                 ids_param = ','.join(coingecko_ids)
                 url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true"
                 return client.get(url)
@@ -85,7 +85,7 @@ async def fetch_crypto_news():
     
     try:
         # Using CoinGecko news API (free)
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             url = "https://api.coingecko.com/api/v3/news"
             response = await client.get(url)
             if response.status_code == 200:

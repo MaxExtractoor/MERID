@@ -193,3 +193,38 @@ def test_replay_uniform_is_deterministic() -> None:
         _ = get_replay_dispatcher()
         u = replay_uniform(1.0, 2.0)
         assert 1.0 <= u <= 2.0
+
+
+@pytest.mark.parametrize("explicit_protection", [False, True])
+def test_snapshot_preserves_execution_latches(tmp_path, monkeypatch, explicit_protection):
+    import json
+    from merid.data.replay_config_snapshot import apply_snapshot
+    from merid.settings import settings
+
+    monkeypatch.setenv("MERID_ALLOW_LIVE_TRADES", "false")
+    monkeypatch.setattr(settings, "MERID_ALLOW_LIVE_TRADES", False)
+    (tmp_path / "tape_config_snapshot.json").write_text(json.dumps({
+        "environ": {"MERID_ALLOW_LIVE_TRADES": "true"},
+        "settings": {"MERID_ALLOW_LIVE_TRADES": True},
+    }), encoding="utf-8")
+    protected = {"MERID_ALLOW_LIVE_TRADES"} if explicit_protection else None
+    assert apply_snapshot(tmp_path, protected_keys=protected)
+    assert os.environ["MERID_ALLOW_LIVE_TRADES"] == "false"
+    assert settings.MERID_ALLOW_LIVE_TRADES is False
+
+
+def test_dispatcher_cannot_restore_live_latches_from_tape(tmp_path, monkeypatch):
+    import json
+    from merid.settings import settings
+
+    tape = _make_tape(str(tmp_path), [{"source": SOURCE_KALSHI_WS, "payload": "a"}])
+    monkeypatch.setenv("TRADING_ENABLED", "false")
+    monkeypatch.setattr(settings, "TRADING_ENABLED", False)
+    (tape / "tape_config_snapshot.json").write_text(json.dumps({
+        "environ": {"TRADING_ENABLED": "true"},
+        "settings": {"TRADING_ENABLED": True},
+    }), encoding="utf-8")
+    dispatcher = ReplayDispatcher(tape)
+    assert dispatcher.get(SOURCE_KALSHI_WS)["payload"] == "a"
+    assert os.environ["TRADING_ENABLED"] == "false"
+    assert settings.TRADING_ENABLED is False

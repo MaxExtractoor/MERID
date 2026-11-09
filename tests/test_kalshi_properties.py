@@ -260,6 +260,9 @@ class TestKellySizingProperties:
         # in Kelly sizing. With small contract counts (< 10), rounding can cause
         # significant relative deviations (e.g., 1 contract vs 3 expected is 67% difference).
         # The property still holds: partial Kelly produces fewer contracts than full Kelly.
+        # At contracts_full == 1 any fractional Kelly rounds to 0 and the ratio is
+        # undefined, so require enough contracts for the ratio to be meaningful.
+        assume(contracts_full >= 3 and contracts_partial > 0)
         assert abs(ratio - kelly_frac) < 0.20, \
             f"Kelly fraction scaling off: {ratio} vs {kelly_frac} (contracts: {contracts_partial}/{contracts_full})"
 

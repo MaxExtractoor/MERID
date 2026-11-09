@@ -160,7 +160,7 @@ def model_version_id(row: DecisionRow) -> str:
         str(row.build_sha),
         str(row.policy_epoch),
     ]
-    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+    return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------

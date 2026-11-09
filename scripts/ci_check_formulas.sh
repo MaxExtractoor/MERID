@@ -46,7 +46,7 @@ check_pattern() {
     
     # Search for pattern, excluding merid/formulas.py and test files
     local matches
-    matches=$(grep -r "${pattern}" \
+    matches=$(grep -rE "${pattern}" \
         --include="*.py" \
         "${PROJECT_ROOT}/merid" \
         "${PROJECT_ROOT}/core" \
@@ -73,8 +73,10 @@ check_pattern() {
 echo "Checking forbidden patterns..."
 echo ""
 
-check_pattern "kelly_fraction\s*=" "Kelly fraction implementation outside formulas.py"
-check_pattern "brier_score\s*=" "Brier score implementation outside formulas.py"
+# NOTE: patterns target formula *computations* (parenthesized/numpy expressions),
+# not kwargs-style pass-throughs like ``kelly_fraction=cfg.value``.
+check_pattern "\bkelly_fraction\s*=\s*\(" "Kelly fraction implementation outside formulas.py"
+check_pattern "\bbrier_score\s*=\s*(np\.|np\.average|\()" "Brier score implementation outside formulas.py"
 check_pattern "\(p.*-\s*o\)\s*\*\*\s*2" "Brier formula (prob - outcome)**2 outside formulas.py"
 check_pattern "volume_weighted_sentiment" "Volume-weighted sentiment outside formulas.py"
 check_pattern "drawdown_tier_action" "Drawdown tier logic outside formulas.py"
@@ -98,7 +100,8 @@ REQUIRED_EXPORTS=(
 )
 
 for export in "${REQUIRED_EXPORTS[@]}"; do
-    if grep -q "^${export}\s*=" "${PROJECT_ROOT}/merid/formulas.py" || \
+    # Allow optional type annotations: NAME = ..., NAME: type = ..., def NAME(, class NAME(
+    if grep -qE "^${export}(\s*:[^=]+)?\s*=" "${PROJECT_ROOT}/merid/formulas.py" || \
        grep -q "^def ${export}" "${PROJECT_ROOT}/merid/formulas.py" || \
        grep -q "^class ${export}" "${PROJECT_ROOT}/merid/formulas.py"; then
         echo "  ✅ ${export} found in merid/formulas.py"

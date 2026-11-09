@@ -1,0 +1,2 @@
+{"capture_seq": 1, "checksum": "dd8818965c24a26307f309ba704fbe80be057da831be11a710bbe495454143c5", "decision_id": "after_ws", "kind": "book", "ts": 1755000000.0}
+{"capture_seq": 2, "checksum": "1ad1ba7931cfed7d043a894166b695013761be1a26b81cab1ef42cce3a7d6aaa", "decision_id": "after_rest", "kind": "risk", "ts": 1755000001.0}

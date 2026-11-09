@@ -170,7 +170,15 @@ class KellySizing:
     kelly_fraction: float  # user-supplied k (e.g., 0.25 for quarter-Kelly)
     bankroll_cents: int
     max_contracts_cap: int
-    
+
+    def __post_init__(self) -> None:
+        # Coerce numeric inputs to Decimal — callers (incl. the CI smoke check)
+        # pass floats; frozen dataclass requires object.__setattr__.
+        for _f in ("edge", "win_prob", "payout_ratio"):
+            _v = getattr(self, _f)
+            if not isinstance(_v, Decimal):
+                object.__setattr__(self, _f, Decimal(str(_v)))
+
     def compute_kelly(self) -> Tuple[float, int]:
         """
         Compute Kelly fraction and resulting contract count.

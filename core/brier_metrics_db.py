@@ -446,28 +446,29 @@ class BrierMetricsDB:
 
             # Compute metrics
             import numpy as np
+            from merid.formulas import brier_score as _brier_point
             probs = np.array([float(row["prob"]) for row in rows])
             outcomes = np.array([int(row["outcome"]) for row in rows])
             weights = np.array([float(row["weight"]) for row in rows])
 
-            # Brier score
-            errors = (probs - outcomes) ** 2
-            brier_score = np.average(errors, weights=weights)
+            # Brier score: canonical per-sample formula, then weighted average
+            errors = np.array([_brier_point(float(p), int(o)) for p, o in zip(probs, outcomes)])
+            brier = float(np.average(errors, weights=weights))
 
             # Brier skill score vs climatology
-            climatology = np.average(outcomes, weights=weights)
-            baseline_errors = (climatology - outcomes) ** 2
-            brier_baseline = np.average(baseline_errors, weights=weights)
-            bss = 1.0 - (brier_score / brier_baseline) if brier_baseline > 0 else 0.0
+            climatology = float(np.average(outcomes, weights=weights))
+            baseline_errors = np.array([_brier_point(climatology, int(o)) for o in outcomes])
+            brier_baseline = float(np.average(baseline_errors, weights=weights))
+            bss = 1.0 - (brier / brier_baseline) if brier_baseline > 0 else 0.0
 
             return {
                 "model_id": model_id,
                 "window_start": window_start,
                 "window_end": window_end,
                 "n_events": len(rows),
-                "brier_score": float(brier_score),
+                "brier_score": brier,
                 "brier_skill_score": float(bss),
-                "quality_category": "Good" if brier_score < 0.2 else "Fair"
+                "quality_category": "Good" if brier < 0.2 else "Fair"
             }
 
 # Global singleton for Brier metrics database

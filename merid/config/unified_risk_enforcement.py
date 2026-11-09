@@ -213,31 +213,35 @@ def enforce_unified_risk_model(
     )
 
 
+def _resolve_config_scalar(value: Any) -> Any:
+    """Resolve ``${VAR:-default}`` placeholders and coerce numeric strings.
+
+    config/*.yaml files use envsubst-style defaults that plain ``yaml.safe_load``
+    returns as literal strings; risk comparisons need real numbers.  Returns the
+    original value when it is not a placeholder or cannot be coerced.
+    """
+    if not isinstance(value, str):
+        return value
+    import re
+    match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}", value.strip())
+    if match:
+        var_name, default = match.group(1), match.group(2)
+        value = os.getenv(var_name, default if default is not None else "")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _load_default_risk_configs() -> list[Dict[str, Any]]:
-    """Load risk configs from default sources."""
+    """Load risk configs from default sources.
+
+    Sources are ordered by precedence: environment variables first, then YAML
+    files, then merid.settings — ``_get_config_value`` returns the first match.
+    """
     configs = []
-    
-    # Source 1: portfolio_optimizer.yaml
-    try:
-        import yaml
-        with open("config/portfolio_optimizer.yaml") as f:
-            data = yaml.safe_load(f)
-            if data and "portfolio_optimizer" in data:
-                configs.append(data["portfolio_optimizer"])
-    except Exception as e:
-        logger.debug(f"Could not load portfolio_optimizer.yaml: {e}")
-    
-    # Source 2: trade_hold_config.yaml
-    try:
-        import yaml
-        with open("config/trade_hold_config.yaml") as f:
-            data = yaml.safe_load(f)
-            if data:
-                configs.append(data)
-    except Exception as e:
-        logger.debug(f"Could not load trade_hold_config.yaml: {e}")
-    
-    # Source 3: Environment variables
+
+    # Source 1: Environment variables (highest precedence)
     env_config = {}
     if os.getenv("MAX_RISK_PCT_GLOBAL"):
         env_config["max_risk_pct_global"] = float(os.getenv("MAX_RISK_PCT_GLOBAL"))
@@ -247,7 +251,27 @@ def _load_default_risk_configs() -> list[Dict[str, Any]]:
         env_config["max_total_notional_usd"] = float(os.getenv("MAX_TOTAL_NOTIONAL_USD"))
     if env_config:
         configs.append(env_config)
-    
+
+    # Source 2: portfolio_optimizer.yaml
+    try:
+        import yaml
+        with open("config/portfolio_optimizer.yaml") as f:
+            data = yaml.safe_load(f)
+            if data and "portfolio_optimizer" in data:
+                configs.append(data["portfolio_optimizer"])
+    except Exception as e:
+        logger.debug(f"Could not load portfolio_optimizer.yaml: {e}")
+
+    # Source 3: trade_hold_config.yaml
+    try:
+        import yaml
+        with open("config/trade_hold_config.yaml") as f:
+            data = yaml.safe_load(f)
+            if data:
+                configs.append(data)
+    except Exception as e:
+        logger.debug(f"Could not load trade_hold_config.yaml: {e}")
+
     # Source 4: merid.settings
     try:
         from merid import settings
@@ -260,7 +284,7 @@ def _load_default_risk_configs() -> list[Dict[str, Any]]:
             configs.append(settings_config)
     except Exception as e:
         logger.debug(f"Could not load settings: {e}")
-    
+
     return configs
 
 
@@ -268,7 +292,7 @@ def _get_config_value(configs: list[Dict[str, Any]], key: str, default: Any) -> 
     """Get first occurrence of key from list of config dicts."""
     for config in configs:
         if key in config:
-            return config[key]
+            return _resolve_config_scalar(config[key])
     return default
 
 

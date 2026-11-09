@@ -18,6 +18,7 @@ import json
 import warnings
 
 from utils.logger import get_logger
+from merid.formulas import brier_score as _canonical_brier_score, mean_brier_score
 
 logger = get_logger("merid_metrics")
 
@@ -100,7 +101,7 @@ class OnlineWeightedBrier:
     
     def update(self, p: float, o: int, weight: float = 1.0) -> None:
         """Update with new prediction/outcome."""
-        error = (p - o) ** 2
+        error = _canonical_brier_score(float(p), int(o))
         self.weight_sum += weight
         self.weighted_error_sum += weight * error
         self.n_events += 1
@@ -141,8 +142,10 @@ class BrierDecomposition:
         if len(y_true) == 0:
             raise ValueError("Empty arrays provided")
         
-        # Overall Brier score
-        brier_score = np.mean((y_pred - y_true) ** 2)
+        # Overall Brier score (canonical merid.formulas implementation)
+        brier_score = mean_brier_score(
+            [(float(p), int(o)) for p, o in zip(y_pred, y_true)]
+        )
         
         # Overall event rate (baseline)
         o_bar = np.mean(y_true)

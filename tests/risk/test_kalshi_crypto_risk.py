@@ -5,7 +5,7 @@ This test suite validates the risk infrastructure for Kalshi 15-minute crypto ma
 It enforces the contract defined in docs/audit/KALSHI_RISK_EXTERNAL_CONTRACT.md.
 
 SPEC_VERSION: 1.0.0
-"""
+
 This suite tests:
 - Position exposure caps (per-market per-side, time-bucket, account-level)
 - PnL computation with Kalshi binary payoff and fee schedule

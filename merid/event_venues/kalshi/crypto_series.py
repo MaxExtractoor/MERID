@@ -131,10 +131,13 @@ class _CacheAdapter:
         self._redis: Optional[Any] = None
         self._memory: Dict[str, Any] = {}
         self._ttl: Dict[str, float] = {}
-        self._try_redis()
+        self._redis_attempted = False
 
     def _try_redis(self) -> None:
         """Attempt to connect to Redis, fall back to memory if unavailable."""
+        if self._redis_attempted:
+            return
+        self._redis_attempted = True
         try:
             import redis
 
@@ -150,6 +153,7 @@ class _CacheAdapter:
 
     async def get(self, key: str) -> Optional[str]:
         """Get value from cache."""
+        self._try_redis()
         try:
             if self._redis:
                 return self._redis.get(key)  # type: ignore
@@ -169,6 +173,7 @@ class _CacheAdapter:
 
     async def set(self, key: str, value: str, ttl_seconds: int) -> None:
         """Set value in cache with TTL."""
+        self._try_redis()
         try:
             if self._redis:
                 self._redis.setex(key, ttl_seconds, value)  # type: ignore
@@ -182,6 +187,7 @@ class _CacheAdapter:
 
     async def delete(self, pattern: str) -> int:
         """Delete keys matching pattern. Returns count deleted."""
+        self._try_redis()
         try:
             if self._redis:
                 keys = self._redis.keys(pattern)
@@ -210,7 +216,7 @@ def _make_cache_key(*parts: str) -> str:
     key = f"{CACHE_PREFIX}:{':'.join(parts)}"
     # Hash long keys to stay within Redis limits
     if len(key) > 200:
-        h = hashlib.md5(key.encode()).hexdigest()[:16]
+        h = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:16]
         key = f"{CACHE_PREFIX}:{h}"
     return key
 

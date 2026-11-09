@@ -255,7 +255,7 @@ class OfflineDataStore:
         storage_format: StorageFormat = StorageFormat.PARQUET,
     ) -> DatasetMetadata:
         """Register a new dataset for offline storage."""
-        dataset_id = f"{category.value}_{hashlib.md5(name.encode()).hexdigest()[:8]}"
+        dataset_id = f"{category.value}_{hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()[:8]}"
         
         storage_path = str(
             Path(self._config.data_root) / category.value / f"{dataset_id}.{storage_format.value}"
@@ -384,7 +384,7 @@ class OfflineDataStore:
         context_length: int = 4096,
     ) -> ModelArtifact:
         """Register a model artifact for offline storage."""
-        artifact_id = f"{model_type.value}_{hashlib.md5(f'{name}_{version}'.encode()).hexdigest()[:8]}"
+        artifact_id = f"{model_type.value}_{hashlib.md5(f'{name}_{version}'.encode(), usedforsecurity=False).hexdigest()[:8]}"
         
         storage_path = str(
             Path(self._config.models_root) / model_type.value / f"{artifact_id}"

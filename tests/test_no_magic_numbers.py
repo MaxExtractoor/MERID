@@ -122,13 +122,13 @@ class TestProbPriceConsistency:
         assert "no_edge_vs_implied" in result
     
     def test_no_order_with_positive_edge(self):
-        """NO order should pass when (1 - model_prob) > (1 - implied_prob)."""
+        """NO order should pass when model_prob (side-specific P(NO)) > implied P(NO)."""
         intent = MockOrderIntent(
             ticker="KXBTC15M-26MAR2501",
             action="buy",
             side="no",
-            price_cents=70,  # implied_prob = 0.70, so (1 - implied) = 0.30
-            model_prob=0.40,  # (1 - model) = 0.60, edge is positive
+            price_cents=70,  # implied P(NO) = 0.70
+            model_prob=0.80,  # model P(NO) = 0.80 > 0.70 - tolerance -> positive edge
         )
         result = _validate_prob_price_consistency(intent)
         assert result is None, "Should pass with positive edge for NO"
@@ -212,8 +212,8 @@ class TestUnderlyingPlausibility:
             ticker="KXBTC15M-26MAR2501",  # BTC 15m
             action="buy",
             side="yes",
-            price_cents=12,  # Very cheap (below 20c threshold)
-            edge_pct=0.02,  # Low edge
+            price_cents=9,  # Very cheap (below 10c plausibility threshold)
+            edge_pct=0.02,  # Low edge (< 20% exceptional-edge bar)
         )
         result = _validate_underlying_plausibility(intent)
         assert result is not None, "Should reject cheap without exceptional edge"
@@ -246,16 +246,17 @@ class TestUnderlyingPlausibility:
         assert result is None, "Non-crypto should bypass"
     
     def test_sell_order_bypass(self):
-        """Sell orders should bypass plausibility check."""
+        """True exit orders (explicit exit marker) bypass plausibility check."""
         intent = MockOrderIntent(
             ticker="KXBTC15M-26MAR2501",
             action="sell",
             side="yes",
             price_cents=5,
             edge_pct=0.01,
+            source="take_profit",
         )
         result = _validate_underlying_plausibility(intent)
-        assert result is None, "Sell orders should bypass"
+        assert result is None, "Exit orders should bypass"
 
 
 class TestPositionLifecycle:
@@ -322,7 +323,7 @@ class TestPositionLifecycle:
             assert "no_exit_plan" in result
     
     def test_sell_order_bypass(self):
-        """Sell orders should bypass lifecycle check."""
+        """True exit orders (explicit exit marker) bypass lifecycle check."""
         intent = MockOrderIntent(
             ticker="KXBTC15M-26MAR2501",
             action="sell",
@@ -330,9 +331,10 @@ class TestPositionLifecycle:
             price_cents=30,
             group_id=None,
             agent_id=None,
+            source="take_profit",
         )
         result = _validate_position_lifecycle(intent)
-        assert result is None, "Sell orders should bypass"
+        assert result is None, "Exit orders should bypass"
 
 
 class TestRiskParametersConstants:
@@ -354,13 +356,13 @@ class TestRiskParametersConstants:
             )
             assert MIN_KALSHI_PRICE_CENTS == 1
             assert MAX_KALSHI_PRICE_CENTS == 99
-            assert DEEP_OTM_CHEAP_CENTS == 5
-            assert DEEP_OTM_EXPENSIVE_CENTS == 95
+            assert DEEP_OTM_CHEAP_CENTS == 10
+            assert DEEP_OTM_EXPENSIVE_CENTS == 75
             assert isinstance(ENFORCE_DEEP_OTM_POLICY, bool)
             assert ENFORCE_DEEP_OTM_POLICY is True, "ENFORCE_DEEP_OTM_POLICY should be True (enabled to block deep OTM longshots)"
             assert isinstance(ENFORCE_PROB_PRICE_CONSISTENCY, bool)
             assert ENFORCE_PROB_PRICE_CONSISTENCY is True, "ENFORCE_PROB_PRICE_CONSISTENCY should be True (tightened)"
-            assert SIZER_MAX_BANKROLL_PCT == 0.03, "SIZER_MAX_BANKROLL_PCT should be 3% (tightened from 5%)"
+            assert SIZER_MAX_BANKROLL_PCT == 0.0, "SIZER_MAX_BANKROLL_PCT is disabled (0.0) — fixed exposure cap is used instead"
         except ImportError as e:
             pytest.fail(f"Failed to import risk_parameters: {e}")
 

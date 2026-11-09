@@ -348,7 +348,9 @@ async def test_partial_ioc_exit_fill_records_executed_count(
 
     result = await _route_exit(intent)
 
-    assert result.status == "filled_live", (result.status, result.reason)
+    # 2026-11-02 outcome semantics: a 1-of-2 IOC fill is partial_live so the
+    # exit path knows the residual contract still needs handling.
+    assert result.status == "partial_live", (result.status, result.reason)
     assert result.executed_count == 1
     assert result.remaining_count == 0
     assert result.has_execution
