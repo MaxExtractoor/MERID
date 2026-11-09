@@ -370,7 +370,13 @@ async def test_case4_fill_then_settlement_preserves_state(harness) -> None:
     harness.ledger._fills["kf_a004"] = _internal_fill(
         "kf_a004", "ord4", count_fp=Decimal("2")
     )
-    written = harness.ledger.record_settlement_proceeds(TICKER, "yes", yes_count=2.0)
+    # 2026-11-07: the equal-opposite delta is sourced from the local
+    # ledger's signed-YES residual at settlement (``residual_yes_cc``),
+    # never from gross exchange ``yes_count`` — those fields stay nonzero
+    # on fully closed lifecycles and would fabricate exposure.
+    written = harness.ledger.record_settlement_proceeds(
+        TICKER, "yes", yes_count=2.0, residual_yes_cc=200,
+    )
     assert written == 1
 
     ok, detail = await harness.run(rest_fills=[_rest_fill("kf_a004", "ord4")])

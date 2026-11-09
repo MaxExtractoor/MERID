@@ -227,6 +227,17 @@ class UnifiedMarketState:
     edge_basis: Optional[float] = None            # implied_prob − external_fair_value
     kelly_fraction_hint: Optional[float] = None   # |edge_basis| / max_loss
 
+    # ── Model provenance (mirrored from KalshiMarketState on read) ────────
+    # Written by the agent decision path on the kalshi state; get_unified()
+    # mirrors them here so exit evaluators that prefer the unified view see
+    # the same fair value that authorized the entry.
+    annualized_vol: Optional[float] = None
+    annualized_vol_source: Optional[str] = None
+    model_fair_prob: Optional[float] = None       # P(YES), point-expiry model
+    model_fair_prob_ts: float = 0.0
+    settlement_fair_prob: Optional[float] = None  # P(YES), final-60s RTI avg
+    settlement_fair_prob_ts: float = 0.0
+
     # ── Freshness timestamps ──────────────────────────────────────────────
     book_updated_ts: Optional[float] = None  # CRITICAL FIX: Use None to distinguish "never set" from "set to epoch"
     candle_updated_ts: float = 0.0

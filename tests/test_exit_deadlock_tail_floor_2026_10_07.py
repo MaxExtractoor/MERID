@@ -34,6 +34,7 @@ import asyncio
 import threading
 import time
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -273,6 +274,10 @@ class TestTailLossFloor:
         (e.g. a cheap entry that has gone nearly worthless)."""
         monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
         monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_CENTS", "18")
+        # 2026-11-09: the absolute floor now carries the same consecutive-
+        # observation debounce as the drop trigger; pin to 1 to keep this
+        # test about the trigger semantics, not the debounce.
+        monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_MIN_OBS", "1")
         monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "1")
         monitor = PositionMonitor()
         monitor._loop = None
@@ -295,8 +300,235 @@ class TestTailLossFloor:
         assert position.tail_loss_floor_fired is True
         assert len(submitted) == 1
 
+    # ── 2026-11-09 floor debounce (KXXRP15M-26NOV082330-30) ──────────────
+    # YES@61 sold at 18c on a single floor observation; the bid recovered
+    # to 42c ~3s post-fill and the market settled YES (-176c realized vs
+    # +156c forgone).  The absolute floor now requires
+    # MERID_TAIL_LOSS_FLOOR_MIN_OBS consecutive observations — the same
+    # debounce the drop trigger already had.
 
-# ── 4. loss_cap canonical wiring ─────────────────────────────────────────────
+    def _floor_monitor(self, monkeypatch):
+        monkeypatch.setenv("MERID_TAIL_LOSS_ENABLED", "1")
+        monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_CENTS", "18")
+        monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_MIN_OBS", "2")
+        # Live posture: price-depth loss exits disabled; the floor salvage
+        # carve-out (tail_floor_breach) is what must still emit.
+        monkeypatch.setenv("MERID_LOSS_EXITS_ENABLED", "0")
+        monkeypatch.setenv("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", "1")
+        monkeypatch.setenv("MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED", "1")
+        monitor = PositionMonitor()
+        monitor._loop = None
+        monkeypatch.setattr(monitor, "_is_expired_market", lambda *a, **k: False)
+        submitted = []
+        monkeypatch.setattr(
+            monitor, "_submit_stop_candidate", lambda c: submitted.append(c)
+        )
+        recorded = []
+        monkeypatch.setattr(pm_mod, "record_stop_candidate", lambda c: recorded.append(c))
+
+        async def _capture(*a, **k):
+            pass
+
+        monkeypatch.setattr(monitor, "_emit_exit_intent", _capture)
+        return monitor, submitted, recorded
+
+    def test_floor_single_observation_does_not_fire(self, monkeypatch):
+        """The XRP whipsaw: one 18c obs must not emit — recovery resets."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+
+        assert position.tail_floor_breach_obs == 1
+        assert position.tail_loss_floor_fired is False
+        assert submitted == []
+        assert recorded == []
+
+    def test_floor_persistent_breach_fires(self, monkeypatch):
+        """A breach held across MERID_TAIL_LOSS_FLOOR_MIN_OBS evals emits."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+
+        assert position.tail_loss_floor_fired is True
+        assert position.tail_floor_breach_obs == 2
+        assert len(submitted) == 1
+        assert submitted[0].trigger_reason == "LOSS_CAP"
+        assert submitted[0].tail_floor_breach is True
+
+    def test_floor_recovery_resets_counter(self, monkeypatch):
+        """Bid recovering above the floor between observations restarts
+        the count — the XRP 18->42c recovery must fully clear the breach."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        # Recovery: bid 42 clears the floor (and the 30c drop for entry 61).
+        asyncio.run(monitor._check_position(position, self._snapshot(42)))
+        assert getattr(position, "tail_floor_breach_obs", 0) == 0
+        # A fresh single breach starts the count over — still no emission.
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+
+        assert position.tail_loss_floor_fired is False
+        assert submitted == []
+
+    def test_floor_min_obs_env_override(self, monkeypatch):
+        """MERID_TAIL_LOSS_FLOOR_MIN_OBS=1 restores immediate firing."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        monkeypatch.setenv("MERID_TAIL_LOSS_FLOOR_MIN_OBS", "1")
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+
+        assert position.tail_loss_floor_fired is True
+        assert len(submitted) == 1
+
+    def test_floor_degraded_quote_does_not_count(self, monkeypatch):
+        """2026-11-09: a non-executable/degraded quote must neither fire
+        nor accumulate breach observations.  Two degraded prints below the
+        floor leave the counter at 0; a trusted breach must then start
+        the count fresh."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        degraded = self._snapshot(18)
+        degraded.data_quality = "DEGRADED"
+        asyncio.run(monitor._check_position(position, degraded))
+        asyncio.run(monitor._check_position(position, degraded))
+
+        assert getattr(position, "tail_floor_breach_obs", 0) == 0
+        assert getattr(position, "tail_drop_breach_obs", 0) == 0
+        assert submitted == []
+
+        # One trusted breach only counts once — still below MIN_OBS=2.
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        assert position.tail_floor_breach_obs == 1
+        assert position.tail_loss_floor_fired is False
+        assert submitted == []
+
+    def test_floor_untrusted_quote_resets_counter(self, monkeypatch):
+        """A degraded print between trusted breaches restarts the count —
+        interleaved bad data cannot be smuggled into the persistence
+        requirement."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        assert position.tail_floor_breach_obs == 1
+
+        degraded = self._snapshot(17)
+        degraded.has_bid_size = False
+        asyncio.run(monitor._check_position(position, degraded))
+        assert position.tail_floor_breach_obs == 0
+        assert position.tail_loss_floor_fired is False
+
+        # Two consecutive trusted breaches now required again.
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+        assert position.tail_loss_floor_fired is True
+        assert len(submitted) == 1
+
+    # ── 2026-11-09 settlement-aware model-disagreement hold ────────────
+    # The drop trigger alone still armed the XRP-2330 panic sell: bids
+    # 31c -> 18c counted two consecutive breaches under the debounce.
+    # When a fresh settlement-aware fair value prices the position
+    # materially above the salvage bid, the breach is a whipsaw
+    # candidate and emission defers until model agreement (or model
+    # absence lets the price signal decide alone).
+
+    def _state_with_fair(self, settlement_prob):
+        import time as _t
+        return SimpleNamespace(
+            annualized_vol_source="realized",
+            model_fair_prob=None,
+            model_fair_prob_ts=0.0,
+            settlement_fair_prob=settlement_prob,
+            settlement_fair_prob_ts=_t.time(),
+            external_fair_value=None,
+            implied_prob=None,
+        )
+
+    def _stub_store(self, monkeypatch, state):
+        stub_store = SimpleNamespace(
+            get_unified=lambda market_id: state,
+            get=lambda market_id: state,
+        )
+        monkeypatch.setattr(
+            "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
+            lambda: stub_store,
+        )
+
+    def test_model_disagreement_defers_salvage(self, monkeypatch):
+        """XRP replay: YES@61, bid 18 on consecutive obs, settlement fair
+        55c -> no emission while the model disagrees."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        self._stub_store(monkeypatch, self._state_with_fair(0.55))
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+
+        assert position.tail_floor_breach_obs == 2  # breach still counted
+        assert position.tail_loss_floor_fired is False
+        assert submitted == []
+
+    def test_model_agreement_fires_immediately(self, monkeypatch):
+        """When the settlement fair collapses alongside the bid, the armed
+        counters emit without re-counting — no extra whipsaw delay."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        state = self._state_with_fair(0.55)
+        self._stub_store(monkeypatch, state)
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+        assert submitted == []
+
+        # Model now agrees the position is terminal: the fixture holds NO,
+        # so agreement means P(YES) -> high (NO fair = 100 - yes_fair).
+        state.settlement_fair_prob = 0.90
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+
+        assert position.tail_loss_floor_fired is True
+        assert len(submitted) == 1
+        assert submitted[0].trigger_reason == "LOSS_CAP"
+
+    def test_model_absent_price_alone_decides(self, monkeypatch):
+        """No fresh model fair -> the price signal alone fires (fail
+        toward loss reduction, unchanged legacy behaviour)."""
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        self._stub_store(monkeypatch, self._state_with_fair(None))
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+
+        assert position.tail_loss_floor_fired is True
+        assert len(submitted) == 1
+
+    def test_model_hold_disabled_by_env(self, monkeypatch):
+        monkeypatch.setenv("MERID_TAIL_LOSS_MODEL_DISAGREE_HOLD", "0")
+        monitor, submitted, recorded = self._floor_monitor(monkeypatch)
+        self._stub_store(monkeypatch, self._state_with_fair(0.55))
+        position = self._position(avg_entry_price_cents=61)
+        monitor.add_position(position)
+
+        asyncio.run(monitor._check_position(position, self._snapshot(18)))
+        asyncio.run(monitor._check_position(position, self._snapshot(17)))
+
+        assert position.tail_loss_floor_fired is True
+        assert len(submitted) == 1
 
 class TestLossCapWiring:
     def test_canonicalizes_to_itself(self):

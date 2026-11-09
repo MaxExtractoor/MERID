@@ -35,24 +35,24 @@ class TestKalshiFeeCalculation:
         fee = calculate_kalshi_fee_cents(1, 10)
         assert fee == 1, f"Fee at 10c should be 1 cent, got {fee}"
         
-    def test_fee_tier_rates(self):
-        """Test tiered fee rates (7%, 5%, 3%)."""
-        # Small tier (< 100 contracts): 7%
+    def test_fee_flat_rate_all_sizes(self):
+        """Kalshi charges a flat 7% taker rate at every size.
+
+        The 5%/3% volume tiers were a mistaken legacy model — Kalshi's fee
+        schedule (effective July 7, 2026) is ``0.07 * C * P * (1-P)`` at all
+        contract counts, ceiled to the whole cent here.
+        """
+        # 0.07 * 10 * 0.50 * 0.50 = $0.175 -> ceil = 18 cents
         fee_10 = calculate_kalshi_fee_cents(10, 50)
-        # Formula: 0.07 * 10 * 0.50 * 0.50 = 0.175 dollars = 17.5 cents -> rounded up to 18 cents
-        assert fee_10 >= 1, f"Fee should be at least 1 cent, got {fee_10}"
-        # The actual calculation with rounding should give us a reasonable value
-        assert 10 <= fee_10 <= 25, f"Fee for 10 contracts at 50c should be reasonable, got {fee_10}"
-        
-        # Medium tier (100-999 contracts): 5%
+        assert fee_10 == 18, f"Fee for 10 contracts at 50c should be 18 cents, got {fee_10}"
+
+        # 0.07 * 100 * 0.50 * 0.50 = $1.75 = 175 cents
         fee_100 = calculate_kalshi_fee_cents(100, 50)
-        # Formula: 0.05 * 100 * 0.50 * 0.50 = 1.25 dollars = 125 cents
-        assert 100 <= fee_100 <= 150, f"Fee for 100 contracts at 50c should be ~125 cents, got {fee_100}"
-        
-        # Large tier (1000+ contracts): 3%
+        assert fee_100 == 175, f"Fee for 100 contracts at 50c should be 175 cents, got {fee_100}"
+
+        # 0.07 * 1000 * 0.50 * 0.50 = $17.50 = 1750 cents
         fee_1000 = calculate_kalshi_fee_cents(1000, 50)
-        # Formula: 0.03 * 1000 * 0.50 * 0.50 = 7.5 dollars = 750 cents
-        assert 700 <= fee_1000 <= 800, f"Fee for 1000 contracts at 50c should be ~750 cents, got {fee_1000}"
+        assert fee_1000 == 1750, f"Fee for 1000 contracts at 50c should be 1750 cents, got {fee_1000}"
         
     def test_minimum_fee_enforcement(self):
         """Test that the cent-rounding floor (1 cent) is enforced."""
@@ -125,7 +125,7 @@ class TestKalshiFeeCalculation:
         # Test with decimal precision (default)
         fee_decimal = calculate_kalshi_fee_cents(100, 50, use_decimal=True)
         assert fee_decimal >= 2, f"Decimal fee should be at least 2 cents, got {fee_decimal}"
-        assert 100 <= fee_decimal <= 150, f"Decimal fee for 100 contracts at 50c should be ~125 cents, got {fee_decimal}"
+        assert fee_decimal == 175, f"Decimal fee for 100 contracts at 50c should be 175 cents (flat 7%), got {fee_decimal}"
 
 
 class TestAgentGridFeeIntegration:

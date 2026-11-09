@@ -50,42 +50,41 @@ class TestPriceFiltering:
         assert 50 in ob.yes_levels
         assert ob.yes_levels[50] == 50
     
-    def test_snapshot_clamps_to_99c(self):
-        """Test that prices are clamped to 99c maximum."""
+    def test_snapshot_preserves_subcent_prices(self):
+        """Sub-cent prices are valid on the 0.01-cent grid; only strict (0,100) bounds filter."""
         ob = LocalOrderbook(ticker="TEST-CLAMP")
-        
-        # Snapshot with 99.5c (should clamp to 99c)
+
+        # Snapshot with 99.5c (valid sub-penny price)
         snapshot = {
             "ticker": "TEST-CLAMP",
-            "yes": [[0.995, 100]],  # 99.5c -> should clamp to 99c
+            "yes": [[0.995, 100]],  # 99.5c
             "no": [],
             "seq": 1,
             "ts": 0.0,
         }
-        
+
         ob.apply_snapshot(snapshot)
-        
-        # Verify clamped to 99c
-        assert 99 in ob.yes_levels
-        assert 100 not in ob.yes_levels
-    
-    def test_snapshot_clamps_to_1c(self):
-        """Test that prices are clamped to 1c minimum."""
+
+        # Verify preserved at sub-cent precision
+        assert 99.5 in ob.yes_levels
+        assert ob.yes_levels[99.5] == 100
+
+    def test_snapshot_drops_boundary_prices(self):
+        """0c and 100c levels are outside the strict (0, 100) bound."""
         ob = LocalOrderbook(ticker="TEST-CLAMP-MIN")
-        
-        # Snapshot with 0.5c (should clamp to 1c)
+
         snapshot = {
             "ticker": "TEST-CLAMP-MIN",
-            "yes": [[0.005, 100]],  # 0.5c -> should clamp to 1c
+            "yes": [[0.005, 100], [1.00, 50], [0.0, 10]],  # 0.5c valid; 100c/0c dropped
             "no": [],
             "seq": 1,
             "ts": 0.0,
         }
-        
+
         ob.apply_snapshot(snapshot)
-        
-        # Verify clamped to 1c
-        assert 1 in ob.yes_levels
+
+        assert 0.5 in ob.yes_levels
+        assert 100 not in ob.yes_levels
         assert 0 not in ob.yes_levels
     
     def test_delta_filters_100c_prices(self):
@@ -114,10 +113,10 @@ class TestPriceFiltering:
         # Verify 100c was filtered out
         assert 100 not in ob.yes_levels
     
-    def test_delta_clamps_to_valid_range(self):
-        """Test that delta prices are clamped to [1, 99]."""
+    def test_delta_preserves_subcent_prices(self):
+        """Delta prices keep sub-cent precision; only strict (0, 100) bounds filter."""
         ob = LocalOrderbook(ticker="TEST-DELTA-CLAMP")
-        
+
         # Initialize with valid snapshot
         snapshot = {
             "ticker": "TEST-DELTA-CLAMP",
@@ -127,18 +126,18 @@ class TestPriceFiltering:
             "ts": 0.0,
         }
         ob.apply_snapshot(snapshot)
-        
-        # Try to add 0.5c level via delta (should clamp to 1c)
+
+        # Add a 0.5c level via delta (valid sub-penny price)
         delta = {
             "side": "yes",
             "price_dollars": 0.005,
             "delta_fp": 100,
         }
-        
+
         ob.apply_delta(delta)
-        
-        # Verify clamped to 1c
-        assert 1 in ob.yes_levels
+
+        # Verify preserved at sub-cent precision
+        assert 0.5 in ob.yes_levels
         assert 0 not in ob.yes_levels
 
 

@@ -4054,7 +4054,7 @@ class KalshiWebSocketBridge:
 
     # ── Enqueue (called from WS listen callback) ─────────────────────────
 
-    async def _dead_letter_fill(self, raw: Any) -> None:
+    def _dead_letter_fill_sync(self, raw: Any) -> None:
         """Buffer a fill that could not be enqueued for later processing.
 
         Only reachable when the bridge queue is 100% full of protected
@@ -4068,6 +4068,12 @@ class KalshiWebSocketBridge:
         side.  A dedicated threading.Lock guards scan+append instead;
         ``_process_dead_letter_queue``'s copy+clear stays atomic under the
         GIL and can only lose a *duplicate* (re-deduped at replay anyway).
+
+        The body is fully synchronous, so it can run on any thread — no
+        event loop required.  Previously this was an ``async def`` reached
+        only via ``run_coroutine_threadsafe``; when no loop was available
+        (shutdown, test harness, pre-loop enqueue) the fill was lost with
+        only an error log.
         """
         if not isinstance(raw, dict):
             return
@@ -4501,16 +4507,19 @@ class KalshiWebSocketBridge:
                     current_qsize,
                 )
 
+    async def _dead_letter_fill(self, raw: Any) -> None:
+        """Async shim kept for callers that already hold a loop."""
+        self._dead_letter_fill_sync(raw)
+
     def _dead_letter_fill_threadsafe(self, event: Any) -> None:
-        """Schedule :meth:`_dead_letter_fill` when the caller is not on a loop."""
-        loop = getattr(self, "_ws_loop", None) or getattr(self, "_forward_loop_ref", None)
-        if loop is not None and not loop.is_closed():
-            try:
-                asyncio.run_coroutine_threadsafe(self._dead_letter_fill(event), loop)
-                return
-            except Exception:
-                pass
-        logger.error("[DEAD-LETTER] fill event could not be dead-lettered (loop unavailable)")
+        """Append to the dead-letter queue from any thread.
+
+        The append is guarded by a threading.Lock and never awaits, so it
+        no longer depends on a reachable event loop — a fill that overflows
+        the bridge queue during shutdown or before the loop starts is still
+        preserved for replay instead of being dropped.
+        """
+        self._dead_letter_fill_sync(event)
 
     def submit_raw_orderbook(self, raw: str, recv_ns: int, recv_wall_ms: float) -> bool:
         """Parse and dispatch a raw orderbook frame through ``_enqueue_event_sync``.

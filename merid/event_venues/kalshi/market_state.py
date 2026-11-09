@@ -4520,10 +4520,25 @@ class KalshiMarketStateStore:
                     self._mark_book_untrusted_and_resync(ticker, "invalid_ws_snapshot_sequence")
                 return None
             _sid_check = self._check_sid_delta_sequence(_s_sid, _s_seq, ticker)
-            if _sid_check < 0:
-                return None
             if _sid_check > 0:
                 self._handle_sid_sequence_gap(_s_sid, _s_seq, _sid_check, ticker)
+            # 2026-11-09: the replay guard must compare against this ticker's
+            # applied book position (``ob.last_seq``), not the shared sid
+            # stream.  ``_sid_last_seq`` is advanced at enqueue time by
+            # deltas still queued *behind* this snapshot in the per-ticker
+            # FIFO — treating them as already-seen dropped the recovery
+            # snapshot and deadlocked book repair.  A snapshot is only stale
+            # when its seq is at/below what this book already applied: a
+            # newer same-ticker frame would have applied first in FIFO order
+            # and raised ``ob.last_seq`` past it.  This mirrors the delta
+            # batch applier's ``msg_seq <= ob.last_seq`` replay check.
+            _snap_book = self._ob.get_book(ticker)
+            _applied_seq = (
+                getattr(_snap_book, "last_seq", None)
+                if _snap_book is not None else None
+            )
+            if _applied_seq is not None and _s_seq <= _applied_seq:
+                return None
 
         # Apply snapshots via the per-ticker queue.  2026-11-04: ALL snapshot
         # vias are routed through the queue so no event loop (drain thread,
@@ -5163,8 +5178,25 @@ class KalshiMarketStateStore:
             # applies, so it drifts stale between applies the same way the
             # raw state field did before recompute-on-read (see ``get``).
             state = self.get(ticker)
-            if state is not None and state.seconds_to_expiry is not None:
-                u.seconds_to_expiry = state.seconds_to_expiry
+            if state is not None:
+                if state.seconds_to_expiry is not None:
+                    u.seconds_to_expiry = state.seconds_to_expiry
+                # 2026-11-09: mirror model provenance onto the unified view.
+                # The agent decision path writes these fields only on the
+                # kalshi state; without the mirror, unified-first exit
+                # consumers never see model_fair_prob /
+                # settlement_fair_prob and silently anchor exits to
+                # external_fair_value or the book mid instead.
+                for _attr in (
+                    "annualized_vol",
+                    "annualized_vol_source",
+                    "model_fair_prob",
+                    "model_fair_prob_ts",
+                    "settlement_fair_prob",
+                    "settlement_fair_prob_ts",
+                ):
+                    if hasattr(state, _attr):
+                        setattr(u, _attr, getattr(state, _attr))
         return u
 
     def get_all(self) -> Dict[str, KalshiMarketState]:

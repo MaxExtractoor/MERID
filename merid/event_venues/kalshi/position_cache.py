@@ -3170,6 +3170,21 @@ class KalshiPositionCache:
                     except Exception as alert_err:
                         logger.warning("[POSITION-CACHE] Failed to send alert for exit fill without position: %s", alert_err)
 
+                    # 2026-11-09: mark the fill handled before returning.
+                    # The rejection is a deliberate terminal decision —
+                    # without the applied mark, duplicate ingestions
+                    # (WS alpha + REST poller) re-fire this critical path
+                    # (KXXRP15M-26NOV082330-30 logged it twice) and the
+                    # stale-cleanup pending-fill deferral would wait on a
+                    # fill that can never apply.
+                    if fill_id:
+                        self._applied_fill_ids[fill_id] = replay_time()
+                        if len(self._applied_fill_ids) > self._applied_fill_ids_max:
+                            evict_count = len(self._applied_fill_ids) // 2
+                            for _ in range(evict_count):
+                                self._applied_fill_ids.popitem(last=False)
+                        self._save_applied_fill_ids()
+
                     # Do NOT create a new position - return early to prevent the bug
                     return
 
@@ -7285,6 +7300,7 @@ class KalshiPositionCache:
 
             # Consult the fills ledger as a secondary canonical source.
             net_contracts = 0
+            fills = []
             if ledger:
                 try:
                     fills = ledger.get_fills(
@@ -7325,6 +7341,52 @@ class KalshiPositionCache:
                 )
                 self._reconciliation_halted[market_id] = True
                 report["halted"].append({"market_id": market_id, "reason": "ledger_exchange_mismatch"})
+                continue
+
+            # 2026-11-09: in-flight fill race — the fills ledger can already
+            # net to zero (entry+exit both recorded) while position_cache has
+            # not yet applied the closing fill through apply_fill.  Removing
+            # the position now makes the in-flight exit fill hit the
+            # EXIT-FILL-WITHOUT-POSITION rejection
+            # (KXXRP15M-26NOV082330-30: REST cleanup deleted the position ~2s
+            # before fill ingestion; the sell fill was then rejected twice).
+            # Defer removal while any recent ledger fill for this market is
+            # still unapplied; the fill pipeline drains within seconds and
+            # the next cleanup re-evaluates.  Fills older than the grace
+            # window are stale pipeline gaps, not in-flight work.
+            _pending_fill = False
+            try:
+                _grace_s = float(
+                    os.getenv("MERID_STALE_CLEANUP_PENDING_FILL_GRACE_S", "300") or 300
+                )
+            except Exception:
+                _grace_s = 300.0
+            _now_utc = datetime.now(timezone.utc)
+            for _lf in fills:
+                _lf_id = getattr(_lf, "fill_id", None)
+                if not _lf_id or _lf_id in self._applied_fill_ids:
+                    continue
+                _lf_ts = getattr(_lf, "created_time", None)
+                _lf_age = None
+                if isinstance(_lf_ts, datetime):
+                    try:
+                        if _lf_ts.tzinfo is None:
+                            _lf_ts = _lf_ts.replace(tzinfo=timezone.utc)
+                        _lf_age = (_now_utc - _lf_ts).total_seconds()
+                    except Exception:
+                        _lf_age = None
+                if _lf_age is None or _lf_age <= _grace_s:
+                    _pending_fill = True
+                    break
+            if _pending_fill:
+                report["kept"].append(
+                    {"market_id": market_id, "reason": "pending_fill_application"}
+                )
+                logger.info(
+                    "[POSITION-CACHE-STALE-CLEANUP] Deferring removal for %s: "
+                    "ledger fill(s) not yet applied through position_cache",
+                    market_id,
+                )
                 continue
 
             # Safe to remove: not on exchange, no open order, no ledger net, not expired.

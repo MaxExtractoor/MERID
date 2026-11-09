@@ -4625,6 +4625,12 @@ def _classify_venue_order_status(
         return "unfilled_ioc" if is_ioc else "rejected"
     if status == "expired":
         return "unfilled_ioc" if is_ioc else "expired"
+    if status == "unfilled":
+        # A terminal zero-fill report (simulator/adapter vocabulary — Kalshi
+        # proper returns "canceled").  Must not fall through to
+        # ``submitted_live``: that implies the order may still fill and would
+        # retain the gate slot and exposure reservations forever.
+        return "unfilled_ioc" if is_ioc else "canceled"
     return "submitted_live"
 
 
@@ -8583,7 +8589,7 @@ def simulate_paper_fill(
     # the slipped fill_price.  Using fill_price understates fees for buys
     # (slippage raises fill_price → reduces payout → reduces fee) and
     # overstates them for sells, diverging from the exchange's actual charge.
-    fee_cents = _kalshi_fee_cents(requested_price, fill_count_fp)
+    fee_cents = calculate_kalshi_fee_cents(fill_count_fp, requested_price)
 
     # Build v1 hash preimage for deterministic fill_id and forensic traceability
     import hashlib
@@ -16904,7 +16910,7 @@ async def _route_live(
                 reason=f"invalid_order_params:price={intent.price_cents}:count={intent.count}:price_out_of_range",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
-        _fee_pre = _kalshi_fee_cents(intent.price_cents, intent.count)
+        _fee_pre = calculate_kalshi_fee_cents(intent.count, intent.price_cents)
         _price_dollars = intent.price_cents / 100.0
         _notional_cents = intent.count * intent.price_cents
         _fee_pct = (_fee_pre / _notional_cents * 100) if _notional_cents > 0 else 0
@@ -18790,7 +18796,7 @@ async def _route_live(
         else:
             fill_price_cents = int(intent.price_cents)
         # Fee is computed on the exact fixed-point count.
-        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count_fp)
+        fee_cents = calculate_kalshi_fee_cents(filled_count_fp, fill_price_cents)
         _venue_oid = placed_res.order_id or "unknown"
 
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order submission for pending order tracking

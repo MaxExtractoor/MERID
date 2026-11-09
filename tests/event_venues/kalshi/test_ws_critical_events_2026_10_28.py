@@ -66,6 +66,12 @@ def _fill_event(ticker="KXBTC15M-T1", sid=7, seq=1, fill_id="f1"):
     }
 
 
+def _book_q(bridge, ticker="KXBTC15M-T1"):
+    """2026-11-04 shard routing: orderbook events land on the per-ticker
+    hash-sharded ``_book_queues`` queue, not ``_thread_queue``."""
+    return bridge._book_queues[hash(ticker) % ws_bridge_mod._BOOK_DRAIN_SHARDS]
+
+
 # ── 1. per-sid sequence tracking ─────────────────────────────────────────
 
 
@@ -189,41 +195,47 @@ class TestCriticalEventProtection:
         assert bridge._drop_oldest_droppable_event() is None
         assert bridge._thread_queue.qsize() == 2
 
-    async def test_pressure_stop_evicts_droppable_not_fill(self, bridge):
-        """>=90% path must evict the oldest droppable, never a queued fill."""
-        cap = bridge._thread_queue.maxsize
+    async def test_pressure_stop_sheds_incoming_book_delta(self, bridge):
+        """>=90% on a book shard sheds the incoming delta; queued frames survive.
+
+        2026-11-04 sharding: orderbook events live on ``_book_queues`` where
+        the >=90% path sheds the incoming frame instead of evicting — queued
+        orderbook data is never the drop victim.  Fills route to
+        ``_thread_queue`` and are untouched by book-shard pressure entirely.
+        """
+        bq = _book_q(bridge)
+        cap = bq.maxsize
         stop = int(cap * 0.9)
-        # fill (critical) at head + droppable deltas behind it up to >=90%
-        bridge._thread_queue.put_nowait(_fill_event())
         for i in range(stop):
-            bridge._thread_queue.put_nowait(_ob_event(seq=i + 1))
-        assert bridge._thread_queue.qsize() >= stop
+            bq.put_nowait(_ob_event(seq=i + 1))
+        assert bq.qsize() >= stop
 
-        await bridge._enqueue_event(_ob_event(seq=9999))
+        await bridge._enqueue_event(_ob_event(seq=9999, sid=9001))
 
-        types = [e["type"] for e in list(bridge._thread_queue.queue)]
-        assert "fill" in types  # the queued fill survived
         assert bridge._events_dropped == 1
+        assert bq.qsize() == stop  # nothing evicted; the incoming was shed
 
     async def test_over_95pct_sheds_noncritical_but_not_critical(self, bridge):
-        cap = bridge._thread_queue.maxsize
-        # Fill to just over 95% with deltas
+        bq = _book_q(bridge)
+        cap = bq.maxsize
+        # Fill the book shard to just over 95% with deltas
         target = int(cap * 0.95) + 1
         for i in range(target):
-            bridge._thread_queue.put_nowait(_ob_event(seq=i + 1))
-        assert bridge._thread_queue.qsize() / cap > 0.95
+            bq.put_nowait(_ob_event(seq=i + 1))
+        assert bq.qsize() / cap > 0.95
 
-        # Non-critical incoming event: the >=90% path evicts one droppable
-        # event AND the >95% path sheds the incoming delta — two drops total.
-        await bridge._enqueue_event(_ob_event(seq=500000))
-        assert bridge._events_dropped == 2
+        # Non-critical incoming event on the pressurized shard: the >=90%
+        # path sheds the incoming delta — one drop, queued frames untouched.
+        await bridge._enqueue_event(_ob_event(seq=500000, sid=9002))
+        assert bridge._events_dropped == 1
+        assert bq.qsize() == target
 
-        # Critical incoming event bypasses the shed and enqueues — at most
-        # one droppable eviction (the >=90% path) may still be counted.
-        await bridge._enqueue_event(_fill_event(fill_id="crit", seq=900))
+        # Critical incoming events route to _thread_queue and are unaffected
+        # by book-shard pressure — they enqueue with no further drops.
+        await bridge._enqueue_event(_fill_event(fill_id="crit", seq=900, sid=9003))
         tail_types = [e.get("type") for e in list(bridge._thread_queue.queue)]
         assert "fill" in tail_types
-        assert bridge._events_dropped <= 3  # +1 droppable eviction, no fill loss
+        assert bridge._events_dropped == 1
 
     async def test_full_queue_frees_droppable_slot(self, bridge):
         cap = bridge._thread_queue.maxsize
@@ -270,21 +282,21 @@ class TestDedupCorrectness:
         assert bridge._events_dropped == 0
 
     async def test_identical_seq_dedupes(self, bridge):
-        ev1 = _ob_event(seq=42, sid=1)
-        ev2 = _ob_event(seq=42, sid=1)
+        ev1 = _ob_event(seq=42, sid=9101)
+        ev2 = _ob_event(seq=42, sid=9101)
         await bridge._enqueue_event(ev1)
         await bridge._enqueue_event(ev2)
-        # second is a replay → dropped
-        assert bridge._thread_queue.qsize() == 1
+        # second is a replay → dropped (sid-seq check runs at enqueue)
+        assert _book_q(bridge).qsize() == 1
+        assert bridge._events_dropped == 1
 
     async def test_same_seq_on_different_sids_not_deduped(self, bridge):
         """sid is part of the dedup identity — seq spaces are per-sub."""
-        bridge._message_cache.clear()  # isolate from the prior dedup test
-        ev1 = _ob_event(seq=43, sid=1)
-        ev2 = _ob_event(seq=43, sid=2)
+        ev1 = _ob_event(seq=43, sid=9102)
+        ev2 = _ob_event(seq=43, sid=9103)
         await bridge._enqueue_event(ev1)
         await bridge._enqueue_event(ev2)
-        assert bridge._thread_queue.qsize() == 2
+        assert _book_q(bridge).qsize() == 2
 
 
 # ── 5. drain-side early stale-drop ───────────────────────────────────────
@@ -296,18 +308,22 @@ class TestDrainEarlyStaleDrop:
         ev["_t_bridge_recv_ns"] = _time.monotonic_ns() - int(5000 * 1e6)  # 5s ago
         return ev
 
-    def test_stale_delta_skips_apply_and_marks_untrusted(self, bridge):
+    def test_stale_delta_still_applies(self, bridge):
+        """2026-11-03: the drain-side BOOK_UPSTREAM_LAG fast-path is gone.
+
+        A lagged but seq-contiguous delta is honest book data — it flows
+        through ``apply_orderbook_message`` and market_state stale-marks it
+        there (entries stay vetoed on data-age, sustained staleness feeds
+        the halt ladder).  The bridge no longer skips or invalidates.
+        """
         store = MagicMock()
         with patch(
             "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
             return_value=store,
         ):
             bridge._apply_orderbook_on_drain(self._stale_delta())
-        store.apply_orderbook_message.assert_not_called()
-        store.mark_book_untrusted_for_bridge.assert_called_once()
-        args, kwargs = store.mark_book_untrusted_for_bridge.call_args
-        assert args[1] == "BOOK_UPSTREAM_LAG"
-        assert kwargs["upstream_wait_ms"] > 1500
+        store.apply_orderbook_message.assert_called_once()
+        store.mark_book_untrusted_for_bridge.assert_not_called()
 
     def test_fresh_delta_still_applies(self, bridge):
         store = MagicMock()

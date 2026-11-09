@@ -127,7 +127,12 @@ class TestRecovery:
         assert state.live_sequence_confirmed is True
         assert store._untrusted_since == {}
         assert lrs.state == "LIVE_ENTRIES_HALTED"
-        assert lrs._reason_codes == ["RECOVERY_VERIFICATION_REQUIRED"]
+        # 2026-11-05: recovery is evidence-gated via complete_runtime_recovery.
+        # With incomplete evidence the halt keeps its ORIGINAL reason codes —
+        # overwriting them with RECOVERY_VERIFICATION_REQUIRED would remove
+        # BOOK_FEED_DEGRADED from the recoverable set and park the process
+        # halted until restart.
+        assert "BOOK_FEED_DEGRADED" in lrs._reason_codes
 
     def test_no_recovery_for_foreign_halt_reason(self, store, tmp_path, monkeypatch):
         lrs = _live_runtime(tmp_path, monkeypatch)
@@ -169,7 +174,11 @@ class TestRecovery:
         bridge._maybe_resume_live_entries_after_reconnect()
 
         assert lrs.state == "LIVE_ENTRIES_HALTED"
-        assert lrs._reason_codes == ["RECOVERY_VERIFICATION_REQUIRED"]
+        # 2026-11-05: a bare reconnect is not verified recovery — the halt
+        # keeps its original recoverable codes so a later evidence-complete
+        # retry can succeed (RECOVERY_VERIFICATION_REQUIRED is not in the
+        # recoverable set and would park the process halted).
+        assert "WS_DATA_PLANE_DEAD" in lrs._reason_codes
 
 
 class TestPruneCleanup:

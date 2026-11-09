@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,6 +51,14 @@ def _book(store, yes=((0.48, 5),), no=((0.50, 4),), seq=100):
     state.book_consistency = "GOOD"
     state.transition = "VALID"
     state.executable = True
+    # The "-T" fixture ticker has no inferable 15m window, so expiry
+    # resolution fails closed to seconds_to_expiry=0.0 and the
+    # untrusted-mark sweep treats the book as expired (poppable).  These
+    # tests exercise LIVE-book staleness, so give the fixture a resolvable
+    # future expiry via the API-field fallback path.
+    state.expected_expiration_time = (
+        datetime.now(timezone.utc) + timedelta(minutes=30)
+    ).isoformat()
     return state
 
 
@@ -73,7 +82,7 @@ class TestDeltaEnqueueFreshness:
         assert ok is True
         assert len(store._delta_queues[TICKER]) == 1
 
-    def test_event_too_old_invalidates_and_returns_false(self):
+    def test_event_too_old_stale_marks_and_keeps_frame(self):
         store = _store()
         _book(store)
         msg = _delta(101)
@@ -90,17 +99,18 @@ class TestDeltaEnqueueFreshness:
             # Venue timestamp far beyond the event-age budget.
             msg["ts_ms"] = (time.time() * 1000.0) - (_BOOK_MAX_EVENT_AGE_MS + 5000)
             ok = store._enqueue_delta(TICKER, msg)
-            assert ok is False
+            # 2026-11-03 freshness-vs-integrity separation: a lagged but
+            # seq-contiguous delta is honest book data — stale-marked (feeds
+            # the untrusted halt ladder + backdated book-update veto) and
+            # KEPT for in-order apply instead of dropped + invalidated.
+            assert ok is True
+            assert TICKER in store._untrusted_since
             state = store.get(TICKER)
-            assert state.data_quality == "INVALID"
-            assert state.transition == "RESYNC_REQUIRED"
-            assert state.invalidation_cause == "BOOK_EVENT_TOO_OLD"
-            assert state.executable is False
-            assert state.recovery_required_source == "FULL_SNAPSHOT"
+            assert state.data_quality == "GOOD"  # not integrity-invalidated
         finally:
             clk.invalidate("test teardown")
 
-    def test_upstream_lag_invalidates(self):
+    def test_upstream_lag_stale_marks_and_keeps_frame(self):
         store = _store()
         _book(store)
         msg = _delta(101)
@@ -109,8 +119,10 @@ class TestDeltaEnqueueFreshness:
             (_BOOK_MAX_UPSTREAM_WAIT_MS + 5000) * 1e6
         )
         ok = store._enqueue_delta(TICKER, msg)
-        assert ok is False
-        assert store.get(TICKER).invalidation_cause == "BOOK_UPSTREAM_LAG"
+        # Same 2026-11-03 contract: stale-mark, keep the frame for in-order
+        # apply — only genuine integrity loss drops/invalidates.
+        assert ok is True
+        assert TICKER in store._untrusted_since
 
     def test_overflow_drains_queue_and_marks_untrusted(self):
         store = _store()

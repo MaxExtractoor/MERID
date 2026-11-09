@@ -564,6 +564,12 @@ class KalshiMarketState:
     annualized_vol_source: Optional[str] = None  # how the vol was resolved
     model_fair_prob: Optional[float] = None      # P(YES) from the active model
     model_fair_prob_ts: float = 0.0              # wall ts of last model write
+    # 2026-11-09: settlement-distribution fair — the final-60-second RTI
+    # average payoff probability published when MERID_SETTLEMENT_DISTRIBUTION_V2
+    # builds successfully.  This is the contract-true anchor that authorized
+    # the entry; exit evaluators prefer it over point-expiry model_fair_prob.
+    settlement_fair_prob: Optional[float] = None
+    settlement_fair_prob_ts: float = 0.0
 
     # Aliases for backward compatibility (OBI filter uses these names)
     @property

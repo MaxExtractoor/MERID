@@ -194,8 +194,9 @@ class TestSequenceGapRecovery:
         """Verify sequence gaps are detected and logged."""
         ws = KalshiWebSocket()
 
-        # Initialize sequence
-        ws._last_seq["KXBTC-24FEB16"] = 100
+        # Initialize sequence — seq counters are scoped per subscription
+        # (sid); messages without a sid use the "conn" bucket.
+        ws._last_seq["conn"] = 100
         ws._ob_initialised.add("KXBTC-24FEB16")
         ws._ob_snapshots["KXBTC-24FEB16"] = {"type": "orderbook_snapshot", "ticker": "KXBTC-24FEB16"}
 
@@ -225,7 +226,7 @@ class TestSequenceGapRecovery:
 
         # Set up cached orderbook
         market_id = "KINX-24MAR15"
-        ws._last_seq[market_id] = 50
+        ws._last_seq["conn"] = 50
         ws._ob_initialised.add(market_id)
         ws._ob_snapshots[market_id] = {"yes_bid": 60, "no_bid": 39}
 
@@ -242,32 +243,32 @@ class TestSequenceGapRecovery:
         """Verify out-of-order messages are dropped."""
         ws = KalshiWebSocket()
         
-        ws._last_seq["KXBTC-24FEB16"] = 100
-        
+        ws._last_seq["conn"] = 100
+
         # Message with old sequence (out of order)
         message = {"seq": 95, "ticker": "KXBTC-24FEB16"}
-        
+
         result = ws._check_sequence(message)
-        
+
         # Message should be dropped
         assert result is False
-        
+
         # Last sequence should not update
-        assert ws._last_seq["KXBTC-24FEB16"] == 100
+        assert ws._last_seq["conn"] == 100
 
     def test_duplicate_sequence_dropped(self):
         """Verify duplicate sequence numbers are dropped."""
         ws = KalshiWebSocket()
         
-        ws._last_seq["KXBTC-24FEB16"] = 100
-        
+        ws._last_seq["conn"] = 100
+
         # Duplicate message
         message = {"seq": 100, "ticker": "KXBTC-24FEB16"}
-        
+
         result = ws._check_sequence(message)
-        
+
         assert result is False
-        assert ws._last_seq["KXBTC-24FEB16"] == 100
+        assert ws._last_seq["conn"] == 100
 
     def test_orderbook_delta_forwarded_without_ws_snapshot_cache(self):
         """Pre-snapshot deltas are forwarded so market_state can queue them (H3)."""

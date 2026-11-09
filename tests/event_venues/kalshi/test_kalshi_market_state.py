@@ -51,11 +51,50 @@ def _snapshot_msg_15m(ticker: str, yes: list, no: list) -> dict:
     }
 
 
+def _apply_snapshot(store: KalshiMarketStateStore, msg: dict, timeout_s: float = 10.0, via: str = "unknown", wait_for=None):
+    """Apply a snapshot and wait for the async batch worker.
+
+    2026-11-04/09: ``apply_orderbook_message`` routes every snapshot through
+    the per-ticker batch worker and returns ``None`` — the apply lands
+    asynchronously.  Tests that assert on the returned/applied state must
+    poll ``store.get(ticker)`` until the book lands (production readiness is
+    only meaningful after the apply, same contract as
+    ``_apply_active_window`` in test_audit_writer_entry_gate).
+
+    ``wait_for`` overrides the default readiness predicate when a second
+    apply must be distinguished from an already-initialized book (e.g. a
+    WS snapshot landing on top of a REST book — ``book_initialized`` is
+    already True, so wait on the WS-owned fields instead).
+    """
+    store.apply_orderbook_message(msg, via=via)
+    ticker = (
+        (msg.get("msg") or msg).get("market_ticker")
+        or (msg.get("msg") or msg).get("ticker")
+        or msg.get("ticker")
+    )
+    deadline = time.monotonic() + timeout_s
+    state = None
+    while time.monotonic() < deadline:
+        state = store.get(ticker)
+        if state is not None:
+            if wait_for is not None:
+                if wait_for(state):
+                    return state
+            elif getattr(state, "book_initialized", False):
+                return state
+        time.sleep(0.02)
+    return store.get(ticker)
+
+
 def _ws_snapshot_msg_15m(ticker: str, yes: list, no: list) -> dict:
     """WS bridge-queue snapshot frames carry subscription identity; sid-less
-    frames are treated as untrusted by the fail-closed gate."""
+    frames are treated as untrusted by the fail-closed gate.
+
+    2026-11-09: ``seq`` is also required — bridge_queue snapshots without a
+    subscription sequence are dropped as ``invalid_ws_snapshot_sequence``."""
     msg = _snapshot_msg_15m(ticker, yes, no)
     msg["sid"] = 1
+    msg["seq"] = 1
     msg["seq"] = 1
     return msg
 
@@ -196,8 +235,12 @@ class TestMarketStateStoreWS:
         
         PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
         """
-        msg = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5], [0.55, 10]], [[0.40, 8], [0.45, 3]])
-        state = self.store.apply_orderbook_message(msg)
+        # 2026-11-09: fixture repaired — the original no=[[0.40,8],[0.45,3]]
+        # put the best NO bid at 45c -> YES ask 55c < YES bid 60c (crossed
+        # book), which the store now correctly rejects as SUSPECT.  Keep the
+        # book healthy: best NO bid 39c -> YES ask 61c > YES bid 60c.
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5], [0.55, 10]], [[0.38, 8], [0.39, 3]])
+        state = _apply_snapshot(self.store, msg)
         assert state is not None
         assert state.ticker == "KXBTC15M-T"
         assert state.book_initialized is True
@@ -205,7 +248,7 @@ class TestMarketStateStoreWS:
     def test_snapshot_populates_best_bid_ask(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5], [0.55, 10]], [[0.35, 8]])
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         # best yes_bid = 60; best_ask = 100 - 35 = 65
         assert state.best_bid_cents == 60
         assert state.best_ask_cents == 65
@@ -213,21 +256,21 @@ class TestMarketStateStoreWS:
     def test_snapshot_computes_mid(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]])
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         # mid = (60 + (100-40)) / 2 = (60 + 60) / 2 = 60
         assert state.mid_cents == 60.0
 
     def test_snapshot_computes_spread(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.58, 5]], [[0.38, 8]])
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         # spread = (100-38) - 58 = 62 - 58 = 4
         assert state.spread_cents == 4
 
     def test_snapshot_top_of_book_size(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 7]], [[0.40, 3]])
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         assert state.top_of_book_size == 10  # 7 + 3
 
     def test_delta_dropped_before_snapshot(self):
@@ -244,10 +287,9 @@ class TestMarketStateStoreWS:
         PRODUCTION AUDIT: Deltas are now batch-processed for performance.
         The test verifies delta is enqueued, not applied immediately.
         """
-        # Apply snapshot first
-        self.store.apply_orderbook_message(
-            _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]])
-        )
+        # Apply snapshot first (async batch worker — wait for it to land
+        # before the delta is enqueued so FIFO ordering is preserved)
+        _apply_snapshot(self.store, _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]]))
         
         # Correct delta format matching validation schema
         delta_msg = {
@@ -268,13 +310,13 @@ class TestMarketStateStoreWS:
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.55, 2]], [[0.45, 2]])
         before = time.monotonic()
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         assert state.last_book_update_ts >= before
 
     def test_get_returns_same_state(self):
         """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.55, 2]], [[0.45, 2]])
-        self.store.apply_orderbook_message(msg)
+        _apply_snapshot(self.store, msg)
         s = self.store.get("KXBTC15M-T")
         assert s is not None
         assert s.ticker == "KXBTC15M-T"
@@ -292,7 +334,7 @@ class TestMarketStateStoreWS:
         #                 yes p=25 (25≥17.5) ✓ sz=10
         #                 no  p=75 → equiv=25 (17.5≤25≤37.5) ✓ sz=8
         msg = _snapshot_msg_15m("KXBTC15M-T", [[0.25, 5], [0.20, 10]], [[0.70, 8]])
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         assert state.depth_10c == 5 + 10 + 8
 
     def test_market_ticker_fallback(self):
@@ -306,7 +348,7 @@ class TestMarketStateStoreWS:
             "yes": [[0.55, 2]],
             "no": [[0.45, 2]],
         }
-        state = self.store.apply_orderbook_message(msg)
+        state = _apply_snapshot(self.store, msg)
         assert state is not None
         assert state.ticker == "KXBTC15M-T"
 
@@ -384,7 +426,7 @@ class TestMarketStateStoreREST:
         PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
         """
         snap = _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]])
-        self.store.apply_orderbook_message(snap)
+        _apply_snapshot(self.store, snap)
         from unittest.mock import patch
         with patch.object(self.store, '_notify_subscribers'):
             self.store.apply_rest_market({"ticker": "KXBTC15M-T", "volume_24h": 100})
@@ -604,7 +646,7 @@ class TestMarketStateStoreQuote:
         from unittest.mock import patch
         store = KalshiMarketStateStore()
         # First: initialize via orderbook snapshot
-        store.apply_orderbook_message(_snapshot_msg_15m(
+        _apply_snapshot(store, _snapshot_msg_15m(
             "KXBTC15M-T",
             yes=[[0.42, 10], [0.40, 5]],
             no=[[0.55, 8]],
@@ -734,7 +776,8 @@ class TestRestQuoteFreshnessSplit:
         store = KalshiMarketStateStore()
         before = time.monotonic()
         with patch.object(store, '_notify_subscribers'):
-            state = store.apply_orderbook_message(
+            state = _apply_snapshot(
+                store,
                 _snapshot_msg_15m("KXBTC15M-T", [[0.60, 5]], [[0.40, 8]]),
                 via="rest_bootstrap",
             )
@@ -852,8 +895,9 @@ class TestRestPreferredBBO:
     during fast markets/rollovers)."""
 
     def _rest_snapshot(self, store, ticker, yes, no):
-        return store.apply_orderbook_message(
-            _snapshot_msg_15m(ticker, yes, no), via="rest_polling"
+        return _apply_snapshot(
+            store,
+            _snapshot_msg_15m(ticker, yes, no), via="rest_polling",
         )
 
     def test_divergent_ws_snapshot_yields_to_fresh_rest(self):
@@ -863,8 +907,9 @@ class TestRestPreferredBBO:
         # REST: yes_bid=60, no_bid=40 -> BBO 60/60
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         # WS snapshot: yes_bid=40, no_bid=40 -> BBO 40/60 (bid 20c stale)
-        state = store.apply_orderbook_message(
-            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        state = _apply_snapshot(
+            store, _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue",
+            wait_for=lambda s: s.last_ws_bid_cents == 40,
         )
         assert state is not None
         assert state.best_bid_cents == 60
@@ -879,8 +924,9 @@ class TestRestPreferredBBO:
         t = "KXBTC15M-T"
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         # WS: yes_bid=58 -> BBO 58/60, only 2c divergent on the bid
-        state = store.apply_orderbook_message(
-            _ws_snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue"
+        state = _apply_snapshot(
+            store, _ws_snapshot_msg_15m(t, [[0.58, 5]], [[0.40, 8]]), via="bridge_queue",
+            wait_for=lambda s: s.last_ws_bid_cents == 58,
         )
         assert state.best_bid_cents == 58
         assert state.quote_owner == "WS_FRESH_VERIFIED"
@@ -892,8 +938,9 @@ class TestRestPreferredBBO:
         state = self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
         # Backdate the REST quote clock beyond the 3s preference window.
         state.last_rest_quote_update_ts = time.monotonic() - 30.0
-        state = store.apply_orderbook_message(
-            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        state = _apply_snapshot(
+            store, _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue",
+            wait_for=lambda s: s.last_ws_bid_cents == 40,
         )
         assert state.best_bid_cents == 40
         assert state.quote_owner == "WS_FRESH_VERIFIED"
@@ -903,8 +950,8 @@ class TestRestPreferredBBO:
         store = KalshiMarketStateStore()
         t = "KXBTC15M-T"
         self._rest_snapshot(store, t, [[0.60, 5]], [[0.40, 8]])
-        state = store.apply_orderbook_message(
-            _ws_snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
+        state = _apply_snapshot(
+            store, _ws_snapshot_msg_15m(t, [[0.30, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         assert state.quote_owner == "REST_VERIFIED_DEGRADED"
         yes_prices = [lvl[0] for lvl in state.yes_bids]
@@ -916,8 +963,8 @@ class TestRestPreferredBBO:
         store = KalshiMarketStateStore()
         t = "KXBTC15M-T"
         self._rest_snapshot(store, t, [[0.58, 5]], [[0.40, 8]])
-        store.apply_orderbook_message(
-            _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
+        _apply_snapshot(
+            store, _ws_snapshot_msg_15m(t, [[0.40, 5]], [[0.40, 8]]), via="bridge_queue"
         )
         ok, reason = store.is_quote_coherent(t, max_divergence_cents=10)
         assert ok is True, reason
@@ -931,8 +978,8 @@ class TestFullSnapshotPendingDeltaDrop:
     def test_delta_dropped_while_full_snapshot_required(self):
         store = KalshiMarketStateStore()
         t = "KXBTC15M-T"
-        state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
+        state = _apply_snapshot(
+            store, _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
         )
         assert state is not None
         # Force the INVALID + FULL_SNAPSHOT recovery state.
@@ -956,8 +1003,8 @@ class TestFullSnapshotPendingDeltaDrop:
         deltas (they are the only source that can attest recovery)."""
         store = KalshiMarketStateStore()
         t = "KXBTC15M-T"
-        state = store.apply_orderbook_message(
-            _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
+        state = _apply_snapshot(
+            store, _snapshot_msg_15m(t, [[0.60, 5]], [[0.40, 8]]), via="rest_polling"
         )
         state.data_quality = "INVALID"
         state.transition = "INVALID_INVERTED"

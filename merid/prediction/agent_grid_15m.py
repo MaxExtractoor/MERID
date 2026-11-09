@@ -8373,8 +8373,11 @@ class LeanAgent15m:
                 market_state.annualized_vol_source = str(vol_source)
                 market_state.model_fair_prob = float(p_yes)
                 market_state.model_fair_prob_ts = time.time()
-        except Exception:
-            pass
+        except Exception as _pub_err:
+            logger.warning(
+                "[MODEL-PROVENANCE] asset=%s failed to publish model fair/vol provenance: %s",
+                asset, _pub_err,
+            )
 
         return HybridProbability(
             p_yes=p_yes,
@@ -8904,6 +8907,19 @@ class LeanAgent15m:
                     max_missing_samples=_settlement_max_missing_samples(),
                 )
                 self._last_v2_dist_status = "built"
+                # Publish the settlement-distribution probability so exit-side
+                # evaluators consume the same final-60-second RTI-average fair
+                # value that authorized the entry, not the point-expiry
+                # Bachelier `model_fair_prob` (which ignores banked samples).
+                try:
+                    if market_state is not None:
+                        market_state.settlement_fair_prob = float(settlement_distribution.p_yes_raw)
+                        market_state.settlement_fair_prob_ts = time.time()
+                except Exception as _sd_pub_err:
+                    logger.warning(
+                        "[SETTLEMENT-DISTRIBUTION] asset=%s failed to publish settlement_fair_prob: %s",
+                        asset, _sd_pub_err,
+                    )
             except Exception as sd_exc:
                 # Expected near the settlement-sample window boundary: elapsed
                 # slots exist before the sampler has recorded any values.
@@ -16105,8 +16121,21 @@ class LeanAgent15m:
                     else None
                 ),
                 p_yes=(
-                    getattr(market_state, "model_fair_prob", None)
-                    if market_state else None
+                    # Prefer the settlement-distribution probability: it is
+                    # the contract-true anchor the entry used under V2, so
+                    # the shadow lane's EV telemetry measures the same
+                    # reference (fresh within the model publish window).
+                    (
+                        getattr(market_state, "settlement_fair_prob", None)
+                        if market_state
+                        and (time.time() - float(getattr(market_state, "settlement_fair_prob_ts", 0.0) or 0.0))
+                            <= max(1.0, float(os.environ.get("MERID_MODEL_FAIR_VALUE_MAX_AGE_MS", "120000")) / 1000.0)
+                        else None
+                    )
+                    or (
+                        getattr(market_state, "model_fair_prob", None)
+                        if market_state else None
+                    )
                 ),
                 spot_price=locals().get("spot_price"),
                 strike_price=(

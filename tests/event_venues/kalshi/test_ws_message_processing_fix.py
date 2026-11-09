@@ -64,17 +64,20 @@ class TestWebSocketMessageProcessingFix:
         ws_client._ws = mock_ws
         ws_client._running = True
 
-        # Mock the message queue and other dependencies
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        ws_client._msg_queue.qsize = MagicMock(return_value=0)
+        # Mock the message queue via _ensure_msg_queue (the stale-loop
+        # rebind would replace a MagicMock bound elsewhere); non-critical
+        # priority keeps market data on _msg_queue, not _priority_msg_queue.
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        mock_q.qsize = MagicMock(return_value=0)
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
 
         # Mock sequence check
         ws_client._check_sequence = MagicMock(return_value=True)
 
         # Mock message priority classification
-        ws_client._classify_message_priority = MagicMock(return_value=1)
+        ws_client._classify_message_priority = MagicMock(return_value=5)
 
         # Track processed messages
         processed_messages = []
@@ -83,7 +86,7 @@ class TestWebSocketMessageProcessingFix:
             priority, data = item
             processed_messages.append(data)
 
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
+        mock_q.put_nowait.side_effect = capture_put_nowait
 
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
@@ -144,28 +147,29 @@ class TestWebSocketMessageProcessingFix:
         
         ws_client._ws = mock_ws
         ws_client._running = True
-        
+
         # Mock the message queue
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
+
         # Track processed messages
         processed_messages = []
-        
+
         def capture_put_nowait(item):
             priority, data = item
             processed_messages.append(data)
-        
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
-        
+
+        mock_q.put_nowait.side_effect = capture_put_nowait
+
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
             try:
                 await ws_client._process_messages_until_disconnect()
             except asyncio.CancelledError:
                 pass  # Expected termination
-        
+
         # Verify no messages were processed due to malformed JSON
         assert len(processed_messages) == 0
     
@@ -190,10 +194,11 @@ class TestWebSocketMessageProcessingFix:
         ws_client._running = True
         
         # Mock the message queue
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
+
         # Mock sequence check to fail
         ws_client._check_sequence = MagicMock(return_value=False)
         
@@ -204,7 +209,7 @@ class TestWebSocketMessageProcessingFix:
             priority, data = item
             processed_messages.append(data)
         
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
+        mock_q.put_nowait.side_effect = capture_put_nowait
         
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
@@ -244,17 +249,20 @@ class TestWebSocketMessageProcessingFix:
         ws_client._ws = mock_ws
         ws_client._running = True
         
-        # Mock the message queue
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        ws_client._msg_queue.qsize = MagicMock(return_value=0)
+        # Mock the message queue via _ensure_msg_queue (the stale-loop
+        # rebind would replace a MagicMock bound elsewhere); non-critical
+        # priority keeps market data on _msg_queue, not _priority_msg_queue.
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        mock_q.qsize = MagicMock(return_value=0)
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
         
         # Mock sequence check
         ws_client._check_sequence = MagicMock(return_value=True)
         
         # Mock message priority classification
-        ws_client._classify_message_priority = MagicMock(return_value=1)
+        ws_client._classify_message_priority = MagicMock(return_value=5)
         
         # Track processed messages
         processed_messages = []
@@ -263,7 +271,7 @@ class TestWebSocketMessageProcessingFix:
             priority, data = item
             processed_messages.append(data)
         
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
+        mock_q.put_nowait.side_effect = capture_put_nowait
         
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
@@ -290,17 +298,20 @@ class TestWebSocketMessageProcessingFix:
         ws_client._ws = mock_ws
         ws_client._running = True
         
-        # Mock the message queue
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        ws_client._msg_queue.qsize = MagicMock(return_value=0)
+        # Mock the message queue via _ensure_msg_queue (the stale-loop
+        # rebind would replace a MagicMock bound elsewhere); non-critical
+        # priority keeps market data on _msg_queue, not _priority_msg_queue.
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        mock_q.qsize = MagicMock(return_value=0)
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
         
         # Mock sequence check
         ws_client._check_sequence = MagicMock(return_value=True)
         
         # Mock message priority classification
-        ws_client._classify_message_priority = MagicMock(return_value=1)
+        ws_client._classify_message_priority = MagicMock(return_value=5)
         
         # Track processed messages
         processed_messages = []
@@ -309,7 +320,7 @@ class TestWebSocketMessageProcessingFix:
             priority, data = item
             processed_messages.append(data)
         
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
+        mock_q.put_nowait.side_effect = capture_put_nowait
         
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
@@ -341,17 +352,20 @@ class TestWebSocketMessageProcessingFix:
         ws_client._ws = mock_ws
         ws_client._running = True
         
-        # Mock the message queue
-        ws_client._msg_queue = MagicMock()
-        ws_client._msg_queue.maxsize = 1000
-        ws_client._msg_queue.put_nowait = MagicMock()
-        ws_client._msg_queue.qsize = MagicMock(return_value=0)
+        # Mock the message queue via _ensure_msg_queue (the stale-loop
+        # rebind would replace a MagicMock bound elsewhere); non-critical
+        # priority keeps market data on _msg_queue, not _priority_msg_queue.
+        mock_q = MagicMock()
+        mock_q.maxsize = 1000
+        mock_q.put_nowait = MagicMock()
+        mock_q.qsize = MagicMock(return_value=0)
+        ws_client._ensure_msg_queue = MagicMock(return_value=mock_q)
         
         # Mock sequence check
         ws_client._check_sequence = MagicMock(return_value=True)
         
         # Mock message priority classification
-        ws_client._classify_message_priority = MagicMock(return_value=1)
+        ws_client._classify_message_priority = MagicMock(return_value=5)
         
         # Track processed messages
         processed_messages = []
@@ -360,7 +374,7 @@ class TestWebSocketMessageProcessingFix:
             priority, data = item
             processed_messages.append(data)
         
-        ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
+        mock_q.put_nowait.side_effect = capture_put_nowait
         
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):

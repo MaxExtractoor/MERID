@@ -52,6 +52,23 @@ def _snapshot_msg(ticker: str, yes: list, no: list) -> dict:
     }
 
 
+def _wait_state(store, ticker, pred, timeout_s=10.0):
+    """Wait until ``pred(state)`` holds on ``store.get(ticker)``.
+
+    2026-11-04/09: every snapshot via is routed through the per-ticker batch
+    worker — ``apply_orderbook_message`` returns before the book/state
+    mutation lands, so assertions must wait for an observable predicate.
+    """
+    deadline = time.monotonic() + timeout_s
+    state = None
+    while time.monotonic() < deadline:
+        state = store.get(ticker)
+        if state is not None and pred(state):
+            return state
+        time.sleep(0.02)
+    return state
+
+
 # ── Market State Staleness Tests ────────────────────────────────────────────
 
 
@@ -98,7 +115,7 @@ class TestMarketStateStalenessFix:
                 no=[[0.52, 4]],
             ))
         
-        state = store.get(ticker)
+        state = _wait_state(store, ticker, lambda s: s.book_initialized)
         
         # Book should be initialized
         assert state.book_initialized is True, \
@@ -209,7 +226,7 @@ class TestBookOverflowRecovery:
                 no=[[0.52, 4]],
             ))
         
-        state = store.get(ticker)
+        state = _wait_state(store, ticker, lambda s: s.book_initialized)
         
         # State should be fresh
         assert state.last_book_update_ts >= t0, \
@@ -501,7 +518,7 @@ class TestRestBboDivergenceGuard:
         """Fresh ticker, no REST quote yet: WS snapshot sync must not raise."""
         store = self._new_store()
         with patch.object(store, '_notify_subscribers'):
-            state = store.apply_orderbook_message(
+            store.apply_orderbook_message(
                 {
                     "type": "orderbook_snapshot",
                     "ticker": self.TICKER,
@@ -512,6 +529,10 @@ class TestRestBboDivergenceGuard:
                 },
                 via="bridge_queue",
             )
+        state = _wait_state(
+            store, self.TICKER,
+            lambda s: s.book_initialized and s.best_bid_cents == 48,
+        )
         assert state is not None
         assert state.book_initialized is True
         assert state.best_bid_cents == 48
@@ -618,7 +639,9 @@ class TestRestBboDivergenceGuard:
                 },
                 via="rest_polling",
             )
-        state = store.get(self.TICKER)
+        state = _wait_state(
+            store, self.TICKER, lambda s: s.last_rest_bid_cents == 48,
+        )
         assert state.last_rest_bid_cents == 48
         assert state.last_rest_ask_cents is None
         # WS snapshot rebuilds a two-sided book; the delta that follows must
@@ -635,6 +658,9 @@ class TestRestBboDivergenceGuard:
                 },
                 via="bridge_queue",
             )
+            # ``snapshot_complete`` is already True from the REST apply —
+            # wait for the WS snapshot's seq to land on the book instead.
+            _wait_state(store, self.TICKER, lambda s: s.ws_last_seq == 100)
             store._apply_delta_internal(self.TICKER, self._ws_delta())
         state = store.get(self.TICKER)
         assert state.data_source == "WS_ORDERBOOK_DELTA_LIVE"

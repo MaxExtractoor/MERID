@@ -88,22 +88,16 @@ class TestLegacyFeesVsParabolicFees:
         assert legacy_fee == float(canonical_fee)
 
     def test_canonical_total_fee_for_100_contracts(self):
-        """Larger sizes are affected by tiered rates, not the per-contract floor.
+        """Both calculators now use the flat 7% taker rate and agree.
 
-        fees.py has tiered rates (0.07 for <100, 0.05 for 100-999, 0.03 for
-        1000+). The canonical parabolic fee currently uses a flat 0.07 taker
-        rate. This test documents the resulting shadow discrepancy so it can be
-        reconciled with actual Kalshi series fee metadata.
+        fees.py retired the mistaken 5%/3% volume tiers (Kalshi has no volume
+        tiers — the only multiplier is per-market M).  The historical
+        45c-vs-63c shadow discrepancy is resolved: both return 63c.
         """
         price_cents = 10
         total_legacy = calculate_kalshi_fee_cents(100, price_cents)
         total_canonical = kalshi_taker_fee_cents_parabolic(price_cents / 100.0, 100)
 
-        # Legacy fees.py: 100 contracts falls into the medium tier (5%) -> 45c
-        assert total_legacy == 45
-        # Canonical parabolic: flat 7% -> 63c
+        # Flat 7%: ceil(0.07 * 100 * 0.10 * 0.90 * 100) = 63c
         assert total_canonical == 63
-
-        # The two calculators disagree by 18c for this size. This is a tracked
-        # discrepancy pending validation against actual exchange-reported fees.
-        assert total_legacy != total_canonical
+        assert total_legacy == 63

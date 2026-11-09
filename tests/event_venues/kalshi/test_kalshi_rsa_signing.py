@@ -177,14 +177,19 @@ class TestKalshiRSASigning(unittest.TestCase):
             self.client._sign_headers("GET", "/trade-api/v2/portfolio/balance")
 
 
-class TestKalshiRSACacheIsolation(unittest.TestCase):
+class TestKalshiRSACacheIsolation:
     """RSA key cache is per client instance and keyed by path/pem source (BUG-3)."""
 
-    def test_cache_invalidated_on_different_path(self):
+    def test_cache_invalidated_on_different_path(self, monkeypatch):
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.backends import default_backend
         from merid.event_venues.kalshi.client import KalshiVenueClient
         from merid.event_venues.kalshi.models import KalshiConfig
+
+        # The repo .env pins MERID_KALSHI_EXPECTED_API_KEY_ID for the real
+        # production account; this test exercises key-cache isolation with a
+        # synthetic key id, so the identity guardrail must be disarmed here.
+        monkeypatch.delenv("MERID_KALSHI_EXPECTED_API_KEY_ID", raising=False)
 
         key1 = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
         key2 = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
@@ -225,8 +230,8 @@ class TestKalshiRSACacheIsolation(unittest.TestCase):
         asyncio.run(_run())
 
         # Client must have key2 from disk, NOT the stale key1 / demo path cache
-        self.assertIsNot(client._private_key, key1)
-        self.assertEqual(client._cached_key_source, "/path/to/live_key.pem")
+        assert client._private_key is not key1
+        assert client._cached_key_source == "/path/to/live_key.pem"
 
 
 def _make_demo_client_fixed_url():

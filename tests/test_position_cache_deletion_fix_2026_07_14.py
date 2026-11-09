@@ -359,7 +359,11 @@ class TestPositionCacheDeletionOnClose:
             }
         ]
         
-        await cache.sync_from_rest(positions_list, rest_timestamp=asyncio.get_event_loop().time())
+        # rest_timestamp is a Unix epoch stamp (see sync_from_rest contract);
+        # the monotonic loop clock is always "older" than epoch and the
+        # snapshot would be discarded as SUPERSEDED_BY_NEWER_REFRESH.
+        import time as _time
+        await cache.sync_from_rest(positions_list, rest_timestamp=_time.time())
         
         # Only open positions should be in cache
         assert len(cache._positions) == 2

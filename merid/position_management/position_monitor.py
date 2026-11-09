@@ -673,10 +673,33 @@ def _tail_drop_min_obs() -> int:
 
     2026-10-24: 15m binaries mean-revert on noise; a single stale/wide bid
     print at entry-drop should not crystallize a loss.  The absolute floor
-    (``floor_cents``) bypasses this — deep collapse is not noise.
+    (``floor_cents``) carries its own debounce — see ``_tail_floor_min_obs``.
     """
     try:
         return max(1, int(os.getenv("MERID_TAIL_LOSS_DROP_MIN_OBS", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _tail_floor_min_obs() -> int:
+    """Consecutive floor-breach observations required before the absolute
+    tail floor fires.
+
+    2026-11-09 (KXXRP15M-26NOV082330-30): the absolute floor fired on a
+    single 18c print at TTE~311s; the bid recovered to 42c ~3s after the
+    IOC filled and the market settled YES — a -176c realized loss vs a
+    +156c settlement forgone.  The breach was one eval cycle of a
+    whipsaw, not terminal collapse — the same signature the drop-trigger
+    debounce was built for on KXDOGE15M-26OCT231945.  A genuine collapse
+    holds the breach for many evals; a transient sweep does not, so the
+    floor now requires ``MERID_TAIL_LOSS_FLOOR_MIN_OBS`` (default 2,
+    mirroring the drop debounce) consecutive observations before it may
+    emit.  Each observation is ~one monitor cycle (~5s), so a real
+    collapse still salvages within seconds while a single-print wick
+    cannot crystallize the loss.
+    """
+    try:
+        return max(1, int(os.getenv("MERID_TAIL_LOSS_FLOOR_MIN_OBS", "2")))
     except (TypeError, ValueError):
         return 2
 
@@ -1558,6 +1581,7 @@ class PositionMonitor:
             "hard_lock_pending",
             "tail_loss_floor_fired",
             "tail_drop_breach_obs",
+            "tail_floor_breach_obs",
         }
 
         # Provenance/construction fields that an older, more trusted record should keep.
@@ -4433,16 +4457,25 @@ class PositionMonitor:
             )
             _drop_hit = _entry_px > 0 and (_entry_px - current_price_cents) >= _drop_cents
             _floor_hit = current_price_cents <= _tail_cfg["floor_cents"]
+            # 2026-11-09: a degraded/non-executable quote must neither
+            # trigger nor *count toward* a catastrophic salvage.  The
+            # debounce makes the trigger robust to single whipsaw prints,
+            # but a run of low-quality prints (empty held-side depth,
+            # non-GOOD data quality, out-of-range bid) would still march
+            # the counter to threshold.  Untrusted observations reset the
+            # counters so only consecutive trusted breaches arm the exit.
+            if not (snapshot is not None and snapshot.is_executable_for_exit()):
+                position.tail_drop_breach_obs = 0
+                position.tail_floor_breach_obs = 0
+                _drop_hit = False
+                _floor_hit = False
             # 2026-10-24: drop-trigger persistence.  A single noisy bid
             # print below entry-drop fired the no-edge salvage on
             # KXDOGE15M-26OCT231945 (YES@86, stopped 77c, settled YES) —
             # the dip recovered while the IOC routed.  Require the breach
             # to hold for MERID_TAIL_LOSS_DROP_MIN_OBS consecutive
-            # evaluations (default 2, ~one extra tick); the absolute
-            # floor stays immediate — at <=18c salvage value is real.
-            if _floor_hit:
-                position.tail_drop_breach_obs = 0
-            elif _drop_hit:
+            # evaluations (default 2, ~one extra tick).
+            if _drop_hit:
                 _min_obs = _tail_drop_min_obs()
                 _obs = int(getattr(position, "tail_drop_breach_obs", 0) or 0) + 1
                 position.tail_drop_breach_obs = _obs
@@ -4450,7 +4483,80 @@ class PositionMonitor:
                     _drop_hit = False
             else:
                 position.tail_drop_breach_obs = 0
+            # 2026-11-09: the absolute floor gets the same consecutive-
+            # observation debounce — a single swept print at <=floor_cents
+            # is a whipsaw candidate, not proven terminal collapse
+            # (KXXRP15M-26NOV082330-30: one 18c obs, IOC filled, bid
+            # recovered to 42c in ~3s, settled YES).  The counters are
+            # independent: the floor no longer bypasses the drop debounce
+            # while it is still counting, so a no-edge salvage cannot emit
+            # on a single floor print either.
+            if _floor_hit:
+                _fobs = int(getattr(position, "tail_floor_breach_obs", 0) or 0) + 1
+                position.tail_floor_breach_obs = _fobs
+                if _fobs < _tail_floor_min_obs():
+                    _floor_hit = False
+            else:
+                position.tail_floor_breach_obs = 0
             if _drop_hit or _floor_hit:
+                # 2026-11-09: settlement-aware model-disagreement hold.
+                # A persistent price breach that the *settlement* model
+                # still prices materially above the salvage bid is a
+                # whipsaw candidate, not a terminal collapse —
+                # KXXRP15M-26NOV082330-30 panic-sold YES@61 at 18c on a
+                # point-model fair of ~19c while the final-60s RTI-average
+                # distribution still favored the held side; the bid
+                # recovered ~3s post-fill and the market settled YES.
+                # Require price + model agreement before catastrophic
+                # salvage: when a fresh settlement-aware fair value sits at
+                # least MERID_TAIL_LOSS_MODEL_HOLD_MARGIN_CENTS above the
+                # exit bid, this evaluation defers (the breach counters
+                # stay armed so a subsequent model-agreeing obs fires
+                # immediately).  When no fresh model fair exists the price
+                # signal alone decides — fail toward loss reduction.
+                _hold_margin = int(
+                    os.environ.get("MERID_TAIL_LOSS_MODEL_HOLD_MARGIN_CENTS", "10")
+                )
+                if (
+                    _hold_margin > 0
+                    and os.environ.get(
+                        "MERID_TAIL_LOSS_MODEL_DISAGREE_HOLD", "1"
+                    ).strip().lower() in ("1", "true", "yes")
+                ):
+                    try:
+                        from merid.event_venues.kalshi.market_state import (
+                            get_kalshi_market_state_store,
+                        )
+
+                        _ss = get_kalshi_market_state_store()
+                        _ms = (
+                            _ss.get_unified(position.market_id)
+                            if hasattr(_ss, "get_unified")
+                            else None
+                        ) or _ss.get(position.market_id)
+                        _fair_c = (
+                            _get_model_fair_value_cents(
+                                _ms, position.side.value
+                            )
+                            if _ms is not None
+                            else None
+                        )
+                    except Exception:
+                        _fair_c = None
+                    if (
+                        _fair_c is not None
+                        and _fair_c >= current_price_cents + _hold_margin
+                    ):
+                        logger.info(
+                            "[TAIL-FLOOR-MODEL-HOLD] %s model_disagrees "
+                            "fair=%s bid=%s margin=%s — deferring salvage",
+                            position.market_id,
+                            _fair_c,
+                            current_price_cents,
+                            _hold_margin,
+                        )
+                        _drop_hit = False
+                        _floor_hit = False
                 # 2026-10-20 operator directive: price-depth loss exits are
                 # off (MERID_LOSS_EXITS_ENABLED=0).  15m binaries mean-
                 # revert to fair until expiry — KXXRP15M-26OCT200200-00

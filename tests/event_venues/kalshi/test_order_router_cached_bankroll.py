@@ -25,13 +25,14 @@ def test_apply_risk_based_order_sizing_uses_provided_bankroll():
     # Provide explicit bankroll
     bankroll_usd = Decimal("50.0")
     count = _apply_risk_based_order_sizing(intent, bankroll_usd=bankroll_usd)
-    
+
     # Should use provided bankroll and return adjusted count.
-    # Bounded by MERID_MAX_CONTRACTS_PER_ORDER=3 (3 contracts @50c = $1.50,
-    # under the $3 exposure cap) — the per-order cap binds before bankroll.
+    # The per-order cap (MERID_MAX_CONTRACTS_PER_ORDER) binds before
+    # bankroll — reference the live constant, not a hardcoded value.
+    from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
     assert count is not None
     assert isinstance(count, (int, Decimal))
-    assert count == 3
+    assert count == MAX_CONTRACTS_PER_ORDER
 
 
 def test_apply_risk_based_order_sizing_handles_none_bankroll():

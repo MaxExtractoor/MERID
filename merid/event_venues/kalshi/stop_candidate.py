@@ -1366,6 +1366,59 @@ def _model_fair_value_max_age_s() -> float:
         return 120.0
 
 
+# Volatility sources that mean "no real volatility estimate was resolved" —
+# a probability built on a default/requested/fallback vol is a prior, not a
+# settlement-aligned valuation, and cannot anchor a sell-vs-hold comparison.
+# Mirrors settlement_aligned_exit._UNTRUSTED_VOL_SOURCES (kept local to avoid
+# a circular import through the exit-pipeline module).
+_UNTRUSTED_MODEL_VOL_SOURCES = frozenset({
+    "",
+    "default",
+    "requested",
+    "fallback",
+    "unknown",
+    "n/a",
+    "none",
+})
+
+
+def _model_vol_source_trusted(state: Any) -> bool:
+    """True when the state's vol provenance describes a resolved estimate.
+
+    ``realized``/``market_implied``/``env_override`` (and their ``_clamped``
+    variants) count as resolved; missing, default, requested, or fallback
+    sources do not.  A state that never received a model publish has no
+    provenance at all — that is untrusted, not neutral.
+    """
+    source = getattr(state, "annualized_vol_source", None)
+    if source is None:
+        source = getattr(state, "vol_source", None)
+    if source is None:
+        source = getattr(state, "model_vol_source", None)
+    base = str(source or "").lower()
+    if base.endswith("_clamped"):
+        base = base[: -len("_clamped")]
+    return base not in _UNTRUSTED_MODEL_VOL_SOURCES
+
+
+def _fresh_model_prob(state: Any, prob_attr: str, ts_attr: str) -> Optional[float]:
+    """Return a fresh, in-range model probability publication or None."""
+    prob = getattr(state, prob_attr, None)
+    if prob is None:
+        return None
+    try:
+        prob_ts = float(getattr(state, ts_attr, 0.0) or 0.0)
+        age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
+        if age_s > _model_fair_value_max_age_s():
+            return None
+        p = float(prob)
+        if not 0.0 < p < 1.0:
+            return None
+        return p
+    except Exception:
+        return None
+
+
 def _get_model_fair_value_cents(state: Any, held_contract: Literal["yes", "no"]) -> Optional[int]:
     """Return *model-derived* fair value in the held contract's price space.
 
@@ -1373,22 +1426,33 @@ def _get_model_fair_value_cents(state: Any, held_contract: Literal["yes", "no"])
     fallback: implied probability is market-derived, so anchoring a
     sell-vs-hold comparison to it is tautological (bid ~= implied implies the
     "overpay" threshold is unreachable or arbitrary).  Only genuinely
-    independent model outputs (``model_fair_prob``, ``external_fair_value``)
-    are valid fair anchors for take-profit and edge-realization gates.
+    independent model outputs are valid fair anchors for take-profit and
+    edge-realization gates.
+
+    Precedence:
+
+      1. ``settlement_fair_prob`` — the final-60-second RTI-average
+         distribution published when ``MERID_SETTLEMENT_DISTRIBUTION_V2``
+         is enabled; this is the same fair reference that authorized the
+         entry, so exit math stays contract-true (banked samples included).
+      2. ``model_fair_prob`` — point-expiry Bachelier probability.
+      3. ``external_fair_value`` — independently produced model output.
+
+    Model-derived values are only trusted when the state's resolved
+    volatility provenance is a real estimate (``_model_vol_source_trusted``)
+    — the same bar the EV exit gate applies via ``model_inputs_ok``.
     """
     unified = state
-    if hasattr(unified, "model_fair_prob") and unified.model_fair_prob is not None:
-        try:
-            prob_ts = float(getattr(unified, "model_fair_prob_ts", 0.0) or 0.0)
-            age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
-            if age_s <= _model_fair_value_max_age_s():
-                yes_fair = int(round(float(unified.model_fair_prob) * 100))
+    if _model_vol_source_trusted(unified):
+        for prob_attr, ts_attr in (
+            ("settlement_fair_prob", "settlement_fair_prob_ts"),
+            ("model_fair_prob", "model_fair_prob_ts"),
+        ):
+            p = _fresh_model_prob(unified, prob_attr, ts_attr)
+            if p is not None:
+                yes_fair = int(round(p * 100))
                 if 1 <= yes_fair <= 99:
-                    if held_contract == "yes":
-                        return yes_fair
-                    return 100 - yes_fair
-        except Exception:
-            pass
+                    return yes_fair if held_contract == "yes" else 100 - yes_fair
 
     if hasattr(unified, "external_fair_value") and unified.external_fair_value is not None:
         try:
@@ -1410,17 +1474,23 @@ def _get_fair_value_provenance(state: Any, held_contract: Literal["yes", "no"]) 
     Same precedence and short-circuit semantics as ``_get_fair_value_cents`` —
     that function is now a thin wrapper so the two cannot drift:
 
-      1. ``model_fair_prob`` fresh within ``_model_fair_value_max_age_s()``
-         (stale/out-of-range falls through).
-      2. ``external_fair_value`` (present-but-out-of-range stops resolution).
-      3. ``implied_prob`` — book mid (present-but-out-of-range stops).
+      1. ``settlement_fair_prob`` fresh within ``_model_fair_value_max_age_s()``
+         — the final-60-second RTI-average distribution fair that authorized
+         the entry under ``MERID_SETTLEMENT_DISTRIBUTION_V2``.
+      2. ``model_fair_prob`` fresh within ``_model_fair_value_max_age_s()``
+         (stale/out-of-range falls through).  Both model-derived branches
+         additionally require ``_model_vol_source_trusted`` — a probability
+         built on an unresolved vol is a prior, not a valuation.
+      3. ``external_fair_value`` (present-but-out-of-range stops resolution).
+      4. ``implied_prob`` — book mid (present-but-out-of-range stops).
 
     Reporting only — identical return values.  Provenance fields: ``source``
-    (``model_fair_prob`` | ``external_fair_value`` | ``implied_prob`` |
-    ``none``), ``model_available``/``model_fresh`` (publication presence and
-    staleness, independent of whether it won), ``model_asof_ts`` /
-    ``model_age_ms`` where a publication timestamp exists, and
-    ``fallback_reason`` for why a higher-precedence source did not win.
+    (``settlement_fair_prob`` | ``model_fair_prob`` | ``external_fair_value`` |
+    ``implied_prob`` | ``none``), ``model_available``/``model_fresh``
+    (publication presence and staleness, independent of whether it won),
+    ``model_asof_ts`` / ``model_age_ms`` where a publication timestamp
+    exists, and ``fallback_reason`` for why a higher-precedence source did
+    not win.
     """
     out: Dict[str, Any] = {
         "value_cents": None,
@@ -1433,30 +1503,42 @@ def _get_fair_value_provenance(state: Any, held_contract: Literal["yes", "no"]) 
     }
     unified = state
 
-    model_val = getattr(unified, "model_fair_prob", None)
-    if hasattr(unified, "model_fair_prob") and model_val is not None:
+    vol_trusted = _model_vol_source_trusted(unified)
+    for prob_attr, ts_attr in (
+        ("settlement_fair_prob", "settlement_fair_prob_ts"),
+        ("model_fair_prob", "model_fair_prob_ts"),
+    ):
+        model_val = getattr(unified, prob_attr, None)
+        if model_val is None:
+            continue
         try:
-            prob_ts = float(getattr(unified, "model_fair_prob_ts", 0.0) or 0.0)
+            prob_ts = float(getattr(unified, ts_attr, 0.0) or 0.0)
             age_s = time.time() - prob_ts if prob_ts > 0 else float("inf")
             out["model_available"] = True
-            out["model_asof_ts"] = prob_ts if prob_ts > 0 else None
-            out["model_age_ms"] = int(age_s * 1000) if age_s != float("inf") else None
+            if out["model_asof_ts"] is None and prob_ts > 0:
+                out["model_asof_ts"] = prob_ts
+                out["model_age_ms"] = int(age_s * 1000) if age_s != float("inf") else None
+            if not vol_trusted:
+                if out["fallback_reason"] is None:
+                    out["fallback_reason"] = "model_vol_source_untrusted"
+                continue
             if age_s <= _model_fair_value_max_age_s():
                 out["model_fresh"] = True
                 yes_fair = int(round(float(model_val) * 100))
                 if 1 <= yes_fair <= 99:
                     out["value_cents"] = yes_fair if held_contract == "yes" else 100 - yes_fair
-                    out["source"] = "model_fair_prob"
+                    out["source"] = prob_attr
                     return out
-                out["fallback_reason"] = "model_fair_prob_out_of_range"
+                if out["fallback_reason"] is None:
+                    out["fallback_reason"] = f"{prob_attr}_out_of_range"
             else:
-                out["fallback_reason"] = "model_fair_prob_stale"
+                if out["fallback_reason"] is None:
+                    out["fallback_reason"] = f"{prob_attr}_stale"
         except Exception:
-            out["fallback_reason"] = "model_fair_prob_invalid"
-    elif hasattr(unified, "model_fair_prob"):
+            if out["fallback_reason"] is None:
+                out["fallback_reason"] = f"{prob_attr}_invalid"
+    if out["fallback_reason"] is None and not out["model_available"]:
         out["fallback_reason"] = "model_fair_prob_absent"
-    else:
-        out["fallback_reason"] = "model_fair_prob_field_missing"
 
     # Unified market state carries external_fair_value as P(YES).
     ext_val = getattr(unified, "external_fair_value", None)

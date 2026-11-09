@@ -361,6 +361,24 @@ def test_store_get_unified_returns_none_for_unknown_ticker():
 # ── D-H2: one-sided orderbook must not produce a snapshot ────────────────────
 
 
+def _wait_unified(store, ticker, timeout_s=10.0):
+    """Wait for the async batch worker to apply a queued snapshot.
+
+    2026-11-04/09: ``apply_orderbook_message`` routes every snapshot through
+    the per-ticker batch worker — ``get_unified`` returns None until the
+    apply lands.
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    u = None
+    while _time.monotonic() < deadline:
+        u = store.get_unified(ticker)
+        if u is not None:
+            return u
+        _time.sleep(0.02)
+    return u
+
+
 def test_one_sided_orderbook_yes_only_does_not_set_book():
     """D-H2: a book with only YES bids and no NO bids must not produce an
     OrderbookSnapshot on the UnifiedMarketState — downstream spread/mid/
@@ -370,19 +388,20 @@ def test_one_sided_orderbook_yes_only_does_not_set_book():
     store = KalshiMarketStateStore()
     ticker = "KXBTC15M-26APR-T70000"
 
-    # Push a WS orderbook_snapshot with YES bids only (no_bids is empty)
+    # Push a WS orderbook_snapshot with YES bids only (no_bids is empty).
+    # Prices are dollars (0..1) — the book stores them as cents.
     snap_msg = {
         "type": "orderbook_snapshot",
         "ticker": ticker,
         "msg": {
             "ticker": ticker,
-            "yes": [[55, 10], [54, 5]],  # YES bids present
-            "no": [],                    # NO bids absent — one-sided
+            "yes": [[0.55, 10], [0.54, 5]],  # YES bids present
+            "no": [],                        # NO bids absent — one-sided
         },
     }
     store.apply_orderbook_message(snap_msg)
 
-    u = store.get_unified(ticker)
+    u = _wait_unified(store, ticker)
     assert u is not None, "UnifiedMarketState should exist after snapshot"
     # A one-sided book must NOT produce a valid OrderbookSnapshot.
     # Before the fix, u.book is set but u.book.no_bids == () and
@@ -407,13 +426,13 @@ def test_one_sided_orderbook_no_only_does_not_set_book():
         "ticker": ticker,
         "msg": {
             "ticker": ticker,
-            "yes": [],                   # YES bids absent — one-sided
-            "no": [[45, 8], [44, 4]],   # NO bids present
+            "yes": [],                     # YES bids absent — one-sided
+            "no": [[0.45, 8], [0.44, 4]],  # NO bids present
         },
     }
     store.apply_orderbook_message(snap_msg)
 
-    u = store.get_unified(ticker)
+    u = _wait_unified(store, ticker)
     assert u is not None
     assert u.book is None, (
         "One-sided book (NO only) must not set u.book; "
@@ -434,13 +453,14 @@ def test_two_sided_orderbook_does_set_book():
         "ticker": ticker,
         "msg": {
             "ticker": ticker,
-            "yes": [[55, 10]],
-            "no": [[48, 8]],
+            # Non-crossed book in dollars: YES bid 55c < YES ask (100-44)c.
+            "yes": [[0.55, 10]],
+            "no": [[0.44, 8]],
         },
     }
     store.apply_orderbook_message(snap_msg)
 
-    u = store.get_unified(ticker)
+    u = _wait_unified(store, ticker)
     assert u is not None
     assert u.book is not None, "Two-sided book must produce a valid OrderbookSnapshot"
     assert len(u.book.yes_bids) > 0

@@ -670,10 +670,15 @@ class TestDynamicOrderTypeSelection:
 class TestDepthBasedOrderSizing:
     """Test depth-based order sizing.
 
-    The slot-based model enforces a maximum of 3 contracts per order
-    (MERID_MAX_CONTRACTS_PER_ORDER default), so depth-based sizing only
+    The slot-based model enforces a per-order cap
+    (MERID_MAX_CONTRACTS_PER_ORDER), so depth-based sizing only
     reduces multi-contract intents to the slot limit.
     """
+
+    @staticmethod
+    def _slot_limit():
+        from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
+        return MAX_CONTRACTS_PER_ORDER
 
     def _intent(self, count):
         from merid.event_venues.kalshi.order_router import OrderIntent
@@ -689,10 +694,10 @@ class TestDepthBasedOrderSizing:
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
         from merid.event_venues.kalshi.models import KalshiMarketState
 
-        # Even with deep liquidity, count cannot exceed the 3-contract slot limit.
+        # Even with deep liquidity, count cannot exceed the per-order slot limit.
         state = KalshiMarketState(ticker="KXBTC-TEST", top_of_book_size=100)
         adjusted_count = _apply_depth_based_order_sizing(self._intent(100), state)
-        assert adjusted_count == 3
+        assert adjusted_count == self._slot_limit()
 
     def test_preserves_single_contract_order(self):
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
@@ -706,7 +711,7 @@ class TestDepthBasedOrderSizing:
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
 
         adjusted_count = _apply_depth_based_order_sizing(self._intent(50), None)
-        assert adjusted_count == 3
+        assert adjusted_count == self._slot_limit()
 
     def test_returns_slot_limit_when_no_liquidity_data(self):
         from merid.event_venues.kalshi.order_router import _apply_depth_based_order_sizing
@@ -714,7 +719,7 @@ class TestDepthBasedOrderSizing:
 
         state = KalshiMarketState(ticker="KXBTC-TEST", top_of_book_size=0)
         adjusted_count = _apply_depth_based_order_sizing(self._intent(50), state)
-        assert adjusted_count == 3
+        assert adjusted_count == self._slot_limit()
 
 
 class TestPriceValidationAgainstOrderbook:

@@ -469,12 +469,9 @@ class TestBookFreshnessTracker:
         tracker = BookFreshnessTracker()
         now = time.time()
         
-        # Update different tickers (without lock for test simplicity)
-        tracker._states["KXBTC15M-26AUG021345-45"] = BookFreshnessState()
-        tracker._states["KXETH15M-26AUG021345-45"] = BookFreshnessState()
-        
-        tracker._states["KXBTC15M-26AUG021345-45"].update_from_ws(exchange_ts=now, received_ts=now)
-        tracker._states["KXETH15M-26AUG021345-45"].update_from_ws(exchange_ts=None, received_ts=now)
+        # Update different tickers via the public API (creates state + per-ticker lock)
+        tracker.update_from_ws("KXBTC15M-26AUG021345-45", now, now)
+        tracker.update_from_ws("KXETH15M-26AUG021345-45", None, now)
         
         btc_state = tracker.get_state("KXBTC15M-26AUG021345-45")
         eth_state = tracker.get_state("KXETH15M-26AUG021345-45")
@@ -492,15 +489,12 @@ class TestBookFreshnessTracker:
         tracker = BookFreshnessTracker()
         now = time.time()
         
-        # Create state directly (without lock for test simplicity)
-        tracker._states["KXBTC15M-26AUG021345-45"] = BookFreshnessState()
-        
         # Fresh data - should be tradable
-        tracker._states["KXBTC15M-26AUG021345-45"].update_from_ws(exchange_ts=now, received_ts=now)
+        tracker.update_from_ws("KXBTC15M-26AUG021345-45", now, now)
         assert tracker.is_tradable("KXBTC15M-26AUG021345-45")
-        
+
         # Stale data - should not be tradable
-        tracker._states["KXBTC15M-26AUG021345-45"].update_from_ws(exchange_ts=now - 20.0, received_ts=now - 20.0)
+        tracker.update_from_ws("KXBTC15M-26AUG021345-45", now - 20.0, now - 20.0)
         assert not tracker.is_tradable("KXBTC15M-26AUG021345-45")
     
     def test_get_all_states(self):
@@ -508,12 +502,9 @@ class TestBookFreshnessTracker:
         tracker = BookFreshnessTracker()
         now = time.time()
         
-        # Create states directly (without lock for test simplicity)
-        tracker._states["KXBTC15M-26AUG021345-45"] = BookFreshnessState()
-        tracker._states["KXETH15M-26AUG021345-45"] = BookFreshnessState()
-        
-        tracker._states["KXBTC15M-26AUG021345-45"].update_from_ws(exchange_ts=now, received_ts=now)
-        tracker._states["KXETH15M-26AUG021345-45"].update_from_rest(received_ts=now, is_fallback=True)
+        # Create states via the public API (creates state + per-ticker lock)
+        tracker.update_from_ws("KXBTC15M-26AUG021345-45", now, now)
+        tracker.update_from_rest("KXETH15M-26AUG021345-45", now, is_fallback=True)
         
         all_states = tracker.get_all_states()
         assert "KXBTC15M-26AUG021345-45" in all_states
