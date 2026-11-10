@@ -428,8 +428,9 @@ jobs:
           mkdir -p reports
           # Bound pytest below the 60-minute job timeout so a hang exits the
           # step (letting the artifact uploads run) instead of cancelling the
-          # job; tee keeps a transcript of the last in-flight test.
-          timeout 3300 python -m pytest \
+          # job; -k escalates to SIGKILL so leaked children cannot hold the
+          # step open, and the transcript captures the last in-flight test.
+          timeout -k 60 3000 python -m pytest \
             tests/event_venues/kalshi/test_allowed_market_policy.py \
             tests/event_venues/kalshi/test_market_catalog_filtering_integration.py \
             tests/event_venues/kalshi/test_market_universe_replay.py \
@@ -441,8 +442,10 @@ jobs:
             tests/web/test_canonical_lifespan_and_tickers.py \
             -v --tb=short --timeout=300 \
             --junitxml=reports/kalshi-contract-pipeline.xml \
-            2>&1 | tee reports/kalshi-contract-pipeline.log
-          exit ${PIPESTATUS[0]}
+            > reports/kalshi-contract-pipeline.log 2>&1
+          ec=$?
+          tail -60 reports/kalshi-contract-pipeline.log
+          exit $ec
 
       - name: Upload Kalshi contract report
         if: always()
