@@ -8,6 +8,20 @@ import pytest
 import sys
 
 
+@pytest.fixture(autouse=True)
+def _pin_15m_profile(monkeypatch):
+    """Pin ``MERID_PROFILE=kalshi_crypto_15m_v2`` for every test in this file.
+
+    These tests assert that the *15m production profile* imports no legacy
+    modules.  ``tests/conftest.py`` clears ``MERID_PROFILE`` for non-15m test
+    files, and CI runners have no ``.env`` to re-supply it — leaving the
+    profile empty makes ``web.api.__init__`` take its non-15m branch and
+    legitimately import the legacy reflection stack, failing the assertion
+    for reasons unrelated to the 15m path under test.
+    """
+    monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+
+
 class TestLegacyModuleGuard:
     """Test legacy module guard functionality."""
     

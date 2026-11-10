@@ -139,19 +139,24 @@ jobs:
           # Capture exit code
           exit_code=${PIPESTATUS[0]}
           
-          # Parse JSON output for summary
+          # Parse JSON output for summary.  The report is a pretty-printed
+          # JSON object (multi-line), so locate its opening brace and decode
+          # from there; exit_code is passed via argv because shell variables
+          # are not visible inside python -c.
           python -c "
           import json
           import sys
           
+          exit_code = int(sys.argv[1])
+          
           try:
-              # Read the JSON output (last line should be JSON)
               with open('self_test_output.log') as f:
-                  lines = f.readlines()
-                  for line in reversed(lines):
-                      if line.strip().startswith('{'):
-                          report = json.loads(line.strip())
-                          break
+                  content = f.read()
+              
+              start = content.rfind('\n{')
+              if start == -1:
+                  raise ValueError('no JSON report found in self-test output')
+              report, _ = json.JSONDecoder().raw_decode(content[start + 1:])
               
               summary = report.get('summary', {})
               print(f'::notice::Self-Test: {summary.get(\"pass\", 0)}/{summary.get(\"total\", 0)} passed')
@@ -163,12 +168,12 @@ jobs:
                           print(f'::error::{test[\"name\"]}: {test.get(\"error\", \"unknown error\")}')
                   sys.exit(1)
               
-              print('✓ Self-test PASSED')
+              print('Self-test PASSED')
           except Exception as e:
               print(f'::warning::Could not parse self-test output: {e}')
               # If we can't parse, rely on exit code
               sys.exit(exit_code)
-          "
+          " "$exit_code"
         continue-on-error: false
 
   # ── Stage 3: Status Snapshot Timing Check ───────────────────────────────────
@@ -315,6 +320,7 @@ jobs:
         continue-on-error: true
       
       - name: Create job summary
+        id: summary
         run: |
           python -c "
           import json
@@ -385,7 +391,11 @@ jobs:
               f.write(f'overall_passed={str(overall_passed).lower()}\n')
               f.write(f'deployment_ready={str(summary[\"deployment_ready\"]).lower()}\n')
           
-          sys.exit(0 if overall_passed else 1)
+          # Always exit 0 here: this step's job is to *report*.  Exiting
+          # non-zero on overall_passed=False used to fail the step before the
+          # artifact upload and GitHub step summary could run, silently
+          # dropping the report.  The enforce step below carries the signal.
+          sys.exit(0)
           "
       
       - name: Upload summary artifacts
@@ -400,6 +410,12 @@ jobs:
       - name: Add to GitHub step summary
         run: |
           cat merid-validation-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Enforce overall result
+        if: steps.summary.outputs.overall_passed != 'true'
+        run: |
+          echo "::error::Production validation failed — see the summary artifact and job log"
+          exit 1
 # 
 # Required secrets (if deploying):
 #   - KALSHI_API_KEY (for staging CFB tests)

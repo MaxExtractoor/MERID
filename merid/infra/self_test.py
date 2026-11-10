@@ -454,7 +454,6 @@ async def _test_integrity_gate() -> ComponentTest:
             fills_ledger=None,
             portfolio_state=None,
             risk_state=None,
-            cfb_rti=None,
             settings=settings,
         )
         

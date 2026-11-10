@@ -27,6 +27,19 @@ def _isolate_fault_manager():
         reset_fault_manager()
 
 
+@pytest.fixture(autouse=True)
+def _kalshi_test_credentials(monkeypatch):
+    """Provide dummy Kalshi credentials for ``KalshiWebSocket()`` construction.
+
+    ``KalshiWebSocket(config=None)`` resolves ``get_kalshi_config()``, which
+    requires a key id and key path/pem for the active environment.  CI runners
+    have no venue credentials (conftest blanks them), so the default-config
+    test raised ``ValueError``.  These tests mock the network path.
+    """
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key_id")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "test_key.pem")
+
+
 @pytest.fixture
 def config():
     """Create test Kalshi config."""

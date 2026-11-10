@@ -677,7 +677,12 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install ruff
-        run: pip install ruff
+        run: |
+          # 2026-11-10: upgrade bundled pip/setuptools first — pip-audit below
+          # audits the whole env and the Python 3.11 ensurepip bundles ship
+          # versions with known advisories, failing the scan on a bare env.
+          pip install --upgrade pip setuptools
+          pip install ruff
 
       # 2026-10-18: `--select E9,F63,F7,F82` surfaced ~170 pre-existing
       # F821/F822/F823 undefined-name findings across legacy and production

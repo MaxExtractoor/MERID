@@ -41,6 +41,20 @@ def _isolate_fault_manager():
         reset_fault_manager()
 
 
+@pytest.fixture(autouse=True)
+def _kalshi_test_credentials(monkeypatch):
+    """Provide dummy Kalshi credentials for ``KalshiWebSocket()`` construction.
+
+    ``KalshiWebSocket(config=None)`` resolves ``get_kalshi_config()``, which
+    requires a key id and key path/pem for the active environment.  CI runners
+    have no venue credentials, so construction raised ``ValueError`` before any
+    reconnect logic ran.  These tests mock ``connect``/``_reconnect`` and never
+    reach request signing, so placeholder values are sufficient.
+    """
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key_id")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "test_key.pem")
+
+
 class TestDisconnectReconnectBackoff:
     """Test disconnect/reconnect with exponential backoff."""
 
