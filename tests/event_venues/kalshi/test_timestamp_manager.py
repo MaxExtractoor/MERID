@@ -279,7 +279,7 @@ class TestTimestampManager:
         
         assert status["ticker"] == "KXBTC15M-26JAN112345-45"
         assert status["has_data"] is True
-        assert status["age_seconds"] == 10.0
+        assert status["age_seconds"] == pytest.approx(10.0, abs=0.01)
         assert status["is_fresh"] is True
         assert status["status"] == "fresh"
     
@@ -294,7 +294,7 @@ class TestTimestampManager:
         status = manager.get_freshness_status("KXBTC15M-26JAN112345-45")
         
         assert status["has_data"] is True
-        assert status["age_seconds"] == 100.0
+        assert status["age_seconds"] == pytest.approx(100.0, abs=0.01)
         assert status["is_fresh"] is False
         # Note: Status might be 'slightly_stale' depending on the implementation logic
         assert status["status"] in ["stale", "slightly_stale"]
@@ -310,7 +310,7 @@ class TestTimestampManager:
         status = manager.get_freshness_status("KXBTC15M-26JAN112345-45")
         
         assert status["has_data"] is True
-        assert status["age_seconds"] == 400.0
+        assert status["age_seconds"] == pytest.approx(400.0, abs=0.01)
         assert status["is_fresh"] is False
         assert status["status"] == "very_stale"
     

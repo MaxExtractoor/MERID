@@ -78,7 +78,9 @@ jobs:
         # timeout still yields the last in-flight test via the artifact below.
         # -k escalates to SIGKILL: a pytest child that leaks pipe writers or
         # ignores SIGTERM must not leave the step running past the bound.
-        timeout -k 60 2700 pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120 > venue-tests.log 2>&1
+        # SIGABRT + PYTHONFAULTHANDLER dumps every thread's stack into the
+        # transcript if the process is wedged after the test summary.
+        PYTHONFAULTHANDLER=1 timeout -s ABRT -k 60 2700 pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120 > venue-tests.log 2>&1
         ec=$?
         tail -60 venue-tests.log
         exit $ec

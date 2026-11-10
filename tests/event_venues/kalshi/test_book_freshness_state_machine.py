@@ -135,12 +135,12 @@ class TestBookFreshnessState:
         # Update with both timestamps
         state.update_from_ws(exchange_ts=now - 1.0, received_ts=now - 0.5)
         assert state.computed_timestamp == now - 1.0  # Uses exchange timestamp
-        assert state.age_seconds == 1.0  # Age based on exchange timestamp
+        assert state.age_seconds == pytest.approx(1.0, abs=0.01)  # Age based on exchange timestamp
         
         # Update with only received timestamp
         state.update_from_ws(exchange_ts=None, received_ts=now - 0.5)
         assert state.computed_timestamp == now - 0.5  # Falls back to received timestamp
-        assert state.age_seconds == 0.5  # Age based on received timestamp
+        assert state.age_seconds == pytest.approx(0.5, abs=0.01)  # Age based on received timestamp
     
     def test_out_of_order_updates(self):
         """Test out-of-order updates are handled correctly."""
@@ -149,15 +149,15 @@ class TestBookFreshnessState:
         
         # First update with old timestamp
         state.update_from_ws(exchange_ts=now - 5.0, received_ts=now - 5.0)
-        assert state.age_seconds == 5.0
+        assert state.age_seconds == pytest.approx(5.0, abs=0.01)
         
         # Second update with newer timestamp
         state.update_from_ws(exchange_ts=now - 1.0, received_ts=now - 1.0)
-        assert state.age_seconds == 1.0  # Age should reflect newest timestamp
+        assert state.age_seconds == pytest.approx(1.0, abs=0.01)  # Age should reflect newest timestamp
         
         # Third update with older timestamp (should not increase age)
         state.update_from_ws(exchange_ts=now - 3.0, received_ts=now - 3.0)
-        assert state.age_seconds == 3.0  # Age reflects this update
+        assert state.age_seconds == pytest.approx(3.0, abs=0.01)  # Age reflects this update
     
     def test_diagnostic_info(self):
         """Test diagnostic info returns complete state."""
