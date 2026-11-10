@@ -428,10 +428,11 @@ jobs:
           mkdir -p reports
           # Bound pytest below the 60-minute job timeout so a hang exits the
           # step (letting the artifact uploads run) instead of cancelling the
-          # job; -k escalates to SIGKILL so leaked children cannot hold the
-          # step open, and the transcript captures the last in-flight test.
-          # SIGABRT + PYTHONFAULTHANDLER dumps all thread stacks on a wedge.
-          PYTHONFAULTHANDLER=1 timeout -s ABRT -k 60 3000 python -m pytest \
+          # job.  pytest runs in its own process group and a watchdog
+          # SIGKILLs the group at 50min — a plain timeout only signals pytest
+          # itself, and leaked children or the venue WS SIGTERM handler can
+          # hold the step open indefinitely.
+          PYTHONFAULTHANDLER=1 setsid --wait python -m pytest \
             tests/event_venues/kalshi/test_allowed_market_policy.py \
             tests/event_venues/kalshi/test_market_catalog_filtering_integration.py \
             tests/event_venues/kalshi/test_market_universe_replay.py \
@@ -443,8 +444,13 @@ jobs:
             tests/web/test_canonical_lifespan_and_tickers.py \
             -v --tb=short --timeout=300 \
             --junitxml=reports/kalshi-contract-pipeline.xml \
-            > reports/kalshi-contract-pipeline.log 2>&1
+            > reports/kalshi-contract-pipeline.log 2>&1 &
+          TPID=$!
+          ( sleep 3000; kill -KILL -- "-$TPID" 2>/dev/null; pkill -KILL -f "pytest.*event_venues" 2>/dev/null ) &
+          WPID=$!
+          wait $TPID
           ec=$?
+          kill "$WPID" 2>/dev/null || true
           tail -60 reports/kalshi-contract-pipeline.log
           exit $ec
 
