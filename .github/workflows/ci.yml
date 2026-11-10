@@ -643,7 +643,10 @@ jobs:
     name: Full Test Discovery
     runs-on: ubuntu-latest
     needs: [swarm-integrity-gate]
-    timeout-minutes: 20
+    # 2026-11-10: ~24k tests need more than 20min on a cold runner, and the
+    # interpreter-shutdown wedge seen in the venue suite would otherwise burn
+    # the whole budget after tests finish.  30min + hard-exit wrapper.
+    timeout-minutes: 30
     continue-on-error: true
 
     steps:
@@ -663,12 +666,24 @@ jobs:
       - name: Discover and run all tests
         run: |
           mkdir -p reports
-          python -m pytest tests/ \
+          # Hard-exit wrapper: the interpreter can wedge during shutdown
+          # after a green run (leaked threads); os._exit preserves pytest's
+          # status.  setsid + watchdog bound a mid-run hang below the job
+          # timeout so this informational job cannot cancel the workflow.
+          PYTHONFAULTHANDLER=1 setsid --wait python scripts/ci_pytest_hard_exit.py tests/ \
             --ignore=tests/ChatGPT --ignore=tests/Grok --ignore=tests/Perplexity --ignore=tests/Final_Draft \
             -v --tb=line --timeout=30 \
             --junitxml=reports/full-discovery.xml \
             -x --maxfail=50 \
-            2>&1 | tail -100 > reports/full-discovery-summary.txt || true
+            > reports/full-discovery-pytest.log 2>&1 &
+          TPID=$!
+          ( sleep 1500; kill -KILL -- "-$TPID" 2>/dev/null; pkill -KILL -f "ci_pytest_hard_exit" 2>/dev/null ) &
+          WPID=$!
+          wait $TPID
+          ec=$?
+          kill "$WPID" 2>/dev/null || true
+          tail -100 reports/full-discovery-pytest.log > reports/full-discovery-summary.txt || true
+          echo "pytest exit: $ec (informational job — failures do not gate)"
           echo "--- Test Collection Summary ---"
           python -m pytest tests/ \
             --ignore=tests/ChatGPT --ignore=tests/Grok --ignore=tests/Perplexity --ignore=tests/Final_Draft \
