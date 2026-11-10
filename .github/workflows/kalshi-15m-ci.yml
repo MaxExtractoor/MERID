@@ -109,8 +109,18 @@ jobs:
         # The kalshi_risk marker is vestigial: its only decorated file
         # (tests/risk/test_kalshi_crypto_risk.py) is collect_ignore'd as stale,
         # so `-m kalshi_risk` selected zero tests and exited 5.  Run the live
-        # reconciliation + risk suites unfiltered instead.
-        pytest tests/reconciliation/ tests/risk/ -v --tb=short
+        # reconciliation + risk suites unfiltered instead.  Same hard-exit
+        # wrapper as the venue step — interpreter shutdown can wedge on
+        # leaked threads even after a green run.
+        PYTHONFAULTHANDLER=1 setsid --wait python scripts/ci_pytest_hard_exit.py tests/reconciliation/ tests/risk/ -v --tb=short > recon-risk-tests.log 2>&1 &
+        TPID=$!
+        ( sleep 1200; kill -KILL -- "-$TPID" 2>/dev/null; pkill -KILL -f "ci_pytest_hard_exit" 2>/dev/null ) &
+        WPID=$!
+        wait $TPID
+        ec=$?
+        kill "$WPID" 2>/dev/null || true
+        tail -40 recon-risk-tests.log
+        exit $ec
 
   thesis-side-invariant-tests:
     name: Thesis Side Invariant Verification
