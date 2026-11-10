@@ -3325,10 +3325,11 @@ async def place_order(
             logger.warning("Risk check failed (non-live, proceeding): %s", exc)
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
-    # Lifecycle contract (profit_only_v1): an entry needs a valid lifecycle
-    # plan, not an armed stop-loss - HOLD_TO_SETTLEMENT is a complete plan and
-    # loss exits are disabled by policy.  Under MERID_PROFIT_ONLY_EXITS=1 an
-    # explicit stop_loss_price_cents is a contract violation and is rejected.
+    # Lifecycle contract (pre_settlement_closeout_v2): an entry needs a valid
+    # lifecycle plan, not an armed stop-loss - PRE_SETTLEMENT_CLOSEOUT is the
+    # baseline plan and loss exits are disabled by policy.  Under
+    # MERID_PROFIT_ONLY_EXITS=1 an explicit stop_loss_price_cents is a contract
+    # violation and is rejected.
     # NOTE: Kalshi API uses base series tickers (KXBTC, KXETH, etc.) without timeframe suffix
     if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXXRP", "KXDOGE")):
         _profit_only_exits = os.getenv("MERID_PROFIT_ONLY_EXITS", "1").strip().lower() in (
@@ -3343,7 +3344,7 @@ async def place_order(
                 )
                 raise HTTPException(
                     status_code=400,
-                    detail="stop_loss_price_cents is not permitted under profit_only_v1 - loss exits are disabled by policy. Omit the field (HOLD_TO_SETTLEMENT applies) or provide take-profit parameters."
+                    detail="stop_loss_price_cents is not permitted under profit_only_v1 - loss exits are disabled by policy. Omit the field (PRE_SETTLEMENT_CLOSEOUT applies) or provide take-profit parameters."
                 )
         elif stop_loss_price_cents is None:
             logger.error(

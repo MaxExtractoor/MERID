@@ -58,7 +58,17 @@ logger = get_logger("merid.event_venues.kalshi.settlement_aligned_exit")
 
 # Bump on any change to the decision policy so persistence streaks and audit
 # records from different policy versions can never combine.
-POLICY_VERSION = "settlement_aligned_exit_v1"
+POLICY_VERSION = "pre_settlement_closeout_v2"
+PRE_SETTLEMENT_CLOSEOUT_SECONDS = 120
+PRE_SETTLEMENT_ENTRY_BUFFER_SECONDS = 30
+
+
+def pre_settlement_closeout_due(seconds_to_expiry: Any) -> bool:
+    try:
+        remaining = Decimal(str(seconds_to_expiry))
+        return remaining.is_finite() and 0 < remaining <= PRE_SETTLEMENT_CLOSEOUT_SECONDS
+    except (ValueError, TypeError, ArithmeticError):
+        return False
 
 
 # ── Environment helpers ───────────────────────────────────────────────────────
@@ -153,6 +163,14 @@ EXIT_REASON_CANONICAL_MAP: Dict[str, str] = {
     "loss_cut_40pct": "stop_loss",
     "manual": "manual",
     "scale_out": "take_profit",
+    # Legacy intent-contract spellings remain valid aliases; they classify to
+    # the same canonical reason instead of falling through as UNKNOWN.
+    "exit_tp": "take_profit",
+    "exit_sl": "stop_loss",
+    "exit_99c": "expiry_liquidation",
+    "exit_expiry": "expiry_liquidation",
+    "exit_risk_limit": "reconciliation",
+    "exit_manual": "manual",
     # The EV gate's own exit reason: submitted only when the evaluator
     # independently concludes net liquidation beats conservative hold value.
     "value_switch_exit": "value_switch_exit",

@@ -48,6 +48,9 @@ def _iso(tmp_path, monkeypatch):
     monkeypatch.delenv("MERID_DRIFT_ASSETS", raising=False)
     monkeypatch.delenv("MERID_DRIFT_MIN_NET_EV_CENTS", raising=False)
     monkeypatch.delenv("MERID_DRIFT_LOCK_GAIN_CENTS", raising=False)
+    for name in tuple(os.environ):
+        if name.startswith(("MERID_DRIFT_", "MERID_CHEAP_NO_")) and not name.endswith("STATE_PATH"):
+            monkeypatch.delenv(name, raising=False)
     yield
 
 
@@ -259,7 +262,13 @@ def test_drift_rescue_stamps_lane_and_floor(tmp_path, monkeypatch):
         "MERID_LIVE_EVIDENCE_PATH",
         _write_live_evidence(tmp_path, _winning_cells("DOGE")),
     )
-    d = _decision(asset="DOGE", seconds_to_expiry=700.0)
+    monkeypatch.setattr(
+        "merid.prediction.current_build_provisional.adverse_selection_reserve_cents",
+        lambda *args, **kwargs: 2.0,
+    )
+    d = _decision(asset="DOGE", seconds_to_expiry=700.0, spot_price=99.85,
+                  model_uncertainty=0.15)
+    assert -12.0 <= float(d.no_edge_breakdown.net_edge) * 100 < 0.0
     assert d.selected_outcome is not None, (
         d.indicators.get("yes_block"), d.indicators.get("no_block"),
         d.no_trade_reason,
@@ -267,6 +276,7 @@ def test_drift_rescue_stamps_lane_and_floor(tmp_path, monkeypatch):
         d.indicators.get("no_thr_cell_id"),
         d.indicators.get("no_thr_prov_cell_id"),
         d.indicators.get("no_drift_block_reason"),
+        str(d.no_edge_breakdown),
     )
     lane = d.indicators.get("decision_lane")
     if lane != "drift_fav":
@@ -368,13 +378,14 @@ def test_lock_threshold_for_drift_lane(monkeypatch):
 
 
 def test_settle_hold_lane_contract():
+    """pre_settlement_closeout_v2: no lane may suppress automatic exits."""
     from merid.position_management.position_monitor import _settle_hold
 
     class _P:
         def __init__(self, lane):
             self.decision_lane = lane
 
-    assert _settle_hold(_P("cheap_no_settle")) is True
+    assert _settle_hold(_P("cheap_no_settle")) is False
     assert _settle_hold(_P("drift_fav")) is False
     assert _settle_hold(_P(None)) is False
     assert _settle_hold(_P("pinned_fav")) is False

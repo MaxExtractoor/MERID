@@ -189,6 +189,93 @@ class TestOrphanedPositionExitE2E:
         assert ctx.generation_id == "07278edf-8911-8eaa-25aa-f302e089abc1"
 
 
+@pytest.mark.parametrize("reason,kind", [
+    ("trail", "trailing_profit"),
+    ("trailing_stop", "trailing_profit"),
+    ("take_profit", "profit_lock"),
+    ("scale_out", "profit_lock"),
+    ("ratchet_trim", "profit_lock"),
+    ("edge_decay", "model_exit"),
+    ("candle_reversal", "model_exit"),
+    ("adaptive_timing", "model_exit"),
+    ("model_invalidation_loss_exit", "model_exit"),
+    ("continuation_stop", "model_exit"),
+])
+@pytest.mark.parametrize("bid,limit", [(81, 79), (81, 81)])
+def test_monitor_trail_preserves_ordinary_authority(tmp_path, bid, limit, reason, kind):
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "merid" / "loop_15m.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    mapping = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                   and node.name == "_map_exit_reason_to_intent_contract")
+    namespace = {}
+    exec(compile(ast.Module(body=[mapping], type_ignores=[]), str(source), "exec"), namespace)
+    wire_reason = namespace[mapping.name](reason).value
+    intent = SimpleNamespace(
+        ticker="KXXRP15M-TRAIL-15", side="yes", action="sell",
+        intent_id="trail-replay", client_order_id="trail-coid",
+        price_cents=limit, count=4, count_fp=4, qty_cc=None,
+        exit_reason=wire_reason, reason=f"exit:{reason}",
+        source="position_monitor_exit", agent_id="XRP_15M",
+        exit_class=None, emergency_type=None, authorization_source=None,
+        position_generation_id="trail-fill", reduce_only=True,
+        entry_or_exit="exit", time_in_force="ioc",
+    )
+    from merid.position_management.exit_pipeline import ExitContext
+    from merid.event_venues.kalshi.order_intent_contract import normalize_order
+
+    ctx = ExitContext(
+        market_id=intent.ticker, generation_id="trail-fill", held_side="yes",
+        remaining_cc=400, breakeven_floor_cents=75, trail_giveback_cents=5,
+        book=ExitBook(held_side="yes", liquidation_cents=bid, qty_cc=400, age_ms=16),
+    )
+    arb = ExitArbiter(
+        state_store=PositionExitStateStore(tmp_path / "state.json"),
+        attempt_store=ExitAttemptStore(tmp_path / "attempts.json"),
+    )
+    legacy = SimpleNamespace(**vars(intent))
+    legacy.exit_reason = "exit_manual"
+    rejected = approve_intent(legacy, ctx, issuer="position_monitor", arbiter=arb)
+    assert not rejected.approved
+    assert "issuer_not_authorized" in rejected.denial
+    prepared = approve_intent(intent, ctx, issuer="position_monitor", arbiter=arb)
+    assert prepared.approved, prepared.denial
+    assert prepared.result.attempt.proposal_kind == kind
+    assert prepared.result.exception is None
+    canonical = normalize_order(intent)
+    assert canonical.exit_class == "operational"
+    assert canonical.emergency_type is None
+
+
+@pytest.mark.parametrize("reason,canonical,classification", [
+    ("settlement_guard", "expiry_liquidation", "emergency"),
+    ("loss_cap", "loss_cap", "emergency"),
+    ("time_stop", "time_exit", "operational"),
+    ("risk", "reconciliation", "operational"),
+    ("stale_data", "reconciliation", "operational"),
+    ("stop_loss", "stop_loss", "discretionary"),
+    ("current_edge_reversal", "signal_reversal", "operational"),
+    ("opportunity_cost", "signal_reversal", "operational"),
+])
+def test_monitor_reason_transport_preserves_taxonomy(reason, canonical, classification):
+    from merid.loop_15m import _map_exit_reason_to_intent_contract
+    from merid.event_venues.kalshi.settlement_aligned_exit import classify_exit_reason
+
+    wire = _map_exit_reason_to_intent_contract(reason)
+    _, actual, exit_class = classify_exit_reason(wire)
+    assert actual == canonical
+    assert exit_class.value == classification
+
+
+def test_unknown_automatic_reason_cannot_claim_manual_authority():
+    from merid.loop_15m import _map_exit_reason_to_intent_contract
+
+    with pytest.raises(ValueError, match="Unknown automatic exit reason"):
+        _map_exit_reason_to_intent_contract("unregistered_exit")
+
+
 class TestHardProfitLockEmergencyAuthorization:
     """2026-11-08 (DOGE-1830): the witnessed hard-profit-lock obligation is
     a mechanical emergency liquidation bound to its position generation.

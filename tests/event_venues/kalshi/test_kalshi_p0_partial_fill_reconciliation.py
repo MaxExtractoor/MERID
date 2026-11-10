@@ -208,6 +208,7 @@ def _entry_intent(
         window_resolution_id="test_window",
         risk_tier="A",
         max_hold_seconds=600,
+        exchange_index=2,
     )
 
 
@@ -238,6 +239,7 @@ def _exit_intent(
         pre_position_size=pre_position,
         expected_post_position_size=0,
         max_hold_seconds=600,
+        exchange_index=2,
     )
 
 

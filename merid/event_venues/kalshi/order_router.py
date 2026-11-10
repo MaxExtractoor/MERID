@@ -1939,9 +1939,11 @@ class ExitPolicyResolution:
     net_edge_cents_at_entry: Optional[float] = None  # Net edge after fees (cents) at entry
 
     # Exit semantics.  "ACTIVE_MANAGEMENT" = TP/SL/trailing policy is live;
-    # "HOLD_TO_SETTLEMENT" = the position is held to settlement by design
-    # (MERID_DISABLE_EXIT_POLICY=1).  Emergency reduce-only/flatten capability
-    # is unaffected — those paths do not consume TP/SL targets.
+    # "PRE_SETTLEMENT_CLOSEOUT" = discretionary exits are disabled but the
+    # mandatory pre-expiry closeout still applies.  "HOLD_TO_SETTLEMENT" is a
+    # legacy serialized label only — it is normalized to closeout downstream.
+    # Emergency reduce-only/flatten capability is unaffected — those paths do
+    # not consume TP/SL targets.
     mode: str = "ACTIVE_MANAGEMENT"
 
     # Metadata
@@ -2001,18 +2003,19 @@ def exit_policy_to_dict(policy: Any) -> Dict[str, Any]:
     }
 
 
-# ── Position lifecycle contract (profit_only_v1) ─────────────────────────────
+# ── Position lifecycle contract (pre_settlement_closeout_v2) ─────────────────
 # Every 15m crypto entry must carry a valid lifecycle plan.  A plan is NOT an
-# active exit order: HOLD_TO_SETTLEMENT is a complete, legal plan — binary
-# contracts settle at expiry and settlement IS the exit.  Loss-triggered exits
-# are disabled by policy (observed premature cash-outs); profit exits (resting
-# take-profit, profit-lock trail) are optional components and never gate entry.
+# active exit order: PRE_SETTLEMENT_CLOSEOUT is a complete, legal plan —
+# profit exits are optional overlays and the position must attempt a full
+# liquidation before expiry.  Intentional hold-to-settlement plans are rejected.
+# Loss-triggered exits are disabled by policy (observed premature cash-outs).
+LIFECYCLE_MODE_PRE_SETTLEMENT = "PRE_SETTLEMENT_CLOSEOUT"
 LIFECYCLE_MODE_HOLD_TO_SETTLEMENT = "HOLD_TO_SETTLEMENT"
 LIFECYCLE_MODE_TAKE_PROFIT_ONLY = "TAKE_PROFIT_ONLY"
 LIFECYCLE_MODE_PROFIT_TRAIL_ONLY = "PROFIT_TRAIL_ONLY"
 LIFECYCLE_MODE_TP_PLUS_TRAIL = "TAKE_PROFIT_PLUS_PROFIT_TRAIL"
 VALID_LIFECYCLE_EXIT_MODES = frozenset({
-    LIFECYCLE_MODE_HOLD_TO_SETTLEMENT,
+    LIFECYCLE_MODE_PRE_SETTLEMENT,
     LIFECYCLE_MODE_TAKE_PROFIT_ONLY,
     LIFECYCLE_MODE_PROFIT_TRAIL_ONLY,
     LIFECYCLE_MODE_TP_PLUS_TRAIL,
@@ -2038,14 +2041,16 @@ class PositionLifecyclePlan:
 
     Replaces the old "must have an armed TP/SL" requirement.  The router
     invariant asserts: plan is present, stop_loss_enabled is False, and
-    exit_mode is one of VALID_LIFECYCLE_EXIT_MODES.  Settlement is always the
-    fallback — profit exits are optional overlays.
+    exit_mode is one of VALID_LIFECYCLE_EXIT_MODES.  Mandatory
+    pre-settlement closeout is the baseline — profit exits are optional
+    overlays and intentional settlement is not a legal plan.
     """
-    policy_id: str = "profit_only_v1"
-    exit_mode: str = LIFECYCLE_MODE_HOLD_TO_SETTLEMENT
+    policy_id: str = "pre_settlement_closeout_v2"
+    exit_mode: str = LIFECYCLE_MODE_PRE_SETTLEMENT
+    closeout_seconds_before_expiry: int = 120
     stop_loss_enabled: bool = False
     stop_loss_disabled_reason: str = "disabled_by_policy"
-    hold_to_settlement_enabled: bool = True
+    hold_to_settlement_enabled: bool = False
     take_profit_enabled: bool = False
     take_profit_price_cents: Optional[int] = None
     profit_trail_enabled: bool = False
@@ -2061,10 +2066,11 @@ def lifecycle_plan_to_dict(plan: Any) -> Dict[str, Any]:
     """Serialize a PositionLifecyclePlan (or plan-like object) to a JSON-safe dict."""
     return {
         "policy_id": getattr(plan, "policy_id", "profit_only_v1"),
-        "exit_mode": getattr(plan, "exit_mode", LIFECYCLE_MODE_HOLD_TO_SETTLEMENT),
+        "exit_mode": getattr(plan, "exit_mode", LIFECYCLE_MODE_PRE_SETTLEMENT),
         "stop_loss_enabled": bool(getattr(plan, "stop_loss_enabled", False)),
         "stop_loss_disabled_reason": getattr(plan, "stop_loss_disabled_reason", "disabled_by_policy"),
-        "hold_to_settlement_enabled": bool(getattr(plan, "hold_to_settlement_enabled", True)),
+        "hold_to_settlement_enabled": bool(getattr(plan, "hold_to_settlement_enabled", False)),
+        "closeout_seconds_before_expiry": getattr(plan, "closeout_seconds_before_expiry", None),
         "take_profit_enabled": bool(getattr(plan, "take_profit_enabled", False)),
         "take_profit_price_cents": getattr(plan, "take_profit_price_cents", None),
         "profit_trail_enabled": bool(getattr(plan, "profit_trail_enabled", False)),
@@ -2092,7 +2098,7 @@ def _coerce_lifecycle_plan(raw: Any) -> Optional[PositionLifecyclePlan]:
                 "hold_to_settlement_enabled", "take_profit_enabled", "take_profit_price_cents",
                 "profit_trail_enabled", "trail_activation_price_cents", "trail_floor_price_cents",
                 "trail_distance_cents", "min_locked_profit_cents", "exit_order_ttl_seconds",
-                "version",
+                "version", "closeout_seconds_before_expiry",
             }
             kwargs = {k: v for k, v in raw.items() if k in known}
             return PositionLifecyclePlan(**kwargs)
@@ -2148,10 +2154,10 @@ def derive_lifecycle_plan(intent: "OrderIntent") -> PositionLifecyclePlan:
 
     Sources, in order: the serialized exit_policy dict on the intent (mode and
     armed flags are authoritative), then armed TP/trailing fields on the intent
-    itself.  A policy whose mode is HOLD_TO_SETTLEMENT always yields
-    HOLD_TO_SETTLEMENT even if stray TP/SL fields are present.  With no armed
-    profit components the plan is HOLD_TO_SETTLEMENT — settlement is the exit.
-    Stop-loss is never armed by this contract (disabled_by_policy).
+    itself.  A legacy HOLD_TO_SETTLEMENT policy label yields the mandatory
+    closeout plan even if stray TP/SL fields are present.  With no armed
+    profit components the plan is PRE_SETTLEMENT_CLOSEOUT.  Stop-loss is never
+    armed by this contract (disabled_by_policy).
     """
     policy = intent.exit_policy if isinstance(getattr(intent, "exit_policy", None), dict) else {}
     asset = _crypto_15m_asset(getattr(intent, "ticker", ""))
@@ -2159,7 +2165,6 @@ def derive_lifecycle_plan(intent: "OrderIntent") -> PositionLifecyclePlan:
 
     if policy.get("mode") == LIFECYCLE_MODE_HOLD_TO_SETTLEMENT:
         return PositionLifecyclePlan(
-            exit_mode=LIFECYCLE_MODE_HOLD_TO_SETTLEMENT,
             exit_order_ttl_seconds=policy.get("max_hold_seconds"),
         )
 
@@ -2193,7 +2198,7 @@ def derive_lifecycle_plan(intent: "OrderIntent") -> PositionLifecyclePlan:
     elif trail_enabled:
         plan.exit_mode = LIFECYCLE_MODE_PROFIT_TRAIL_ONLY
     else:
-        plan.exit_mode = LIFECYCLE_MODE_HOLD_TO_SETTLEMENT
+        plan.exit_mode = LIFECYCLE_MODE_PRE_SETTLEMENT
     return plan
 
 
@@ -2210,8 +2215,14 @@ def _validate_lifecycle_plan(plan: Optional[PositionLifecyclePlan]) -> Optional[
         return f"invalid_exit_mode:{plan.exit_mode}"
     if plan.stop_loss_enabled:
         return "stop_loss_enabled"
-    if not plan.hold_to_settlement_enabled:
-        return "no_settlement_fallback"
+    if plan.hold_to_settlement_enabled:
+        return "intentional_settlement_not_allowed"
+    from merid.event_venues.kalshi.settlement_aligned_exit import PRE_SETTLEMENT_CLOSEOUT_SECONDS
+    if (
+        isinstance(plan.closeout_seconds_before_expiry, bool)
+        or plan.closeout_seconds_before_expiry != PRE_SETTLEMENT_CLOSEOUT_SECONDS
+    ):
+        return "invalid_pre_settlement_deadline"
     if plan.exit_mode in (LIFECYCLE_MODE_TAKE_PROFIT_ONLY, LIFECYCLE_MODE_TP_PLUS_TRAIL):
         if not plan.take_profit_enabled:
             return "take_profit_mode_without_take_profit"
@@ -2313,12 +2324,13 @@ def resolve_exit_policy(
             edge_confidence = None
             net_edge_cents_at_entry = None
 
-    # Settlement-hold mode (2026-09-27 operator flag, made explicit 2026-11):
-    # when MERID_DISABLE_EXIT_POLICY=1 the position is held to settlement
-    # resolution by design.  Return an honest policy object with no TP/SL/
-    # trailing/scale-out targets instead of fabricating discretionary targets
-    # that the position monitor will ignore.  Emergency reduce-only, cancel,
-    # and flatten capability are independent of this policy and unaffected.
+    # Settlement-hold mode (2026-09-27 operator flag, updated 2026-11):
+    # when MERID_DISABLE_EXIT_POLICY=1 discretionary TP/SL/trailing/scale-out
+    # targets are disabled, but the position is NOT held to settlement — the
+    # mandatory pre-expiry closeout still applies.  Return an honest policy
+    # object with no discretionary targets instead of fabricating targets the
+    # position monitor will ignore.  Emergency reduce-only, cancel, flatten,
+    # and settlement-guard closeout capability are independent and unaffected.
     if os.environ.get("MERID_DISABLE_EXIT_POLICY", "0").strip().lower() in (
         "1", "true", "yes", "on",
     ):
@@ -2355,7 +2367,7 @@ def resolve_exit_policy(
             min_edge_after_fees_cents=0.0,
             edge_confidence=edge_confidence,
             net_edge_cents_at_entry=net_edge_cents_at_entry,
-            mode="HOLD_TO_SETTLEMENT",
+            mode=LIFECYCLE_MODE_PRE_SETTLEMENT,
         )
 
     # CRITICAL FIX: Load TP/SL from YAML exit_policy.risk_reward config (2026-07-15)
@@ -3763,7 +3775,7 @@ class OrderIntent:
     exit_policy: Optional[Dict[str, Any]] = None  # Resolved ExitPolicyResolution as JSON-safe dict
     # PROFIT_ONLY LIFECYCLE CONTRACT: canonical position lifecycle plan
     # (PositionLifecyclePlan as JSON-safe dict).  Derived by the router
-    # invariant when absent; HOLD_TO_SETTLEMENT is a valid plan.
+    # invariant when absent; PRE_SETTLEMENT_CLOSEOUT is the baseline plan.
     lifecycle_plan: Optional[Dict[str, Any]] = None
     max_rest_seconds: Optional[int] = 180  # Max time a maker/passive order may rest on the book before expiration
     
@@ -7499,9 +7511,10 @@ def _check_exit_delta_invariant(intent: OrderIntent, mode: TradingMode) -> Optio
 def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMode) -> Optional[OrderResult]:
     """Enforce the position lifecycle invariant for 15m crypto entry orders.
 
-    Contract (profit_only_v1): every 15m crypto entry must carry a valid
-    PositionLifecyclePlan.  A plan is a *lifecycle contract*, not an armed exit
-    order — HOLD_TO_SETTLEMENT is a complete legal plan.  Validation requires:
+    Contract (pre_settlement_closeout_v2): every 15m crypto entry must carry a
+    valid PositionLifecyclePlan.  A plan is a *lifecycle contract*, not an armed
+    exit order — PRE_SETTLEMENT_CLOSEOUT is a complete legal plan.  Validation
+    requires:
       - plan resolves (explicit intent.lifecycle_plan, or derived from the
         serialized exit_policy + TP/trailing fields),
       - plan.stop_loss_enabled is False (loss exits are disabled by policy),
@@ -7583,8 +7596,8 @@ def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMo
                     intent.exit_policy["lifecycle_plan"] = intent.lifecycle_plan
     else:
         # No explicit plan: derive one from the serialized exit policy and the
-        # armed TP/trailing fields.  HOLD_TO_SETTLEMENT is always derivable,
-        # so an entry is never blocked merely for lacking exit orders.
+        # armed TP/trailing fields.  PRE_SETTLEMENT_CLOSEOUT is always
+        # derivable, so an entry is never blocked merely for lacking exit orders.
         plan = derive_lifecycle_plan(intent)
         intent.lifecycle_plan = lifecycle_plan_to_dict(plan)
         # Mirror onto the serialized exit policy so the position record carries
@@ -7963,6 +7976,25 @@ def _resolve_rest_seconds(intent: OrderIntent) -> int:
     return 180
 
 
+def _pre_settlement_entry_denial(intent: OrderIntent) -> Optional[str]:
+    if not _is_15m_crypto_entry_order(intent):
+        return None
+    if getattr(intent, "decision_lane", None) in ("cheap_no_settle", "settlement_convergence"):
+        return "settlement_lane_incompatible_with_closeout"
+    from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
+    from merid.event_venues.kalshi.settlement_aligned_exit import (
+        PRE_SETTLEMENT_CLOSEOUT_SECONDS, PRE_SETTLEMENT_ENTRY_BUFFER_SECONDS,
+    )
+    expiry = parse_kalshi_15m_window_end_utc(intent.ticker)
+    if expiry is None:
+        return None
+    if expiry.timestamp() - _now_unix_s() <= (
+        PRE_SETTLEMENT_CLOSEOUT_SECONDS + PRE_SETTLEMENT_ENTRY_BUFFER_SECONDS
+    ):
+        return "pre_settlement_entry_deadline"
+    return None
+
+
 def _resolve_gtc_expiration(intent: OrderIntent) -> int:
     """Resolve an absolute GTC expiration timestamp.
 
@@ -7972,9 +8004,14 @@ def _resolve_gtc_expiration(intent: OrderIntent) -> int:
     """
     exp_ts = getattr(intent, "order_expiration_ts", None)
     now = _now_unix_s()
-    if exp_ts and int(exp_ts) > now:
-        return int(exp_ts)
-    return now + _resolve_rest_seconds(intent)
+    expiration = int(exp_ts) if exp_ts and int(exp_ts) > now else now + _resolve_rest_seconds(intent)
+    if _is_15m_crypto_entry_order(intent):
+        from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
+        from merid.event_venues.kalshi.settlement_aligned_exit import PRE_SETTLEMENT_CLOSEOUT_SECONDS
+        expiry = parse_kalshi_15m_window_end_utc(intent.ticker)
+        if expiry is not None:
+            expiration = min(expiration, int(expiry.timestamp()) - PRE_SETTLEMENT_CLOSEOUT_SECONDS)
+    return expiration
 
 
 def _resolve_max_slippage_cents() -> int:
@@ -14468,6 +14505,9 @@ async def _route_live(
     plan_done: bool = False,
 ) -> OrderResult:
     """Route LIVE intents through the canonical KalshiVenueClient."""
+    denial = _pre_settlement_entry_denial(intent)
+    if denial is not None:
+        return OrderResult(status="rejected", mode=mode, reason=denial, latency_ms=0.0)
     # Durable identity finalization is idempotent. It is performed early in
     # _route_order_async_impl / _route_order_impl, but _route_live may be called
     # directly by tests or batch paths. Ensure the canonical coid exists before
@@ -17757,6 +17797,11 @@ async def _route_live(
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.
         # Mark the durable attempt as SUBMITTING before the network call.
+        denial = _pre_settlement_entry_denial(intent)
+        if denial is not None:
+            _mark_attempt_status(intent, "REJECTED")
+            _release_allocated_slot(intent)
+            return OrderResult(status="rejected", mode=mode, reason=denial, latency_ms=0.0)
         if not _mark_attempt_status(intent, "SUBMITTING"):
             logger.error(
                 "[ORDER-ATTEMPT-STATUS] submission claim failed for intent_id=%s; not sending",
@@ -22421,6 +22466,11 @@ async def _execute_scaled_order(
     Returns:
         OrderResult if scaling was applied, None if scaling not applicable
     """
+    if _is_live_mode(mode):
+        return OrderResult(
+            status="rejected", mode=mode,
+            reason="scaled_live_execution_not_validated", latency_ms=0.0,
+        )
     try:
         from merid.event_venues.kalshi.order_scaler import (
             get_order_scaler,

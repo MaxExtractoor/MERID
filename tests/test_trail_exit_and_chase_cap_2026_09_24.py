@@ -77,6 +77,15 @@ def _seed_canonical_position_cache():
     cache._positions.pop(market_id, None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_aligned_divergence_state():
+    from merid.event_venues.kalshi import order_router as _order_router
+
+    _order_router._aligned_div.clear()
+    yield
+    _order_router._aligned_div.clear()
+
+
 def _make_state(*, yes_bid=None, yes_ask=None, age_ms=1000, seconds_to_expiry=90.0):
     # Default TTE sits inside the evidence-envelope terminal window (<=120s).
     # Since 2026-10-12 the scalping-asymmetry envelope defers trailing_stop
@@ -347,11 +356,9 @@ def test_no_veto_when_economics_unavailable(monkeypatch):
     assert approved is True
 
 
-def test_emergency_expiry_settles_without_premium(monkeypatch):
-    """Inside the emergency cutoff an expiry sell now needs a market premium:
-    settlement needs no book, so a trusted model valuing the contract above
-    the bid means the position rides to settlement (auto_exit_99c ->
-    expiry_liquidation)."""
+def test_mandatory_closeout_sells_without_premium(monkeypatch):
+    """Inside the mandatory closeout window the deadline trumps settle-value EV:
+    the position must attempt liquidation even when the model favors settlement."""
     _stub_evaluator(
         monkeypatch, _trusted_hold_eval(net_sell="55.0", cons_hold="66.0", p_cal=70)
     )
@@ -359,26 +366,27 @@ def test_emergency_expiry_settles_without_premium(monkeypatch):
     state = _make_state(yes_bid=55, yes_ask=57, seconds_to_expiry=30.0)
 
     approved, _price, record, _did = _run_guard(
-        position, "auto_exit_99c", exit_price_cents=55, state=state
+        position, "settlement_guard", exit_price_cents=55, state=state
     )
 
-    assert approved is False
+    assert approved is True
     assert record["is_emergency"] is True
-    assert record["reject_reason"] == "expiry_settle_default"
+    assert record["mandatory_closeout"] is True
 
 
-def test_forced_exit_vetoed_outside_emergency(monkeypatch):
-    """expiry_liquidation beyond the emergency cutoff IS vetoable: a winning
-    position must not be dumped at a discount just because a timer fired."""
+def test_forced_exit_vetoed_outside_closeout(monkeypatch):
+    """expiry_liquidation beyond the mandatory closeout window IS vetoable: a
+    winning position must not be dumped at a discount just because a timer fired."""
     _stub_evaluator(monkeypatch, _trusted_hold_eval())
     position = _make_trail_position()
-    state = _make_state(yes_bid=55, yes_ask=57, seconds_to_expiry=120.0)
+    state = _make_state(yes_bid=55, yes_ask=57, seconds_to_expiry=121.0)
 
     approved, _price, record, _did = _run_guard(
         position, "settlement_guard", exit_price_cents=55, state=state
     )
 
     assert approved is False
+    assert record["mandatory_closeout"] is False
     assert record["reject_reason"] == "expiry_settle_default"
 
 
@@ -401,10 +409,11 @@ def _expiry_eval(**overrides):
 
 
 def test_expiry_untrusted_eval_rides_to_settlement(monkeypatch):
-    """Incident replay: eval untrusted -> settle, don't donate spread+fee."""
+    """Outside the mandatory closeout window an untrusted eval still rides to
+    settlement instead of donating spread+fee at the bid."""
     _stub_evaluator(monkeypatch, _expiry_eval())  # everything untrusted/None
     position = _make_trail_position()
-    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=104.0)
+    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=121.0)
 
     approved, _price, record, _did = _run_guard(
         position, "settlement_guard", exit_price_cents=48, state=state
@@ -429,7 +438,7 @@ def test_expiry_premium_sell_proceeds(monkeypatch):
         ),
     )
     position = _make_trail_position()
-    state = _make_state(yes_bid=60, yes_ask=62, seconds_to_expiry=90.0)
+    state = _make_state(yes_bid=60, yes_ask=62, seconds_to_expiry=121.0)
 
     approved, _price, record, _did = _run_guard(
         position, "settlement_guard", exit_price_cents=60, state=state
@@ -453,7 +462,7 @@ def test_expiry_no_premium_settles(monkeypatch):
         ),
     )
     position = _make_trail_position()
-    state = _make_state(yes_bid=46, yes_ask=48, seconds_to_expiry=90.0)
+    state = _make_state(yes_bid=46, yes_ask=48, seconds_to_expiry=121.0)
 
     approved, _price, record, _did = _run_guard(
         position, "settlement_guard", exit_price_cents=46, state=state
@@ -463,9 +472,9 @@ def test_expiry_no_premium_settles(monkeypatch):
     assert record["reject_reason"] == "expiry_settle_default"
 
 
-def test_expiry_gate_applies_inside_emergency_cutoff(monkeypatch):
-    """T-30s is 'emergency' for quote checks but settlement still needs no
-    book — an untrusted eval must not force-sell at the bid."""
+def test_mandatory_closeout_applies_inside_emergency_cutoff(monkeypatch):
+    """T-30s is inside both the emergency and mandatory-closeout windows, so the
+    deadline liquidation proceeds even when the eval is untrusted."""
     _stub_evaluator(monkeypatch, _expiry_eval())
     position = _make_trail_position()
     state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=30.0)
@@ -474,8 +483,9 @@ def test_expiry_gate_applies_inside_emergency_cutoff(monkeypatch):
         position, "settlement_guard", exit_price_cents=48, state=state
     )
 
-    assert approved is False
-    assert record["reject_reason"] == "expiry_settle_default"
+    assert approved is True
+    assert record["is_emergency"] is True
+    assert record["mandatory_closeout"] is True
 
 
 def test_expiry_gate_env_off_restores_legacy_sell(monkeypatch):
@@ -483,7 +493,7 @@ def test_expiry_gate_env_off_restores_legacy_sell(monkeypatch):
     monkeypatch.setenv("MERID_SETTLEMENT_GUARD_EV_GATE", "0")
     _stub_evaluator(monkeypatch, _expiry_eval())
     position = _make_trail_position()
-    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=90.0)
+    state = _make_state(yes_bid=48, yes_ask=52, seconds_to_expiry=121.0)
 
     approved, _price, record, _did = _run_guard(
         position, "settlement_guard", exit_price_cents=48, state=state

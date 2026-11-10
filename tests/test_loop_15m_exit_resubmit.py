@@ -128,6 +128,8 @@ async def test_unproven_exit_outcome_retains_lock(
     if failure == "filled_exit_failure":
         self_mock._position_monitor._update_order_attempt_status.return_value = True
         self_mock._position_monitor._mark_exit_intent_reconciled.return_value = False
+    if failure == "identity_mismatch":
+        self_mock._position_monitor._mark_exit_intent_reconciled.return_value = False
 
     async def _fake_route(intent):
         route_calls.append((intent.client_order_id, intent.order_attempt_id))

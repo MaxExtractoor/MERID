@@ -122,6 +122,21 @@ def _seconds_to_expiry_from_ticker(ticker: str) -> Optional[float]:
 DEFAULT_SETTLEMENT_GUARD_SECONDS = 120
 
 
+def _closeout_seconds_remaining(position, snapshot=None) -> Optional[float]:
+    remaining = _seconds_to_expiry_from_ticker(position.market_id)
+    if remaining is not None:
+        return remaining
+    remaining = getattr(snapshot, "seconds_to_expiry", None)
+    if remaining is not None:
+        return remaining
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        store = get_kalshi_market_state_store()
+        return getattr(store.get(position.market_id), "seconds_to_expiry", None) if store else None
+    except Exception:
+        return None
+
+
 def _get_settlement_guard_seconds() -> float:
     """Load settlement guard seconds from active profile (config-driven)."""
     try:
@@ -1055,12 +1070,13 @@ def _lock_threshold_for(position) -> int:
 
 
 def _settle_hold(position) -> bool:
-    """``cheap_no_settle`` positions carry a settlement claim — take-profit,
-    dynamic-TP, trailing and ratchet exits would dump the position at the
-    drift price and forfeit the measured settle edge.  The global hard
-    lock still applies (a rally to >=90c pays far more than the settle
-    claim) and LOSS_CAP salvage remains the catastrophe floor."""
-    return _position_decision_lane(position) == "cheap_no_settle"
+    """Deprecated under pre_settlement_closeout_v2.
+
+    Settlement-claim lanes may no longer suppress automatic exits: every
+    filled position must remain eligible for profitable scalps and the
+    mandatory pre-expiry closeout.  Kept as a stable False predicate so old
+    callers/tests do not reintroduce hold-to-settlement behavior."""
+    return False
 
 
 def _hard_lock_fast_path_enabled() -> bool:
@@ -4530,6 +4546,8 @@ class PositionMonitor:
                 f"_check_position requires an ExitPriceSnapshot, got {type(snapshot).__name__}. "
                 "Use _legacy_check_position for deprecated integer test paths."
             )
+        if position.size <= 0 or position.exited_at is not None:
+            return None
         current_price_cents = snapshot.own_side_bid_cents
 
         # Update runtime state using the executable liquidation bid
@@ -4560,6 +4578,22 @@ class PositionMonitor:
             position.exit_triggered = False
             position.exit_reason = None
             position.exit_price_cents = None
+
+        from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
+
+        remaining = _closeout_seconds_remaining(position, snapshot)
+        if pre_settlement_closeout_due(remaining):
+            decision = ExitDecision(
+                reason=ExitReason.SETTLEMENT_GUARD,
+                priority=get_priority_for_reason(ExitReason.SETTLEMENT_GUARD),
+                source_layer=ExitSourceLayer.POSITION_LEVEL,
+                exit_price_cents=current_price_cents,
+                metadata={"mandatory_closeout": True, "seconds_to_expiry": remaining},
+            )
+            await self._emit_exit_intent(
+                position, decision.reason, current_price_cents, snapshot=snapshot,
+            )
+            return decision
 
         candidates: List[ExitDecision] = []
 
@@ -7693,7 +7727,13 @@ class PositionMonitor:
             bypass_in_flight_check: If True, skip the in-flight check (for expired markets)
             snapshot: Optional ExitPriceSnapshot used for the trigger
         """
-        if _exit_policy_disabled() and exit_reason != ExitReason.HARD_PROFIT_LOCK:
+        from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
+        if pre_settlement_closeout_due(_closeout_seconds_remaining(position, snapshot)):
+            exit_reason = ExitReason.SETTLEMENT_GUARD
+            contracts_to_close = None
+        if _exit_policy_disabled() and exit_reason not in (
+            ExitReason.HARD_PROFIT_LOCK, ExitReason.SETTLEMENT_GUARD,
+        ):
             _log_exit_policy_suppressed(position, exit_reason, exit_price_cents, contracts_to_close)
             return
         if _exit_policy_disabled():

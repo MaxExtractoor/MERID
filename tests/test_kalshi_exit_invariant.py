@@ -1,10 +1,10 @@
 """Regression tests for the position lifecycle invariant.
 
-Contract (profit_only_v1): all entry orders on 15m crypto contracts must carry
-a valid PositionLifecyclePlan.  A plan is a lifecycle contract, not an armed
-exit order - HOLD_TO_SETTLEMENT is a complete legal plan, loss-triggered exits
-are disabled by policy, and profit exits (resting TP / profit-lock trail) are
-optional components that never gate entry.
+Contract (pre_settlement_closeout_v2): all entry orders on 15m crypto contracts
+must carry a valid PositionLifecyclePlan with a mandatory pre-settlement
+closeout.  Settlement is only an exceptional reconciliation outcome, never an
+intentional lifecycle mode; loss-triggered exits are disabled by policy and
+profit exits are optional components that never gate entry.
 
 Invariant scope:
 - Entry orders: action="buy" on 15m crypto (KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M)
@@ -218,13 +218,10 @@ class TestInvariantEnforcement:
 
     @pytest.mark.asyncio
     async def test_entry_order_without_exit_rejected(self):
-        """Bare entry order derives a HOLD_TO_SETTLEMENT plan and passes.
+        """A bare entry derives a mandatory PRE_SETTLEMENT_CLOSEOUT plan.
 
-        Under profit_only_v1, an entry with no armed TP/SL is a valid
-        HOLD_TO_SETTLEMENT lifecycle plan - settlement is the exit.  It must
-        NOT be rejected by the lifecycle invariant (this is the
-        no_trade_without_exit defect fix: the ETH BUY_NO@35c +4.4% entry was
-        wrongly rejected).
+        Settlement is not a legal intentional exit mode.  An entry with no
+        armed TP/SL still gets the lifecycle contract required by the router.
         """
         import time as _time
         intent = OrderIntent(
@@ -233,19 +230,20 @@ class TestInvariantEnforcement:
             action="buy",
             price_cents=50,
             count=1,
-            # No exit targets -> valid HOLD_TO_SETTLEMENT plan
+            # No exit targets -> mandatory closeout plan
             mode=TradingMode.MOCK,
         )
         result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
         # Invariant passes - a valid plan was derived and attached
         assert result is None
         assert intent.lifecycle_plan is not None
-        assert intent.lifecycle_plan["exit_mode"] == "HOLD_TO_SETTLEMENT"
+        assert intent.lifecycle_plan["exit_mode"] == "PRE_SETTLEMENT_CLOSEOUT"
         assert intent.lifecycle_plan["stop_loss_enabled"] is False
-        assert intent.lifecycle_plan["hold_to_settlement_enabled"] is True
+        assert intent.lifecycle_plan["hold_to_settlement_enabled"] is False
+        assert intent.lifecycle_plan["closeout_seconds_before_expiry"] == 120
 
-    def test_explicit_hold_to_settlement_plan_passes(self):
-        """An explicit HOLD_TO_SETTLEMENT lifecycle plan is valid."""
+    def test_explicit_hold_to_settlement_plan_rejected(self):
+        """An explicit HOLD_TO_SETTLEMENT lifecycle plan violates closeout policy."""
         import time as _time
         intent = OrderIntent(
             ticker="KXETH15M-26SEP291215-15",
@@ -261,7 +259,9 @@ class TestInvariantEnforcement:
             },
             mode=TradingMode.MOCK,
         )
-        assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
+        result = _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK)
+        assert result is not None and result.status == "rejected"
+        assert "invalid_exit_mode:HOLD_TO_SETTLEMENT" in result.reason
 
     def test_explicit_tp_plus_trail_plan_passes(self):
         """An explicit TAKE_PROFIT_PLUS_PROFIT_TRAIL plan is valid (the ETH 35c example)."""
@@ -276,7 +276,7 @@ class TestInvariantEnforcement:
                 "policy_id": "profit_only_v1",
                 "exit_mode": "TAKE_PROFIT_PLUS_PROFIT_TRAIL",
                 "stop_loss_enabled": False,
-                "hold_to_settlement_enabled": True,
+                "hold_to_settlement_enabled": False,
                 "take_profit_enabled": True,
                 "take_profit_price_cents": 43,
                 "profit_trail_enabled": True,
@@ -359,9 +359,8 @@ class TestInvariantEnforcement:
         assert intent.lifecycle_plan["stop_loss_enabled"] is False
         assert intent.lifecycle_plan["exit_mode"] == "TAKE_PROFIT_ONLY"
 
-    def test_hold_to_settlement_policy_mode_passes(self):
-        """exit_policy dict mode=HOLD_TO_SETTLEMENT yields a valid plan even
-        if stray exit fields are present."""
+    def test_hold_to_settlement_policy_mode_derives_closeout(self):
+        """Legacy HOLD_TO_SETTLEMENT policy input normalizes to mandatory closeout."""
         import time as _time
         intent = OrderIntent(
             ticker="KXETH15M-26SEP291215-15",
@@ -373,7 +372,8 @@ class TestInvariantEnforcement:
             mode=TradingMode.MOCK,
         )
         assert _check_exit_target_invariant(intent, _time.monotonic(), TradingMode.MOCK) is None
-        assert intent.lifecycle_plan["exit_mode"] == "HOLD_TO_SETTLEMENT"
+        assert intent.lifecycle_plan["exit_mode"] == "PRE_SETTLEMENT_CLOSEOUT"
+        assert intent.lifecycle_plan["hold_to_settlement_enabled"] is False
 
     def test_derived_trail_params_use_asset_defaults(self):
         """A policy with trailing_enabled derives PROFIT_TRAIL params with a

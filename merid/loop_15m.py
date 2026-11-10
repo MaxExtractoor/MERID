@@ -593,26 +593,39 @@ def _map_exit_reason_to_intent_contract(exit_reason_str: str) -> "ExitReason":
     
     # Map position_management exit reasons to intent_contract exit reasons
     mapping = {
-        "take_profit": ExitReason.EXIT_TP,
-        "stop_loss": ExitReason.EXIT_SL,
-        "auto_exit_99c": ExitReason.EXIT_99C,
+        "take_profit": ExitReason.EXIT_TAKE_PROFIT,
+        "stop_loss": ExitReason.EXIT_STOP_LOSS,
+        "auto_exit_99c": ExitReason.EXIT_SETTLEMENT_GUARD,
         "hard_profit_lock": ExitReason.EXIT_HARD_PROFIT_LOCK,
         "manual": ExitReason.EXIT_MANUAL,
-        "time_stop": ExitReason.EXIT_EXPIRY,
-        "risk": ExitReason.EXIT_RISK_LIMIT,
-        "stale_data": ExitReason.EXIT_RISK_LIMIT,
-        "candle_reversal": ExitReason.EXIT_MANUAL,
-        "adaptive_timing": ExitReason.EXIT_MANUAL,
-        "edge_decay": ExitReason.EXIT_MANUAL,
-        "scale_out": ExitReason.EXIT_MANUAL,
-        "extreme_profit": ExitReason.EXIT_99C,  # Deprecated but map to 99C
-        "dynamic_take_profit": ExitReason.EXIT_TP,
-        "ratchet_trim": ExitReason.EXIT_TP,
-        "ratchet_floor": ExitReason.EXIT_TP,
-        "trail": ExitReason.EXIT_MANUAL,
+        "time_stop": ExitReason.EXIT_TIME,
+        "risk": ExitReason.EXIT_RECONCILIATION,
+        "stale_data": ExitReason.EXIT_RECONCILIATION,
+        "candle_reversal": ExitReason.EXIT_SIGNAL_REVERSAL,
+        "adaptive_timing": ExitReason.EXIT_TIME,
+        "edge_decay": ExitReason.EXIT_SIGNAL_REVERSAL,
+        "current_edge_reversal": ExitReason.EXIT_SIGNAL_REVERSAL,
+        "opportunity_cost": ExitReason.EXIT_SIGNAL_REVERSAL,
+        "continuation_stop": ExitReason.EXIT_SIGNAL_REVERSAL,
+        "model_invalidation": ExitReason.EXIT_MODEL_INVALIDATION,
+        "model_invalidation_loss_exit": ExitReason.EXIT_MODEL_INVALIDATION,
+        "scale_out": ExitReason.EXIT_SCALE_OUT,
+        "settlement_guard": ExitReason.EXIT_SETTLEMENT_GUARD,
+        "market_expired": ExitReason.EXIT_MARKET_EXPIRED,
+        "loss_cap": ExitReason.EXIT_LOSS_CAP,
+        "loss_cut_40pct": ExitReason.EXIT_STOP_LOSS,
+        "extreme_profit": ExitReason.EXIT_SETTLEMENT_GUARD,  # Deprecated but map to 99C
+        "dynamic_take_profit": ExitReason.EXIT_DYNAMIC_TAKE_PROFIT,
+        "ratchet_trim": ExitReason.EXIT_RATCHET_TRIM,
+        "ratchet_floor": ExitReason.EXIT_RATCHET_FLOOR,
+        "trail": ExitReason.EXIT_TRAILING_STOP,
+        "trailing_stop": ExitReason.EXIT_TRAILING_STOP,
     }
     
-    return mapping.get(exit_reason_str.lower(), ExitReason.EXIT_MANUAL)
+    key = exit_reason_str.lower().strip()
+    if key not in mapping:
+        raise ValueError(f"Unknown automatic exit reason: {exit_reason_str!r}")
+    return mapping[key]
 
 # ── Loop diagnostics file IO (env-gated to avoid hot-loop disk overhead) ──────
 # The 15m loop historically wrote to a hardcoded health_diagnostic.txt on EVERY
@@ -2450,6 +2463,16 @@ def _run_exit_price_guard(
                 best_ask = _get_executable_ask_cents(_alt_state, held_outcome)
     quote_age_ms = _book_age_ms(state) if state is not None else None
     seconds_to_expiry = _seconds_to_expiry(state) if state is not None else None
+    if seconds_to_expiry is None:
+        try:
+            from merid.position_management.position_monitor import (
+                _seconds_to_expiry_from_ticker,
+            )
+            seconds_to_expiry = _seconds_to_expiry_from_ticker(
+                getattr(position, "market_id", "") or ""
+            )
+        except Exception:
+            seconds_to_expiry = None
     quote_source = (
         getattr(state, "book_source", None)
         or getattr(state, "source", None)
@@ -2512,6 +2535,9 @@ def _run_exit_price_guard(
     # Forced exits are time/market-driven and must be allowed to realize a loss;
     # otherwise the system holds losing positions into settlement.
     is_forced = canonical in ("expiry_liquidation", "time_exit")
+    from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
+    mandatory_closeout = canonical == "expiry_liquidation" and pre_settlement_closeout_due(seconds_to_expiry)
+    record["mandatory_closeout"] = mandatory_closeout
     record["is_emergency"] = is_emergency
     record["is_forced"] = is_forced
 
@@ -2976,6 +3002,7 @@ def _run_exit_price_guard(
     # Applies inside the emergency cutoff too — settlement needs no book.
     if (
         canonical == "expiry_liquidation"
+        and not mandatory_closeout
         and os.environ.get("MERID_SETTLEMENT_GUARD_EV_GATE", "1") == "1"
         and ev_eval is not None
         and ev_eval.decision != EvDecision.BLOCK_UNKNOWN_REASON
@@ -3047,6 +3074,7 @@ def _run_exit_price_guard(
     # expiry-liquidation inside the cutoff always proceeds (deadline trumps).
     if (
         exit_class != ExitClass.DISCRETIONARY
+        and not mandatory_closeout
         and not is_emergency
         and ev_eval is not None
         and ev_eval.decision != EvDecision.BLOCK_UNKNOWN_REASON
@@ -4600,7 +4628,7 @@ async def _execute_exit_order(
                         exit_reason_str,
                         _prepared.result.status, _prepared.denial,
                     )
-                    if _prepared.result.status == "held_unmarketable":
+                    if _prepared.result.status in ("held_unmarketable", "rejected"):
                         _released, _held_coid = _terminalize_arbiter_held_exit(
                             self._position_monitor,
                             position.position_id,
@@ -5299,7 +5327,7 @@ def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepar
         monitor is None
         or not client_order_id
         or getattr(prepared, "approved", True)
-        or getattr(result, "status", None) != "held_unmarketable"
+        or getattr(result, "status", None) not in ("held_unmarketable", "rejected")
         or getattr(result, "attempt", None) is not None
     ):
         return False, None
@@ -5332,7 +5360,10 @@ def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepar
             and not flight.get("exchange_order_id")
             and not flight.get("ack_status")
         )
-    if not flight_coid or not pre_wire:
+    if (
+        not flight_coid or not pre_wire
+        or (result.status == "rejected" and flight_coid != client_order_id)
+    ):
         logger.warning(
             "[EXIT-ARBITER] held-exit release refused: position=%s "
             "flight_coid=%s state=%s exchange_order_id=%s — "
@@ -5354,7 +5385,7 @@ def _terminalize_arbiter_held_exit(monitor, position_id, client_order_id, prepar
         client_order_id=flight_coid,
         raw_payload={
             "never_dispatched_evidence": "arbiter_held_before_route",
-            "arbiter_status": "held_unmarketable",
+            "arbiter_status": result.status,
             "intent_client_order_id": client_order_id,
             "flight_client_order_id": flight_coid,
         },
@@ -11149,12 +11180,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 # profit_only_v1: sl_cents may be None (loss stops disabled).
                 assert exit_policy.sl_cents is None or exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
                 assert exit_policy.max_hold_seconds > 0, f"Exit policy max_hold_seconds must be positive for ticker={ticker}, got {exit_policy.max_hold_seconds}"
-                # 2026-11: explicit exit-mode semantics.  HOLD_TO_SETTLEMENT is a
-                # valid strategy mode (no discretionary TP/SL by design); any
-                # unrecognized mode fails closed.  ACTIVE_MANAGEMENT still
-                # requires at least one live exit target.
+                # 2026-11: explicit exit-policy mode semantics.  ACTIVE_MANAGEMENT
+                # means discretionary TP/SL/trailing policy is live;
+                # PRE_SETTLEMENT_CLOSEOUT means discretionary exits are disabled
+                # but the mandatory pre-expiry closeout still applies;
+                # HOLD_TO_SETTLEMENT is a legacy serialized label normalized to
+                # closeout at the router.  Any unrecognized mode fails closed.
                 _exit_mode = getattr(exit_policy, "mode", "ACTIVE_MANAGEMENT") or "ACTIVE_MANAGEMENT"
-                if _exit_mode not in ("ACTIVE_MANAGEMENT", "HOLD_TO_SETTLEMENT"):
+                if _exit_mode not in ("ACTIVE_MANAGEMENT", "PRE_SETTLEMENT_CLOSEOUT", "HOLD_TO_SETTLEMENT"):
                     self._rejection_counters["exit_policy_failed"] += 1
                     logger.error(
                         "[15M-LOOP] Unrecognized exit policy mode=%s for %s - rejecting order",
@@ -11162,18 +11195,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     )
                     return self._mark_reject(
                         candidate, "exit_policy_resolution", "unrecognized_exit_mode",
-                        observed=_exit_mode, required="ACTIVE_MANAGEMENT|HOLD_TO_SETTLEMENT")
+                        observed=_exit_mode, required="ACTIVE_MANAGEMENT|PRE_SETTLEMENT_CLOSEOUT|HOLD_TO_SETTLEMENT")
                 # profit_only_v1: an ACTIVE_MANAGEMENT policy with no armed
-                # TP/SL is NOT a rejection - it derives a HOLD_TO_SETTLEMENT
-                # lifecycle plan at the router (settlement is the exit).  Only
-                # log it for observability; entry gating is not affected.
+                # TP/SL is NOT a rejection - it derives a PRE_SETTLEMENT_CLOSEOUT
+                # lifecycle plan at the router.  Only log it for observability;
+                # entry gating is not affected.
                 if (
-                    _exit_mode == "ACTIVE_MANAGEMENT"
+                    _exit_mode in ("ACTIVE_MANAGEMENT", "PRE_SETTLEMENT_CLOSEOUT")
                     and not exit_policy.take_profit_enabled
                     and not exit_policy.stop_loss_enabled
                 ):
                     logger.info(
-                        "[15M-LOOP] No armed TP/SL for %s - lifecycle plan = HOLD_TO_SETTLEMENT",
+                        "[15M-LOOP] No armed TP/SL for %s - lifecycle plan = PRE_SETTLEMENT_CLOSEOUT",
                         ticker,
                     )
             else:

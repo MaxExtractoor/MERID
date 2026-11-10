@@ -955,3 +955,40 @@ contract are unchanged — readiness is earned by draining, not by relaxing
 the gate. The `MERID_AUDIT_SHED_DEPTH` fallback in
 `_sampled_out_rejection` was also aligned to `_shed_admit`'s 700 so
 noise-class rejection sampling engages inside the 700–1500 band.
+
+## Session-loss replay and trailing-exit reason semantics
+
+- `strategy_decision_outcomes.realized_net_pnl_cents` is a legacy-named
+  per-contract entry-to-settlement thesis counterfactual, not account P&L.
+  Inspect `capital_realized_pnl_cents` and reconcile quantities and fees
+  against authoritative signed `kalshi_fills.proceeds_dollars`; those cash
+  proceeds already include fees, so do not subtract `fee_cost` again.
+- Monitor `trail` intents must preserve `trailing_stop` semantics across
+  the intent-contract bridge. Mapping them to `exit_manual` causes the
+  arbiter to request `EXTERNAL_AUTHORITY`, which correctly denies the
+  position-monitor issuer. Live XRP-26NOV100915 trailing attempts at
+  14:06:46 and 14:08:21 UTC demonstrated this failure.
+- Offline verification: `.venv/Scripts/python.exe -m pytest --noconftest
+  tests/test_exit_orphaned_position_linkage_2026_10_28.py
+  tests/test_exit_order_side_mapping.py tests/test_side_mapping_properties.py -q`.
+- Automatic exit transport must preserve canonical reason semantics, including
+  take-profit, scale-out, model/signal, time, and market-obligation exits.
+  Unknown automatic reasons must not fall back to operator/manual authority.
+- The operator's latest requested policy is automated pre-settlement liquidation
+  for all remaining quantities, including trimmed runners. The monitor attempts
+  full closeout at T-120s regardless of lane or unrealized loss; deadline exits
+  bypass settlement-value holds and profit floors. New settlement-only entries
+  are rejected, entries require more than 150s remaining, and resting entry
+  expiration is capped at T-120s. Liquidity or venue failures can still prevent
+  fills; unknown submissions remain locked for authoritative reconciliation.
+- Drift-lane tests must isolate repository environment overrides and measured
+  adverse-selection artifacts. The rescue fixture pins its reserve and uses a
+  directional candidate that passes the shared conviction/coin-flip gates.
+- Legacy scaling defaults off and must not be enabled based on scaler unit tests
+  alone: its child executor clones order identity and bypasses canonical routing;
+  aggregate fill accounting and per-child reservations need end-to-end repair.
+- Expanded isolated verification: `.venv/Scripts/python.exe -m pytest
+  tests/test_exit_orphaned_position_linkage_2026_10_28.py
+  tests/test_exit_arbiter_held_never_dispatched.py
+  tests/test_residual_runner_repairs_2026_11_09.py tests/test_order_scaler.py
+  --noconftest -q` (107 passed on 2026-11-10).

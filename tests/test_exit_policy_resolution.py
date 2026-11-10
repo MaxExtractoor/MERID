@@ -64,8 +64,8 @@ class TestOrderRouterExitPolicy:
         multiplier, so conservative < normal < aggressive.
         """
         strip_context = {
-            "entry_price_cents": 42,
-            "entry_model_probability": 0.70,
+            "entry_price_cents": 52,
+            "entry_model_probability": 0.80,
         }
         conservative = router_resolve_exit_policy(
             edge_result=None, asset="BTC", regime="conservative", strip_context=strip_context
@@ -93,6 +93,12 @@ class TestOrderRouterExitPolicy:
         before it was assigned, raising UnboundLocalError when the active profile
         was unavailable.  The function must always return a valid ExitPolicyResolution.
         """
+        def no_profile():
+            raise RuntimeError("no active profile")
+
+        monkeypatch.setattr("merid.risk.profiles.crypto_15m_profile.get_active_profile", no_profile)
+        monkeypatch.setenv("MERID_PROFIT_ONLY_EXITS", "1")
+        monkeypatch.setenv("MERID_DISABLE_EXIT_POLICY", "0")
         result = router_resolve_exit_policy(edge_result=None, asset="BTC", regime="normal")
         assert result is not None
         assert result.sl_mode == StopLossMode.FIXED_CENTS

@@ -242,12 +242,11 @@ def context_from_position(
 _PROFIT_LOCK_REASONS = frozenset({
     "take_profit", "ratchet_trim", "scale_out",
     "auto_exit_99c", "extreme_profit", "dynamic_take_profit",
-    "settlement_guard",
 })
 _TRAIL_REASONS = frozenset({"trail", "trailing_stop", "trailing_profit"})
 _EMERGENCY_REASONS = frozenset({
     "hard_stop", "loss_cap", "risk", "manual", "position_monitor_manual",
-    "market_expired", "expiry_liquidation", "stale_data",
+    "market_expired", "expiry_liquidation", "settlement_guard", "stale_data",
     "position_mismatch", "emergency", "hard_risk", "operational_risk",
     "external_exit", "reconciliation", "reconcile",
     # 2026-11-08 (DOGE-1830): the witnessed hard-profit-lock obligation is a
@@ -271,8 +270,15 @@ def _canonical_reason_key(reason: Any) -> str:
     r = str(getattr(reason, "value", reason) or "").lower().strip()
     for prefix in ("exit:", "exit_"):
         if r.startswith(prefix):
-            return r[len(prefix):]
-    return r
+            r = r[len(prefix):]
+            break
+    return {
+        "tp": "take_profit",
+        "sl": "stop_loss",
+        "99c": "expiry_liquidation",
+        "expiry": "expiry_liquidation",
+        "risk_limit": "reconciliation",
+    }.get(r, r)
 
 
 def kind_for_reason(reason: Any, exit_class: Optional[str] = None) -> str:
