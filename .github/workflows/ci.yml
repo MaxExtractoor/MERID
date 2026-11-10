@@ -404,7 +404,10 @@ jobs:
     name: Kalshi contract pipeline (Track A)
     runs-on: ubuntu-latest
     needs: [swarm-integrity-gate]
-    timeout-minutes: 25
+    # 2026-11-10: the tests/event_venues/kalshi suite alone is ~2.1k tests and
+    # needs well over 25 min on a cold CI runner; the job-level timeout was
+    # cancelling the run before the suite could finish.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -433,7 +436,7 @@ jobs:
             tests/test_execution_audit_regressions.py \
             tests/core/test_celery_tasks.py \
             tests/web/test_canonical_lifespan_and_tickers.py \
-            -v --tb=short \
+            -v --tb=short --timeout=300 \
             --junitxml=reports/kalshi-contract-pipeline.xml
 
       - name: Upload Kalshi contract report
