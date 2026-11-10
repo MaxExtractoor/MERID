@@ -73,7 +73,19 @@ jobs:
         # -m kalshi_core` — both directories are pytest-ignored (legacy mirrors)
         # and no test carries the kalshi_core mark, so the step collected 0
         # tests and failed with pytest exit code 5.
-        pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120
+        # 2026-11-10: bound the suite with GNU timeout (45min — the suite is
+        # ~5min locally) and tee the -v transcript to a file so a hang or
+        # timeout still yields the last in-flight test via the artifact below.
+        timeout 2700 pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120 2>&1 | tee venue-tests.log
+        exit ${PIPESTATUS[0]}
+
+    - name: Upload venue test transcript
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kalshi-venue-tests-transcript
+        path: venue-tests.log
+        retention-days: 14
     
     - name: Run reconciliation and risk tests
       env:

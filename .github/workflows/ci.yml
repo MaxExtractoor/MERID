@@ -426,7 +426,10 @@ jobs:
       - name: Standard Kalshi contract slice
         run: |
           mkdir -p reports
-          python -m pytest \
+          # Bound pytest below the 60-minute job timeout so a hang exits the
+          # step (letting the artifact uploads run) instead of cancelling the
+          # job; tee keeps a transcript of the last in-flight test.
+          timeout 3300 python -m pytest \
             tests/event_venues/kalshi/test_allowed_market_policy.py \
             tests/event_venues/kalshi/test_market_catalog_filtering_integration.py \
             tests/event_venues/kalshi/test_market_universe_replay.py \
@@ -437,14 +440,19 @@ jobs:
             tests/core/test_celery_tasks.py \
             tests/web/test_canonical_lifespan_and_tickers.py \
             -v --tb=short --timeout=300 \
-            --junitxml=reports/kalshi-contract-pipeline.xml
+            --junitxml=reports/kalshi-contract-pipeline.xml \
+            2>&1 | tee reports/kalshi-contract-pipeline.log
+          exit ${PIPESTATUS[0]}
 
       - name: Upload Kalshi contract report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kalshi-contract-pipeline-report
-          path: reports/kalshi-contract-pipeline.xml
+          path: |
+            reports/kalshi-contract-pipeline.xml
+            reports/kalshi-contract-pipeline.log
+          if-no-files-found: ignore
 
   # ── Kalshi reconciliation + gate tests (path-filtered) ──────────────
   # Only runs when files under merid/event_venues/kalshi, merid/reconciliation, or core/execution_gate change.
