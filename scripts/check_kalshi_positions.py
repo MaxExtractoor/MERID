@@ -9,7 +9,21 @@ position sync issues and ensuring the system is tracking positions correctly.
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
+import sys
+from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+for line in Path(__file__).resolve().parents[1].joinpath(".env").read_text(encoding="utf-8-sig").splitlines():
+    if "=" in line and not line.lstrip().startswith("#"):
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 
@@ -25,7 +39,7 @@ async def check_positions():
         client = KalshiVenueClient(config)
         
         print(f"\nConnecting to Kalshi API...")
-        print(f"Base URL: {config.base_url}")
+        print(f"Base URL: {config.rest_base_url}")
         print(f"Environment: {config.env}")
         
         await client.connect()

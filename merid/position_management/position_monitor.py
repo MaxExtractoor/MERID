@@ -4597,12 +4597,6 @@ class PositionMonitor:
 
         candidates: List[ExitDecision] = []
 
-        # 2026-10-21 (drift-lane epoch): cheap_no_settle positions carry a
-        # settlement claim — profit-family exits at the drift price would
-        # forfeit the measured settle edge (+7..15c/contract pooled).  The
-        # global hard lock still fires via its own latch path (a >=90c bid
-        # pays far more than the claim), and LOSS_CAP / tail-loss salvage
-        # / SETTLEMENT_GUARD / STOP_LOSS remain fully armed.
         _settle_hold_pos = _settle_hold(position)
         _SETTLE_HOLD_SUPPRESSED = {
             ExitReason.TAKE_PROFIT,

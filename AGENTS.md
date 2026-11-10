@@ -984,6 +984,8 @@ noise-class rejection sampling engages inside the 700–1500 band.
 - Drift-lane tests must isolate repository environment overrides and measured
   adverse-selection artifacts. The rescue fixture pins its reserve and uses a
   directional candidate that passes the shared conviction/coin-flip gates.
+  These synthetic economics are not evidence that the lane's live strategy is
+  profitable; measured drift adverse selection remains bound in production.
 - Legacy scaling defaults off and must not be enabled based on scaler unit tests
   alone: its child executor clones order identity and bypasses canonical routing;
   aggregate fill accounting and per-child reservations need end-to-end repair.
@@ -992,3 +994,19 @@ noise-class rejection sampling engages inside the 700–1500 band.
   tests/test_exit_arbiter_held_never_dispatched.py
   tests/test_residual_runner_repairs_2026_11_09.py tests/test_order_scaler.py
   --noconftest -q` (107 passed on 2026-11-10).
+- Follow-up verification: `tests/test_exit_guard_2026_08_19.py`,
+  `tests/test_exit_floor_and_parse_2026_10_20.py`,
+  `tests/test_exit_attempt_terminal_mirror_2026_11_07.py`,
+  `tests/test_exit_attempt_submitting_wedge_2026_10_19.py`,
+  `tests/test_exit_lifecycle_integration_2026_10_08.py`,
+  `tests/test_exit_intent_callback.py`, `tests/test_exit_policy_resolution.py`,
+  `tests/exit_acceptance/accept_settlement_lifecycle.py`,
+  `tests/test_exit_liveness_stress.py`, and
+  `tests/test_entry_exit_invariant_2026_08_08.py` supplement the prior 483-test
+  run; they do not establish an unqualified full-suite pass. Custom
+  `tests/exit_acceptance/accept_exit_integration.py` invokes pytest at module
+  import and must not be collected with pytest without a dedicated isolation fix.
+- `scripts/check_kalshi_positions.py` requires its repository path, UTF-8 output,
+  and explicit credential-file loading; inspect exchange positions and balance
+  before restart and verify live preflight before claiming automatic trading
+  readiness. `scripts/cleanup_port_8011.ps1` requires administrator privileges.
