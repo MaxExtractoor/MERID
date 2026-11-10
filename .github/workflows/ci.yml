@@ -426,13 +426,11 @@ jobs:
       - name: Standard Kalshi contract slice
         run: |
           mkdir -p reports
-          # Bound pytest below the 60-minute job timeout so a hang exits the
-          # step (letting the artifact uploads run) instead of cancelling the
-          # job.  pytest runs in its own process group and a watchdog
-          # SIGKILLs the group at 50min — a plain timeout only signals pytest
-          # itself, and leaked children or the venue WS SIGTERM handler can
-          # hold the step open indefinitely.
-          PYTHONFAULTHANDLER=1 setsid --wait python -m pytest \
+          # Same Linux shutdown wedge as the venue suite: run through
+          # scripts/ci_pytest_hard_exit.py (os._exit preserves pytest's code)
+          # inside its own process group; watchdog SIGKILLs the group at
+          # 50min as a backstop and the transcript keeps the last test.
+          PYTHONFAULTHANDLER=1 setsid --wait python scripts/ci_pytest_hard_exit.py \
             tests/event_venues/kalshi/test_allowed_market_policy.py \
             tests/event_venues/kalshi/test_market_catalog_filtering_integration.py \
             tests/event_venues/kalshi/test_market_universe_replay.py \

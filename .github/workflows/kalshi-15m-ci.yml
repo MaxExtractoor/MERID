@@ -76,13 +76,14 @@ jobs:
         # -m kalshi_core` — both directories are pytest-ignored (legacy mirrors)
         # and no test carries the kalshi_core mark, so the step collected 0
         # tests and failed with pytest exit code 5.
-        # 2026-11-10: run pytest in its own session/process group with a
-        # watchdog that SIGKILLs the whole group at 45min.  A plain `timeout`
-        # only signals pytest itself: leaked grandchildren keep the runner
-        # step open forever, and the venue WS SIGTERM handler does not exit
-        # the process.  The group kill bounds pytest *and* anything it
-        # spawned; the transcript still captures the last in-flight test.
-        PYTHONFAULTHANDLER=1 setsid --wait pytest tests/event_venues/kalshi/ -v --tb=short --timeout=120 > venue-tests.log 2>&1 &
+        # 2026-11-10: the suite finishes all tests in <1min but the
+        # interpreter wedges during shutdown on Linux (leaked WS/asyncio
+        # state), so run it through scripts/ci_pytest_hard_exit.py which
+        # preserves pytest's exit code via os._exit.  pytest still runs in
+        # its own process group with a watchdog SIGKILL at 45min as a
+        # backstop for a mid-run wedge; the transcript captures the
+        # last in-flight test either way.
+        PYTHONFAULTHANDLER=1 setsid --wait python scripts/ci_pytest_hard_exit.py tests/event_venues/kalshi/ -v --tb=short --timeout=120 > venue-tests.log 2>&1 &
         TPID=$!
         ( sleep 2700; kill -KILL -- "-$TPID" 2>/dev/null; pkill -KILL -f "pytest.*event_venues" 2>/dev/null ) &
         WPID=$!
