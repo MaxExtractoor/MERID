@@ -26,6 +26,7 @@ import merid.prediction.trade_decision as _td_mod
 from merid.event_venues.kalshi.order_router import (
     OrderIntent,
     _revalidate_entry_economics,
+    _entry_refresh_grace_allowed,
 )
 
 
@@ -128,6 +129,53 @@ def _run(intent):
     return asyncio.run(
         _revalidate_entry_economics(intent, mode=None, t0=time.monotonic())
     )
+
+
+@pytest.mark.parametrize("profile,age,allowed", [
+    ("legacy", 21000, False), ("conservative", 21000, True),
+    ("conservative", 31000, False), ("mixed", 21000, True),
+    ("mixed", 61000, False), ("aggressive", 89000, True),
+    ("aggressive", 91000, False), ("mixed", float("nan"), False),
+])
+def test_refresh_grace_is_bounded(monkeypatch, profile, age, allowed):
+    monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", profile)
+    assert _entry_refresh_grace_allowed(_intent(), age) is allowed
+
+
+@pytest.mark.parametrize("inputs", [None, {}, _pin(annualized_vol=0), _pin(strike_price=float("nan")),
+                                         _pin(seconds_to_expiry_decision=170)])
+def test_refresh_grace_requires_recomputable_model_and_closeout_room(monkeypatch, inputs):
+    monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", "mixed")
+    assert not _entry_refresh_grace_allowed(_intent(probability_inputs=inputs), 21000)
+
+
+def test_grace_cannot_fall_back_to_price_only(monkeypatch):
+    _wire(monkeypatch, book=_ob(yes_bid=48, no_bid=50), rti=_rti(99.9))
+    intent = _intent(probability_inputs=None)
+    intent._exec_full_recompute_required = True
+    result = _run(intent)
+    assert result.status == "rejected"
+    assert "full_model_required" in result.reason
+
+
+def test_grace_rejects_stale_rti(monkeypatch):
+    obs = _rti(99.9)
+    obs.observed_ts_mono_ns -= 20_000_000_000
+    _wire(monkeypatch, book=_ob(yes_bid=48, no_bid=50), rti=obs)
+    intent = _intent()
+    intent._exec_full_recompute_required = True
+    result = _run(intent)
+    assert result.status == "rejected"
+    assert "spot_stale:refresh_grace" in result.reason
+
+
+def test_grace_fully_recomputes_21_second_old_decision(monkeypatch):
+    _wire(monkeypatch, book=_ob(yes_bid=48, no_bid=50), rti=_rti(99.9))
+    intent = _intent(snapshot_ts=time.time() - 21.0)
+    intent._exec_full_recompute_required = True
+    assert _run(intent) is None
+    assert intent._execution_revalidated
+    assert intent.p_selected != 0.55
 
 
 def test_model_revalidation_passes_and_rebinds(monkeypatch):

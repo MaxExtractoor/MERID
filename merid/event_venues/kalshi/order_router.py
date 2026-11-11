@@ -5286,6 +5286,24 @@ def _post_only_strict_passivity(
     return None, None
 
 
+def _entry_refresh_grace_allowed(intent: "OrderIntent", age_ms: float) -> bool:
+    from merid.prediction.window_plan import execution_profile_settings
+
+    ceiling = execution_profile_settings()["refresh_ms"]
+    inputs = getattr(intent, "probability_inputs", None)
+    if not math.isfinite(age_ms) or age_ms < 0 or age_ms > ceiling or ceiling <= 0:
+        return False
+    if not isinstance(inputs, dict) or getattr(intent, "p_selected", None) is None:
+        return False
+    try:
+        values = [float(inputs[k]) for k in (
+            "strike_price", "annualized_vol", "seconds_to_expiry_decision"
+        )]
+        return all(math.isfinite(v) and v > 0 for v in values) and values[2] > age_ms / 1000.0 + 150.0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
 async def _revalidate_entry_economics(
     intent: "OrderIntent", *, mode: "TradingMode", t0: float
 ) -> Optional["OrderResult"]:
@@ -5435,6 +5453,8 @@ async def _revalidate_entry_economics(
         and _pinputs.get("seconds_to_expiry_decision") is not None
         and _p_sel0_f is not None
     )
+    if getattr(intent, "_exec_full_recompute_required", False) and not _pin_ok:
+        return _rej("stale_decision_refresh_failed:full_model_required")
     if _pin_ok:
         try:
             from merid.data.cf_rti_adapter import get_live_rti
@@ -5507,6 +5527,10 @@ async def _revalidate_entry_economics(
                     _spot_f = None
             if _spot_f is None:
                 return _rej("stale_decision_spot_stale:rti_ineligible")
+            if getattr(intent, "_exec_full_recompute_required", False) and (
+                _spot_age_s is None or _spot_age_s > float(os.getenv("MERID_EXECUTION_SPOT_MAX_AGE_S", "5"))
+            ):
+                return _rej("stale_decision_spot_stale:refresh_grace")
             _spot_state = f"rti_ok_age={_spot_age_s:.1f}s" if _spot_age_s is not None else "rti_ok"
             _prov["spot"] = f"{_spot_f}/{_spot_state}"
 
@@ -14004,7 +14028,14 @@ def _prepare_order_for_gate(
         _decision_warn_ms = float(os.getenv("MERID_EXECUTION_DECISION_WARN_MS", "1500"))
         _decision_max_ms = float(os.getenv("MERID_EXECUTION_DECISION_MAX_AGE_MS", "3500"))
         _decision_age_ms = _snap_age * 1000.0
-        if _decision_age_ms > _decision_max_ms:
+        _refresh_grace = (
+            _decision_age_ms > _decision_max_ms
+            and _entry_refresh_grace_allowed(intent, _decision_age_ms)
+        )
+        if _refresh_grace:
+            intent._exec_full_recompute_required = True
+            intent._exec_revalidate_required = True
+        if _decision_age_ms > _decision_max_ms and not _refresh_grace:
             logger.warning(
                 "[STALE-DECISION] ticker=%s code=stale_decision_dropped age_ms=%.0f "
                 "max_ms=%.0f — entry authorization too old at submit; re-score next tick",

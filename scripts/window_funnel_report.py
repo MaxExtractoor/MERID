@@ -72,8 +72,8 @@ STAGE_EPISODE = "unique_episodes"
 STAGE_EVAL = "model_evaluations"
 STAGE_POS_EV = "positive_net_edge"
 STAGE_VETO_SURV = "evidence_veto_survivors"
-STAGE_EMIT = "emitted"
-STAGE_WIRE = "wire_attempts"
+STAGE_EMIT = "model_selected"
+STAGE_WIRE = "dispatch_attempts"
 STAGE_ACCEPTED = "router_accepted"
 STAGE_FILLED = "filled"
 STAGE_SETTLED = "settled"
@@ -293,7 +293,8 @@ class Funnel:
     # ------------------------------------------------------------------
     def add_decision_row(self, row: Tuple[Any, ...]) -> None:
         (did, cid, ts, ticker, asset, side, decision, prc, lane,
-         tte, afg_json, gates_json) = row
+         tte, afg_json, gates_json) = row[:12]
+        side_edges = dict(zip(SIDES, row[12:14]))
         self.eval_rows += 1
         route = did.rsplit(":", 1)[-1] if ":" in (did or "") else "?"
         self.eval_rows_by_route[route] += 1
@@ -341,7 +342,7 @@ class Funnel:
         # Per-side funnel assignment for this row.
         for s in row_sides:
             verdicts = _side_gate_verdicts(gates, s)
-            pos = _passed(verdicts, "positive_ev") or emitted
+            pos = side_edges.get(s) is not None and float(side_edges[s]) > 0.0
             veto_ok = pos and all(
                 _passed(verdicts, vg) or verdicts.get(vg) is None
                 for vg in _VETO_GATES
@@ -380,15 +381,22 @@ class Funnel:
         """Join lifecycle events for emitted decisions."""
         for chunk in _chunks(sorted(self.emitted_decisions)):
             ph = ",".join("?" * len(chunk))
-            for did, etype, stage, rcode in conn.execute(
-                f"SELECT decision_id, event_type, stage, reason_code "
+            for did, etype, stage, rcode, detail_json in conn.execute(
+                f"SELECT decision_id, event_type, stage, reason_code, reason_detail_json "
                 f"FROM strategy_decision_events WHERE decision_id IN ({ph})",
                 chunk,
             ):
                 if etype == "ORDER_SUBMITTED":
                     self.wire_attempt.add(did)
-                    self.accepted.add(did)
+                    try:
+                        detail = _loads(detail_json or "{}")
+                    except (TypeError, ValueError):
+                        detail = {}
+                    if isinstance(detail, dict) and detail.get("exchange_order_id"):
+                        self.accepted.add(did)
                 elif etype == "ORDER_FILLED":
+                    self.wire_attempt.add(did)
+                    self.accepted.add(did)
                     self.filled.add(did)
                 elif etype == "ROUTER_REJECTED":
                     self.wire_attempt.add(did)
@@ -501,11 +509,15 @@ def main() -> int:
 
         fn = Funnel()
         q = (
-            "SELECT decision_id, candidate_id, decision_ts, ticker, asset, "
-            "selected_side, decision, primary_reason_code, admission_lane, "
-            "seconds_to_close, all_failed_gates_json, gate_results_json "
-            "FROM strategy_decisions WHERE decision_ts > ? "
-            "ORDER BY decision_ts"
+            "SELECT d.decision_id, d.candidate_id, d.decision_ts, d.ticker, d.asset, "
+            "d.selected_side, d.decision, d.primary_reason_code, d.admission_lane, "
+            "d.seconds_to_close, d.all_failed_gates_json, d.gate_results_json, "
+            "(SELECT expected_net_ev_cents FROM strategy_decision_side_ev ev "
+            "WHERE ev.decision_id=d.decision_id AND ev.side='yes'), "
+            "(SELECT expected_net_ev_cents FROM strategy_decision_side_ev ev "
+            "WHERE ev.decision_id=d.decision_id AND ev.side='no') "
+            "FROM strategy_decisions d WHERE d.decision_ts > ? "
+            "ORDER BY d.decision_ts"
         )
         t0 = time.time()
         n = 0

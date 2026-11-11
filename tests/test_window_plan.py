@@ -25,6 +25,7 @@ from merid.prediction import basket_direction as bd
 @pytest.fixture(autouse=True)
 def _plan_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MERID_WINDOW_PLAN_ENABLED", "1")
+    monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", "legacy")
     monkeypatch.setenv("MERID_WINDOW_PLAN_BUDGET_USD", "3.00")
     monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_CONTRACTS", "5")
     monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_SUBMISSIONS", "6")
@@ -65,6 +66,63 @@ def _patches(committed=None):
         patch("merid.prediction.window_quota.quota_basket_leader_side",
               return_value=None),
     )
+
+
+@pytest.mark.parametrize("profile,cap", [("conservative", 2), ("mixed", 3), ("aggressive", 6)])
+def test_profile_preserves_shared_caps_and_leaves_mixed_capacity(monkeypatch, profile, cap):
+    monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", profile)
+    monkeypatch.setenv("MERID_WINDOW_PLAN_BUDGET_USD", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_CONTRACTS", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_ORDER_CAP_USD", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_CORR_CAP_PCT", "1")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_QTY_CC", "600")
+    monkeypatch.setenv("MERID_MAX_CONTRACTS_PER_ORDER", "6")
+    p1, p2, p3 = _patches()
+    with p1, p2, p3, patch("merid.risk.global_slot_allocator.MAX_CONTRACTS_PER_ORDER", 6):
+        first = wp.admit(
+            ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
+            price_cents=90, requested_count=6, tte_s=500, decision_id="first", post_only=True,
+        )
+        second = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
+            price_cents=90, requested_count=6, tte_s=500, decision_id="second", post_only=True,
+        )
+    assert first[0] and first[1] == cap
+    if profile == "mixed":
+        assert second[0] and second[1] == 3
+    if second[0]:
+        assert first[1] + second[1] <= 6
+        assert sum(Decimal(p[3]["reserved_usd"]) for p in (first, second)) <= 6
+    else:
+        assert profile == "aggressive" and second[2] == "window_plan_contract_cap"
+
+
+def test_mixed_ignores_uncommitted_btc_but_honors_real_exposure(monkeypatch):
+    monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", "mixed")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_ENFORCE_BASKET_LEADER", "1")
+    bd.record_direction("BTC", "yes")
+    p1, p2, p3 = _patches()
+    with p1, p2, p3:
+        ok, _, reason, _ = wp.admit(
+            ticker="KXETH15M-26OCT251445-45", asset="ETH", side="no",
+            price_cents=50, requested_count=1, tte_s=500, decision_id="independent",
+        )
+    assert ok, reason
+    committed = (Decimal("0.5"), 100, {"BTC": Decimal("0.5")},
+                 {"yes": Decimal("0.5")}, {"BTC": "yes"}, True)
+    p1, p2, p3 = _patches(committed)
+    with p1, p2, p3:
+        ok, _, reason, _ = wp.admit(
+            ticker="KXSOL15M-26OCT251445-45", asset="SOL", side="no",
+            price_cents=50, requested_count=1, tte_s=500, decision_id="exposure",
+        )
+    assert not ok and reason == "window_plan_basket_dissenter"
+
+
+def test_invalid_execution_profile_fails_closed():
+    with pytest.raises(ValueError, match="Unknown scalp execution profile"):
+        wp.execution_profile_settings("unbounded")
 
 
 def test_budget_fit_and_lift():

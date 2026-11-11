@@ -42,6 +42,7 @@ def _iso(monkeypatch, tmp_path):
     monkeypatch.delenv("MERID_POLICY_GIVEBACK_MIN_SAMPLES", raising=False)
     monkeypatch.delenv("MERID_POLICY_GIVEBACK_FLOOR_CENTS", raising=False)
     monkeypatch.delenv("MERID_POLICY_GIVEBACK_CAP_CENTS", raising=False)
+    monkeypatch.setenv("MERID_POLICY_GIVEBACK_EPOCH_TS", "0")
     xg.reset_cache()
     yield
     xg.reset_cache()
@@ -92,6 +93,19 @@ def test_giveback_sparse_samples_still_measured(tmp_path):
         [_mark("DOGE", -8.0) for _ in range(3)],  # exactly min_samples
     )
     assert xg.giveback_per_trigger_cents("DOGE") == pytest.approx(8.0)
+
+
+def test_giveback_epoch_filters_old_and_undated_marks(tmp_path, monkeypatch):
+    monkeypatch.setenv("MERID_POLICY_GIVEBACK_EPOCH_TS", "1000")
+    _write_marks(
+        tmp_path / "em.jsonl",
+        [
+            {**_mark("BTC", -14.0), "ts": 999},
+            _mark("BTC", -14.0),
+            *[{**_mark("BTC", -6.0), "ts": ts} for ts in (1000, 1001, 1002)],
+        ],
+    )
+    assert xg.giveback_per_trigger_cents("BTC") == pytest.approx(6.0)
 
 
 def test_edge_charges_policy_giveback():

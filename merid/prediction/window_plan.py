@@ -85,6 +85,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def execution_profile_settings(profile: Optional[str] = None) -> dict:
+    name = (profile or os.environ.get("MERID_SCALP_EXECUTION_PROFILE", "mixed")).strip().lower()
+    profiles = {
+        "legacy": {"order_contracts": None, "leader": "all", "refresh_ms": 0},
+        "conservative": {"order_contracts": 2, "leader": "all", "refresh_ms": 30000},
+        "mixed": {"order_contracts": 3, "leader": "committed", "refresh_ms": 60000},
+        "aggressive": {"order_contracts": 6, "leader": "off", "refresh_ms": 90000},
+    }
+    if name not in profiles:
+        raise ValueError(f"Unknown scalp execution profile: {name}")
+    return {"name": name, **profiles[name]}
+
+
 def plan_enabled() -> bool:
     return _env_flag("MERID_WINDOW_PLAN_ENABLED", True)
 
@@ -528,19 +541,21 @@ def admit(
     leader_asset = (
         os.environ.get("MERID_BASKET_LEADER_ASSET", "BTC").strip().upper() or "BTC"
     )
-    if plan_enforce_basket_leader() and asset != leader_asset:
+    profile = execution_profile_settings()
+    detail["execution_profile"] = profile["name"]
+    if plan_enforce_basket_leader() and profile["leader"] != "off" and asset != leader_asset:
         leader_side = (
             asset_sides.get(leader_asset) or pending_asset_sides.get(leader_asset)
         )
         leader_src = "committed" if leader_side else None
-        if leader_side is None:
+        if leader_side is None and profile["leader"] == "all":
             try:
                 from merid.prediction.window_quota import quota_basket_leader_side
                 leader_side = quota_basket_leader_side(ticker)
             except Exception:
                 leader_side = None
             leader_src = "record" if leader_side else None
-        if leader_side is None:
+        if leader_side is None and profile["leader"] == "all":
             try:
                 from merid.prediction import basket_direction as _bd
                 leader_side = _bd.leader_direction(asset)
@@ -594,7 +609,13 @@ def admit(
         global_cap_cc = int(_GLOBAL_CAP) * 100
     except Exception:
         global_cap_cc = plan_max_qty_cc()
-    fit_cc = min(fit_cc, plan_max_qty_cc(), global_cap_cc, remaining_cc)
+    if profile["order_contracts"] is not None:
+        profile_cap_cc = int(profile["order_contracts"] * 100)
+    elif profile["name"] in ("conservative", "mixed"):
+        profile_cap_cc = 300
+    else:
+        profile_cap_cc = remaining_cc
+    fit_cc = min(fit_cc, plan_max_qty_cc(), global_cap_cc, remaining_cc, profile_cap_cc)
     detail["room_usd"] = str(room_usd.quantize(Decimal("0.0001")))
     detail["cost_per_contract_usd"] = str(cost_per.quantize(Decimal("0.0001")))
     detail["fit_cc"] = fit_cc
