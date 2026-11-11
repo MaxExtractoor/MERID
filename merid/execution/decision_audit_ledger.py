@@ -2844,7 +2844,32 @@ class DecisionAuditLedger:
                     scan_frontier_rowid,
                 )
                 _last_progress_log = 0.0
-                while True:
+                # 2026-11-11: yield disk I/O between scan pages.  A full_scan
+                # re-reads ~3.2M outcome rows on the spindle-bound store; at
+                # full speed it starved queued decision/fill writes past the
+                # lag budget (audit_writer_unhealthy entry blocks observed
+                # 2026-11-11).  The scan is resumable via resume_rowid, so
+                # pacing costs wall-clock time, not correctness.  While the
+                # oldest queued write exceeds the yield age, each page pauses
+                # (bounded per page) so live evidence drains first.
+                _recon_yield_age_s = float(
+                    os.environ.get("MERID_RECONCILE_YIELD_AGE_S", "180")
+                )
+                _recon_yield_max_s = float(
+                    os.environ.get("MERID_RECONCILE_YIELD_MAX_S", "10")
+                )
+                # 2026-11-11: bound each page query to a rowid window so the
+                # yield check below actually engages.  Previously each query
+                # scanned (last_rowid, frontier] until 500 candidates — with
+                # sparse candidates that was effectively one giant table
+                # scan per page and the yield never fired mid-scan.
+                _recon_span = max(
+                    1, int(os.environ.get("MERID_RECONCILE_SCAN_SPAN", "100000"))
+                )
+                while last_rowid < scan_frontier_rowid:
+                    _win_end = min(
+                        last_rowid + _recon_span, scan_frontier_rowid
+                    )
                     rows = scan_conn.execute(
                         """
                         SELECT DISTINCT o.decision_id,
@@ -2867,11 +2892,12 @@ class DecisionAuditLedger:
                         ORDER BY o.rowid
                         LIMIT 500
                         """,
-                        (last_rowid, scan_frontier_rowid),
+                        (last_rowid, _win_end),
                     ).fetchall()
-                    if not rows:
-                        break
-                    last_rowid = rows[-1]["_rid"]
+                    if rows:
+                        last_rowid = rows[-1]["_rid"]
+                    else:
+                        last_rowid = _win_end
                     for row in rows:
                         decision_id = row["decision_id"]
                         # Fills-DB reads outside self._lock: under disk
@@ -2928,6 +2954,26 @@ class DecisionAuditLedger:
                             last_rowid,
                             healed,
                         )
+                    if _recon_yield_max_s > 0 and _recon_yield_age_s > 0:
+                        _yield_deadline = time.monotonic() + _recon_yield_max_s
+                        while time.monotonic() < _yield_deadline:
+                            try:
+                                with self._write_queue.mutex:
+                                    _q0 = (
+                                        self._write_queue.queue[0][1]
+                                        if self._write_queue.queue
+                                        else None
+                                    )
+                            except Exception:
+                                _q0 = None
+                            _oldest_age = (
+                                time.monotonic() - _q0
+                                if _q0 is not None
+                                else 0.0
+                            )
+                            if _oldest_age <= _recon_yield_age_s:
+                                break
+                            time.sleep(0.25)
                 self._reconcile_state_save(
                     resume_rowid=last_rowid,
                     complete_through_rowid=max(

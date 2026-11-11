@@ -1455,3 +1455,77 @@ def test_unresolved_recheck_excludes_permanent_reasons_and_bounds_attempts(
     # retryable row in the window is correct — the attempt counter is
     # preserved so a settle that fails again stays bounded.
     assert ledger.requeue_unresolved_outcomes(dec_max.ticker, close_max) == 1
+
+
+def test_reconcile_fill_outcomes_windowed_scan_heals_all_candidates(
+    tmp_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """MERID_RECONCILE_SCAN_SPAN=1 forces one-rowid windows: the scan must
+    still visit every candidate and heal all of them (no skips at window
+    boundaries), and the I/O yield must not break completion even with a
+    stale item sitting in the write queue."""
+    import time as _t
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    monkeypatch.setenv("MERID_RECONCILE_SCAN_SPAN", "1")
+    monkeypatch.setenv("MERID_RECONCILE_YIELD_MAX_S", "0.2")
+    monkeypatch.setenv("MERID_RECONCILE_YIELD_AGE_S", "180")
+    fills_db = tmp_path / "kalshi_fills.db"
+    _make_fills_db(
+        fills_db,
+        [
+            {
+                "fill_id": "fill_wa",
+                "decision_trace_id": "dec_win_a",
+                "execution_outcome_side": "yes",
+                "execution_action": "sell",
+                "execution_price_cents": 46,
+                "fee_cost": 0.0,
+            },
+            {
+                "fill_id": "fill_wb",
+                "decision_trace_id": "dec_win_b",
+                "execution_outcome_side": "yes",
+                "execution_action": "sell",
+                "execution_price_cents": 47,
+                "fee_cost": 0.0,
+            },
+        ],
+    )
+    monkeypatch.setenv(
+        "MERID_RECONCILE_STATE_PATH", str(tmp_path / "reconcile_state.json")
+    )
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    # Settle with the fills DB unreachable so both rows go SETTLED with
+    # NULL fill attribution -> heal candidates once fills are visible.
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(tmp_path / "absent.db"))
+    for i, did in enumerate(("dec_win_a", "dec_win_b")):
+        dec = _enter_decision_no()
+        dec.decision_id = did
+        dec.ticker = f"KXBTC15M-WIN-{i:02d}"
+        ledger.record_trade_decision(dec)
+        close_ts = dec.timestamp_utc.timestamp() + float(dec.seconds_to_expiry)
+        ledger.record_settlement(
+            ticker=dec.ticker,
+            close_ts=close_ts,
+            settled_yes=True,
+            settlement_value_cents=100,
+        )
+
+    monkeypatch.setenv("MERID_FILLS_DB_PATH", str(fills_db))
+    # A stale queued write makes the yield pause (bounded by YIELD_MAX_S)
+    # on every window — the scan must still run to completion.
+    ledger._write_queue.put((lambda: None, _t.monotonic() - 9999.0, "low"))
+
+    assert ledger.reconcile_fill_outcomes() == 2
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        for did, px in (("dec_win_a", 54), ("dec_win_b", 53)):
+            row = conn.execute(
+                "SELECT actual_fill_price_cents, realized_net_pnl_cents "
+                "FROM strategy_decision_outcomes WHERE decision_id = ?",
+                (did,),
+            ).fetchone()
+            assert row["actual_fill_price_cents"] == px

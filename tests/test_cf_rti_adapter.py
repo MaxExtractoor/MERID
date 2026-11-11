@@ -379,3 +379,57 @@ def test_provider_late_observation_rejected_at_freshness_boundary():
     result = _validate_observation("BTC", "BRTI", obs)
     assert result is None
     assert "stale" in get_last_rejection_reason("BTC")
+
+
+def test_warn_throttled_emits_once_per_interval():
+    """Advisory warnings emit once per key per interval, then re-arm."""
+    from merid.data.cf_rti_adapter import _warn_throttled
+
+    with patch("merid.data.cf_rti_adapter.logger") as mock_logger:
+        for _ in range(3):
+            _warn_throttled("test_key", "advisory %s", 1)
+        assert mock_logger.warning.call_count == 1
+
+        # Different key is independent.
+        _warn_throttled("other_key", "advisory %s", 2)
+        assert mock_logger.warning.call_count == 2
+
+        # Window expiry re-arms the same key.
+        _state.future_warn_last_mono.clear()
+        _warn_throttled("test_key", "advisory %s", 1)
+        assert mock_logger.warning.call_count == 3
+
+
+def test_future_timestamp_warning_is_throttled_across_ticks():
+    """A persistent future-skewed source warns once, not once per RTI tick."""
+    now_ms = _now_ms()
+    now_mono_ns = _now_mono_ns()
+
+    obs = CfbRtiObservation(
+        asset="BTC",
+        cfb_symbol="BRTI",
+        value=65000.0,
+        source_ts_ms=now_ms + 10_000,  # >5s ahead of the local clock
+        observed_ts_ms=now_ms,
+        observed_ts_mono_ns=now_mono_ns,
+        sequence=1,
+    )
+
+    with patch("merid.data.cf_rti_adapter.logger") as mock_logger:
+        for _ in range(5):
+            _validate_observation("BTC", "BRTI", obs)
+
+    future_warnings = [
+        c for c in mock_logger.warning.call_args_list
+        if "source_timestamp_in_future" in str(c)
+    ]
+    assert len(future_warnings) == 1
+
+    # After the throttle state resets the warning re-arms.
+    _state.future_warn_last_mono.clear()
+    with patch("merid.data.cf_rti_adapter.logger") as mock_logger2:
+        _validate_observation("BTC", "BRTI", obs)
+    assert any(
+        "source_timestamp_in_future" in str(c)
+        for c in mock_logger2.warning.call_args_list
+    )

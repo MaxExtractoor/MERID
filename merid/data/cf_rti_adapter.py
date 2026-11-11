@@ -183,11 +183,29 @@ class _AdapterState:
     last_failure_reason_by_asset: Dict[str, str] = field(default_factory=dict)
     consecutive_failures_by_asset: Dict[str, int] = field(default_factory=dict)
     rti_history_by_asset: Dict[str, Deque[CfbRtiObservation]] = field(default_factory=dict)
+    future_warn_last_mono: Dict[str, float] = field(default_factory=dict)
 
 
 _state = _AdapterState()
 _rti_history_lock = threading.RLock()
 _RTI_HISTORY_MAX_LEN = int(os.environ.get("MERID_CFB_RTI_HISTORY_MAX_LEN", "120"))
+
+# Advisory-warning throttle: persistent conditions (e.g. host clock drift
+# absorbed by venue calibration, or a source clock running ahead) would
+# otherwise emit a WARNING per RTI tick per asset (~100 lines/s), saturating
+# the async log queue and hiding real events.  Emit at most once per key per
+# interval; the condition is operator-actionable, not per-tick information.
+_FUTURE_WARN_INTERVAL_S = float(
+    os.environ.get("MERID_CF_RTI_SKEW_WARN_INTERVAL_S", "300")
+)
+
+
+def _warn_throttled(key: str, msg: str, *args: Any) -> None:
+    now = time.monotonic()
+    if now - _state.future_warn_last_mono.get(key, 0.0) < _FUTURE_WARN_INTERVAL_S:
+        return
+    _state.future_warn_last_mono[key] = now
+    logger.warning(msg, *args)
 
 # One-shot stack-capture flags for pipeline stalls.
 _processing_stack_captured = False
@@ -523,7 +541,8 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         and _skew_ref_basis == "kalshi_calibrated"
         and source_ts_ms - observed_wall_ms > _FUTURE_SKEW_LIMIT_MS
     ):
-        logger.warning(
+        _warn_throttled(
+            f"skew_tolerated:{asset}",
             "[CF-RTI-ADAPTER] cfb_rti_future_skew_tolerated asset=%s "
             "cfb_symbol=%s source_ts_ms=%s observed_ts_ms=%s "
             "raw_lead_ms=%s calibrated_lead_ms=%s — host clock drift "
@@ -777,7 +796,8 @@ def _validate_observation(
     if wall_age_ms < -5_000:
         # Source clock is more than 5s ahead of ours.  Warn but do not reject;
         # the data is still fresh from its own perspective.
-        logger.warning(
+        _warn_throttled(
+            f"src_future:{asset}",
             "[CF-RTI-ADAPTER] source_timestamp_in_future asset=%s cfb_symbol=%s "
             "source_ts_ms=%d now_ms=%d skew_ms=%d",
             asset, cfb_symbol, obs.source_ts_ms, now_ms, -wall_age_ms,
@@ -978,6 +998,7 @@ def reset_state() -> None:
     _state.last_failure_reason_by_asset.clear()
     _state.consecutive_failures_by_asset.clear()
     _state.rti_history_by_asset.clear()
+    _state.future_warn_last_mono.clear()
 
 
 def final_minute_cutoff_seconds() -> float:
