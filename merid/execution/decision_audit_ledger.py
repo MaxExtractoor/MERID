@@ -407,6 +407,16 @@ class DecisionAuditLedger:
         self._init_lock = threading.Lock()
         self._db_ready = False
         self._shared_conn: Optional[sqlite3.Connection] = None
+        # 2026-11-10: dedicated WAL-checkpoint connection.  wal_checkpoint is
+        # serviced as a queued write item, so it runs on the writer thread —
+        # frequently INSIDE _run_queued_batch's open BEGIN IMMEDIATE on
+        # _shared_conn.  PRAGMA wal_checkpoint on a connection with an active
+        # transaction fails instantly with SQLITE_LOCKED ("database table is
+        # locked"; busy_timeout does not apply), which is why every scheduled
+        # checkpoint failed and the WAL grew past 1GB while entries halted on
+        # audit_writer_unhealthy.  A separate connection has no open
+        # transaction or cursors, so the pragma can actually merge frames.
+        self._ckpt_conn_obj: Optional[sqlite3.Connection] = None
         # 2026-10-28: dedicated persistent read connection.  WAL-mode readers
         # get a consistent snapshot without touching the writer's lock —
         # previously single-SELECT readers serialized behind ``self._lock``
@@ -622,6 +632,12 @@ class DecisionAuditLedger:
                 except Exception:
                     pass
                 self._read_conn = None
+        if self._ckpt_conn_obj is not None:
+            try:
+                self._ckpt_conn_obj.close()
+            except Exception:
+                pass
+            self._ckpt_conn_obj = None
         return flushed
 
     def _submit_write(self, fn: Callable[[], None], *, priority: str = "normal") -> None:
@@ -1073,6 +1089,19 @@ class DecisionAuditLedger:
             # last checkpoint.  On the production spindle (~100-200ms per
             # fsync) per-commit FULL syncs were the dominant writer cost.
             conn.execute("PRAGMA synchronous = NORMAL")
+            # 2026-11-10: the stock ~2MiB page cache cannot hold the hot set
+            # of a multi-GB audit DB — every queued write re-read index and
+            # table pages from the spindle (observed audit_write_exec_ms
+            # p95 ~= 1.7s/item, writer ~0.6 items/s vs ~3+/s arrival, queue
+            # oldest >20min -> audit_writer_unhealthy halted all entries).
+            # Raise the cache so recent B-tree tails stay resident; env-
+            # tunable, 0 keeps the SQLite default.
+            _cache_kib = int(
+                os.getenv("MERID_AUDIT_WRITER_CACHE_KIB", "262144")
+            )
+            if _cache_kib > 0:
+                conn.execute("PRAGMA cache_size = %d" % (-_cache_kib))
+            conn.execute("PRAGMA temp_store = MEMORY")
             # Larger autocheckpoint amortizes checkpoint bursts on slow disk.
             conn.execute(
                 "PRAGMA wal_autocheckpoint = %d"
@@ -1109,6 +1138,49 @@ class DecisionAuditLedger:
             except Exception:
                 pass
 
+    def _ckpt_conn(self) -> sqlite3.Connection:
+        """Lazily-opened dedicated connection for WAL checkpoints.
+
+        Never returns ``_shared_conn``: checkpoints run while the writer's
+        batch transaction may be open on that handle, and SQLite refuses
+        ``PRAGMA wal_checkpoint`` on a connection with an active transaction
+        (SQLITE_LOCKED — not retryable via busy_timeout).  This connection
+        stays in autocommit (isolation_level=None) and only ever runs the
+        checkpoint pragma, so it can never hold an open write transaction
+        itself.  Guarded by ``self._lock`` like ``_shared_conn``.
+        """
+        conn = self._ckpt_conn_obj
+        if conn is None:
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False
+            )
+            conn.isolation_level = None
+            conn.execute("PRAGMA busy_timeout = 5000")
+            _ckcache_kib = int(
+                os.getenv("MERID_AUDIT_CKPT_CACHE_KIB", "131072")
+            )
+            if _ckcache_kib > 0:
+                conn.execute("PRAGMA cache_size = %d" % (-_ckcache_kib))
+            conn.execute("PRAGMA temp_store = MEMORY")
+            self._ckpt_conn_obj = conn
+        return conn
+
+    def _drop_ckpt_conn(self) -> None:
+        """Invalidate the checkpoint connection after a fatal error.
+
+        Mirrors ``_drop_shared_conn``: a handle poisoned by WAL recovery
+        under contention stays broken for its lifetime, so the next
+        checkpoint must reconnect on a fresh handle.
+        """
+        with self._lock:
+            conn = self._ckpt_conn_obj
+            self._ckpt_conn_obj = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def _read(self) -> sqlite3.Connection:
         """Lazily-opened persistent read connection (WAL snapshot isolation).
 
@@ -1128,6 +1200,16 @@ class DecisionAuditLedger:
                     conn.row_factory = sqlite3.Row
                     conn.execute("PRAGMA busy_timeout = 5000")
                     conn.execute("PRAGMA query_only = ON")
+                    # Same cache reasoning as the writer conn: evidence and
+                    # reconcile scans over the multi-GB store run faster with
+                    # a real page cache, and shorter scans release their WAL
+                    # read mark sooner so checkpoints are not starved.
+                    _rcache_kib = int(
+                        os.getenv("MERID_AUDIT_READER_CACHE_KIB", "131072")
+                    )
+                    if _rcache_kib > 0:
+                        conn.execute("PRAGMA cache_size = %d" % (-_rcache_kib))
+                    conn.execute("PRAGMA temp_store = MEMORY")
                     self._read_conn = conn
         return self._read_conn
 
@@ -4415,7 +4497,10 @@ class DecisionAuditLedger:
             mode = "PASSIVE"
         try:
             with self._lock:
-                conn = self._conn()
+                # Dedicated connection, never _shared_conn: this call is
+                # serviced on the writer thread, usually inside an open
+                # batch transaction, where the pragma fails SQLITE_LOCKED.
+                conn = self._ckpt_conn()
                 busy, wal_frames, ckpt_frames = conn.execute(
                     "PRAGMA wal_checkpoint(%s)" % mode
                 ).fetchone()
@@ -4432,6 +4517,8 @@ class DecisionAuditLedger:
                 )
             return bool(busy)
         except Exception as exc:
+            if "readonly" in str(exc).lower() or "closed" in str(exc).lower():
+                self._drop_ckpt_conn()
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] wal_checkpoint(%s) failed: %s", mode, exc
             )
