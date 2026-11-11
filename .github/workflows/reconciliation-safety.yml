@@ -147,12 +147,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
+      # No setup-python: this job only runs grep checks. setup-python's
+      # post-job cache/toolcache cleanup flaked on 2026-11-11 (run
+      # 43107225913) after every real check had already passed.
       - name: Verify reduced grace window (BUG-0324-0005)
         run: |
           # Check that default grace window is reduced to 30s
@@ -176,12 +173,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
+      # No setup-python: this job only runs grep checks. setup-python's
+      # post-job cache/toolcache cleanup flaked on 2026-11-11 (run
+      # 43107225913) after every real check had already passed.
       - name: Verify KALSHI_ONLY fix (BUG-0324-0007)
         run: |
           # Check that get_paper_trading_engine is used instead of get_paper_engine
