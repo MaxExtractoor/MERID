@@ -115,6 +115,16 @@ def archive(db_path: Path, archive_dir: Path, days: int, chunk_ids: int,
     con = sqlite3.connect(str(db_path), timeout=60)
     con.execute("PRAGMA busy_timeout = 60000")
     con.execute("PRAGMA journal_mode = WAL")
+    # 2026-11-10: the 25GB source makes per-id index probes disk-bound at the
+    # default ~2MB page cache (observed <1 chunk/min).  Pin a large cache and
+    # mmap the file so repeated probes hit RAM after warmup — with the server
+    # stopped this is the difference between hours and tens of minutes.
+    _cache_kib = int(os.environ.get("MERID_ARCHIVE_CACHE_MIB", "8192")) * 1024
+    if _cache_kib > 0:
+        con.execute("PRAGMA cache_size = %d" % (-_cache_kib))
+    _mmap = int(os.environ.get("MERID_ARCHIVE_MMAP_BYTES", "0"))
+    if _mmap > 0:
+        con.execute("PRAGMA mmap_size = %d" % _mmap)
     cutoff = time.time() - days * DAY
     print(f"[archive] cutoff={_utc(cutoff)} ({days}d) dry_run={dry_run}",
           flush=True)
@@ -159,6 +169,14 @@ def archive(db_path: Path, archive_dir: Path, days: int, chunk_ids: int,
         acon = sqlite3.connect(str(path), timeout=60)
         acon.execute("PRAGMA journal_mode = WAL")
         acon.execute("PRAGMA busy_timeout = 60000")
+        # Same cache/mmap treatment as the source connection: the archive
+        # side does the heavy sequential writes and ATTACHed src probes.
+        _acache_kib = int(
+            os.environ.get("MERID_ARCHIVE_CACHE_MIB", "8192")) * 1024
+        if _acache_kib > 0:
+            acon.execute("PRAGMA cache_size = %d" % (-_acache_kib))
+        if _mmap > 0:
+            acon.execute("PRAGMA mmap_size = %d" % _mmap)
         # Read rows straight out of the source DB — the archive writer owns
         # the transfer so the main connection only ever DELETEs.
         acon.execute("ATTACH DATABASE ? AS src", (str(db_path),))

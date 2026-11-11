@@ -1102,6 +1102,14 @@ class DecisionAuditLedger:
             if _cache_kib > 0:
                 conn.execute("PRAGMA cache_size = %d" % (-_cache_kib))
             conn.execute("PRAGMA temp_store = MEMORY")
+            # 2026-11-10: mmap lets the OS page cache serve cold index/table
+            # reads on the multi-GB store instead of 4KiB random pager I/O on
+            # the spindle; env-tunable, 0 keeps mmap disabled.
+            _mmap_bytes = int(
+                os.getenv("MERID_AUDIT_MMAP_BYTES", "8589934592")
+            )
+            if _mmap_bytes > 0:
+                conn.execute("PRAGMA mmap_size = %d" % _mmap_bytes)
             # Larger autocheckpoint amortizes checkpoint bursts on slow disk.
             conn.execute(
                 "PRAGMA wal_autocheckpoint = %d"
@@ -1162,6 +1170,11 @@ class DecisionAuditLedger:
             if _ckcache_kib > 0:
                 conn.execute("PRAGMA cache_size = %d" % (-_ckcache_kib))
             conn.execute("PRAGMA temp_store = MEMORY")
+            _ckmmap_bytes = int(
+                os.getenv("MERID_AUDIT_MMAP_BYTES", "8589934592")
+            )
+            if _ckmmap_bytes > 0:
+                conn.execute("PRAGMA mmap_size = %d" % _ckmmap_bytes)
             self._ckpt_conn_obj = conn
         return conn
 
@@ -1210,6 +1223,11 @@ class DecisionAuditLedger:
                     if _rcache_kib > 0:
                         conn.execute("PRAGMA cache_size = %d" % (-_rcache_kib))
                     conn.execute("PRAGMA temp_store = MEMORY")
+                    _rmmap_bytes = int(
+                        os.getenv("MERID_AUDIT_MMAP_BYTES", "8589934592")
+                    )
+                    if _rmmap_bytes > 0:
+                        conn.execute("PRAGMA mmap_size = %d" % _rmmap_bytes)
                     self._read_conn = conn
         return self._read_conn
 

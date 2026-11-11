@@ -170,3 +170,34 @@ def test_read_and_ckpt_conns_use_configured_cache_size(
     assert read_conn.execute("PRAGMA cache_size").fetchone()[0] == -32768
     ckpt_conn = ledger._ckpt_conn()
     assert ckpt_conn.execute("PRAGMA cache_size").fetchone()[0] == -16384
+
+
+def test_writer_conn_uses_configured_mmap_size(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mmap_size (bytes) lets the OS page cache serve cold reads on the
+    multi-GB store instead of 4KiB pager I/O on the spindle."""
+    monkeypatch.setenv("MERID_AUDIT_MMAP_BYTES", "1048576")
+    ledger = _ledger(tmp_db)
+    conn = ledger._conn()
+    assert conn.execute("PRAGMA mmap_size").fetchone()[0] == 1048576
+
+
+def test_read_and_ckpt_conns_use_configured_mmap_size(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MERID_AUDIT_MMAP_BYTES", "2097152")
+    ledger = _ledger(tmp_db)
+    ledger.wal_checkpoint("PASSIVE")  # opens the ckpt conn
+    assert ledger._read().execute("PRAGMA mmap_size").fetchone()[0] == 2097152
+    assert ledger._ckpt_conn().execute("PRAGMA mmap_size").fetchone()[0] == 2097152
+
+
+def test_mmap_size_zero_keeps_default_disabled(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MERID_AUDIT_MMAP_BYTES=0 disables the override entirely."""
+    monkeypatch.setenv("MERID_AUDIT_MMAP_BYTES", "0")
+    ledger = _ledger(tmp_db)
+    conn = ledger._conn()
+    assert conn.execute("PRAGMA mmap_size").fetchone()[0] == 0
