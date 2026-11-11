@@ -10,6 +10,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
@@ -453,6 +454,15 @@ async def scale_agent_pool(
 
 # ── Promotion Report ─────────────────────────────────────────────────
 
+# Promotion-report regeneration can spawn subprocess suites (pytest
+# gauntlet) that take minutes — 2026-11-10: running it synchronously inside
+# these async handlers froze the entire event loop (trading + API) when a
+# grandchild held the capture pipe past the subprocess timeout.  All report
+# access goes through a worker thread with a hard cap; with
+# MERID_PROMOTION_REPORT_FAST=1 (production) regeneration is near-instant.
+_PROMOTION_REPORT_TIMEOUT_S = 45.0
+
+
 @router.get("/promotion-report")
 async def get_promotion_report() -> Dict[str, Any]:
     """
@@ -462,7 +472,10 @@ async def get_promotion_report() -> Dict[str, Any]:
     """
     try:
         from merid.promotion_report import get_cached_promotion_report
-        report = get_cached_promotion_report(gauntlet_cycles=5)
+        report = await asyncio.wait_for(
+            asyncio.to_thread(get_cached_promotion_report, gauntlet_cycles=5),
+            timeout=_PROMOTION_REPORT_TIMEOUT_S,
+        )
         return report.to_dict()
     except Exception as exc:
         logger.error(f"promotion_report_error: {exc}")
@@ -485,8 +498,14 @@ async def refresh_promotion_report(
     """Force-regenerate the promotion report (bypasses cache)."""
     try:
         from merid.promotion_report import invalidate_cache, get_cached_promotion_report
-        invalidate_cache()
-        report = get_cached_promotion_report(gauntlet_cycles=5)
+
+        def _regen() -> Any:
+            invalidate_cache()
+            return get_cached_promotion_report(gauntlet_cycles=5)
+
+        report = await asyncio.wait_for(
+            asyncio.to_thread(_regen), timeout=_PROMOTION_REPORT_TIMEOUT_S
+        )
         return report.to_dict()
     except Exception as exc:
         logger.error(f"promotion_report_refresh_error: {exc}")
@@ -503,7 +522,10 @@ async def get_promotion_checklist(domain: Optional[str] = Query(None)) -> List[D
     """
     try:
         from merid.promotion_report import promotion_checklist
-        return promotion_checklist(domain=domain)
+        return await asyncio.wait_for(
+            asyncio.to_thread(promotion_checklist, domain=domain),
+            timeout=_PROMOTION_REPORT_TIMEOUT_S,
+        )
     except Exception as exc:
         logger.error(f"promotion_checklist_error: {exc}")
         return [{

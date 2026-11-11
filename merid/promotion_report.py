@@ -467,9 +467,9 @@ def _run_blueprint_checks() -> RingResult:
     except ImportError:
         # Fallback: run as subprocess
         try:
-            result = subprocess.run(
+            result = _run_capture(
                 [sys.executable, "scripts/ci_blueprint_checks.py", "--json"],
-                capture_output=True, text=True, timeout=30,
+                timeout=30,
             )
             import json
             data = json.loads(result.stdout)
@@ -502,15 +502,62 @@ def _run_blueprint_checks() -> RingResult:
 
 # ── Ring 2: Paper Matrix SLOs ───────────────────────────────────────
 
+def _run_capture(cmd: list, timeout: float) -> "subprocess.CompletedProcess":
+    """subprocess.run equivalent that kills the whole process TREE on timeout.
+
+    2026-11-10 incident: ``subprocess.run(timeout=...)`` only terminates the
+    direct child.  On this host the venv python launcher re-execs the real
+    interpreter as a grandchild, which inherits the stdout/stderr pipe —
+    after the direct child is killed, ``communicate()`` keeps blocking on the
+    still-open pipe forever and froze the entire trading server when the
+    promotion-report gauntlet ran inside the request/loop path.  Popen +
+    communicate + ``taskkill /T`` (Windows) tears down the whole tree so the
+    pipes actually reach EOF.
+    """
+    is_windows = os.name == "nt"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        # POSIX: own process group so killpg reaches grandchildren; Windows
+        # tree-kill goes through taskkill /T below.
+        start_new_session=not is_windows,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Kill the entire tree — grandchildren keep the pipes open and
+        # would otherwise hold communicate() past the timeout indefinitely.
+        try:
+            if is_windows:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=15,
+                )
+            else:
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            proc.kill()
+        try:
+            out, err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _run_paper_matrix() -> RingResult:
     """Run paper trading matrix tests and parse results."""
     t0 = time.time()
     try:
-        result = subprocess.run(
+        result = _run_capture(
             [sys.executable, "-m", "pytest",
              "tests/test_paper_trading_matrix.py",
              "-v", "--tb=line", "-q"],
-            capture_output=True, text=True, timeout=120,
+            timeout=120,
         )
         output = result.stdout + result.stderr
 
@@ -573,13 +620,23 @@ def _run_agent_gauntlet(cycles: int = 10) -> tuple:
             loop = None
         if loop is not None:
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 # Create the coroutine inside the worker thread so it is always
                 # awaited there; creating it eagerly here can leave it
                 # unawaited if submit/result raises (e.g. timeout).
                 verdicts = pool.submit(
                     lambda: asyncio.run(run_gauntlet(cycles=cycles))
                 ).result(timeout=120)
+            except Exception:
+                # shutdown(wait=False): a ``with`` block would wait for the
+                # unkillable asyncio.run worker forever, making the 120s
+                # result() timeout ineffective (same freeze class as the
+                # pytest pipe deadlock, 2026-11-10).
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=False, cancel_futures=True)
         else:
             verdicts = asyncio.run(run_gauntlet(cycles=cycles))
         summary = gauntlet_summary(verdicts)
@@ -698,6 +755,10 @@ def generate_promotion_report(gauntlet_cycles: int = 10) -> PromotionReport:
 _cached_report: Optional[PromotionReport] = None
 _cached_at: float = 0.0
 _CACHE_TTL_S = 300.0  # 5 minutes
+# Serializes regeneration: the gauntlet can take minutes, and concurrent
+# callers (API threads, execution-guard refresh, loop sync) must share one
+# in-flight run instead of stampeding subprocess suites.
+_cache_lock = threading.Lock()
 
 
 def get_cached_promotion_report(gauntlet_cycles: int = 5) -> PromotionReport:
@@ -705,9 +766,14 @@ def get_cached_promotion_report(gauntlet_cycles: int = 5) -> PromotionReport:
     global _cached_report, _cached_at
     if _cached_report and (time.time() - _cached_at) < _CACHE_TTL_S:
         return _cached_report
-    previous = _cached_report
-    _cached_report = generate_promotion_report(gauntlet_cycles=gauntlet_cycles)
-    _cached_at = time.time()
+    with _cache_lock:
+        # Re-check under the lock — a concurrent caller may have just
+        # finished regenerating while we waited.
+        if _cached_report and (time.time() - _cached_at) < _CACHE_TTL_S:
+            return _cached_report
+        previous = _cached_report
+        _cached_report = generate_promotion_report(gauntlet_cycles=gauntlet_cycles)
+        _cached_at = time.time()
     _diff_and_log(previous, _cached_report)
     return _cached_report
 
@@ -715,8 +781,9 @@ def get_cached_promotion_report(gauntlet_cycles: int = 5) -> PromotionReport:
 def invalidate_cache():
     """Force regeneration on next call."""
     global _cached_report, _cached_at
-    _cached_report = None
-    _cached_at = 0.0
+    with _cache_lock:
+        _cached_report = None
+        _cached_at = 0.0
 
 
 # ── Promotion Checklist (runbook as data) ────────────────────────────
