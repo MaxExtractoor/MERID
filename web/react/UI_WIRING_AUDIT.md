@@ -51,6 +51,42 @@ verified against source before fixing.
 - New: `tests/test_ui_readiness_contract.py` (503/200 matrix + ui-summary session gate), `tests/test_kalshi_ui_order_normalization.py` (14 raw-order shapes × 2 sources, fractional counts, own-side pricing, NaN/Infinity rejection, REST fallback), `web/react/src/agents/__tests__/session.test.ts` (11 cases), `web/react/src/hooks/usePoll.test.tsx` (4 races), `web/react/e2e/ui-contract.spec.ts`.
 - Deleted stale e2e specs for retired views (`dashboard`, `trade`, `kalshi-dashboards`); `accessibility.spec.ts` rewritten for the seven views. Playwright `Ctrl+K` is browser-reserved in headless — e2e exercises the TopBar-search open path instead.
 
+## 2026-11-12 — upstream/midstream/downstream contract audit (second pass)
+
+Second full-stack pass focused on real backend payloads vs. what the views
+actually render. Every finding verified against source before fixing.
+
+### Backend contracts
+
+| Finding | Fix |
+| --- | --- |
+| `GET /api/v1/kalshi/markets` catalog path serialized outcomes with `price` but no `bid`/`ask`, so the market picker showed no spread/quotes even though `CatalogMarket.yes_bid`/`yes_ask` were authoritative dollars | Outcome rows now carry real `bid`/`ask` (YES side from catalog BBO; NO side as the YES-book complement, `null` when absent — never fabricated from `price`) |
+| `GET /api/v1/kalshi/positions` cache path dropped `unrealized_pnl`/`realized_pnl`, so the portfolio rendered `$0.00` PnL for cached positions | Cache rows now pass through both PnL fields |
+| `GET /api/v1/kalshi/market-states` returned only a sparse subset (spread/mid/depth/tob) — agent wall market blocks, depth chart, and trade-ticket staleness had no BBO/freshness/executable/shard data to render | Endpoint now emits the canonical `KalshiMarketState` fields: `yes_bid_c`/`yes_ask_c`, mid, spread, depth, book health, data quality, quote owner, `executable`, freshness timestamps, exchange shard |
+| `POST /api/v1/kalshi/orders` `count` was `int` — fractional centi-contract orders (which `OrderIntent`/`count_fp` already support end-to-end) were rejected at the API boundary | `count: float` with finite/positive validation and 0.01-grid rounding downstream |
+| Crypto 15m exit-policy branch in `place_order` matched BTC/ETH/XRP/DOGE prefixes but omitted `KXSOL` | `KXSOL` added — SOL 15m orders now get the same lifecycle/exit handling |
+| `GET /api/v1/kalshi-grid/summary` returned `available`/`agent_count`/loop fields but not the `agents_total`/`agents_running`/`mode` the UI consumed — SystemRibbon's mode chip rendered a dead field | Summary now emits per-agent `enabled`/`running` flags plus `agents_total`/`agents_running`/`mode` aggregates |
+
+### Frontend wiring
+
+| Finding | Fix |
+| --- | --- |
+| `AgentDetail.normalizeBook` couldn't tell cent-priced vs dollar-priced ladders apart; YES asks were missing when only NO bids existed | Normalization now handles both unit shapes and derives YES asks from NO bids (`100 - no_bid`) |
+| `Terminal` listed expired/settled 15m markets alongside live ones and passed no book-freshness signal to the ticket | Expired/closed markets filtered out; `bookAgeMs`/`bookStale` props wired through |
+| `KalshiTradeTicket` forced integer contracts (min 1) despite the API's 0.01 contract grid, and let a `null`/`NaN` price slip into validation | Fractional quantity (min 0.01, step 0.01), `price: number \| null`, explicit finite/range price guards, book-age staleness disable |
+| `SystemRibbon` grid chip read `summary.mode` which the backend never emitted | Replaced with real grid telemetry (`agents_running`/`agents_total` + loop state) |
+| `mergeWallAgents` left new market-state fields (BBO, executable, shard, freshness) unmapped | Mapper + `MarketState`/`ServerAgent`/`GridSummary` types extended; wall/detail/terminal consume them |
+
+### Tests
+
+- New `tests/test_ui_wiring_audit_contracts.py` pins: market-states field set,
+  positions PnL passthrough, catalog outcome bid/ask (incl. NO-side complement
+  and absent-BBO honesty), fractional `place_order` count validation +
+  `KXSOL` lifecycle branch, and grid summary aggregates.
+- Jest: `agents/__tests__/api.test.ts` (normalizer coverage for the new
+  payload shapes) and `KalshiTradeTicket.test.tsx` (0.01 min qty, fractional
+  steps, null-price guards).
+
 ## Verified but deliberately unchanged
 
 - `system.mode` stays `'live'` under `LIVE_ENTRIES_HALTED` — it is **venue mode**

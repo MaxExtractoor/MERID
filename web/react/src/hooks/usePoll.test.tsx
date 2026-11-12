@@ -53,7 +53,7 @@ test('StrictMode replay ignores the first effect request', async () => {
 test('failed refresh preserves last good data and timestamp', async () => {
   get.mockResolvedValueOnce('good').mockRejectedValueOnce(new Error('offline'));
   const { result } = renderHook(() => usePoll('/data', { ms: 0 }));
-  await act(async () => {});
+  await act(async () => { await Promise.resolve(); });
   const lastOk = result.current.lastOk;
   await act(async () => { result.current.refresh(); });
   expect(result.current.data).toBe('good');
