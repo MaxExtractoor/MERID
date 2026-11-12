@@ -28,6 +28,32 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _coerce_version_int(value: Any) -> int:
+    """Coerce a persisted version marker to int.
+
+    ``basis_version`` is declared ``int`` but older persisted records can
+    carry string forms (``'v1'``).  ``int('v1')`` raises — and downstream
+    exit-attempt creation crashed on it live (2026-11-12 XRP-2000: every
+    exit dispatch refused).  Extracts the leading digit run ('v1'->1,
+    '2026-10-05'->2026); unparseable -> 0.
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        run: List[str] = []
+        for ch in value:
+            if ch.isdigit():
+                run.append(ch)
+            elif run:
+                break
+        return int("".join(run)) if run else 0
+    return 0
+
+
 class PositionSide(str, Enum):
     """Position side for binary contracts."""
     YES = "yes"
@@ -1465,7 +1491,7 @@ class Position:
             avg_entry_price_cents=data.get("avg_entry_price_cents", 0),
             all_in_entry_basis_cents=data.get("all_in_entry_basis_cents"),
             basis_state=data.get("basis_state", "UNKNOWN"),
-            basis_version=data.get("basis_version", 0),
+            basis_version=_coerce_version_int(data.get("basis_version", 0)),
             basis_sources=list(data.get("basis_sources", [])) if data.get("basis_sources") else [],
             opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.now(timezone.utc),
             take_profit_price_cents=data.get("take_profit_price_cents"),

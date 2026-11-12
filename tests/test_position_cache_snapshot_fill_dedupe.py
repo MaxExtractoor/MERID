@@ -324,6 +324,66 @@ def test_partial_fill_then_remaining_canonical_still_applies(tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
+# 5. recompute_position_from_ledger marks replayed fills applied.
+#    Live incident 2026-11-11 (ETH + XRP): sync_from_rest adopted a
+#    ledger-recomputed position, then the delayed canonical fill event applied
+#    the same economic delta a second time -> cache=600 vs exchange=300,
+#    contract-limit warnings, and a fills_reconciliation_failed halt.
+# ---------------------------------------------------------------------------
+
+def test_recompute_marks_replayed_fills_applied(tmp_path, monkeypatch):
+    cache = _cache(tmp_path, monkeypatch)
+
+    entry = _fill("fill-recompute-1", created_time=T0)
+    cache._fills_ledger = _ledger(entry)
+
+    pos = asyncio.run(cache.recompute_position_from_ledger(TICKER, "BTC_15M"))
+    assert pos is not None
+    assert pos.quantity_cc == 100
+    assert "fill-recompute-1" in cache._applied_fill_ids
+
+    # Simulate the caller adopting the recomputed state (sync_from_rest does
+    # this via base_position), then deliver the delayed fill event — the same
+    # economic fill must not mutate exposure a second time.
+    cache._positions[TICKER] = pos
+    asyncio.run(_on_fill(cache, fill_id="fill-recompute-1"))
+    assert _yes_exposure(cache) == 100, "recompute + fill event double-applied"
+
+
+def test_recompute_flat_replay_marks_both_legs(tmp_path, monkeypatch):
+    """Entry+exit replaying to flat: both legs are reflected in the empty
+    result — a re-delivered entry fill must not ghost a closed position."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    entry = _fill("fill-re-e", created_time=T0)
+    exit_ = _fill("fill-re-x", created_time=T0 + timedelta(seconds=10),
+                  action="sell", is_exit=True)
+    cache._fills_ledger = _ledger(entry, exit_)
+
+    pos = asyncio.run(cache.recompute_position_from_ledger(TICKER, "BTC_15M"))
+    assert pos is None
+    assert {"fill-re-e", "fill-re-x"} <= set(cache._applied_fill_ids)
+
+    asyncio.run(_on_fill(cache, fill_id="fill-re-e"))
+    assert _yes_exposure(cache) == 0, "re-delivered entry ghosted a closed position"
+
+
+def test_recompute_skips_undetermined_direction_fill(tmp_path, monkeypatch):
+    """A fill with no determinable direction contributes nothing and must not
+    be marked applied — it still needs real classification on delivery."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    bad = _fill("fill-bad-dir", created_time=T0, action="", side="")
+    good = _fill("fill-good-1", created_time=T0 + timedelta(seconds=1))
+    cache._fills_ledger = _ledger(bad, good)
+
+    pos = asyncio.run(cache.recompute_position_from_ledger(TICKER, "BTC_15M"))
+    assert pos is not None
+    assert "fill-good-1" in cache._applied_fill_ids
+    assert "fill-bad-dir" not in cache._applied_fill_ids
+
+
+# ---------------------------------------------------------------------------
 # 4. Helper unit tests.
 # ---------------------------------------------------------------------------
 

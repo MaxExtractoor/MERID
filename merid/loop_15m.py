@@ -2282,6 +2282,35 @@ def _resolve_exit_policy_snapshot(position: Any) -> Tuple[Dict[str, Any], bool]:
     return raw, False
 
 
+def _coerce_attempt_version_int(value: Any) -> int:
+    """Coerce a version marker to int for durable exit-attempt records.
+
+    ``basis_version``/``policy_version`` are declared ints but arrive from
+    persisted position records and policy snapshots that can carry string
+    forms (``'v1'``, ``'2026-10-05'``).  A bare ``int()`` raises on those and
+    — observed live 2026-11-12 on KXXRP15M-26NOV112000-00 — killed every exit
+    dispatch for the position (``Failed to create durable exit attempt:
+    invalid literal for int() ... 'v1'`` -> ``refusing dispatch``).  The
+    version is audit metadata; it must never refuse an exit.  Extracts the
+    leading digit run ('v1'->1, '2026-10-05'->2026); unparseable -> 0.
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        run: List[str] = []
+        for ch in value:
+            if ch.isdigit():
+                run.append(ch)
+            elif run:
+                break
+        return int("".join(run)) if run else 0
+    return 0
+
+
 def _run_exit_price_guard(
     position: Any,
     exit_reason: Any,
@@ -4194,8 +4223,8 @@ async def _execute_exit_order(
                     requested_quantity=requested_exit_cc,
                     requested_limit_cents=int(round(exit_price_cents)),
                     exchange_order_id=None,
-                    policy_version=int(_exit_policy.get("version", 0) or 0),
-                    basis_version=int(getattr(position, "basis_version", 0) or 0),
+                    policy_version=_coerce_attempt_version_int(_exit_policy.get("version", 0)),
+                    basis_version=_coerce_attempt_version_int(getattr(position, "basis_version", 0)),
                     payload={
                         "order_attempt_id": intent.order_attempt_id,
                         "parent_entry_fill_id": intent.parent_entry_fill_id,

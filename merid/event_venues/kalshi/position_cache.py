@@ -4854,6 +4854,7 @@ class KalshiPositionCache:
         # storing it as entry_fill_price_cents would leave the record in the
         # wrong side space and trip complement guards downstream.
         entry_anchor_price_cents: Optional[int] = None
+        _recompute_contributed_fill_ids: List[str] = []
 
         for fill in sorted_fills:
             if first_fill is None:
@@ -4975,6 +4976,30 @@ class KalshiPositionCache:
                 entry_cash_proceeds_usd = entry_cash_proceeds_usd - released_basis + remainder_cash
 
             yes_exposure += fill_yes
+            _replayed_fid = getattr(fill, 'fill_id', None)
+            if _replayed_fid:
+                _recompute_contributed_fill_ids.append(_replayed_fid)
+
+        # 2026-11-11: Exactly-once across recompute and event paths — same
+        # contract as _rebuild_from_fills_ledger.  Every fill replayed into the
+        # reconstructed state (including replays that net to flat) is already
+        # reflected here; mark it applied so a delayed canonical fill event
+        # cannot re-apply the same economic delta.  Observed live twice in one
+        # session: recompute/REST-sync +300 then fill-bus +300 -> cache=600 vs
+        # exchange=300, leaving a phantom position that tripped reconciliation.
+        if _recompute_contributed_fill_ids:
+            _newly_marked = 0
+            for _fid in _recompute_contributed_fill_ids:
+                if _fid not in self._applied_fill_ids:
+                    self._applied_fill_ids[_fid] = replay_time()
+                    _newly_marked += 1
+            if _newly_marked:
+                self._save_applied_fill_ids()
+                logger.info(
+                    "[POSITION-RECOMPUTE-COVERAGE] market=%s marked %d replayed "
+                    "fill(s) applied (yes_exposure=%s)",
+                    market_id, _newly_marked, yes_exposure,
+                )
 
         # Convert canonical YES exposure back to (side, quantity_cc).
         if yes_exposure == 0:
@@ -5485,6 +5510,12 @@ class KalshiPositionCache:
         # created_time <= rest_timestamp is already included in the synced
         # quantities and must be marked applied so a delayed fill event cannot
         # re-apply the same economic fill as a delta.
+        # NOTE: rest_timestamp must be the snapshot RESPONSE time, not request
+        # start — fills landing in the request/response flight window are
+        # inside the snapshot, while fills after the response are not.  Callers
+        # pass time.time() at sync invocation (post-fetch), which approximates
+        # response time; do not widen this bound to apply time or post-response
+        # fills would be wrongly covered and under-counted.
         rest_sync_dt = datetime.fromtimestamp(rest_timestamp, tz=timezone.utc)
 
         # CRITICAL FIX (2026-08-11): Per-source idempotency guard.  Multiple
