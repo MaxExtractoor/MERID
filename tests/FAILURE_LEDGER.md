@@ -24,6 +24,8 @@ Classes: `obsolete_expectation`, `env_config_leakage`,
 | `test_unified_edge_fixes.py::test_edge_computer_initialization` | yes — `min_edge_cents` retuned 4.0→1.25 on 2026-07-10 | obsolete_expectation | `unified_edge.py:338` (`self.min_edge_cents = 1.25`) | none | FIXED: assert 1.25 with provenance comment |
 | `test_crypto_kalshi_sizing_fix.py` (collection error) | yes — `merid.prediction.dynamic_sizing` deleted | unsupported_legacy | module no longer exists; cycle-cap concept superseded by profile/window-plan sizing | collection abort masked other results | FIXED: `pytest.importorskip` module-level skip |
 | `test_unified_edge_integration.py` (collection error) | yes — `KalshiTradingAgent` renamed/archived (now `LeanAgent15m`) | unsupported_legacy | class absent from `agent_grid_15m` | collection abort masked other results | FIXED: module-level `pytest.skip` when class missing |
+| `test_dispatch_disposition_coverage.py::TestSuppressionBranch::test_entries_disabled_event_records_control` | latent — fixed-char 3000-byte window; `decision_id` stamping sits 3375 chars after the BLOCKED event (between it and RECEIVED at 4218) | brittle_source_slice (env_config_leakage-adjacent) | suppression→RECEIVED ordering in `_run_loop` candidate loop | none — guard only | FIXED: window bounded by next `to_state=` emit instead of char count |
+| *(defect found by new tests, not a test failure)* `_mark_reject` unbound | n/a — latent since method extraction | real_production_defect | `loop_15m.py` bind block binds all module-level self-methods except `_mark_reject` | **telemetry corruption**: every `self._mark_reject(...)` in `_execute_candidate` (~40 sites) raised AttributeError → outer except stamped `stage=execute_exception`, incremented `router_exception`, discarded named gate/reason. Orders still rejected (fail-safe direction preserved) but all rejection attribution was wrong | FIXED: `Kalshi15mLoop._mark_reject = _mark_reject` binding + audit confirms no other unbound self-methods |
 
 ## Verification notes
 
@@ -36,5 +38,11 @@ Classes: `obsolete_expectation`, `env_config_leakage`,
 - `tests/test_loop_15m_bugfixes.py`: 77/77 pass.
 - `test_order_router_caller_restrictions.py` was excluded from the sweep
   (repo-scan slowness, pre-existing); classify on next baseline pass.
-- Behavioral (non-source-scan) coverage for the hedge-bankroll repair and
-  window-plan fail-closed path is tracked as follow-up work, not yet added.
+- Behavioral (non-source-scan) coverage added 2026-11-12:
+  `test_hedge_bankroll_fail_closed.py` (6 tests — unavailable/stale/error
+  equity → 0 cents → no hedge intents) and
+  `test_execute_candidate_early_rejects.py` (4 tests — missing
+  ticker/side/action return False with named `_reject_detail`).  The latter
+  caught the unbound `_mark_reject` defect above.  Deeper `_execute_candidate`
+  gates remain guarded by the AST disposition-coverage test; full behavioral
+  conversion is deferred (heavy router/market-state dependency graph).

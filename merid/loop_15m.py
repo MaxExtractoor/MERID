@@ -13765,6 +13765,7 @@ Kalshi15mLoop._run_agent_grid_with_timeout = _run_agent_grid_with_timeout
 Kalshi15mLoop._get_candidate_key = _get_candidate_key
 Kalshi15mLoop._get_asset_window_key = _get_asset_window_key
 Kalshi15mLoop._validate_candidate_edge = _validate_candidate_edge
+Kalshi15mLoop._mark_reject = _mark_reject
 Kalshi15mLoop._execute_candidate = _execute_candidate
 Kalshi15mLoop._run_agents_directly = _run_agents_directly
 Kalshi15mLoop.summary = summary

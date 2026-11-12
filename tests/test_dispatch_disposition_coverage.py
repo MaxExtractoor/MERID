@@ -170,9 +170,17 @@ class TestSuppressionBranch:
         src = LOOP_PATH.read_text(encoding="utf-8")
         idx = src.find('to_state="BLOCKED_ENTRIES_DISABLED"')
         assert idx > 0, "suppression lifecycle event missing"
-        ctx = src[idx:idx + 3000]
-        for key in ("entries_block_reason", "allow_new_entries", "decision_id"):
+        # Bound the window semantically: everything up to the next lifecycle
+        # event emit (RECEIVED).  A fixed char count breaks whenever the
+        # suppression context grows — decision_id stamping sits between the
+        # two events by design.
+        nxt = src.find("to_state=", idx + 10)
+        assert nxt > idx, "no subsequent lifecycle event found"
+        ctx = src[idx:nxt]
+        for key in ("entries_block_reason", "allow_new_entries"):
             assert key in ctx, f"suppression event context missing {key}"
+        # decision identity must be stamped before the RECEIVED event fires
+        assert "decision_id" in ctx, "decision_id stamping missing before RECEIVED event"
 
     def test_mark_reject_helper_present(self):
         src = LOOP_PATH.read_text(encoding="utf-8")
