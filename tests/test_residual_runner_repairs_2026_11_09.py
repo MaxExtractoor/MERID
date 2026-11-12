@@ -26,7 +26,7 @@ from merid.position_management.position_monitor import (
 from merid.position_management.position import Position, PositionSide
 
 
-def _pos(size=1.0, entry=67, side=PositionSide.NO):
+def _pos(size=1.0, entry=67, side=PositionSide.NO, baseline=None):
     p = Position(
         position_id="pos-resid-0001",
         market_id="KXXRP15M-26NOV091200-00",
@@ -34,6 +34,11 @@ def _pos(size=1.0, entry=67, side=PositionSide.NO):
         size=size,
         avg_entry_price_cents=entry,
     )
+    # 2026-11-12: the floor now requires proof a partial really filled —
+    # position.size must sit below the entry-size baseline.  Tests that
+    # model a post-partial residual pass baseline > size explicitly.
+    if baseline is not None:
+        p.residual_runner_baseline_size = baseline
     return p
 
 
@@ -46,27 +51,36 @@ class TestResidualRunnerFloor:
         p.scale_out_triggered = False
         assert _residual_runner_floor_price(p, 20) is None
 
+    def test_phantom_flag_does_not_arm(self):
+        # 2026-11-12 regression: trim flags latch at candidate-win, not fill.
+        # A suppressed trim leaves ratchet_trimmed=True on the FULL position;
+        # without a real size reduction the floor must NOT arm.
+        p = _pos(size=3.0, entry=96, baseline=Decimal("3"))
+        p.ratchet_trimmed = True
+        assert _residual_runner_floor_price(p, 90) is None
+        assert _residual_runner_floor_price(p, 80) is None
+
     def test_fires_at_breakeven_floor(self):
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.ratchet_trimmed = True
         # Peak 84 -> floor = max(67, 84-8) = 76.  Bid 70 <= 76 -> fire.
         p._residual_runner_peak_cents = 84
         assert _residual_runner_floor_price(p, 70) == 76
 
     def test_no_fire_above_floor(self):
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.ratchet_trimmed = True
         p._residual_runner_peak_cents = 84
         assert _residual_runner_floor_price(p, 80) is None
 
     def test_floor_never_below_entry(self):
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.ratchet_trimmed = True
         p._residual_runner_peak_cents = 70  # 70-8=62 < 67 -> floor = 67
         assert _residual_runner_floor_price(p, 63) == 67
 
     def test_peak_tracks_upward(self):
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.scale_out_triggered = True
         assert _residual_runner_floor_price(p, 90) is None
         assert p._residual_runner_peak_cents == 90
@@ -75,14 +89,14 @@ class TestResidualRunnerFloor:
 
     def test_env_kill(self, monkeypatch):
         monkeypatch.setenv("MERID_RESIDUAL_RUNNER_FLOOR", "0")
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.ratchet_trimmed = True
         p._residual_runner_peak_cents = 90
         assert _residual_runner_floor_price(p, 40) is None
 
     def test_trail_env(self, monkeypatch):
         monkeypatch.setenv("MERID_RESIDUAL_RUNNER_TRAIL_CENTS", "20")
-        p = _pos(entry=67)
+        p = _pos(entry=67, baseline=Decimal("4"))
         p.ratchet_trimmed = True
         p._residual_runner_peak_cents = 84
         # floor = max(67, 84-20)=67

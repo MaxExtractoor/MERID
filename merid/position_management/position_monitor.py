@@ -254,10 +254,29 @@ def _residual_runner_floor_price(
         return None
     if current_price_cents is None:
         return None
+    # 2026-11-12: stamp the entry-size baseline on first evaluation — before
+    # any exit intent can exist — so the floor can prove a partial actually
+    # filled.  Persisted via PositionExitStateStore._SCALAR_FIELDS.
+    baseline = getattr(position, "residual_runner_baseline_size", None)
+    if baseline is None:
+        baseline = position.size
+        position.residual_runner_baseline_size = baseline
     if not (
         getattr(position, "ratchet_trimmed", False)
         or getattr(position, "scale_out_triggered", False)
     ):
+        return None
+    # The trim/scale-out flags latch at candidate-win time, NOT at fill —
+    # a suppressed or rejected partial leaves them set on the FULL position
+    # (2026-11-12 incident: phantom ratchet_trim armed a breakeven floor that
+    # loss_cap'd fresh entries seconds after open).  Require proof the
+    # position was actually reduced below its baseline size.
+    try:
+        _size_now = Decimal(str(position.size))
+        _size_base = Decimal(str(baseline))
+    except Exception:
+        return None
+    if not (_size_now < _size_base):
         return None
     entry_basis = (
         getattr(position, "all_in_entry_basis_cents", None)
@@ -279,6 +298,29 @@ def _residual_runner_floor_price(
     if int(current_price_cents) <= floor:
         return floor
     return None
+
+
+def _rollback_unfilled_partial_flags(position: "Position", exit_reason) -> None:
+    """Clear win-time partial-exit flags when no exit order was emitted.
+
+    ``ratchet_trimmed`` / ``scale_out_triggered`` / ``dynamic_tp_triggered``
+    latch in the candidate resolver BEFORE ``_emit_exit_intent`` runs; a
+    deterministic suppression (exit-policy disabled, breakeven floor) leaves
+    them set with no fill behind them — which both blocks a later profitable
+    re-trim and falsely arms the residual-runner floor.  Rolling back on
+    no-emission keeps the flags honest: they mean "a partial exit was
+    attempted AND allowed to reach the venue", never "a candidate once won".
+    """
+    try:
+        if exit_reason == ExitReason.RATCHET_TRIM:
+            position.ratchet_trimmed = False
+        elif exit_reason == ExitReason.SCALE_OUT:
+            position.scale_out_triggered = False
+            position.scale_out_remaining_size = Decimal("0")
+        elif exit_reason == ExitReason.DYNAMIC_TAKE_PROFIT:
+            position.dynamic_tp_triggered = False
+    except Exception:
+        pass
 
 
 def _is_forced_exit_reason(exit_reason: ExitReason) -> bool:
@@ -7807,6 +7849,7 @@ class PositionMonitor:
             ExitReason.HARD_PROFIT_LOCK, ExitReason.SETTLEMENT_GUARD,
         ):
             _log_exit_policy_suppressed(position, exit_reason, exit_price_cents, contracts_to_close)
+            _rollback_unfilled_partial_flags(position, exit_reason)
             return
         if _exit_policy_disabled():
             # HARD_PROFIT_LOCK is a risk-control rule, not a discretionary exit:
@@ -7929,6 +7972,7 @@ class PositionMonitor:
                 target_hit=False,
                 exit_reason=exit_reason,
             )
+            _rollback_unfilled_partial_flags(position, exit_reason)
             return
 
         # AUDIT: Timing correctness - record trigger timestamp
@@ -8191,6 +8235,7 @@ class PositionMonitor:
                     position.position_id[:8], exit_reason.value, exit_price_cents,
                     snapshot.own_side_bid_cents if snapshot else None,
                 )
+                _rollback_unfilled_partial_flags(position, exit_reason)
                 return
 
             # The exit must be profitable after round-trip fee buffer.
@@ -8221,6 +8266,7 @@ class PositionMonitor:
                         position.position_id[:8], exit_reason.value, exit_price_cents,
                         entry_ref, min_exit - entry_ref, min_exit,
                     )
+                    _rollback_unfilled_partial_flags(position, exit_reason)
                     return
 
         # CRITICAL FIX (2026-08-22): Quarantine inherited/unknown-provenance positions.
@@ -8236,6 +8282,7 @@ class PositionMonitor:
                 position.fill_source,
                 position.risk_params_state,
             )
+            _rollback_unfilled_partial_flags(position, exit_reason)
             return
 
         # CRITICAL FIX (2026-07-16): Dispatch the exit callback BEFORE mark_exited().

@@ -90,6 +90,7 @@ _SCALAR_FIELDS = (
     "staged_exit_stage_0_timestamp",
     "staged_exit_stage_1_timestamp",
     "staged_exit_stage_2_timestamp",
+    "residual_runner_baseline_size",
 )
 
 # Sticky-true fields: once set on a live position, restore keeps them set.
@@ -702,6 +703,7 @@ class PositionExitStateStore:
                 "staged_exit_stage_1_timestamp",
                 "staged_exit_stage_2_timestamp",
                 "trailing_profit_threshold_reached_at",
+                "residual_runner_baseline_size",
             ):
                 val = record.get(fname)
                 if val is not None:
