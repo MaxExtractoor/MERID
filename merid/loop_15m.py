@@ -6377,6 +6377,26 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
 
     return allow_new_entries
 
+async def _hedge_sizing_bankroll_cents(bankroll_service) -> int:
+    """Resolve freshness-bounded equity to cents for hedge sizing.
+
+    Returns 0 when the bankroll service is absent or equity is
+    unavailable/stale/non-positive, so the hedge engine produces no orders
+    (fail closed).  Never fabricates a bankroll — the previous $1000
+    fallback sized real hedge entries against unverified equity.
+    """
+    try:
+        equity = (
+            await bankroll_service.get_equity_for_risk_calc()
+            if bankroll_service is not None
+            else None
+        )
+    except Exception:
+        return 0
+    if equity is None or equity <= 0:
+        return 0
+    return int(equity * 100)
+
 async def _run_loop(self) -> None:
     # Main loop execution - runs trading cycles at configured cadence.
     tick_id = 0
@@ -8125,15 +8145,7 @@ async def _run_loop(self) -> None:
                     # The previous $1000 fabricated fallback sized real hedge
                     # entries against equity that was never verified.
                     bankroll_service = await get_bankroll_service_v2()
-                    _hedge_equity = (
-                        await bankroll_service.get_equity_for_risk_calc()
-                        if bankroll_service else None
-                    )
-                    bankroll_cents = (
-                        int(_hedge_equity * 100)
-                        if _hedge_equity is not None and _hedge_equity > 0
-                        else 0
-                    )
+                    bankroll_cents = await _hedge_sizing_bankroll_cents(bankroll_service)
                     
                     # Compute hedge intents based on current exposure
                     hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)
