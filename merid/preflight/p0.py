@@ -8,6 +8,7 @@ bankroll service, and an RTI stream.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import time
@@ -262,14 +263,6 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
             ExitOrderAttemptState.RESOLVING_ON_EXCHANGE.value,
         )
         with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)) as conn:
-            # created_at NULL or non-numeric fails closed: it counts as
-            # blocking because its market liveness cannot be ruled out.
-            blocking = conn.execute(
-                "SELECT COUNT(*) FROM order_attempts "
-                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
-                "AND (created_at IS NULL OR created_at > ?)",
-                (cutoff,),
-            ).fetchone()[0]
             quarantined = conn.execute(
                 "SELECT COUNT(*) FROM order_attempts "
                 "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
@@ -287,14 +280,19 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
             # (still nonterminal, still audited, resolved by runtime
             # reconcile).  Unparseable/NULL tickers or future expiries stay
             # strictly blocking.
+            # 2026-11-12: the same expired-market reclassification now applies
+            # to entry order_attempts — attempt oa_bbe157e0 (SUBMISSION_UNKNOWN,
+            # route_timeout, market KXBTC15M-26NOV112030-30 expired 01:30Z)
+            # boot-blocked P0 for ~40min after its market could no longer trade.
+            # Entry rows carry no ticker column; the ticker lives in
+            # payload_json.order.ticker.
             from merid.event_venues.kalshi.market_filter import (
                 parse_expiry_from_ticker,
             )
 
             _now_s = time.time()
 
-            def _market_expired(row) -> bool:
-                ticker = row[1]
+            def _market_expired(ticker) -> bool:
                 if not ticker:
                     return False
                 try:
@@ -302,6 +300,31 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
                 except Exception:
                     return False
                 return bool(expiry_ts) and expiry_ts <= _now_s
+
+            blocking = conn.execute(
+                "SELECT COUNT(*) FROM order_attempts "
+                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
+                "AND created_at IS NULL",
+            ).fetchone()[0]
+            young_entry_rows = conn.execute(
+                "SELECT order_attempt_id, payload_json FROM order_attempts "
+                "WHERE status IN ('SUBMITTING', 'SUBMISSION_UNKNOWN') "
+                "AND created_at IS NOT NULL AND created_at > ?",
+                (cutoff,),
+            ).fetchall()
+            entry_settled_quarantined = 0
+            for _r in young_entry_rows:
+                _ticker = None
+                try:
+                    _payload = json.loads(_r[1] or "{}")
+                    _ticker = (_payload.get("order") or {}).get("ticker")
+                except Exception:
+                    _ticker = None
+                if _market_expired(_ticker):
+                    entry_settled_quarantined += 1
+                else:
+                    blocking += 1
+            quarantined += entry_settled_quarantined
 
             young_exit_rows = conn.execute(
                 f"SELECT attempt_id, ticker FROM exit_order_attempts "
@@ -316,7 +339,7 @@ def _check_uncertain_submissions() -> Tuple[bool, str]:
                     # created_at NULL rows already counted above by the same
                     # predicate; treat missing identity as blocking.
                     exit_blocking += 1
-                elif _market_expired(_r):
+                elif _market_expired(_r[1]):
                     exit_settled_quarantined += 1
                 else:
                     exit_blocking += 1

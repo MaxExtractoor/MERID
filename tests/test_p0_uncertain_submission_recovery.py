@@ -106,6 +106,48 @@ def test_uncertain_exit_attempt_fails(store):
     assert not _check_uncertain_submissions()[0]
 
 
+@pytest.mark.parametrize("status", ["SUBMITTING", "SUBMISSION_UNKNOWN"])
+def test_young_entry_attempt_on_expired_market_is_quarantined(store, status):
+    # 2026-11-12: entry attempts got the same expired-market reclassification
+    # exits received on 2026-11-02.  A young uncertain ENTRY whose market has
+    # already closed cannot create exposure — the venue cancels resting orders
+    # at close and settlement sweeps the rest — so it must not boot-block P0.
+    # Regression: oa_bbe157e0 (route_timeout on KXBTC15M-26NOV112030-30,
+    # expired 01:30Z) blocked startup ~40min after its market died.
+    now = time.time()
+    store.persist_attempt(attempts.OrderAttemptRecord(
+        order_attempt_id="oa-expired", client_order_id="co-expired",
+        decision_id="dec-1", replaces_order_attempt_id=None,
+        intent_id="intent-1", client_tag=None, run_id=None,
+        process_id=None, fingerprint="fp-1", status=status,
+        created_at=now, updated_at=now,
+        payload_json='{"order": {"ticker": "KXBTC15M-20JAN010000-00"}}',
+    ))
+    ok, msg = _check_uncertain_submissions()
+    assert ok, msg
+    assert "quarantined=1" in msg
+    assert store.get_by_order_attempt_id("oa-expired").status == status
+
+
+@pytest.mark.parametrize("payload", [
+    '{"order": {"ticker": "KXBTC15M-40JAN010000-00"}}',  # live market
+    '{"order": {}}',                                    # missing ticker
+    '{}',                                               # no order block
+    'not-json',                                         # corrupt payload
+])
+def test_young_entry_attempt_on_live_or_unknown_market_fails_closed(store, payload):
+    now = time.time()
+    store.persist_attempt(attempts.OrderAttemptRecord(
+        order_attempt_id="oa-live", client_order_id="co-live",
+        decision_id="dec-1", replaces_order_attempt_id=None,
+        intent_id="intent-1", client_tag=None, run_id=None,
+        process_id=None, fingerprint="fp-1",
+        status="SUBMISSION_UNKNOWN",
+        created_at=now, updated_at=now, payload_json=payload,
+    ))
+    assert not _check_uncertain_submissions()[0]
+
+
 @pytest.mark.asyncio
 async def test_p0_stops_before_balance_or_funding(monkeypatch):
     monkeypatch.setattr(

@@ -11234,8 +11234,14 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     and not exit_policy.take_profit_enabled
                     and not exit_policy.stop_loss_enabled
                 ):
+                    # Discretionary TP/SL are off, but the lifecycle plan still
+                    # arms mandatory pre-expiry closeout (and trail/lock exits
+                    # where the policy provides them) — say so explicitly so
+                    # the position never looks unprotected.
                     logger.info(
-                        "[15M-LOOP] No armed TP/SL for %s - lifecycle plan = PRE_SETTLEMENT_CLOSEOUT",
+                        "[15M-LOOP] No discretionary TP/SL armed for %s - "
+                        "lifecycle plan = PRE_SETTLEMENT_CLOSEOUT "
+                        "(mandatory pre-expiry liquidation remains active)",
                         ticker,
                     )
             else:
