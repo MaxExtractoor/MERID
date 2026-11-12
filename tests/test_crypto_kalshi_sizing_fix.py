@@ -10,6 +10,16 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+# merid.prediction.dynamic_sizing was deleted (cycle sizing moved into the
+# profile/window-plan stack).  Skip the whole module explicitly rather than
+# failing collection — restore if the module returns.
+pytest.importorskip(
+    "merid.prediction.dynamic_sizing",
+    reason="dynamic_sizing module deleted; cycle-cap coverage superseded",
+)
+
 from merid.prediction.dynamic_sizing import (
     compute_cycle_sizing_cap,
     get_cycle_sizing_cap,

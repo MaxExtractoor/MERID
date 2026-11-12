@@ -114,6 +114,11 @@ class TestBoundedLaneMembership:
             # and per-day attempt counters.
             "drift_fav",
             "cheap_no_settle",
+            # 2026-11-08 (bf16e0c8): reversal-scalp lane — bounded
+            # countertrend admission on confirmed-regime + opposite
+            # fast-leg flip; lane band 5-60c, TTE 120-600s, stamped-floor
+            # economics, follows the evaluated route (IOC when taker).
+            "reversal_scalp",
         }
 
 

@@ -295,7 +295,9 @@ class TestUnifiedEdgeFixes:
         # Test with default calibration
         computer1 = UnifiedEdgeComputer()
         assert computer1.calibration is not None
-        assert computer1.min_edge_cents == 4.0
+        # min_edge_cents was retuned 4.0 -> 1.25 on 2026-07-10 (moltbook
+        # research, BTC base); edge thresholds now live in profile edge_bands.
+        assert computer1.min_edge_cents == 1.25
         assert computer1.max_spread_pct == 0.70
         assert computer1.max_spread_cents == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
         

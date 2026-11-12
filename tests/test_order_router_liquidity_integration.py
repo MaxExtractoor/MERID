@@ -391,10 +391,16 @@ class TestOrderRouterFallbackMarketState:
     """Full-path test that the liquidity fallback reaches the real KalshiMarketStateStore adapter."""
 
     @pytest.mark.asyncio
-    async def test_fallback_calls_real_kalshi_market_state_store(self):
+    async def test_fallback_calls_real_kalshi_market_state_store(self, monkeypatch):
         """route_order_async must call get_kalshi_market_state_store().get_unified() in the fallback branch."""
         from types import SimpleNamespace
         from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot, OrderbookLevel
+
+        # Submit-time EV revalidation is a separate fail-closed gate that runs
+        # before _route_live; this test exercises the liquidity-fallback branch
+        # inside _route_live, so disable the unrelated gate (same pattern as
+        # test_execution_gate_fail_closed_order_paths.py).
+        monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
 
         now = time.time()
         mock_orderbook = OrderbookSnapshot(

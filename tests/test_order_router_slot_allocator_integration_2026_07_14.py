@@ -136,15 +136,21 @@ class TestOrderRouterSlotAllocatorIntegration:
         print("✓ Per-asset limit enforcement test passed")
     
     def test_can_allocate_respects_exposure_cap(self):
-        """Test that can_allocate() respects $1 exposure cap."""
+        """can_allocate() enforces the configured exposure cap at boundaries.
+
+        The production default moved $1 -> $3 -> $6 (commit 811db09f), so the
+        cap is injected explicitly rather than asserted against the ambient
+        default.  Prices stay inside the [25c, 80c] entry band so the exposure
+        check — not the price-domain check — is what rejects."""
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
         )
-        
+
         allocator = get_global_slot_allocator()
-        
-        # Fill up to 85c exposure (leaving 15c available)
+        allocator.max_exposure_usd = 1.00
+
+        # Fill to $0.75: BTC 1ct @45c + ETH 1ct @30c -> $0.25 available.
         request1 = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
@@ -158,25 +164,34 @@ class TestOrderRouterSlotAllocatorIntegration:
             agent_id="ETH_15M",
             asset="ETH",
             ticker="KXETH15M-26JUL111145-45",
-            entry_price_cents=40,
+            entry_price_cents=30,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        
+
         allocator.request_allocation(request1)
         allocator.request_allocation(request2)
-        assert abs(allocator.get_total_exposure() - 0.85) < 0.01
-        
-        # 20c order should fail (would exceed $1)
-        can_alloc, reason = allocator.can_allocate(20, "SOL")
-        assert not can_alloc, f"20c order should fail at 85c exposure: {reason}"
-        assert "insufficient" in reason.lower() or "exposure" in reason.lower()
-        
-        # 10c order should succeed (within available exposure and valid price range)
-        can_alloc2, reason2 = allocator.can_allocate(10, "SOL")
-        assert can_alloc2, f"10c order should succeed at 85c exposure: {reason2}"
-        
+        assert abs(allocator.get_total_exposure() - 0.75) < 0.01
+
+        # Boundary: SOL 1ct @25c needs exactly $0.25 == available -> allowed.
+        can_alloc, reason = allocator.can_allocate(25, "SOL")
+        assert can_alloc, f"25c order should fit exactly at $0.25 available: {reason}"
+
+        # Over cap: SOL 1ct @60c needs $0.60 > $0.25 -> insufficient exposure.
+        can_alloc2, reason2 = allocator.can_allocate(60, "SOL")
+        assert not can_alloc2, f"60c order should fail at $0.25 available: {reason2}"
+        assert "insufficient exposure" in reason2.lower()
+
+        # Fractional count still bounded by the same cash exposure math:
+        # 0.5ct @60c = $0.30 > $0.25 -> rejected.
+        can_alloc3, reason3 = allocator.can_allocate(60, "SOL", count=0.5)
+        assert not can_alloc3, f"0.5ct @60c should fail at $0.25 available: {reason3}"
+
+        # 0.4ct @60c = $0.24 <= $0.25 -> allowed.
+        can_alloc4, reason4 = allocator.can_allocate(60, "SOL", count=0.4)
+        assert can_alloc4, f"0.4ct @60c should fit at $0.25 available: {reason4}"
+
         print("✓ can_allocate() respects exposure cap test passed")
 
 

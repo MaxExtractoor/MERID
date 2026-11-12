@@ -52,17 +52,21 @@ class TestDepthBasedSizingSlotLimit:
         result = _apply_depth_based_order_sizing(intent, state)
         assert result == 0
     
-    def test_requested_count_greater_than_1_capped_to_1(self):
-        """Test that requested_count > cap is capped to MAX_CONTRACTS_PER_ORDER."""
+    def test_requested_count_above_cap_capped_to_cap(self):
+        """Test that requested_count > MAX_CONTRACTS_PER_ORDER is capped.
+
+        The request must exceed the *configured* cap to exercise the clamp —
+        a fixed literal goes stale every time the cap is retuned (the cap
+        moved 1 -> 3 -> 6 across 2026-10)."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
             action="buy",
             price_cents=50,
-            count=5,
+            count=int(_CAP) + 5,
         )
         state = MockMarketState(top_of_book_size=10)
-        
+
         result = _apply_depth_based_order_sizing(intent, state)
         assert result == _CAP
     
@@ -80,17 +84,20 @@ class TestDepthBasedSizingSlotLimit:
         result = _apply_depth_based_order_sizing(intent, state)
         assert result == _CAP
     
-    def test_requested_count_greater_than_1_with_zero_liquidity_capped_to_1(self):
-        """Test that requested_count > cap with zero liquidity is capped."""
+    def test_requested_count_above_cap_with_zero_liquidity_capped_to_cap(self):
+        """Test that requested_count > cap with zero liquidity is capped.
+
+        Zero top-of-book returns the (already cap-clamped) request unchanged;
+        the request must exceed the configured cap to exercise the clamp."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
             action="buy",
             price_cents=50,
-            count=3,
+            count=int(_CAP) + 3,
         )
         state = MockMarketState(top_of_book_size=0)
-        
+
         result = _apply_depth_based_order_sizing(intent, state)
         assert result == _CAP
     

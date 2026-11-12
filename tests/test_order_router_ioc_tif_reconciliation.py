@@ -38,10 +38,30 @@ class FakeState:
 class TestResolveTif:
     """Tests for _resolve_tif and ResolvedTIF."""
 
+    # KXETH15M-26AUG090200-00 encodes window end 2026-08-09 02:00 ET.  The
+    # settlement clamp pins GTC expiration to window_end - 120s, so tests that
+    # exercise the normal (non-expired) path must inject a clock inside the
+    # window rather than rely on wall time — the ticker is a fixed fixture.
+    _TICKER = "KXETH15M-26AUG090200-00"
+
+    def _now_inside_window(self, margin_s: int = 600) -> int:
+        from merid.event_venues.kalshi.expiry_fallback import (
+            parse_kalshi_15m_window_end_utc,
+        )
+        end = parse_kalshi_15m_window_end_utc(self._TICKER)
+        assert end is not None, "fixture ticker must parse as a 15m window"
+        return int(end.timestamp()) - margin_s
+
+    def _freeze_clock(self, monkeypatch, margin_s: int = 600) -> int:
+        import merid.event_venues.kalshi.order_router as router
+        fixed_now = self._now_inside_window(margin_s)
+        monkeypatch.setattr(router, "_now_unix_s", lambda: fixed_now)
+        return fixed_now
+
     def _intent(self, **overrides):
         from merid.event_venues.kalshi.order_router import OrderIntent
         defaults = {
-            "ticker": "KXETH15M-26AUG090200-00",
+            "ticker": self._TICKER,
             "side": "BUY_YES",
             "action": "buy",
             "price_cents": 50,
@@ -64,13 +84,18 @@ class TestResolveTif:
         assert tif == "IOC"
         assert exp is None
 
-    def test_maker_is_gtc_with_future_expiration(self):
+    def test_maker_is_gtc_with_future_expiration(self, monkeypatch):
         from merid.event_venues.kalshi.order_router import _resolve_tif
+        fixed_now = self._freeze_clock(monkeypatch)
         intent = self._intent(aggressiveness=0.0, post_only=True)
         tif, exp = _resolve_tif(intent)
         assert tif == "GTC"
         assert exp is not None
-        assert exp > int(time.time())
+        assert exp > fixed_now
+        # Rest horizon default is 180s; the settlement clamp
+        # (window_end - 120s) is further out at this injected time, so the
+        # rest horizon binds.
+        assert exp == fixed_now + 180
 
     def test_reduce_only_exit_is_ioc(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
@@ -79,12 +104,15 @@ class TestResolveTif:
         assert tif == "IOC"
         assert exp is None
 
-    def test_gtc_honors_explicit_order_expiration_ts(self):
+    def test_gtc_honors_explicit_order_expiration_ts(self, monkeypatch):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        future = int(time.time()) + 120
+        fixed_now = self._freeze_clock(monkeypatch)
+        future = fixed_now + 120
         intent = self._intent(time_in_force="gtc", order_expiration_ts=future)
         tif, exp = _resolve_tif(intent)
         assert tif == "GTC"
+        # Explicit ts is honored: it precedes both now+rest and the
+        # settlement clamp (window_end - 120s) at this injected time.
         assert exp == future
 
 

@@ -727,11 +727,14 @@ class TestEndToEndExecutionFlow:
     def test_full_flow_enforces_exposure_cap(self):
         """Test that the full flow enforces the exposure cap across all assets.
 
-        The canonical cap moved from $1.00 to $2.00 and then to $3.00
-        (MERID_FIXED_EXPOSURE_CAP_USD default)."""
+        The cap is injected explicitly: the production default moved
+        $1 -> $2 -> $3 -> $6 (latest: MERID_FIXED_EXPOSURE_CAP_USD=6.00,
+        commit 811db09f), so asserting against the ambient default would
+        break on every retune.  This scenario pins a $3.00 cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
 
         allocator = GlobalSlotAllocator()
+        allocator.max_exposure_usd = 3.00
 
         # Allocate BTC: 3 contracts at 50c ($1.50)
         request1 = AllocationRequest(
