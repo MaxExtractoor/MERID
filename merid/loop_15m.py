@@ -7771,17 +7771,28 @@ async def _run_loop(self) -> None:
                                         )
                                         continue
                             except Exception as _wp_err:
-                                # Degraded mode on an unexpected plan error:
-                                # the order proceeds under the pre-existing caps
-                                # (MAX_CONTRACTS_PER_ORDER, slot allocator, $3
-                                # fixed exposure) which still bound it — a plan
-                                # bug must not silently disable all entries, and
-                                # a scan failure already fails closed inside
-                                # admit() with window_plan_scan_failed.
+                                # 2026-11-XX: fail closed.  The window plan is
+                                # enabled by default and owns the budget
+                                # reservation for this order; an unexpected
+                                # admission error means the admitted quantity
+                                # and reservation cannot be established, so
+                                # the candidate must not proceed under
+                                # pre-existing caps alone.  Scan failures
+                                # already fail closed inside admit() with
+                                # window_plan_scan_failed; this covers the
+                                # remaining unexpected-error surface.
                                 logger.error("[WINDOW-PLAN] admission error ticker=%s: %s", ticker, _wp_err)
                                 self._rejection_counters["window_plan_error"] = (
                                     self._rejection_counters.get("window_plan_error", 0) + 1
                                 )
+                                self._log_candidate_lifecycle_event(
+                                    candidate_id=candidate_id,
+                                    from_state="RECEIVED",
+                                    to_state="REJECTED",
+                                    reason=f"window_plan_error:{_wp_err}",
+                                    context={"ticker": ticker, "decision_id": candidate.get("decision_id")},
+                                )
+                                continue
 
                             # Execute candidate and check if order was actually submitted
                             order_submitted = await self._execute_candidate(candidate, tick_id)
@@ -8107,13 +8118,22 @@ async def _run_loop(self) -> None:
                     from merid.event_venues.kalshi.order_router import compute_hedge_intents, route_order_async
                     from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service as get_bankroll_service_v2
                     
-                    # Get current bankroll for hedge sizing - use v2 directly
+                    # Get current bankroll for hedge sizing - use v2 directly.
+                    # 2026-11-XX: freshness-bounded equity only; when the
+                    # bankroll state is unavailable/stale the engine receives
+                    # bankroll_cents=0 and produces no orders (fail closed).
+                    # The previous $1000 fabricated fallback sized real hedge
+                    # entries against equity that was never verified.
                     bankroll_service = await get_bankroll_service_v2()
-                    if bankroll_service:
-                        summary = await bankroll_service.get_summary()
-                        bankroll_cents = int(summary.equity_usd * 100) if summary and summary.equity_usd else 100000
-                    else:
-                        bankroll_cents = 100000
+                    _hedge_equity = (
+                        await bankroll_service.get_equity_for_risk_calc()
+                        if bankroll_service else None
+                    )
+                    bankroll_cents = (
+                        int(_hedge_equity * 100)
+                        if _hedge_equity is not None and _hedge_equity > 0
+                        else 0
+                    )
                     
                     # Compute hedge intents based on current exposure
                     hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)

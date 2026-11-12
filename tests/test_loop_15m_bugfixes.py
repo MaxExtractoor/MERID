@@ -1846,8 +1846,11 @@ def test_hedge_pass_handles_errors_gracefully():
     with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
         loop_source = f.read()
     
-    # Verify hedge pass is wrapped in try-except
-    hedge_section = loop_source[loop_source.find("compute_hedge_intents"):loop_source.find("compute_hedge_intents") + 2000]
+    # Verify hedge pass is wrapped in try-except.  The window must cover the
+    # bankroll-resolution preamble plus the per-intent arbiter try blocks;
+    # 4000 chars spans from the compute_hedge_intents import to the outer
+    # hedge_exc handler without reaching unrelated code.
+    hedge_section = loop_source[loop_source.find("compute_hedge_intents"):loop_source.find("compute_hedge_intents") + 4000]
     
     # Should have exception handling
     assert "except" in hedge_section or "try:" in hedge_section, \
