@@ -50,8 +50,9 @@ def main() -> None:
         jsonl_path = sys.argv[sys.argv.index("--jsonl") + 1]
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 
-    # ---- orders: intent_id -> lane ; client_order_id -> exit reason ----
+    # ---- orders: intent_id -> lane/deploy ; client_order_id -> exit reason ----
     intent_lane, coid_reason = {}, {}
+    intent_deploy = {}
     for intent_id, client_order_id, meta in con.execute(
         "SELECT intent_id, client_order_id, metadata FROM trade_attribution_fact "
         "WHERE event_type='order'"
@@ -64,6 +65,9 @@ def main() -> None:
         lane = inner.get("decision_lane")
         if intent_id and lane:
             intent_lane[intent_id] = lane
+        run_id = inner.get("run_id") or outer.get("run_id")
+        if intent_id and run_id:
+            intent_deploy[intent_id] = str(run_id)
         reason = inner.get("reason") or inner.get("source")
         if client_order_id and reason:
             coid_reason[client_order_id] = str(reason)
@@ -123,6 +127,9 @@ def main() -> None:
             "coid": d.get("client_order_id"),
             "agent": d.get("agent_id"),
             "fill_id": d.get("fill_id"),
+            "exec_mode": d.get("entry_execution_mode"),
+            "config_hash": (d.get("config_hash") or "")[:12] or None,
+            "liq_role": d.get("liquidity_role"),
         })
 
     # ---- build episodes: accumulate yes-delta; close at zero crossing ----
@@ -183,14 +190,26 @@ def main() -> None:
 
         net_cents = (proceeds - fees + settle_payout) * 100.0
 
-        # lane from first entry intent
+        # lane + deployment cohort from first entry intent/order
         lane = "external"
+        deploy = None
+        exec_modes = set()
+        config_hashes = set()
         for f in entries:
+            if f.get("exec_mode"):
+                exec_modes.add(str(f["exec_mode"]))
+            if f.get("config_hash"):
+                config_hashes.add(f["config_hash"])
+            if deploy is None:
+                deploy = intent_deploy.get(f["intent"]) or intent_deploy.get(f["coid"])
             lane = intent_lane.get(f["intent"]) or intent_lane.get(f["coid"]) or lane
             if lane != "external":
                 break
         if lane == "external" and entries:
             lane = "core" if entries[0]["intent"] else "external"
+        # run_id embeds process start ts (YYYYMMDDHHMMSS_pid_rand) — cohort key
+        deploy_cohort = (deploy or "unknown")[:15] if deploy else "unknown"
+        exec_mode = "+".join(sorted(exec_modes)) if exec_modes else "unknown"
 
         # exit reason mix
         reasons = defaultdict(float)
@@ -211,6 +230,8 @@ def main() -> None:
         xp_px = [_pos_px(f) for f in exits if _pos_px(f) is not None]
         entry_vwap = sum(ep_px) / len(ep_px) if ep_px else None
         exit_vwap = sum(xp_px) / len(xp_px) if xp_px else None
+        # entry cash committed (position-side cents) for return-on-capital
+        entry_notional_c = (qty_contracts * entry_vwap) if entry_vwap is not None else None
         entry_ts = min(f["ts"] for f in entries) if entries else first["ts"]
         last_fill_ts = max(f["ts"] for f in ep["fills"])
         hold_s = (st[2] if (resid_cc != 0 and st) else last_fill_ts) - entry_ts
@@ -226,29 +247,52 @@ def main() -> None:
             "hold_s": round(hold_s, 1), "entry_ts": entries[0]["ets"] if entries else first["ets"],
             "entry_vwap_c": round(entry_vwap, 1) if entry_vwap is not None else None,
             "exit_vwap_c": round(exit_vwap, 1) if exit_vwap is not None else None,
+            "deploy_cohort": deploy_cohort, "exec_mode": exec_mode,
+            "config_hash": sorted(config_hashes)[0] if config_hashes else None,
+            "entry_notional_c": round(entry_notional_c, 1) if entry_notional_c is not None else None,
+            "net_per_contract_c": round(net_cents / qty_contracts, 2) if qty_contracts else None,
+            "return_on_entry_pct": round(100.0 * net_cents / entry_notional_c, 2)
+            if entry_notional_c else None,
         })
 
-    # ---- aggregate: lane x asset x side ----
-    agg = defaultdict(lambda: [0, 0.0, 0, 0.0, 0])
+    # ---- aggregate: deploy x lane x asset x side (version-aware) ----
+    agg = defaultdict(lambda: [0, 0.0, 0, 0.0, 0.0])
     reason_agg = defaultdict(lambda: [0, 0.0])
+    exec_agg = defaultdict(lambda: [0, 0.0])
+    day_set = defaultdict(set)
     for r in out_rows:
-        k = (r["lane"], r["asset"], r["side"])
+        k = (r["deploy_cohort"], r["lane"], r["asset"], r["side"])
         a = agg[k]
         a[0] += 1
         a[1] += r["net_cents"]
         a[2] += 1 if r["net_cents"] > 0 else 0
         a[3] += r["hold_s"]
         a[4] += r["qty_contracts"]
+        if r.get("entry_ts"):
+            day_set[k].add(str(r["entry_ts"])[:10])
         ra = reason_agg[(r["lane"], r["exit_reason"])]
         ra[0] += 1
         ra[1] += r["net_cents"]
+        ea = exec_agg[(r["side"], r["exec_mode"])]
+        ea[0] += 1
+        ea[1] += r["net_cents"]
 
     print(f"episodes={len(out_rows)} skipped={dict(skipped)}")
-    print(f"\n{'lane':24s} {'asset':5s} {'side':4s} {'n':>4s} {'qty':>7s} {'net_c':>9s} {'avg_c':>7s} {'win%':>6s} {'avg_hold':>8s}")
-    print("-" * 82)
+    print(f"\n{'deploy':16s} {'lane':22s} {'asset':5s} {'side':4s} {'n':>4s} {'qty':>7s} {'net_c':>9s} {'net/ct':>7s} {'ret%':>7s} {'win%':>6s} {'days':>4s}")
+    print("-" * 110)
     for k in sorted(agg):
         n, net, wins, hold, qty = agg[k]
-        print(f"{k[0]:24s} {k[1]:5s} {k[2]:4s} {n:4d} {qty:7.1f} {net:9.1f} {net/n:7.2f} {100*wins/n:5.1f}% {hold/n:7.0f}s")
+        sub = [r for r in out_rows if (r["deploy_cohort"], r["lane"], r["asset"], r["side"]) == k]
+        npc = sum(r["net_cents"] for r in sub) / max(sum(r["qty_contracts"] for r in sub), 1e-9)
+        notional = sum(r["entry_notional_c"] or 0 for r in sub)
+        ret = 100.0 * net / notional if notional else 0.0
+        print(f"{k[0]:16s} {k[1]:22s} {k[2]:5s} {k[3]:4s} {n:4d} {qty:7.1f} {net:9.1f} {npc:7.2f} {ret:6.2f}% {100*wins/n:5.1f}% {len(day_set[k]):4d}")
+
+    print(f"\n{'side':4s} {'exec_mode':12s} {'n':>4s} {'net_c':>9s} {'avg_c':>7s}")
+    print("-" * 40)
+    for k in sorted(exec_agg):
+        n, net = exec_agg[k]
+        print(f"{k[0]:4s} {k[1]:12s} {n:4d} {net:9.1f} {net/n:7.2f}")
 
     print(f"\n{'lane':24s} {'exit_reason':38s} {'n':>4s} {'net_c':>9s} {'avg_c':>7s}")
     print("-" * 82)
