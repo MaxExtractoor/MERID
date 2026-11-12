@@ -397,6 +397,31 @@ def _order_dict(rec: Any) -> Dict[str, Any]:
     }
 
 
+def _monitor_tracks_market(market_id: Any) -> Optional[bool]:
+    """Whether the live position monitor is actively tracking this market.
+
+    2026-11-12: REST-synced CachedPositions can carry no exit_policy_id /
+    TP / SL fields even though the monitor armed and is evaluating exits
+    for them — the UI then reported "EXITS NOT ARMED" on protected
+    positions.  The monitor is the authoritative exit-armer: every tracked
+    position gets TP/SL, hard-lock, and pre-settlement closeout evaluation.
+    Returns True/False when the monitor answers, None when unavailable.
+    """
+    try:
+        from merid.position_management.position_monitor import (
+            get_position_monitor,
+        )
+        mon = get_position_monitor()
+        mid = str(market_id or "")
+        pos_id = (getattr(mon, "_market_to_position", None) or {}).get(mid)
+        if not pos_id:
+            return False
+        pos = (getattr(mon, "_open_positions", None) or {}).get(pos_id)
+        return pos is not None
+    except Exception:
+        return None
+
+
 def _positions_for_agent(
     agent: Any, grid: Optional[Any], prefixes: List[str]
 ) -> List[Dict[str, Any]]:
@@ -419,6 +444,15 @@ def _positions_for_agent(
             if qty in (None, 0):
                 continue
             seen.add(str(mid))
+            cache_armed = bool(
+                getattr(pos, "exit_policy_id", None)
+                or getattr(pos, "stop_loss_enabled", False)
+                or getattr(pos, "stop_loss_price_cents", None)
+                or getattr(pos, "take_profit_price_cents", None)
+            )
+            monitored = _monitor_tracks_market(
+                getattr(pos, "market_id", None) or mid
+            )
             out.append({
                 "market_id": getattr(pos, "market_id", None) or mid,
                 "side": getattr(pos, "side", None),
@@ -426,12 +460,9 @@ def _positions_for_agent(
                 "avg_price_c": _f(getattr(pos, "avg_price_cents", None)),
                 "realized_pnl_c": _usd_to_cents(getattr(pos, "realized_pnl_usd", None)),
                 "unrealized_pnl_c": _usd_to_cents(getattr(pos, "unrealized_pnl_usd", None)),
-                "exits_armed": bool(
-                    getattr(pos, "exit_policy_id", None)
-                    or getattr(pos, "stop_loss_enabled", False)
-                    or getattr(pos, "stop_loss_price_cents", None)
-                    or getattr(pos, "take_profit_price_cents", None)
-                ),
+                # Monitor tracking is authoritative for exit coverage;
+                # cache fields alone under-report REST-synced positions.
+                "exits_armed": bool(cache_armed or monitored),
                 "source": "position_cache",
             })
     # Fallback/cross-check: grid's last REST exchange snapshot.

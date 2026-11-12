@@ -142,6 +142,34 @@ def test_drift_block_each_failure_named(monkeypatch):
                         entry_price_basis="bid") is None
 
 
+def test_drift_block_side_gate_defaults_no_only(monkeypatch):
+    """2026-11-12 incident regression: the lane's 2026-10-21 audit measured
+    the drift edge only on the NO-side 40-74c cohort — every YES cohort was
+    thin or negative.  Both 2200-window losses were YES-side drift_fav
+    admissions rescued by the widened EV floor.  The side gate must default
+    to NO-only and name its block reason."""
+    monkeypatch.setenv("MERID_DRIFT_LANE_ENABLED", "1")
+    kw = dict(asset="ETH", entry_price_basis="bid")
+    assert dl.drift_block(50.0, -1.0, 600.0, side="no", **kw) is None
+    assert dl.drift_block(50.0, -1.0, 600.0, side="yes", **kw) == "drift_side"
+    # Side omitted stays backward-compatible (callers that never pass it
+    # are not newly gated).
+    assert dl.drift_block(50.0, -1.0, 600.0, **kw) is None
+    # Explicit opt-in restores YES admissions.
+    monkeypatch.setenv("MERID_DRIFT_SIDES", "yes,no")
+    assert dl.drift_block(50.0, -1.0, 600.0, side="yes", **kw) is None
+    monkeypatch.setenv("MERID_DRIFT_SIDES", "yes")
+    assert dl.drift_block(50.0, -1.0, 600.0, side="no", **kw) == "drift_side"
+    assert dl.drift_block(50.0, -1.0, 600.0, side="yes", **kw) is None
+
+
+def test_drift_sides_env_parsing(monkeypatch):
+    monkeypatch.delenv("MERID_DRIFT_SIDES", raising=False)
+    assert dl.drift_sides() == frozenset({"no"})
+    monkeypatch.setenv("MERID_DRIFT_SIDES", "YES, no")
+    assert dl.drift_sides() == frozenset({"yes", "no"})
+
+
 def test_cheap_no_block_each_failure_named(monkeypatch):
     monkeypatch.setenv("MERID_CHEAP_NO_LANE_ENABLED", "1")
     kw = dict(

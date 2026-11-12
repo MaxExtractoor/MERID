@@ -5614,6 +5614,7 @@ def _compute_trade_decision_impl(
                                                     net_ev_cents=float(
                                                         _ne_c
                                                     ),
+                                                    side=_side,
                                                     tte_seconds=(
                                                         float(
                                                             seconds_to_expiry
@@ -6289,6 +6290,7 @@ def _compute_trade_decision_impl(
         asset=asset,
         entry_price_basis=entry_price_basis,
         ticker=ticker,
+        side="yes",
     ) if _yes_drift_price else None
     _no_drift_block = _dl.drift_block(
         side_price_cents=float(no_price_cents) if no_price_cents else None,
@@ -6299,6 +6301,7 @@ def _compute_trade_decision_impl(
         asset=asset,
         entry_price_basis=entry_price_basis,
         ticker=ticker,
+        side="no",
     ) if _no_drift_price else None
     _no_cheap_price = _dl.cheap_no_band_match(no_price_cents)
     _no_cheap_block = _dl.cheap_no_block(

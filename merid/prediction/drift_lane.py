@@ -138,6 +138,20 @@ def drift_assets() -> frozenset:
     return frozenset(a.strip().upper() for a in raw.split(",") if a.strip())
 
 
+def drift_sides() -> frozenset:
+    """Outcome sides the lane may admit.  The 2026-10-21 pooled audit
+    measured the drift edge only on the NO-side 40-74c cohort (+0.6..+3.0c
+    per contract, SOL/DOGE/ETH/XRP positive); every YES cohort was thin or
+    negative.  2026-11-12 incident: two YES-side drift_fav admissions
+    (SOL yes@72-76c, XRP yes@79c, both net-EV negative rescued by the lane
+    floor) collapsed to ~0c within minutes — the exact negative-evidence
+    cohort.  Default is therefore NO-only; widen via
+    ``MERID_DRIFT_SIDES`` only with settled-fill evidence for the added
+    side."""
+    raw = os.environ.get("MERID_DRIFT_SIDES", "no")
+    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
 def drift_max_contracts() -> float:
     return _env_float("MERID_DRIFT_MAX_CONTRACTS", 4.0)
 
@@ -174,6 +188,7 @@ def drift_block(
     asset: Optional[str] = None,
     entry_price_basis: Optional[str] = None,
     ticker: Optional[str] = None,
+    side: Optional[str] = None,
 ) -> Optional[str]:
     """Strict drift-lane admission gate.  Returns a block reason on
     failure, ``None`` when every lane condition passes (or the lane is
@@ -181,6 +196,8 @@ def drift_block(
     """
     if not drift_enabled():
         return "drift_disabled"
+    if side is not None and str(side).lower() not in drift_sides():
+        return "drift_side"
     if not drift_band_match(side_price_cents):
         return "drift_band"
     if asset is not None and str(asset).upper() not in drift_assets():

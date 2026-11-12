@@ -1374,6 +1374,17 @@ class PositionMonitor:
         self._market_to_position: Dict[str, str] = {}  # market_id -> position_id
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
+        # 2026-11-12: heartbeat + hung-task guard.  The 02:54 UTC incident
+        # left _running=True with poll_count frozen — a silently dead or
+        # hung poll task meant zero exit evaluation while positions were
+        # open.  _last_poll_mono is refreshed at the top of every poll
+        # iteration; the watchdog restarts the task when it finishes
+        # unexpectedly or stalls beyond the limit.
+        self._last_poll_mono: float = 0.0
+        self._poll_hung: bool = False
+        self._watchdog_interval: float = 10.0
+        self._watchdog_cancel_grace: float = 10.0
         self._exit_intent_callback = None  # Callback for exit intents
         self._lock = threading.RLock()  # Thread-safe access to position dicts
 
@@ -8883,6 +8894,7 @@ class PositionMonitor:
         while self._running:
             try:
                 poll_start_time = __import__('time').monotonic()
+                self._last_poll_mono = poll_start_time
                 poll_count += 1
 
                 # AUDIT: Timing correctness - track poll interval and drift
@@ -9190,6 +9202,87 @@ class PositionMonitor:
                 )
                 await asyncio.sleep(self._poll_interval)
 
+    async def _watchdog_loop(self) -> None:
+        """Supervise the poll task.
+
+        2026-11-12: the poll loop froze with ``_running=True`` — positions
+        kept their exit policies on paper but nothing evaluated them.  This
+        watchdog detects a finished task (logging its exception, which the
+        old code swallowed silently) and a heartbeat stall, then restarts
+        the loop.  A task that survives cancellation is NOT duplicated —
+        two concurrent poll loops share no poll_count and could
+        double-submit exits — it is flagged ``_poll_hung`` and P0-alerted
+        instead.
+        """
+        _time = __import__('time')
+        check_interval = float(getattr(self, "_watchdog_interval", 10.0) or 10.0)
+        # Generous bound: a single poll may legitimately await slow exit
+        # submissions; only sustained silence counts as a stall.
+        stall_limit = max(float(self._poll_interval) * 10.0, 60.0)
+        while self._running:
+            try:
+                await asyncio.sleep(check_interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            task = self._task
+            if task is None:
+                continue
+            if task.done():
+                exc = None
+                try:
+                    exc = task.exception()
+                except Exception:
+                    pass
+                logger.critical(
+                    "[POSITION-MONITOR-WATCHDOG] poll task finished unexpectedly "
+                    "(exc=%r) — restarting", exc,
+                )
+                self._task = asyncio.create_task(self._poll_loop())
+                self._last_poll_mono = _time.monotonic()
+                continue
+            last = self._last_poll_mono
+            if last and (_time.monotonic() - last) > stall_limit:
+                logger.critical(
+                    "[POSITION-MONITOR-WATCHDOG] poll heartbeat stale %.1fs "
+                    "> %.1fs — cancelling hung task", _time.monotonic() - last,
+                    stall_limit,
+                )
+                task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=float(getattr(self, "_watchdog_cancel_grace", 10.0) or 10.0),
+                    )
+                except Exception:
+                    pass
+                if task.done():
+                    self._poll_hung = False
+                    self._task = asyncio.create_task(self._poll_loop())
+                    self._last_poll_mono = _time.monotonic()
+                    logger.critical(
+                        "[POSITION-MONITOR-WATCHDOG] poll loop restarted after stall"
+                    )
+                else:
+                    self._poll_hung = True
+                    logger.critical(
+                        "[POSITION-MONITOR-WATCHDOG] poll task survived cancel — "
+                        "NOT starting a duplicate loop; exits may be unmonitored"
+                    )
+                    try:
+                        _p0_exit_alert(
+                            "POSITION_MONITOR_POLL_HUNG",
+                            None,
+                            f"heartbeat stale >{stall_limit:.0f}s and task survived "
+                            "cancellation — position exits unmonitored",
+                        )
+                    except Exception:
+                        pass
+                    # Stop watching a task we cannot control; re-check only
+                    # if it eventually finishes.
+                    self._task = task
+
     async def start(self) -> None:
         """
         Start the position monitor.
@@ -9424,7 +9517,9 @@ class PositionMonitor:
         self._cleanup_stale_exit_in_flight_on_startup()
 
         self._running = True
+        self._last_poll_mono = __import__('time').monotonic()
         self._task = asyncio.create_task(self._poll_loop())
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
         logger.info(
             "[POSITION-MONITOR] Started (poll_interval=%ds, tracking %d positions)",
             self._poll_interval,
@@ -9439,6 +9534,14 @@ class PositionMonitor:
             return
 
         self._running = False
+
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
 
         if self._task:
             self._task.cancel()
