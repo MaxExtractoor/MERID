@@ -110,7 +110,10 @@ export interface ServerAgent {
   last_signal_ts?: string | number;
   last_signal_age_s?: number;
   position_count?: number;
+  working_order?: boolean;
+  working_orders?: Array<Record<string, unknown>>;
   risk_budget_used?: number;
+  risk_budget_cap_usd?: number;
   is_zombie?: boolean;
   has_signal?: boolean;
   rejected_reason?: string;
@@ -119,6 +122,7 @@ export interface ServerAgent {
   /** Live entry-TTE cutoff (seconds) — new entries vetoed below this. */
   entry_cutoff_secs?: number;
   trend_aligned?: boolean;
+  run_id?: string;
   heartbeat?: { last_eval_ms?: number; book_age_ms?: number; watermark_ms?: number; spot_age_ms?: number };
   market?: AssetAgent['market'];
   position?: AssetAgent['position'];
@@ -173,7 +177,32 @@ export const AGENT_ENDPOINTS = {
 
 export const fetchGridAgents = () => getJson<GridAgentsResponse>(AGENT_ENDPOINTS.GRID_AGENTS);
 export const fetchLegacyAgents = () => getJson<{ agents?: ServerAgent[] } | ServerAgent[]>(AGENT_ENDPOINTS.LEGACY_AGENTS);
-export const fetchGridSummary = () => getJson<GridSummary>(AGENT_ENDPOINTS.GRID_SUMMARY);
+
+/**
+ * GET /api/v1/kalshi-grid/summary returns {available, running, agent_count,
+ * agents[], exchange_positions, open_orders, loop{...}} — NOT the legacy
+ * {agents_total, agents_running, mode} shape.  Normalize here so consumers
+ * read one contract; agents_running stays undefined when the backend omits
+ * per-agent running flags (honest '?' in the UI, never a guessed count).
+ */
+export const fetchGridSummary = async (): Promise<GridSummary> => {
+  const raw = await getJson<Record<string, unknown>>(AGENT_ENDPOINTS.GRID_SUMMARY);
+  const agents = Array.isArray(raw?.agents)
+    ? (raw.agents as GridSummary['agents']) ?? []
+    : [];
+  const agentCount = numOr(raw?.agent_count) ?? agents.length;
+  const anyRunningFlag = agents.some((a) => a && typeof a.running === 'boolean');
+  const agentsRunning = anyRunningFlag
+    ? agents.filter((a) => a?.running === true).length
+    : undefined;
+  return {
+    ...(raw as unknown as GridSummary),
+    agent_count: agentCount,
+    agents_total: agentCount,
+    agents_running: agentsRunning,
+    agents,
+  };
+};
 const FEED_KINDS: ReadonlySet<string> = new Set([
   'enter', 'veto', 'skip', 'order', 'fill', 'guard', 'exit', 'settle', 'state',
 ]);
@@ -362,10 +391,12 @@ export function toAssetAgent(s: ServerAgent): AssetAgent | null {
 
 /**
  * Map a raw market-state row into the UI MarketState shape.
- * Live row (verified kalshi_api.py): `{book_initialized, spread_cents,
- * mid_cents, depth_10c, top_of_book_size, volume_24h, open_interest,
- * seconds_to_expiry, expiration_time, last_updated, source}`.
- * yes_bid/yes_ask are not published — left undefined (UI shows n/a).
+ * Live row (kalshi_api.py /market-states): emits cents-suffixed BBO
+ * (yes_bid_cents/yes_ask_cents/no_bid_cents/no_ask_cents), mid_cents,
+ * spread_cents, book_age_ms, book_health, executable, data_source,
+ * status, underlying, strike_price/floor_strike, external_spot,
+ * last_price_cents, quote_owner, data_quality, seconds_to_expiry,
+ * volume_24h, open_interest, last_update_ts.
  */
 function toMarketState(r: Record<string, unknown>, ticker?: string): MarketState {
   const lastUpdated = r.last_update_ts ?? r.last_updated;
@@ -374,17 +405,30 @@ function toMarketState(r: Record<string, unknown>, ticker?: string): MarketState
     const ts = parseTsMs(lastUpdated);
     if (ts != null) bookAge = Math.max(0, Date.now() - ts);
   }
+  const depth = numOr(r.depth_contracts ?? r.depth_10c);
   return {
     ticker: String(r.ticker ?? ticker ?? ''),
     initialized: Boolean(r.initialized ?? r.book_initialized ?? false),
-    yes_bid_c: numOr(r.yes_bid_c ?? r.yes_bid),
-    yes_ask_c: numOr(r.yes_ask_c ?? r.yes_ask),
+    yes_bid_c: numOr(r.yes_bid_c ?? r.yes_bid ?? r.yes_bid_cents ?? r.best_bid_cents),
+    yes_ask_c: numOr(r.yes_ask_c ?? r.yes_ask ?? r.yes_ask_cents ?? r.best_ask_cents),
+    no_bid_c: numOr(r.no_bid_c ?? r.no_bid_cents ?? r.best_no_bid_cents),
+    no_ask_c: numOr(r.no_ask_c ?? r.no_ask_cents ?? r.best_no_ask_cents),
     mid_c: numOr(r.mid_c ?? r.mid_cents),
     spread_c: numOr(r.spread_c ?? r.spread_cents),
-    depth_contracts: numOr(r.depth_contracts),
+    depth_contracts: depth,
     volume: numOr(r.volume ?? r.volume_24h),
     open_interest: numOr(r.open_interest),
     secs_to_expiry: numOr(r.secs_to_expiry ?? r.seconds_to_expiry),
+    status: typeof r.status === 'string' ? r.status : undefined,
+    underlying: typeof r.underlying === 'string' ? r.underlying : undefined,
+    strike: numOr(r.strike ?? r.strike_price ?? r.floor_strike),
+    external_spot: numOr(r.external_spot),
+    last_price_c: numOr(r.last_price_c ?? r.last_price_cents),
+    book_health: typeof r.book_health === 'string' ? r.book_health : undefined,
+    executable: typeof r.executable === 'boolean' ? r.executable : undefined,
+    data_source: typeof r.data_source === 'string' ? r.data_source : (typeof r.source === 'string' ? r.source : undefined),
+    quote_owner: typeof r.quote_owner === 'string' ? r.quote_owner : undefined,
+    data_quality: typeof r.data_quality === 'string' ? r.data_quality : undefined,
     last_update_ts: lastUpdated != null ? String(lastUpdated) : undefined,
     book_age_ms: bookAge,
   };

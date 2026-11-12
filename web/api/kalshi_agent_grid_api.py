@@ -795,19 +795,23 @@ async def get_grid_summary(request: Request) -> Dict[str, Any]:
             "loop": _json_safe(_loop_summary(loop)),
         }
 
+    grid_running = bool(getattr(grid, "_running", False))
     agents = getattr(grid, "_agents", []) or []
     loop_summary = _loop_summary(loop)
     agent_rows = []
     for agent in agents:
+        enabled = _agent_enabled(agent)
         agent_rows.append({
             "name": _agent_name(agent),
             "asset": _agent_asset(agent),
+            "enabled": enabled,
+            "running": bool(grid_running and enabled),
             "rejection_reason": _agent_cycle_decision(agent).get("rejection_reason") or None,
         })
 
     return {
         "available": True,
-        "running": bool(getattr(grid, "_running", False)),
+        "running": grid_running,
         "agent_count": len(agents),
         "agents": agent_rows,
         "executed_candidates": sorted(

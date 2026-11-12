@@ -181,12 +181,73 @@ describe('KalshiTradeTicket', () => {
   });
 
   describe('Validation', () => {
-    it('clamps contract count to minimum 1', () => {
+    it('clamps contract count to the 0.01-contract floor', () => {
       renderWithToast(<KalshiTradeTicket {...defaultProps} />);
       const input = screen.getByLabelText('Number of contracts') as HTMLInputElement;
       fireEvent.change(input, { target: { value: '0' } });
-      // Component clamps to Math.max(1, v), so value stays at 1
-      expect(input.value).toBe('1');
+      // Centi-contract grid: minimum is 0.01, not 1.
+      expect(input.value).toBe('0.01');
+    });
+
+    it('accepts fractional contract counts', () => {
+      renderWithToast(<KalshiTradeTicket {...defaultProps} />);
+      const input = screen.getByLabelText('Number of contracts') as HTMLInputElement;
+      fireEvent.change(input, { target: { value: '0.15' } });
+      expect(input.value).toBe('0.15');
+      expect(screen.getByRole('button', { name: /Buy 0\.15 YES/i })).toBeInTheDocument();
+    });
+
+    it('blocks submission when the venue price is unavailable', async () => {
+      const noPrice = [
+        { id: 'yes', name: 'Yes', price: null, bid: null, ask: null },
+        { id: 'no', name: 'No', price: null, bid: null, ask: null },
+      ];
+      renderWithToast(<KalshiTradeTicket {...defaultProps} outcomes={noPrice} />);
+      const submitBtn = screen.getByRole('button', { name: /Buy 1 YES/i });
+      expect(submitBtn).toBeDisabled();
+      fireEvent.click(submitBtn);
+      await waitFor(() => {
+        expect(global.fetch).not.toHaveBeenCalledWith(
+          expect.stringContaining('/kalshi/orders'),
+          expect.objectContaining({ method: 'POST' }),
+        );
+      });
+    });
+
+    it('still submits a limit order when the venue price is unavailable', async () => {
+      const noPrice = [
+        { id: 'yes', name: 'Yes', price: null, bid: null, ask: null },
+        { id: 'no', name: 'No', price: null, bid: null, ask: null },
+      ];
+      renderWithToast(<KalshiTradeTicket {...defaultProps} outcomes={noPrice} />);
+      fireEvent.click(screen.getByText('Limit order'));
+      fireEvent.change(screen.getByLabelText('Limit price in cents'), { target: { value: '55' } });
+      const submitBtn = screen.getByRole('button', { name: /Buy 1 YES/i });
+      expect(submitBtn).not.toBeDisabled();
+      fireEvent.click(submitBtn);
+      await waitFor(() => {
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.stringContaining('price_cents=55'),
+          expect.objectContaining({ method: 'POST' }),
+        );
+      });
+    });
+
+    it('blocks submission on stale orderbook telemetry', async () => {
+      renderWithToast(<KalshiTradeTicket {...defaultProps} bookAgeMs={45_000} />);
+      fireEvent.click(screen.getByRole('button', { name: /Buy 1 YES/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/Market data is stale/)).toBeInTheDocument();
+      });
+      expect(global.fetch).not.toHaveBeenCalledWith(
+        expect.stringContaining('/kalshi/orders'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    it('warns when the book is not executable', () => {
+      renderWithToast(<KalshiTradeTicket {...defaultProps} marketExecutable={false} />);
+      expect(screen.getByText(/Book not executable/)).toBeInTheDocument();
     });
   });
 });

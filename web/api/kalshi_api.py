@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -446,6 +447,35 @@ def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
 
 # ── Market browsing ──────────────────────────────────────────────────────
 
+def _catalog_outcome_row(cm: Any, o: Any) -> Dict[str, Any]:
+    """Serialize one catalog outcome for GET /markets.
+
+    Prices are venue-agnostic dollars (0-1) — EventOutcome.price is already
+    normalized from Kalshi cents by the client converter.  bid/ask come from
+    CatalogMarket.yes_bid/yes_ask (real exchange BBO, dollars, None when the
+    venue did not quote) — NOT from EventOutcome.best_bid/best_ask, which the
+    Kalshi converter back-fills with the last price and would fabricate a
+    zero-spread quote.  NO-side quotes are the YES-book complement.
+    """
+    oid = str(getattr(o, "outcome_id", "") or "").lower()
+    yes_bid = getattr(cm, "yes_bid", None)
+    yes_ask = getattr(cm, "yes_ask", None)
+    bid = ask = None
+    if oid == "yes":
+        bid, ask = yes_bid, yes_ask
+    elif oid == "no":
+        bid = (1.0 - yes_ask) if yes_ask is not None else None
+        ask = (1.0 - yes_bid) if yes_bid is not None else None
+    price = getattr(o, "price", None)
+    return {
+        "id": getattr(o, "outcome_id", None),
+        "name": getattr(o, "outcome_name", None),
+        "price": float(price) if price is not None else None,
+        "bid": float(bid) if bid is not None else None,
+        "ask": float(ask) if ask is not None else None,
+    }
+
+
 @router.get("/markets",
     summary="List Kalshi Markets",
     description="Browse cataloged Kalshi markets with filters for category, asset, timeframe, and search keywords.",
@@ -518,14 +548,11 @@ async def list_markets(
                         "volume": float(m.market.volume) if m.market.volume else 0,
                         "expires_at": m.expires_at.isoformat() if m.expires_at else None,
                         "minutes_to_expiry": round(m.minutes_to_expiry, 1) if m.minutes_to_expiry else None,
-                        "outcomes": [
-                            {
-                                "id": o.outcome_id,
-                                "name": o.outcome_name,
-                                "price": float(o.price),
-                            }
-                            for o in m.market.outcomes
-                        ],
+                        "yes_bid": getattr(m, "yes_bid", None),
+                        "yes_ask": getattr(m, "yes_ask", None),
+                        "yes_bid_size": getattr(m, "yes_bid_size", None),
+                        "yes_ask_size": getattr(m, "yes_ask_size", None),
+                        "outcomes": [_catalog_outcome_row(m, o) for o in m.market.outcomes],
                     }
                     for m in markets
                 ],
@@ -1666,6 +1693,10 @@ async def _ensure_fresh_positions(max_staleness_seconds: int = 60) -> Tuple[List
                 "outcome": pos.side,
                 "size": pos.contracts,
                 "avg_price": pos.avg_price_cents / 100.0 if pos.avg_price_cents else 0,
+                # CachedPosition carries USD-denominated PnL — surface it so the
+                # UI does not render a fabricated $0.00 unrealized PnL.
+                "unrealized_pnl": float(pos.unrealized_pnl_usd) if getattr(pos, "unrealized_pnl_usd", None) is not None else 0.0,
+                "realized_pnl": float(pos.realized_pnl_usd) if getattr(pos, "realized_pnl_usd", None) is not None else 0.0,
                 "source": "position_cache",
                 "synthetic": False,
             })
@@ -3236,7 +3267,7 @@ async def place_order(
     ticker: str,
     side: str,            # "yes" or "no"
     action: str,          # "buy" or "sell"
-    count: int,
+    count: float,         # contracts — fractional OK (Kalshi V2 0.01-contract grid)
     price_cents: int,
     order_type: str = "limit",
     time_in_force: str = "gtc",
@@ -3270,8 +3301,12 @@ async def place_order(
         raise HTTPException(400, f"Invalid side: {side!r}, must be 'yes' or 'no'")
     if action not in ("buy", "sell"):
         raise HTTPException(400, f"Invalid action: {action!r}, must be 'buy' or 'sell'")
+    if not isinstance(count, (int, float)) or not math.isfinite(count):
+        raise HTTPException(400, "count must be a finite number")
     if count <= 0:
         raise HTTPException(400, "count must be > 0")
+    if count < 0.01:
+        raise HTTPException(400, "count must be >= 0.01 contracts (centi-contract grid)")
     if not (1 <= price_cents <= 99):
         raise HTTPException(400, "price_cents must be 1-99")
 
@@ -3331,7 +3366,7 @@ async def place_order(
     # MERID_PROFIT_ONLY_EXITS=1 an explicit stop_loss_price_cents is a contract
     # violation and is rejected.
     # NOTE: Kalshi API uses base series tickers (KXBTC, KXETH, etc.) without timeframe suffix
-    if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXXRP", "KXDOGE")):
+    if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE")):
         _profit_only_exits = os.getenv("MERID_PROFIT_ONLY_EXITS", "1").strip().lower() in (
             "1", "true", "yes", "on",
         )
@@ -6828,19 +6863,46 @@ async def get_market_states(
         else:
             filtered_states = all_states
         
-        # Format response
+        # Format response — expose the executable BBO and trust metadata the
+        # state store already maintains so the UI can render live quotes and
+        # honest freshness/health instead of 'n/a'.  All fields are read
+        # defensively: attributes absent on a given state version emit None.
         states_dict = {}
+        _now_wall = time.time()
         for ticker, state in filtered_states.items():
+            wall_ts = getattr(state, 'last_book_update_wall_ts', 0.0) or 0.0
+            book_age_ms = round((_now_wall - wall_ts) * 1000.0, 1) if wall_ts > 0 else None
+            last_update = getattr(state, 'last_update', None)
             states_dict[ticker] = {
                 "book_initialized": getattr(state, 'book_initialized', False),
-                "spread_cents": getattr(state, 'spread_cents', 0),
-                "mid_cents": getattr(state, 'mid_cents', 0),
-                "depth_10c": getattr(state, 'depth_10c', {}),
-                "top_of_book_size": getattr(state, 'top_of_book_size', {}),
+                "yes_bid_cents": getattr(state, 'best_bid_cents', None),
+                "yes_ask_cents": getattr(state, 'best_ask_cents', None),
+                "no_bid_cents": getattr(state, 'best_no_bid_cents', None),
+                "no_ask_cents": getattr(state, 'best_no_ask_cents', None),
+                "mid_cents": getattr(state, 'mid_cents', None),
+                "spread_cents": getattr(state, 'spread_cents', None),
+                "depth_10c": getattr(state, 'depth_10c', None),
+                "top_of_book_size": getattr(state, 'top_of_book_size', None),
                 "volume_24h": getattr(state, 'volume_24h', 0),
                 "open_interest": getattr(state, 'open_interest', 0),
-                "seconds_to_expiry": getattr(state, 'seconds_to_expiry', 0),
+                "seconds_to_expiry": getattr(state, 'seconds_to_expiry', None),
                 "expiration_time": getattr(state, 'expiration_time', None),
+                "status": getattr(state, 'status', None),
+                "underlying": getattr(state, 'underlying', None),
+                "strike_price": getattr(state, 'strike_price', None),
+                "floor_strike": getattr(state, 'floor_strike', None),
+                "external_spot": getattr(state, 'external_spot', None),
+                "last_price_cents": getattr(state, 'last_price_cents', None),
+                "book_health": getattr(state, 'book_health', None),
+                "executable": getattr(state, 'executable', None),
+                "data_source": getattr(state, 'data_source', None),
+                "quote_owner": getattr(state, 'quote_owner', None),
+                "data_quality": getattr(state, 'data_quality', None),
+                "book_age_ms": book_age_ms,
+                "last_update_ts": (
+                    last_update.isoformat() if hasattr(last_update, 'isoformat')
+                    else (datetime.fromtimestamp(wall_ts, tz=timezone.utc).isoformat() if wall_ts > 0 else None)
+                ),
                 "last_updated": getattr(state, 'last_updated', None),
                 "source": "market_state_store"
             }

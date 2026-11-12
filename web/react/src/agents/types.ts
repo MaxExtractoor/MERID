@@ -137,14 +137,32 @@ export interface AssetAgent {
     strike?: number;
     yes_bid_c?: number;
     yes_ask_c?: number;
+    no_bid_c?: number;
+    no_ask_c?: number;
     mid_c?: number;
     spread_c?: number;
     secs_to_close?: number;    // seconds to 15m window close
+    status?: string;           // venue market status (open/closed/paused)
+    underlying?: string;       // BTC/ETH/SOL/... settlement asset
     book_fresh?: boolean;
     book_age_ms?: number;      // ms since last book update
+    book_health?: string;      // NO_SNAPSHOT|LIVE|DEGRADED|... state-machine label
+    executable?: boolean;      // book healthy enough to trade against
+    data_quality?: string;
+    data_source?: string;      // WS_LIVE | REST_BOOTSTRAP | STALE_WS | ...
+    external_spot?: number;    // CF Benchmarks RTI / external reference
+    model_fair_prob?: number;  // model fair probability (0-1) when published
+    annualized_vol?: number;
+    last_price_c?: number;     // last trade price, cents
+    ws_last_event_age_ms?: number;
+    last_update_ts?: number;
     window_low_c?: number;
     window_high_c?: number;
-    last_price_c?: number;
+    depth_10c_yes?: number;
+    depth_10c_no?: number;
+    min_depth_yes?: number;
+    min_depth_no?: number;
+    exchange_index?: number;   // Kalshi collateral shard for this market
   };
   position?: AgentPosition | null;
   lanes: LaneInfo[];
@@ -168,13 +186,44 @@ export interface AssetAgent {
   raw?: Record<string, unknown>;
 }
 
+export interface GridSummaryAgent {
+  name?: string;
+  asset?: string;
+  enabled?: boolean;
+  running?: boolean;
+  rejection_reason?: string | null;
+}
+
+/** Loop telemetry echoed by GET /api/v1/kalshi-grid/summary. */
+export interface GridLoopSummary {
+  running?: boolean | null;
+  tick?: number | null;
+  cycle_count?: number | null;
+  error_count?: number | null;
+  cadence_seconds?: number | null;
+  last_cycle_at?: string | null;
+  started_at?: string | null;
+  halted_due_to_drawdown?: boolean | null;
+}
+
+/**
+ * GET /api/v1/kalshi-grid/summary — verified shape:
+ *   {available, running, agent_count, agents[], executed_candidates[],
+ *    exchange_positions, open_orders, loop{...}}
+ * agents_total / agents_running are normalized client-side aliases.
+ */
 export interface GridSummary {
-  running: boolean;
-  agents_total: number;
-  agents_running: number;
-  mode?: string;
-  uptime_s?: number;
-  last_cycle_ts?: string;
+  available?: boolean;
+  reason?: string;
+  running?: boolean;
+  agent_count?: number;
+  agents_total?: number;       // alias of agent_count
+  agents_running?: number;     // count of agents with running===true; undefined when backend omits the flag
+  agents?: GridSummaryAgent[];
+  exchange_positions?: number;
+  open_orders?: number;
+  executed_candidates?: string[];
+  loop?: GridLoopSummary;
 }
 
 export type DecisionEventKind =
@@ -201,12 +250,24 @@ export interface MarketState {
   initialized?: boolean;
   yes_bid_c?: number;
   yes_ask_c?: number;
+  no_bid_c?: number;
+  no_ask_c?: number;
   mid_c?: number;
   spread_c?: number;
   depth_contracts?: number;
   volume?: number;
   open_interest?: number;
   secs_to_expiry?: number;
+  status?: string;
+  underlying?: string;
+  strike?: number;
+  external_spot?: number;
+  last_price_c?: number;
+  book_health?: string;
+  executable?: boolean;
+  data_source?: string;
+  quote_owner?: string;
+  data_quality?: string;
   last_update_ts?: string;
   book_age_ms?: number;
 }

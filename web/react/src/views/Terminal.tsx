@@ -179,8 +179,14 @@ const Trade = () => {
     }
   };
 
-  // Filter for 15m crypto markets (BTC, ETH, SOL, XRP, DOGE)
-  const markets = (marketsPoll.data ?? []).filter((m) => is15mCrypto(m) && m.active !== false);
+  // Filter for 15m crypto markets (BTC, ETH, SOL, XRP, DOGE).  Drop rows
+  // whose catalog expiry already passed — `active` can stay true until the
+  // venue settles, and trading a dead window is never valid.
+  const markets = (marketsPoll.data ?? []).filter((m) =>
+    is15mCrypto(m)
+    && m.active !== false
+    && (m.minutes_to_expiry == null || m.minutes_to_expiry > 0),
+  );
 
   // Execution-gate state for the header chip (ticket also reads it internally).
   const liveState = system.live?.state ?? 'UNKNOWN';
@@ -356,13 +362,18 @@ const Trade = () => {
                   ticker={selectedMarket.ticker}
                   entryCutoffSecs={sel?.entry_cutoff_secs}
                   secsToClose={sel?.market?.secs_to_close}
+                  bookAgeMs={sel?.market?.book_age_ms}
+                  bookFresh={sel?.market?.book_fresh}
+                  marketExecutable={sel?.market?.executable}
                   marketVetoReason={vetoR}
                   marketVetoDetail={vetoD}
                   question={selectedMarket.question}
                   outcomes={(selectedMarket.outcomes ?? []).map(o => ({
                     id: o.id ?? o.name ?? '',
                     name: o.name ?? o.id ?? '',
-                    price: o.price ?? 0.5,
+                    // null stays null — the ticket blocks submission rather
+                    // than silently pricing an unknown market at 50¢.
+                    price: o.price ?? null,
                     bid: o.bid ?? null,
                     ask: o.ask ?? null,
                   }))}

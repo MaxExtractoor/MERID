@@ -82,13 +82,20 @@ function normalizeBook(raw: unknown): NormalizedBook {
     const noBids = toLevels(obj.no_bids ?? obj.no_dollars);
     asks = noBids.map((l) => ({ price: 100 - l.price, size: l.size }));
   }
-  const spread = numOr(obj.spread_cents ?? obj.spread_c);
-  const mid = numOr(obj.midpoint ?? obj.mid_c);
+  // Units are field-specific, not value-guessed: *_cents fields are already
+  // cents; `midpoint`/`mid` are dollars (0-1); `mid_c`/`mid_cents` are cents
+  // (same convention as the agent market block).  levelToCents's <=1 heuristic
+  // would misread a legitimate 1¢ or 0.5¢ spread as dollars — never apply it
+  // to *_cents fields.
+  const spreadC = numOr(obj.spread_cents ?? obj.spread_c);
+  const spreadD = numOr(obj.spread);
+  const midC = numOr(obj.mid_cents ?? obj.mid_c);
+  const midD = numOr(obj.midpoint ?? obj.mid);
   return {
     bids,
     asks,
-    spreadC: spread != null ? levelToCents(spread) : undefined,
-    midC: mid != null ? levelToCents(mid) : undefined,
+    spreadC: spreadC ?? (spreadD != null ? levelToCents(spreadD) : undefined),
+    midC: midC ?? (midD != null ? levelToCents(midD) : undefined),
     stale: typeof obj.error === 'string' ? true : undefined,
   };
 }

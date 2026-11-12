@@ -230,10 +230,20 @@ export const SystemRibbon = memo(function SystemRibbon({ ribbon, sources, onRefr
             {shardCents != null ? fmtCentsAsUsd(shardCents) : 'n/a'}
           </span>
         </div>
-        {ribbon.grid?.mode && (
-          <div className="flex flex-col leading-tight">
-            <span className="text-[8px] uppercase tracking-widest text-slate-500">mode</span>
-            <span className="text-sm font-bold text-slate-300 uppercase">{ribbon.grid.mode}</span>
+        {ribbon.grid && (
+          <div className="flex flex-col leading-tight" title={
+            ribbon.grid.loop?.cycle_count != null
+              ? `grid loop — ${ribbon.grid.loop.cycle_count} cycles, last ${ribbon.grid.loop.last_cycle_at ?? 'n/a'}`
+              : 'agent grid status'
+          }>
+            <span className="text-[8px] uppercase tracking-widest text-slate-500">grid</span>
+            <span className={cx('text-sm font-bold uppercase',
+              ribbon.grid.running === true ? 'text-slate-300'
+                : ribbon.grid.running === false ? 'text-red-400' : 'text-slate-500')}>
+              {ribbon.grid.running === true
+                ? `on ${ribbon.grid.agents_running ?? '?'}/${ribbon.grid.agents_total ?? '?'}`
+                : ribbon.grid.running === false ? 'stopped' : 'n/a'}
+            </span>
           </div>
         )}
       </div>

@@ -26,7 +26,9 @@ import { ConfirmModal } from './ConfirmModal';
 interface Outcome {
   id: string;
   name: string;
-  price: number;
+  /** Own-side last price in dollars (0-1). null = venue did not quote — the
+   *  ticket refuses to guess a price for order submission. */
+  price: number | null;
   bid: number | null;
   ask: number | null;
 }
@@ -48,6 +50,12 @@ interface TradeTicketProps {
   entryCutoffSecs?: number;
   /** Live seconds-to-close on this market's agent, when known. */
   secsToClose?: number;
+  /** ms since the live orderbook last updated (authoritative freshness). */
+  bookAgeMs?: number;
+  /** Backend book_fresh flag for this market, when known. */
+  bookFresh?: boolean;
+  /** Backend executable flag — book healthy enough to trade against. */
+  marketExecutable?: boolean;
   /** Current veto/gate reason on this market's agent (e.g. SKIP_MARKET_NOT_READY). */
   marketVetoReason?: string;
   /** Gate-level sub-reason (e.g. STALE:age=75s>t60s, NOT-LIVE-SEQUENCE-CONFIRMED). */
@@ -83,6 +91,10 @@ function kalshiFee(priceCents: number, contracts: number): number {
   return Math.ceil(raw * 10000) / 10000;
 }
 
+/** Contract count display — trims to the 0.01 grid without float noise. */
+const fmtCount = (n: number): string =>
+  (Math.round(n * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+
 type TradeErrorType = 'validation' | 'network' | 'api' | 'insufficient_balance' | 'market_closed';
 interface TradeError {
   type: TradeErrorType;
@@ -105,6 +117,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   balance,
   entryCutoffSecs,
   secsToClose,
+  bookAgeMs,
+  bookFresh,
+  marketExecutable,
   marketVetoReason,
   marketVetoDetail,
 }) => {
@@ -128,7 +143,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
 
   const [side, setSide] = useState<Side>(suggestedSide ?? 'yes');
   const [sizeMode, setSizeMode] = useState<SizeMode>('contracts');
-  const [contracts, setContracts] = useState(suggestedSize ?? 1);
+  // Contracts are fractional — Kalshi V2 settles on the 0.01-contract grid,
+  // matching the strategy's centi-contract sizing.
+  const [contracts, setContracts] = useState<number>(suggestedSize ?? 1);
   const [dollarAmount, setDollarAmount] = useState(1);
   const [useLimit, setUseLimit] = useState(false);
   const [limitPrice, setLimitPrice] = useState<number | null>(null);
@@ -154,31 +171,38 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const noOutcome = outcomes.find(o => (o.name ?? '').toLowerCase() === 'no') ?? outcomes[1];
 
   const activeOutcome = side === 'yes' ? yesOutcome : noOutcome;
-  const priceCents = useMemo(() => {
+  // null = no usable price — never substitute a plausible-looking 50¢.
+  const priceCents = useMemo<number | null>(() => {
     if (useLimit && limitPrice != null) return limitPrice;
-    return Math.round((activeOutcome?.price ?? 0.5) * 100);
+    const p = activeOutcome?.price;
+    return typeof p === 'number' && Number.isFinite(p) && p > 0 && p < 1
+      ? Math.round(p * 100)
+      : null;
   }, [useLimit, limitPrice, activeOutcome]);
 
   const effectiveContracts = useMemo(() => {
     if (sizeMode === 'contracts') return contracts;
-    if (priceCents <= 0) return 0;
-    return Math.floor(dollarAmount / (priceCents / 100));
+    if (priceCents == null || priceCents <= 0) return 0;
+    // Round DOWN to the 0.01-contract grid — never oversize a dollar budget.
+    return Math.floor((dollarAmount / (priceCents / 100)) * 100) / 100;
   }, [sizeMode, contracts, dollarAmount, priceCents]);
 
-  const cost = (priceCents / 100) * effectiveContracts;
+  const cost = priceCents != null ? (priceCents / 100) * effectiveContracts : 0;
   const maxPayout = effectiveContracts; // $1 per contract
   const maxProfit = maxPayout - cost;
-  const fee = kalshiFee(priceCents, effectiveContracts);
+  const fee = priceCents != null ? kalshiFee(priceCents, effectiveContracts) : 0;
   const netProfit = maxProfit - fee;
-  const impliedProb = priceCents;
+  const impliedProb = priceCents ?? 0;
   // "vs market": how far the limit price sits from the live own-side quote.
   // Negative = cheaper than market (maker advantage), positive = paying
   // through. Only meaningful for limit orders — a market order IS the quote.
-  const marketC = activeOutcome?.price != null ? Math.round(activeOutcome.price * 100) : null;
-  const vsMarketC = useLimit && marketC != null ? priceCents - marketC : null;
+  const marketC = activeOutcome?.price != null && activeOutcome.price > 0 && activeOutcome.price < 1
+    ? Math.round(activeOutcome.price * 100)
+    : null;
+  const vsMarketC = useLimit && marketC != null && priceCents != null ? priceCents - marketC : null;
 
   const spread = useMemo(() => {
-    if (!activeOutcome?.bid || !activeOutcome?.ask) return null;
+    if (activeOutcome?.bid == null || activeOutcome?.ask == null) return null;
     return Math.round((activeOutcome.ask - activeOutcome.bid) * 100);
   }, [activeOutcome]);
 
@@ -188,7 +212,8 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   }, [ticker, side, effectiveContracts, priceCents, mode]);
 
   const validate = useCallback((): string | null => {
-    if (effectiveContracts <= 0) return 'Size must be at least 1 contract';
+    if (effectiveContracts < 0.01) return 'Size must be at least 0.01 contracts';
+    if (priceCents == null) return 'Price unavailable — the venue did not quote this outcome';
     if (priceCents <= 0 || priceCents >= 100) return 'Price must be between 1¢ and 99¢';
     if (useLimit && limitPrice == null) return 'Enter a limit price';
     // Spendable = available cash only — portfolio value cannot collateralize a
@@ -243,7 +268,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         side,
         action: 'buy',
         count: String(effectiveContracts),
-        price_cents: String(priceCents),
+        price_cents: String(priceCents ?? 0),
         order_type: useLimit ? 'limit' : 'market',
         mode,
       });
@@ -313,18 +338,23 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       return;
     }
 
-    // T-035: Block trading on stale data (>30s since last price update)
-    if (lastUpdated) {
-      const dataAge = Date.now() - new Date(lastUpdated).getTime();
-      if (dataAge > 30_000) {
-        const staleMsg = 'Market data is stale (>30s). Refresh before trading.';
-        if (enhanced) {
-          setTradeError({ type: 'market_closed', message: staleMsg, recoverable: true });
-        } else {
-          setError(staleMsg);
-        }
-        return;
+    // T-035: Block trading on stale data.  Prefer the live orderbook age
+    // (authoritative — catalog rows can be minutes old while the endpoint
+    // itself polls fine); fall back to the catalog timestamp only when no
+    // book telemetry exists for this market.
+    const dataAge = bookAgeMs != null
+      ? bookAgeMs
+      : lastUpdated
+        ? Date.now() - new Date(lastUpdated).getTime()
+        : null;
+    if (dataAge != null && dataAge > 30_000) {
+      const staleMsg = 'Market data is stale (>30s). Refresh before trading.';
+      if (enhanced) {
+        setTradeError({ type: 'market_closed', message: staleMsg, recoverable: true });
+      } else {
+        setError(staleMsg);
       }
+      return;
     }
 
     // Live orders confirm via ConfirmModal (consistent with kill-switch /
@@ -336,7 +366,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
 
     submitGuardRef.current = true;
     void executeOrder();
-  }, [validate, mode, lastUpdated, enhanced, executeOrder]);
+  }, [validate, mode, lastUpdated, bookAgeMs, enhanced, executeOrder]);
 
   const handleLiveConfirm = useCallback(() => {
     setConfirmOpen(false);
@@ -400,7 +430,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
               : 'bg-slate-700 text-gray-400 hover:text-white'
           }`}
         >
-          YES {yesOutcome && <span className="ml-1 font-mono">{((yesOutcome.price ?? 0) * 100).toFixed(0)}¢</span>}
+          YES {yesOutcome && <span className="ml-1 font-mono">{yesOutcome.price != null ? `${(yesOutcome.price * 100).toFixed(0)}¢` : '—'}</span>}
         </button>
         <button
           type="button"
@@ -411,7 +441,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
               : 'bg-slate-700 text-gray-400 hover:text-white'
           }`}
         >
-          NO {noOutcome && <span className="ml-1 font-mono">{((noOutcome.price ?? 0) * 100).toFixed(0)}¢</span>}
+          NO {noOutcome && <span className="ml-1 font-mono">{noOutcome.price != null ? `${(noOutcome.price * 100).toFixed(0)}¢` : '—'}</span>}
         </button>
       </div>
 
@@ -419,7 +449,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       <div className="space-y-1">
         <div className="flex justify-between text-xs text-gray-400">
           <span>Implied Probability</span>
-          <span className="font-mono">{impliedProb}%</span>
+          <span className="font-mono">{priceCents != null ? `${priceCents}%` : 'n/a'}</span>
         </div>
         <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
           <ProgressBar pct={Math.max(2, Math.min(98, impliedProb))} color={side === 'yes' ? 'bg-green-500' : 'bg-red-500'} />
@@ -451,21 +481,22 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           {sizeMode === 'dollars' && <DollarSign className="w-4 h-4 text-gray-400" />}
           <input
             type="number"
-            min={1}
+            min={0.01}
+            step={0.01}
             value={sizeMode === 'contracts' ? contracts : dollarAmount}
             onChange={(e) => {
               const raw = e.target.value;
-              if (raw === '' || raw === '-') return;
-              const v = parseInt(raw, 10);
-              if (isNaN(v)) return;
-              if (sizeMode === 'contracts') setContracts(Math.max(1, v));
-              else setDollarAmount(Math.max(1, v));
+              if (raw === '' || raw === '-' || raw === '.') return;
+              const v = parseFloat(raw);
+              if (!Number.isFinite(v)) return;
+              if (sizeMode === 'contracts') setContracts(Math.max(0.01, Math.round(v * 100) / 100));
+              else setDollarAmount(Math.max(0.01, v));
             }}
             className="flex-1 bg-slate-700 rounded-lg px-3 py-2 text-sm text-white border border-slate-600 focus:border-orange-500 focus:outline-none font-mono"
             aria-label={sizeMode === 'contracts' ? 'Number of contracts' : 'Dollar amount'}
           />
           {sizeMode === 'dollars' && effectiveContracts > 0 && (
-            <span className="text-xs text-gray-500">= {effectiveContracts} contracts</span>
+            <span className="text-xs text-gray-500">= {fmtCount(effectiveContracts)} contracts</span>
           )}
         </div>
       </div>
@@ -480,7 +511,11 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
             onChange={(e) => {
               setUseLimit(e.target.checked);
               if (e.target.checked && limitPrice == null) {
-                setLimitPrice(Math.round((activeOutcome?.price ?? 0.5) * 100));
+                setLimitPrice(
+                  activeOutcome?.price != null && activeOutcome.price > 0 && activeOutcome.price < 1
+                    ? Math.round(activeOutcome.price * 100)
+                    : null,
+                );
               }
             }}
             className="rounded border-slate-600 bg-slate-700 text-orange-500 focus:ring-orange-500"
@@ -640,12 +675,27 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         </div>
       )}
 
+      {/* Live-book freshness + executability (advisory — the order router
+          re-checks readiness authoritatively; these warn before submit). */}
+      {bookFresh === false && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span>Orderbook stale{bookAgeMs != null ? ` (${Math.round(bookAgeMs / 1000)}s)` : ''} — quotes may be outdated</span>
+        </div>
+      )}
+      {marketExecutable === false && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>Book not executable — entries will be rejected by the readiness gate</span>
+        </div>
+      )}
+
       {/* Submit */}
       <button
         type="button"
         onClick={handleSubmit}
-        disabled={submitting || submitGuardRef.current || effectiveContracts <= 0 || executionBlocked || fillsIntegrityBroken}
-        title={fillsIntegrityBroken ? 'Trading disabled: fills reconciliation broken' : executionBlocked ? 'Trading halted: execution gate blocked' : undefined}
+        disabled={submitting || submitGuardRef.current || effectiveContracts < 0.01 || priceCents == null || executionBlocked || fillsIntegrityBroken}
+        title={fillsIntegrityBroken ? 'Trading disabled: fills reconciliation broken' : executionBlocked ? 'Trading halted: execution gate blocked' : priceCents == null ? 'No venue price for this outcome' : undefined}
         className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 ${
           side === 'yes'
             ? 'bg-green-600 hover:bg-green-500 text-white'
@@ -656,7 +706,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           <Loader2 className="w-4 h-4 animate-spin" />
         ) : (
           <>
-            Buy {effectiveContracts} {side.toUpperCase()}
+            Buy {fmtCount(effectiveContracts)} {side.toUpperCase()}
             <ArrowRight className="w-4 h-4" />
             <span className="font-mono">${(cost ?? 0).toFixed(2)}</span>
           </>
@@ -700,7 +750,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       <ConfirmModal
         isOpen={confirmOpen}
         title="Confirm LIVE order"
-        message={`Buy ${effectiveContracts} ${side.toUpperCase()} on ${ticker} @ ${priceCents}¢ — cost $${cost.toFixed(2)}, max loss $${cost.toFixed(2)}, net profit if win $${netProfit.toFixed(2)}. Real money at risk.`}
+        message={`Buy ${fmtCount(effectiveContracts)} ${side.toUpperCase()} on ${ticker} @ ${priceCents ?? '—'}¢ — cost $${cost.toFixed(2)}, max loss $${cost.toFixed(2)}, net profit if win $${netProfit.toFixed(2)}. Real money at risk.`}
         confirmText="Place live order"
         confirmVariant="danger"
         checklistItems={[{ id: 'ack', label: 'I understand this is a real-money live order' }]}

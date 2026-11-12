@@ -127,8 +127,18 @@ export function mergeWallAgents(
     if (!market.ticker && ms?.ticker) market.ticker = ms.ticker;
     if (market.yes_bid_c == null && ms?.yes_bid_c != null) market.yes_bid_c = ms.yes_bid_c;
     if (market.yes_ask_c == null && ms?.yes_ask_c != null) market.yes_ask_c = ms.yes_ask_c;
+    if (market.no_bid_c == null && ms?.no_bid_c != null) market.no_bid_c = ms.no_bid_c;
+    if (market.no_ask_c == null && ms?.no_ask_c != null) market.no_ask_c = ms.no_ask_c;
     if (market.mid_c == null && ms?.mid_c != null) market.mid_c = ms.mid_c;
     if (market.spread_c == null && ms?.spread_c != null) market.spread_c = ms.spread_c;
+    if (market.last_price_c == null && ms?.last_price_c != null) market.last_price_c = ms.last_price_c;
+    if (market.external_spot == null && ms?.external_spot != null) market.external_spot = ms.external_spot;
+    if (market.strike == null && ms?.strike != null) market.strike = ms.strike;
+    if (market.underlying == null && ms?.underlying != null) market.underlying = ms.underlying;
+    if (market.book_health == null && ms?.book_health != null) market.book_health = ms.book_health;
+    if (market.executable == null && ms?.executable != null) market.executable = ms.executable;
+    if (market.data_source == null && ms?.data_source != null) market.data_source = ms.data_source;
+    if (market.status == null && ms?.status != null) market.status = ms.status;
     if (market.secs_to_close == null && ms?.secs_to_expiry != null) {
       market.secs_to_close = ms.secs_to_expiry;
     }
