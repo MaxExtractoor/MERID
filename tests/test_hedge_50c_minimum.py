@@ -75,6 +75,7 @@ class TestHedgeEngine50cMinimum(unittest.TestCase):
         # Create mock config
         mock_config = Mock(spec=HedgeConfig)
         mock_config.enabled = True
+        mock_config.entries_enabled = True
         mock_config.timeframes = {"15m": TimeframeHedgeRule()}
         mock_config.slice_value_cents = Mock(return_value=10000)
         mock_config.get_timeframe_rule = Mock(return_value=TimeframeHedgeRule())
@@ -115,6 +116,7 @@ class TestHedgeEngine50cMinimum(unittest.TestCase):
         # Create mock config
         mock_config = Mock(spec=HedgeConfig)
         mock_config.enabled = True
+        mock_config.entries_enabled = True
         mock_config.timeframes = {"15m": TimeframeHedgeRule()}
         mock_config.slice_value_cents = Mock(return_value=10000)
         mock_config.get_timeframe_rule = Mock(return_value=TimeframeHedgeRule())

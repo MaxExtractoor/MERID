@@ -23054,13 +23054,30 @@ async def execute_arbitrage_async(
     )
     
     # Log arbitrage execution results
-    yes_success = "filled" in yes_result.status or "accepted" in yes_result.status
-    no_success = "filled" in no_result.status or "accepted" in no_result.status
-    
-    if yes_success and no_success:
+    yes_filled = "filled" in yes_result.status
+    no_filled = "filled" in no_result.status
+
+    if yes_filled and no_filled:
         logger.info(
             "[ARBITRAGE-SUCCESS] Both sides filled: yes_status=%s no_status=%s total_edge=%dc",
             yes_result.status, no_result.status, 100 - (yes_ask_cents + no_bid_cents)
+        )
+    elif yes_filled != no_filled:
+        # UNPAIRED LEG: one side filled, the other did not.  The surviving
+        # leg is naked directional exposure mislabeled as arbitrage — it
+        # must be reconciled immediately, not left to the alpha book.
+        filled_side = "yes" if yes_filled else "no"
+        filled_ticker = yes_ticker if yes_filled else no_ticker
+        filled_result = yes_result if yes_filled else no_result
+        logger.error(
+            "[ARBITRAGE-UNPAIRED-LEG] CRITICAL: %s leg filled (%s status=%s "
+            "qty_cc=%s) but opposite leg failed (status=%s reason=%s) — "
+            "naked directional exposure on %s requires immediate reconciliation",
+            filled_side, filled_side, filled_result.status,
+            getattr(filled_result, "executed_quantity_cc", None),
+            no_result.status if yes_filled else yes_result.status,
+            getattr(no_result if yes_filled else yes_result, "reason", None),
+            filled_ticker,
         )
     else:
         logger.warning(

@@ -232,6 +232,7 @@ class TestHedgeEngineAssetRanking(unittest.TestCase):
 
         config = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 a: AssetSliceConfig(slice_pct_of_bankroll=0.1)
                 for a in ("BTC", "ETH", "SOL", "XRP", "DOGE")

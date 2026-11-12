@@ -166,6 +166,7 @@ class TestCrossAssetHedgingWarning:
         # Create config with cross_asset_enabled=True
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             cross_asset_enabled=True,
             asset_slices={"BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25)},
             timeframes={"1h": TimeframeHedgeRule(target_hedge_ratio=0.5)},
@@ -196,6 +197,7 @@ class TestCrossAssetHedgingWarning:
         # Create config with cross_asset_enabled=False (default)
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             cross_asset_enabled=False,
             asset_slices={"BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25)},
             timeframes={"1h": TimeframeHedgeRule(target_hedge_ratio=0.5)},

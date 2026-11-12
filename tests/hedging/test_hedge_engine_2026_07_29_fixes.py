@@ -358,6 +358,7 @@ class TestHedgeSizeValidation(unittest.TestCase):
         engine = CryptoHedgeEngine()
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
             },
@@ -406,6 +407,7 @@ class TestReduceOnExposureFlip(unittest.TestCase):
         engine = CryptoHedgeEngine()
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
             },

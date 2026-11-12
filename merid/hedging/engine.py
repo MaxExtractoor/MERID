@@ -91,6 +91,7 @@ class CryptoHedgeEngine:
         self._lock = threading.Lock()
         # P2 Task 8: auto-exit loop health surface
         self._auto_exit_last_check_ts: float = 0.0
+        self._entries_suppressed_last_log_ts: float = 0.0
         self._auto_exit_total_exits_submitted: int = 0
         self._auto_exit_total_iterations: int = 0
         self._auto_exit_last_error: Optional[str] = None
@@ -137,6 +138,33 @@ class CryptoHedgeEngine:
 
         all_assets = list(ACTIVE_CRYPTO_ASSETS)
         all_tfs = list(config.timeframes.keys())
+
+        # Hedge entries gate (2026-11-12): risk-increasing hedge buys are
+        # disabled by default — they bypass TradeDecision approval and
+        # window-plan budget reservation, and same-market opposite-side pairs
+        # on 15m binaries lock in spread+fees rather than reduce variance.
+        # Exits are generated elsewhere (pnl_tracker / auto_exit paths) and
+        # are unaffected.  Re-enable via config entries_enabled or
+        # MERID_HEDGE_ENTRIES_ENABLED only after hedge producers join shared
+        # authorization/reservation accounting.
+        if not getattr(config, "entries_enabled", False):
+            # Observability: count cells that *would* have produced hedge
+            # orders (|net_delta| >= 2c ⇒ |hedge_delta| >= 1c ⇒ count >= 1),
+            # throttled to one log per 60s so evidence health can see the
+            # suppressed demand without spamming every tick.
+            would_hedge = 0
+            for asset in all_assets:
+                for tf in all_tfs:
+                    if abs(exposure.net_delta_cents(asset, tf)) >= 2:
+                        would_hedge += 1
+            now = time.time()
+            if would_hedge and now - self._entries_suppressed_last_log_ts >= 60.0:
+                self._entries_suppressed_last_log_ts = now
+                logger.info(
+                    "[hedge-engine] entries_enabled=false — suppressed hedge "
+                    "demand in %d (asset,tf) cells", would_hedge,
+                )
+            return HedgeResult()
 
         # Hedge assets are picked by exposure magnitude. This is for hedging
         # (defense), not alpha sizing — so ANY asset with non-zero exposure

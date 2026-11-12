@@ -719,8 +719,7 @@ class PredictionMarketRisk:
         # 5b. EMERGENCY GLOBAL BANKROLL CAP: Total portfolio notional cannot exceed 2% of bankroll
         # SAFETY: This is the critical 1-2% bankroll enforcement across ALL agents
         # CRITICAL FIX: Use live bankroll from bankroll_service_v2, not static settings
-        MINIMUM_GLOBAL_BANKROLL_CENTS = 5000  # $50 minimum to prevent negative caps
-        global_bankroll_usd = Decimal("50000.00")  # Default for logging only
+        global_bankroll_usd = Decimal("0")  # Reassigned from verified equity below
         try:
             # Use live bankroll from bankroll_service_v2 (same source as sizing)
             from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
@@ -741,22 +740,34 @@ class PredictionMarketRisk:
                     reason="BANKROLL_UNAVAILABLE: Live Kalshi bankroll not available for global cap.",
                     market_id=market_id,
                 )
-            # FIX: If bankroll is 0 or negative, use minimum to prevent negative cap
-            if global_bankroll_cents <= 0:
-                logger.warning(
-                    "[RISK_GLOBAL_CAP_FIX] Live bankroll is %s (invalid), using minimum $%.2f",
-                    global_bankroll_cents, MINIMUM_GLOBAL_BANKROLL_CENTS / 100
-                )
-                global_bankroll_cents = MINIMUM_GLOBAL_BANKROLL_CENTS
             global_bankroll_usd = Decimal(global_bankroll_cents) / Decimal("100")
             # 2% of bankroll = max TOTAL portfolio notional (1% = more conservative)
             global_bankroll_cap = (global_bankroll_usd * Decimal("0.02")).quantize(Decimal("0.01"))
-            # EXTRA SAFETY: Ensure cap is never negative or zero
+            # Fail closed: verified-but-tiny equity yields a non-positive cap.
+            # Flooring to a fabricated bankroll/cap would invent purchasing
+            # power the account does not have.
             if global_bankroll_cap <= 0:
-                global_bankroll_cap = Decimal("1.00")  # Minimum $1.00 cap
+                logger.error(
+                    "[RISK_GLOBAL_CAP_REJECT] Verified bankroll %s yields "
+                    "non-positive 2%% cap (%s). Rejecting order.",
+                    live_equity_usd, global_bankroll_cap
+                )
+                return PreTradeCheck(
+                    allowed=False,
+                    action=RiskAction.REJECT,
+                    reason="BANKROLL_UNAVAILABLE: verified bankroll too small for 2% cap.",
+                    market_id=market_id,
+                )
         except Exception as e:
-            logger.error("[RISK_GLOBAL_CAP_FIX] Error computing global bankroll cap: %s. Using fallback.", e)
-            global_bankroll_cap = Decimal("1000.00")  # Fallback: 2% of $50K
+            # Fail closed: an error resolving bankroll state must not become
+            # fabricated purchasing power (previously fell back to a $1000 cap).
+            logger.error("[RISK_GLOBAL_CAP_FIX] Error computing global bankroll cap: %s. Rejecting (fail closed).", e)
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason="BANKROLL_UNAVAILABLE: bankroll state error during global cap check.",
+                market_id=market_id,
+            )
 
         if total_notional + order_notional > global_bankroll_cap:
             logger.error(

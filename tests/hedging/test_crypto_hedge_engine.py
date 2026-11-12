@@ -206,6 +206,7 @@ class TestCryptoHedgeEngineDeterminism(unittest.TestCase):
 
         return HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),
@@ -295,6 +296,7 @@ class TestHedgeOrderProperties(unittest.TestCase):
 
         return HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),
@@ -413,6 +415,7 @@ class TestAdjacentHorizonHedging(unittest.TestCase):
 
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),
@@ -519,6 +522,7 @@ class TestHedgeEngineMetrics(unittest.TestCase):
         engine = CryptoHedgeEngine()
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),
@@ -734,6 +738,7 @@ class TestNoDoubleHedging(unittest.TestCase):
         engine = CryptoHedgeEngine()
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),
@@ -781,6 +786,7 @@ class TestHedgeReducesExposure(unittest.TestCase):
         engine = CryptoHedgeEngine()
         cfg = HedgeConfig(
             enabled=True,
+            entries_enabled=True,
             asset_slices={
                 "BTC": AssetSliceConfig(slice_pct_of_bankroll=0.25),
                 "ETH": AssetSliceConfig(slice_pct_of_bankroll=0.25),

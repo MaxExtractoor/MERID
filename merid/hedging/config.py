@@ -88,6 +88,15 @@ class HedgeConfig:
     """Top-level hedge configuration — immutable after load."""
 
     enabled: bool = True
+    # Risk-increasing hedge ENTRIES (buys that open offsetting positions).
+    # Default OFF: hedge entries bypass TradeDecision approval and window-plan
+    # budget reservation, pay spread+fees for unvalidated economics, and on
+    # 15m binaries a same-market opposite-side pair locks in cost rather than
+    # reducing variance.  Exits (auto_exit_hedges / TP-SL) are unaffected —
+    # they are risk-reducing and must stay live for residual positions.
+    # Re-enable only with MERID_HEDGE_ENTRIES_ENABLED=1 after shared
+    # authorization/reservation accounting covers hedge producers.
+    entries_enabled: bool = False
     use_cross_asset_hedging: bool = False
     max_drawdown_pct: float = 40.0
 
@@ -200,8 +209,16 @@ def load_hedge_config(path: Optional[str] = None) -> HedgeConfig:
         resting_exit_enabled=bool(ae_cfg.get("resting_exit_enabled", False)),
     )
 
+    entries_enabled = bool(h.get("entries_enabled", False))
+    env_entries = os.getenv("MERID_HEDGE_ENTRIES_ENABLED", "").strip().lower()
+    if env_entries in ("1", "true", "yes", "on"):
+        entries_enabled = True
+    elif env_entries in ("0", "false", "no", "off"):
+        entries_enabled = False
+
     return HedgeConfig(
         enabled=bool(h.get("enabled", True)),
+        entries_enabled=entries_enabled,
         use_cross_asset_hedging=bool(h.get("use_cross_asset_hedging", False)),
         max_drawdown_pct=float(h.get("max_drawdown_pct", 40.0)),
         asset_slices=slices,

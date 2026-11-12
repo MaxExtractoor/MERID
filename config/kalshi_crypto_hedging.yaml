@@ -3,6 +3,14 @@
 
 hedging:
   enabled: true
+  # Risk-increasing hedge entries (opposite-side buys) are OFF by default.
+  # They bypass decision approval and window-plan reservation, and on 15m
+  # binaries a same-market YES+NO pair locks in spread+fees rather than
+  # hedging variance.  Hedge EXITS (auto_exit, TP/SL) remain active for any
+  # residual hedge positions.  Set MERID_HEDGE_ENTRIES_ENABLED=1 to re-enable
+  # only after hedge producers join shared authorization/reservation
+  # accounting (WP3).
+  entries_enabled: false
   use_cross_asset_hedging: false
   max_drawdown_pct: 40.0
 
