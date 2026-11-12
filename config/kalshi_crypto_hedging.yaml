@@ -11,6 +11,13 @@ hedging:
   # only after hedge producers join shared authorization/reservation
   # accounting (WP3).
   entries_enabled: false
+  # Counterfactual shadow lane (observe-only): while entries are gated,
+  # the engine still computes its orders and compute_hedge_intents records
+  # each hypothetical order to logs/hedge_shadow.jsonl with executable ask,
+  # side depth, versioned taker fee, fill ratio, and book freshness.
+  # Env: MERID_HEDGE_SHADOW_ENABLED (default 1), MERID_HEDGE_SHADOW_LOG,
+  #      MERID_HEDGE_SHADOW_MAX_BOOK_AGE_S (default 5).
+  # Shadow records are grading evidence only — they cannot route orders.
   use_cross_asset_hedging: false
   max_drawdown_pct: 40.0
 

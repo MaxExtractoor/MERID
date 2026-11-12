@@ -101,6 +101,44 @@ Run architectural separation tests:
 python -m pytest tests/test_15m_architectural_separation.py -v
 ```
 
+## Risk Producers & Evidence Health
+
+The 15m path has exactly one enabled risk-increasing producer: the
+Phase-A-audited candidate pipeline (TradeDecision approval + size ceiling
++ window-plan reservation + fail-closed bankroll). Other producers are
+gated:
+
+| Producer | State | Accounting |
+|----------|-------|------------|
+| Candidate entries | enabled | approval + window-plan reservation |
+| Hedge entries | **disabled** (`hedging.entries_enabled`, default false) | bypasses alpha approval — gated until shared authorization exists |
+| Hedge exits | enabled (reduce-only) | n/a |
+| Market making | disabled by default | separate opt-in policy |
+| YES/NO arbitrage | disabled (`ARBITRAGE_ENABLED`) | unpaired-leg fills emit CRITICAL telemetry |
+
+Hedge shadow lane: while entries are gated, `compute_hedge_intents`
+runs the engine in `shadow` mode and records each hypothetical order to
+`logs/hedge_shadow.jsonl` with executable ask, side depth, versioned
+taker fee, fill ratio, and book freshness (`research_eligible` requires
+a fresh book and full-size displayed depth). Observe-only; cannot route.
+
+Reserve evidence-health report — answers "is old evidence still driving
+the current policy?" across bankroll, slot allocator, window plan,
+capital sleeve, scalp return model, market-state store, and hedge policy:
+
+```bash
+python -m merid.diagnostics.evidence_health_report
+```
+
+Fail-closed bankroll: all sizing paths use freshness-bounded verified
+equity (`get_equity_for_risk_calc`); unavailable/stale bankroll yields
+zero size or `BANKROLL_UNAVAILABLE` rejection — never fabricated caps.
+
+Sizing roadmap: shadow Kelly telemetry is live, but live 0.10
+fractional-Kelly magnitude stays off until the empirical net scalp-return
+model is validated under current policy. See
+`docs/decisions/2026-11-12-hedge-gating-shadow-evidence.md`.
+
 ## Migration History
 
 ### Before Separation

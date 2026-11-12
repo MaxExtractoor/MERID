@@ -22798,9 +22798,32 @@ def compute_hedge_intents(bankroll_cents: int = 0) -> List[OrderIntent]:
         except Exception as e:
             logger.debug(f"Market catalog unavailable for hedge: {e}")
 
+        # Counterfactual shadow lane: while entries are gated off, compute
+        # the orders the engine *would* have sent and record them with
+        # executable-book/fee/fill modeling for post-settlement grading.
+        # Shadow orders are never converted to intents or routed.
+        entries_on = bool(getattr(cfg, "entries_enabled", False))
+        shadow = False
+        if not entries_on:
+            try:
+                from merid.hedging import shadow_eval
+                shadow = shadow_eval.shadow_enabled()
+            except Exception:
+                shadow = False
+
         result = engine.compute_hedge_orders(
             snap, cfg, bankroll_cents=bankroll_cents, market_catalog=catalog,
+            shadow=shadow,
         )
+        if shadow and result.orders:
+            try:
+                from merid.hedging import shadow_eval
+                shadow_eval.record_shadow_orders(
+                    result.orders, exposure=snap, bankroll_cents=bankroll_cents,
+                )
+            except Exception:
+                pass
+            return []
         if not result.orders:
             return []
 

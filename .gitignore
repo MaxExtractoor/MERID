@@ -499,3 +499,20 @@ data/*.backup_20*
 live_monitor.txt
 .git_commit_msg.txt
 data/fvg_kill_switch.json
+# Shadow/evidence + local artifact hygiene (2026-11-12)
+/nul
+web/react/nul
+*.db-journal
+*.db-shm
+*.db-wal
+*.smoke_artifact
+data/kalshi_book_archiver.lock
+data/preserved_book_archive_*/
+data/quarantine_test_artifacts_*/
+tools/*.exe
+tools/*.zip
+tools/Eula.txt
+web/react/playwright-report/
+web/react/test-results/
+web/react/build_out.txt
+web/react/tsc_out*.txt

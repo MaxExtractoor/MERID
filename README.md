@@ -78,6 +78,10 @@ Execution-path controls:
 - **Drawdown protection** — cycle-level and multi-timeframe drawdown halts
 - **Shard collateral** — Kalshi crypto markets live on exchange shard 2; startup preflight and the loop move idle cash onto the trading shard
 - **Stale-decision revalidation** — entry economics are rechecked against fresh spot before submission; stale or decayed-edge intents are vetoed
+- **Fail-closed bankroll** — sizing uses freshness-bounded verified equity only; unavailable state rejects (`BANKROLL_UNAVAILABLE`) rather than falling back to fabricated caps
+- **Hedge entries gated off** — `hedging.entries_enabled` defaults false; hedge buys bypass alpha approval/reservation and same-market pairs lock in costs. Exits stay live. Counterfactual shadow records go to `logs/hedge_shadow.jsonl` (`MERID_HEDGE_SHADOW_ENABLED`)
+- **Evidence-health report** — `python -m merid.diagnostics.evidence_health_report` shows freshness/fallback state for every reserve and gate influencing policy
+- **Kelly sizing deferred** — shadow telemetry only until the empirical net-return model is validated; live fractional-Kelly magnitude is not active
 
 Environment templates live in `config/profiles/env.*.example`. See [`ENV_SETUP.md`](ENV_SETUP.md).
 

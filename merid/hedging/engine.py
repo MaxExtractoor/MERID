@@ -108,6 +108,7 @@ class CryptoHedgeEngine:
         config: Any,  # HedgeConfig
         bankroll_cents: int = 0,
         market_catalog: Optional[Any] = None,
+        shadow: bool = False,
     ) -> HedgeResult:
         """Compute hedge orders for all (asset, timeframe) cells.
 
@@ -116,6 +117,11 @@ class CryptoHedgeEngine:
             config: HedgeConfig loaded from YAML.
             bankroll_cents: Current total bankroll in cents.
             market_catalog: Optional KalshiMarketCatalog for ticker resolution.
+            shadow: When True, bypass the ``entries_enabled`` gate so the
+                caller can record what *would* have been ordered
+                (counterfactual evaluation).  Shadow orders must never be
+                routed — the caller is responsible for recording them and
+                returning no intents.
 
         Returns:
             HedgeResult with a list of HedgeOrder objects.
@@ -147,7 +153,9 @@ class CryptoHedgeEngine:
         # are unaffected.  Re-enable via config entries_enabled or
         # MERID_HEDGE_ENTRIES_ENABLED only after hedge producers join shared
         # authorization/reservation accounting.
-        if not getattr(config, "entries_enabled", False):
+        # ``shadow=True`` bypasses this gate for counterfactual recording
+        # only — the orders are identical to what live mode would emit.
+        if not getattr(config, "entries_enabled", False) and not shadow:
             # Observability: count cells that *would* have produced hedge
             # orders (|net_delta| >= 2c ⇒ |hedge_delta| >= 1c ⇒ count >= 1),
             # throttled to one log per 60s so evidence health can see the
