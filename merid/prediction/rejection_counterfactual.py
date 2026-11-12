@@ -332,6 +332,51 @@ _WRITER_BOOT_LOCK = threading.Lock()
 _FLUSH_IDLE_S = 1.0
 _dropped_lines = 0
 
+# 2026-11-12: the live file reached 12.3 GB with no rotation — disk pressure
+# and slow appends on the production spindle.  Size-capped rotation keeps the
+# hot path bounded; timestamped siblings preserve the audit trail and are
+# pruned beyond the backup count.  Telemetry must never break trading, so
+# every failure here is swallowed.
+_REJECTED_MAX_BYTES = int(
+    os.environ.get("MERID_REJECTED_CANDIDATES_MAX_BYTES", str(500 * 1024 * 1024))
+)
+_REJECTED_BACKUPS = int(os.environ.get("MERID_REJECTED_CANDIDATES_BACKUPS", "3"))
+
+
+def _rotate_rejected_candidates_if_needed(path: str) -> None:
+    """Rotate ``path`` to ``path.<UTC-timestamp>`` when it exceeds the cap.
+
+    Called on the writer thread before each append burst.  Oldest rotated
+    siblings beyond ``_REJECTED_BACKUPS`` are removed.
+    """
+    try:
+        if _REJECTED_MAX_BYTES <= 0:
+            return
+        if not os.path.exists(path) or os.path.getsize(path) < _REJECTED_MAX_BYTES:
+            return
+        import glob as _glob
+        import time as _time
+        ts = _time.strftime("%Y%m%d-%H%M%S", _time.gmtime())
+        rotated = f"{path}.{ts}"
+        # Same-second collisions append a counter suffix.
+        n = 1
+        while os.path.exists(rotated):
+            n += 1
+            rotated = f"{path}.{ts}-{n}"
+        os.replace(path, rotated)
+        siblings = sorted(_glob.glob(f"{path}.[0-9]*"))
+        for old in siblings[: max(0, len(siblings) - _REJECTED_BACKUPS)]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        logger.warning(
+            "[REJECTED-CANDIDATE] rotated %s -> %s (%.1f MB, keeping %d backups)",
+            path, rotated, os.path.getsize(rotated) / (1024 * 1024), _REJECTED_BACKUPS,
+        )
+    except Exception as exc:  # pragma: no cover - telemetry must never break trading
+        logger.debug("[REJECTED-CANDIDATE] rotation failed for %s: %s", path, exc)
+
 
 def _is_test_env() -> bool:
     return os.environ.get("MERID_ENV", "").lower() in ("testing", "test", "ci")
@@ -358,6 +403,7 @@ def _writer_main() -> None:
             for p, lines in pending.items():
                 try:
                     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+                    _rotate_rejected_candidates_if_needed(p)
                     with open(p, "a", encoding="utf-8") as f:
                         f.writelines(lines)
                 except Exception as exc:

@@ -30,6 +30,7 @@ from merid.position_management.position import (
     TAKE_PROFIT_MIN_PROFIT_CENTS,
     SIDE_SPACE_TOTAL_CENTS,
     canonical_position_key,
+    ensure_exit_contract,
 )
 from merid.position_management.exit_policy import ExitAction, ExitReason, is_position_quarantined, is_exit_reason_allowed_for_quarantine
 from merid.position_management.exit_policy_resolver import get_exit_policy_resolver
@@ -1555,6 +1556,9 @@ class PositionMonitor:
                 )
                 return
 
+            # 2026-11-12: same exit-contract guarantee as upsert_position —
+            # no monitored position may be stored policy-less.
+            self._ensure_managed_exit_contract(position, "add_position")
             self._open_positions[position.position_id] = position
             self._market_to_position[position.market_id] = position.position_id
             self._sweep_orphan_exit_registry(position.position_id)
@@ -1626,6 +1630,37 @@ class PositionMonitor:
             return 2
         return 1
 
+    def _ensure_managed_exit_contract(self, position: Position, caller: str = "") -> None:
+        """Guarantee a monitored position carries a non-empty exit contract.
+
+        2026-11-12: positions arriving without policy provenance (REST sync,
+        external fills, legacy records) used to be stored with
+        ``exit_policy=None`` — every exit attempt then recorded
+        ``policy_missing=true``.  Synthesize an honest contract describing
+        the exits actually armed on the position (resolved TP/SL fields,
+        trailing state, always-on settlement guard / pre-expiry closeout).
+        """
+        contract, synthesized = ensure_exit_contract(
+            getattr(position, "exit_policy", None),
+            market_id=getattr(position, "market_id", "") or "",
+            take_profit_enabled=position.take_profit_price_cents is not None,
+            stop_loss_enabled=bool(
+                position.stop_loss_enabled and position.stop_loss_price_cents is not None
+            ),
+            trailing_enabled=getattr(position, "trailing_type", None)
+            not in (None, TrailingType.NONE),
+        )
+        if synthesized:
+            position.exit_policy = contract
+            logger.warning(
+                "[EXIT-CONTRACT-SYNTHESIZED] market=%s caller=%s - "
+                "position stored without policy provenance; synthesized "
+                "contract attached (tp=%s sl=%s)",
+                getattr(position, "market_id", "?"), caller or "?",
+                position.take_profit_price_cents is not None,
+                bool(position.stop_loss_enabled and position.stop_loss_price_cents is not None),
+            )
+
     def upsert_position(self, position: Position, caller: str = "") -> None:
         """
         Add a position or update an existing one while preserving runtime state.
@@ -1652,6 +1687,13 @@ class PositionMonitor:
         if position.position_key is None:
             position.position_key = canonical_position_key(position.market_id)
             position.known_aliases = [position.market_id]
+
+        # 2026-11-12: an empty exit_policy dict is "missing", not a real
+        # policy.  Normalize to None up front so trusted-record preservation
+        # below can fill it, and so the synthesized-contract fallback at
+        # store time is the single place gaps are closed.
+        if isinstance(position.exit_policy, dict) and not position.exit_policy:
+            position.exit_policy = None
 
         # Runtime fields that must be preserved across replacements.
         runtime_fields = {
@@ -1689,6 +1731,10 @@ class PositionMonitor:
             "provenance_state", "take_profit_price_cents", "stop_loss_enabled",
             "stop_loss_price_cents", "trailing_type", "trailing_param", "scale_out_price_cents",
             "all_in_entry_basis_cents", "basis_state", "basis_version", "basis_sources",
+            # 2026-11-12: the exit contract is provenance — a trusted record's
+            # real policy must survive an equal-trust REST/fill upsert that
+            # carries none (or only a synthesized placeholder).
+            "exit_policy", "exit_policy_id",
         }
 
         with self._lock:
@@ -1709,6 +1755,9 @@ class PositionMonitor:
                     )
                     return
 
+                # 2026-11-12: guarantee the stored record carries an exit
+                # contract — no monitored position may be policy-less.
+                self._ensure_managed_exit_contract(position, caller)
                 self._open_positions[position.position_id] = position
                 self._market_to_position[position.market_id] = position.position_id
                 self._sweep_orphan_exit_registry(position.position_id)
@@ -1814,9 +1863,27 @@ class PositionMonitor:
                 if existing.opened_at:
                     base.opened_at = existing.opened_at
 
+            # A synthesized placeholder never displaces a real recorded
+            # policy — the synthesized contract is honest but strictly less
+            # informative than recovered intent.
+            if (
+                isinstance(getattr(base, "exit_policy", None), dict)
+                and base.exit_policy.get("synthesized")
+                and isinstance(getattr(existing, "exit_policy", None), dict)
+                and existing.exit_policy
+                and not existing.exit_policy.get("synthesized")
+            ):
+                base.exit_policy = existing.exit_policy
+                if getattr(base, "exit_policy_id", None) in (None, "", "unknown"):
+                    base.exit_policy_id = existing.exit_policy_id
+
             # Re-run post-init to recompute derived fields (initial_risk, hard_stop,
             # fallback TP, etc.) now that size/avg/SL/TP may have changed.
             base.__post_init__()
+
+            # 2026-11-12: guarantee the stored record carries an exit
+            # contract — no monitored position may be policy-less.
+            self._ensure_managed_exit_contract(base, caller)
 
             # Ensure the canonical key mapping is stable.
             self._open_positions[position.position_id] = base

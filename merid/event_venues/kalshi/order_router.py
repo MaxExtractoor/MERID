@@ -12025,21 +12025,45 @@ def _apply_risk_based_order_sizing(
             asset = "DOGE"
         
         if not asset:
-            logger.warning("[RISK-BASED-SIZING] Could not extract asset from ticker=%s, returning original count", ticker)
-            return requested
+            # 2026-11-XX: sizing state unavailable — the per-asset exposure,
+            # loss-cap, and contract caps inside compute_order_size are all
+            # asset-keyed, so an unparseable ticker cannot be sized safely.
+            # Exits already bypass above; entries fail closed.
+            logger.warning(
+                "[RISK-BASED-SIZING] Could not extract asset from ticker=%s - rejecting entry fail-closed",
+                ticker,
+            )
+            return Decimal("0")
         
         # Get bankroll - use provided value or fetch from service
         # CRITICAL FIX: Use cached bankroll to avoid blocking order submission
         # get_summary_sync() uses run_coroutine_threadsafe with 30s timeout which blocks orders
         if bankroll_usd is None:
-            from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
-            # Use cached value from bankroll service if available
-            if _BANKROLL_SERVICE_V2 and _BANKROLL_SERVICE_V2._current and _BANKROLL_SERVICE_V2._current.equity_usd:
-                bankroll_usd = Decimal(str(_BANKROLL_SERVICE_V2._current.equity_usd))
-                logger.debug("[RISK-BASED-SIZING] Using cached bankroll: %s", bankroll_usd)
-            else:
-                logger.warning("[RISK-BASED-SIZING] Bankroll cache unavailable, returning original count")
-                return requested
+            # 2026-11-XX: use the freshness-bounded cached equity only
+            # (FRESH or within MERID_BANKROLL_STALE_AFTER_S).  Reading raw
+            # ``_current.equity_usd`` ignored BalanceState and could size
+            # against ERROR or arbitrarily stale data.  With no trustworthy
+            # snapshot the entry is rejected — sizing never falls back to
+            # the requested quantity.
+            try:
+                from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
+                _svc = _BANKROLL_SERVICE_V2
+                _eq = None
+                if _svc is not None:
+                    _cached_fn = getattr(_svc, "get_equity_for_risk_calc_sync_cached", None)
+                    if callable(_cached_fn):
+                        _eq = _cached_fn()
+                if _eq is not None:
+                    bankroll_usd = Decimal(str(_eq))
+                    logger.debug("[RISK-BASED-SIZING] Using freshness-bounded cached bankroll: %s", bankroll_usd)
+            except Exception:
+                bankroll_usd = None
+            if bankroll_usd is None:
+                logger.warning(
+                    "[RISK-BASED-SIZING] No trustworthy bankroll snapshot for ticker=%s - rejecting entry (fail-closed)",
+                    intent.ticker,
+                )
+                return Decimal("0")
         
         price_cents = intent.price_cents
         
@@ -12051,7 +12075,35 @@ def _apply_risk_based_order_sizing(
         
         # Get metadata from intent for sweet spot price adjustment tracking (2026-07-31)
         intent_metadata = getattr(intent, 'metadata', None) or {}
-        
+
+        # 2026-11-XX: unified economic basis — the router's Kelly gate must use
+        # the same fee-aware all-in cost as the loop's sizing call.  Prefer the
+        # decision-carried ``intent.fee_cents`` (the exact value the loop fed
+        # ``compute_order_size``, truncated to int the same way); only when the
+        # intent carries no fee do we recompute from the effective liquidity
+        # role.  Previously the router re-checked edge fee-free and could
+        # disagree with the upstream gate.
+        _estimated_fee_cents: Optional[int] = None
+        try:
+            _intent_fee = getattr(intent, "fee_cents", None)
+            if _intent_fee is not None:
+                _estimated_fee_cents = int(float(_intent_fee))
+            else:
+                from merid.prediction.unified_sizing import compute_fee_cents as _compute_fee_cents
+                _exec_mode = str(getattr(intent, "execution_mode", "") or "").lower()
+                _liq_role = str(getattr(intent, "liquidity_role", "") or "").lower()
+                _is_maker = (
+                    "maker" in _exec_mode
+                    or "maker" in _liq_role
+                    or "passive" in _exec_mode
+                    or "passive" in _liq_role
+                    or (bool(getattr(intent, "post_only", False))
+                        and float(getattr(intent, "aggressiveness", 0.0) or 0.0) == 0.0)
+                )
+                _estimated_fee_cents = int(_compute_fee_cents(int(price_cents), "maker" if _is_maker else "taker"))
+        except Exception:
+            _estimated_fee_cents = None
+
         # Compute order size using unified_sizing (enforces $1 fixed exposure cap)
         # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
         # 2026-07-13: Pass side for correct Kelly calculation
@@ -12065,7 +12117,9 @@ def _apply_risk_based_order_sizing(
             model_prob=model_prob,  # 2026-07-12: Kelly Criterion
             side=side,  # 2026-07-13: Pass side for Kelly
             metadata=intent_metadata,  # 2026-07-31: Pass metadata for sweet spot tracking
-            flb_position_multiplier=flb_position_multiplier  # 2026-08-01: FLB position sizing
+            flb_position_multiplier=flb_position_multiplier,  # 2026-08-01: FLB position sizing
+            consider_fee_impact=True,
+            estimated_fee_cents=_estimated_fee_cents,
         )
         
         # If unified_sizing returns a non-positive (or sub-centi-contract) count,
@@ -12108,6 +12162,8 @@ def _apply_risk_based_order_sizing(
                         side=side,
                         metadata=intent_metadata,
                         flb_position_multiplier=flb_position_multiplier,
+                        consider_fee_impact=True,
+                        estimated_fee_cents=_estimated_fee_cents,
                     )
                     if count > 0:
                         max_count_fp = Decimal(str(count))
@@ -12140,8 +12196,12 @@ def _apply_risk_based_order_sizing(
         return sized
 
     except Exception as e:
-        logger.error("[RISK-BASED-SIZING] Failed to apply risk-based sizing: %s - returning original count for safety", e, exc_info=True)
-        return requested
+        # 2026-11-XX: sizing failure means the risk state needed to authorize
+        # quantity could not be established.  Returning the requested count
+        # would submit an unverified size — reject the entry instead.  The
+        # order path treats <= 0 as a local rejection before any wire call.
+        logger.error("[RISK-BASED-SIZING] Failed to apply risk-based sizing: %s - rejecting entry fail-closed", e, exc_info=True)
+        return Decimal("0")
 
 
 def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> tuple[str, str]:

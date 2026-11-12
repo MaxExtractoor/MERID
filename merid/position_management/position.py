@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import logging
 import os
 import time
@@ -161,6 +161,53 @@ FALLBACK_STOP_LOSS_BUFFER_CENTS = int(os.getenv("MERID_FALLBACK_STOP_LOSS_BUFFER
 # SIDE-SPACE constant: a binary contract's price space spans 0-100 cents in the
 # contract's own side (YES or NO).  No 100-cent mirroring is used.
 SIDE_SPACE_TOTAL_CENTS = 100
+
+
+def ensure_exit_contract(
+    exit_policy: Optional[Dict[str, Any]],
+    *,
+    market_id: str = "",
+    take_profit_enabled: bool = True,
+    stop_loss_enabled: bool = True,
+    trailing_enabled: bool = True,
+) -> Tuple[Dict[str, Any], bool]:
+    """Return ``(contract, was_synthesized)`` for a monitored position.
+
+    2026-11-12 incident: positions reconstructed via REST sync, external
+    fills, or startup cache loads reached the monitor with
+    ``exit_policy={}`` — every exit attempt then recorded
+    ``policy_missing=true`` with an empty ``policy_snapshot``.  Exits still
+    fired (TP/SL fields are resolved independently), but the durable
+    contract was absent, so audit/reconciliation could not prove what
+    protection was armed.
+
+    Every monitored position must carry an exit contract.  When provenance
+    is missing, synthesize one that honestly describes the exits the
+    monitor will actually evaluate: the resolved TP/SL enable flags,
+    trailing state, and the always-armed settlement guard / pre-expiry
+    closeout.  The ``synthesized``/``provenance`` markers keep the record
+    truthful — this is a fallback contract, not recovered intent.
+    """
+    if isinstance(exit_policy, dict) and exit_policy:
+        return exit_policy, False
+    contract = {
+        "mode": (
+            "ACTIVE_MANAGEMENT"
+            if (take_profit_enabled or stop_loss_enabled)
+            else "PRE_SETTLEMENT_CLOSEOUT"
+        ),
+        "version": 0,
+        "synthesized": True,
+        "provenance": "exit_contract_synthesized",
+        "reason": "missing_policy_provenance",
+        "market_id": market_id or None,
+        "take_profit_enabled": bool(take_profit_enabled),
+        "stop_loss_enabled": bool(stop_loss_enabled),
+        "trailing_enabled": bool(trailing_enabled),
+        "settlement_guard_enabled": True,
+        "hard_profit_lock_enabled": "env_gated",
+    }
+    return contract, True
 
 
 @dataclass

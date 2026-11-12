@@ -7302,7 +7302,89 @@ async def _run_loop(self) -> None:
                                 self._rejection_counters["edge_validation_failed"] += 1
                                 logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
                                 continue
-                            
+
+                            # 2026-11-XX: Explicit entry approval — every
+                            # risk-increasing entry must carry an APPROVED
+                            # decision ceiling.  Missing decisions, zero or
+                            # negative approvals, and stale decisions reject
+                            # here, before sizing, window-plan admission, or
+                            # routing.  The ceiling is stamped on the
+                            # candidate and enforced again at window-plan
+                            # admission and at _execute_candidate.
+                            try:
+                                from merid.prediction.entry_approval import (
+                                    approval_enforced as _approval_enforced,
+                                    resolve_entry_approval as _resolve_entry_approval,
+                                )
+                            except Exception as _appr_imp_err:
+                                # Fail closed: if the approval module itself
+                                # cannot be imported, enforcement stays on
+                                # and every candidate resolves UNAVAILABLE.
+                                logger.error(
+                                    "[15m-LOOP] entry_approval import failed ticker=%s: %s",
+                                    ticker, _appr_imp_err, exc_info=True,
+                                )
+                                _approval_enforced = lambda: True
+                                _resolve_entry_approval = None
+                            try:
+                                _approval = (
+                                    _resolve_entry_approval(candidate)
+                                    if _resolve_entry_approval is not None
+                                    else None
+                                )
+                            except Exception as _appr_err:
+                                _approval = None
+                                logger.error(
+                                    "[15m-LOOP] Entry approval resolution failed ticker=%s: %s",
+                                    ticker, _appr_err, exc_info=True,
+                                )
+                            _appr_state_s = (
+                                _approval.state.value
+                                if _approval is not None and getattr(_approval, "state", None) is not None
+                                else "unavailable"
+                            )
+                            _appr_reason = _approval.reason if _approval is not None else "approval_resolution_error"
+                            if _appr_state_s != "approved":
+                                if _approval_enforced():
+                                    self._rejection_counters["entry_not_approved"] += 1
+                                    self._log_candidate_lifecycle_event(
+                                        candidate_id=candidate_id,
+                                        from_state="RECEIVED",
+                                        to_state="REJECTED",
+                                        reason=f"entry_not_approved:{_appr_state_s}:{_appr_reason}",
+                                        context={
+                                            "ticker": ticker,
+                                            "asset": asset,
+                                            "approval_state": _appr_state_s,
+                                            "approval_reason": _appr_reason,
+                                            "approval_ceiling_cc": getattr(_approval, "ceiling_cc", None),
+                                            "decision_id": getattr(_approval, "decision_id", None),
+                                            "approval_age_s": getattr(_approval, "age_s", None),
+                                        },
+                                    )
+                                    logger.info(
+                                        "[15m-LOOP] Entry approval %s for ticker=%s (%s) - skipping execution",
+                                        _appr_state_s, ticker, _appr_reason,
+                                    )
+                                    continue
+                                else:
+                                    logger.warning(
+                                        "[15m-LOOP] Entry approval %s for ticker=%s (%s) - ENFORCEMENT DISABLED, proceeding",
+                                        _appr_state_s, ticker, _appr_reason,
+                                    )
+                            # Stamp the approval ceiling only for APPROVED
+                            # decisions; shadow-mode proceeds carry no ceiling
+                            # so downstream stages keep legacy unbounded
+                            # behavior rather than half-enforcing a state that
+                            # was never granted.
+                            candidate["_entry_approval_ceiling_cc"] = (
+                                _approval.ceiling_cc if _appr_state_s == "approved" else None
+                            )
+                            candidate["_entry_approval_state"] = _appr_state_s
+                            candidate["_entry_approval_decision_id"] = (
+                                _approval.decision_id if _approval is not None else None
+                            )
+
                             # Use dynamic position sizing if enabled
                             try:
                                 from merid.prediction.unified_sizing import compute_order_size, shard_stake_cap_usd
@@ -7312,7 +7394,26 @@ async def _run_loop(self) -> None:
                                 # Async cache-only read; never blocks the event loop on a balance fetch.
                                 bankroll_usd = await get_equity_for_risk_calc_async()
                                 if bankroll_usd is None:
-                                    bankroll_usd = 100.0
+                                    # 2026-11-XX: No trustworthy bankroll state
+                                    # (never fetched, ERROR, or outside the
+                                    # documented staleness window).  Sizing
+                                    # against a fabricated balance is not a
+                                    # valid recovery path — block the entry
+                                    # until the bankroll service republishes a
+                                    # FRESH/stale-bounded snapshot.
+                                    self._rejection_counters["bankroll_unavailable"] += 1
+                                    self._log_candidate_lifecycle_event(
+                                        candidate_id=candidate_id,
+                                        from_state="RECEIVED",
+                                        to_state="REJECTED",
+                                        reason="bankroll_unavailable",
+                                        context={"ticker": ticker, "asset": asset},
+                                    )
+                                    logger.warning(
+                                        "[15m-LOOP] Bankroll unavailable for sizing ticker=%s - rejecting entry (fail-closed)",
+                                        ticker,
+                                    )
+                                    continue
                                 
                                 # Get price from candidate or market state
                                 # CRITICAL FIX (2026-07-06): The old default of 50c made sizing
@@ -7555,23 +7656,26 @@ async def _run_loop(self) -> None:
                                     ticker, count, _get_max_contracts_per_order()
                                 )
                             except Exception as sizing_err:
-                                # 2026-10-06: Do NOT silently downgrade to 1 contract when the
-                                # configured target is higher.  Keep the candidate's seeded
-                                # target count (or the configured per-order target if absent);
-                                # downstream caps (max_per_order, approved_size_cc, hard
-                                # exposure cap) still bound it.
-                                _fallback_count = candidate.get("count")
-                                try:
-                                    _fallback_count = float(_fallback_count)
-                                except (TypeError, ValueError):
-                                    _fallback_count = 0.0
-                                if _fallback_count < 0.01:
-                                    _fallback_count = float(_get_max_contracts_per_order())
-                                logger.warning(
-                                    "[15m-LOOP] Dynamic sizing failed, keeping configured target count=%s: %s",
-                                    _fallback_count, sizing_err
+                                # 2026-11-XX: A sizing failure means the
+                                # risk state needed to authorize quantity
+                                # could not be established.  Preserving the
+                                # seeded target count would let an
+                                # unverified quantity reach the wire —
+                                # reject the candidate instead.  The next
+                                # cycle regenerates a fresh decision.
+                                self._rejection_counters["sizing_unavailable"] += 1
+                                self._log_candidate_lifecycle_event(
+                                    candidate_id=candidate_id,
+                                    from_state="RECEIVED",
+                                    to_state="REJECTED",
+                                    reason=f"sizing_unavailable:{sizing_err}",
+                                    context={"ticker": ticker, "asset": asset},
                                 )
-                                candidate["count"] = _fallback_count
+                                logger.error(
+                                    "[15m-LOOP] Dynamic sizing failed for ticker=%s: %s - rejecting candidate (fail-closed)",
+                                    ticker, sizing_err, exc_info=True,
+                                )
+                                continue
 
                             # 2026-10-25: deterministic window plan — clamp the
                             # order to the shared per-window budget / contract /
@@ -7624,6 +7728,16 @@ async def _run_loop(self) -> None:
                                         allow_lift=(
                                             candidate.get("decision_lane")
                                             not in BOUNDED_POST_ONLY_LANES
+                                        ),
+                                        # 2026-11-XX: decision-approved ceiling
+                                        # (centi-contracts).  Lift sizing may
+                                        # fill unused budget only up to this
+                                        # bound — the plan can never admit
+                                        # more than the decision approved, and
+                                        # the reservation matches the admitted
+                                        # size by construction.
+                                        size_ceiling_cc=candidate.get(
+                                            "_entry_approval_ceiling_cc"
                                         ),
                                     )
                                     if _wp_allowed:
@@ -11352,9 +11466,16 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         # 2026-08-29: The quantity must never exceed the EV-gated approved size.
         # approved_size_cc is centi-contracts; convert back to fractional contracts.
-        if approved_size_cc is not None and approved_size_cc > 0:
+        # 2026-11-XX: a zero approval is an explicit REJECTION, not "no
+        # ceiling" — previously ``> 0`` let a zero-approved decision through
+        # at full window-plan/router size.
+        if approved_size_cc is not None:
             approved_count = approved_size_cc / 100.0
-            if approved_count > 0.0 and count > approved_count:
+            if approved_count <= 0.0:
+                return self._mark_reject(
+                    candidate, "sizing", "approved_size_nonpositive",
+                    observed=approved_size_cc)
+            if count > approved_count:
                 logger.warning(
                     "[15M-LOOP] count=%s exceeds EV-approved count=%s; capping. ticker=%s",
                     count, approved_count, ticker,

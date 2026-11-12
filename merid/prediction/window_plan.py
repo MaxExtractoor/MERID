@@ -473,6 +473,7 @@ def admit(
     post_only: bool = False,
     decision_id: str = "",
     allow_lift: bool = True,
+    size_ceiling_cc: Optional[int] = None,
     now: Optional[float] = None,
 ) -> Tuple[bool, float, str, dict]:
     """Deterministic admission into the shared window plan.
@@ -481,7 +482,14 @@ def admit(
     final_count is the count to submit (clamped to remaining budget; raised
     toward the budget fit when LIFT_SIZING is on and upstream sizing was
     more conservative).  On reject, final_count is 0 and reason is a stable
-    ``window_plan_*`` code for telemetry."""
+    ``window_plan_*`` code for telemetry.
+
+    ``size_ceiling_cc`` is the decision-approved ceiling in centi-contracts.
+    When provided it bounds the admitted size under BOTH lift and clamp
+    modes — the plan may reduce toward budget fit but may never admit more
+    than the decision approved.  A non-positive ceiling rejects; ``None``
+    preserves the legacy unbounded-by-decision behavior for callers that
+    have no approval object (tests, shadow paths)."""
     now = time.time() if now is None else float(now)
     detail: dict = {}
     suffix = window_suffix(ticker)
@@ -616,6 +624,14 @@ def admit(
     else:
         profile_cap_cc = remaining_cc
     fit_cc = min(fit_cc, plan_max_qty_cc(), global_cap_cc, remaining_cc, profile_cap_cc)
+    # Decision-approved ceiling: admission may shrink toward budget fit but
+    # never exceed what the decision layer approved.  A non-positive ceiling
+    # is an explicit rejection upstream; defensively refuse here too.
+    if size_ceiling_cc is not None:
+        detail["approval_ceiling_cc"] = int(size_ceiling_cc)
+        if int(size_ceiling_cc) <= 0:
+            return False, 0.0, "window_plan_below_approval", detail
+        fit_cc = min(fit_cc, int(size_ceiling_cc))
     detail["room_usd"] = str(room_usd.quantize(Decimal("0.0001")))
     detail["cost_per_contract_usd"] = str(cost_per.quantize(Decimal("0.0001")))
     detail["fit_cc"] = fit_cc

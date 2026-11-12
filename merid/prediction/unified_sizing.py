@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 import os
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -826,6 +826,133 @@ def calculate_kelly_fraction(
 # Unified Sizing Function
 # =============================================================================
 
+
+def _shadow_kelly_multiplier() -> float:
+    """Intended fractional-Kelly multiplier for shadow targets.
+
+    ``MERID_SHADOW_KELLY_MULTIPLIER`` (default 0.10) is the operator-selected
+    policy constant — telemetry only until the validated scalp return model
+    authorizes live magnitude.
+    """
+    try:
+        return float(os.environ.get("MERID_SHADOW_KELLY_MULTIPLIER", "0.10"))
+    except (TypeError, ValueError):
+        return 0.10
+
+
+def _shadow_kelly_enabled() -> bool:
+    return os.environ.get("MERID_SHADOW_KELLY_SIZING", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _shadow_kelly_metadata(
+    *,
+    model_prob: float,
+    price_cents: int,
+    fee_cents: Optional[float],
+    existing_exposure_usd: Decimal,
+    available_exposure_usd: Decimal,
+    final_contracts: float,
+) -> Optional[Dict[str, Any]]:
+    """Shadow fractional-Kelly target — telemetry only, never order flow.
+
+    Computes the provisional settlement-binary full-Kelly fraction
+    ``f* = max(0, (p - c)/(1 - c))`` on the all-in acquisition cost, applies the
+    configured fractional multiplier to the strategy capital sleeve, subtracts
+    already-committed exposure, and floors to the centi-contract grid.
+
+    PROVISIONAL: settlement economics do not model scalp exits, failed exits,
+    or partial fills.  When a validated ``ScalpReturnModel`` is registered the
+    ``return_model`` field reports its version; until then the target is
+    labeled ``settlement_proxy_provisional`` and must not size live orders.
+    """
+    if not _shadow_kelly_enabled():
+        return None
+    try:
+        from merid.risk.capital_sleeve import compute_capital_sleeve
+        from merid.risk.scalp_return_model import get_active_return_model
+
+        all_in_cost_cents = compute_all_in_cost_cents(price_cents, fee_cents, 0)
+        cost_per_contract_usd = Decimal(str(all_in_cost_cents)) / Decimal("100")
+        if cost_per_contract_usd <= 0 or cost_per_contract_usd >= Decimal("1"):
+            return {"state": "unavailable", "reason": "invalid_acquisition_cost"}
+
+        p = float(model_prob)
+        c_acq = float(cost_per_contract_usd)
+        f_star = max(0.0, (p - c_acq) / (1.0 - c_acq)) if c_acq < 1.0 else 0.0
+
+        sleeve = compute_capital_sleeve()
+        equity = sleeve.effective_equity_usd
+        multiplier = _shadow_kelly_multiplier()
+        rm = get_active_return_model()
+
+        out: Dict[str, Any] = {
+            "policy": "fractional_kelly_shadow",
+            "sizing_policy_version": "shadow_v1",
+            "fractional_kelly_multiplier": multiplier,
+            "return_model": rm.model_version if rm is not None else "settlement_proxy_provisional",
+            "empirical_return_model": "registered" if rm is not None else "unavailable",
+            "full_kelly_fraction": f_star,
+            "equity_state": sleeve.state,
+            "equity_sleeve_usd": sleeve.sleeve_equity_usd,
+            "equity_backed_usd": sleeve.backed_equity_usd,
+            "effective_equity_usd": equity,
+            "existing_exposure_usd": float(existing_exposure_usd),
+            "available_exposure_usd": float(available_exposure_usd),
+            "all_in_cost_cents": all_in_cost_cents,
+            "current_sized_contracts": float(final_contracts),
+        }
+
+        if equity is None or equity <= 0:
+            out["state"] = "unavailable"
+            out["reason"] = "equity_unavailable"
+            return out
+
+        target_capital = Decimal(str(multiplier)) * Decimal(str(f_star)) * Decimal(str(equity))
+        incremental_capital = max(
+            Decimal("0"), target_capital - Decimal(str(existing_exposure_usd))
+        )
+        naive_contracts = (
+            (target_capital / cost_per_contract_usd).quantize(
+                CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN
+            )
+            if cost_per_contract_usd > 0 else Decimal("0")
+        )
+        target_contracts = (
+            (incremental_capital / cost_per_contract_usd).quantize(
+                CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN
+            )
+            if cost_per_contract_usd > 0 else Decimal("0")
+        )
+        # Cap-fit under the same exposure bound the live path uses.
+        cap_fit_contracts = (
+            (Decimal(str(available_exposure_usd)) / cost_per_contract_usd).quantize(
+                CONTRACT_COUNT_QUANTUM, rounding=ROUND_DOWN
+            )
+            if cost_per_contract_usd > 0 else Decimal("0")
+        )
+        shadow_final = min(target_contracts, cap_fit_contracts)
+
+        out.update({
+            "state": "ok",
+            "target_capital_usd": float(target_capital),
+            "incremental_capital_usd": float(incremental_capital),
+            "naive_target_contracts": float(naive_contracts),
+            "kelly_target_contracts": float(target_contracts),
+            "cap_fit_contracts": float(cap_fit_contracts),
+            "shadow_final_contracts": float(shadow_final),
+            "binding_constraints": [
+                c for c, v in (
+                    ("exposure_cap", cap_fit_contracts < target_contracts),
+                    ("incremental_exhausted", incremental_capital <= 0),
+                ) if v
+            ],
+        })
+        return out
+    except Exception:
+        return {"state": "unavailable", "reason": "shadow_computation_error"}
+
 def compute_order_size(
     bankroll_usd: Decimal,
     price_cents: int,
@@ -1330,6 +1457,18 @@ def compute_order_size(
         metadata["model_prob"] = model_prob
         metadata["confidence"] = confidence_float
         metadata["kelly_fraction"] = kelly_fraction
+        # 2026-11-XX: shadow fractional-Kelly target (telemetry only) —
+        # records what a 0.10-Kelly policy on the capital sleeve WOULD size,
+        # alongside the cap-driven count actually returned.  Purely additive;
+        # never influences the returned count.
+        metadata["shadow_kelly"] = _shadow_kelly_metadata(
+            model_prob=model_prob,
+            price_cents=price_cents,
+            fee_cents=_fee_cents,
+            existing_exposure_usd=existing_exposure_usd,
+            available_exposure_usd=available_exposure_usd,
+            final_contracts=float(scaled),
+        )
 
     logger.info(
         "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%.2f notional=$%.2f price=%dc "
