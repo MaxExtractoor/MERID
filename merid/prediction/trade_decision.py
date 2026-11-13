@@ -796,6 +796,12 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # the probe size and stay post-only.  Positive-LCB admissions may cross
     # as taker IOC under MERID_BOUNDED_TAKER_CROSS.
     "pinned_fav",
+    # 2026-11-13: late-taker IOC lane — ask-priced taker rescue for the
+    # counterfactual-positive ETH-NO 50-59c / TTE 120-240s cell (+4.57c
+    # settle, +4.69c markout over the late_taker_shadow cohort).  Bounded
+    # 1-contract sizing, durable per-ticker/daily caps; taker-evaluated so
+    # the bounded execution policy crosses as IOC at the ask.
+    "late_taker_ioc",
     # 2026-11-13: late-edge probe lane (10-69.99c own-side bid, TTE
     # 60-120s) — bounded re-measurement of the window the generic entry
     # floor excludes under current-code maker economics.  Maker-only by
@@ -6429,6 +6435,50 @@ def _compute_trade_decision_impl(
         _no_cheap_price and _no_cheap_block is None and _dl.cheap_no_enabled()
     )
 
+    # 2026-11-13 (late-taker lane): taker/ask-priced rescue for the one
+    # counterfactual-positive cell the late_taker_shadow cohort measured —
+    # ETH NO ask 50-59c at TTE 120-240s (+4.57c settle mean, +4.69c mean
+    # markout, n~89).  Same lane-floor substitution discipline as
+    # drift/cheap_no: the lane only rescues candidates the generic bound
+    # rejects, every shared structural gate still binds, and the basis
+    # check inside late_taker_block keeps bid-priced passes inert.
+    _yes_late_taker_price = _dl.late_taker_band_match(yes_price_cents)
+    _no_late_taker_price = _dl.late_taker_band_match(no_price_cents)
+    _yes_late_taker_block = _dl.late_taker_block(
+        side="yes",
+        side_price_cents=float(yes_price_cents) if yes_price_cents else None,
+        net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        asset=asset,
+        entry_price_basis=entry_price_basis,
+        ticker=ticker,
+    ) if _yes_late_taker_price else None
+    _no_late_taker_block = _dl.late_taker_block(
+        side="no",
+        side_price_cents=float(no_price_cents) if no_price_cents else None,
+        net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+        tte_seconds=(
+            float(seconds_to_expiry) if seconds_to_expiry is not None else None
+        ),
+        asset=asset,
+        entry_price_basis=entry_price_basis,
+        ticker=ticker,
+    ) if _no_late_taker_price else None
+    _yes_late_taker_qualifies = (
+        _yes_late_taker_price
+        and _yes_late_taker_block is None
+        and _dl.late_taker_enabled()
+    )
+    _no_late_taker_qualifies = (
+        _no_late_taker_price
+        and _no_late_taker_block is None
+        and _dl.late_taker_enabled()
+    )
+    indicators["yes_late_taker_block"] = _yes_late_taker_block
+    indicators["no_late_taker_block"] = _no_late_taker_block
+
     _yes_regime_block = _dr.regime_entry_block(_dir_reg, "yes", z)
     _no_regime_block = _dr.regime_entry_block(_dir_reg, "no", z)
     # 2026-10-16 (whipsaw audit): trend-side exhaustion guard — fresh-label
@@ -7056,15 +7106,26 @@ def _compute_trade_decision_impl(
         # floor — so the downstream stamps must carry that pair too, the
         # same re-veto hazard as the pinned_fav substitution above.
         if _pfx == "yes":
-            _lane_admitted_s = _pf_admitted_s or _yes_drift_qualifies
+            _lane_admitted_s = (
+                _pf_admitted_s
+                or _yes_drift_qualifies
+                or _yes_late_taker_qualifies
+            )
             _lane_floor_s = (
                 _dr._pinned_fav_min_ev_cents()
                 if _pf_admitted_s
-                else _dl.drift_min_ev_cents()
+                else (
+                    _dl.drift_min_ev_cents()
+                    if _yes_drift_qualifies
+                    else _dl.late_taker_min_ev_cents()
+                )
             )
         else:
             _lane_admitted_s = (
-                _pf_admitted_s or _no_drift_qualifies or _no_cheap_qualifies
+                _pf_admitted_s
+                or _no_drift_qualifies
+                or _no_cheap_qualifies
+                or _no_late_taker_qualifies
             )
             _lane_floor_s = (
                 _dr._pinned_fav_min_ev_cents()
@@ -7072,7 +7133,11 @@ def _compute_trade_decision_impl(
                 else (
                     _dl.drift_min_ev_cents()
                     if _no_drift_qualifies
-                    else _dl.cheap_no_min_ev_cents()
+                    else (
+                        _dl.cheap_no_min_ev_cents()
+                        if _no_cheap_qualifies
+                        else _dl.late_taker_min_ev_cents()
+                    )
                 )
             )
         # effective_required_edge is the admission bound downstream re-gates
@@ -7132,7 +7197,20 @@ def _compute_trade_decision_impl(
                     if (
                         (_yes_drift_qualifies if _pfx == "yes" else _no_drift_qualifies)
                     )
-                    else "cheap_no_settle"
+                    else (
+                        "cheap_no_settle"
+                        if (
+                            _pfx == "no" and _no_cheap_qualifies
+                        )
+                        else (
+                            "late_taker_ioc"
+                            if (
+                                (_yes_late_taker_qualifies if _pfx == "yes"
+                                 else _no_late_taker_qualifies)
+                            )
+                            else "cheap_no_settle"
+                        )
+                    )
                 )
             )
         indicators[f"{_pfx}_effective_required_source"] = (
@@ -8964,6 +9042,21 @@ def _compute_trade_decision_impl(
             elif _no_cheap_qualifies and not indicators.get("decision_lane"):
                 indicators["decision_lane"] = "cheap_no_settle"
                 indicators["entry_lane"] = "cheap_no_settle"
+
+        # 2026-11-13 (late-taker lane): stamps after the maker rescue lanes
+        # — a drift/cheap/pf admission inside the taker window keeps its
+        # own identity; the lane owns only the residual ask-priced rescue
+        # its floor substitution admitted.  Bounded sizing via
+        # BOUNDED_POST_ONLY_LANES; durable per-ticker/daily budget consumed
+        # in agent_grid with the same consume-then-suppress discipline.
+        _sel_lt = (
+            _yes_late_taker_qualifies
+            if selected_outcome == "yes"
+            else _no_late_taker_qualifies
+        )
+        if _sel_lt and not indicators.get("decision_lane"):
+            indicators["decision_lane"] = "late_taker_ioc"
+            indicators["entry_lane"] = "late_taker_ioc"
 
         # 2026-11-08: reversal-scalp admissions stamp AFTER every
         # cell/lane owner — a normal admission inside the bounce window

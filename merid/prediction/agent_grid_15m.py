@@ -10742,10 +10742,26 @@ class LeanAgent15m:
                     "MERID_WINDOW_QUOTA_TAKER", "1"
                 ).strip().lower() in ("1", "true", "yes")
             )
+            # 2026-11-13 (late-taker lane): the lane's measured cohort IS
+            # the ask-taker distribution — a post-only flip would price a
+            # fill the admission never evaluated (same hazard as
+            # window_quota/pinned-fav taker probes).  Kill switch:
+            # MERID_LATE_TAKER_IOC_CROSS=0 restores probe post-only.
+            _lt_taker = (
+                _decision_lane == "late_taker_ioc"
+                and os.environ.get(
+                    "MERID_LATE_TAKER_IOC_CROSS", "1"
+                ).strip().lower() in ("1", "true", "yes")
+            )
             _cross_as_taker = (
                 _bounded_taker_cross
                 and liquidity_role == "taker"
-                and (not _probe_restricted or _pf_taker_probe or _wq_taker)
+                and (
+                    not _probe_restricted
+                    or _pf_taker_probe
+                    or _wq_taker
+                    or _lt_taker
+                )
             )
             if (
                 _bounded_taker_cross
@@ -10753,6 +10769,7 @@ class LeanAgent15m:
                 and _probe_restricted
                 and not _pf_taker_probe
                 and not _wq_taker
+                and not _lt_taker
             ):
                 logger.info(
                     "[PROBE-NO-TAKER] asset=%s side=%s lane=%s - taker cross "
@@ -10996,7 +11013,7 @@ class LeanAgent15m:
                         )
                 except Exception:
                     pass
-            if _decision_lane in ("drift_fav", "cheap_no_settle") and (
+            if _decision_lane in ("drift_fav", "cheap_no_settle", "late_taker_ioc") and (
                 decision.selected_outcome is not None
             ):
                 # 2026-10-21 (drift-lane epoch): same consume-then-suppress
@@ -11013,6 +11030,9 @@ class LeanAgent15m:
                     if _decision_lane == "drift_fav":
                         _cap_t = _dl_lane.drift_max_per_ticker()
                         _cap_d = _dl_lane.drift_daily_max()
+                    elif _decision_lane == "late_taker_ioc":
+                        _cap_t = _dl_lane.late_taker_max_per_ticker()
+                        _cap_d = _dl_lane.late_taker_daily_max()
                     else:
                         _cap_t = _dl_lane.cheap_no_max_per_ticker()
                         _cap_d = _dl_lane.cheap_no_daily_max()
@@ -11335,6 +11355,16 @@ class LeanAgent15m:
                         from merid.prediction import drift_lane as _dl_cap
                         _lane_cap = min(
                             _lane_cap, _dl_cap.cheap_no_max_contracts()
+                        )
+                    except Exception:
+                        pass
+                elif _decision_lane == "late_taker_ioc":
+                    # 2026-11-13: the taker probe is a 1-contract bounded
+                    # emission — never the generic bounded cap.
+                    try:
+                        from merid.prediction import drift_lane as _dl_cap
+                        _lane_cap = min(
+                            _lane_cap, _dl_cap.late_taker_max_contracts()
                         )
                     except Exception:
                         pass

@@ -102,6 +102,7 @@ def _env_float(name: str, default: float) -> float:
 
 DRIFT_LANE_ID = "drift_fav"
 CHEAP_NO_LANE_ID = "cheap_no_settle"
+LATE_TAKER_LANE_ID = "late_taker_ioc"
 SALVAGE_BOUNDED_LANES = frozenset({DRIFT_LANE_ID, CHEAP_NO_LANE_ID})
 
 
@@ -406,7 +407,117 @@ def cheap_no_block(
 
 
 # ---------------------------------------------------------------------------
-# Durable attempt counter (shared by both lanes; lane-scoped records)
+# late_taker_ioc lane (2026-11-13 counterfactual audit)
+# ---------------------------------------------------------------------------
+#
+# Evidence: logs/late_taker_shadow.jsonl evaluated every TTE 120-240s
+# two-sided book against calibrated p minus ask minus taker fee minus
+# regime reserves.  Joining fee_inclusive_edge>0 candidates to
+# settlement_outcomes + same-ticker markouts measured ONE positive cell:
+# ETH NO ask 50-59c — settle +4.57c mean (n~89, 60% win) and +4.69c mean
+# 30-60s markout (66% positive, no taker adverse-selection bleed).  Every
+# other asset NO 50-59c settled negative (BTC -3.26, SOL -3.18, XRP -2.13,
+# DOGE +0.64) and YES cells were noise — the lane is therefore scoped
+# ETH+NO only by default; widen via env only with equivalent settled
+# evidence.  The generic effective-required bound (~7.5c observed) vetoes
+# this cohort as no_positive_executable_edge while realized economics
+# clear the lane floor — same re-veto hazard the drift/cheap lanes were
+# built to fix, on the taker/ask basis this time.
+
+def late_taker_enabled() -> bool:
+    return _env_flag("MERID_LATE_TAKER_LANE_ENABLED", False)
+
+
+def late_taker_price_lo() -> float:
+    return _env_float("MERID_LATE_TAKER_PRICE_LO", 50.0)
+
+
+def late_taker_price_hi() -> float:
+    return _env_float("MERID_LATE_TAKER_PRICE_HI", 59.99)
+
+
+def late_taker_tte_min_s() -> float:
+    return _env_float("MERID_LATE_TAKER_TTE_MIN_S", 120.0)
+
+
+def late_taker_tte_max_s() -> float:
+    return _env_float("MERID_LATE_TAKER_TTE_MAX_S", 240.0)
+
+
+def late_taker_min_ev_cents() -> float:
+    return _env_float("MERID_LATE_TAKER_MIN_NET_EV_CENTS", 1.0)
+
+
+def late_taker_assets() -> frozenset:
+    raw = os.environ.get("MERID_LATE_TAKER_ASSETS", "ETH")
+    return frozenset(a.strip().upper() for a in raw.split(",") if a.strip())
+
+
+def late_taker_sides() -> frozenset:
+    raw = os.environ.get("MERID_LATE_TAKER_SIDES", "no")
+    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def late_taker_max_per_ticker() -> int:
+    return int(_env_float("MERID_LATE_TAKER_MAX_PER_TICKER", 1.0))
+
+
+def late_taker_daily_max() -> int:
+    return int(_env_float("MERID_LATE_TAKER_DAILY_MAX", 24.0))
+
+
+def late_taker_max_contracts() -> float:
+    return _env_float("MERID_LATE_TAKER_MAX_CONTRACTS", 1.0)
+
+
+def late_taker_band_match(price_cents: Optional[float]) -> bool:
+    if price_cents is None:
+        return False
+    try:
+        p = float(price_cents)
+    except (TypeError, ValueError):
+        return False
+    return late_taker_price_lo() <= p <= late_taker_price_hi()
+
+
+def late_taker_block(
+    side: Optional[str],
+    side_price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+    asset: Optional[str] = None,
+    entry_price_basis: Optional[str] = None,
+    ticker: Optional[str] = None,
+) -> Optional[str]:
+    """Strict late-taker admission gate.  Returns a block reason on
+    failure, ``None`` when every lane condition passes.  Callers gate on
+    band_match + enabled before consulting this (same contract as
+    ``drift_block``/``cheap_no_block``).  The lane is taker-only: the
+    measured cohort is the executable-ask distribution, so a bid-priced
+    evaluation must never inherit the lane floor."""
+    if not late_taker_enabled():
+        return "late_taker_disabled"
+    if str(side or "").lower() not in late_taker_sides():
+        return "late_taker_side"
+    if asset is not None and str(asset).upper() not in late_taker_assets():
+        return "late_taker_asset"
+    if not late_taker_band_match(side_price_cents):
+        return "late_taker_band"
+    if tte_seconds is None or not (
+        late_taker_tte_min_s() <= float(tte_seconds) <= late_taker_tte_max_s()
+    ):
+        return "late_taker_tte"
+    if net_ev_cents is None or float(net_ev_cents) < late_taker_min_ev_cents():
+        return "late_taker_low_ev"
+    if entry_price_basis != "ask":
+        return "late_taker_basis_not_ask"
+    if ticker and lane_attempts_exhausted(LATE_TAKER_LANE_ID, ticker):
+        return "late_taker_attempts_exhausted"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Durable attempt counter (shared by all lanes; lane-scoped records)
 # ---------------------------------------------------------------------------
 
 def lane_state_path() -> str:
@@ -449,6 +560,10 @@ def lane_attempts_exhausted(
     rec = _lane_rec(st, lane)
     if lane == DRIFT_LANE_ID:
         per_ticker, daily = drift_max_per_ticker(), drift_daily_max()
+    elif lane == LATE_TAKER_LANE_ID:
+        per_ticker, daily = (
+            late_taker_max_per_ticker(), late_taker_daily_max()
+        )
     else:
         per_ticker, daily = cheap_no_max_per_ticker(), cheap_no_daily_max()
     if int(rec.get("count") or 0) >= daily:

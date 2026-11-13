@@ -1010,3 +1010,41 @@ noise-class rejection sampling engages inside the 700–1500 band.
   and explicit credential-file loading; inspect exchange positions and balance
   before restart and verify live preflight before claiming automatic trading
   readiness. `scripts/cleanup_port_8011.ps1` requires administrator privileges.
+
+## 2026-11-13 Gate/lane restriction audit — counterfactual verdicts
+
+Multi-week first-entry-per-(ticker,side) counterfactual over
+`logs/rejected_candidates*.jsonl` (5.4M rows, 2026-10-25→11-13) joined to
+`logs/settlement_outcomes.jsonl` and `data/decision_audit.db` snapshots.
+Extractor/report scripts: `scripts/extract_first_entries.py`,
+`scripts/counterfactual_multiday.py`, `scripts/validate_cells_fast.py`.
+
+- `no_positive_executable_edge` (dominant veto, ~80% of rejections):
+  14,133 first-entries settle at **-1.56c mean / -22,100c total** — the gate
+  is economically correct. Do NOT relax the core executable-edge gate.
+- Cheap-tail settle edge (10-24c YES cells +6..+14c settle P&L) is the
+  already-documented **settle-only** cohort: `drift_lane.py` docstring and
+  `MERID_CHEAP_NO_COUNTERFACTUAL_REPORT_2026-11-06.md` prove it is negative
+  under every scalp/exit rule. The 2026-11-10 operator settlement-closeout
+  policy makes it uncapturable — lifting the edge gate for it admits losers.
+- `no_eligible_price_band`: YES aggregate +2.34c (n=258) is the same
+  settle-only/marginal pocket; NO side -4.36c. Bands stay.
+- `cost_basis_override_no` -16.44c, `EVIDENCE_HARD_BLOCK` -8.87c settle —
+  evidence/cost gates are net savers. `tte_entry_cutoff` late entries lose
+  at settlement (-5.35c). `MERID_ENTRY_MAX_REQUOTES_PER_KEY` and all daily
+  caps are non-binding (0 exhaustions in 26k attempts; ~16 entries/day vs
+  96-1440 caps).
+- `cheap_no_settle` + `settlement_convergence` lanes are dead **by the
+  2026-11-10 operator pre-settlement-liquidation policy**
+  (`settlement_lane_incompatible_with_closeout` in order_router.py), not by
+  stale config. cheap_no stays enabled as a zero-cost counterfactual probe
+  (`submission_attempted=false`); it generates the settle-cohort telemetry
+  without exchange traffic.
+- `late_edge_probe` (10-69.99c bid, TTE 60-120s, EV>=+3c) is deployed and
+  disjoint from pinned_fav's 94-98c domain — its PRICE_HI cap does NOT gate
+  pinned_fav. Zero submissions as of 2026-11-13; verify telemetry after a
+  few days before judging reachability.
+- Actual flow since 2026-11-10: 42 entries / 43 exits, net ~-$6.49 —
+  activity is opportunity-bound, not gate-bound. The path to more fills is
+  new alpha (e.g. lead-lag shadow lane, `MERID_LEAD_LAG_SHADOW_LANE_DESIGN_2026-11-12.md`)
+  or exit-capture improvement on admitted trades, not looser gates.
