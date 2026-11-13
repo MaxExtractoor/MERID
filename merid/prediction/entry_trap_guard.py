@@ -300,6 +300,15 @@ def record_window_emission(
         return
     ts = time.time() if ts is None else float(ts)
     with _REG_LOCK:
+        # 2026-11-13: window keys roll every 15m and were never evicted —
+        # prune windows whose newest emission is >1h old once the registry
+        # grows past a bound (avoids an unbounded process-local leak).
+        if len(_WINDOW_EMISSIONS) > 512:
+            for _wk in [
+                k for k, recs in _WINDOW_EMISSIONS.items()
+                if not recs or all(ts - float(t2) > 3600.0 for _s, (_sd, t2) in recs.items())
+            ]:
+                _WINDOW_EMISSIONS.pop(_wk, None)
         (_WINDOW_EMISSIONS.setdefault(key, {}))[series] = (side, ts)
 
 

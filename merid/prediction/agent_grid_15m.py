@@ -9796,6 +9796,17 @@ class LeanAgent15m:
                     else None
                 ),
             )
+            # 2026-11-13: ticker keys roll every 15m and were never evicted —
+            # the map grew ~480 deques/day (~13MB/day).  Evict keys whose
+            # newest sample is >30min old, but only when the map is large
+            # enough for the scan to matter.
+            if len(_wq_hist) > 512:
+                _now_hist = time.time()
+                for _hk in [
+                    k for k, dq in _wq_hist.items()
+                    if not dq or _now_hist - float(dq[-1][0]) > 1800.0
+                ]:
+                    _wq_hist.pop(_hk, None)
         except Exception as _etg_rec_exc:
             logger.debug("[ENTRY-TRAP-HIST] record failed: %s", _etg_rec_exc)
 

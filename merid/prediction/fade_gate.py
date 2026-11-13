@@ -50,6 +50,22 @@ _STALE_S = float(os.environ.get("MERID_FADE_GATE_STALE_S", str(7 * 86400)))
 _PENDING_TTL_S = float(os.environ.get("MERID_FADE_GATE_PENDING_TTL_S", str(6 * 3600)))
 _REFRESH_S = float(os.environ.get("MERID_FADE_GATE_REFRESH_S", "300"))
 
+# 2026-11-13 (cost-basis veto audit): unconditional admission vetoes
+# (``cost_basis_override_{side}``) measured as net value-destroying on the
+# settled counterfactual — the NO cohort ran +6.4c/trade forfeited
+# (BTC-NO +17.4c, n=34) while XRP-NO stayed toxic (-36c).  Same evidence
+# pattern as the fade gate, opposite polarity: the veto stands by default
+# and releases per (gate, asset, side) only on POSITIVE settled proof —
+# fail-CLOSED on missing evidence, matching the drift scope-release rule
+# (releasing an admission broadener requires proof, not absence of proof).
+_VETO_RELEASE_MODE = os.environ.get(
+    "MERID_VETO_RELEASE_MODE", "auto"
+).strip().lower()
+_VETO_RELEASE_MIN_N = int(os.environ.get("MERID_VETO_RELEASE_MIN_N", "20"))
+_VETO_RELEASE_MIN_EV_C = float(
+    os.environ.get("MERID_VETO_RELEASE_MIN_EV_C", "2.0")
+)
+
 _STATE_PATH = Path(
     os.environ.get("MERID_FADE_GATE_STATE_PATH", "data/fade_gate_state.json")
 )
@@ -382,6 +398,85 @@ def record_shadow_sample(
             _refresh_if_due(time.time())
     except Exception as e:  # pragma: no cover - telemetry must never break trading
         logger.debug("[FADE-GATE] shadow sample failed: %s", e)
+
+
+def veto_release_check(
+    *,
+    gate: str,
+    asset: str,
+    side: str,
+    ticker: str,
+    px: float,
+    route: Optional[str] = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Evidence-release for unconditional admission vetoes.
+
+    Every veto-eligible candidate appends a counterfactual sample under
+    ``gate`` (deduped per ticker+side, same store as the fade gate), then
+    the (gate, asset, side) cohort's settled trailing EV decides:
+
+        released  : n >= MIN_N and trailing EV >= MIN_EV_C
+        veto      : everything else — including no evidence at all
+
+    ``MIN_EV_C`` defaults to +2c so the release clears the ~1-3c
+    adverse-selection haircut quoted-price counterfactuals carry on maker
+    fills.  Stateless by design: the rolling window re-derives the verdict
+    on every refresh, so a released cohort whose evidence decays back below
+    the bound is re-vetoed automatically (bounded flap at the boundary,
+    smoothed by the 300s refresh throttle).
+
+    Modes (``MERID_VETO_RELEASE_MODE``):
+        auto — release on proven positive evidence (default)
+        off  — never release; the caller's veto applies unconditionally
+
+    Fail-closed on internal/evidence errors when mode=auto?  No — an
+    internal error returns ``released=False`` (veto stands) because this
+    gate exists to *broaden* admission; a broken evidence store must not
+    silently admit.  Telemetry failures inside ``_record_sample`` still
+    never raise.
+    """
+    detail: Dict[str, Any] = {"mode": _VETO_RELEASE_MODE, "gate": gate}
+    if _VETO_RELEASE_MODE != "auto":
+        detail["outcome"] = "mode_off_veto_stands"
+        return False, detail
+    try:
+        _load_state()
+        _record_sample(
+            gate=str(gate or "veto").lower(),
+            asset=asset,
+            side=side,
+            ticker=ticker,
+            px=float(px),
+            route=route,
+        )
+        with _lock:
+            _refresh_if_due(time.time())
+            rec = _cohorts.get(
+                (str(gate).lower(), str(asset).upper(), str(side).lower())
+            )
+            trailing = (rec or {}).get("trailing") or []
+            n = len(trailing)
+            ev_c = (
+                round(sum(trailing) / n, 2) if n else None
+            )
+            released = bool(
+                n >= _VETO_RELEASE_MIN_N
+                and ev_c is not None
+                and ev_c >= _VETO_RELEASE_MIN_EV_C
+            )
+            detail["outcome"] = "released" if released else "veto_stands"
+            detail["cohort"] = {"n": n, "ev_c": ev_c}
+            if released:
+                logger.info(
+                    "[VETO-RELEASE] %s %s %s: trailing n=%d ev=%.2fc >= %.2fc",
+                    gate, str(asset).upper(), str(side).upper(),
+                    n, ev_c, _VETO_RELEASE_MIN_EV_C,
+                )
+            return released, detail
+    except Exception as e:  # pragma: no cover - fail-closed for admission broadening
+        logger.debug("[VETO-RELEASE] check failed (veto stands): %s", e)
+        detail["outcome"] = "error_veto_stands"
+        return False, detail
 
 
 def fade_gate_check(

@@ -236,3 +236,114 @@ class TestModes:
     def test_allowlist_mode_delegates(self):
         fg = _fresh_module()
         assert fg.gate_mode() == "auto"
+
+
+# ── veto_release_check: evidence-release for unconditional vetoes ────────────
+# 2026-11-13 cost-basis audit: p_selected<=min_p forfeited +6.4c/tr on the
+# settled counterfactual (BTC-NO +17.4c).  The veto stands by default and
+# releases per (gate, asset, side) only on proven positive trailing EV.
+
+def _veto_check(fg, asset="BTC", side="no", ticker="KXBTC15M-V-00", px=40.0, gate="cost_basis"):
+    return fg.veto_release_check(
+        gate=gate, asset=asset, side=side, ticker=ticker, px=px, route="maker_bid"
+    )
+
+
+class TestVetoRelease:
+    def test_unproven_cohort_veto_stands(self):
+        fg = _fresh_module()
+        released, detail = _veto_check(fg)
+        assert released is False
+        assert detail["outcome"] == "veto_stands"
+
+    def test_toxic_cohort_veto_stands(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MIN_N = 4
+        # 6 settled losses for side=no (resolved_yes=1, px=30 -> -30 each)
+        rows = [(f"KXXRP15M-V{i}-00", 1) for i in range(6)]
+        for i in range(6):
+            _veto_check(fg, asset="XRP", side="no", ticker=f"KXXRP15M-V{i}-00", px=30.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        released, detail = _veto_check(fg, asset="XRP", side="no", ticker="probe")
+        assert released is False
+        assert detail["cohort"]["ev_c"] is not None and detail["cohort"]["ev_c"] < 0
+
+    def test_proven_positive_releases(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MIN_N = 4
+        fg._VETO_RELEASE_MIN_EV_C = 2.0
+        # 6 settled wins for side=no (resolved_yes=0, px=30 -> +70 each, EV=+70)
+        rows = [(f"KXDOGE15M-V{i}-00", 0) for i in range(6)]
+        for i in range(6):
+            _veto_check(fg, asset="DOGE", side="no", ticker=f"KXDOGE15M-V{i}-00", px=30.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        released, detail = _veto_check(fg, asset="DOGE", side="no", ticker="probe")
+        assert released is True
+        assert detail["outcome"] == "released"
+        assert detail["cohort"]["n"] == 6
+
+    def test_min_n_required(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MIN_N = 10
+        fg._VETO_RELEASE_MIN_EV_C = 2.0
+        # only 3 wins (< min_n 10) -> veto stands despite huge EV
+        rows = [(f"KXSOL15M-V{i}-00", 0) for i in range(3)]
+        for i in range(3):
+            _veto_check(fg, asset="SOL", side="no", ticker=f"KXSOL15M-V{i}-00", px=30.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        released, _ = _veto_check(fg, asset="SOL", side="no", ticker="probe")
+        assert released is False
+
+    def test_ev_below_release_bound_vetoes(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MIN_N = 4
+        fg._VETO_RELEASE_MIN_EV_C = 2.0
+        # wins at px=98 -> +2c each? need >=2.0: px=97 -> +3c win... craft EV=+1c:
+        # side=no px=99 resolved_yes=0 -> +1c each (below 2.0 bound)
+        rows = [(f"KXETH15M-V{i}-00", 0) for i in range(6)]
+        for i in range(6):
+            _veto_check(fg, asset="ETH", side="no", ticker=f"KXETH15M-V{i}-00", px=99.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        released, detail = _veto_check(fg, asset="ETH", side="no", ticker="probe", px=99.0)
+        assert released is False
+        assert detail["cohort"]["ev_c"] == 1.0
+
+    def test_release_is_per_gate_asset_side(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MIN_N = 4
+        # prove cost_basis BTC-no released
+        rows = [(f"KXBTC15M-V{i}-00", 0) for i in range(6)]
+        for i in range(6):
+            _veto_check(fg, asset="BTC", side="no", ticker=f"KXBTC15M-V{i}-00", px=30.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        assert _veto_check(fg, asset="BTC", side="no", ticker="p1")[0] is True
+        # different asset, different side, different gate all still veto
+        assert _veto_check(fg, asset="XRP", side="no", ticker="p2")[0] is False
+        assert _veto_check(fg, asset="BTC", side="yes", ticker="p3")[0] is False
+        assert _veto_check(fg, asset="BTC", side="no", ticker="p4", gate="drift")[0] is False
+
+    def test_mode_off_never_releases(self):
+        fg = _fresh_module()
+        fg._VETO_RELEASE_MODE = "off"
+        fg._VETO_RELEASE_MIN_N = 1
+        rows = [("KXXRP15M-OFF-00", 0)]
+        _veto_check(fg, asset="XRP", side="no", ticker="KXXRP15M-OFF-00", px=30.0)
+        _write_settlements(rows)
+        fg._last_refresh_ts = 0.0
+        released, detail = _veto_check(fg, asset="XRP", side="no", ticker="probe")
+        assert released is False
+        assert detail["outcome"] == "mode_off_veto_stands"
+
+    def test_sample_recorded_under_gate(self):
+        fg = _fresh_module()
+        _veto_check(fg, asset="BTC", side="no", ticker="KXBTC15M-S-00", px=42.0)
+        lines = _SAMPLES.read_text().strip().splitlines()
+        rec = json.loads(lines[-1])
+        assert rec["gate"] == "cost_basis"
+        assert rec["asset"] == "BTC"
+        assert rec["px"] == 42.0

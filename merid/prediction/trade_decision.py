@@ -7153,6 +7153,53 @@ def _compute_trade_decision_impl(
     if _no_cb_epc_exempt:
         indicators["cost_basis_epc_overridden_no"] = True
 
+    # 2026-11-13 (cost-basis veto audit): the unconditional p_selected <=
+    # min_p floor measured net value-destroying on settled counterfactuals —
+    # the NO cohort forfeited +6.4c/trade (BTC-NO +17.4c n=34, SOL-NO
+    # +7.7c) while XRP-NO stayed toxic (-36c).  Per-(asset,side) evidence
+    # release via the shared veto-release store: the floor stands unless
+    # the cohort's settled trailing EV proves the veto wrong (n>=20,
+    # EV>=+2c — clears the ~1-3c maker-fill adverse-selection haircut).
+    # Memoized per side; only invoked on the generic-path branch below —
+    # i.e. non-lane side, edge cleared, p_selected <= min_p — which is
+    # exactly the veto-eligible cohort the samples must measure.
+    _cb_release_cache: Dict[str, bool] = {}
+    _cb_release_evaluated: set = set()
+
+    def _cb_evidence_release(side: str) -> bool:
+        if side in _cb_release_cache:
+            return _cb_release_cache[side]
+        if side not in ("yes", "no"):
+            return False
+        released = False
+        try:
+            _bd = yes_breakdown if side == "yes" else no_breakdown
+            _px = float(_bd.executable_entry_price) * 100.0
+            released, _det = _fade_gate.veto_release_check(
+                gate="cost_basis",
+                asset=asset,
+                side=side,
+                ticker=ticker,
+                px=_px,
+                route=route,
+            )
+            _cb_release_evaluated.add(side)
+            indicators[f"cost_basis_release_{side}"] = _det.get("outcome")
+            _co = _det.get("cohort") or {}
+            indicators[f"cost_basis_release_n_{side}"] = _co.get("n")
+            indicators[f"cost_basis_release_ev_c_{side}"] = _co.get("ev_c")
+        except Exception:
+            released = False
+        _cb_release_cache[side] = released
+        return released
+
+    def _cb_release_known(side: str) -> bool:
+        """Release verdict for telemetry labels — True only when the generic
+        path actually evaluated the cohort (never triggers sampling here)."""
+        return bool(
+            side in _cb_release_evaluated and _cb_release_cache.get(side)
+        )
+
     # 2026-10-15: counter-model directional gate.  A side the model itself
     # scores below 0.5 needs the counter-model premium edge (or clears the
     # hard floor at all); applied on the same effective edge the lane gates
@@ -7236,6 +7283,7 @@ def _compute_trade_decision_impl(
                     _yes_cbp_neg_floor
                     or _yes_cb_epc_exempt
                     or yes_breakdown.p_selected > yes_min_p
+                    or _cb_evidence_release("yes")
                 )
                 and _yes_regime_ok
                 and _yes_conv_block is None
@@ -7265,6 +7313,7 @@ def _compute_trade_decision_impl(
                     _no_cbp_neg_floor
                     or _no_cb_epc_exempt
                     or no_breakdown.p_selected > no_min_p
+                    or _cb_evidence_release("no")
                 )
                 and _no_regime_ok
                 and _no_conv_block is None
@@ -7300,6 +7349,7 @@ def _compute_trade_decision_impl(
         trendside_block_s: Optional[str] = None,
         eff_edge_s: Optional[float] = None,
         cb_epc_exempt_s: bool = False,
+        cb_release_s: bool = False,
         dir_veto_s: Optional[str] = None,
         drift_price_applies_s: bool = False,
         drift_block_s: Optional[str] = None,
@@ -7380,7 +7430,12 @@ def _compute_trade_decision_impl(
                         if min_edge_s < 0.0
                         else f"edge_below_threshold_{side}"
                     )
-            if min_edge_s >= 0.0 and bd.p_selected <= min_p_s and not cb_epc_exempt_s:
+            if (
+                min_edge_s >= 0.0
+                and bd.p_selected <= min_p_s
+                and not cb_epc_exempt_s
+                and not cb_release_s
+            ):
                 if _lane_window_s:
                     if not _lane_rescued_s:
                         return drift_block_s or cheap_block_s
@@ -7479,6 +7534,7 @@ def _compute_trade_decision_impl(
             trendside_block_s=_yes_trendside_block,
             eff_edge_s=_yes_eff_edge,
             cb_epc_exempt_s=_yes_cb_epc_exempt,
+            cb_release_s=_cb_release_known("yes"),
             dir_veto_s=_yes_dir_veto,
             drift_price_applies_s=_yes_drift_price,
             drift_block_s=_yes_drift_block,
@@ -7502,6 +7558,7 @@ def _compute_trade_decision_impl(
             trendside_block_s=_no_trendside_block,
             eff_edge_s=_no_eff_edge,
             cb_epc_exempt_s=_no_cb_epc_exempt,
+            cb_release_s=_cb_release_known("no"),
             dir_veto_s=_no_dir_veto,
             drift_price_applies_s=_no_drift_price,
             drift_block_s=_no_drift_block,
@@ -7942,11 +7999,13 @@ def _compute_trade_decision_impl(
                 best_threshold >= 0
                 and _cb_p <= best_min_p
                 and not _cb_epc_overrides
+                and not _cb_evidence_release(best_side)
             ):
                 # p_selected does not clear the side-aware positive-EV floor
                 # (entry + all-in cost reserve).  Checked before the
                 # structural safety gates to match _side_block_reason's
                 # ordering — a below-floor price is the deeper rejection.
+                # 2026-11-13: evidence-proven cohorts release (veto_release_check).
                 no_trade_reason = f"cost_basis_override_{best_side}"
                 indicators[f"cost_basis_override_{best_side}_p"] = _cb_p
                 indicators[f"cost_basis_override_{best_side}_floor"] = best_min_p
