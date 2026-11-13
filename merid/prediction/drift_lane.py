@@ -181,6 +181,74 @@ def drift_band_match(price_cents: Optional[float]) -> bool:
     return drift_price_lo() <= p <= drift_price_hi()
 
 
+def _drift_nonscope_conds_pass(
+    side_price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+    entry_price_basis: Optional[str],
+    ticker: Optional[str],
+) -> bool:
+    """Every drift-lane condition EXCEPT the asset/side scope lists.
+
+    Used to identify candidates that are drift-qualified but for the
+    static scope exclusion — the exact cohort the evidence gate measures.
+    """
+    return (
+        drift_band_match(side_price_cents)
+        and tte_seconds is not None
+        and drift_tte_min_s() <= float(tte_seconds) <= drift_tte_max_s()
+        and net_ev_cents is not None
+        and float(net_ev_cents) >= drift_min_ev_cents()
+        and entry_price_basis == "bid"
+        and not (ticker and lane_attempts_exhausted(DRIFT_LANE_ID, ticker))
+    )
+
+
+def _drift_scope_eval(
+    *,
+    asset: Optional[str],
+    side: Optional[str],
+    ticker: Optional[str],
+    px: Optional[float],
+) -> None:
+    """Emit a counterfactual sample for a scope-excluded drift candidate."""
+    try:
+        from merid.prediction import fade_gate as _fg
+
+        _fg.record_shadow_sample(
+            gate="drift",
+            asset=str(asset or ""),
+            side=str(side or ""),
+            ticker=str(ticker or ""),
+            px=float(px or 0.0),
+            route=DRIFT_LANE_ID,
+        )
+    except Exception:
+        pass
+
+
+def _drift_scope_released(asset: Optional[str], side: Optional[str]) -> bool:
+    """True when the (drift, asset, side) counterfactual cohort proves the
+    excluded scope profitable — trailing settled EV at/above the release
+    bound with the minimum sample.  Fail-closed: no evidence -> no release.
+    """
+    try:
+        from merid.prediction import fade_gate as _fg
+
+        min_n = int(_env_float("MERID_DRIFT_SCOPE_RELEASE_MIN_N", 20.0))
+        min_ev = _env_float("MERID_DRIFT_SCOPE_RELEASE_MIN_EV_C", 1.0)
+        st = _fg.cohort_stats(
+            "drift", str(asset or "").upper(), str(side or "").lower()
+        )
+        return (
+            int(st.get("n") or 0) >= min_n
+            and st.get("ev_c") is not None
+            and float(st["ev_c"]) >= min_ev
+        )
+    except Exception:
+        return False
+
+
 def drift_block(
     side_price_cents: Optional[float],
     net_ev_cents: Optional[float],
@@ -193,15 +261,43 @@ def drift_block(
     """Strict drift-lane admission gate.  Returns a block reason on
     failure, ``None`` when every lane condition passes (or the lane is
     inert — callers gate on band_match + enabled before consulting this).
+
+    2026-11-12: the asset/side scope lists are no longer permanent.  A
+    scope-excluded candidate that passes every other lane condition emits
+    a counterfactual sample (fade_gate ``drift`` cohort) and is admitted
+    once that cohort's settled EV proves positive — self-resetting scope
+    with the same hysteresis/evidence discipline as the fade gate.
     """
     if not drift_enabled():
         return "drift_disabled"
-    if side is not None and str(side).lower() not in drift_sides():
-        return "drift_side"
-    if not drift_band_match(side_price_cents):
+    side_fail = side is not None and str(side).lower() not in drift_sides()
+    band_fail = not drift_band_match(side_price_cents)
+    asset_fail = (
+        asset is not None and str(asset).upper() not in drift_assets()
+    )
+    if side_fail:
+        scope_reason = "drift_side"
+    elif band_fail:
         return "drift_band"
-    if asset is not None and str(asset).upper() not in drift_assets():
-        return "drift_asset"
+    elif asset_fail:
+        scope_reason = "drift_asset"
+    else:
+        scope_reason = None
+    if scope_reason is not None:
+        # First-failure semantics preserved: a scope reason only surfaces
+        # when no earlier check failed (side > band > asset ordering).
+        # When every NON-scope lane condition still passes, the candidate
+        # is drift-qualified but for the static scope list — emit
+        # counterfactual evidence and admit on proven cohort release.
+        if _drift_nonscope_conds_pass(
+            side_price_cents, net_ev_cents, tte_seconds, entry_price_basis, ticker
+        ):
+            _drift_scope_eval(
+                asset=asset, side=side, ticker=ticker, px=side_price_cents
+            )
+            if _drift_scope_released(asset, side):
+                return None
+        return scope_reason
     if tte_seconds is None or not (
         drift_tte_min_s() <= float(tte_seconds) <= drift_tte_max_s()
     ):

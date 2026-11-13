@@ -38,6 +38,7 @@ from merid.prediction.threshold_cells import (
     SOFT_EVIDENCE_CODES,
 )
 from merid.prediction.rejection_counterfactual import log_rejected_candidate
+from merid.prediction import fade_gate as _fade_gate
 from merid.prediction import empirical_price_calibration as _epc
 from merid.prediction import model_calibration_log as _mcl
 from merid.prediction import forecast_event as _fe
@@ -358,6 +359,17 @@ MERID_FLB_LONGSHOT_SLOPE = float(os.environ.get("MERID_FLB_LONGSHOT_SLOPE", "0.1
 # EV diff selects the opposite side and we systematically sell into the
 # prevailing move.  Fading leans below ~10c was net-positive (+19c/trade),
 # so only meaningful leans are gated.
+#
+# 2026-11-12: the static allowlist is RETIRED as the default.  A 24,389-
+# candidate counterfactual audit against settlement_outcomes showed the
+# blocked NO-fade cohorts were net POSITIVE on current maker routes
+# (BTC +3.5c, DOGE +3.2c per window; XRP-YES fades remained toxic at
+# -9.2c), and the allowlist could never release an asset whose cohort
+# recovered.  fade_gate.py now gates per (asset, side) on a rolling
+# settled-counterfactual window with hysteresis — blocks form only on
+# proven-toxic trailing cohorts and release automatically on recovery or
+# stale evidence.  MERID_FADE_GATE_MODE=allowlist restores this static
+# list; =off disables the gate entirely.
 MERID_FADE_BLOCK_MIN_LEAN_CENTS = float(
     os.environ.get("MERID_FADE_BLOCK_MIN_LEAN_CENTS", "10.0")
 )
@@ -8109,13 +8121,43 @@ def _compute_trade_decision_impl(
         )
         if _fade:
             indicators["fade_gate_evaluated"] = True
-            if asset.upper() in MERID_FADE_ALLOWED_ASSETS:
-                indicators["fade_gate_outcome"] = "allowed_by_cohort"
+            # 2026-11-12: evidence-decay gate (fade_gate.py).  ``auto`` mode
+            # (default) samples every fade-shaped candidate and blocks only
+            # per-(asset, side) cohorts whose trailing settled counterfactual
+            # EV is toxic — self-resetting via rolling window + hysteresis.
+            # ``allowlist`` preserves the legacy static cohort; ``off`` never
+            # blocks.  All modes fail open.
+            _fg_mode = _fade_gate.gate_mode()
+            if _fg_mode == "allowlist":
+                _fg_allow = asset.upper() in MERID_FADE_ALLOWED_ASSETS
+                indicators["fade_gate_outcome"] = (
+                    "allowed_by_cohort" if _fg_allow else "blocked_static_cohort"
+                )
+            elif _fg_mode == "off":
+                _fg_allow = True
+                indicators["fade_gate_outcome"] = "disabled"
             else:
+                _fg_allow, _fg_detail = _fade_gate.fade_gate_check(
+                    asset=asset,
+                    side=selected_outcome,
+                    ticker=ticker,
+                    lean_cents=_mkt_lean_c,
+                    entry_price_cents=float(
+                        edge_breakdown.executable_entry_price
+                    )
+                    * 100.0,
+                    route=route,
+                )
+                indicators["fade_gate_outcome"] = _fg_detail.get("outcome")
+                if _fg_detail.get("cohort"):
+                    indicators["fade_gate_cohort"] = _fg_detail["cohort"]
+            if not _fg_allow:
+                _fg_cohort = indicators.get("fade_gate_cohort") or {}
                 logger.info(
                     "[TRADE-DECISION] asset=%s ticker=%s route=%s FADE GATE blocked %s entry: "
-                    "market lean %.1fc opposes trade side (historical fade cohort toxic)",
+                    "market lean %.1fc opposes trade side (cohort n=%s ev=%sc)",
                     asset, ticker, route, selected_outcome.upper(), _mkt_lean_c,
+                    _fg_cohort.get("n"), _fg_cohort.get("ev_c"),
                 )
                 no_trade_reason = f"market_fade_blocked_{selected_outcome}"
                 log_rejected_candidate(
