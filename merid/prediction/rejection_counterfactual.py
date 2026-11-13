@@ -78,6 +78,9 @@ _COUNTERFACTUAL_REASON_PREFIXES = (
     "tte_entry_cutoff",
     "structural_risk_veto",
     "edge_below_dynamic_threshold",
+    # 2026-11-13: late-edge probe lane vetoes — the bounded TTE-floor
+    # exception cohort must stay measurable in the counterfactual joins.
+    "late_edge_probe",
     # 2026-10-09: the fixed selected-side entry-price cap.  Cap rejections
     # carry the shadow verdict (qualified_ex_cap + other_failures) so the
     # marginal >75c cohort is measurable without submitting anything.

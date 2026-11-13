@@ -2321,3 +2321,384 @@ def record_pinned_fav_submission(
             if tmp and os.path.exists(tmp):
                 os.remove(tmp)
         return count
+
+
+# ---------------------------------------------------------------------------
+# Late-edge probe (2026-11-13): bounded TTE-floor exception lane
+# ---------------------------------------------------------------------------
+#
+# The generic engine floor ``MERID_ENTRY_MIN_SECONDS_TO_EXPIRY`` (default
+# 120s) and the regime classifier's ``MERID_REGIME_MIN_TTE_FLOOR_S`` (90s)
+# were set from pre-2026-10 execution data: taker fills inside the final
+# two minutes were the most adversely selected cohort on the old stack.
+# The current stack is different — maker/bid-priced evaluation, the
+# reserve-stacked EV gate, per-asset moneyness caps, tail calibration, and
+# the settlement lane all post-date that measurement — but the floor still
+# vetoes every ordinary candidate below 120s regardless of claimed edge.
+#
+# This lane re-opens a *bounded* slice of that window for measurement and
+# execution under current-code economics:
+#
+#   * price band   MERID_LATE_EDGE_PROBE_PRICE_LO/HI_CENTS (default
+#                  10.0 / 69.99) — the mid-band where the 2026-11-06 audit
+#                  measured the least-toxic late cells; disjoint from the
+#                  pinned-fav band (>=92c), the settlement lane (<60s TTE),
+#                  and every other lane's TTE floor (>=120s).
+#   * TTE window   MERID_LATE_EDGE_PROBE_MIN_TTE_S (default 60s) up to the
+#                  generic engine floor itself — above the settlement
+#                  lane's domain, below the normal entry floor.
+#   * basis        MERID_LATE_EDGE_PROBE_BASIS (default "bid") — maker-only.
+#                  Web evidence on 15m crypto binaries is unambiguous that
+#                  the late window's edge is a *resting* edge: taker flow
+#                  inside the final minutes is the adverse-selection
+#                  cohort, while post-only bids at fair value are the
+#                  configuration external Kalshi makers measured positive.
+#   * EV floor     MERID_LATE_EDGE_PROBE_MIN_EV_CENTS (default +3.0) —
+#                  stricter than the ordinary bound: the reserve stack
+#                  already charges late-window uncertainty, so the probe
+#                  demands clearly-positive claimed edge rather than
+#                  relaxing the economics.
+#   * scope        MERID_LATE_EDGE_PROBE_SIDES / _ASSETS.
+#   * budget       MERID_LATE_EDGE_PROBE_DAILY_MAX durable submissions/day.
+#
+# The lane is additive, never substitutive: a probe-domain side still must
+# clear every ordinary gate (depth, tail, evidence, throttle, bookflow,
+# conviction, regime, countertrend, moneyness caps, canonical range).  The
+# probe bar is an *extra* veto on top of the normal path for its domain —
+# it can only make the late window stricter, never admit what the normal
+# gates would reject.  ``MERID_LATE_EDGE_PROBE_ENABLED=0`` disables the
+# floor exemption and every probe gate; the generic floor is untouched.
+
+
+def late_edge_probe_enabled() -> bool:
+    return _env_flag("MERID_LATE_EDGE_PROBE_ENABLED", False)
+
+
+def _late_edge_probe_lo() -> float:
+    return _env_float("MERID_LATE_EDGE_PROBE_PRICE_LO_CENTS", 10.0)
+
+
+def _late_edge_probe_hi() -> float:
+    return _env_float("MERID_LATE_EDGE_PROBE_PRICE_HI_CENTS", 69.99)
+
+
+def _late_edge_probe_min_tte() -> float:
+    return _env_float("MERID_LATE_EDGE_PROBE_MIN_TTE_S", 60.0)
+
+
+def _late_edge_probe_max_tte() -> float:
+    """Probe domain tops out at the generic engine entry floor itself.
+
+    Reading the same env the engine floor uses keeps the two consistent:
+    raising ``MERID_ENTRY_MIN_SECONDS_TO_EXPIRY`` widens the probe window
+    automatically, lowering it shrinks the probe to nothing rather than
+    leaving a gap above the floor where the lane still claims domain.
+    """
+    return _env_float("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", 120.0)
+
+
+def late_edge_probe_sides() -> frozenset:
+    raw = os.environ.get("MERID_LATE_EDGE_PROBE_SIDES", "yes,no")
+    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def late_edge_probe_assets() -> frozenset:
+    raw = os.environ.get(
+        "MERID_LATE_EDGE_PROBE_ASSETS", "BTC,ETH,SOL,XRP,DOGE"
+    )
+    return frozenset(a.strip().upper() for a in raw.split(",") if a.strip())
+
+
+def _late_edge_probe_min_ev_cents() -> float:
+    return _env_float("MERID_LATE_EDGE_PROBE_MIN_EV_CENTS", 3.0)
+
+
+def _late_edge_probe_basis() -> str:
+    return os.environ.get("MERID_LATE_EDGE_PROBE_BASIS", "bid").strip().lower()
+
+
+def late_edge_probe_band_match(price_cents: Optional[float]) -> bool:
+    """True when the own-side executable price sits inside the probe band.
+
+    Flag-independent on purpose (same contract as ``pinned_fav_band_match``):
+    the decision engine uses it to apply the probe veto to in-band sides
+    even on evaluations where the lane flag state is ambiguous, so an
+    in-band candidate can never ride ordinary gates below the floor
+    unmeasured.
+    """
+    if price_cents is None:
+        return False
+    try:
+        p = float(price_cents)
+    except (TypeError, ValueError):
+        return False
+    return _late_edge_probe_lo() <= p <= _late_edge_probe_hi()
+
+
+def late_edge_probe_scope_match(
+    side: Optional[str], asset: Optional[str]
+) -> bool:
+    """Side/asset scope check.  Missing side fails closed; a missing asset
+    passes only when it names a scoped asset — an empty scope list scopes
+    to nothing (fail closed)."""
+    if side is None or str(side).strip().lower() not in late_edge_probe_sides():
+        return False
+    assets = late_edge_probe_assets()
+    if not assets:
+        return False
+    return str(asset or "").strip().upper() in assets
+
+
+def late_edge_probe_reachable(
+    side_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+    side: Optional[str] = None,
+    asset: Optional[str] = None,
+) -> bool:
+    """Reachability check for the agent_grid classifier bypass.
+
+    Lets an own-side bid inside the probe band below the regime classifier's
+    TTE floor reach ``compute_trade_decision``, which owns the strict lane
+    gate.  False unless the lane is armed AND price/TTE/scope are inside
+    the lane window.  ``side``/``asset`` are optional for backward
+    compatibility; when supplied they must match the scope lists.
+    """
+    if not late_edge_probe_enabled():
+        return False
+    if not late_edge_probe_band_match(side_price_cents):
+        return False
+    if tte_seconds is None:
+        return False
+    try:
+        tte = float(tte_seconds)
+    except (TypeError, ValueError):
+        return False
+    if not (_late_edge_probe_min_tte() <= tte <= _late_edge_probe_max_tte()):
+        return False
+    if side is not None and not late_edge_probe_scope_match(side, asset):
+        return False
+    return True
+
+
+def late_edge_probe_tte_exempt(
+    *,
+    yes_bid_cents: Optional[float],
+    no_bid_cents: Optional[float],
+    seconds_to_expiry: Optional[float],
+    exit_only_cutoff: float,
+    entry_price_basis: Optional[str],
+    asset: Optional[str] = None,
+) -> bool:
+    """Candidate-level engine-floor exemption for the probe lane.
+
+    The generic ``min_tte_entry_disabled`` floor rejects the whole
+    candidate; this hands *only* probe-domain candidates to the engine's
+    per-side gates.  Requires the lane armed, the configured entry basis
+    (maker bid by default — the late window's measured edge is a resting
+    edge, not a taker one), TTE inside the probe window and above the
+    exit-only cutoff, and at least one own-side bid inside the band whose
+    side/asset scope matches.  Fail-closed on any missing input.
+    """
+    if not late_edge_probe_enabled():
+        return False
+    if entry_price_basis != _late_edge_probe_basis():
+        return False
+    if seconds_to_expiry is None:
+        return False
+    try:
+        tte = float(seconds_to_expiry)
+    except (TypeError, ValueError):
+        return False
+    if not (_late_edge_probe_min_tte() <= tte <= _late_edge_probe_max_tte()):
+        return False
+    if tte <= float(exit_only_cutoff):
+        return False
+    for side, px in (("yes", yes_bid_cents), ("no", no_bid_cents)):
+        if (
+            late_edge_probe_band_match(px)
+            and late_edge_probe_scope_match(side, asset)
+        ):
+            return True
+    return False
+
+
+def late_edge_probe_block(
+    side_price_cents: Optional[float],
+    net_ev_cents: Optional[float],
+    tte_seconds: Optional[float],
+    side: Optional[str] = None,
+    asset: Optional[str] = None,
+    entry_price_basis: Optional[str] = None,
+) -> Optional[str]:
+    """Strict late-edge probe gate — an *additional* veto, never a rescue.
+
+    Returns ``None`` when the lane is inert for this side (disabled, price
+    outside the band, TTE outside the probe window, side/asset out of
+    scope, or wrong entry basis) AND when every probe condition passes.
+    The caller treats a non-``None`` return as a veto on the normal
+    qualify path for that side; the ordinary economics, structural gates,
+    and lane-owned alternatives are unaffected either way.
+
+    The EV leg reads the same reserve-stacked ``net_edge`` the normal path
+    compares — the probe demands *more* claimed edge than the ordinary
+    bound, not less, because the late window's fill distribution is the
+    least certain on the book.
+    """
+    if not late_edge_probe_enabled():
+        return None
+    if not late_edge_probe_band_match(side_price_cents):
+        return None
+    if (
+        entry_price_basis is not None
+        and entry_price_basis != _late_edge_probe_basis()
+    ):
+        return None
+    if not late_edge_probe_scope_match(side, asset):
+        return None
+    # Unlike the band-owning lanes, the probe shares its price band with
+    # the ordinary path — outside its TTE window it must be fully inert
+    # (None), never a veto, or every in-band side above the floor would
+    # be blocked by a lane that does not own them.
+    if tte_seconds is None:
+        return None
+    try:
+        tte = float(tte_seconds)
+    except (TypeError, ValueError):
+        return None
+    if not (_late_edge_probe_min_tte() <= tte <= _late_edge_probe_max_tte()):
+        return None
+    ev = _finite_or_none(net_ev_cents)
+    if ev is None or ev < _late_edge_probe_min_ev_cents():
+        return "late_edge_probe_low_ev"
+    if late_edge_probe_cap_remaining() <= 0:
+        return "late_edge_probe_daily_cap"
+    return None
+
+
+def late_edge_probe_admits(
+    side_price_cents: Optional[float],
+    tte_seconds: Optional[float],
+    side: Optional[str] = None,
+    asset: Optional[str] = None,
+    entry_price_basis: Optional[str] = None,
+) -> bool:
+    """True when a qualified selection sits inside the probe domain.
+
+    Used to stamp ``decision_lane="late_edge_probe"`` on admissions the
+    floor exemption let through — the cohort must stay separable in the
+    outcome joins so fill quality (the metric that decides whether this
+    window deserves a wider bound) is measurable per lane.
+    """
+    if not late_edge_probe_enabled():
+        return False
+    if not late_edge_probe_band_match(side_price_cents):
+        return False
+    if (
+        entry_price_basis is not None
+        and entry_price_basis != _late_edge_probe_basis()
+    ):
+        return False
+    if not late_edge_probe_scope_match(side, asset):
+        return False
+    if tte_seconds is None:
+        return False
+    try:
+        tte = float(tte_seconds)
+    except (TypeError, ValueError):
+        return False
+    return _late_edge_probe_min_tte() <= tte <= _late_edge_probe_max_tte()
+
+
+def late_edge_probe_daily_max() -> int:
+    """Per-day cap on probe lane order submissions (bounded bleed).
+
+    The lane exists to re-measure a cohort the generic floor excluded; a
+    fixed daily budget keeps the probe bounded while its own fills replace
+    the counterfactual basis.  24/day across five assets is ~5 per asset —
+    enough to accumulate settled outcomes within days, small enough that a
+    mispriced window cannot bleed the account.
+    """
+    return int(_env_float("MERID_LATE_EDGE_PROBE_DAILY_MAX", 24.0))
+
+
+def late_edge_probe_state_path() -> str:
+    return os.environ.get(
+        "MERID_LATE_EDGE_PROBE_STATE_PATH", "data/late_edge_probe_fills.json"
+    )
+
+
+_late_probe_counter_lock = threading.RLock()
+
+
+def _late_probe_count_for_day(path: str, day: str) -> int:
+    """Read the emission budget, rolling over only to a later UTC day."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return 0
+    stored_day = rec["date"]
+    if not isinstance(stored_day, str) or datetime.strptime(
+        stored_day, "%Y-%m-%d"
+    ).date().isoformat() != stored_day:
+        raise ValueError("invalid late-edge-probe budget date")
+    count = rec["count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("invalid late-edge-probe budget count")
+    if stored_day > day:
+        raise ValueError("late-edge-probe budget date is ahead of host UTC date")
+    return count if stored_day == day else 0
+
+
+def late_edge_probe_fills_today(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    """Probe decision emissions for the current UTC day; fail closed."""
+    now = time.time() if now is None else float(now)
+    day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+    with _late_probe_counter_lock:
+        try:
+            return _late_probe_count_for_day(
+                path or late_edge_probe_state_path(), day
+            )
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            logger.error(
+                "Late-edge-probe budget unavailable; failing closed: %s", exc
+            )
+            return max(0, late_edge_probe_daily_max())
+
+
+def late_edge_probe_cap_remaining(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    return max(
+        0, late_edge_probe_daily_max() - late_edge_probe_fills_today(path, now)
+    )
+
+
+def record_late_edge_probe_submission(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    """Increment today's probe decision-emission counter; returns new count.
+
+    Emissions, including those rejected downstream, consume the daily budget.
+    """
+    now = time.time() if now is None else float(now)
+    p = path or late_edge_probe_state_path()
+    day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+    with _late_probe_counter_lock:
+        count = _late_probe_count_for_day(p, day) + 1
+        directory = os.path.dirname(p) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, delete=False
+            ) as f:
+                tmp = f.name
+                json.dump({"date": day, "count": count}, f)
+            os.replace(tmp, p)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+        return count

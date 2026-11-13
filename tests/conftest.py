@@ -23,6 +23,16 @@ _os.environ.setdefault(
     "MERID_EMPIRICAL_CAL_LOG_PATH",
     _os.path.join(__import__("tempfile").gettempdir(), "merid_test_epc_obs.jsonl"),
 )
+# 2026-11-13: the policy give-back reserve is charged off the
+# live-written logs/exit_markouts.jsonl; each nightly refit silently
+# shifts every decision test's net EV.  Point the loader at a
+# nonexistent path so the suite sees the floor reserve it was written
+# against.  Tests that exercise give-back write and pin their own
+# fixture log explicitly.  (The tail calibrator is intentionally NOT
+# pinned here — release-gate tests assert on the shipped artifact.)
+_os.environ["MERID_EXIT_MARKOUT_LOG"] = _os.path.join(
+    __import__("tempfile").gettempdir(), "merid_test_exit_markouts_absent.jsonl"
+)
 # 2026-08-24: Force unit tests to run in mock/preview mode so legacy live-mode
 # transitions in setUp/tearDown do not throw, and decision-provenance/shared-risk
 # guards that require full production stack are not enforced.
@@ -66,6 +76,12 @@ _os.environ["MERID_USE_REALIZED_VOL"] = "0"
 _os.environ["MERID_MARKET_ANCHOR_MIN_W"] = "0"
 _os.environ["MERID_MARKET_ANCHOR_MAX_W"] = "0"
 _os.environ["MERID_ENTRY_MIN_SECONDS_TO_EXPIRY"] = "0"
+# 2026-11-13: production .env clamps every enabled regime band's min-TTE
+# down to 90s (MERID_REGIME_MIN_TTE_FLOOR_S=90, the 2026-10-23 mid-zone
+# fix).  market_regime reads it at import; pin it off so the suite sees
+# the code-default band floors (balanced >=120s) the regime tests were
+# written against.
+_os.environ["MERID_REGIME_MIN_TTE_FLOOR_S"] = "0"
 _os.environ["MERID_FLB_LONGSHOT_SLOPE"] = "0"
 _os.environ["MERID_ENTRY_MAKER_ENABLED"] = "0"
 # Settlement-distribution V2 and the settlement-convergence lane: exercised
@@ -92,11 +108,28 @@ _os.environ["MERID_MONEYNESS_EV_RELIEF_ENABLED"] = "0"
 # expected terminal reasons.  Exercised explicitly in
 # tests/test_pinned_fav_lane.py.
 _os.environ["MERID_PINNED_FAV_ENABLED"] = "0"
+# 2026-11-13: production .env arms lane-scoped moneyness cap overrides
+# (MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}=98/99) that
+# supersede the per-asset moneyness cap the suite was written against.
+# "" reads as unset (_env_float parse-fail -> None -> per-asset cap),
+# and .env cannot override an already-set key.
+for _side in ("YES", "NO"):
+    for _asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        _os.environ[
+            f"MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{_side}_{_asset}"
+        ] = ""
 # 2026-10-20 (pinned-fav maker mode): production .env re-centers the lane
 # band on the resting-bid window (82-91c).  Pin the mode off globally —
 # the taker-mode 92-98c reserved band is the default the suite was
 # written against; maker-mode tests opt in via fixture.
 _os.environ["MERID_PINNED_FAV_MAKER_MODE"] = "0"
+# 2026-11-13 (late-edge probe): production .env arms the bounded TTE-floor
+# exception lane (10-69.99c own-side bid, TTE 60-120s); pin it off here so
+# legacy decision tests keep their expected terminal reasons — the lane
+# also reads MERID_ENTRY_MIN_SECONDS_TO_EXPIRY (pinned "0" above) as its
+# domain ceiling, so it is inert either way.  Exercised explicitly in
+# tests/test_late_edge_probe.py.
+_os.environ["MERID_LATE_EDGE_PROBE_ENABLED"] = "0"
 # 2026-10-20 (mid-window NO relief): production .env arms an 8c bound
 # relief for the measured-positive NO mid-window cohort — it collapses the
 # NO-side dynamic bound and would re-attribute/re-admit candidates in
@@ -218,6 +251,9 @@ for _env_key, _fname in {
     # file holds both sides in manual-review suspension — tests must start
     # from a clean throttle and exercise suspensions explicitly.
     "MERID_DIRECTIONAL_THROTTLE_PATH": "directional_throttle.json",
+    # Late-edge probe lane (2026-11-13): the durable daily emission counter
+    # must never read production state.
+    "MERID_LATE_EDGE_PROBE_STATE_PATH": "late_edge_probe_fills.json",
     # Regime EMA/hysteresis state: production persistence must not leak into
     # tests (stale confirmed labels would change gate verdicts).
     "MERID_DIRECTIONAL_REGIME_STATE_PATH": "directional_regime_state.json",

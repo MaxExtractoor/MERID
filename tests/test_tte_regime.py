@@ -100,22 +100,22 @@ class TestTTERegimeClassifier:
         assert multiplier == 2.0
     
     def test_get_max_spread_normal(self):
-        """Test max spread in normal regime."""
+        """Test max spread in normal regime (20c cap, aligned 2026-07-12)."""
         classifier = TTERegimeClassifier()
         max_spread = classifier.get_max_spread(tte_seconds=720)
-        assert max_spread == 40
+        assert max_spread == 20
     
     def test_get_max_spread_critical(self):
         """Test max spread in critical regime."""
         classifier = TTERegimeClassifier()
         max_spread = classifier.get_max_spread(tte_seconds=240)
-        assert max_spread == 20
+        assert max_spread == 4
     
     def test_get_max_spread_terminal(self):
         """Test max spread in terminal regime."""
         classifier = TTERegimeClassifier()
         max_spread = classifier.get_max_spread(tte_seconds=90)
-        assert max_spread == 10
+        assert max_spread == 3
     
     def test_get_min_depth_normal(self):
         """Test min depth in normal regime."""
@@ -124,16 +124,16 @@ class TestTTERegimeClassifier:
         assert min_depth == 5
     
     def test_get_min_depth_critical(self):
-        """Test min depth in critical regime."""
+        """Test min depth in critical regime (profile-aligned flat 5)."""
         classifier = TTERegimeClassifier()
         min_depth = classifier.get_min_depth(tte_seconds=240)
-        assert min_depth == 15
+        assert min_depth == 5
     
     def test_get_min_depth_terminal(self):
-        """Test min depth in terminal regime."""
+        """Test min depth in terminal regime (profile-aligned flat 5)."""
         classifier = TTERegimeClassifier()
         min_depth = classifier.get_min_depth(tte_seconds=90)
-        assert min_depth == 20
+        assert min_depth == 5
     
     def test_should_allow_entry_normal(self):
         """Test entry allowed in normal regime."""

@@ -93,6 +93,8 @@ _REASON_TO_GATE: Tuple[Tuple[str, str], ...] = (
     # 2026-11-08: reversal-scalp lane vetoes (price band / TTE / EV floor /
     # disabled near-miss) attribute to their own gate, not a generic lane.
     ("reversal_scalp", "reversal_lane"),
+    # 2026-11-13: late-edge probe lane vetoes attribute to their own gate.
+    ("late_edge_probe", "late_edge_lane"),
 )
 
 

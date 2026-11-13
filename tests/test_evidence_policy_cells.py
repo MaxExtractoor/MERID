@@ -829,6 +829,10 @@ def _pf_env(monkeypatch, floor="-6.0", daily_max="12"):
     monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
     monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", floor)
     monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", daily_max)
+    # .env raised the lane band to 94-98 (2026-10-31 containment); these
+    # tests were written against the authored 92-98 domain — pin the
+    # band so the 93c fixture stays in-lane.
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_LO", "92")
 
 
 def test_pinned_empty_cells_floor_substitution(monkeypatch):

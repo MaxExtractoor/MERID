@@ -11072,6 +11072,78 @@ class LeanAgent15m:
                         )
                 except Exception:
                     pass
+            if _decision_lane == "late_edge_probe" and (
+                decision.selected_outcome is not None
+            ):
+                # 2026-11-13 (late-edge probe): same consume-then-suppress
+                # discipline as pinned_fav/window_quota/drift — the durable
+                # counter is the single source of truth and an over-cap
+                # emission becomes a LANE_SUPPRESSED event rather than a
+                # silent budget leak.
+                try:
+                    from merid.prediction import directional_regime as _dr_lep_lane
+                    _n = _dr_lep_lane.record_late_edge_probe_submission()
+                    _cap = _dr_lep_lane.late_edge_probe_daily_max()
+                    if _n > _cap:
+                        try:
+                            from merid.execution.decision_audit_ledger import (
+                                get_decision_audit_ledger,
+                            )
+                            _ticker_now = str(
+                                getattr(decision, "ticker", "") or ticker or ""
+                            )
+                            get_decision_audit_ledger().append_decision_event(
+                                decision_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                event_type="LANE_SUPPRESSED",
+                                stage="ALLOCATION",
+                                reason_code="late_edge_probe_cap_exceeded_at_emission",
+                                reason_detail={
+                                    "side": decision.selected_outcome,
+                                    "lane": _decision_lane,
+                                    "ticker": _ticker_now,
+                                    "late_probe_count_today": int(_n),
+                                    "late_probe_daily_cap": int(_cap),
+                                },
+                                trace_id=str(
+                                    getattr(decision, "decision_id", "") or ""
+                                ),
+                                run_id=decision.indicators.get("run_id"),
+                                ticker=_ticker_now,
+                                asset=asset,
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[LATE-EDGE-PROBE] asset=%s side=%s suppressed — "
+                            "emission count=%d exceeded daily cap=%d",
+                            asset, decision.selected_outcome, _n, _cap,
+                        )
+                        decision = replace(
+                            decision,
+                            selected_outcome=None,
+                            selected_action=None,
+                            selected_outcome_price=None,
+                            no_trade_reason="late_edge_probe_cap_exceeded_at_emission",
+                        )
+                    else:
+                        logger.info(
+                            "[LATE-EDGE-PROBE] asset=%s side=%s lane submissions today=%d",
+                            asset, decision.selected_outcome, _n,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "[LATE-EDGE-PROBE] budget persistence unavailable for %s: %s",
+                        asset, exc,
+                    )
+                    decision = replace(
+                        decision,
+                        selected_outcome=None,
+                        selected_action=None,
+                        selected_outcome_price=None,
+                        no_trade_reason="late_edge_probe_budget_unavailable",
+                    )
             if _decision_lane == "threshold_cell":
                 try:
                     from merid.prediction import threshold_cells as _tc
@@ -16096,6 +16168,78 @@ class LeanAgent15m:
                     min_book_freshness_ms=1000,
                     min_time_to_expiry_seconds=_pf_tte_lo,
                     max_time_to_expiry_seconds=_pf_tte_hi,
+                )
+        except Exception:
+            pass
+
+        # 2026-11-13 (late-edge probe): bounded TTE-floor exception bypass.
+        # Own-side bids inside the probe band (default 10-69.99c) with TTE
+        # inside [probe_min, engine floor] die as ``tte_entry_cutoff`` at
+        # the regime classifier's 90s floor before the decision engine can
+        # price them — the same dead-letter pattern the pinned-fav bypass
+        # fixed for its band.  When the lane is armed and an own-side bid
+        # is probe-reachable, inject a pseudo-regime so the candidate
+        # reaches ``compute_trade_decision``, which owns the strict gate
+        # (``directional_regime.late_edge_probe_block``) plus every
+        # ordinary downstream veto.  Reachability only — band/TTE/scope
+        # here; admission economics stay in the engine.  The settlement
+        # lane's own pseudo-regime keeps precedence at <60s.
+        try:
+            from merid.prediction import directional_regime as _dr_lep
+            from merid.event_venues.kalshi.market_regime import (
+                SkewRegime as _LEP_SkewRegime,
+            )
+
+            _lep_tte = (
+                float(seconds_to_expiry)
+                if seconds_to_expiry is not None
+                else None
+            )
+            # Maker-basis reachability: the lane admits resting bids, so
+            # the own-side BID is the price that must sit in band (YES bid
+            # = best_bid; NO bid = 100 - best_ask), mirroring the pf
+            # maker-mode reachability convention above.
+            _lep_yes_px = float(best_bid) if best_bid else None
+            _lep_no_px = (
+                (100.0 - float(best_ask)) if best_ask else None
+            )
+            _lep_tte_lo = int(_dr_lep._late_edge_probe_min_tte())
+            _lep_tte_hi = int(_dr_lep._late_edge_probe_max_tte())
+            _lep_px_lo = int(_dr_lep._late_edge_probe_lo())
+            _lep_px_hi = int(round(_dr_lep._late_edge_probe_hi()))
+            if yes_regime is None and _dr_lep.late_edge_probe_reachable(
+                _lep_yes_px, _lep_tte, side="yes", asset=asset
+            ):
+                yes_regime = _LEP_SkewRegime(
+                    name="late_edge_probe",
+                    min_price_cents=_lep_px_lo,
+                    max_price_cents=_lep_px_hi,
+                    min_net_edge_cents=Decimal("3.0"),
+                    min_confidence=Decimal("0.80"),
+                    max_spread_cents=2,
+                    min_depth_multiple=Decimal("1.0"),
+                    size_multiplier=Decimal("0.50"),
+                    enabled=True,
+                    min_book_freshness_ms=1000,
+                    min_time_to_expiry_seconds=_lep_tte_lo,
+                    max_time_to_expiry_seconds=_lep_tte_hi,
+                )
+            if no_regime is None and _dr_lep.late_edge_probe_reachable(
+                _lep_no_px, _lep_tte, side="no", asset=asset
+            ):
+                no_regime = _LEP_SkewRegime(
+                    name="late_edge_probe",
+                    min_price_cents=_lep_px_lo,
+                    max_price_cents=_lep_px_hi,
+                    min_net_edge_cents=Decimal("3.0"),
+                    min_confidence=Decimal("0.80"),
+                    max_spread_cents=2,
+                    min_depth_multiple=Decimal("1.0"),
+                    size_multiplier=Decimal("0.50"),
+                    enabled=True,
+                    min_book_freshness_ms=1000,
+                    min_time_to_expiry_seconds=_lep_tte_lo,
+                    max_time_to_expiry_seconds=_lep_tte_hi,
                 )
         except Exception:
             pass

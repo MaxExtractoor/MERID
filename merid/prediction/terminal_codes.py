@@ -290,6 +290,17 @@ def canonical_terminal_code(
         return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
     if rl.startswith("reversal_scalp"):
         return TerminalCode.STRUCTURAL_RISK_VETO.value
+    # 2026-11-13: late-edge probe lane codes — the lane EV floor miss is a
+    # threshold failure, cap/budget misses are capacity blocks, and the
+    # residuals are structural lane vetoes.
+    if rl.startswith("late_edge_probe_low_ev"):
+        return TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+    if rl.startswith("late_edge_probe_daily_cap") or rl.startswith(
+        "late_edge_probe_cap_exceeded"
+    ) or rl.startswith("late_edge_probe_budget"):
+        return TerminalCode.EVIDENCE_HARD_BLOCK.value
+    if rl.startswith("late_edge_probe"):
+        return TerminalCode.STRUCTURAL_RISK_VETO.value
     if (
         rl.startswith("countertrend_")
         or rl.startswith("bookflow_")

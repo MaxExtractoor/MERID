@@ -952,6 +952,23 @@ class RestingOrderMonitor:
                     ) / 60.0
                 except (TypeError, ValueError):
                     _pre_expiry_min = PRE_EXPIRY_CANCEL_THRESHOLD_MIN
+            elif (record.decision_lane or "") == "late_edge_probe":
+                # 2026-11-13: same lane-scoped floor as pinned_fav — probe
+                # entries are admitted inside the generic 120s bound by
+                # design (TTE window 60-120s), so the generic 120s cancel
+                # would kill every resting probe order before it could
+                # fill.  Their floor is
+                # MERID_PRE_EXPIRY_CANCEL_MIN_S_LATE_EDGE_PROBE (default
+                # 45s, safely above the 30s final-minute entry cutoff).
+                try:
+                    _pre_expiry_min = float(
+                        os.environ.get(
+                            "MERID_PRE_EXPIRY_CANCEL_MIN_S_LATE_EDGE_PROBE",
+                            "45",
+                        )
+                    ) / 60.0
+                except (TypeError, ValueError):
+                    _pre_expiry_min = PRE_EXPIRY_CANCEL_THRESHOLD_MIN
             if minutes_to_expiry is not None and minutes_to_expiry < _pre_expiry_min:
                 logger.warning(
                     "[RESTING-CANCEL-BEFORE-EXPIRY] ticker=%s kalshi_order_id=%s tte=%.1fmin < %.2fmin - cancelling resting order",

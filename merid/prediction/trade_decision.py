@@ -796,6 +796,13 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     # the probe size and stay post-only.  Positive-LCB admissions may cross
     # as taker IOC under MERID_BOUNDED_TAKER_CROSS.
     "pinned_fav",
+    # 2026-11-13: late-edge probe lane (10-69.99c own-side bid, TTE
+    # 60-120s) — bounded re-measurement of the window the generic entry
+    # floor excludes under current-code maker economics.  Maker-only by
+    # construction (bid basis), stricter-than-normal EV floor, durable
+    # daily emission cap; stays 1-contract post-only so fill quality — the
+    # metric that decides whether the window widens — is measured per fill.
+    "late_edge_probe",
     # 2026-10-17: window-quota lane — paid-telemetry fallback that emits
     # the ungated best side as a 1-contract taker IOC when every upstream
     # lane declined the window.  Bounded by durable per-ticker/daily caps
@@ -4052,7 +4059,7 @@ def _compute_trade_decision_impl(
     # 2026-09-23: minimum time-to-expiry for new entries.  Post-restart audit
     # showed entries landing in the final 2-7 minutes were the most adversely
     # selected cohort (momentum dominates and the market is most efficient
-    # there); MERID_ENTRY_MIN_SECONDS_TO_EXPIRY (default 180s) keeps entries
+    # there); MERID_ENTRY_MIN_SECONDS_TO_EXPIRY (default 120s) keeps entries
     # out of that tail.  Exits are unaffected.  The settlement-convergence
     # lane is exempt because its probability claim rests on banked settlement
     # samples rather than on a live-price forecast.
@@ -4084,10 +4091,37 @@ def _compute_trade_decision_impl(
             _pf_maker_tte_exempt = False
         if _pf_maker_tte_exempt:
             indicators["pf_maker_tte_exempt"] = True
+    # 2026-11-13 (late-edge probe): bounded TTE-floor exception lane.  The
+    # generic floor predates the current maker-priced/reserve-stacked stack
+    # and vetoes every ordinary candidate below 120s regardless of claimed
+    # edge.  The probe hands only its scoped domain — own-side bid inside
+    # the configured price band, TTE inside [probe_min, floor], matching
+    # side/asset scope, configured entry basis — to the engine's per-side
+    # gates, where ``late_edge_probe_block`` adds a stricter EV floor on
+    # top of every ordinary gate.  It is not a generic relaxation:
+    # ``MERID_LATE_EDGE_PROBE_ENABLED=0`` restores the floor untouched.
+    # Fail-closed on any missing input.
+    _late_probe_tte_exempt = False
+    if seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY:
+        try:
+            from merid.prediction import directional_regime as _dr_lep_tte
+            _late_probe_tte_exempt = _dr_lep_tte.late_edge_probe_tte_exempt(
+                yes_bid_cents=yes_bid_cents,
+                no_bid_cents=no_bid_cents,
+                seconds_to_expiry=seconds_to_expiry,
+                exit_only_cutoff=exit_only_cutoff,
+                entry_price_basis=entry_price_basis,
+                asset=asset,
+            )
+        except Exception:
+            _late_probe_tte_exempt = False
+        if _late_probe_tte_exempt:
+            indicators["late_probe_tte_exempt"] = True
     if (
         seconds_to_expiry <= MERID_ENTRY_MIN_SECONDS_TO_EXPIRY
         and not settlement_lane
         and not _pf_maker_tte_exempt
+        and not _late_probe_tte_exempt
     ):
         return _no_trade("min_tte_entry_disabled")
 
@@ -6278,6 +6312,54 @@ def _compute_trade_decision_impl(
         )
     )
 
+    # 2026-11-13 (late-edge probe): bounded TTE-floor exception lane.  Own-
+    # side prices inside the probe band below the generic entry floor reach
+    # this point only via the candidate-level floor exemption; the probe
+    # gate is an *additional* veto on the normal qualify path — it can
+    # only restrict the late window, never rescue a candidate the ordinary
+    # gates reject.  ``_late_price`` is flag-independent (same contract as
+    # ``_yes_pf_price``): an in-band side below the floor that fails the
+    # probe bar reports the lane's own reason instead of a generic label.
+    # Settlement-lane evaluations are exempt from the probe veto — that
+    # lane's banked-sample gates own its cohort end-to-end.
+    _yes_late_price = _dr.late_edge_probe_band_match(yes_price_cents)
+    _no_late_price = _dr.late_edge_probe_band_match(no_price_cents)
+    _late_tte_s = (
+        float(seconds_to_expiry) if seconds_to_expiry is not None else None
+    )
+    _yes_late_block = (
+        _dr.late_edge_probe_block(
+            side_price_cents=(
+                float(yes_price_cents) if yes_price_cents else None
+            ),
+            net_ev_cents=float(yes_breakdown.net_edge) * 100.0,
+            tte_seconds=_late_tte_s,
+            side="yes",
+            asset=asset,
+            entry_price_basis=entry_price_basis,
+        )
+        if _yes_late_price and not settlement_lane
+        else None
+    )
+    _no_late_block = (
+        _dr.late_edge_probe_block(
+            side_price_cents=(
+                float(no_price_cents) if no_price_cents else None
+            ),
+            net_ev_cents=float(no_breakdown.net_edge) * 100.0,
+            tte_seconds=_late_tte_s,
+            side="no",
+            asset=asset,
+            entry_price_basis=entry_price_basis,
+        )
+        if _no_late_price and not settlement_lane
+        else None
+    )
+    indicators["yes_late_probe_price"] = _yes_late_price
+    indicators["no_late_probe_price"] = _no_late_price
+    indicators["yes_late_probe_block"] = _yes_late_block
+    indicators["no_late_probe_block"] = _no_late_block
+
     # 2026-10-21 (drift-lane epoch): mid-band maker rescue lanes.
     # The pooled 15,637-sample audit measured NO-side 40-74c drift
     # entries at +0.6..+3.0c/contract under a buy-at-bid -> +12c lock ->
@@ -7289,6 +7371,10 @@ def _compute_trade_decision_impl(
                 and _yes_conv_block is None
                 and _yes_ct_lane_block is None
                 and _yes_price_cap_block is None
+                # 2026-11-13 (late-edge probe): the probe bar is an extra
+                # veto on the normal path for its TTE-floor domain — it
+                # only ever restricts, never rescues.
+                and _yes_late_block is None
             )
         )
     )
@@ -7319,6 +7405,8 @@ def _compute_trade_decision_impl(
                 and _no_conv_block is None
                 and _no_ct_lane_block is None
                 and _no_price_cap_block is None
+                # 2026-11-13 (late-edge probe): same additive veto as YES.
+                and _no_late_block is None
             )
         )
     )
@@ -7357,6 +7445,8 @@ def _compute_trade_decision_impl(
         cheap_block_s: Optional[str] = None,
         rev_match_s: bool = False,
         rev_block_s: Optional[str] = None,
+        late_price_applies_s: bool = False,
+        late_block_s: Optional[str] = None,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         # 2026-11-08 (reversal-scalp): a matched candidate is owned by the
@@ -7395,6 +7485,14 @@ def _compute_trade_decision_impl(
             # Lane-blocked (specific reason) or lane-disarmed near-miss.
             return rev_block_s or "reversal_scalp_disabled"
         elif not _rev_rescued_s:
+            # 2026-11-13 (late-edge probe): a probe-domain side below the
+            # generic entry floor that failed the lane's own bar owns the
+            # terminal label — its specific failure (EV floor, basis, daily
+            # cap) is the honest reason the late window stayed closed,
+            # checked before the generic economics labels.  A probe pass
+            # (block None) falls through to the ordinary labels unchanged.
+            if late_price_applies_s and late_block_s is not None:
+                return late_block_s
             # 2026-09-30: economics first — a side that never had positive
             # executable EV is an EV rejection, not an evidence-policy block.
             # Evidence only owns the terminal code when the economics cleared.
@@ -7540,6 +7638,8 @@ def _compute_trade_decision_impl(
             drift_block_s=_yes_drift_block,
             rev_match_s=bool(_yes_rev_match),
             rev_block_s=_yes_rev_block,
+            late_price_applies_s=_yes_late_price,
+            late_block_s=_yes_late_block,
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -7566,6 +7666,8 @@ def _compute_trade_decision_impl(
             cheap_block_s=_no_cheap_block,
             rev_match_s=bool(_no_rev_match),
             rev_block_s=_no_rev_block,
+            late_price_applies_s=_no_late_price,
+            late_block_s=_no_late_block,
         ),
     })
 
@@ -8873,6 +8975,35 @@ def _compute_trade_decision_impl(
         if _sel_rev and not indicators.get("decision_lane"):
             indicators["decision_lane"] = "reversal_scalp"
             indicators["entry_lane"] = "reversal_scalp"
+
+        # 2026-11-13 (late-edge probe): the TTE-floor exception lane stamps
+        # after every lane owner — cell/lane identities keep precedence and
+        # the probe owns only the residual late-window admission its floor
+        # exemption let through.  Bounded post-only sizing applies via
+        # BOUNDED_POST_ONLY_LANES; the daily emission budget is consumed
+        # in agent_grid at the same consume-then-suppress discipline as
+        # pinned_fav/window_quota.
+        _sel_late_px = (
+            (float(yes_price_cents) if yes_price_cents else None)
+            if selected_outcome == "yes"
+            else (float(no_price_cents) if no_price_cents else None)
+        )
+        if (
+            _dr.late_edge_probe_admits(
+                side_price_cents=_sel_late_px,
+                tte_seconds=(
+                    float(seconds_to_expiry)
+                    if seconds_to_expiry is not None
+                    else None
+                ),
+                side=selected_outcome,
+                asset=asset,
+                entry_price_basis=entry_price_basis,
+            )
+            and not indicators.get("decision_lane")
+        ):
+            indicators["decision_lane"] = "late_edge_probe"
+            indicators["entry_lane"] = "late_edge_probe"
 
         # Generic evidence escape lane: a pass resting on sparse/pooled cell
         # evidence is admissible only as a bounded post-only canary entry —
