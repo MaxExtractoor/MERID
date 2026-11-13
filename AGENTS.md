@@ -1048,3 +1048,20 @@ Extractor/report scripts: `scripts/extract_first_entries.py`,
   activity is opportunity-bound, not gate-bound. The path to more fills is
   new alpha (e.g. lead-lag shadow lane, `MERID_LEAD_LAG_SHADOW_LANE_DESIGN_2026-11-12.md`)
   or exit-capture improvement on admitted trades, not looser gates.
+
+### 2026-11-13 `late_taker_ioc` lane (bounded taker rescue)
+
+New production sub-lane in `drift_lane.py` + `trade_decision.py` +
+`agent_grid_15m.py`, armed by `MERID_LATE_TAKER_LANE_ENABLED=1` in `.env`
+(code default off).  Domain: ask-priced (taker) evaluations only,
+ETH+NO by default, own-side ask 50-59.99c, TTE 120-240s, claimed net EV
+>= +1c lane floor, 1-contract bounded sizing, per-ticker 1 / daily 24
+durable caps (`data/drift_lane_state.json` lane record
+`late_taker_ioc`), IOC taker cross allowed for probe-restricted
+emissions (`MERID_LATE_TAKER_IOC_CROSS`, default on).  Evidence:
+`logs/late_taker_shadow.jsonl` fee_inclusive_edge>0 cohort joined to
+settlement — ETH NO 50-59c settled +4.57c mean (n~89, 60% win) with
++4.69c mean markout; all other asset/side cells settled negative, so
+scope stays ETH+NO until equivalent evidence exists.  Verification:
+`tests/test_late_taker_lane.py` (11 tests) +
+`tests/test_evidence_lane_floor_probes.py`.
