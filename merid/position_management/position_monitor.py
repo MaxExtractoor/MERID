@@ -310,15 +310,32 @@ def _rollback_unfilled_partial_flags(position: "Position", exit_reason) -> None:
     re-trim and falsely arms the residual-runner floor.  Rolling back on
     no-emission keeps the flags honest: they mean "a partial exit was
     attempted AND allowed to reach the venue", never "a candidate once won".
+
+    The durable record is cleared too: ``PositionExitStateStore.save`` merges
+    sticky-true fields from the previous record, so an in-memory-only clear
+    would be resurrected on the next save/restore.
     """
     try:
+        cleared = None
         if exit_reason == ExitReason.RATCHET_TRIM:
             position.ratchet_trimmed = False
+            cleared = "ratchet_trimmed"
         elif exit_reason == ExitReason.SCALE_OUT:
             position.scale_out_triggered = False
             position.scale_out_remaining_size = Decimal("0")
+            cleared = "scale_out_triggered"
         elif exit_reason == ExitReason.DYNAMIC_TAKE_PROFIT:
             position.dynamic_tp_triggered = False
+            cleared = "dynamic_tp_triggered"
+        if cleared is not None:
+            try:
+                from merid.position_management.position_exit_state import (
+                    get_exit_state_store,
+                )
+
+                get_exit_state_store().clear_flags(position, cleared)
+            except Exception:
+                pass
     except Exception:
         pass
 

@@ -264,8 +264,10 @@ class DatabaseSafetyBackupManager:
                 # Apply retention policies
                 await self._apply_retention_policies()
                 
-                # Save metadata
-                self._save_metadata()
+                # Save metadata — off the event loop: the full-history JSON
+                # dump is synchronous file I/O and this task shares the
+                # serving loop; a slow write must not stall trading/HTTP.
+                await asyncio.to_thread(self._save_metadata)
                 
             except Exception as e:
                 logger.error(f"Error in backup loop: {e}")

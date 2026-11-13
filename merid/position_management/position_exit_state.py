@@ -411,6 +411,45 @@ class PositionExitStateStore:
             self._last_saved_hash[key] = record_hash
         self._flush()
 
+    def clear_flags(self, position: Any, fields: Any) -> None:
+        """Durably clear named fields on a position's exit-state record.
+
+        ``save()`` treats ``_STICKY_TRUE_FIELDS`` as merge-once-true: once a
+        flag lands in the durable record, every later snapshot is forced back
+        to True.  That is correct for "a partial exit really filled" but wrong
+        for the unfilled-exit rollbacks — ``_rollback_unfilled_partial_flags``
+        and the failed-order retry path clear the live attribute after no
+        fill occurred, and without this the persisted record would resurrect
+        the flag on the next save/restore (the phantom-flag class).
+
+        Mutates the stored record directly (bypassing the sticky merge),
+        refreshes the dirty hash, and flushes.  No-op when the position has
+        no record yet.
+        """
+        try:
+            key = _record_key(position)
+            if not key:
+                return
+            names = [fields] if isinstance(fields, str) else list(fields)
+            with self._io_lock:
+                rec = self._records.get(str(key))
+                if rec is None:
+                    return
+                changed = False
+                for fname in names:
+                    if rec.get(fname):
+                        rec[fname] = False
+                        changed = True
+                if not changed:
+                    return
+                rec["updated_at"] = time.time()
+                self._last_saved_hash[str(key)] = hash(
+                    json.dumps(rec, sort_keys=True, default=str)
+                )
+            self._flush()
+        except Exception as exc:  # pragma: no cover - telemetry must not break exits
+            logger.debug("[EXIT-STATE-STORE] clear_flags failed: %s", exc)
+
     def record_floor_ratchet(
         self,
         market_id: str,

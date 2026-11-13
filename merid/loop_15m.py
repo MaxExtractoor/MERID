@@ -5589,6 +5589,24 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
             position.ratchet_trimmed = False
             position.dynamic_tp_triggered = False
             position.break_even_triggered = False
+            # 2026-11-12: durable records merge sticky-true fields, so the
+            # in-memory clear alone would be resurrected on next save/restore.
+            try:
+                from merid.position_management.position_exit_state import (
+                    get_exit_state_store,
+                )
+
+                get_exit_state_store().clear_flags(
+                    position,
+                    (
+                        "scale_out_triggered",
+                        "ratchet_trimmed",
+                        "dynamic_tp_triggered",
+                        "break_even_triggered",
+                    ),
+                )
+            except Exception:
+                pass
             # Note: trailing_profit_zone_activated is runtime state, not persisted, so it's
             # automatically reset when the position is re-added to the monitor
 
@@ -5607,6 +5625,32 @@ def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_
         else:
             # Partial exit failed: position still monitored; restore trimmed size
             position.size += contracts_to_close
+            # 2026-11-12: the trigger flag latched at candidate-win time must
+            # re-arm too — restoring size without clearing it leaves the trim
+            # permanently suppressed (same phantom-flag class as the
+            # residual-runner floor bug).  Clear only the flag matching the
+            # failed reason; flags for other partial exits that legitimately
+            # fired earlier stay latched.
+            _reason_str = (
+                exit_reason.value
+                if hasattr(exit_reason, "value")
+                else str(exit_reason)
+            )
+            _partial_flag = {
+                "scale_out": "scale_out_triggered",
+                "ratchet_trim": "ratchet_trimmed",
+                "dynamic_take_profit": "dynamic_tp_triggered",
+            }.get(str(_reason_str).lower())
+            if _partial_flag is not None:
+                setattr(position, _partial_flag, False)
+                try:
+                    from merid.position_management.position_exit_state import (
+                        get_exit_state_store,
+                    )
+
+                    get_exit_state_store().clear_flags(position, _partial_flag)
+                except Exception:
+                    pass
             logger.warning(
                 "[EXIT-ORDER-RETRY] Partial exit failed, restored size: position=%s market=%s "
                 "size=%d (+%d restored) reason=%s retry_count=%s",

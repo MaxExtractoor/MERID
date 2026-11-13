@@ -233,3 +233,36 @@ class TestDeadAttemptRelease:
         ):
             assert mon._exit_attempt_dead_release("pos-resid-0001", "exit_abc") is False
         mon._release_stale_exit_flags.assert_not_called()
+
+
+# ── durable sticky-flag clear (2026-11-12 phantom-flag resurrection fix) ────
+
+class TestClearFlagsBypassesStickyMerge:
+    def test_clear_flags_overrides_sticky_true(self, tmp_path):
+        from merid.position_management.position_exit_state import (
+            PositionExitStateStore,
+        )
+
+        store = PositionExitStateStore(path=tmp_path / "exit_state.json")
+        p = _pos(size=3.0, entry=96, baseline=Decimal("3"))
+        p.ratchet_trimmed = True
+        store.save(p)  # persists True via sticky merge
+        # Simulate the unfilled-exit rollback: live attr cleared, then a
+        # later save() must NOT resurrect the flag from the previous record.
+        p.ratchet_trimmed = False
+        store.clear_flags(p, "ratchet_trimmed")
+        store.save(p)
+        store2 = PositionExitStateStore(path=tmp_path / "exit_state.json")
+        rec = store2._records.get("KXXRP15M-26NOV091200-00|None") or next(
+            iter(store2._records.values())
+        )
+        assert rec["ratchet_trimmed"] is False
+
+    def test_clear_flags_noop_without_record(self, tmp_path):
+        from merid.position_management.position_exit_state import (
+            PositionExitStateStore,
+        )
+
+        store = PositionExitStateStore(path=tmp_path / "exit_state.json")
+        p = _pos()
+        store.clear_flags(p, "ratchet_trimmed")  # must not raise
