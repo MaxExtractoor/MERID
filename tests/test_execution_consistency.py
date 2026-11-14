@@ -131,12 +131,73 @@ def test_post_only_taker_fill_is_violation():
     assert "post_only_taker_fill" in rows[0]["violations"]
 
 
-def test_tier_a_with_archive_window():
+def _cov(open_s=900.0, close_s=2000.0, state="closed", gaps="[]",
+         first_snap_ns=899e9, last_evt_ns=2000e9, snap_count=3,
+         delta_count=100):
+    return {
+        "open_s": open_s, "close_s": close_s, "state": state,
+        "gap_times_ns": ec._parse_gap_times(gaps),
+        "first_snap_ns": first_snap_ns, "last_evt_ns": last_evt_ns,
+        "snapshot_count": snap_count, "delta_count": delta_count,
+        "pre_snapshot_deltas": 0, "source_db": "test.db",
+    }
+
+
+def test_tier_a_with_reconstructable_book():
     att = _attempt(exchange_order_id="ord1")
-    arch = {"KXXRP15M-26NOV130630-30": [(900.0, 2000.0)]}
+    arch = {"KXXRP15M-26NOV130630-30": [_cov()]}
     rows = _run([_fill(ts=1000.0)], {"coid1": att}, arch=arch)
     assert rows[0]["tier"] == "A"
+    assert rows[0]["book_evidence"] == "reconstructable"
     assert rows[0]["verdict"] == "event_replay_comparison"
+
+
+def test_tier_a_rejected_when_snapshot_after_episode_start():
+    """Book state at fill time is unknown if first snapshot is late."""
+    att = _attempt(exchange_order_id="ord1")
+    arch = {"KXXRP15M-26NOV130630-30": [
+        _cov(first_snap_ns=1005e9)]}  # snapshot 5s after first fill
+    rows = _run([_fill(ts=1000.0)], {"coid1": att}, arch=arch)
+    assert rows[0]["tier"] != "A"
+    assert rows[0]["book_evidence"] == "no_snapshot_before_episode"
+
+
+def test_tier_a_rejected_on_gapped_state():
+    att = _attempt(exchange_order_id="ord1")
+    arch = {"KXXRP15M-26NOV130630-30": [_cov(state="gapped")]}
+    rows = _run([_fill(ts=1000.0)], {"coid1": att}, arch=arch)
+    assert rows[0]["tier"] != "A"
+    assert rows[0]["book_evidence"] == "state_gapped"
+
+
+def test_tier_a_rejected_on_gap_inside_episode():
+    att = _attempt(exchange_order_id="ord1")
+    # detected_utc_ns values are stored as float nanoseconds in the column;
+    # the parser takes them verbatim.  1000.5e9 ns = 1000.5 s -> inside
+    # the episode window [t0-120s, t1+5s].
+    gaps = '[{"detected_utc_ns": 1000500000000}]'
+    arch = {"KXXRP15M-26NOV130630-30": [_cov(gaps=gaps)]}
+    rows = _run([_fill(ts=1000.0)], {"coid1": att}, arch=arch)
+    assert rows[0]["tier"] != "A"
+    assert rows[0]["book_evidence"] == "gap_in_episode_window"
+
+
+def test_tier_a_allows_gap_long_before_episode():
+    """A gap >120s before episode start is assumed resynced by snapshot."""
+    att = _attempt(exchange_order_id="ord1")
+    gaps = '[{"detected_utc_ns": 800000000000}]'  # 200s before t0=1000
+    arch = {"KXXRP15M-26NOV130630-30": [_cov(gaps=gaps)]}
+    rows = _run([_fill(ts=1000.0)], {"coid1": att}, arch=arch)
+    assert rows[0]["tier"] == "A"
+
+
+def test_parse_gap_times_handles_bad_input():
+    assert ec._parse_gap_times(None) == []
+    assert ec._parse_gap_times("") == []
+    assert ec._parse_gap_times("not-json") == []
+    assert ec._parse_gap_times('{"a": 1}') == []
+    assert ec._parse_gap_times(
+        '[{"detected_utc_ns": 5}, {"detected_utc_ns": "x"}, {}]') == [5.0]
 
 
 def test_tier_d_no_attempt():

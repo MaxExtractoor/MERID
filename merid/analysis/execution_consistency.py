@@ -228,20 +228,98 @@ def _order_record_instruction(rec: dict):
 
 # ---------------------------------------------------------------- book tiers
 
-def archive_ticker_windows(paths: list[str]) -> dict:
-    """ticker -> list of (open_ts, close_ts) coverage windows."""
-    win = defaultdict(list)
+# A gap detected this long before the episode start is assumed resynced by
+# the archiver's periodic snapshot; inside this window the book state at
+# episode time cannot be certified reconstructable.
+_GAP_RESYNC_ALLOWANCE_S = 120.0
+
+_COV_COLS = (
+    "market_ticker, market_open_ts, market_close_ts, state, gaps,"
+    " first_snapshot_recv_utc_ns, last_event_recv_utc_ns,"
+    " snapshot_count, delta_count, pre_snapshot_deltas"
+)
+
+
+def _parse_gap_times(raw) -> list[float]:
+    """Extract detected_utc_ns values from a coverage row's gaps JSON."""
+    if not raw:
+        return []
+    try:
+        gaps = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(gaps, list):
+        return []
+    out = []
+    for g in gaps:
+        if isinstance(g, dict):
+            try:
+                out.append(float(g.get("detected_utc_ns")))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def archive_coverage_index(paths: list[str]) -> dict:
+    """ticker -> [coverage row dicts] across book-archive databases.
+
+    Each row carries the fields needed for the strict Tier-A check:
+    market window, collector state, gap detections, snapshot/delta counts,
+    and first-snapshot / last-event receive timestamps (ns).
+    """
+    idx = defaultdict(list)
     for p in paths:
         try:
             conn = _ro(p)
-            for tk, o, c in conn.execute(
-                    "SELECT market_ticker, market_open_ts, market_close_ts"
-                    " FROM archive_coverage"):
-                win[tk].append((float(o), float(c)))
+            for (tk, o, c, state, gaps, fsnap, levt, snaps, deltas,
+                 pre_d) in conn.execute(
+                    f"SELECT {_COV_COLS} FROM archive_coverage"):
+                idx[tk].append({
+                    "open_s": float(o) if o is not None else None,
+                    "close_s": float(c) if c is not None else None,
+                    "state": state,
+                    "gap_times_ns": _parse_gap_times(gaps),
+                    "first_snap_ns": float(fsnap) if fsnap else None,
+                    "last_evt_ns": float(levt) if levt else None,
+                    "snapshot_count": snaps or 0,
+                    "delta_count": deltas or 0,
+                    "pre_snapshot_deltas": pre_d or 0,
+                    "source_db": Path(p).name,
+                })
             conn.close()
         except Exception:
             continue
-    return win
+    return idx
+
+
+def _cov_row_supports_episode(row: dict, t0: float, t1: float):
+    """Strict Tier-A check: is the book reconstructable over [t0, t1]?
+
+    Requires: market window covers the episode, collector state is not
+    'gapped', a snapshot was received before episode start, events were
+    still arriving at episode end, book events exist, and no detected
+    sequence gap falls inside the episode (or within the resync allowance
+    before it).
+    """
+    o, c = row.get("open_s"), row.get("close_s")
+    if o is None or c is None or not (o - 5 <= t0 and t1 <= c + 5):
+        return False, "window_not_covering"
+    if row.get("state") == "gapped":
+        return False, "state_gapped"
+    if not row.get("snapshot_count") or not row.get("delta_count"):
+        return False, "no_book_events"
+    t0_ns, t1_ns = t0 * 1e9, t1 * 1e9
+    fsnap = row.get("first_snap_ns")
+    if not fsnap or fsnap > t0_ns + 1e9:
+        return False, "no_snapshot_before_episode"
+    levt = row.get("last_evt_ns")
+    if not levt or levt < t1_ns - 1e9:
+        return False, "coverage_ends_before_episode"
+    gap_lo = t0_ns - _GAP_RESYNC_ALLOWANCE_S * 1e9
+    gap_hi = t1_ns + 5e9
+    if any(gap_lo <= g <= gap_hi for g in row.get("gap_times_ns", [])):
+        return False, "gap_in_episode_window"
+    return True, "reconstructable"
 
 
 def load_snapshots_index(db: str, tickers: set[str],
@@ -479,8 +557,15 @@ def analyze(fills, attempts, snaps, arch_windows, order_records=None):
         # ---- tier classification ----
         t0 = fl[0]["ts"] or att.get("created_at") or 0
         t1 = fl[-1]["ts"] or t0
-        wins = arch_windows.get(ticker, [])
-        tier_a = any(o - 5 <= t0 and t1 <= c + 5 for o, c in wins)
+        tier_a = False
+        book_reason = "no_archive_coverage"
+        for cov in arch_windows.get(ticker, []):
+            ok, why = _cov_row_supports_episode(cov, t0, t1)
+            if ok:
+                tier_a = True
+                book_reason = "reconstructable"
+                break
+            book_reason = why
 
         # decision snapshot: join attempt decision_id, else nearest by ticker
         snap = None
@@ -541,6 +626,7 @@ def analyze(fills, attempts, snaps, arch_windows, order_records=None):
             "book_age_ms": snap[5] if snap else None,
             "slippage_cents_vs_decision": slip,
             "tier": tier,
+            "book_evidence": book_reason,
             "attempt_status": att.get("status"),
             "build_sha": att.get("build_sha"),
             "limit_semantics": limit_sem,
@@ -609,6 +695,9 @@ def main(argv=None) -> int:
     ap.add_argument("--book-archives", nargs="*", default=[
         "data/kalshi_book_archive.db",
         "data/kalshi_book_archive_active.db",
+        # live2's 71GB WAL makes direct reads prohibitively slow; use the
+        # extracted subset (scripts/extract_live2_books.py) instead.
+        "data/_live2_extract.db",
         "data/kalshi_book_archive_live3.db",
     ])
     ap.add_argument("--order-records", default=None,
@@ -628,7 +717,7 @@ def main(argv=None) -> int:
     dids |= {a.get("decision_id_payload") for a in attempts.values()
              if a.get("decision_id_payload")}
     snaps = load_snapshots_index(args.audit_db, tickers, dids)
-    arch = archive_ticker_windows(args.book_archives)
+    arch = archive_coverage_index(args.book_archives)
     order_records = (load_order_records(args.order_records)
                      if args.order_records else None)
 
