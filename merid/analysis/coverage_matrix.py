@@ -33,10 +33,24 @@ def _ro(p: str) -> sqlite3.Connection:
 
 
 def _asset_of(ticker: str) -> str:
+    # Require the 15M series marker so e.g. KXBTCD (BTC daily) does not
+    # classify as BTC.
     for a in ASSETS:
-        if ticker.startswith("KX" + a):
+        if ticker.startswith("KX" + a + "15M"):
             return a
     return "?"
+
+
+def _rec_asset(rec: dict) -> str:
+    """Asset for a jsonl record: trust the asset field, else parse ticker.
+
+    ~2.4k settlement_outcomes records carry no usable ``asset`` field but
+    have canonical KX{ASSET}15M- tickers — bucket by ticker, not "?".
+    """
+    a = (rec.get("asset") or "").upper()
+    if a in ASSETS:
+        return a
+    return _asset_of(rec.get("ticker") or rec.get("series_ticker") or "")
 
 
 def _iter_jsonl(path: Path):
@@ -59,7 +73,7 @@ def collect() -> dict:
     # --- boundary resolution ---
     bsrc, bver = Counter(), Counter()
     for r in _iter_jsonl(REPO / "data/contract_boundaries_v1.jsonl"):
-        a = (r.get("asset") or "?").upper()
+        a = _rec_asset(r)
         if a in ASSETS or a == "?":
             bsrc[(a, r.get("boundary_source"))] += 1
             bver[(a, r.get("verification_status"))] += 1
@@ -74,7 +88,7 @@ def collect() -> dict:
     sout = Counter()
     for r in _iter_jsonl(REPO / "logs/settlement_outcomes.jsonl"):
         if r.get("event_type") == "settlement_outcome":
-            a = (r.get("asset") or "?").upper()
+            a = _rec_asset(r)
             if a in ASSETS or a == "?":
                 sout[a] += 1
     for a in ASSETS + ["?"]:
@@ -172,7 +186,7 @@ def collect() -> dict:
     aunits = Counter()
     for r in _iter_jsonl(REPO / "reports/pop_authoritative_2026-11-14.jsonl"):
         if r.get("record_type") == "unit":
-            a = (r.get("asset") or "?").upper()
+            a = _rec_asset(r)
             if a in ASSETS:
                 aunits[a] += 1
     for a in ASSETS + ["?"]:
