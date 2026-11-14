@@ -47,10 +47,18 @@ describe('isSessionScopedPath', () => {
     expect(isSessionScopedPath('/api/v1/kalshi-grid/decision-feed?limit=60')).toBe(false);
   });
 
+  it('scopes live-runtime-state routes (halt/release/recover require a session)', () => {
+    expect(isSessionScopedPath('/api/v1/live-runtime-state/')).toBe(true);
+    expect(isSessionScopedPath('/api/v1/live-runtime-state/halt')).toBe(true);
+    expect(isSessionScopedPath('/api/v1/live-runtime-state/release')).toBe(true);
+    expect(isSessionScopedPath('/api/v1/live-runtime-state/recover')).toBe(true);
+    expect(isSessionScopedPath('/api/v1/live-runtime-stateX')).toBe(false);
+  });
+
   it('does not scope look-alike prefixes or other routers', () => {
     expect(isSessionScopedPath('/api/v1/kalshix/y')).toBe(false);
     expect(isSessionScopedPath('/api/v1/agents')).toBe(false);
-    expect(isSessionScopedPath('/api/v1/live-runtime-state/')).toBe(false);
+    expect(isSessionScopedPath('/api/v1/kalshi-grid/agents')).toBe(false);
   });
 });
 

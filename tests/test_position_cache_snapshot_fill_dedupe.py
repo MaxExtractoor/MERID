@@ -87,6 +87,7 @@ def _fill(fill_id, *, created_time, side="yes", action="buy", qty_cc=100,
         is_exit=is_exit,
         unmatched=False,
         is_live=True,
+        canonicalization_state="TRUSTED_LIVE_V1",
         agent_id="BTC_15M",
         exchange_index=2,
         proceeds_dollars=None,
@@ -298,9 +299,16 @@ def test_fill_first_then_snapshot_remains_consistent(tmp_path, monkeypatch):
     assert _yes_exposure(cache) == 100
 
 
-def test_partial_fill_then_remaining_canonical_still_applies(tmp_path, monkeypatch):
-    """Two distinct fills for the same market: the one predating the snapshot
-    is covered; a second (post-snapshot) partial must still apply."""
+def test_partial_fill_covered_by_snapshot_does_not_double_apply(tmp_path, monkeypatch):
+    """Two distinct fills for the same market where the REST snapshot already
+    contains BOTH: the covered fill must not apply its delta a second time.
+
+    2026-11-14 incident (KXBTC15M-26NOV132030-30): the venue stamps fill
+    created_time at record finalization, which can postdate the REST position
+    snapshot that already contains the fill — fill 01:21:33 vs snapshot
+    01:21:23.877 already showing +300cc -> cache=600 vs exchange=300 ->
+    fills_reconciliation_failed halt.  Quantity evidence now proves coverage
+    where the timestamp cannot."""
     cache = _cache(tmp_path, monkeypatch)
 
     part1 = _fill("fill-p1", created_time=T0, qty_cc=50)
@@ -310,17 +318,163 @@ def test_partial_fill_then_remaining_canonical_still_applies(tmp_path, monkeypat
     cache._fills_ledger = ledger
 
     asyncio.run(cache.sync_from_rest(
-        positions=[_rest_position(contracts=1)],   # exchange shows 1 (p1+p2 executed; p2's created_time is post-snapshot though)
+        positions=[_rest_position(contracts=1)],   # exchange shows 1 = p1+p2
         rest_timestamp=SNAP_TS,
     ))
     assert _yes_exposure(cache) == 100
     assert "fill-p1" in cache._applied_fill_ids
 
-    # p2's exchange created_time is AFTER the snapshot -> not covered -> applies.
-    # (This is the edge where snapshot qty may already include it; the
-    # reconciler owns that residual — the guard must not block it.)
+    # p2's created_time is post-snapshot, but the snapshot quantity already
+    # contains its delta — applying it would double-count.
     asyncio.run(_on_fill(cache, fill_id="fill-p2", contracts=0.5))
+    assert _yes_exposure(cache) == 100
+    assert "fill-p2" in cache._applied_fill_ids
+
+
+def test_post_snapshot_fill_outside_snapshot_still_applies(tmp_path, monkeypatch):
+    """A fill genuinely absent from the REST snapshot (exchange showed only
+    part1) must still apply — coverage classification must not suppress real
+    exposure."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    part1 = _fill("fill-p1", created_time=T0, qty_cc=50)
+    part2 = _fill("fill-p2", created_time=T0 + timedelta(seconds=60), qty_cc=50)
+    ledger = _ledger(part1)
+    ledger.get_fill_by_id.side_effect = lambda fid: {"fill-p1": part1, "fill-p2": part2}.get(fid)
+    cache._fills_ledger = ledger
+
+    asyncio.run(cache.sync_from_rest(
+        positions=[_rest_position(contracts=0.5)],  # snapshot has only p1
+        rest_timestamp=SNAP_TS,
+    ))
+    assert _yes_exposure(cache) == 50
+
+    asyncio.run(_on_fill(cache, fill_id="fill-p2", contracts=0.5))
+    assert _yes_exposure(cache) == 100
+    assert "fill-p2" in cache._applied_fill_ids
+
+
+def test_fill_created_after_snapshot_but_covered_by_quantity(tmp_path, monkeypatch):
+    """Exact 2026-11-14 incident shape: fill created_time postdates the REST
+    snapshot, the snapshot already contains the position, and the ledger only
+    learns the fill when the delayed event arrives.  The quantity classifier
+    must prove coverage and skip the delta."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    # Ledger is empty at sync time; the fill record materializes afterwards.
+    ledger_fills = []
+    entry = _fill("fill-incident-1", created_time=T0 + timedelta(seconds=50), qty_cc=300)
+    ledger = Mock()
+    ledger.get_fill_by_id.side_effect = lambda fid: (
+        {"fill-incident-1": entry} if ledger_fills else {}
+    ).get(fid)
+    ledger.get_fills_by_market.side_effect = lambda _m, **kw: list(ledger_fills)
+    ledger.get_fills.side_effect = lambda **kw: list(ledger_fills)
+    cache._fills_ledger = ledger
+
+    # Snapshot already shows the full 3-contract position.
+    asyncio.run(cache.sync_from_rest(
+        positions=[_rest_position(contracts=3)],
+        rest_timestamp=SNAP_TS,
+    ))
+    assert _yes_exposure(cache) == 300
+
+    # The fill record lands in the ledger, then the delayed canonical event
+    # arrives — created_time (T0+50) is AFTER the snapshot (T0+22), so the
+    # timestamp guard cannot help; quantity evidence must.
+    ledger_fills.append(entry)
+    asyncio.run(_on_fill(cache, fill_id="fill-incident-1", contracts=3))
+    assert _yes_exposure(cache) == 300, "snapshot-covered fill double-applied"
+    assert "fill-incident-1" in cache._applied_fill_ids
+
+
+def test_ambiguous_coverage_fails_closed_to_rest_reconciliation(tmp_path, monkeypatch):
+    """When ledger evidence can prove neither 'covered' nor 'new', the fill
+    must not mutate position state — the cache quarantines to REST
+    reconciliation instead of guessing."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    # Ledger is empty at sync time (snapshot-only position); the fill record
+    # materializes when the delayed event arrives.
+    ledger_fills = []
+    f2 = _fill("fill-a2", created_time=T0 + timedelta(seconds=60), qty_cc=100)
+    ledger = Mock()
+    ledger.get_fill_by_id.side_effect = lambda fid: (
+        {"fill-a2": f2} if ledger_fills else {}
+    ).get(fid)
+    ledger.get_fills_by_market.side_effect = lambda _m, **kw: list(ledger_fills)
+    ledger.get_fills.side_effect = lambda **kw: list(ledger_fills)
+    cache._fills_ledger = ledger
+
+    # Snapshot shows 1.5 contracts — consistent with neither hypothesis:
+    # 'covered' implies 1.0 (just this fill), 'new' implies 0.0.
+    asyncio.run(cache.sync_from_rest(
+        positions=[_rest_position(contracts=1.5)],
+        rest_timestamp=SNAP_TS,
+    ))
     assert _yes_exposure(cache) == 150
+
+    ledger_fills.append(f2)
+    cache.require_rest_reconciliation = Mock()
+    asyncio.run(_on_fill(cache, fill_id="fill-a2"))
+    assert _yes_exposure(cache) == 150, "ambiguous fill mutated exposure"
+    assert "fill-a2" not in cache._applied_fill_ids
+    cache.require_rest_reconciliation.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 6. stop_candidate exits must apply (position-reducing fills are never
+#    external-trade-skipped).  2026-11-14 incident: the 1-contract
+#    stop_candidate exit was skipped as 'external', leaving cache=100 vs
+#    exchange=0 -> fills_reconciliation_failed halt.
+# ---------------------------------------------------------------------------
+
+def test_stop_candidate_exit_fill_applies_to_position(tmp_path, monkeypatch):
+    cache = _cache(tmp_path, monkeypatch)
+
+    entry = _fill("fill-se-1", created_time=T0, qty_cc=300)
+    cache._fills_ledger = _ledger(entry)
+    asyncio.run(_on_fill(cache, fill_id="fill-se-1", contracts=3))
+    assert _yes_exposure(cache) == 300
+
+    # Internal arbiter exit carries agent_id='stop_candidate' — not a _15M
+    # agent and != position agent — but it reduces the position and MUST apply.
+    exit_fill = _fill(
+        "fill-se-x", created_time=T0 + timedelta(seconds=30),
+        action="sell", is_exit=True, qty_cc=100,
+    )
+    exit_fill.agent_id = "stop_candidate"
+    ledger = _ledger(entry, exit_fill)
+    ledger.get_fill_by_id.side_effect = lambda fid: {
+        "fill-se-1": entry, "fill-se-x": exit_fill,
+    }.get(fid)
+    cache._fills_ledger = ledger
+
+    asyncio.run(_on_fill(cache, fill_id="fill-se-x", action="sell", contracts=1))
+    assert _yes_exposure(cache) == 200, "stop_candidate exit was skipped as external"
+
+
+def test_external_entry_fill_still_skipped_and_recorded(tmp_path, monkeypatch):
+    """Guard against over-correction: a non-_15M ENTRY fill (genuinely
+    external, position-increasing) must still be skipped."""
+    cache = _cache(tmp_path, monkeypatch)
+
+    entry = _fill("fill-ee-1", created_time=T0, qty_cc=100)
+    cache._fills_ledger = _ledger(entry)
+    asyncio.run(_on_fill(cache, fill_id="fill-ee-1"))
+    assert _yes_exposure(cache) == 100
+
+    ext = _fill("fill-ee-x", created_time=T0 + timedelta(seconds=10), qty_cc=50)
+    ext.agent_id = "some_other_agent"
+    ext.is_exit = False
+    ledger = _ledger(entry, ext)
+    ledger.get_fill_by_id.side_effect = lambda fid: {
+        "fill-ee-1": entry, "fill-ee-x": ext,
+    }.get(fid)
+    cache._fills_ledger = ledger
+
+    asyncio.run(_on_fill(cache, fill_id="fill-ee-x", contracts=0.5))
+    assert _yes_exposure(cache) == 100, "external entry fill mutated position"
 
 
 # ---------------------------------------------------------------------------

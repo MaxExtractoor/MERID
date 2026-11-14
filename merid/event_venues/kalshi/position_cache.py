@@ -669,6 +669,68 @@ def _fill_created_time_dt(fill_record: Any) -> Optional[datetime]:
     return None
 
 
+_UNTRUSTED_FILL_STATES = frozenset(
+    {"UNTRUSTED_LEGACY", "UNTRUSTED_RAW", "UNTRUSTED_SIDE_CONFLICT"}
+)
+
+
+def _trusted_fill_yes_delta_cc(fill: Any) -> Optional[int]:
+    """Signed-YES centi-contract delta for a ledger fill the cache may track.
+
+    Returns ``None`` for fills that are untrusted, quarantined, derived, or
+    whose canonical direction/quantity cannot be proven — the same exclusion
+    semantics ``on_fill`` and ``fills_ledger._compute_position_from_fill_ids``
+    apply before a fill may mutate live position state.
+    """
+    if fill is None:
+        return None
+    state = getattr(fill, "canonicalization_state", None)
+    if state is None or state in _UNTRUSTED_FILL_STATES:
+        return None
+    if getattr(fill, "unmatched", False) or getattr(fill, "derived_id", False):
+        return None
+    delta = getattr(fill, "canonical_yes_delta_cc", None)
+    if isinstance(delta, int) and not isinstance(delta, bool):
+        return delta
+    action = (
+        getattr(fill, "canonical_position_action", None)
+        or getattr(fill, "action", None)
+        or ""
+    ).lower()
+    side = (
+        getattr(fill, "canonical_position_side", None)
+        or getattr(fill, "side", None)
+        or ""
+    ).lower()
+    if action not in ("buy", "sell") or side not in ("yes", "no"):
+        return None
+    qty_cc = getattr(fill, "quantity_cc", None)
+    if not qty_cc:
+        count_fp = getattr(fill, "count_fp", None)
+        if count_fp is None:
+            return None
+        try:
+            qty_cc = int(Decimal(str(count_fp)) * Decimal("100"))
+        except Exception:
+            return None
+    try:
+        qty_cc = int(qty_cc)
+    except Exception:
+        return None
+    if qty_cc <= 0:
+        return None
+    if BINARY_PRICE_SPACE_AVAILABLE:
+        try:
+            return int(yes_delta(action, side, qty_cc))
+        except Exception:
+            return None
+    if (action, side) in {("buy", "yes"), ("sell", "no")}:
+        return qty_cc
+    if (action, side) in {("sell", "yes"), ("buy", "no")}:
+        return -qty_cc
+    return None
+
+
 def _get_market_price_fallback(ticker: str) -> int:
     """Get market price from KalshiMarketStateStore as fallback for avg_price_cents.
 
@@ -1656,6 +1718,125 @@ class KalshiPositionCache:
         if not pos:
             return 0
         return pos._yes_exposure()
+
+    def _trusted_market_fill_deltas(self, market_id: str):
+        """Return ``[(fill_id, signed_yes_delta_cc), ...]`` for trusted ledger
+        fills on ``market_id``, or ``None`` when the ledger is unavailable."""
+        ledger = self._get_fills_ledger()
+        if ledger is None:
+            return None
+        try:
+            fills = ledger.get_fills_by_market(market_id) or []
+        except Exception:
+            return None
+        out = []
+        for f in fills:
+            fid = getattr(f, "fill_id", None)
+            d = _trusted_fill_yes_delta_cc(f)
+            if fid and d is not None:
+                out.append((fid, d))
+        return out
+
+    def _classify_fill_coverage(
+        self,
+        market_id: str,
+        fill_id: str,
+        fill_delta_cc: int,
+        pre_position_yes: int,
+    ) -> str:
+        """Classify whether ``fill_id``'s delta is already inside the cache.
+
+        The venue stamps ``created_time`` at fill-record finalization, which can
+        postdate the REST position snapshot that already contains the fill
+        (observed live 2026-11-14: fill created_time 01:21:33 vs snapshot
+        01:21:23.877 that already showed the +300cc position).  Timestamp
+        comparison cannot prove coverage in that direction, so fall back to
+        quantity evidence: every trusted ledger fill for the market is either
+        reflected in ``pre_position_yes`` or still pending.  Returns:
+
+        - ``"covered"`` — the position already contains this fill's delta
+          (e.g. a REST snapshot absorbed it); applying it again would
+          double-count.
+        - ``"new"``     — the delta is genuinely missing; apply normally.
+        - ``"ambiguous"`` — ledger evidence cannot prove either; the caller
+          must fail closed to REST reconciliation rather than guess.
+        - ``"unknown"`` — ledger data unavailable; preserve legacy behavior.
+        """
+        if not fill_delta_cc:
+            return "unknown"
+        pairs = self._trusted_market_fill_deltas(market_id)
+        if pairs is None:
+            return "unknown"
+        net = 0
+        others = 0
+        seen_current = False
+        for fid, d in pairs:
+            net += d
+            if fid == fill_id:
+                seen_current = True
+                continue
+            if fid not in self._applied_fill_ids:
+                others += d
+        if not seen_current:
+            # The market index can lag the fill record; the current fill is
+            # still a ledger fill for coverage purposes.
+            net += fill_delta_cc
+        expected_if_covered = net - others
+        expected_if_new = expected_if_covered - fill_delta_cc
+        if pre_position_yes == expected_if_covered:
+            return "covered"
+        if pre_position_yes == expected_if_new:
+            return "new"
+        return "ambiguous"
+
+    def _mark_snapshot_covered_fills_by_quantity(
+        self, market_id: str, pos_yes: int
+    ) -> int:
+        """Mark unapplied ledger fills proven inside a REST position snapshot.
+
+        ``residual = ledger_net - snapshot`` equals the summed delta of fills
+        executed after the snapshot response.  When the residual is zero every
+        pending fill is inside; otherwise each pending fill is tested by exact
+        equality — removing its delta must leave the residual consistent.
+        Mixed subsets resolve greedily; anything unproven stays pending for
+        the ``on_fill`` coverage classifier.
+        """
+        pairs = self._trusted_market_fill_deltas(market_id)
+        if pairs is None:
+            return 0
+        net = sum(d for _, d in pairs)
+        residual = net - pos_yes
+        pending = [
+            (fid, d) for fid, d in pairs if fid not in self._applied_fill_ids
+        ]
+        if not pending:
+            return 0
+        marked = 0
+        if residual == 0:
+            for fid, _d in pending:
+                self._applied_fill_ids[fid] = replay_time()
+                marked += 1
+        else:
+            changed = True
+            while changed:
+                changed = False
+                cur = sum(d for _, d in pending)
+                for fid, d in list(pending):
+                    if cur - d == residual:
+                        self._applied_fill_ids[fid] = replay_time()
+                        pending.remove((fid, d))
+                        marked += 1
+                        changed = True
+                        break
+        if marked:
+            self._save_applied_fill_ids()
+            logger.info(
+                "[POSITION-CACHE-REST-COVERAGE-QTY] market=%s marked %d fill(s) "
+                "applied by quantity proof (snapshot_yes=%s ledger_net=%s "
+                "residual=%s)",
+                market_id, marked, pos_yes, net, residual,
+            )
+        return marked
 
     def _emit_exposure_reconciliation(
         self,
@@ -2768,9 +2949,10 @@ class KalshiPositionCache:
             # The fill is still marked applied and its provenance is migrated
             # onto the position (the snapshot cannot carry fill linkage).
             if pre_position is not None and fill_id:
+                _snapshot_covers_fill = False
+                _cover_rec = fill_record
                 _pos_rest_ts = getattr(pre_position, "rest_synced_at", None)
                 if _pos_rest_ts is not None:
-                    _cover_rec = fill_record
                     if _cover_rec is None:
                         try:
                             _cover_ledger = self._get_fills_ledger()
@@ -2782,6 +2964,7 @@ class KalshiPositionCache:
                             _cover_rec = None
                     _fill_ct = _fill_created_time_dt(_cover_rec)
                     if _fill_ct is not None and _fill_ct <= _pos_rest_ts:
+                        _snapshot_covers_fill = True
                         logger.warning(
                             "[POSITION-CACHE-FILL-COVERED-BY-REST] fill_id=%s market=%s "
                             "fill_created=%s <= rest_synced_at=%s - snapshot already contains "
@@ -2789,42 +2972,77 @@ class KalshiPositionCache:
                             fill_id, market_id, _fill_ct.isoformat(), _pos_rest_ts.isoformat(),
                             pre_position_yes, fill_yes_delta,
                         )
-                        self._applied_fill_ids[fill_id] = replay_time()
-                        self._save_applied_fill_ids()
-                        # Migrate entry provenance the snapshot could not carry.
-                        # Only when the fill opens the currently-held side and
-                        # the record lacks linkage — never overwrite existing
-                        # provenance, never stamp an exit fill as the entry.
-                        _pos_yes = pre_position._yes_exposure()
-                        _opens_held_side = (
-                            _pos_yes != 0
-                            and fill_yes_delta != 0
-                            and (fill_yes_delta > 0) == (_pos_yes > 0)
+
+                if not _snapshot_covers_fill:
+                    # 2026-11-14: quantity-based coverage.  The venue stamps
+                    # ``created_time`` at fill-record finalization, which can
+                    # postdate the REST snapshot that already contains the
+                    # position — the timestamp test above cannot see that
+                    # direction (observed live: fill created_time 01:21:33 vs
+                    # snapshot 01:21:23.877 already showing +300cc -> cache=600
+                    # vs exchange=300 -> fills_reconciliation_failed halt).
+                    _qty_state = self._classify_fill_coverage(
+                        market_id, fill_id, fill_yes_delta, pre_position_yes,
+                    )
+                    if _qty_state == "covered":
+                        _snapshot_covers_fill = True
+                        logger.warning(
+                            "[POSITION-CACHE-FILL-COVERED-BY-QTY] fill_id=%s market=%s "
+                            "pre_yes=%s ledger_net implies coverage - skipping delta "
+                            "(would-be delta=%s)",
+                            fill_id, market_id, pre_position_yes, fill_yes_delta,
                         )
-                        if _opens_held_side:
-                            if not pre_position.entry_fill_id or pre_position.entry_fill_id == "unknown":
-                                pre_position.entry_fill_id = fill_id
-                            _coid = client_order_id or getattr(_cover_rec, "client_order_id", None)
-                            if _coid and not pre_position.client_order_id:
-                                pre_position.client_order_id = _coid
-                            _forder = getattr(_cover_rec, "order_id", None)
-                            if _forder and not pre_position.entry_order_id:
-                                pre_position.entry_order_id = _forder
-                            _fintent = getattr(_cover_rec, "intent_id", None)
-                            if _fintent and not pre_position.entry_intent_id:
-                                pre_position.entry_intent_id = _fintent
-                            # 2026-10-28: the snapshot that covered this fill
-                            # also left the position without its authorized
-                            # net claim — restore the risk contract from the
-                            # decision audit so the no-edge tail-loss salvage
-                            # can engage (same gap the sync coverage path
-                            # repairs via _backfill_entry_risk_contract).
-                            _backfill_entry_risk_contract(
-                                pre_position,
-                                [_cover_rec] if _cover_rec is not None else [],
-                                _pos_yes,
-                            )
+                    elif _qty_state == "ambiguous":
+                        self.require_rest_reconciliation(
+                            market_id,
+                            reason="fill_coverage_ambiguous",
+                        )
+                        logger.critical(
+                            "[POSITION-CACHE-FILL-COVERAGE-AMBIGUOUS] fill_id=%s market=%s "
+                            "pre_yes=%s delta=%s - ledger evidence cannot prove the fill "
+                            "is inside or outside the position state; quarantining to "
+                            "REST reconciliation instead of guessing.",
+                            fill_id, market_id, pre_position_yes, fill_yes_delta,
+                        )
                         return
+
+                if _snapshot_covers_fill:
+                    self._applied_fill_ids[fill_id] = replay_time()
+                    self._save_applied_fill_ids()
+                    # Migrate entry provenance the snapshot could not carry.
+                    # Only when the fill opens the currently-held side and
+                    # the record lacks linkage — never overwrite existing
+                    # provenance, never stamp an exit fill as the entry.
+                    _pos_yes = pre_position._yes_exposure()
+                    _opens_held_side = (
+                        _pos_yes != 0
+                        and fill_yes_delta != 0
+                        and (fill_yes_delta > 0) == (_pos_yes > 0)
+                    )
+                    if _opens_held_side:
+                        if not pre_position.entry_fill_id or pre_position.entry_fill_id == "unknown":
+                            pre_position.entry_fill_id = fill_id
+                        _coid = client_order_id or getattr(_cover_rec, "client_order_id", None)
+                        if _coid and not pre_position.client_order_id:
+                            pre_position.client_order_id = _coid
+                        _forder = getattr(_cover_rec, "order_id", None)
+                        if _forder and not pre_position.entry_order_id:
+                            pre_position.entry_order_id = _forder
+                        _fintent = getattr(_cover_rec, "intent_id", None)
+                        if _fintent and not pre_position.entry_intent_id:
+                            pre_position.entry_intent_id = _fintent
+                        # 2026-10-28: the snapshot that covered this fill
+                        # also left the position without its authorized
+                        # net claim — restore the risk contract from the
+                        # decision audit so the no-edge tail-loss salvage
+                        # can engage (same gap the sync coverage path
+                        # repairs via _backfill_entry_risk_contract).
+                        _backfill_entry_risk_contract(
+                            pre_position,
+                            [_cover_rec] if _cover_rec is not None else [],
+                            _pos_yes,
+                        )
+                    return
 
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
@@ -3104,24 +3322,44 @@ class KalshiPositionCache:
                 # 15m agents are: BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M
                 is_15m_agent = fill_agent_id.endswith('_15M')
                 if not is_15m_agent or (position_agent_id and fill_agent_id != position_agent_id):
-                    # Record external trade in monitor
-                    try:
-                        from merid.event_venues.kalshi.thesis_side_monitor import get_thesis_side_monitor
-                        monitor = get_thesis_side_monitor()
-                        monitor.record_external_trade(
-                            market_id=market_id,
-                            fill_agent_id=fill_agent_id,
-                            position_agent_id=position_agent_id,
-                            fill_id=fill_id
+                    # 2026-11-14: position-reducing fills must always apply.
+                    # Internal exit machinery (stop_candidate arbiter exits)
+                    # carries agent_id='stop_candidate' — skipping it left the
+                    # cache holding phantom exposure vs the exchange
+                    # (observed live: exchange=0 cache=100 ->
+                    # fills_reconciliation_failed halt on KXBTC15M-26NOV132030-30).
+                    _fill_reduces_position = (
+                        bool(is_exit)
+                        or getattr(fill_record, "is_exit", None) is True
+                        or str(getattr(fill_record, "entry_or_exit", "") or "").lower() == "exit"
+                        or getattr(fill_record, "reduce_only", None) is True
+                    )
+                    if _fill_reduces_position:
+                        logger.info(
+                            "[POSITION-CACHE-EXTERNAL-EXIT-APPLIED] market=%s "
+                            "fill_agent_id=%s position_agent_id=%s fill_id=%s - "
+                            "applying position-reducing fill from exit path",
+                            market_id, fill_agent_id, position_agent_id, fill_id,
                         )
-                        # Skip processing external fills - don't attach to 15m position
-                        logger.warning(
-                            "[POSITION-CACHE-EXTERNAL-TRADE] Skipping external fill: market=%s fill_agent_id=%s position_agent_id=%s fill_id=%s",
-                            market_id, fill_agent_id, position_agent_id, fill_id
-                        )
-                        return
-                    except Exception as monitor_err:
-                        logger.debug("[POSITION-CACHE] Could not record external trade in monitor: %s", monitor_err)
+                    else:
+                        # Record external trade in monitor
+                        try:
+                            from merid.event_venues.kalshi.thesis_side_monitor import get_thesis_side_monitor
+                            monitor = get_thesis_side_monitor()
+                            monitor.record_external_trade(
+                                market_id=market_id,
+                                fill_agent_id=fill_agent_id,
+                                position_agent_id=position_agent_id,
+                                fill_id=fill_id
+                            )
+                            # Skip processing external fills - don't attach to 15m position
+                            logger.warning(
+                                "[POSITION-CACHE-EXTERNAL-TRADE] Skipping external fill: market=%s fill_agent_id=%s position_agent_id=%s fill_id=%s",
+                                market_id, fill_agent_id, position_agent_id, fill_id
+                            )
+                            return
+                        except Exception as monitor_err:
+                            logger.debug("[POSITION-CACHE] Could not record external trade in monitor: %s", monitor_err)
 
             # Log fill with linkage to order submission and position
             logger.info(
@@ -6546,6 +6784,25 @@ class KalshiPositionCache:
                                 _covered_records,
                                 _covered_pos_yes,
                             )
+                            # 2026-11-14: the venue stamps fill created_time at
+                            # record finalization, which can postdate the REST
+                            # snapshot that already contains the fill — the
+                            # timestamp pass above cannot see that direction
+                            # (observed live: fill 01:21:33 vs snapshot
+                            # 01:21:23.877 already showing +300cc -> cache=600
+                            # vs exchange=300 -> fills_reconciliation_failed
+                            # halt).  When the residual ledger-vs-snapshot
+                            # exposure is exactly explained by pending fills,
+                            # mark them covered by quantity proof.
+                            try:
+                                self._mark_snapshot_covered_fills_by_quantity(
+                                    market_id, _covered_pos_yes,
+                                )
+                            except Exception as _qty_err:
+                                logger.debug(
+                                    "[POSITION-CACHE-REST-COVERAGE-QTY] quantity coverage marking failed for %s: %s",
+                                    market_id, _qty_err,
+                                )
                     except Exception as _cover_err:
                         logger.debug(
                             "[POSITION-CACHE-REST-COVERAGE] fill coverage marking failed for %s: %s",

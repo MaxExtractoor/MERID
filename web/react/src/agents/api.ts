@@ -50,8 +50,13 @@ async function authedFetch(path: string, init: RequestInit = {}): Promise<Respon
 async function errorDetail(res: Response, path: string): Promise<Error> {
   let detail = '';
   try {
-    const body = await res.json() as { detail?: string };
-    detail = body?.detail ? ` — ${body.detail}` : '';
+    const body = await res.json() as { detail?: unknown };
+    // FastAPI returns detail as a string for HTTPException(str) but as an
+    // object for structured refusals (e.g. /live-runtime-state/recover
+    // returns {status, missing}) — serialize either form.
+    if (body?.detail != null) {
+      detail = ` — ${typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)}`;
+    }
   } catch { /* non-JSON error body */ }
   return new Error(`${res.status} ${res.statusText} @ ${path}${detail}`);
 }
@@ -162,6 +167,7 @@ export const AGENT_ENDPOINTS = {
   LIVE_RUNTIME_STATE: '/api/v1/live-runtime-state/',
   HALT: '/api/v1/live-runtime-state/halt',
   RELEASE: '/api/v1/live-runtime-state/release',
+  RECOVER: '/api/v1/live-runtime-state/recover',
   UNIFIED_HEALTH: '/api/v1/unified-health',
   SPOT_PRICES: '/api/v1/spot/prices',
   CALIBRATION_STATS: '/api/v1/kalshi/calibration/stats',
@@ -268,8 +274,13 @@ export const fetchSpotPrices = () => getJson<Record<string, unknown>>(AGENT_ENDP
 /** Emergency halt — blocks new entries. Exits/cancels stay live. */
 export const haltEntries = (reason = 'operator_halt') =>
   postJson<Record<string, unknown>>(AGENT_ENDPOINTS.HALT, { reason });
-/** Release halt — requires the backend's release assertion to pass. */
-export const releaseEntries = () => postJson<Record<string, unknown>>(AGENT_ENDPOINTS.RELEASE, {});
+/** Verified release — the backend probes fresh reconciliation, fill
+ *  watermark, exits/router availability, and production/live identity, then
+ *  commits the canonical RECOVERY_RUNNING -> LIVE_ENTRIES_ENABLED transition.
+ *  A 409 means evidence is still missing; the halt stays in place (fail
+ *  closed). The manual-token /release endpoint remains for break-glass use. */
+export const releaseEntries = () =>
+  postJson<Record<string, unknown>>(AGENT_ENDPOINTS.RECOVER, { reason: 'operator_release_ui' });
 /** Kill switch takes `activate` as a QUERY param (verified: kalshi_api.py:4548). */
 export const setKillSwitch = (active: boolean) =>
   postJson<Record<string, unknown>>(`${AGENT_ENDPOINTS.KILL_SWITCH}?activate=${active}`);

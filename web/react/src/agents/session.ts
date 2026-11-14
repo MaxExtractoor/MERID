@@ -22,9 +22,15 @@ export const SESSION_TOKEN_KEY = 'merid-access';
 const REGISTER_PATH = '/api/v1/auth/register';
 const OPERATOR_USERNAME = 'operator';
 
-/** The only router gated by get_current_session is /api/v1/kalshi. */
+/** Routers gated by get_current_session: /api/v1/kalshi/* plus the
+ *  state-changing live-runtime-state endpoints (halt/release/recover).
+ *  The GET status read stays unauthenticated server-side, but sending the
+ *  session header on it is harmless and keeps one code path. */
 export const isSessionScopedPath = (path: string): boolean =>
-  path === '/api/v1/kalshi' || path.startsWith('/api/v1/kalshi/');
+  path === '/api/v1/kalshi' ||
+  path.startsWith('/api/v1/kalshi/') ||
+  path === '/api/v1/live-runtime-state' ||
+  path.startsWith('/api/v1/live-runtime-state/');
 
 let memoryToken: string | null = null;
 
