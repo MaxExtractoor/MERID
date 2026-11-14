@@ -65,6 +65,18 @@ def main(argv=None) -> int:
     ap.add_argument("--export-joins", default=None, metavar="PATH",
                     help="write the deterministic anchored-join record "
                          "(accepted/rejected/ambiguous) as JSONL to PATH")
+    ap.add_argument("--boundaries", default=None, metavar="PATH",
+                    help="contract-boundary sidecar JSONL from "
+                         "merid.analysis.forecast_audit.boundaries")
+    ap.add_argument("--export-population", default=None, metavar="PATH",
+                    help="write the scored-unit population (entries + units "
+                         "with resolved stage probabilities) as JSONL")
+    ap.add_argument("--boundary-mode", choices=("ledger", "authoritative"),
+                    default=None,
+                    help="boundary regime: 'ledger' = legacy reconstructed "
+                         "close_ts (default); 'authoritative' = resolved "
+                         "boundary sidecar with per-ticker ledger fallback "
+                         "(implies --boundaries required)")
     ap.add_argument("--econ", action="store_true",
                     help="include fill-economics join (full outcomes-table scan)")
     ap.add_argument("--row-counts", action="store_true",
@@ -92,6 +104,12 @@ def main(argv=None) -> int:
         include_econ=args.econ,
         label_policy=args.label_policy,
         export_joins_path=args.export_joins,
+        boundary_mode=(
+            args.boundary_mode
+            or ("authoritative" if args.boundaries else "ledger")
+        ),
+        boundaries_path=args.boundaries,
+        export_population_path=args.export_population,
     )
     if cfg.primary_block_len_s not in cfg.block_lens_s:
         ap.error("--primary-block-len must be one of --block-lens")

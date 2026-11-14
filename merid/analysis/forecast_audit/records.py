@@ -234,6 +234,14 @@ class TickerProbe:
     # Ticker-stem asset vs decisions' asset column disagreement -> quarantined
     # downstream (never silently prefer one source).
     asset_mismatch: bool = False
+    # Authoritative contract boundary (boundaries.py sidecar).  When present,
+    # ``effective_close_ts`` is the boundary's contract_boundary_ts and the
+    # horizon targets were computed against it; the ledger close_ts_* fields
+    # remain for drift measurement only.  ``boundary`` is the raw record
+    # (duck-typed; records.py must not import boundaries.py — circular).
+    boundary: Optional[Any] = None
+    effective_close_ts: Optional[float] = None
+    boundary_source: Optional[str] = None
 
 
 @dataclass
@@ -272,15 +280,23 @@ def probe_horizon_population(
     since_close_ts: Optional[float] = None,
     until_close_ts: Optional[float] = None,
     progress_cb: Optional[Any] = None,
+    boundaries: Optional[Dict[str, Any]] = None,
 ) -> ProbeRun:
     """Index-assisted per-ticker probe of the evaluation population.
 
     For each ticker: two extreme-row probes establish ``close_ts`` (last
     decision row = most informed value; first row for the drift flag) and the
     decision window. For each horizon: one probe for the latest eligible row
-    at-or-before ``close_ts - horizon``; on miss, one unfiltered probe to
-    bound the missing reason. Ledger outcome is fetched per ticker (for the
-    official-outcome cross-check and as label fallback).
+    at-or-before ``effective_close - horizon``; on miss, one unfiltered probe
+    to bound the missing reason. Ledger outcome is fetched per ticker (for
+    the official-outcome cross-check and as label fallback).
+
+    ``boundaries`` (optional {ticker: BoundaryRecord}) supplies the
+    authoritative contract boundary: when a record carries
+    ``contract_boundary_ts`` it replaces the reconstructed ledger close for
+    target computation, window filtering, and ``effective_close_ts``.  The
+    ledger close_ts values are still probed and reported for drift
+    measurement — the sidecar never mutates the ledger.
 
     Roughly 6-10 index seeks per ticker — no table scan. When
     ``idx_decisions_ticker`` is absent the ticker universe falls back to an
@@ -361,11 +377,28 @@ def probe_horizon_population(
                 and asset is not None
                 and str(asset).upper() != stem_asset
             )
-            if close_ts is not None:
-                if since_close_ts is not None and close_ts < since_close_ts:
+
+            # Authoritative boundary (sidecar): replaces the reconstructed
+            # ledger close for target computation when present.  Ledger
+            # values are retained for drift measurement.
+            boundary = boundaries.get(ticker) if boundaries else None
+            boundary_ts = (
+                getattr(boundary, "contract_boundary_ts", None)
+                if boundary is not None else None
+            )
+            effective_close = (
+                float(boundary_ts) if boundary_ts is not None else close_ts
+            )
+            boundary_source = (
+                getattr(boundary, "boundary_source", None)
+                if boundary is not None else None
+            )
+
+            if effective_close is not None:
+                if since_close_ts is not None and effective_close < since_close_ts:
                     n_excluded_window += 1
                     continue
-                if until_close_ts is not None and close_ts > until_close_ts:
+                if until_close_ts is not None and effective_close > until_close_ts:
                     n_excluded_window += 1
                     continue
 
@@ -402,9 +435,9 @@ def probe_horizon_population(
                     ledger_outcome = (None, s_row[1], s_row[0])
 
             h_probes: List[HorizonProbe] = []
-            if close_ts is not None:
+            if effective_close is not None:
                 for h in horizons_s:
-                    target = close_ts - h
+                    target = effective_close - h
                     row = conn.execute(
                         f"SELECT {_ROW_COLS} {_ROW_JOINS} "
                         f"WHERE d.ticker = ? AND d.decision_ts <= ? AND {elig} "
@@ -445,6 +478,11 @@ def probe_horizon_population(
                 ledger_outcome=ledger_outcome,
                 horizons=h_probes,
                 asset_mismatch=mismatch,
+                boundary=boundary,
+                effective_close_ts=(
+                    float(effective_close)
+                    if effective_close is not None else None),
+                boundary_source=boundary_source,
             ))
         mismatched = [p.ticker for p in out if p.asset_mismatch]
         return ProbeRun(

@@ -354,6 +354,96 @@ def classify_boundary(
     return cls, spread, settle_delta
 
 
+# ---------------------------------------------------------------------------
+# Authoritative-boundary classification (boundary_mode="authoritative")
+# ---------------------------------------------------------------------------
+#
+# With a resolved contract boundary (boundaries.py sidecar) the ledger's
+# reconstructed close_ts is demoted to drift evidence: it no longer drives
+# target selection, so its pathologies cannot corrupt the population.  The
+# quarantine contract narrows to contradictions between TRUSTED sources:
+#
+#   * asset-column mismatch (unchanged),
+#   * official settlement_ts materially BEFORE the contract boundary —
+#     settlement cannot precede the observation window's end,
+#   * boundary resolution itself absent (no contract_boundary_ts anywhere).
+#
+# Ledger first/last spread and |boundary - ledger_last| are reported as
+# evidence (reconstruction_drift / boundary_ledger_divergence) but do NOT
+# quarantine: they measure how wrong the OLD implementation was, which is
+# the migration report's subject, not a contract defect.
+
+BOUNDARY_LEDGER_DIVERGENCE_REVIEW_S = 300.0
+
+
+def classify_boundary_authoritative(
+    ticker: str,
+    boundary_ts: Optional[float],
+    boundary_source: Optional[str],
+    ledger_first: Optional[float],
+    ledger_last: Optional[float],
+    official: OfficialOutcomes,
+    *,
+    asset_mismatch: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
+    """(class, evidence) under the authoritative-boundary regime.
+
+    ``boundary_ts`` is the resolved contract_boundary_ts (may be None when
+    even the sidecar could not resolve one — then the ledger value was used
+    and the ticker is flagged ``boundary_fallback_ledger``).
+    """
+    o = official.by_ticker.get(ticker.upper())
+    settle_ts = o.settlement_ts if o is not None else None
+    ledger_spread = (
+        abs(ledger_last - ledger_first)
+        if ledger_first is not None and ledger_last is not None else None
+    )
+    ledger_delta = (
+        boundary_ts - ledger_last
+        if boundary_ts is not None and ledger_last is not None else None
+    )
+    settle_delta = (
+        settle_ts - boundary_ts
+        if settle_ts is not None and boundary_ts is not None else None
+    )
+    used_fallback = (
+        boundary_source in (None, "ledger_reconstructed", "unresolved")
+    )
+    evidence = {
+        "boundary_ts": boundary_ts,
+        "boundary_source": boundary_source,
+        "used_ledger_fallback": used_fallback,
+        "ledger_close_spread_s": ledger_spread,
+        "boundary_minus_ledger_last_s": ledger_delta,
+        "settle_delta_s": settle_delta,
+    }
+    if asset_mismatch:
+        return BOUNDARY_ASSET_MISMATCH, evidence
+    if boundary_ts is None:
+        # No authoritative boundary AND no usable ledger close: the probe
+        # already marks these no_close_ts downstream; classify honestly.
+        return "boundary_unresolved", evidence
+    if used_fallback:
+        # Boundary came from the reconstructed ledger — same trust level as
+        # the old regime; keep the old quarantine semantics on it.
+        if settle_delta is not None and settle_delta < SETTLEMENT_BEFORE_CLOSE_QUARANTINE_S:
+            return BOUNDARY_INVERTED, evidence
+        if ledger_spread is not None and ledger_spread > CLOSE_TS_SPREAD_QUARANTINE_S:
+            return BOUNDARY_EXTREME_SPREAD, evidence
+        return "boundary_fallback_ledger", evidence
+    if settle_delta is not None and settle_delta < SETTLEMENT_BEFORE_CLOSE_QUARANTINE_S:
+        return BOUNDARY_INVERTED, evidence
+    if settle_delta is not None and settle_delta > 7200.0:
+        return BOUNDARY_SETTLE_LAG, evidence
+    if ledger_delta is not None and abs(ledger_delta) > BOUNDARY_LEDGER_DIVERGENCE_REVIEW_S:
+        return "boundary_ledger_divergence", evidence
+    if ledger_spread is not None and ledger_spread > CLOSE_TS_SPREAD_FLAG_S:
+        return BOUNDARY_DRIFT, evidence
+    if settle_delta is None and o is None:
+        return BOUNDARY_NO_OFFICIAL, evidence
+    return BOUNDARY_OK, evidence
+
+
 def _ticker_close_ts(rows: List[DecisionRow]) -> Tuple[Optional[float], str, float]:
     """Robust per-ticker close time. The ledger's per-row ``close_ts`` can
     drift slightly after close (up to ~40s observed), so the median of
@@ -551,6 +641,10 @@ def _flag_anchored_reuse(units: List[EvalUnit]) -> int:
     return reused
 
 
+BOUNDARY_MODE_LEDGER = "ledger"
+BOUNDARY_MODE_AUTHORITATIVE = "authoritative"
+
+
 def build_population_from_probes(
     probes: List[TickerProbe],
     *,
@@ -561,14 +655,24 @@ def build_population_from_probes(
     expected_tickers: Optional[List[str]] = None,
     anch_past_tolerance_s: float = ANCH_PAST_TOLERANCE_S,
     anch_future_slack_s: float = ANCH_FUTURE_SLACK_S,
+    boundary_mode: str = BOUNDARY_MODE_LEDGER,
 ) -> Population:
     """Build the evaluation population from per-ticker probe results.
 
     Same contract as ``build_population`` but consumes the index-probe
-    loader's output — the production path on the large live DB. ``close_ts``
-    is the LAST decision row's value (the most informed estimate the ledger
-    holds); the first/last spread is the drift flag.
+    loader's output — the production path on the large live DB.
+
+    ``boundary_mode``:
+      * ``"ledger"`` — legacy behavior: close_ts is the LAST decision row's
+        reconstructed value (``close_ts_last`` fallback ``close_ts_first``);
+        boundary classification uses the old drift/quarantine rules.
+      * ``"authoritative"`` — close_ts is the probe's
+        ``effective_close_ts``: the resolved contract boundary when the
+        sidecar provides one, else the ledger value (per-ticker fallback).
+        Horizon targets were already computed against it at probe time.
+        Boundary classification uses ``classify_boundary_authoritative``.
     """
+    authoritative = boundary_mode == BOUNDARY_MODE_AUTHORITATIVE
     probe_by_ticker = {p.ticker: p for p in probes}
     ticker_universe = set(probe_by_ticker)
     if expected_tickers:
@@ -592,10 +696,34 @@ def build_population_from_probes(
             continue
 
         asset = probe.asset
-        close_ts = (
-            probe.close_ts_last
-            if probe.close_ts_last is not None else probe.close_ts_first
-        )
+        if authoritative:
+            # Probe already resolved the fallback chain:
+            # contract_boundary_ts -> ledger close_last -> close_first.
+            close_ts = probe.effective_close_ts
+            if close_ts is None:
+                close_ts = (
+                    probe.close_ts_last
+                    if probe.close_ts_last is not None
+                    else probe.close_ts_first
+                )
+            boundary_ts = (
+                getattr(probe.boundary, "contract_boundary_ts", None)
+                if probe.boundary is not None else None
+            )
+            boundary_source = probe.boundary_source
+            close_source = (
+                boundary_source
+                if boundary_ts is not None and boundary_source
+                else "ledger_last_row"
+            )
+        else:
+            close_ts = (
+                probe.close_ts_last
+                if probe.close_ts_last is not None else probe.close_ts_first
+            )
+            boundary_ts = None
+            boundary_source = None
+            close_source = "ledger_last_row"
         if (
             probe.close_ts_first is not None
             and probe.close_ts_last is not None
@@ -603,11 +731,20 @@ def build_population_from_probes(
         ):
             spread_flags += 1
 
-        b_cls, b_spread, b_delta = classify_boundary(
-            ticker, probe.close_ts_first, probe.close_ts_last, official,
-            asset_mismatch=probe.asset_mismatch)
+        if authoritative:
+            b_cls, b_evidence = classify_boundary_authoritative(
+                ticker, boundary_ts, boundary_source,
+                probe.close_ts_first, probe.close_ts_last, official,
+                asset_mismatch=probe.asset_mismatch)
+            b_spread = b_evidence.get("ledger_close_spread_s")
+            b_delta = b_evidence.get("settle_delta_s")
+        else:
+            b_cls, b_spread, b_delta = classify_boundary(
+                ticker, probe.close_ts_first, probe.close_ts_last, official,
+                asset_mismatch=probe.asset_mismatch)
+            b_evidence = {"close_spread_s": b_spread, "settle_delta_s": b_delta}
         boundary_classes[ticker] = b_cls
-        boundary_evidence[ticker] = {
+        boundary_evidence[ticker] = b_evidence if authoritative else {
             "close_spread_s": b_spread, "settle_delta_s": b_delta}
         if b_cls in BOUNDARY_QUARANTINE_CLASSES:
             quarantined_tickers.append(ticker)
@@ -682,7 +819,7 @@ def build_population_from_probes(
                 snapshot_ts=row.decision_ts,
                 snapshot_offset_s=offset,
                 close_ts=close_ts,
-                close_ts_source="ledger_last_row",
+                close_ts_source=close_source,
                 p_raw=row.raw_p_yes,
                 p_final=row.calibrated_p_yes,
                 m_mid=row.yes_mid,

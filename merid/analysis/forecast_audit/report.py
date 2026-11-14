@@ -112,6 +112,16 @@ class AuditConfig:
     # (settlement_ts + 300s) is a named sensitivity, never a silent fallback.
     label_policy: str = LABEL_POLICY_OBSERVED
     grace_s: float = 300.0
+    # Contract-boundary regime (P1a).  "ledger" = legacy reconstructed
+    # close_ts; "authoritative" = resolved boundary sidecar
+    # (boundaries.py) with per-ticker ledger fallback.
+    boundary_mode: str = "ledger"
+    boundaries_path: Optional[str] = None
+    # Optional JSONL export of the scored-unit population (one row per
+    # (ticker,horizon) entry incl. status, plus one row per scored unit with
+    # resolved stage probabilities) — the versioned-population artifact for
+    # before/after boundary-migration diffs.
+    export_population_path: Optional[str] = None
     # Anchored-stage join bounds (see units.join_anchored for semantics).
     # past_tol bounds how far before decision_ts a record may sit;
     # future_slack covers the same-evaluation emission lag (rec.ts is
@@ -347,6 +357,25 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
         return time.time()
 
     t = _log("probing per-ticker horizon snapshots (index seeks only)", time.time())
+    boundaries = None
+    boundary_stats: Dict[str, Any] = {"mode": cfg.boundary_mode}
+    if cfg.boundary_mode == "authoritative":
+        if not cfg.boundaries_path:
+            raise ValueError(
+                "boundary_mode='authoritative' requires boundaries_path")
+        from .boundaries import load_boundaries, BOUNDARY_RESOLVER_VERSION
+        boundaries = load_boundaries(cfg.boundaries_path)
+        boundary_stats["sidecar"] = _file_meta(cfg.boundaries_path)
+        boundary_stats["resolver_version"] = BOUNDARY_RESOLVER_VERSION
+        boundary_stats["n_records"] = len(boundaries)
+        from collections import Counter
+        boundary_stats["source_counts"] = dict(Counter(
+            getattr(b, "boundary_source", "?") for b in boundaries.values()))
+        boundary_stats["verification_counts"] = dict(Counter(
+            getattr(b, "verification_status", "?")
+            for b in boundaries.values()))
+        _log(f"loaded {len(boundaries)} boundary records "
+             f"({boundary_stats['source_counts']})", t)
     probe_run = probe_horizon_population(
         cfg.db_path,
         horizons_s=cfg.horizons_s,
@@ -357,6 +386,7 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
             (lambda m: print(f"[{time.strftime('%H:%M:%S')}] {m}",
                              file=sys.stderr, flush=True))
             if progress else None),
+        boundaries=boundaries,
     )
     probes = probe_run.probes
     t = _log(
@@ -403,6 +433,7 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
         expected_tickers=expected,
         anch_past_tolerance_s=cfg.anch_past_tolerance_s,
         anch_future_slack_s=cfg.anch_future_slack_s,
+        boundary_mode=cfg.boundary_mode,
     )
     scored_units = population.units
     t = _log(f"population built: {len(scored_units)} units / {len(population.entries)} entries", t)
@@ -419,6 +450,13 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
         s.get("train_labels_assumed", 0)
         for h in fold_stats.values() for s in h.values())
     t = _log("fitted forecasts + base rates done", t)
+
+    # ---- optional population export (versioned-population artifact) --------
+    if cfg.export_population_path:
+        t = _log("exporting scored-unit population", t)
+        _export_population(
+            cfg.export_population_path, population, scored_units,
+            fitted, base_rates, cfg)
 
     all_idx = list(range(len(scored_units)))
     close_ts_arr = [u.close_ts for u in scored_units]
@@ -614,13 +652,56 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
     for tk, cls in population.boundary_classes.items():
         b_counts[cls] = b_counts.get(cls, 0) + 1
         b_examples.setdefault(cls, []).append(tk)
+
+    # Migration evidence (authoritative mode): distribution of
+    # boundary-minus-ledger deltas and per-source unit coverage.
+    migration: Dict[str, Any] = {"mode": cfg.boundary_mode}
+    if cfg.boundary_mode == "authoritative":
+        deltas = [
+            ev.get("boundary_minus_ledger_last_s")
+            for ev in population.boundary_evidence.values()
+            if isinstance(ev, dict)
+            and ev.get("boundary_minus_ledger_last_s") is not None
+        ]
+        if deltas:
+            arr = np.asarray(deltas, dtype=float)
+            migration["boundary_minus_ledger_last_s"] = {
+                "n": int(arr.size),
+                "mean": float(arr.mean()),
+                "p50": float(np.percentile(arr, 50)),
+                "p90": float(np.percentile(arr, 90)),
+                "p99": float(np.percentile(arr, 99)),
+                "min": float(arr.min()),
+                "max": float(arr.max()),
+                "abs_gt_30s": int((np.abs(arr) > 30).sum()),
+                "abs_gt_300s": int((np.abs(arr) > 300).sum()),
+            }
+        src_unit_counts: Dict[str, int] = {}
+        for u in scored_units:
+            src = u.close_ts_source or "unknown"
+            src_unit_counts[src] = src_unit_counts.get(src, 0) + 1
+        migration["units_by_close_ts_source"] = src_unit_counts
+        fb = sum(
+            1 for ev in population.boundary_evidence.values()
+            if isinstance(ev, dict) and ev.get("used_ledger_fallback"))
+        migration["tickers_used_ledger_fallback"] = fb
+
     boundary_block = {
         "semantics": (
             "Ledger close_ts is reconstructed per decision row "
             "(decision_ts + seconds_to_expiry). Official settlement_timestamp_utc "
             "is Kalshi settlement publication time, never the contract close — "
             "a material negative delta contradicts the boundary and quarantines."
+            if cfg.boundary_mode == "ledger" else
+            "Authoritative mode: close_ts is the resolved contract boundary "
+            "(venue metadata / ticker-parsed ET window end / flagged ledger "
+            "fallback). Ledger close_ts is drift evidence only; quarantine "
+            "requires a trusted-source contradiction (settlement before "
+            "boundary, asset mismatch, unresolved boundary)."
         ),
+        "mode": cfg.boundary_mode,
+        "resolution": boundary_stats,
+        "migration": migration,
         "class_counts": b_counts,
         "quarantined_tickers": population.quarantined_tickers,
         "examples": {
@@ -701,6 +782,8 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
             "grace_s": cfg.grace_s if cfg.label_policy == LABEL_POLICY_GRACE else None,
             "anch_past_tolerance_s": cfg.anch_past_tolerance_s,
             "anch_future_slack_s": cfg.anch_future_slack_s,
+            "boundary_mode": cfg.boundary_mode,
+            "boundaries_path": cfg.boundaries_path,
         },
         "scoring_unit": "ticker x horizon x model_version_id (canonical YES space)",
         "model_version_definition": (
@@ -847,6 +930,77 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
             "repair by clipping the inferred timestamp.",
         ],
     }
+
+
+def _export_population(
+    path: str,
+    population: Any,
+    units: List[EvalUnit],
+    fitted: Dict[int, Any],
+    base_rates: Dict[int, float],
+    cfg: "AuditConfig",
+) -> None:
+    """Write the versioned scored-unit population as JSONL.
+
+    Two record types:
+      * ``entry`` — every (ticker,horizon) population entry with its status
+        (ok/missing/unscored/quarantined/excluded) — the coverage contract.
+      * ``unit`` — every scored unit with resolved stage probabilities in
+        canonical YES space, the official label, and boundary provenance.
+        Enough to re-score any comparison offline on arbitrary subpopulations.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    stage_names = ("const_half", "base_rate", "mid", "raw", "anch_wf",
+                   "final", "q0", "q1")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "record_type": "manifest",
+            "schema": "forecast_audit_population_v1",
+            "boundary_mode": cfg.boundary_mode,
+            "boundaries_path": cfg.boundaries_path,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+        }) + "\n")
+        bclass = population.boundary_classes
+        for e in population.entries:
+            f.write(json.dumps({
+                "record_type": "entry",
+                "ticker": e.ticker,
+                "asset": e.asset,
+                "horizon_s": e.horizon_s,
+                "status": e.status,
+                "reason": e.reason,
+                "snapshot_ts": e.snapshot_ts,
+                "snapshot_offset_s": e.snapshot_offset_s,
+                "boundary_class": bclass.get(e.ticker),
+            }, default=str) + "\n")
+        for i, u in enumerate(units):
+            fit = fitted.get(i)
+            stages = {
+                s: stage_probability(u, s, fit, base_rates.get(i))
+                for s in stage_names
+            }
+            f.write(json.dumps({
+                "record_type": "unit",
+                "ticker": u.ticker,
+                "asset": u.asset,
+                "horizon_s": u.horizon_s,
+                "model_version_id": u.model_version_id,
+                "target_ts": u.target_ts,
+                "snapshot_ts": u.snapshot_ts,
+                "snapshot_offset_s": u.snapshot_offset_s,
+                "close_ts": u.close_ts,
+                "close_ts_source": u.close_ts_source,
+                "decision_id": u.decision_id,
+                "y": u.y,
+                "label_ts": u.label_ts,
+                "label_source": u.label_source,
+                "decision": u.decision,
+                "selected_side": u.selected_side,
+                "realized_net_pnl_cents": u.realized_net_pnl_cents,
+                "boundary_class": bclass.get(u.ticker),
+                "stages": stages,
+            }, default=str) + "\n")
 
 
 def _fmt_verdict_line(name: str, res: Dict[str, Any]) -> str:

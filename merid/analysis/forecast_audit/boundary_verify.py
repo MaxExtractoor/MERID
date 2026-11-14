@@ -34,66 +34,30 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from merid.prediction.forecast_event import scheduled_close_from_ticker
+from merid.analysis.forecast_audit.rules_windows import (  # noqa: E402
+    parse_rules_windows as _parse_rules_windows_impl,
+)
+from merid.ticker_time import parse_kalshi_15m_window_end_utc  # noqa: E402
 
 _FIELDS = ("expected_expiration_time", "expiration_time", "close_time",
            "open_time", "latest_expiration_time")
 
-# rules_primary phrase: "... the sixty seconds of CF Benchmarks' XRTI
-# before 2:45 PM EDT on Oct 16, 2026 ..." — first occurrence is the
-# CLOSING reference window end, second is the OPENING reference window
-# end.  The stated wall time is ET; the sixty-second window precedes it.
-_RULES_TIME_RE = None
-
-
-def _rules_time_re():
-    global _RULES_TIME_RE
-    if _RULES_TIME_RE is None:
-        import re
-        _RULES_TIME_RE = re.compile(
-            r"before\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s+(E[DS]T)\s+on\s+"
-            r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})", re.IGNORECASE)
-    return _RULES_TIME_RE
-
-
-_MONTHS = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,
-           "AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
-
 
 def _parse_rules_windows(rules_primary: str) -> Dict[str, Any]:
-    """Extract opening/closing reference-window boundaries from rules text.
+    return _parse_rules_windows_impl(rules_primary)
 
-    Returns window end timestamps (UTC epoch) parsed from the rules' own
-    stated ET times, plus the exact supporting passages.  Never infers the
-    window from API timestamp names — the rules text is the authority.
-    """
-    out: Dict[str, Any] = {"passages": [], "close_window_end_ts": None,
-                           "open_window_end_ts": None}
-    if not rules_primary:
-        return out
+
+def _scheduled_close_from_ticker(ticker: Optional[str]) -> Optional[float]:
+    """Same semantics as ``forecast_event.scheduled_close_from_ticker`` but
+    resolved through the dependency-free ``merid.ticker_time`` parser —
+    keeps this module importable without the prediction package init."""
+    if not ticker:
+        return None
     try:
-        from zoneinfo import ZoneInfo
-        et = ZoneInfo("America/New_York")
+        dt = parse_kalshi_15m_window_end_utc(str(ticker))
+        return float(dt.timestamp()) if dt is not None else None
     except Exception:
-        return out
-    from datetime import datetime, timezone
-    matches = list(_rules_time_re().finditer(rules_primary))
-    for i, m in enumerate(matches):
-        hh, mm, ampm, _tz, mon_s, dd, yy = m.groups()
-        mon = _MONTHS.get(mon_s[:3].upper())
-        if mon is None:
-            continue
-        hour = int(hh) % 12 + (12 if ampm.upper() == "PM" else 0)
-        try:
-            dt = datetime(int(yy), mon, int(dd), hour, int(mm), tzinfo=et)
-        except ValueError:
-            continue
-        span = rules_primary[max(0, m.start() - 120):m.end() + 10]
-        out["passages"].append(span.strip())
-        key = "close_window_end_ts" if i == 0 else "open_window_end_ts"
-        if out.get(key) is None:
-            out[key] = dt.astimezone(timezone.utc).timestamp()
-    return out
+        return None
 
 
 def _iso_to_ts(v: Any) -> Optional[float]:
@@ -126,7 +90,7 @@ def fetch_market(ticker: str, timeout_s: float = 10.0,
 def verify_ticker(raw: Dict[str, Any], tolerance_s: float = 5.0) -> Dict[str, Any]:
     """Compare parsed ticker close against venue lifecycle fields."""
     ticker = raw.get("ticker")
-    parsed = scheduled_close_from_ticker(ticker)
+    parsed = _scheduled_close_from_ticker(ticker)
     out: Dict[str, Any] = {
         "ticker": ticker,
         "parsed_close_ts": parsed,
@@ -152,11 +116,11 @@ def verify_ticker(raw: Dict[str, Any], tolerance_s: float = 5.0) -> Dict[str, An
         # reference window is [T-60, T).  Ends are parsed from the rules'
         # own stated ET times, never inferred from API field names.
         "opening_reference_window_start": (
-            rw["open_window_end_ts"] - 60.0
+            rw["open_window_end_ts"] - (rw.get("window_seconds") or 60.0)
             if rw["open_window_end_ts"] is not None else None),
         "opening_reference_window_end": rw["open_window_end_ts"],
         "closing_reference_window_start": (
-            rw["close_window_end_ts"] - 60.0
+            rw["close_window_end_ts"] - (rw.get("window_seconds") or 60.0)
             if rw["close_window_end_ts"] is not None else None),
         "closing_reference_window_end": rw["close_window_end_ts"],
         # expected_expiration_time is "when the outcome is expected to be
