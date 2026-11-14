@@ -191,6 +191,41 @@ def load_attempts(db: str) -> dict:
     return out
 
 
+def load_order_records(path: str) -> dict:
+    """order_id -> exchange-submitted order record (authoritative limit)."""
+    out = {}
+    p = Path(path)
+    if not p.exists():
+        return out
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(ln)
+        except Exception:
+            continue
+        oid = row.get("target_order_id")
+        o = row.get("order")
+        if oid and isinstance(o, dict):
+            out[oid] = o
+    return out
+
+
+def _order_record_instruction(rec: dict):
+    """Normalize an exchange order record to (leg, is_buy, limit_cents)."""
+    side = (rec.get("side") or "").lower()
+    action = (rec.get("action") or "").lower()
+    leg = "yes" if "yes" in side else ("no" if "no" in side else None)
+    is_buy = action.startswith("buy")
+    px = rec.get("yes_price_dollars") if leg == "yes" \
+        else rec.get("no_price_dollars")
+    if px is None:
+        px = rec.get("yes_price") if leg == "yes" else rec.get("no_price")
+    try:
+        limit = round(float(px) * 100, 4) if px is not None else None
+    except (TypeError, ValueError):
+        limit = None
+    return leg, is_buy, limit
+
+
 # ---------------------------------------------------------------- book tiers
 
 def archive_ticker_windows(paths: list[str]) -> dict:
@@ -304,7 +339,7 @@ def _norm_side_action(side: str | None, action: str | None):
     return leg, is_buy
 
 
-def analyze(fills, attempts, snaps, arch_windows):
+def analyze(fills, attempts, snaps, arch_windows, order_records=None):
     # group fills into order episodes
     episodes = defaultdict(list)
     for f in fills:
@@ -336,6 +371,16 @@ def analyze(fills, attempts, snaps, arch_windows):
             leg, is_buy = _norm_side_action(first.get("side"),
                                             first.get("action"))
 
+        # exchange order record (when fetched) is authoritative for the
+        # submitted direction + limit — resolves IOC-exit leg ambiguity
+        # and any attempt-store price convention gaps.
+        exch_rec = (order_records or {}).get(oid)
+        exch_limit = None
+        if exch_rec is not None:
+            rleg, ribuy, exch_limit = _order_record_instruction(exch_rec)
+            if rleg is not None:
+                leg, is_buy = rleg, ribuy
+
         # quantities: fills are centi-contracts; order count_fp is contracts
         fill_qty_cc = sum(int(f["quantity_cc"] or 0) for f in fl)
         order_qty_cc = None
@@ -365,7 +410,11 @@ def analyze(fills, attempts, snaps, arch_windows):
         limit_sem = att.get("limit_semantics") or ""
         eff_bound = None
         bound_source = None
-        if limit_sem.startswith("ioc_exit"):
+        if exch_limit is not None:
+            eff_bound = exch_limit
+            bound_source = "exchange_order_record"
+            limit_sem = "exchange_order_record"
+        elif limit_sem.startswith("ioc_exit"):
             eff_bound = att.get("price_cents")
             bound_source = "ioc_requested_limit"
         elif att.get("chase_cap_cents") is not None:
@@ -562,6 +611,8 @@ def main(argv=None) -> int:
         "data/kalshi_book_archive_active.db",
         "data/kalshi_book_archive_live3.db",
     ])
+    ap.add_argument("--order-records", default=None,
+                    help="JSONL from scripts/fetch_order_records.py")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
@@ -578,8 +629,10 @@ def main(argv=None) -> int:
              if a.get("decision_id_payload")}
     snaps = load_snapshots_index(args.audit_db, tickers, dids)
     arch = archive_ticker_windows(args.book_archives)
+    order_records = (load_order_records(args.order_records)
+                     if args.order_records else None)
 
-    rows = analyze(fills, attempts, snaps, arch)
+    rows = analyze(fills, attempts, snaps, arch, order_records)
     rep = {
         "schema": "execution_consistency_v1",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
