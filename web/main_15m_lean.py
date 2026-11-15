@@ -2962,6 +2962,96 @@ async def internal_resolve_policies(request: dict):
         raise HTTPException(status_code=500, detail=f"resolve_policies_error: {e!r}")
 
 
+_AUDIT_RECONCILE_DISPOSITIONS = frozenset(
+    {"recovered", "reconstructed", "duplicate_no_loss", "accepted_loss"}
+)
+
+
+@app.get("/api/internal/v1/audit-writer/failures")
+async def internal_audit_writer_failures(
+    session: dict = Depends(get_current_session),
+):
+    """List unreconciled decision-audit writer failures + queue health.
+
+    The failure ledger is append-only and fail-closed: unreconciled required
+    write losses keep ``writer_health().unhealthy`` true and block new entries
+    until an operator reconciles them with an explicit disposition.  This
+    endpoint exposes the outstanding failure ids so they can be reconciled
+    without parsing the jsonl by hand.
+    """
+    try:
+        from merid.execution.decision_audit_ledger import (
+            get_decision_audit_ledger,
+        )
+
+        ledger = get_decision_audit_ledger()
+        return {
+            "health": ledger.writer_health(),
+            "outstanding": ledger.outstanding_failure_records(),
+        }
+    except Exception as exc:
+        logger.exception("[INTERNAL-AUDIT] failures listing failed: %r", exc)
+        raise HTTPException(status_code=500, detail=f"audit_failures_error: {exc!r}")
+
+
+@app.post("/api/internal/v1/audit-writer/reconcile")
+async def internal_audit_writer_reconcile(
+    request: dict, session: dict = Depends(get_current_session)
+):
+    """Reconcile outstanding decision-audit writer failures.
+
+    Body: ``{"failure_ids": [...] | "all", "disposition": ..., "note": ...}``.
+    ``disposition`` must be one of recovered / reconstructed /
+    duplicate_no_loss / accepted_loss — the same set enforced by
+    ``DecisionAuditLedger.acknowledge_failed_writes``.  Omitting
+    ``failure_ids`` (or passing "all") reconciles every outstanding record.
+    The reconcile record is appended durably before the in-process health
+    count is recomputed, so a later restart cannot silently re-block.
+    """
+    from merid.execution.decision_audit_ledger import (
+        get_decision_audit_ledger,
+    )
+
+    disposition = str(request.get("disposition") or "")
+    if disposition not in _AUDIT_RECONCILE_DISPOSITIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "invalid disposition: %r (expected one of %s)"
+                % (disposition, sorted(_AUDIT_RECONCILE_DISPOSITIONS))
+            ),
+        )
+    note = str(request.get("note") or "")[:200]
+    try:
+        ledger = get_decision_audit_ledger()
+        failure_ids = request.get("failure_ids")
+        if failure_ids == "all" or failure_ids is None:
+            failure_ids = [
+                r["failure_id"] for r in ledger.outstanding_failure_records()
+            ]
+        if not isinstance(failure_ids, (list, tuple)) or not all(
+            isinstance(_i, str) and _i for _i in failure_ids
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="failure_ids must be a list of failure_id strings or \"all\"",
+            )
+        failure_ids = list(failure_ids)
+        outstanding = ledger.acknowledge_failed_writes(
+            failure_ids, disposition, note
+        )
+        return {
+            "reconciled_count": len(failure_ids),
+            "outstanding": outstanding,
+            "disposition": disposition,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[INTERNAL-AUDIT] reconcile failed: %r", exc)
+        raise HTTPException(status_code=500, detail=f"audit_reconcile_error: {exc!r}")
+
+
 loop_task: asyncio.Task | None = None
 kalshi_loop: Any = None
 ws_refresh_task: asyncio.Task | None = None

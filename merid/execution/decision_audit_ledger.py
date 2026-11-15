@@ -985,6 +985,47 @@ class DecisionAuditLedger:
             "last_batch_size": getattr(self, "_last_batch_size", 1),
         }
 
+    def outstanding_failure_records(self) -> List[Dict[str, Any]]:
+        """Fresh parse of the failure ledger: unreconciled failure records.
+
+        ``writer_health`` caches its count for the process lifetime; operator
+        tooling needs the live id list to reconcile specific failures.  The
+        ledger file is small (one JSON object per line) so a fresh scan is
+        cheap and always reflects the durable append-only record.
+        """
+        import json as _json
+        _fpath = self.db_path.parent / "decision_audit_writer_failures.jsonl"
+        failures: Dict[str, Dict[str, Any]] = {}
+        reconciled = set()
+        try:
+            if _fpath.exists():
+                with open(_fpath, encoding="utf-8") as _fh:
+                    for _ln in _fh:
+                        try:
+                            _r = _json.loads(_ln)
+                        except Exception:
+                            continue
+                        if _r.get("kind") == "failure":
+                            _fid = _r.get("failure_id")
+                            if _fid:
+                                failures[_fid] = _r
+                        elif _r.get("kind") == "reconcile":
+                            for _fid in _r.get("failure_ids") or []:
+                                reconciled.add(_fid)
+        except Exception:
+            return []
+        return [
+            {
+                "failure_id": _fid,
+                "ts": _r.get("ts"),
+                "priority": _r.get("priority"),
+                "error": _r.get("error"),
+                "run_id": _r.get("run_id"),
+            }
+            for _fid, _r in failures.items()
+            if _fid not in reconciled
+        ]
+
     def acknowledge_failed_writes(
         self, failure_ids, disposition: str, note: str = ""
     ) -> int:
