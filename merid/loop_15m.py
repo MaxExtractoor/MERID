@@ -10477,10 +10477,17 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                     # 2026-11-04: regime compute re-reads/persists state on
                     # disk when its tick advances — py-spy caught it blocking
                     # the uvicorn loop mid-startup.  It is pure sync + lock-
-                    # protected; run it off-loop on the default executor.
-                    _dir_regime = await asyncio.get_running_loop().run_in_executor(
-                        None, compute_directional_regime, feature_snapshot
-                    )
+                    # protected; run it off-loop on the default executor with a 3.0s timeout.
+                    try:
+                        _dir_regime = await asyncio.wait_for(
+                            asyncio.get_running_loop().run_in_executor(
+                                None, compute_directional_regime, feature_snapshot
+                            ),
+                            timeout=3.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[REGIME] compute timed out on executor, running inline")
+                        _dir_regime = compute_directional_regime(feature_snapshot)
                     logger.info(
                         "[REGIME] tick=%d label=%s breadth60=%d/%d btc_r60=%s reason=%s",
                         tick,

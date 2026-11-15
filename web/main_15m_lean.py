@@ -1574,9 +1574,16 @@ async def unified_health_check():
             # 2026-11-04: ws_bridge.summary() block-waits a Future on the
             # ws-io thread — py-spy caught this endpoint parked in
             # Future.result() on the uvicorn loop while the API timed out.
-            summary = await asyncio.get_running_loop().run_in_executor(
-                None, ws_bridge.summary
-            )
+            # 2026-11-15: Bounded with wait_for(2.0) so executor congestion never wedges the endpoint.
+            try:
+                summary = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, ws_bridge.summary
+                    ),
+                    timeout=2.0,
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                summary = {"running": False, "error": str(exc)}
             # Bridge status hierarchy:
             #   1. Forwarder active (summary.running) -> running / ready
             #   2. Forwarder down but REST polling active -> degraded / ready (fallback)
@@ -1798,10 +1805,16 @@ async def data_flow_validation():
             overall_health = "degraded"
         else:
             # 2026-11-04: same Future.result() loop-block as unified-health;
-            # offload the cross-thread summary call.
-            ws_summary = await asyncio.get_running_loop().run_in_executor(
-                None, ws_bridge.summary
-            )
+            # offload the cross-thread summary call (bounded with 2.0s timeout).
+            try:
+                ws_summary = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, ws_bridge.summary
+                    ),
+                    timeout=2.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                ws_summary = {"running": False}
             ws_running = ws_summary.get("running", False)
             
             # Check if market state store has recent data for the configured

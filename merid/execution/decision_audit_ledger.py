@@ -897,10 +897,16 @@ class DecisionAuditLedger:
         now = time.monotonic()
         last = getattr(self, "_last_commit_mono", 0.0)
         oldest = 0.0
+        oldest_required = 0.0
         try:
             with self._write_queue.mutex:
                 if self._write_queue.queue:
                     oldest = now - self._write_queue.queue[0][1]
+                    for item in self._write_queue.queue:
+                        if len(item) > 2 and item[2] == "required":
+                            req_age = now - item[1]
+                            if req_age > oldest_required:
+                                oldest_required = req_age
         except Exception:
             pass
         depth = self._write_queue.qsize()
@@ -954,7 +960,7 @@ class DecisionAuditLedger:
         unhealthy = (
             failed > 0
             or (self._writer_started and not alive)
-            or (alive and depth > 0 and oldest > lag_budget)
+            or (alive and depth > 0 and (oldest_required > lag_budget or oldest > (lag_budget * 2)))
             or (inflight_required and inflight_age is not None
                 and inflight_age > lag_budget)
         )
@@ -963,6 +969,7 @@ class DecisionAuditLedger:
             "writer_alive": alive,
             "queue_depth": depth,
             "oldest_queued_age_s": round(oldest, 3),
+            "oldest_required_age_s": round(oldest_required, 3),
             "seconds_since_last_write_served": since,
             "inflight_required": inflight_required,
             "inflight_age_s": inflight_age,

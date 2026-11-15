@@ -311,8 +311,8 @@ _log_queue_max_seen = 0
 # audit-critical prefixes below) sheds first; WARNING sheds only under the
 # much higher emergency bound; ERROR/CRITICAL are never shed.  Records that
 # are shed are counted and surfaced via get_log_queue_stats / [LOG-QUEUE].
-_LOG_SHED_INFO_DEPTH = int(os.getenv("MERID_LOG_SHED_INFO_DEPTH", "20000"))
-_LOG_SHED_WARN_DEPTH = int(os.getenv("MERID_LOG_SHED_WARN_DEPTH", "150000"))
+_LOG_SHED_INFO_DEPTH = int(os.getenv("MERID_LOG_SHED_INFO_DEPTH", "4000"))
+_LOG_SHED_WARN_DEPTH = int(os.getenv("MERID_LOG_SHED_WARN_DEPTH", "20000"))
 _log_shed_info = 0
 _log_shed_warn = 0
 

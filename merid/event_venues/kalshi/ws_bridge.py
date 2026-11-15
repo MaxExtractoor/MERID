@@ -2643,12 +2643,15 @@ class KalshiWebSocketBridge:
             future.cancel()
             raise
 
-    def _ws_sync_call(self, coro_factory, *args, timeout: float = 1.0, default: Any = None):
+    def _ws_sync_call(self, coro_factory, *args, timeout: float = 0.25, default: Any = None):
         """Synchronous cross-thread call used only for read-only diagnostics.
 
         Used from sync methods like get_health_status() and stats().  No other
         thread should mutate the KalshiWebSocket object directly.
         """
+        wt = getattr(self, "_ws_thread", None)
+        if wt is None or not wt.is_alive():
+            return default
         if self._ws_loop is None or self._ws_loop.is_closed() or not self._ws_loop.is_running():
             return default
         try:
@@ -6006,7 +6009,12 @@ class KalshiWebSocketBridge:
 
         # Include underlying WS client stats if available
         try:
-            result["ws_client"] = self._ws_sync_call(self._ws.aget_stats, default={})
+            ws_obj = getattr(self, "_ws", None)
+            wt = getattr(self, "_ws_thread", None)
+            if ws_obj is not None and wt is not None and wt.is_alive():
+                result["ws_client"] = self._ws_sync_call(ws_obj.aget_stats, default={})
+            else:
+                result["ws_client"] = {}
         except (AttributeError, RuntimeError):
             pass
 
