@@ -891,3 +891,39 @@ class TestPoolResetOnTimeout:
         assert not result.success
         assert len(reset_calls) == 1
         assert mock_http.request.await_count == 2
+
+
+class TestOrphanedClientDeferredClose:
+    """2026-11-14: a single request timeout used to aclose() the shared
+    per-loop httpx client immediately, killing every sibling request still
+    in flight on it — one slow Kalshi response cascaded into ~10 circuit
+    failures and opened kalshi_live (entry halt).  The orphaned client must
+    stay open until in-flight attempts drain; new requests already get a
+    fresh client from _ensure_client."""
+
+    @pytest.mark.asyncio
+    async def test_reset_defers_orphan_aclose(self, client, monkeypatch):
+        import asyncio
+        import merid.event_venues.kalshi.client as client_mod
+
+        monkeypatch.setattr(client_mod, "_KALSHI_POOL_DRAIN_DELAY_S", 0.01)
+
+        loop_id = client._get_current_loop_id()
+        assert loop_id is not None
+        orphan = AsyncMock()
+        orphan.is_closed = False
+        client._clients_by_loop[loop_id] = orphan
+        client._clients_loop_refs[loop_id] = asyncio.get_running_loop()
+        client._http_client = orphan
+        client._client_loop_id = loop_id
+
+        await client._reset_http_client_after_loop_error()
+
+        # Orphan popped from the registry (new requests get a fresh client)
+        # but NOT closed — sibling in-flight requests survive.
+        assert loop_id not in client._clients_by_loop
+        orphan.aclose.assert_not_called()
+
+        # After the drain delay the orphan is closed exactly once.
+        await asyncio.sleep(0.1)
+        orphan.aclose.assert_awaited_once()

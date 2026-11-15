@@ -265,6 +265,40 @@ _KALSHI_CONNECT_TIMEOUT = 15.0
 _KALSHI_READ_TIMEOUT = 45.0
 _KALSHI_WRITE_TIMEOUT = 30.0
 _KALSHI_POOL_TIMEOUT = 15.0
+# Grace period before an orphaned (popped-from-registry) httpx client is
+# actually aclose()d.  In-flight requests still hold the orphan; closing it
+# immediately turns ONE timeout into ~KALSHI_MAX_CONCURRENT_REQUESTS circuit
+# failures (observed 2026-11-14: kalshi_live OPEN + entry halt after a single
+# slow Kalshi response during a REST burst).  New requests already get a
+# fresh client; the orphan only needs to outlive the longest in-flight
+# attempt (~connect+read worst case well under 90s).
+_KALSHI_POOL_DRAIN_DELAY_S = float(os.getenv("MERID_KALSHI_POOL_DRAIN_DELAY_S", "90"))
+
+# Strong refs for deferred orphan-client close tasks (asyncio tasks are GC'd
+# if unreferenced while pending).
+_pending_client_closes: "Set[asyncio.Task]" = set()
+
+
+def _schedule_orphaned_client_close(client: "httpx.AsyncClient") -> None:
+    """Close an orphaned per-loop httpx client after in-flight requests drain.
+
+    Must be called from the event loop the client is bound to.  If no loop is
+    running the client is simply dropped (process/loop teardown reclaims it).
+    """
+    async def _close() -> None:
+        try:
+            await asyncio.sleep(_KALSHI_POOL_DRAIN_DELAY_S)
+            if not client.is_closed:
+                await client.aclose()
+        except Exception:
+            pass
+
+    try:
+        task = asyncio.get_running_loop().create_task(_close())
+    except RuntimeError:
+        return
+    _pending_client_closes.add(task)
+    task.add_done_callback(_pending_client_closes.discard)
 
 # Circuit breaker for event loop resets (prevents reset storms)
 KALSHI_LOOP_RESET_THRESHOLD = 5  # Max resets in time window
@@ -695,7 +729,13 @@ class KalshiVenueClient(EventVenueClient):
                 if not client.is_closed:
                     if current_loop_id is not None:
                         # The client we popped was bound to the current loop.
-                        await client.aclose()
+                        # 2026-11-14: do NOT aclose() immediately — sibling
+                        # requests still in flight on this shared client would
+                        # all fail, turning one timeout into a circuit-opening
+                        # failure burst.  Popping already isolates NEW requests
+                        # onto a fresh client; close the orphan after the
+                        # in-flight attempts have had time to finish.
+                        _schedule_orphaned_client_close(client)
                     else:
                         # No running loop; we cannot safely close from here.
                         logger.debug("[kalshi] Dropping client without aclose() because no running loop")
