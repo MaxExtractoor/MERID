@@ -10486,21 +10486,43 @@ async def _run_agent_grid_with_timeout(self, tick: int, trading_ready: bool = Tr
                             timeout=3.0,
                         )
                     except asyncio.TimeoutError:
-                        logger.warning("[REGIME] compute timed out on executor, running inline")
-                        _dir_regime = compute_directional_regime(feature_snapshot)
-                    logger.info(
-                        "[REGIME] tick=%d label=%s breadth60=%d/%d btc_r60=%s reason=%s",
-                        tick,
-                        _dir_regime.label,
-                        _dir_regime.breadth60_pos,
-                        _dir_regime.breadth60_total,
-                        (
-                            f"{_dir_regime.btc_r60:+.5f}"
-                            if _dir_regime.btc_r60 is not None
-                            else "n/a"
-                        ),
-                        _dir_regime.reason,
-                    )
+                        # 2026-11-15: never run the regime compute inline on
+                        # this loop.  The compute serializes on _REGIME_LOCK
+                        # and does a force-read + atomic rewrite of
+                        # directional_regime_state.json; under spindle
+                        # contention (audit writer batches, settlement
+                        # catch-up, sweep backfill, WER dumps) that path
+                        # blocked the event loop for 56-80s — the observed
+                        # [EVENT-LOOP-STALL] events that made the API
+                        # unreachable and spiked the audit writer queue.
+                        # wait_for abandons only the return value: the
+                        # executor task still completes _update_regime_state,
+                        # so hysteresis advances regardless.  This loop-level
+                        # value feeds only the tick log — the per-asset
+                        # regime gates recompute inside run_cycle on the
+                        # dedicated grid loop — so reuse the agent grid's
+                        # last computed regime for the log line.
+                        logger.warning(
+                            "[REGIME] compute timed out on executor, "
+                            "reusing last regime for tick log"
+                        )
+                        _dir_regime = getattr(
+                            self.agent_grid, "_dir_regime_last", None
+                        )
+                    if _dir_regime is not None:
+                        logger.info(
+                            "[REGIME] tick=%d label=%s breadth60=%d/%d btc_r60=%s reason=%s",
+                            tick,
+                            _dir_regime.label,
+                            _dir_regime.breadth60_pos,
+                            _dir_regime.breadth60_total,
+                            (
+                                f"{_dir_regime.btc_r60:+.5f}"
+                                if _dir_regime.btc_r60 is not None
+                                else "n/a"
+                            ),
+                            _dir_regime.reason,
+                        )
             except Exception as _dr_err:
                 logger.debug("[REGIME] compute failed: %s", _dr_err)
 
