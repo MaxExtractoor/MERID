@@ -13,15 +13,18 @@ from decimal import Decimal
 def test_apply_risk_based_order_sizing_uses_provided_bankroll():
     """Test that _apply_risk_based_order_sizing uses provided bankroll when available."""
     from merid.event_venues.kalshi.order_router import _apply_risk_based_order_sizing, OrderIntent
-    
+    from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
+
     intent = OrderIntent(
         ticker="KXBTC15M-TEST",
         side="yes",
         action="buy",
         price_cents=50,
-        count=10,
+        # Request above the per-order cap so the exposure cap — not the
+        # requested quantity — is what binds the returned size.
+        count=int(MAX_CONTRACTS_PER_ORDER) + 10,
     )
-    
+
     # Provide explicit bankroll
     bankroll_usd = Decimal("50.0")
     count = _apply_risk_based_order_sizing(intent, bankroll_usd=bankroll_usd)
@@ -29,7 +32,6 @@ def test_apply_risk_based_order_sizing_uses_provided_bankroll():
     # Should use provided bankroll and return adjusted count.
     # The per-order cap (MERID_MAX_CONTRACTS_PER_ORDER) binds before
     # bankroll — reference the live constant, not a hardcoded value.
-    from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
     assert count is not None
     assert isinstance(count, (int, Decimal))
     assert count == MAX_CONTRACTS_PER_ORDER
@@ -85,13 +87,14 @@ def test_apply_risk_based_order_sizing_uses_freshness_bounded_bankroll():
     """When no explicit bankroll is passed, the router must use the
     freshness-bounded cached equity — not raw _current.equity_usd."""
     from merid.event_venues.kalshi.order_router import _apply_risk_based_order_sizing, OrderIntent
+    from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
 
     intent = OrderIntent(
         ticker="KXBTC15M-TEST",
         side="yes",
         action="buy",
         price_cents=50,
-        count=10,
+        count=int(MAX_CONTRACTS_PER_ORDER) + 10,
     )
 
     svc = Mock()
@@ -103,7 +106,6 @@ def test_apply_risk_based_order_sizing_uses_freshness_bounded_bankroll():
         count = _apply_risk_based_order_sizing(intent, bankroll_usd=None)
 
     svc.get_equity_for_risk_calc_sync_cached.assert_called_once()
-    from merid.risk.global_slot_allocator import MAX_CONTRACTS_PER_ORDER
     assert count == MAX_CONTRACTS_PER_ORDER
 
 
