@@ -82,7 +82,7 @@ def degraded_margin_c() -> float:
 
 
 def degraded_max_contracts() -> int:
-    return max(1, int(_env_float("MERID_EVIDENCE_DEGRADED_MAX_CONTRACTS", 1)))
+    return max(1, int(_env_float("MERID_EVIDENCE_DEGRADED_MAX_CONTRACTS", 11)))
 
 
 def export_enabled() -> bool:

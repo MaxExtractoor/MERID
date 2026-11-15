@@ -142,7 +142,7 @@ class ProductionAuditHarness:
     # Critical risk limits (from profile YAML)
     # 2026-07-17: Percentage-based limits (3% per-agent / 5% total) are DISABLED
     # System now uses fixed $2 exposure cap via GlobalSlotAllocator (MERID_FIXED_EXPOSURE_CAP_USD)
-    FIXED_EXPOSURE_CAP_USD = 2.00  # Fixed $2 total exposure cap across all 5 assets
+    FIXED_EXPOSURE_CAP_USD = 11.00  # Fixed $11 total exposure cap across all 5 assets
     
     def _get_expected_exposure_cap_usd(self) -> float:
         """Return the resolved live-config exposure cap, or the hardcoded default."""

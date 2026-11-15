@@ -775,7 +775,7 @@ async def _kalshi_place_order(
             elif "DOGE" in ticker_upper:
                 asset = "DOGE"
             
-            max_contracts_limit = 6  # 2026-10-27: Default fallback to 6 (still capped by $6 exposure)
+            max_contracts_limit = 11  # 2026-11-14: Default fallback to 11 (still capped by $11 exposure)
             if asset:
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -1301,7 +1301,7 @@ def build_live_route_order_intent(
     elif "DOGE" in ticker_upper:
         asset = "DOGE"
     
-    max_contracts_limit = 6  # 2026-10-27: Default fallback to 6 (still capped by $6 exposure)
+    max_contracts_limit = 11  # 2026-11-14: Default fallback to 11 (still capped by $11 exposure)
     if asset:
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile

@@ -56,13 +56,12 @@ class TestFillsPipelineDataLoss:
         
         content = poller_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that clear_all_fills is NOT called in POSITION-FALLBACK
-        has_clear_fills = 'await ledger.clear_all_fills()' in content
-        assert not has_clear_fills, "POSITION-FALLBACK should not clear fills ledger"
-        
-        # Check that the fix comment is present
-        has_fix_comment = 'NOT clearing fills ledger' in content
-        assert has_fix_comment, "Fix comment should be present"
+        # Check that no fills-clearing call exists anywhere in the poller
+        # (2026-11-14: POSITION-FALLBACK section was refactored away; the
+        # original 'NOT clearing fills ledger' comment no longer exists, so
+        # assert the stronger behavioral invariant directly)
+        has_clear_fills = 'clear_all_fills' in content or '.clear_fills(' in content
+        assert not has_clear_fills, "Poller must not clear the fills ledger"
 
 
 class Test75cEntryBandFix:
@@ -130,9 +129,9 @@ class TestPositionSizingLimits:
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that max_single_order_contracts is 6
-        has_max_contracts_two = 'max_single_order_contracts: 6' in content
-        assert has_max_contracts_two, "max_single_order_contracts should be 6 for $6 fixed exposure cap"
+        # Check that max_single_order_contracts is 11
+        has_max_contracts_two = 'max_single_order_contracts: 11' in content
+        assert has_max_contracts_two, "max_single_order_contracts should be 11 for $11 fixed exposure cap"
     
     def test_unified_risk_manager_enforces_single_contract(self):
         """Verify UnifiedRiskManager enforces single contract limit."""
@@ -142,9 +141,9 @@ class TestPositionSizingLimits:
         
         content = risk_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that per_trade_max_contracts defaults to 6
-        has_single_contract = 'per_trade_max_contracts: int = 6' in content
-        assert has_single_contract, "per_trade_max_contracts should default to 6"
+        # Check that per_trade_max_contracts defaults to 11
+        has_single_contract = 'per_trade_max_contracts: int = 11' in content
+        assert has_single_contract, "per_trade_max_contracts should default to 11"
         
         # Check that contracts > max_contracts is enforced
         has_enforcement = 'contracts > self._limits.per_trade_max_contracts' in content
@@ -242,11 +241,11 @@ class TestSingleContractPerOrder:
         from decimal import Decimal
         from merid.prediction.unified_sizing import compute_order_size, _get_max_contracts_per_asset
 
-        # v2.5.0 profile allows up to 6 contracts within the $6 exposure cap.
+        # v2.6.0 profile allows up to 11 contracts within the $11 exposure cap.
         max_contracts = _get_max_contracts_per_asset("BTC")
         assert max_contracts >= 1, "Profile must allow at least 1 contract"
 
-        fixed_exposure_cap_cents = 600  # $6.00 cap expressed in cents
+        fixed_exposure_cap_cents = 1100  # $11.00 cap expressed in cents
 
         for price_cents in (10, 43, 75, 99):
             contract_count, notional, _ = compute_order_size(

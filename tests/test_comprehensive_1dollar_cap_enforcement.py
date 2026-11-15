@@ -59,20 +59,20 @@ class TestComprehensive1DollarCapEnforcement:
         unsafe_defaults = 0
         
         for i, line in enumerate(lines):
-            # Fallbacks bounded at <=6 contracts are safe: the fixed exposure
+            # Fallbacks bounded at <=11 contracts are safe: the fixed exposure
             # cap remains the binding constraint on dollar exposure.
             import re as _re
             m = _re.search(r'max_contracts_limit\s*=\s*(\d+)', line)
             if m:
-                if int(m.group(1)) <= 6:
+                if int(m.group(1)) <= 11:
                     safe_defaults += 1
                 else:
                     unsafe_defaults += 1
 
         assert safe_defaults >= 1, \
-            f"Expected at least 1 bounded default (max_contracts_limit<=6), found {safe_defaults}"
+            f"Expected at least 1 bounded default (max_contracts_limit<=11), found {safe_defaults}"
         assert unsafe_defaults == 0, \
-            f"Found {unsafe_defaults} unsafe defaults (max_contracts_limit>6)"
+            f"Found {unsafe_defaults} unsafe defaults (max_contracts_limit>11)"
 
     def test_strategy_uses_unified_sizing_not_legacy(self):
         """
@@ -103,12 +103,12 @@ class TestComprehensive1DollarCapEnforcement:
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile = yaml.safe_load(f)
         
-        # Canonical cap: $6.00 (2026-10-27), aligned with
-        # MERID_FIXED_EXPOSURE_CAP_USD in .env and the 6-contract entry target.
+        # Canonical cap: $11.00 (2026-11-14), aligned with
+        # MERID_FIXED_EXPOSURE_CAP_USD in .env and the 11-contract entry target.
         assert 'risk_policy' in profile, "Profile must have risk_policy section"
         assert 'fixed_exposure_cap_usd' in profile['risk_policy'], "Profile must have fixed_exposure_cap_usd"
-        assert profile['risk_policy']['fixed_exposure_cap_usd'] == 6.00, \
-            f"fixed_exposure_cap_usd must be 6.00, got {profile['risk_policy']['fixed_exposure_cap_usd']}"
+        assert profile['risk_policy']['fixed_exposure_cap_usd'] == 11.00, \
+            f"fixed_exposure_cap_usd must be 11.00, got {profile['risk_policy']['fixed_exposure_cap_usd']}"
 
     def test_profile_yaml_has_max_contracts_1_per_asset(self):
         """
@@ -119,7 +119,7 @@ class TestComprehensive1DollarCapEnforcement:
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile = yaml.safe_load(f)
         
-        # Verify all 5 assets have max_contracts=6
+        # Verify all 5 assets have max_contracts=11
         required_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         for asset in required_assets:
             assert asset in profile['assets'], f"Profile must have asset config for {asset}"
@@ -132,8 +132,8 @@ class TestComprehensive1DollarCapEnforcement:
             else:
                 max_contracts_value = max_contracts
             
-            assert max_contracts_value == 6, \
-                f"{asset} max_contracts must be 6, got {max_contracts_value}"
+            assert max_contracts_value == 11, \
+                f"{asset} max_contracts must be 11, got {max_contracts_value}"
 
     def test_order_scaling_disabled_in_profile(self):
         """
@@ -206,11 +206,11 @@ class TestComprehensive1DollarCapEnforcement:
         with open(risk_limits_path, 'r', encoding='utf-8') as f:
             risk_limits = yaml.safe_load(f)
         
-        # risk_limits.yaml keeps the $6.00 file default; production resolves
-        # the cap via MERID_FIXED_EXPOSURE_CAP_USD env override ($6.00).
+        # risk_limits.yaml keeps the $11.00 file default; production resolves
+        # the cap via MERID_FIXED_EXPOSURE_CAP_USD env override ($11.00).
         assert 'fixed_exposure_cap_usd' in risk_limits, "risk_limits.yaml must have fixed_exposure_cap_usd"
-        assert risk_limits['fixed_exposure_cap_usd'] == 6.00, \
-            f"fixed_exposure_cap_usd must be 6.00, got {risk_limits['fixed_exposure_cap_usd']}"
+        assert risk_limits['fixed_exposure_cap_usd'] == 11.00, \
+            f"fixed_exposure_cap_usd must be 11.00, got {risk_limits['fixed_exposure_cap_usd']}"
 
     def test_risk_limits_yaml_max_contracts_1(self):
         """
@@ -221,11 +221,11 @@ class TestComprehensive1DollarCapEnforcement:
         with open(risk_limits_path, 'r', encoding='utf-8') as f:
             risk_limits = yaml.safe_load(f)
         
-        # Verify per_trade max_contracts is 6
+        # Verify per_trade max_contracts is 11
         if 'per_trade' in risk_limits:
             assert 'max_contracts' in risk_limits['per_trade'], "per_trade must have max_contracts"
-            assert risk_limits['per_trade']['max_contracts'] == 6, \
-                f"per_trade max_contracts must be 6, got {risk_limits['per_trade']['max_contracts']}"
+            assert risk_limits['per_trade']['max_contracts'] == 11, \
+                f"per_trade max_contracts must be 11, got {risk_limits['per_trade']['max_contracts']}"
 
     def test_no_percentage_based_allocation_caps(self):
         """
@@ -271,7 +271,7 @@ class TestComprehensive1DollarCapEnforcement:
         with open(slot_allocator_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Verify the fixed exposure cap is referenced (env-resolved, $6.00
+        # Verify the fixed exposure cap is referenced (env-resolved, $11.00
         # file default via MERID_FIXED_EXPOSURE_CAP_USD in .env)
         assert 'fixed_exposure_cap' in content or 'MAX_EXPOSURE_USD' in content, \
             "global_slot_allocator must reference the fixed exposure cap"

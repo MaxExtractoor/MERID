@@ -71,11 +71,11 @@ def compare(candidates, books, *, latency_s=21, targets=(5, 10, 20)):
                 if c["edge"] + c["price"] - entry < max(0, c["required"]) - 1e-9:
                     skipped["price_edge_decayed"] += 1
                     continue
-                quantity = min(settings["order_contracts"], 6 - contracts[window])
+                quantity = min(settings["order_contracts"], 11 - contracts[window])
                 while quantity > 0:
                     fee = float(kalshi_fee_cents_exact(entry / 100, Decimal(quantity), "taker"))
                     cost = entry * quantity + fee
-                    if spent[window] + cost <= 600:
+                    if spent[window] + cost <= 1100:
                         break
                     quantity -= 1
                 if quantity <= 0:

@@ -34,6 +34,7 @@ class TestKalshiCrypto15mRiskEnvelopeContract:
             "max_daily_loss_usd": 50.0,
             "drawdown_halt_pct": 0.15,
             "drawdown_unwind_pct": 0.20,
+            "drawdown_halt_enabled": True,
             "peak_equity_usd": 1000.0,
             "current_equity_usd": 1000.0,
             "current_drawdown_pct": 0.0,
@@ -70,7 +71,7 @@ class TestKalshiCrypto15mRiskEnvelopeContract:
             live_bankroll_usd=1000.0,
         )
         assert envelope is not None
-        assert envelope.max_single_order_notional_usd == 2.0  # aligned with fixed $2 exposure cap
+        assert envelope.max_single_order_notional_usd == 11.0  # aligned with fixed $11 exposure cap
 
     def test_zero_or_negative_bankroll_is_invalid(self):
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope

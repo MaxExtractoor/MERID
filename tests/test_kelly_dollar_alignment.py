@@ -1,8 +1,8 @@
-"""Regression tests for Kelly criterion alignment with $1 global slot allocation.
+"""Regression tests for Kelly criterion alignment with the fixed-exposure slot allocation.
 
 This test suite ensures that:
 1. Kelly criterion math is NOT used in production 15m crypto stack
-2. Fixed $1 exposure model is the only sizing mechanism
+2. Fixed $11 exposure model is the only sizing mechanism
 3. Legacy Kelly implementations are properly isolated
 4. Edge band Kelly multipliers are not applied in production
 """
@@ -19,10 +19,10 @@ os.environ["MERID_PROFILE"] = "kalshi_crypto_15m_v2"
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestKellyDollarAlignment:
-    """Test that Kelly criterion is properly aligned with $1 global slot allocation."""
+    """Test that Kelly criterion is properly aligned with the fixed-exposure slot allocation."""
 
     def test_unified_sizing_uses_fixed_dollar_not_kelly(self):
-        """Verify compute_order_size uses fixed $1 model, not Kelly math."""
+        """Verify compute_order_size uses fixed $11 model, not Kelly math."""
         from merid.prediction.unified_sizing import compute_order_size
         from decimal import Decimal
         
@@ -50,17 +50,17 @@ class TestKellyDollarAlignment:
                 model_prob=model_prob  # 2026-07-12: Kelly Criterion integration
             )
             
-            # Should always return 1 contract (slot-based model)
-            assert count == 1, f"Expected count=1 for edge={edge_pct}, price={price_cents}, got {count}"
+            # Should always return the full 11-contract slot size regardless of edge band
+            assert count == 11, f"Expected count=11 for edge={edge_pct}, price={price_cents}, got {count}"
             
-            # Notional should equal contract cost (price_cents / 100)
-            expected_notional = Decimal(str(price_cents / 100.0))
+            # Notional should equal 11 contracts at contract cost (price_cents / 100)
+            expected_notional = Decimal(str(11 * price_cents / 100.0))
             assert abs(float(notional) - float(expected_notional)) < 0.01, \
                 f"Expected notional=${expected_notional}, got ${notional}"
             
-            # Metadata should contain fixed_exposure_cap_usd=1.00
+            # Metadata should contain fixed_exposure_cap_usd=11.00
             assert "fixed_exposure_cap_usd" in metadata
-            assert metadata["fixed_exposure_cap_usd"] == 1.00
+            assert float(metadata["fixed_exposure_cap_usd"]) == 11.00
 
     def test_kelly_multiplier_function_not_called_in_production(self):
         """Verify _get_kelly_multiplier is not called by compute_order_size."""
@@ -119,15 +119,20 @@ class TestKellyDollarAlignment:
         assert envelope.kelly_fraction == 0.02, \
             f"kelly_fraction should be 0.02 (2%), got {envelope.kelly_fraction}"
 
-    def test_global_slot_allocator_enforces_1_dollar_cap(self):
-        """Verify global slot allocator enforces $1 exposure cap."""
+    def test_global_slot_allocator_enforces_exposure_cap(self):
+        """Verify global slot allocator enforces the $11 exposure cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         
         allocator = GlobalSlotAllocator()
         
         # Check MAX_EXPOSURE_USD
-        assert allocator.MAX_EXPOSURE_USD == 1.00, \
-            f"Global slot allocator should have $1 cap, got ${allocator.MAX_EXPOSURE_USD}"
+        assert allocator.MAX_EXPOSURE_USD == 11.00, \
+            f"Global slot allocator should have $11 cap, got ${allocator.MAX_EXPOSURE_USD}"
+        
+        # The exceed-cap scenario pins a small cap explicitly (same pattern as
+        # test_hard_exposure_cap_fix_2026_07_13) so it does not depend on the
+        # ambient production cap.
+        allocator.max_exposure_usd = 1.00
         
         # Test allocation logic
         can_allocate, reason = allocator.can_allocate(entry_price_cents=50)
@@ -144,6 +149,7 @@ class TestKellyDollarAlignment:
                 'spread_cents': 2,
                 'is_exit_order': False,
                 'request_time': 0,
+                'count': 1,
                 'confidence': 0.8  # 2026-07-12: Kelly Criterion integration
             })()
         )
@@ -201,10 +207,10 @@ class TestKellyDollarAlignment:
             side="yes"  # 2026-07-13: Pass side for Kelly calculation
         )
         
-        # All should return 1 contract (Kelly multipliers not applied)
-        assert count_watch == 1, f"Watch band should return 1, got {count_watch}"
-        assert count_small == 1, f"Small band should return 1, got {count_small}"
-        assert count_standard == 1, f"Standard band should return 1, got {count_standard}"
+        # All should return the full 11-contract size (Kelly multipliers not applied)
+        assert count_watch == 11, f"Watch band should return 11, got {count_watch}"
+        assert count_small == 11, f"Small band should return 11, got {count_small}"
+        assert count_standard == 11, f"Standard band should return 11, got {count_standard}"
 
     def test_profile_kelly_fraction_is_2_percent(self):
         """Verify profile kelly_fraction is 2% (aligned with unified risk limit)."""

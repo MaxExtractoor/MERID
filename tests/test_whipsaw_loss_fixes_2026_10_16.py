@@ -229,12 +229,12 @@ def test_probe_not_restricted_on_clean_evidence() -> None:
 
 
 def test_probe_max_contracts_default_six(monkeypatch) -> None:
-    # 2026-10-27: probe cap default tracks MERID_MAX_CONTRACTS_PER_ORDER=6
-    # under the $6.00 global exposure cap (was 3 under the 2026-10-19 caps).
-    # Production may still pin MERID_PROBE_LANE_MAX_CONTRACTS lower.
+    # 2026-11-14: probe cap default tracks MERID_MAX_CONTRACTS_PER_ORDER=11
+    # under the $11.00 global exposure cap.  Production may still pin
+    # MERID_PROBE_LANE_MAX_CONTRACTS lower.
     monkeypatch.delenv("MERID_PROBE_LANE_MAX_CONTRACTS", raising=False)
     from merid.prediction.agent_grid_15m import _probe_lane_max_contracts
-    assert _probe_lane_max_contracts() == 6.0
+    assert _probe_lane_max_contracts() == 11.0
 
 
 # ---------------------------------------------------------------- C --------

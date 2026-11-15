@@ -1928,9 +1928,9 @@ def _get_resolved_max_contracts() -> int:
     if resolved is not None and resolved.max_contracts_per_order is not None:
         return int(resolved.max_contracts_per_order)
     try:
-        return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
+        return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "11"))
     except Exception:
-        return 6
+        return 11
 
 
 def _canary_lcb_threshold_cents(

@@ -65,7 +65,7 @@ USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() 
 #
 # With $40 equity:
 #   - Fixed exposure cap: $1.00 (NEW - replaces percentage-based sizing)
-#   - Total cap: $6.00 (15%) → production safety cap (fallback)
+#   - Total cap: $11.00 (production safety cap, fallback)
 #   - Daily loss: $2.00 (5%) → automatic halt trigger
 # ═══════════════════════════════════════════════════════════════════════════
 # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-08)
@@ -75,7 +75,7 @@ _DEFAULT_CYCLE_RISK_PCT = "0.05"  # 5% per cycle - DISABLED (using fixed $1 inst
 MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", _DEFAULT_CYCLE_RISK_PCT))
 MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% total max - DISABLED (using fixed $1 instead)
 # NEW: Fixed $1 exposure cap (2026-07-08)
-FIXED_EXPOSURE_CAP_USD: float = float(os.getenv("FIXED_EXPOSURE_CAP_USD", "1.00"))  # $1 max exposure
+FIXED_EXPOSURE_CAP_USD: float = float(os.getenv("FIXED_EXPOSURE_CAP_USD", "11.00"))  # $11 max exposure
 
 # Daily and cluster risk caps (auto-scale with bankroll)
 # DAILY_LOSS_CAP_PCT = 5% of bankroll (2026 best practice - halt trading)

@@ -2,7 +2,7 @@
 
 This module provides a single source of truth for order size computation
 under the fixed-exposure-cap model (global slot allocator).  The cap is the
-resolved live config ``fixed_exposure_cap_usd`` (currently $6.00).
+resolved live config ``fixed_exposure_cap_usd`` (currently $11.00).
 
 The sizing function:
 - Applies Kelly-criterion edge filtering (rejects no-edge trades)
@@ -417,13 +417,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
     Returns:
         Max contracts for this asset
     
-    Fallback: returns 6 if profile is unavailable; production must activate the profile.
+    Fallback: returns 11 if profile is unavailable; production must activate the profile.
     """
     if not _PROFILE_AVAILABLE:
         logger.warning(
-            "[UNIFIED-SIZING] Profile adapter not available - using default max_contracts=6"
+            "[UNIFIED-SIZING] Profile adapter not available - using default max_contracts=11"
         )
-        return 6
+        return 11
     
     try:
         if is_profile_active():
@@ -440,13 +440,13 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             if asset_config:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
-            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=6", asset, asset_normalized)
-            return 6  # Slot model: 6 contracts per order ($6 global slot allocator)
+            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=11", asset, asset_normalized)
+            return 11  # Slot model: 11 contracts per order ($11 global slot allocator)
         else:
             logger.warning(
-                "[UNIFIED-SIZING] Profile not active - using default max_contracts=6"
+                "[UNIFIED-SIZING] Profile not active - using default max_contracts=11"
             )
-            return 6  # Slot model default; production must activate profile for real values
+            return 11  # Slot model default; production must activate profile for real values
     except Exception as e:
         logger.error(
             "[UNIFIED-SIZING] Failed to read max_contracts from profile: %s - "
@@ -595,7 +595,7 @@ def compute_ev_net(
 
 # 2026-07-16: _get_per_trade_risk_pct REMOVED (percentage-based sizing PRUNED).
 # The global slot allocator enforces per-trade exposure under the resolved
-# fixed_exposure_cap_usd (currently $6.00, up to 6 contracts, 10c-75c).
+# fixed_exposure_cap_usd (currently $11.00, up to 11 contracts, 10c-75c).
 
 
 def _is_dynamic_sizing_enabled() -> bool:
@@ -629,7 +629,7 @@ def _get_dynamic_sizing_base_contracts() -> int:
         Base contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 6  # Default
+        return 11  # Default
     
     try:
         if is_profile_active():
@@ -639,7 +639,7 @@ def _get_dynamic_sizing_base_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_base_contracts: %s", e)
     
-    return 6  # Default
+    return 11  # Default
 
 
 def _get_dynamic_sizing_edge_multiplier() -> float:
@@ -695,7 +695,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
         Max contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 6  # Slot model: 6 contracts per order ($6 global slot allocator)
+        return 11  # Slot model: 11 contracts per order ($11 global slot allocator)
     
     try:
         if is_profile_active():
@@ -705,7 +705,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
     
-    return 6  # Slot model: 6 contracts per order ($6 global slot allocator)
+    return 11  # Slot model: 11 contracts per order ($11 global slot allocator)
 
 
 def _get_dynamic_sizing_min_contracts() -> int:
@@ -976,7 +976,7 @@ def compute_order_size(
 
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
     All percentage-based sizing has been removed in favor of the resolved
-    fixed exposure cap (``fixed_exposure_cap_usd``, currently $6.00).
+    fixed exposure cap (``fixed_exposure_cap_usd``, currently $11.00).
 
     NEW (2026-07-12): Kelly Criterion integration
     - Uses Kelly fraction to filter trades with no edge
@@ -993,10 +993,10 @@ def compute_order_size(
            per-order contract max (3 in production)
         7. Otherwise, reject (no slots available)
 
-    Example with existing_exposure=$0.65, price_cents=35, cap=$6.00:
-        available_exposure = $6.00 - $0.65 = $5.35
+    Example with existing_exposure=$0.65, price_cents=35, cap=$11.00:
+        available_exposure = $11.00 - $0.65 = $10.35
         contract_cost = $0.35
-        max_by_exposure = 6.7 -> capped by per-order max to 3 contracts
+        max_by_exposure = 29.6 -> capped by per-order max to 11 contracts
     
     Args:
         bankroll_usd: Current bankroll in USD (from Kalshi API) - kept for compatibility
@@ -1074,13 +1074,13 @@ def compute_order_size(
             asset, model_prob, price_cents, kelly_fraction
         )
     
-    # 2026-10-06 UPDATE: Fixed $6 total exposure model - slot-based position management
+    # 2026-10-06 UPDATE: Fixed $11 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
-    # New model: sum of all contract prices must be ≤ $6
+    # New model: sum of all contract prices must be ≤ $11
 
     # Step 1: Get fixed exposure cap from the resolved live config.
     # The resolved config is the single source of truth for the cap.
-    fixed_exposure_cap_usd = Decimal("6.00")  # Fallback default; resolved config overrides
+    fixed_exposure_cap_usd = Decimal("11.00")  # Fallback default; resolved config overrides
     try:
         from merid.config.live_config import get_resolved_live_config
 
@@ -1178,7 +1178,7 @@ def compute_order_size(
 
     # Step 6: Compute target contract count (fractional allowed, 2 decimals)
     # 2026-08-22: Size up to the configured per-asset max while staying inside the
-    # fixed global exposure cap (resolved fixed_exposure_cap_usd, currently $6).
+    # fixed global exposure cap (resolved fixed_exposure_cap_usd, currently $11).
     if _is_dynamic_sizing_enabled():
         target_contracts = Decimal(str(_get_dynamic_sizing_base_contracts()))
         if target_contracts < CONTRACT_COUNT_QUANTUM:

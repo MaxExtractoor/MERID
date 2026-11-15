@@ -535,9 +535,9 @@ def _get_max_contracts_per_order() -> int:
         return get_global_slot_allocator().max_contracts_per_order
     except Exception:
         try:
-            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
+            return int(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "11"))
         except Exception:
-            return 6
+            return 11
 
 logger = get_logger("merid.loop_15m")
 
@@ -11476,9 +11476,9 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
 
         # 2026-09-30: bounded lanes (threshold-cell, provisional, canary, escape,
         # marginal/maker routes) are capped-size instruments.  2026-10-14: the
-        # cap is MERID_BOUNDED_LANE_MAX_CONTRACTS (default 1.0) — the previous
+        # cap is MERID_BOUNDED_LANE_MAX_CONTRACTS (default 11.0) — the previous
         # hardcode normalized every cell-tagged candidate to exactly 1.0 and
-        # silently overrode the configured cap after the operator raised it to 3.
+        # silently overrode the configured cap after the operator raised it.
         # The cap is a ceiling only: it never inflates a smaller unified_sizing
         # result.  If the trading shard cannot collateralize the sized count,
         # the router's insufficient_shard_balance gate rejects locally.
@@ -11495,8 +11495,8 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             except Exception:
                 _lane_cap = 1.0
             if candidate.get("decision_lane") == "window_quota":
-                # Quota probes are budgeted at MERID_WINDOW_QUOTA_MAX_CONTRACTS
-                # (default 1) — they must not inherit a raised generic cap.
+                # Quota orders are budgeted at MERID_WINDOW_QUOTA_MAX_CONTRACTS
+                # (default 11) — they must not inherit a raised generic cap.
                 try:
                     from merid.prediction import window_quota as _wq_lc
                     _lane_cap = min(_lane_cap, _wq_lc.quota_max_contracts())

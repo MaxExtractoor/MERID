@@ -79,11 +79,11 @@ class ResolvedLiveConfig:
     resolved_at: float = 0.0
 
     # Exposure and sizing
-    fixed_exposure_cap_usd: Decimal = Decimal("6.00")
-    max_total_notional_usd: Decimal = Decimal("6.00")
-    max_single_order_notional_usd: Decimal = Decimal("6.00")
-    max_contracts_per_order: int = 6
-    max_positions_per_asset: int = 1
+    fixed_exposure_cap_usd: Decimal = Decimal("11.00")
+    max_total_notional_usd: Decimal = Decimal("11.00")
+    max_single_order_notional_usd: Decimal = Decimal("11.00")
+    max_contracts_per_order: int = 11
+    max_positions_per_asset: int = 11
 
     # Price collar (execution; router must be a subset of this)
     min_entry_cents: int = 25
@@ -562,7 +562,7 @@ _ENV_OVERRIDES.update({
         ("MERID_CHEAP_NO_DAILY_MAX", "int", 0, 500),
         ("MERID_FAV_LOCK_GAIN_CENTS", "int", 1, 98),
         ("MERID_EXIT_ENVELOPE_PROFIT_LOCK_C", "float", 0.1, 99),
-        ("MERID_PER_TRADE_LOSS_BUDGET_CENTS", "float", 1, 1000),
+        ("MERID_PER_TRADE_LOSS_BUDGET_CENTS", "float", 1, 5000),
         # 2026-10-25: deterministic per-window trade plan knobs — one shared
         # budget/contract/submission bound across all five series per window.
         # Bounds here are the safety envelope; merid.prediction.window_plan

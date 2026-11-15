@@ -1,9 +1,9 @@
-"""Regression tests for the 6-contract / $6.00 sizing policy (2026-10-27).
+"""Regression tests for the 11-contract / $11.00 sizing policy (2026-11-14).
 
 Covers the user's directive:
-- Configured target 6 produces approved/allocated quantity 6 when limits permit.
+- Configured target 11 produces approved/allocated quantity 11 when limits permit.
 - Quantity 1 still works through configuration (parameterized, not removed).
-- Both YES and NO entries preserve sizing at quantity 6.
+- Both YES and NO entries preserve sizing at quantity 11.
 - Partial entry fills reserve only the filled quantity.
 - Partial exit fills do not free the slot budget (position stays open).
 - Full close releases the reservation.
@@ -46,25 +46,25 @@ def _alloc(count, asset="BTC", ticker=None, price=50, exit_order=False):
     return allocator, allocator.request_allocation(req)
 
 
-class TestThreeContractPolicy:
-    def test_resolved_config_is_three_contracts(self):
-        """Resolved live config exposes the 6-contract / $6 policy."""
+class TestElevenContractPolicy:
+    def test_resolved_config_is_eleven_contracts(self):
+        """Resolved live config exposes the 11-contract / $11 policy."""
         from merid.config.live_config import resolve_live_config
         resolved = resolve_live_config()
         assert resolved.resolved
-        assert int(resolved.max_contracts_per_order) == 6
-        assert float(resolved.fixed_exposure_cap_usd) == 6.00
+        assert int(resolved.max_contracts_per_order) == 11
+        assert float(resolved.fixed_exposure_cap_usd) == 11.00
 
-    @pytest.mark.parametrize("target", [1, 2, 3, 6])
+    @pytest.mark.parametrize("target", [1, 2, 3, 6, 11])
     def test_entry_quantity_parameterized(self, target):
-        """Entry quantities up to 6 are all valid under the policy."""
+        """Entry quantities up to 11 are all valid under the policy."""
         allocator, (ok, reason, slot_id) = _alloc(target, price=50)
         assert ok, f"count={target} rejected: {reason}"
         assert slot_id is not None
         slot = allocator._slots[slot_id]
         assert slot.count == float(target)
 
-    def test_seven_contracts_rejected(self):
+    def test_twelve_contracts_rejected(self):
         """count > max_contracts_per_order is rejected at request validation."""
         from merid.risk.global_slot_allocator import AllocationRequest
         with pytest.raises(ValueError):
@@ -72,29 +72,29 @@ class TestThreeContractPolicy:
                 agent_id="BTC_15M", asset="BTC",
                 ticker="KXBTC15M-26OCT061200-00",
                 entry_price_cents=50, edge_pct=2.0, spread_cents=5,
-                is_exit_order=False, count=7,
+                is_exit_order=False, count=12,
             )
 
-    def test_three_contracts_at_75c_fit_cap(self):
-        """3 contracts at the top of the entry band fit the $3 cap."""
-        allocator, (ok, reason, slot_id) = _alloc(3, price=75)
+    def test_eleven_contracts_at_75c_fit_cap(self):
+        """11 contracts at the top of the entry band fit the $11 cap."""
+        allocator, (ok, reason, slot_id) = _alloc(11, price=75)
         assert ok, reason
-        assert allocator.get_total_exposure() == pytest.approx(2.25)
+        assert allocator.get_total_exposure() == pytest.approx(8.25)
 
     def test_entry_cost_over_budget_rejected(self):
-        """A second entry that would exceed the shared $6 budget is rejected."""
-        allocator, (ok1, _, _) = _alloc(6, asset="BTC", price=75)  # $4.50
+        """A second entry that would exceed the shared $11 budget is rejected."""
+        allocator, (ok1, _, _) = _alloc(11, asset="BTC", price=75)  # $8.25
         assert ok1
-        # A second 6-contract entry on a different asset would exceed the budget.
+        # A second 11-contract entry on a different asset would exceed the budget.
         from merid.risk.global_slot_allocator import AllocationRequest
         req2 = AllocationRequest(
             agent_id="ETH_15M", asset="ETH",
             ticker="KXETH15M-26OCT061200-00",
             entry_price_cents=75, edge_pct=2.0, spread_cents=5,
-            is_exit_order=False, count=6,
+            is_exit_order=False, count=11,
         )
         ok2, reason2, _ = allocator.request_allocation(req2)
-        assert not ok2, "6 more contracts at 75c ($4.50) must exceed $6 budget with $4.50 already allocated"
+        assert not ok2, "11 more contracts at 75c ($8.25) must exceed $11 budget with $8.25 already allocated"
         assert "exposure" in reason2.lower() or "Insufficient" in reason2
 
 
@@ -122,18 +122,18 @@ class TestPartialFillAndExitReservation:
         position_cache.release-on-full-close gating."""
         allocator, (ok, _, slot_id) = _alloc(3, price=50)
         assert ok
-        assert allocator.get_available_exposure() == pytest.approx(4.50)
+        assert allocator.get_available_exposure() == pytest.approx(9.50)
         # update fill to full position; then full close releases everything.
         allocator.update_slot_fill_price(slot_id, 50, filled_count=3.0)
         released = allocator.release_slot_by_ticker("KXBTC15M-26OCT061200-00")
         assert released
         assert allocator.get_total_exposure() == pytest.approx(0.0)
-        assert allocator.get_available_exposure() == pytest.approx(6.00)
+        assert allocator.get_available_exposure() == pytest.approx(11.00)
 
 
-class TestSizingTargetThree:
-    def test_compute_order_size_targets_three(self):
-        """compute_order_size returns 6 contracts when limits permit."""
+class TestSizingTargetEleven:
+    def test_compute_order_size_targets_eleven(self):
+        """compute_order_size returns 11 contracts when limits permit."""
         from merid.prediction.unified_sizing import compute_order_size
         count, notional, meta = compute_order_size(
             bankroll_usd=Decimal("1000.0"),
@@ -141,8 +141,8 @@ class TestSizingTargetThree:
             asset="BTC",
             model_prob=0.60,
         )
-        assert count == 6, f"expected 6, got {count} meta={meta}"
-        assert notional == Decimal("1.50")
+        assert count == 11, f"expected 11, got {count} meta={meta}"
+        assert notional == Decimal("2.75")
 
     def test_compute_order_size_respects_one_contract_config(self):
         """A 1-contract configured target still works through the sizing path."""

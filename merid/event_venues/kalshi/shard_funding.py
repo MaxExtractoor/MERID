@@ -60,13 +60,13 @@ def min_collateral_cents() -> int:
 def target_shard_usd() -> Decimal:
     """Cash we want parked on the trading shard: the fixed exposure cap.
 
-    The $6 slot allocator (``MERID_FIXED_EXPOSURE_CAP_USD``) is the only
+    The $11 slot allocator (``MERID_FIXED_EXPOSURE_CAP_USD``) is the only
     exposure model, so a fully funded shard needs exactly one cap of cash.
     """
     try:
-        return Decimal(os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "6.00"))
+        return Decimal(os.environ.get("MERID_FIXED_EXPOSURE_CAP_USD", "11.00"))
     except ArithmeticError:
-        return Decimal("6.00")
+        return Decimal("11.00")
 
 
 def resolve_trading_shard(catalog: Any = None) -> int:

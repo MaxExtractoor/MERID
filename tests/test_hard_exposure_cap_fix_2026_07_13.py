@@ -691,6 +691,11 @@ class TestEndToEndExecutionFlow:
         from unittest.mock import Mock
         
         allocator = GlobalSlotAllocator()
+        # Pin the per-asset position limit: the resolved live config allows
+        # max_positions_per_asset=11 (profile agent_defaults, 2026-11-14), so
+        # the ambient value depends on whether an earlier test populated the
+        # config cache.
+        allocator.max_positions_per_asset = 1
         
         # Allocate first BTC position
         request1 = AllocationRequest(
@@ -728,8 +733,8 @@ class TestEndToEndExecutionFlow:
         """Test that the full flow enforces the exposure cap across all assets.
 
         The cap is injected explicitly: the production default moved
-        $1 -> $2 -> $3 -> $6 (latest: MERID_FIXED_EXPOSURE_CAP_USD=6.00,
-        commit 811db09f), so asserting against the ambient default would
+        $1 -> $2 -> $3 -> $6 -> $11 (latest: MERID_FIXED_EXPOSURE_CAP_USD=11.00,
+        profile v2.6.0), so asserting against the ambient default would
         break on every retune.  This scenario pins a $3.00 cap."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
 

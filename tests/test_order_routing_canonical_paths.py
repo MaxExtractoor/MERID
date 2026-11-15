@@ -106,8 +106,8 @@ class TestOrderRoutingCanonicalPaths:
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
 
         # The class attribute is bound at import from MERID_MAX_EXPOSURE_USD
-        # (default 3.00; .env raises it on the trade-every-window profile).
-        expected = float(_os.getenv("MERID_MAX_EXPOSURE_USD", "3.00"))
+        # (default 11.00; .env may raise/lower it on the trade-every-window profile).
+        expected = float(_os.getenv("MERID_MAX_EXPOSURE_USD", "11.00"))
         allocator = GlobalSlotAllocator()
         assert allocator is not None
         assert allocator.MAX_EXPOSURE_USD == expected
@@ -135,7 +135,7 @@ class TestOrderRoutingCanonicalPaths:
 
     def test_canonical_risk_check_order_documented(self):
         """Verify canonical risk check order is documented."""
-        doc_path = Path("docs/CANONICAL_RISK_CHECK_ORDER.md")
+        doc_path = Path("docs/archive/CANONICAL_RISK_CHECK_ORDER.md")
         assert doc_path.exists(), "Canonical risk check order documentation should exist"
         
         content = doc_path.read_text(encoding='utf-8')
@@ -144,7 +144,7 @@ class TestOrderRoutingCanonicalPaths:
 
     def test_canonical_price_range_constants_documented(self):
         """Verify canonical price range constants are documented."""
-        doc_path = Path("docs/CANONICAL_PRICE_RANGE_CONSTANTS.md")
+        doc_path = Path("docs/archive/CANONICAL_PRICE_RANGE_CONSTANTS.md")
         assert doc_path.exists(), "Canonical price range constants documentation should exist"
         
         content = doc_path.read_text(encoding='utf-8')

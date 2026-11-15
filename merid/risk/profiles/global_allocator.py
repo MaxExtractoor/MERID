@@ -6,7 +6,7 @@ Replaces per-asset caps with a top-N edge knapsack allocator under venue cap.
 Core idea:
 - Collect all candidates from all agents in a cycle
 - Sort by edge (descending)
-- Optimal knapsack fill under the venue cap (resolved fixed_exposure_cap_usd, currently $6.00)
+- Optimal knapsack fill under the venue cap (resolved fixed_exposure_cap_usd, currently $11.00)
 - Only submit orders that fit under the cap
 
 This ensures:
@@ -36,7 +36,7 @@ def _default_venue_cap_usd() -> float:
     """Resolved fixed exposure cap for the shared venue pool (USD).
 
     Single authority: the resolved live config's ``fixed_exposure_cap_usd``
-    (currently $3.00).  Falls back to the env value, then a conservative $1.00.
+    (currently $11.00).  Falls back to the env value, then a conservative $11.00.
     """
     try:
         from merid.config.live_config import get_resolved_live_config
@@ -46,9 +46,9 @@ def _default_venue_cap_usd() -> float:
     except Exception:
         pass
     try:
-        return float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "1.00"))
+        return float(os.getenv("MERID_FIXED_EXPOSURE_CAP_USD", "11.00"))
     except Exception:
-        return 1.00
+        return 11.00
 
 
 def _to_edge_fraction(edge: float) -> float:

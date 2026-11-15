@@ -35,7 +35,7 @@ class TestUnifiedSizing(unittest.TestCase):
         # Expected (new behavior after min_notional disabled):
         # max_notional = $36.58 × 0.0200 (bankroll_cap) = $0.73
         # contracts_from_notional = floor(0.73 / 0.50) = 1
-        # max_contracts_cap = 6 (for ETH)
+        # max_contracts_cap = 11 (for ETH)
         # count = 1 (capped by max_notional, not max_contracts)
         # notional = 1 × $0.50 = $0.50
         # But with fractional_contract_override_threshold=0.5, allows 1 contract if max_notional >= 50% of contract cost
@@ -44,7 +44,7 @@ class TestUnifiedSizing(unittest.TestCase):
         # Actual behavior may vary based on profile configuration
         # Just verify it's reasonable (not 0, not excessive)
         self.assertGreaterEqual(count, 0, f"Expected non-negative count, got {count}")
-        self.assertLessEqual(count, 6, f"Expected count <= max_contracts_cap (6), got {count}")
+        self.assertLessEqual(count, 11, f"Expected count <= max_contracts_cap (11), got {count}")
         if count > 0:
             self.assertGreaterEqual(notional_usd, Decimal("0"), f"Expected non-negative notional, got ${notional_usd}")
     
@@ -73,7 +73,7 @@ class TestUnifiedSizing(unittest.TestCase):
         # Just verify it's reasonable
         
         self.assertGreaterEqual(count, 1)
-        self.assertLessEqual(count, 10, "Should respect max contracts cap")
+        self.assertLessEqual(count, 11, "Should respect max contracts cap")
         self.assertGreaterEqual(notional_usd, Decimal("0"))
     
     def test_sizing_with_10000_bankroll_50c_price(self):
@@ -92,11 +92,11 @@ class TestUnifiedSizing(unittest.TestCase):
         # Expected:
         # max_notional = $10000 × 0.008 = $80
         # contracts_from_notional = floor(80 / 0.50) = 160
-        # But capped at max_contracts_cap (10 for BTC)
-        # count = 10
-        # notional = 10 × $0.50 = $5.00
+        # But capped at max_contracts_cap (11 for BTC)
+        # count = 11
+        # notional = 11 × $0.50 = $5.50
         
-        self.assertLessEqual(count, 10, "Should respect max contracts cap")
+        self.assertLessEqual(count, 11, "Should respect max contracts cap")
         self.assertGreaterEqual(count, 1)
     
     @patch('merid.risk.global_slot_allocator.get_global_slot_allocator')
@@ -154,7 +154,7 @@ class TestUnifiedSizing(unittest.TestCase):
         """Test sizing with cheap contracts (10 cents).
 
         CRITICAL FIX: 2026-07-06 - min_notional lowered from $0.50 to $0.15 to align with 15c price floor.
-        The $6 fixed exposure cap and profile max_contracts=6 allow 6 contracts for BTC at 10c.
+        The $11 fixed exposure cap and profile max_contracts=11 allow 11 contracts for BTC at 10c.
         """
         bankroll = Decimal("100.00")
         price_cents = 10
@@ -168,17 +168,17 @@ class TestUnifiedSizing(unittest.TestCase):
         )
 
         # Expected (profile-driven slot sizing):
-        # fixed_exposure_cap_usd = $6.00
+        # fixed_exposure_cap_usd = $11.00
         # existing_exposure = $0.00
-        # available = $6.00
+        # available = $11.00
         # contract_cost = $0.10
-        # max_by_exposure = floor(6.00 / 0.10) = 60
-        # max_contracts_cap = 6 (BTC per kalshi_crypto_15m_v2.yaml)
-        # count = min(6, 6, 60) = 6
-        # notional = 6 × $0.10 = $0.60
+        # max_by_exposure = floor(11.00 / 0.10) = 110
+        # max_contracts_cap = 11 (BTC per kalshi_crypto_15m_v2.yaml)
+        # count = min(11, 11, 110) = 11
+        # notional = 11 × $0.10 = $1.10
 
-        self.assertEqual(count, 6, f"Expected 6 contracts for {asset} at {price_cents}c, got {count}")
-        self.assertEqual(notional_usd, Decimal("0.60"))
+        self.assertEqual(count, 11, f"Expected 11 contracts for {asset} at {price_cents}c, got {count}")
+        self.assertEqual(notional_usd, Decimal("1.10"))
     
     def test_sizing_with_expensive_contracts(self):
         """Test sizing with expensive contracts (75 cents - max canonical range).
@@ -206,7 +206,7 @@ class TestUnifiedSizing(unittest.TestCase):
         # Just verify it's reasonable
         
         self.assertGreaterEqual(count, 1)
-        self.assertLessEqual(count, 10, "Should respect max contracts cap")
+        self.assertLessEqual(count, 11, "Should respect max contracts cap")
         self.assertGreaterEqual(notional_usd, Decimal("0"))
     
     def test_sizing_with_small_bankroll(self):
@@ -235,7 +235,7 @@ class TestUnifiedSizing(unittest.TestCase):
         # Just verify it's reasonable
         
         self.assertGreaterEqual(count, 0, "Should return non-negative count")
-        self.assertLessEqual(count, 6, "Should respect max contracts cap")
+        self.assertLessEqual(count, 11, "Should respect max contracts cap")
         if count > 0:
             self.assertGreaterEqual(notional_usd, Decimal("0"))
     
@@ -345,11 +345,11 @@ class TestIntegrationETH15MScenario(unittest.TestCase):
         
         # Verify new behavior - should allow trades
         self.assertGreaterEqual(count, 0, "Should return non-negative count")
-        self.assertLessEqual(count, 6, "Should respect max contracts cap (6 for ETH)")
+        self.assertLessEqual(count, 11, "Should respect max contracts cap (11 for ETH)")
         if count > 0:
             self.assertGreaterEqual(notional_usd, Decimal("0"), "Should be non-negative notional")
             # Dynamic sizing may increase notional, so just verify it's reasonable
-            self.assertLessEqual(notional_usd, Decimal("5.00"), f"Notional ${notional_usd} should be reasonable")
+            self.assertLessEqual(notional_usd, Decimal("11.00"), f"Notional ${notional_usd} should be reasonable")
 
 
 # REMOVED: TestTimeOfDayScaling class

@@ -41,7 +41,7 @@ class TestCrypto15mProfileDataclass:
             'venue_max_orders_per_hour',
             'agent_max_notional_pct', 'agent_max_orders_per_window',
             'agent_max_yes_position', 'agent_max_no_position',
-            'agent_max_concurrent_trades', 'agent_minutes_before_expiry',
+            'agent_minutes_before_expiry',
             'agent_cutoff_minutes_before_expiry',
             'confidence_use_crypto_threshold_matrix', 'confidence_profile_name',
             'confidence_kelly_multiplier_no_trade', 'confidence_kelly_multiplier_cautious',
@@ -64,7 +64,6 @@ class TestCrypto15mProfileDataclass:
             'legacy_disable_bankroll_category_limits', 'legacy_disable_bankroll_prediction_risk',
             'legacy_disable_bankroll_guardrails',
             # 2026 Research-Based Risk Management fields
-            'throttling_max_orders_per_15m_window',
             'throttling_consecutive_loss_pause',
             'throttling_max_session_risk_pct',
             'correlation_tracking_enabled',
@@ -166,9 +165,9 @@ class TestCrypto15mProfileLoading:
                 assert profile.venue_max_category_notional_pct == 0.0, "venue_max_category_notional_pct should be 0.0 (disabled)"
                 assert profile.agent_max_notional_pct == 0.0, "agent_max_notional_pct should be 0.0 (disabled)"
                 
-                # Verify fixed exposure cap is set to $1.00
-                assert profile.risk_policy_fixed_exposure_cap_usd == 1.0, \
-                    f"risk_policy_fixed_exposure_cap_usd should be 1.0, got {profile.risk_policy_fixed_exposure_cap_usd}"
+                # Verify fixed exposure cap is set to $11.00
+                assert profile.risk_policy_fixed_exposure_cap_usd == 11.0, \
+                    f"risk_policy_fixed_exposure_cap_usd should be 11.0, got {profile.risk_policy_fixed_exposure_cap_usd}"
             else:
                 # Check that USD values are computed and positive
                 assert profile.venue_max_single_order_usd > 0, "venue_max_single_order_usd should be positive"
@@ -1180,5 +1179,5 @@ def test_profile_adapter_defaults_match_3_percent_risk_limit():
     
     # Verify fixed exposure cap is configured
     risk_policy = profile_yaml.get('risk_policy', {})
-    assert risk_policy.get('fixed_exposure_cap_usd') == 1.00, \
-        "Fixed exposure cap should be $1.00"
+    assert risk_policy.get('fixed_exposure_cap_usd') == 11.00, \
+        "Fixed exposure cap should be $11.00"

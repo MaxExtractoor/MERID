@@ -43,12 +43,21 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 profile_name: kalshi_crypto_15m_v2
-profile_version: "2.5.0"
+profile_version: "2.6.0"
 description: "Config-only risk model for 15m crypto prediction markets on Kalshi with 2026 research-based correlation and volatility management"
 
 # ── Change Log ──────────────────────────────────────────────────────────────────
 # Tracks implementation progress and version history for the 5-phase probability modeling roadmap
 change_log:
+  - version: "2.6.0"
+    date: "2026-11-14"
+    description: "Raised fixed exposure model to $11.00 / 11 contracts per order (operator-directed scale-up)"
+    changes:
+      - "risk_policy.fixed_exposure_cap_usd: 6.00 -> 11.00"
+      - "contract_caps.max_single_order_contracts: 6 -> 11; failsafe.max_contracts_per_order: 6 -> 11"
+      - "dynamic_sizing base_contracts/max_contracts: 6 -> 11"
+      - "assets.*.max_contracts.value: 6 -> 11; agent_defaults max_yes_position/max_no_position: 6 -> 11"
+      - "risk_policy.max_stop_loss_usd_per_cluster + per_asset_cluster_stop_loss: 6.00 -> 11.00"
   - version: "2.5.0"
     date: "2026-10-27"
     description: "Doubled fixed exposure model to $6.00 / 6 contracts per order (operator-directed scale-up)"
@@ -340,14 +349,15 @@ scale_out:
 # Scale position size based on edge and confidence (slot-model compatible)
 # 2026-10-06: Entry target raised to 3 contracts while keeping the fixed exposure cap model ($3).
 # 2026-10-27: Entry target raised to 6 contracts under the $6 fixed exposure cap.
+# 2026-11-14: Entry target raised to 11 contracts under the $11 fixed exposure cap.
 dynamic_sizing:
-  enabled: true  # ENABLED: Slot-model compatible - size up to 6 contracts within $6 cap
-  base_contracts: 6  # Base target: 6 contracts per entry, subject to existing risk/liquidity checks
+  enabled: true  # ENABLED: Slot-model compatible - size up to 11 contracts within $11 cap
+  base_contracts: 11  # Base target: 11 contracts per entry, subject to existing risk/liquidity checks
   edge_multiplier: 2.0  # Amplify edge impact for small velocity-based edges (Turbine research)
   confidence_multiplier: 1.0  # Amplify confidence impact (Turbine research)
-  max_contracts: 6  # HARD RULE: 6 contracts per order, bounded by $6 fixed exposure cap
+  max_contracts: 11  # HARD RULE: 11 contracts per order, bounded by $11 fixed exposure cap
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: size up to 6 contracts based on edge and confidence within $6 cap (slot-model compatible)"
+  description: "Dynamic sizing: size up to 11 contracts based on edge and confidence within $11 cap (slot-model compatible)"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -355,7 +365,7 @@ dynamic_sizing:
 # 2026-07-09: DISABLED - conflicts with 1-contract-per-order slot-based model
 # Order scaling requires orders >= 3 contracts, but slot model enforces 1 contract max
 order_scaling:
-  enabled: false  # DISABLED: Conflicts with slot-based model (up to 6 contracts per order under $6 cap)
+  enabled: false  # DISABLED: Conflicts with slot-based model (up to 11 contracts per order under $11 cap)
   strategy: "adaptive"  # Strategy: "twap", "iceberg", "adaptive"
   min_child_orders: 2  # Minimum number of child orders
   max_child_orders: 5  # Maximum number of child orders
@@ -613,7 +623,7 @@ throttling:
 # Emergency brake when market data is degraded (catalog stuck but MD fresh).
 # This is separate from normal strip limits and should be clearly logged when active.
 failsafe:
-  max_contracts_per_order: 6  # Max contracts per order when in failsafe mode (emergency brake); same cap as normal mode
+  max_contracts_per_order: 11  # Max contracts per order when in failsafe mode (emergency brake); same cap as normal mode
 
 # ── Toxicity Detection Configuration (Bot Counter-Trading Prevention) ───────
 # Detects predatory trading behaviors and market manipulation using:
@@ -838,9 +848,9 @@ assets:
     # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $6 total exposure model
     # max_notional_pct DISABLED - using fixed $6 exposure cap instead
     max_contracts:
-      value: 6  # Up to 6 contracts per order (slot-based exposure management, capped by $6)
+      value: 11  # Up to 11 contracts per order (slot-based exposure management, capped by $11)
       static: profile
-      description: "Maximum contracts per order for BTC (up to 6 contracts per slot within $6 cap)"
+      description: "Maximum contracts per order for BTC (up to 11 contracts per slot within $11 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -863,9 +873,9 @@ assets:
     # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $6 total exposure model
     # max_notional_pct DISABLED - using fixed $6 exposure cap instead
     max_contracts:
-      value: 6  # Up to 6 contracts per order (slot-based exposure management, capped by $6)
+      value: 11  # Up to 11 contracts per order (slot-based exposure management, capped by $11)
       static: profile
-      description: "Maximum contracts per order for ETH (up to 6 contracts per slot within $6 cap)"
+      description: "Maximum contracts per order for ETH (up to 11 contracts per slot within $11 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -888,9 +898,9 @@ assets:
     # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $6 total exposure model
     # max_notional_pct DISABLED - using fixed $6 exposure cap instead
     max_contracts:
-      value: 6  # Up to 6 contracts per order (slot-based exposure management, capped by $6)
+      value: 11  # Up to 11 contracts per order (slot-based exposure management, capped by $11)
       static: profile
-      description: "Maximum contracts per order for SOL (up to 6 contracts per slot within $6 cap)"
+      description: "Maximum contracts per order for SOL (up to 11 contracts per slot within $11 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -913,9 +923,9 @@ assets:
     # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $6 total exposure model
     # max_notional_pct DISABLED - using fixed $6 exposure cap instead
     max_contracts:
-      value: 6  # Up to 6 contracts per order (slot-based exposure management, capped by $6)
+      value: 11  # Up to 11 contracts per order (slot-based exposure management, capped by $11)
       static: profile
-      description: "Maximum contracts per order for XRP (up to 6 contracts per slot within $6 cap)"
+      description: "Maximum contracts per order for XRP (up to 11 contracts per slot within $11 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -938,9 +948,9 @@ assets:
     # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $6 total exposure model
     # max_notional_pct DISABLED - using fixed $6 exposure cap instead
     max_contracts:
-      value: 6  # Up to 6 contracts per order (slot-based exposure management, capped by $6)
+      value: 11  # Up to 11 contracts per order (slot-based exposure management, capped by $11)
       static: profile
-      description: "Maximum contracts per order for DOGE (up to 6 contracts per slot within $6 cap)"
+      description: "Maximum contracts per order for DOGE (up to 11 contracts per slot within $11 cap)"
     # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
     # These conflicted with edge_bands (single source of truth) and were ignored
     # All edge thresholds now come from edge_bands section (2.5% unified minimum)
@@ -963,14 +973,15 @@ assets:
 # 2026-07-08 UPDATE: Percentage-based agent caps DISABLED in favor of fixed $6 exposure model
 # max_notional_pct DISABLED - using fixed $6 exposure cap instead
 agent_defaults:
-  # CRITICAL FIX (2026-07-17): All order flow limits removed - $6 global exposure cap is single source of truth
-  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=6.00, MAX_CONTRACTS_PER_ORDER=6, MAX_POSITIONS_PER_ASSET=1
+  # CRITICAL FIX (2026-07-17): All order flow limits removed - $11 global exposure cap is single source of truth
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=11.00, MAX_CONTRACTS_PER_ORDER=11, MAX_POSITIONS_PER_ASSET=11
   # These limits make order flow limits redundant or impossible
-  max_yes_position: 6  # Aligned with MAX_CONTRACTS_PER_ORDER=6 in GlobalSlotAllocator
-  max_no_position: 6  # Aligned with MAX_CONTRACTS_PER_ORDER=6 in GlobalSlotAllocator
-  # Position-count rule is intentionally unchanged: a position may now contain
-  # up to 6 contracts, but the number of concurrent positions per asset stays 2.
-  max_positions_per_asset: 2
+  max_yes_position: 11  # Aligned with MAX_CONTRACTS_PER_ORDER=11 in GlobalSlotAllocator
+  max_no_position: 11  # Aligned with MAX_CONTRACTS_PER_ORDER=11 in GlobalSlotAllocator
+  # Position-count rule raised 2 -> 11 (2026-11-14) with the 11-contract policy;
+  # a position may hold up to 11 contracts and total exposure stays bounded
+  # by the $11 fixed cap regardless of concurrent position count.
+  max_positions_per_asset: 11
   
   # Entry window (time before expiry to start trading)
   # Kalshi 15m markets only exist ~15 minutes before expiry
@@ -1340,10 +1351,10 @@ kelly:
 # These are venue-level limits to prevent excessive position concentration
 # 2026-07-09: Reduced all caps to align with slot-based model and $6 exposure cap
 contract_caps:
-  # 2026-10-27: Allow up to 6 contracts per order within $6 global exposure cap.
-  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=6.00, MAX_CONTRACTS_PER_ORDER=6, MAX_POSITIONS_PER_ASSET=1
-  # The $6 cap remains the single source of truth for total exposure.
-  max_single_order_contracts: 6  # Aligned with MAX_CONTRACTS_PER_ORDER=6 in GlobalSlotAllocator
+  # 2026-11-14: Allow up to 11 contracts per order within $11 global exposure cap.
+  # GlobalSlotAllocator enforces: MAX_EXPOSURE_USD=11.00, MAX_CONTRACTS_PER_ORDER=11, MAX_POSITIONS_PER_ASSET=11
+  # The $11 cap remains the single source of truth for total exposure.
+  max_single_order_contracts: 11  # Aligned with MAX_CONTRACTS_PER_ORDER=11 in GlobalSlotAllocator
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
 # Risk limits that affect order acceptance and sizing
@@ -1351,13 +1362,15 @@ contract_caps:
 # Replaces percentage-based sizing with fixed dollar cap
 risk_policy:
   # FIXED DOLLAR EXPOSURE MODEL (2026-07-08)
-  # Ensures never more than $6.00 exposure at any time across all assets
+  # Ensures never more than $11.00 exposure at any time across all assets
   # Forces entries in sweet spot (10-75c) and enables mandatory profit exits
   # 2026-10-06: raised to $3.00 for the 3-contract entry target; one slot reserves
   # up to 3 contracts, so 3 contracts at up to ~99c always fit the cap.
   # 2026-10-27: raised to $6.00 for the 6-contract entry target; 6 contracts at
   # up to ~99c always fit the cap.
-  fixed_exposure_cap_usd: 6.00  # CRITICAL: $6.00 max total exposure across all assets
+  # 2026-11-14: raised to $11.00 for the 11-contract entry target; 11 contracts at
+  # up to ~99c always fit the cap.
+  fixed_exposure_cap_usd: 11.00  # CRITICAL: $11.00 max total exposure across all assets
   sequential_trading: true  # No new entries until all positions exit
   # MANDATORY PROFIT EXIT (2026-07-08)
   # Automatic profit-taking based on entry price to ensure quick wins
@@ -1387,13 +1400,14 @@ risk_policy:
   # 2026-10-27: all assets raised to $6.00 to match the fixed exposure cap —
   # the gate brakes accumulated cluster loss without vetoing a legal
   # full-size position (worst case = full notional, up to the $6 cap).
-  max_stop_loss_usd_per_cluster: 6.00  # Aggregate fallback; must be >= $6 exposure cap
+  # 2026-11-14: raised to $11.00 to match the $11 exposure cap.
+  max_stop_loss_usd_per_cluster: 11.00  # Aggregate fallback; must be >= $11 exposure cap
   per_asset_cluster_stop_loss:
-    BTC: 6.00  # BTC: $6 max cluster stop-loss
-    ETH: 6.00  # ETH: $6 max cluster stop-loss
-    SOL: 6.00  # SOL: $6 max cluster stop-loss
-    XRP: 6.00  # XRP: $6 max cluster stop-loss
-    DOGE: 6.00  # DOGE: $6 max cluster stop-loss
+    BTC: 11.00  # BTC: $11 max cluster stop-loss
+    ETH: 11.00  # ETH: $11 max cluster stop-loss
+    SOL: 11.00  # SOL: $11 max cluster stop-loss
+    XRP: 11.00  # XRP: $11 max cluster stop-loss
+    DOGE: 11.00  # DOGE: $11 max cluster stop-loss
   # ATR-based stop loss configuration (2026-07-15: added for dynamic risk management)
   atr_stop_loss_enabled: true  # Enable ATR-based stop loss calculation
   atr_period: 14  # 14-day ATR period (industry standard)
@@ -1587,9 +1601,9 @@ exit_policy:
       tp_min_profit_cents: 5
 
     # ── Per-Position Hard Loss Cap (2026-08-25) ──────────────────────────────
-    # Backstop only: $5/position unrealized loss cap.  At 1-2 contract sizing this
+    # Backstop only: $11/position unrealized loss cap.  At 1-11 contract sizing this
     # does not fire; it protects the book if sizing scales.
-    hard_unrealized_loss_cap_usd: 5.00
+    hard_unrealized_loss_cap_usd: 11.00
 
     # ── Continuation Stop (2026-08-25) ───────────────────────────────────────
     # DISABLED until backtest-calibrated.  Per-asset, vol-normalized parameters

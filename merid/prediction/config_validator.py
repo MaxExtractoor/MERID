@@ -34,7 +34,7 @@ def validate_15m_scalper_config() -> Tuple[bool, List[str]]:
         "TOPN_MAX_CYCLE_RISK_PCT": ("0.01", "0.05"),
         "MAX_CONTRACTS_PER_TF_CRYPTO_15M": ("20", "100"),
         "KALSHI_TRADER_RISK_PCT": ("0.01", "0.05"),
-        "KALSHI_TRADER_MAX_POSITION": ("1", "5"),
+        "KALSHI_TRADER_MAX_POSITION": ("1", "11"),
     }
     
     for var, (min_val, max_val) in critical_vars.items():

@@ -66,12 +66,15 @@ def test_age_falls_back_to_mtime_without_generated_at():
     assert h.state == eh.DEGRADED
 
 
-def test_degraded_controls():
+def test_degraded_controls(monkeypatch):
+    # Pin the degraded cap so the assertion does not depend on the ambient
+    # default (raised to 11 with the 2026-11-14 contract policy).
+    monkeypatch.setenv("MERID_EVIDENCE_DEGRADED_MAX_CONTRACTS", "4")
     fresh = eh.assess(_art(60), now=NOW)
     deg = eh.assess(_art(1800), now=NOW)
     stale = eh.assess(_art(7200), now=NOW)
     assert fresh.max_contracts is None and fresh.margin_uplift_frac == 0.0
-    assert deg.max_contracts == 1
+    assert deg.max_contracts == 4
     assert deg.margin_uplift_frac == pytest.approx(0.01)
     assert deg.score_cells and fresh.score_cells
     assert not stale.score_cells and stale.max_contracts == 1

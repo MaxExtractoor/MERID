@@ -155,19 +155,19 @@ FAMILIES = {
     "MERID_FIXED_EXPOSURE_CAP": (
         "fixed_exposure_cap",
         "exposure_containment",
-        "Per-order/position USD cap $6.00 shared with shard sizing.",
+        "Per-order/position USD cap $11.00 shared with shard sizing.",
         "Account-size bound",
         ".env + AGENTS.md §6a"),
     "MERID_MAX_CONTRACTS_PER_ORDER": (
         "max_contracts_per_order",
         "exposure_containment",
-        "6 contracts per order bound.",
+        "11 contracts per order bound.",
         "Account-size bound",
         ".env + AGENTS.md §14"),
     "MERID_WINDOW_PLAN": (
         "window_plan",
         "exposure_containment",
-        "Per-window/per-asset USD caps $6, max contracts 6, order cap $6, "
+        "Per-window/per-asset USD caps $11, max contracts 11, order cap $11, "
         "lift-sizing flag.",
         "Window-level capital allocation",
         ".env flags"),

@@ -17,8 +17,8 @@ class TestGlobalExposureCap:
     def test_fixed_exposure_cap_is_one_dollar(self):
         """Verify the fixed exposure cap is exactly $1.00."""
         from merid.settings import settings
-        cap = getattr(settings, 'MERID_FIXED_EXPOSURE_CAP_USD', 6.00)
-        assert cap == 6.00, f"Fixed exposure cap must be $6.00, got ${cap}"
+        cap = getattr(settings, 'MERID_FIXED_EXPOSURE_CAP_USD', 11.00)
+        assert cap == 11.00, f"Fixed exposure cap must be $11.00, got ${cap}"
     
     def test_exposure_cap_environment_variable(self):
         """Verify exposure cap can be set via environment variable."""
@@ -48,8 +48,8 @@ class TestGlobalExposureCap:
         assert limits.max_cycle_risk_pct == 0.0, "Cycle risk percentage must be disabled"
         assert limits.max_total_risk_pct == 0.0, "Total risk percentage must be disabled"
         assert limits.per_trade_max_notional_pct == 0.0, "Per-trade risk percentage must be disabled"
-        # Verify fixed cap is used (canonical $6.00 cap, raised 2026-10-27)
-        assert limits.fixed_exposure_cap_usd == 6.00, "Fixed exposure cap must be $6.00"
+        # Verify fixed cap is used (canonical $11.00 cap, raised 2026-11-14)
+        assert limits.fixed_exposure_cap_usd == 11.00, "Fixed exposure cap must be $11.00"
 
 
 class TestPerContractExposure:
@@ -232,12 +232,12 @@ class TestExposureInvariants:
         from merid.risk.global_slot_allocator import GlobalSlotAllocator
         allocator = GlobalSlotAllocator()
         
-        # Verify cap is $6.00 (canonical fixed cap, raised 2026-10-27)
+        # Verify cap is $11.00 (canonical fixed cap, raised 2026-11-14)
         original_cap = allocator.MAX_EXPOSURE_USD
-        assert original_cap == 6.00, "Initial cap must be $6.00"
+        assert original_cap == 11.00, "Initial cap must be $11.00"
         
-        # Verify cap is still $6.00 (class constant should not change)
-        assert allocator.MAX_EXPOSURE_USD == 6.00, "Cap must remain $6.00"
+        # Verify cap is still $11.00 (class constant should not change)
+        assert allocator.MAX_EXPOSURE_USD == 11.00, "Cap must remain $11.00"
 
 
 if __name__ == "__main__":

@@ -78,24 +78,23 @@ def _default_entry_contracts() -> float:
     except Exception:
         pass
     try:
-        return float(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "6"))
+        return float(os.environ.get("MERID_MAX_CONTRACTS_PER_ORDER", "11"))
     except Exception:
-        return 6.0
+        return 11.0
 
 
 def _bounded_lane_max_contracts() -> float:
-    """Contract cap for BOUNDED_POST_ONLY_LANES (default 1.0).
+    """Contract cap for BOUNDED_POST_ONLY_LANES (default 11.0).
 
-    Bounded lanes are designed as one-contract instruments so their canary
-    accounting (daily caps, per-window dedupe, loss self-suspension) prices a
-    probe cheaply.  MERID_BOUNDED_LANE_MAX_CONTRACTS raises the cap when the
-    operator wants bounded flow sized above one contract; the fixed exposure
-    cap still bounds the order's dollar risk regardless.
+    Bounded lanes carry their own daily caps, per-window dedupe, and loss
+    self-suspension; 2026-11-14 the default tracks the 11-contract per-order
+    policy.  MERID_BOUNDED_LANE_MAX_CONTRACTS may pin a lower value; the
+    fixed exposure cap still bounds the order's dollar risk regardless.
     """
     try:
-        v = float(os.environ.get("MERID_BOUNDED_LANE_MAX_CONTRACTS", "1"))
+        v = float(os.environ.get("MERID_BOUNDED_LANE_MAX_CONTRACTS", "11"))
     except Exception:
-        return 1.0
+        return 11.0
     return max(0.01, min(v, 100.0))
 
 
@@ -118,16 +117,16 @@ def _canary_lane_max_contracts() -> float:
 
 
 def _probe_lane_max_contracts() -> float:
-    """Hard cap for *evidence-refused* probes (default 6.0 contracts).
+    """Hard cap for *evidence-refused* probes (default 11.0 contracts).
 
-    2026-10-27: default tracks MERID_MAX_CONTRACTS_PER_ORDER=6 under the
-    $6.00 global exposure cap; production may pin a lower value via
+    2026-10-27: default tracks MERID_MAX_CONTRACTS_PER_ORDER under the
+    global exposure cap; production may pin a lower value via
     MERID_PROBE_LANE_MAX_CONTRACTS to keep probes cheap.
     """
     try:
-        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "6"))
+        v = float(os.environ.get("MERID_PROBE_LANE_MAX_CONTRACTS", "11"))
     except Exception:
-        return 3.0
+        return 11.0
     return max(0.01, min(v, 100.0))
 
 
@@ -2649,7 +2648,7 @@ class LeanAgentConfig:
     max_time_to_expiry_s: int = 900  # Maximum time to expiry in seconds
 
     # CRITICAL FIX (2026-07-17): Removed per_strip_order_limit and max_orders_per_15m_window - $1 exposure cap is the limit
-    # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+    # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=11.00, MAX_CONTRACTS_PER_ORDER=11
 
     per_asset_cooldown_s: int = 3  # Cooldown period in seconds after trade (2026-07-11: reduced to 3s for 15m alignment)
 
@@ -10303,7 +10302,7 @@ class LeanAgent15m:
                     # coherence checks see a consistent triple (the true
                     # argmax stays in window_quota.argmax_side).
                     _wq_new_best = _wq_side
-                # Size up to MERID_WINDOW_QUOTA_MAX_CONTRACTS (default 3),
+                # Size up to MERID_WINDOW_QUOTA_MAX_CONTRACTS (default 11),
                 # bounded by visible whole-contract ask depth so
                 # submit_revalidation never rejects for partial_depth.
                 _wq_target_cc = int(round(_wq_quota.quota_max_contracts() * 100.0))
@@ -11328,19 +11327,18 @@ class LeanAgent15m:
                     # they must not inherit a raised generic bounded cap.
                     _lane_cap = min(_lane_cap, _canary_lane_max_contracts())
                 elif _decision_lane == "window_quota":
-                    # The quota lane is documented and budgeted as a
-                    # 1-contract probe (MERID_WINDOW_QUOTA_MAX_CONTRACTS) —
-                    # it must not inherit a raised generic bounded cap; on a
-                    # ~$7 account a 3-contract 97c emit is ~40% of bankroll.
+                    # The quota lane is bounded by its own contract cap
+                    # (MERID_WINDOW_QUOTA_MAX_CONTRACTS, default 11) — it must
+                    # not inherit a raised generic bounded cap.
                     try:
                         from merid.prediction import window_quota as _wq_cap
                         _lane_cap = min(_lane_cap, _wq_cap.quota_max_contracts())
                     except Exception:
                         pass
                 elif _decision_lane == "drift_fav":
-                    # 2026-10-21: the drift lane is sized so a fill leaves
-                    # cap room for a concurrent pf lot under $3 — it must
-                    # not inherit a raised generic bounded cap.
+                    # The drift lane carries its own contract cap
+                    # (MERID_DRIFT_MAX_CONTRACTS, default 11) — it must not
+                    # inherit a raised generic bounded cap.
                     try:
                         from merid.prediction import drift_lane as _dl_cap
                         _lane_cap = min(
@@ -11359,8 +11357,9 @@ class LeanAgent15m:
                     except Exception:
                         pass
                 elif _decision_lane == "late_taker_ioc":
-                    # 2026-11-13: the taker probe is a 1-contract bounded
-                    # emission — never the generic bounded cap.
+                    # The taker lane is bounded by its own contract cap
+                    # (MERID_LATE_TAKER_MAX_CONTRACTS, default 11) — never
+                    # the generic bounded cap.
                     try:
                         from merid.prediction import drift_lane as _dl_cap
                         _lane_cap = min(
@@ -20205,7 +20204,7 @@ class LeanAgent15m:
 
 
             # CRITICAL FIX (2026-07-17): Removed max_orders_per_15m_window check - $1 exposure cap is the limit
-            # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+            # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=11.00, MAX_CONTRACTS_PER_ORDER=11
 
 
 
@@ -21116,7 +21115,7 @@ class LeanAgent15m:
                 current_strip_orders = self._strip_order_counts.get(strip_ticker, 0)
 
                 # CRITICAL FIX (2026-07-17): Removed per_strip_order_limit check - $1 exposure cap is the limit
-                # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=1.00, MAX_CONTRACTS_PER_ORDER=1, MAX_POSITIONS_PER_ASSET=1
+                # GlobalSlotAllocator enforces MAX_EXPOSURE_USD=11.00, MAX_CONTRACTS_PER_ORDER=11
 
 
 

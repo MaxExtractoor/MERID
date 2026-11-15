@@ -674,8 +674,8 @@ class TradeExecutionTests:
         max_contracts_per_order = failsafe.get("max_contracts_per_order", 0)
         
         # Expected values
-        expected_exposure_cap = 1.0  # $1 fixed cap
-        expected_max_contracts = 1  # 1 contract per order
+        expected_exposure_cap = 11.0  # $11 fixed cap
+        expected_max_contracts = 11  # 11 contracts per order
         
         # Allow for missing risk_policy if failsafe is set correctly
         passed = (max_contracts_per_order == expected_max_contracts) or \

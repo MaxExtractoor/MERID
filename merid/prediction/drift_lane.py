@@ -48,8 +48,8 @@ Bounds (env-tunable):
   MERID_DRIFT_MIN_NET_EV_CENTS        -2.0     claimed-EV floor
   MERID_DRIFT_ASSETS                  SOL,ETH,DOGE,XRP  (BTC excluded —
                                       the pooled cohort measured -1.6c)
-  MERID_DRIFT_MAX_CONTRACTS           4.0      sized so a drift fill
-                                      leaves cap room for a pf lot
+  MERID_DRIFT_MAX_CONTRACTS           11.0     tracks the per-order cap;
+                                      EV/TTE/depth/daily gates still decide
   MERID_DRIFT_LOCK_GAIN_CENTS         12       per-position lock offset
   MERID_DRIFT_MAX_PER_TICKER          2        emission attempts/window
   MERID_DRIFT_DAILY_MAX               96       catastrophic-bleed bound
@@ -66,7 +66,7 @@ Bounds (env-tunable):
   MERID_CHEAP_NO_TTE_MIN_S            240      settle runway
   MERID_CHEAP_NO_MIN_NET_EV_CENTS     -6.0     premium-bound floor
   MERID_CHEAP_NO_MIN_P                0.12     anti-degenerate claim gate
-  MERID_CHEAP_NO_MAX_CONTRACTS        6.0      tracks the per-order cap;
+  MERID_CHEAP_NO_MAX_CONTRACTS        11.0     tracks the per-order cap;
                                       the 25-40c band bounds notional
   MERID_CHEAP_NO_MAX_PER_TICKER       1
   MERID_CHEAP_NO_DAILY_MAX            24       a sleeve is a lottery,
@@ -154,7 +154,7 @@ def drift_sides() -> frozenset:
 
 
 def drift_max_contracts() -> float:
-    return _env_float("MERID_DRIFT_MAX_CONTRACTS", 4.0)
+    return _env_float("MERID_DRIFT_MAX_CONTRACTS", 11.0)
 
 
 def drift_lock_gain_cents() -> int:
@@ -345,7 +345,7 @@ def cheap_no_min_p() -> float:
 
 
 def cheap_no_max_contracts() -> float:
-    return _env_float("MERID_CHEAP_NO_MAX_CONTRACTS", 6.0)
+    return _env_float("MERID_CHEAP_NO_MAX_CONTRACTS", 11.0)
 
 
 def cheap_no_max_per_ticker() -> int:
@@ -467,7 +467,7 @@ def late_taker_daily_max() -> int:
 
 
 def late_taker_max_contracts() -> float:
-    return _env_float("MERID_LATE_TAKER_MAX_CONTRACTS", 1.0)
+    return _env_float("MERID_LATE_TAKER_MAX_CONTRACTS", 11.0)
 
 
 def late_taker_band_match(price_cents: Optional[float]) -> bool:

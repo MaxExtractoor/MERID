@@ -4,7 +4,8 @@ selected a side this window.
 The lane exists so each asset-window produces measurable live flow even
 when the model claims no positive edge: when every upstream lane declines,
 the grid force-selects the ungated best side (the net-edge argmax) and
-emits a bounded 1-contract taker IOC.  This is paid telemetry — the
+emits a bounded taker IOC capped at MERID_WINDOW_QUOTA_MAX_CONTRACTS
+(default 11, tracking the per-order cap).  This is paid telemetry — the
 expected value is deliberately allowed to be negative inside a capped
 spend bound — not an edge claim.  Normal lane admissions always take
 precedence; quota only fires on a selection that otherwise would have
@@ -136,7 +137,7 @@ def quota_min_gap_s() -> float:
 
 
 def quota_max_contracts() -> float:
-    return _env_float("MERID_WINDOW_QUOTA_MAX_CONTRACTS", 3.0)
+    return _env_float("MERID_WINDOW_QUOTA_MAX_CONTRACTS", 11.0)
 
 
 def quota_dir_absent_min_p() -> float:

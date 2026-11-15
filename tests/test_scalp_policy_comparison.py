@@ -40,7 +40,7 @@ def test_comparison_diversifies_without_multiplying_window_budget():
     assert result["mixed:target_5c"]["trades"] == 2
     assert result["aggressive:target_5c"]["trades"] == 1
     for rec in result.values():
-        assert rec["contracts"] == 6
+        assert rec["contracts"] == 11
         assert 0 < rec["quote_path_upper_bound_net_cents"] < 36
 
 

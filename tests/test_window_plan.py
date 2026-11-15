@@ -68,32 +68,32 @@ def _patches(committed=None):
     )
 
 
-@pytest.mark.parametrize("profile,cap", [("conservative", 2), ("mixed", 3), ("aggressive", 6)])
+@pytest.mark.parametrize("profile,cap", [("conservative", 4), ("mixed", 6), ("aggressive", 11)])
 def test_profile_preserves_shared_caps_and_leaves_mixed_capacity(monkeypatch, profile, cap):
     monkeypatch.setenv("MERID_SCALP_EXECUTION_PROFILE", profile)
-    monkeypatch.setenv("MERID_WINDOW_PLAN_BUDGET_USD", "6")
-    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_CONTRACTS", "6")
-    monkeypatch.setenv("MERID_WINDOW_PLAN_ORDER_CAP_USD", "6")
-    monkeypatch.setenv("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_BUDGET_USD", "11")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_CONTRACTS", "11")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_ORDER_CAP_USD", "11")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_PER_ASSET_CAP_USD", "11")
     monkeypatch.setenv("MERID_WINDOW_PLAN_CORR_CAP_PCT", "1")
-    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_QTY_CC", "600")
-    monkeypatch.setenv("MERID_MAX_CONTRACTS_PER_ORDER", "6")
+    monkeypatch.setenv("MERID_WINDOW_PLAN_MAX_QTY_CC", "1100")
+    monkeypatch.setenv("MERID_MAX_CONTRACTS_PER_ORDER", "11")
     p1, p2, p3 = _patches()
-    with p1, p2, p3, patch("merid.risk.global_slot_allocator.MAX_CONTRACTS_PER_ORDER", 6):
+    with p1, p2, p3, patch("merid.risk.global_slot_allocator.MAX_CONTRACTS_PER_ORDER", 11):
         first = wp.admit(
             ticker="KXBTC15M-26OCT251445-45", asset="BTC", side="yes",
-            price_cents=90, requested_count=6, tte_s=500, decision_id="first", post_only=True,
+            price_cents=90, requested_count=11, tte_s=500, decision_id="first", post_only=True,
         )
         second = wp.admit(
             ticker="KXETH15M-26OCT251445-45", asset="ETH", side="yes",
-            price_cents=90, requested_count=6, tte_s=500, decision_id="second", post_only=True,
+            price_cents=90, requested_count=11, tte_s=500, decision_id="second", post_only=True,
         )
     assert first[0] and first[1] == cap
     if profile == "mixed":
-        assert second[0] and second[1] == 3
+        assert second[0] and second[1] == 5
     if second[0]:
-        assert first[1] + second[1] <= 6
-        assert sum(Decimal(p[3]["reserved_usd"]) for p in (first, second)) <= 6
+        assert first[1] + second[1] <= 11
+        assert sum(Decimal(p[3]["reserved_usd"]) for p in (first, second)) <= 11
     else:
         assert profile == "aggressive" and second[2] == "window_plan_contract_cap"
 
