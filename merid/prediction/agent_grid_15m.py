@@ -1262,6 +1262,16 @@ MERID_MAKER_BID_DAILY_FILE = os.environ.get(
     "MERID_MAKER_BID_DAILY_FILE", "data/maker_bid_lane.json"
 )
 
+# HMM regime detector (adaptive strategy switching).  The AGENTS.md live
+# contract requires regime signals to stay disabled unless explicitly
+# validated and approved; hmmlearn is also absent from the production
+# environment, which leaves the detector inert while still logging an
+# ERROR per agent at startup.  Default off; opt in with
+# MERID_REGIME_DETECTOR_ENABLED=1 only after validation.
+MERID_REGIME_DETECTOR_ENABLED = os.environ.get(
+    "MERID_REGIME_DETECTOR_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes")
+
 
 def _maker_bid_daily_state() -> dict:
     """Read the maker-bid lane's UTC-day submission counter."""
@@ -2361,6 +2371,7 @@ async def build_15m_agent_grid(
             velocity_threshold_btc=0.00015,
             alpha_0=0.0,
             alpha_1=200.0,
+            regime_detector_enabled=MERID_REGIME_DETECTOR_ENABLED,
         ),
         LeanAgentConfig(
             name="ETH_15M",
@@ -2370,6 +2381,7 @@ async def build_15m_agent_grid(
             velocity_threshold_eth=0.00015,
             alpha_0=0.0,
             alpha_1=200.0,
+            regime_detector_enabled=MERID_REGIME_DETECTOR_ENABLED,
         ),
         LeanAgentConfig(
             name="SOL_15M",
@@ -2379,6 +2391,7 @@ async def build_15m_agent_grid(
             velocity_threshold_sol=0.000225,
             alpha_0=0.0,
             alpha_1=200.0,
+            regime_detector_enabled=MERID_REGIME_DETECTOR_ENABLED,
         ),
         LeanAgentConfig(
             name="XRP_15M",
@@ -2388,6 +2401,7 @@ async def build_15m_agent_grid(
             velocity_threshold_xrp=0.000225,
             alpha_0=0.0,
             alpha_1=200.0,
+            regime_detector_enabled=MERID_REGIME_DETECTOR_ENABLED,
         ),
         LeanAgentConfig(
             name="DOGE_15M",
@@ -2397,6 +2411,7 @@ async def build_15m_agent_grid(
             velocity_threshold_doge=0.0003,
             alpha_0=0.0,
             alpha_1=200.0,
+            regime_detector_enabled=MERID_REGIME_DETECTOR_ENABLED,
         ),
     ]
 
