@@ -907,7 +907,12 @@ class DecisionAuditLedger:
                 if self._write_queue.queue:
                     oldest = now - self._write_queue.queue[0][1]
                     for item in self._write_queue.queue:
-                        if len(item) > 2 and item[2] == "required":
+                        # Required = non-"low" priority, matching the shed
+                        # policy and _service_item accounting.  ("required"
+                        # was never an actual priority value — the literal
+                        # check left oldest_required permanently 0 and the
+                        # configured lag budget unenforced for real work.)
+                        if len(item) > 2 and item[2] != "low":
                             req_age = now - item[1]
                             if req_age > oldest_required:
                                 oldest_required = req_age

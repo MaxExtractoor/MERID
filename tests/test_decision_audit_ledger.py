@@ -1645,3 +1645,49 @@ def test_reconcile_fill_outcomes_windowed_scan_heals_all_candidates(
                 (did,),
             ).fetchone()
             assert row["actual_fill_price_cents"] == px
+
+
+def test_writer_health_oldest_required_tracks_non_low(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: oldest_required must track non-'low' queue items.
+
+    'required' was never an actual priority value, so the literal check left
+    oldest_required permanently 0 and the configured lag budget unenforced
+    for real work.  Required evidence = everything except 'low' priority —
+    the same rule shedding and failure accounting already use.
+    """
+    import time as _t
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("MERID_AUDIT_WRITER_LAG_BUDGET_S", "60")
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    ledger._writer_started = True
+    ledger._writer_thread = MagicMock()
+    ledger._writer_thread.is_alive.return_value = True
+    ledger._failures_loaded = True
+    ledger._failed_required_writes = 0
+
+    now = _t.monotonic()
+    # FIFO head is a stale low-priority item (110s) — under the 2x any-item
+    # bound (120s) so only the required-age branch can trip.  The oldest
+    # non-low item is 90s old: past the 60s required budget.
+    ledger._write_queue.put((lambda: None, now - 110.0, "low"))
+    ledger._write_queue.put((lambda: None, now - 90.0, "high"))
+    ledger._write_queue.put((lambda: None, now - 30.0, "normal"))
+
+    wh = ledger.writer_health()
+    assert wh["oldest_queued_age_s"] == pytest.approx(110.0, abs=1.0)
+    assert wh["oldest_required_age_s"] == pytest.approx(90.0, abs=1.0)
+    assert wh["unhealthy"] is True
+
+    # Fresh queue: nothing near the budget -> healthy.
+    ledger2 = DecisionAuditLedger(db_path=tmp_db)
+    ledger2._writer_started = True
+    ledger2._writer_thread = MagicMock()
+    ledger2._writer_thread.is_alive.return_value = True
+    ledger2._failures_loaded = True
+    ledger2._failed_required_writes = 0
+    ledger2._write_queue.put((lambda: None, now - 5.0, "high"))
+    wh2 = ledger2.writer_health()
+    assert wh2["unhealthy"] is False
