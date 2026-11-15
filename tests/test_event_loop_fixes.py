@@ -97,6 +97,9 @@ class TestLoopLagActions:
         monitor._on_degraded_callbacks = []
         monitor._on_halt_callbacks = []
         monitor._halt_consecutive_count = 0
+        monitor._degraded_consecutive_count = 0
+        monitor._degraded_max_consecutive = 1
+        monitor._degraded_mode_active = False
         monitor._scope_reduced = False
         monitor._scope_reduced_at = None
         yield monitor
@@ -144,7 +147,7 @@ class TestLoopLagActions:
     async def test_halt_band_consecutive_counting(self, lag_monitor):
         """Halt band should count consecutive samples before shutdown."""
         # Set low threshold for testing
-        lag_monitor._halt_max_consecutive = 2
+        lag_monitor._halt_max_consecutive = 3
 
         # First halt sample
         lag_monitor._trigger_halt(2500.0)
@@ -153,6 +156,11 @@ class TestLoopLagActions:
         # Second halt sample
         lag_monitor._trigger_halt(2500.0)
         assert lag_monitor._halt_consecutive_count == 2
+
+        # Third consecutive breach hits the sustained threshold: the monitor
+        # logs HALT BAND SUSTAINED and halves the counter to prevent log spam.
+        lag_monitor._trigger_halt(2500.0)
+        assert lag_monitor._halt_consecutive_count == lag_monitor._halt_max_consecutive // 2
 
         # Shutdown should be triggered after threshold
         # (In real code, this would call initiate_shutdown)
@@ -264,6 +272,9 @@ class TestIntegration:
         monitor._on_elevated_callbacks = []
         monitor._on_degraded_callbacks = []
         monitor._halt_consecutive_count = 0
+        monitor._degraded_consecutive_count = 0
+        monitor._degraded_max_consecutive = 1
+        monitor._degraded_mode_active = False
         monitor._scope_reduced = False
         monitor._scope_reduced_at = None
 
