@@ -899,6 +899,122 @@ def test_pending_unsettled_tickers_skips_blank_ticker(tmp_db: Path) -> None:
     assert all(t and str(t).strip() for t, _ in pending)
 
 
+def test_outcome_sweep_columns_populated_at_insert(tmp_db: Path) -> None:
+    """2026-11-11: sweep_ticker/sweep_close_ts are denormalized onto the
+    outcome row at insert so the settlement sweep lanes never join the
+    multi-GB decisions table (the join held a WAL read snapshot for minutes
+    per poll and starved checkpoints)."""
+    import time
+    from datetime import datetime, timezone
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    # Trade-decision path.
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "dec_sweep_cols"
+    dec.ticker = "KXBTC15M-SWEEP-TEST"
+    ledger.record_trade_decision(dec)
+    expected_close = (
+        dec.timestamp_utc.replace(tzinfo=timezone.utc).timestamp()
+        + float(dec.seconds_to_expiry)
+    )
+
+    # Pre-decision rejection path.
+    assert ledger.record_pre_decision_rejection(
+        cycle_id="c_sweep",
+        run_id="run_x",
+        ticker="KXETH15M-SWEEP-REJ",
+        asset="ETH",
+        reason="market_not_entry_ready",
+        seconds_to_expiry=300.0,
+        decision_id="rej_sweep_cols",
+        candidate_id="rej_sweep_cols",
+    ) is True
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT sweep_ticker, sweep_close_ts FROM strategy_decision_outcomes "
+            "WHERE decision_id = 'dec_sweep_cols'"
+        ).fetchone()
+        assert row["sweep_ticker"] == dec.ticker
+        assert row["sweep_close_ts"] == pytest.approx(expected_close, abs=1.0)
+
+        rej = conn.execute(
+            "SELECT sweep_ticker, sweep_close_ts FROM strategy_decision_outcomes "
+            "WHERE decision_id = 'rej_sweep_cols'"
+        ).fetchone()
+        assert rej["sweep_ticker"] == "KXETH15M-SWEEP-REJ"
+        assert rej["sweep_close_ts"] is not None
+
+    # And the sweep surfaces the trade-decision ticker once its market closed.
+    pending = ledger.pending_unsettled_tickers(now=time.time() + 3600)
+    assert dec.ticker in [t for t, _ in pending]
+
+
+def test_sweep_column_backfill_repairs_null_rows(tmp_db: Path) -> None:
+    """Rows written before the sweep-column migration carry NULL sweep cols;
+    the bounded backfill must populate them from strategy_decisions while
+    leaving SETTLED rows untouched (terminal — never swept)."""
+    import time
+
+    os.environ["MERID_DECISION_AUDIT_LEDGER_ENABLED"] = "1"
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    dec = _no_trade_decision("no_edge_below_threshold")
+    dec.decision_id = "dec_backfill_pending"
+    dec.ticker = "KXSOL15M-BACKFILL-TEST"
+    ledger.record_trade_decision(dec)
+
+    # Simulate a pre-migration row: strip the sweep columns, then settle a
+    # second decision so one SETTLED and one PENDING row exist.
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            "UPDATE strategy_decision_outcomes SET sweep_ticker = NULL, "
+            "sweep_close_ts = NULL WHERE decision_id = ?",
+            (dec.decision_id,),
+        )
+        conn.commit()
+
+    dec2 = _no_trade_decision("no_edge_below_threshold")
+    dec2.decision_id = "dec_backfill_settled"
+    dec2.ticker = "KXXRP15M-BACKFILL-SETTLED"
+    ledger.record_trade_decision(dec2)
+    close2 = dec2.timestamp_utc.timestamp() + float(dec2.seconds_to_expiry)
+    ledger.record_settlement(
+        ticker=dec2.ticker,
+        close_ts=close2,
+        settled_yes=True,
+        settlement_value_cents=100,
+    )
+
+    # Run the backfill synchronously (the production path runs it on a
+    # daemon thread after _ensure_db).
+    ledger._run_sweep_backfill()
+
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.row_factory = sqlite3.Row
+        pending_row = conn.execute(
+            "SELECT sweep_ticker, sweep_close_ts FROM strategy_decision_outcomes "
+            "WHERE decision_id = 'dec_backfill_pending'"
+        ).fetchone()
+        assert pending_row["sweep_ticker"] == dec.ticker
+        assert pending_row["sweep_close_ts"] is not None
+
+        # SETTLED rows are skipped by the backfill — they can never re-enter
+        # a sweep lane, so NULL sweep cols are harmless there.
+        settled_row = conn.execute(
+            "SELECT outcome_status, sweep_ticker FROM strategy_decision_outcomes "
+            "WHERE decision_id = 'dec_backfill_settled'"
+        ).fetchone()
+        assert settled_row["outcome_status"] == "SETTLED"
+
+    # The repaired PENDING row is visible to the hot sweep again.
+    pending = ledger.pending_unsettled_tickers(now=time.time() + 3600)
+    assert dec.ticker in [t for t, _ in pending]
+
+
 # ── Capital-realized vs thesis P&L (2026-10-13) ──────────────────────────────
 
 

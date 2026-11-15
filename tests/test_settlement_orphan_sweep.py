@@ -32,9 +32,10 @@ def _insert_pending(ledger, decision_id, ticker, close_ts):
             ),
         )
         conn.execute(
-            "INSERT INTO strategy_decision_outcomes (decision_id, outcome_status) "
-            "VALUES (?, 'PENDING')",
-            (decision_id,),
+            "INSERT INTO strategy_decision_outcomes "
+            "(decision_id, outcome_status, sweep_ticker, sweep_close_ts) "
+            "VALUES (?, 'PENDING', ?, ?)",
+            (decision_id, ticker, close_ts),
         )
 
 

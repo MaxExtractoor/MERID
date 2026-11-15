@@ -406,6 +406,10 @@ class DecisionAuditLedger:
         # _shared_conn, so the write lock buys nothing here.
         self._init_lock = threading.Lock()
         self._db_ready = False
+        # 2026-11-11: one-shot guard for the sweep-column backfill thread
+        # (see _run_sweep_backfill).  Started lazily by _ensure_db once the
+        # schema/migration has run.
+        self._sweep_backfill_started = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         # 2026-11-10: dedicated WAL-checkpoint connection.  wal_checkpoint is
         # serviced as a queued write item, so it runs on the writer thread —
@@ -1053,6 +1057,7 @@ class DecisionAuditLedger:
                     self._migrate(conn)
                     self._register_known_gaps(conn)
                 self._db_ready = True
+            self._maybe_start_sweep_backfill()
             if not self._startup_checkpoint_done:
                 self._startup_checkpoint_done = True
                 # Do not wait for other readers during startup maintenance.
@@ -1425,6 +1430,24 @@ class DecisionAuditLedger:
             "INTEGER NOT NULL DEFAULT 0",
         )
 
+        # 2026-11-11: denormalize ticker/close_ts onto the outcomes table so
+        # the settlement sweep lanes can answer "which tickers still have
+        # PENDING/UNRESOLVED outcomes" from a covering index on outcomes
+        # alone.  The previous decisions<->outcomes join + GROUP BY probed
+        # the multi-GB decisions table once per PENDING row (~51k random
+        # reads) and held a WAL read snapshot for minutes per poll cycle,
+        # starving checkpoints (decision_audit.db-wal grew past 600MB and
+        # regrew after every truncate).  SETTLED is terminal, so sweep
+        # columns only need populating for live (PENDING/UNRESOLVED) rows —
+        # done at insert time below plus the bounded background backfill
+        # (_run_sweep_backfill) for rows written before this migration.
+        _add_column(conn, "strategy_decision_outcomes", "sweep_ticker", "TEXT")
+        _add_column(conn, "strategy_decision_outcomes", "sweep_close_ts", "REAL")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcomes_sweep "
+            "ON strategy_decision_outcomes(outcome_status, sweep_close_ts, sweep_ticker)"
+        )
+
         # One-time data backfills for rows written before the columns above
         # existed.  On the production DB (hundreds of MB) the selected=1
         # UPDATE/JOIN below scans the full side-EV table and runs for minutes
@@ -1517,6 +1540,233 @@ class DecisionAuditLedger:
                     gap["detected_ts"],
                     time.time(),
                 ),
+            )
+
+    # ── Sweep-column backfill (2026-11-11) ─────────────────────────────────
+    #
+    # Rows written before the sweep_ticker/sweep_close_ts migration have NULL
+    # sweep columns and are invisible to the settlement sweep lanes until
+    # backfilled.  Only non-SETTLED outcomes ever feed those lanes (SETTLED is
+    # terminal), so the backfill skips settled rows entirely.
+    # Backfill chunk sizing lives in _run_sweep_backfill (read chunk default
+    # 500, write txns are per-chunk rowid UPDATEs — see its docstring for why
+    # read/write are split across two connections).
+    _SWEEP_BACKFILL_STATE_NAME = "audit_outcome_sweep_backfill_{db_stem}.json"
+
+    def _maybe_start_sweep_backfill(self) -> None:
+        """Start the one-time sweep-column backfill exactly once per process."""
+        if self._sweep_backfill_started or not self._db_ready:
+            return
+        self._sweep_backfill_started = True
+        threading.Thread(
+            target=self._run_sweep_backfill,
+            name="audit-sweep-backfill",
+            daemon=True,
+        ).start()
+
+    def _run_sweep_backfill(self) -> None:
+        """Backfill ``sweep_ticker``/``sweep_close_ts`` for pre-migration rows.
+
+        Only non-SETTLED outcomes ever feed the sweep lanes, so the work set
+        is the ~59k PENDING/UNRESOLVED rows — not the full ~470k-row table.
+        A rowid-range UPDATE...FROM probes ``strategy_decisions`` once per
+        scanned row regardless of status (~75ms cold each), which projected
+        to ~10h of write-lock churn; instead this collects the unfilled
+        rowids up front through the covering sweep index
+        (``outcome_status, sweep_close_ts, sweep_ticker`` — ``sweep_ticker
+        IS NULL`` entries cluster at the head of each status partition) and
+        joins ``decisions`` only for those rows.
+
+        ``sweep_ticker IS NULL`` doubles as the progress marker: committed
+        batches drop out of the candidate set, so an interrupted run resumes
+        automatically on restart.  Rows whose ``decision_id`` has no
+        decisions row can never resolve — each is attempted once per
+        process and then left NULL (bounded: one retry per restart).
+        Newest rowids process first so the hot lane's 12h window gains sweep
+        columns within the first batches.
+        """
+        state_path = (
+            self.db_path.parent
+            / self._SWEEP_BACKFILL_STATE_NAME.format(db_stem=self.db_path.stem)
+        )
+        # Outer retry loop: a single ``database is locked`` must not kill the
+        # whole backfill — Phase A re-collects whatever ``sweep_ticker IS
+        # NULL`` remains, so every attempt resumes where the last committed
+        # batch stopped.  Bounded by wall-clock so a permanently wedged DB
+        # cannot spin forever; the next process start simply tries again.
+        # Let startup contention (preflight writes, writer-queue drain,
+        # settlement catch-up, evidence refresh) settle before competing
+        # for the write lock — observed: the first batches kept losing
+        # BEGIN IMMEDIATE races for the first ~2min after boot.  Skipped
+        # under pytest (hermetic tmp DBs have no startup contention).
+        _start_delay = (
+            0.0
+            if _is_test_context()
+            else float(os.environ.get("MERID_SWEEP_BACKFILL_START_DELAY_S", "90"))
+        )
+        if _start_delay > 0:
+            time.sleep(_start_delay)
+        deadline = time.time() + float(
+            os.environ.get("MERID_SWEEP_BACKFILL_MAX_S", str(6 * 3600))
+        )
+        try:
+            # Two connections, two phases per chunk:
+            #  * ``rconn`` (autocommit WAL reader) runs the expensive
+            #    outcomes->decisions join — ~10-75ms of random I/O per row.
+            #    Readers never take the write lock, so the audit writer and
+            #    checkpoints are unaffected; each SELECT's snapshot releases
+            #    at fetchall.
+            #  * ``wconn`` holds BEGIN IMMEDIATE only for the fast rowid
+            #    UPDATEs (~ms per row) — write-lock duty cycle drops from
+            #    ~minutes per batch to well under a second, so
+            #    record_settlement / decision writes never starve.
+            # A single-connection UPDATE...FROM held the write lock across
+            # every probe and produced sustained ``database is locked``
+            # storms in the writer queue (observed 2026-11-15).
+            rconn = sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False,
+                isolation_level=None,
+            )
+            rconn.row_factory = sqlite3.Row
+            rconn.execute("PRAGMA busy_timeout = 30000")
+            rconn.execute("PRAGMA query_only = ON")
+            wconn = sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False
+            )
+            try:
+                wconn.execute("PRAGMA busy_timeout = 30000")
+                wconn.execute("PRAGMA synchronous = NORMAL")
+                read_chunk = int(
+                    os.environ.get("MERID_SWEEP_BACKFILL_READ_CHUNK", "500")
+                )
+                yield_s = float(
+                    os.environ.get("MERID_SWEEP_BACKFILL_YIELD_S", "8")
+                )
+                total_attempted = 0
+                seen: set = set()
+                while time.time() < deadline:
+                    # Phase A: unfilled non-SETTLED rowids, newest first.  The
+                    # sweep index covers (status, close_ts, ticker); unfilled
+                    # rows have NULL sweep cols and sort first per status.
+                    # ``seen`` drops rows already attempted this process —
+                    # decision_id-less orphans can never resolve and must not
+                    # be re-collected every pass.
+                    rowids = [
+                        rid
+                        for rid in (
+                            int(r[0])
+                            for r in rconn.execute(
+                                """
+                                SELECT rowid FROM strategy_decision_outcomes
+                                INDEXED BY idx_outcomes_sweep
+                                WHERE outcome_status IN ('PENDING', 'UNRESOLVED')
+                                  AND sweep_ticker IS NULL
+                                ORDER BY rowid DESC
+                                """
+                            ).fetchall()
+                        )
+                        if rid not in seen
+                    ]
+                    if not rowids:
+                        logger.info(
+                            "[DECISION-AUDIT-LEDGER] sweep-column backfill "
+                            "complete (%d rows attempted)",
+                            total_attempted,
+                        )
+                        state_path.write_text(
+                            json.dumps({"done": True, "next_hi": 0})
+                        )
+                        return
+                    if total_attempted == 0 and not seen:
+                        logger.info(
+                            "[DECISION-AUDIT-LEDGER] sweep-column backfill: "
+                            "%d unfilled non-SETTLED rows",
+                            len(rowids),
+                        )
+                    progress = False
+                    batch_failed = False
+                    for i in range(0, len(rowids), read_chunk):
+                        if time.time() >= deadline:
+                            break
+                        chunk = rowids[i : i + read_chunk]
+                        # Phase B (read): resolve (ticker, close_ts) per
+                        # rowid on the WAL reader — no write lock held.
+                        try:
+                            placeholders = ",".join("?" for _ in chunk)
+                            pairs = rconn.execute(
+                                f"""
+                                SELECT o.rowid AS rid, d.ticker AS t,
+                                       d.close_ts AS c
+                                FROM strategy_decision_outcomes o
+                                JOIN strategy_decisions d
+                                  ON d.decision_id = o.decision_id
+                                WHERE o.rowid IN ({placeholders})
+                                """,
+                                chunk,
+                            ).fetchall()
+                        except Exception as exc:
+                            logger.info(
+                                "[DECISION-AUDIT-LEDGER] sweep-column "
+                                "backfill read failed (retrying): %s",
+                                exc,
+                            )
+                            batch_failed = True
+                            break
+                        if not pairs:
+                            # Every rowid in the chunk lacked a decisions
+                            # match — nothing to write; count as attempted
+                            # (they stay NULL and are excluded via ``seen``).
+                            seen.update(chunk)
+                            total_attempted += len(chunk)
+                            progress = True
+                            continue
+                        # Phase C (write): apply resolved pairs by rowid in
+                        # one short transaction.
+                        try:
+                            wconn.execute("BEGIN IMMEDIATE")
+                            for p in pairs:
+                                wconn.execute(
+                                    "UPDATE strategy_decision_outcomes "
+                                    "SET sweep_ticker = ?, sweep_close_ts = ? "
+                                    "WHERE rowid = ?",
+                                    (p["t"], p["c"], p["rid"]),
+                                )
+                            wconn.execute("COMMIT")
+                        except Exception as exc:
+                            try:
+                                wconn.execute("ROLLBACK")
+                            except Exception:
+                                pass
+                            logger.info(
+                                "[DECISION-AUDIT-LEDGER] sweep-column "
+                                "backfill write failed (retrying): %s",
+                                exc,
+                            )
+                            batch_failed = True
+                            break
+                        seen.update(chunk)
+                        total_attempted += len(chunk)
+                        progress = True
+                        tmp = state_path.with_name(state_path.name + ".tmp")
+                        tmp.write_text(json.dumps({"next_hi": chunk[-1]}))
+                        os.replace(tmp, state_path)
+                        if yield_s > 0:
+                            # Reader-gap for WAL checkpoints between chunks.
+                            time.sleep(yield_s)
+                    if batch_failed or not progress:
+                        # Lock contention or deadline — back off, then the
+                        # outer loop re-collects remaining NULL rowids.
+                        time.sleep(30.0)
+                        continue
+            finally:
+                try:
+                    rconn.close()
+                except Exception:
+                    pass
+                wconn.close()
+        except Exception as exc:
+            logger.warning(
+                "[DECISION-AUDIT-LEDGER] sweep-column backfill failed: %s", exc
             )
 
     # ── Public recording API ───────────────────────────────────────────────
@@ -1804,8 +2054,9 @@ class DecisionAuditLedger:
                 )
                 if ticker and str(ticker).strip():
                     conn.execute(
-                        "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
-                        (decision_id,),
+                        "INSERT INTO strategy_decision_outcomes "
+                        "(decision_id, sweep_ticker, sweep_close_ts) VALUES (?, ?, ?)",
+                        (decision_id, ticker, close_ts),
                     )
                 else:
                     # No resolvable contract was bound to this rejection, so no
@@ -1814,9 +2065,10 @@ class DecisionAuditLedger:
                     # /markets/ call that 301s every poll cycle).
                     conn.execute(
                         """INSERT INTO strategy_decision_outcomes
-                           (decision_id, outcome_status, unresolved_reason, unresolved_at)
-                           VALUES (?, 'UNRESOLVED', 'no_contract_at_decision', ?)""",
-                        (decision_id, now),
+                           (decision_id, outcome_status, unresolved_reason, unresolved_at,
+                            sweep_ticker, sweep_close_ts)
+                           VALUES (?, 'UNRESOLVED', 'no_contract_at_decision', ?, ?, ?)""",
+                        (decision_id, now, ticker, close_ts),
                     )
                 self._append_decision_event_locked(
                     conn,
@@ -4093,19 +4345,20 @@ class DecisionAuditLedger:
         cutoff = now_ts - grace_s
         floor = now_ts - lookback_s
         try:
-            # 2026-10-28: pure read on the dedicated read connection.
+            # 2026-11-11: sweep columns are denormalized onto outcomes at
+            # insert/backfill, so this is a covering-index scan on outcomes
+            # alone — no per-row probe into the multi-GB decisions table and
+            # no multi-minute WAL read snapshot pinning checkpoints.
             rows = self._read().execute(
                 """
-                SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
-                FROM strategy_decisions d
-                JOIN strategy_decision_outcomes o
-                  ON d.decision_id = o.decision_id
-                WHERE o.outcome_status = 'PENDING'
-                  AND d.close_ts < ?
-                  AND d.close_ts > ?
-                  AND d.ticker IS NOT NULL
-                  AND d.ticker != ''
-                GROUP BY d.ticker
+                SELECT sweep_ticker AS ticker, MAX(sweep_close_ts) AS close_ts
+                FROM strategy_decision_outcomes
+                WHERE outcome_status = 'PENDING'
+                  AND sweep_close_ts < ?
+                  AND sweep_close_ts > ?
+                  AND sweep_ticker IS NOT NULL
+                  AND sweep_ticker != ''
+                GROUP BY sweep_ticker
                 ORDER BY close_ts DESC
                 LIMIT ?
                 """,
@@ -4162,18 +4415,17 @@ class DecisionAuditLedger:
         now_ts = now if now is not None else time.time()
         floor = now_ts - older_than_s
         try:
-            # 2026-10-28: pure read on the dedicated read connection.
+            # 2026-11-11: denormalized sweep columns — covering-index scan on
+            # outcomes alone (see pending_unsettled_tickers).
             rows = self._read().execute(
                 """
-                SELECT d.ticker AS ticker, MAX(d.close_ts) AS close_ts
-                FROM strategy_decisions d
-                JOIN strategy_decision_outcomes o
-                  ON d.decision_id = o.decision_id
-                WHERE o.outcome_status = 'PENDING'
-                  AND d.close_ts <= ?
-                  AND d.ticker IS NOT NULL
-                  AND d.ticker != ''
-                GROUP BY d.ticker
+                SELECT sweep_ticker AS ticker, MAX(sweep_close_ts) AS close_ts
+                FROM strategy_decision_outcomes
+                WHERE outcome_status = 'PENDING'
+                  AND sweep_close_ts <= ?
+                  AND sweep_ticker IS NOT NULL
+                  AND sweep_ticker != ''
+                GROUP BY sweep_ticker
                 ORDER BY close_ts ASC
                 LIMIT ?
                 """,
@@ -4213,21 +4465,19 @@ class DecisionAuditLedger:
             # 2026-10-28: pure read on the dedicated read connection.
             rows = self._read().execute(
                 f"""
-                SELECT d.ticker AS ticker,
-                       MAX(d.close_ts) AS close_ts,
+                SELECT o.sweep_ticker AS ticker,
+                       MAX(o.sweep_close_ts) AS close_ts,
                        MAX(o.unresolved_at) AS unresolved_at,
                        MAX(o.unresolved_reason) AS reason
-                FROM strategy_decisions d
-                JOIN strategy_decision_outcomes o
-                  ON d.decision_id = o.decision_id
+                FROM strategy_decision_outcomes o
                 WHERE o.outcome_status = 'UNRESOLVED'
                   AND o.unresolved_at IS NOT NULL
                   AND o.unresolved_at >= ?
                   AND COALESCE(o.unresolved_recheck_count, 0) < ?
                   AND {self._UNRESOLVED_RECHECK_REASON_PREDICATE}
-                  AND d.ticker IS NOT NULL
-                  AND d.ticker != ''
-                GROUP BY d.ticker
+                  AND o.sweep_ticker IS NOT NULL
+                  AND o.sweep_ticker != ''
+                GROUP BY o.sweep_ticker
                 ORDER BY unresolved_at DESC
                 LIMIT ?
                 """,
@@ -5183,8 +5433,9 @@ class DecisionAuditLedger:
 
             # Insert a PENDING outcome row for the settlement joiner to fill later.
             conn.execute(
-                "INSERT INTO strategy_decision_outcomes (decision_id) VALUES (?)",
-                (decision_id,),
+                "INSERT INTO strategy_decision_outcomes "
+                "(decision_id, sweep_ticker, sweep_close_ts) VALUES (?, ?, ?)",
+                (decision_id, str(getattr(decision, "ticker", "")), close_ts),
             )
 
             # First decision-stage lifecycle event: the model either emitted an
