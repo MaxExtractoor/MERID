@@ -1688,9 +1688,31 @@ class DecisionAuditLedger:
                 yield_s = float(
                     os.environ.get("MERID_SWEEP_BACKFILL_YIELD_S", "8")
                 )
+                # Self-throttle: the sweep columns only feed orphan-sweep
+                # lanes — never the live decision path — so whenever the
+                # audit write queue is backed up the whole backfill stands
+                # down until production traffic drains.  Observed 2026-11-15:
+                # backfill write txns held the DB write lock ~10-15s per
+                # 500-row chunk on cold pages, serialising every shared-conn
+                # writer behind self._lock until the queue crossed the
+                # unhealthy bound.  A <state>.PAUSE file applies the same
+                # stand-down manually without a restart.
+                pause_depth = int(
+                    os.environ.get("MERID_SWEEP_BACKFILL_PAUSE_DEPTH", "300")
+                )
+                pause_s = float(
+                    os.environ.get("MERID_SWEEP_BACKFILL_PAUSE_S", "30")
+                )
+                pause_flag = state_path.with_name(state_path.name + ".PAUSE")
                 total_attempted = 0
                 seen: set = set()
                 while time.time() < deadline:
+                    if (
+                        self._write_queue.qsize() >= pause_depth
+                        or pause_flag.exists()
+                    ):
+                        time.sleep(pause_s)
+                        continue
                     # Phase A: unfilled non-SETTLED rowids, newest first.  The
                     # sweep index covers (status, close_ts, ticker); unfilled
                     # rows have NULL sweep cols and sort first per status.
@@ -1733,6 +1755,13 @@ class DecisionAuditLedger:
                     batch_failed = False
                     for i in range(0, len(rowids), read_chunk):
                         if time.time() >= deadline:
+                            break
+                        if (
+                            self._write_queue.qsize() >= pause_depth
+                            or pause_flag.exists()
+                        ):
+                            # Queue filled mid-pass — stop here; unprocessed
+                            # rowids stay NULL and are re-collected next pass.
                             break
                         chunk = rowids[i : i + read_chunk]
                         # Phase B (read): resolve (ticker, close_ts) per
