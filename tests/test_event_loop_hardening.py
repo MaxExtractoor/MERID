@@ -18,6 +18,15 @@ from dataclasses import fields
 class TestWSBridgeQueueMetrics:
     """Tests for WS bridge queue depth and backpressure metrics."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_bridge_singleton_guard(self):
+        """KalshiWebSocketBridge refuses a second in-process instantiation;
+        each test builds its own instance, so reset the guard per test."""
+        from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+        KalshiWebSocketBridge._instance_created = False
+        yield
+        KalshiWebSocketBridge._instance_created = False
+
     def test_health_status_includes_queue_metrics(self):
         """Verify get_health_status() includes queue depth metrics."""
         from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
