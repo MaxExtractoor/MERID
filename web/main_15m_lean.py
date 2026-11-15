@@ -1002,9 +1002,15 @@ async def lifespan(app: FastAPI):
                 pass
         raise
     
+    # Start event-loop lag monitor to detect main thread event loop stalls
+    from merid.utils.event_loop_monitor import EventLoopLagMonitor
+    _lag_monitor = EventLoopLagMonitor().start()
+    app.state.event_loop_lag_monitor = _lag_monitor
+
     yield
-    
+
     # Shutdown
+    _lag_monitor.stop()
     logger.info("[LIFESPAN] Step 9: Graceful shutdown started")
 
     # ERROR HANDLING IMPROVEMENT: Specific exception handling for each shutdown step
@@ -1417,10 +1423,23 @@ async def health_check():
     CRITICAL FIX (2026-07-17): Split from readiness probe per Kubernetes best practices.
     This should be fast and reliable - no external dependencies.
     """
+    lag_stats = {}
+    monitor = getattr(app.state, "event_loop_lag_monitor", None)
+    if monitor is not None:
+        try:
+            lag_stats = monitor.get_stats()
+        except Exception:
+            pass
+
     return {
         "status": "alive",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_loop": lag_stats,
     }
+
+
+_last_safety_check_time: float = 0.0
+_last_safety_check_result: tuple[bool, Dict[str, Any]] = (True, {"status": "ok", "reason": None})
 
 
 @app.get("/api/v1/ready")
@@ -1430,6 +1449,8 @@ async def readiness_check():
     CRITICAL FIX (2026-07-17): Checks if startup completed and loop is running.
     Returns 503 if not ready to receive traffic.
     """
+    global _last_safety_check_time, _last_safety_check_result
+
     # Check loop task status
     kalshi_task = getattr(app.state, "kalshi_15m_task", None)
     loop_alive = kalshi_task is not None and not kalshi_task.done()
@@ -1437,16 +1458,18 @@ async def readiness_check():
     # Check if lifespan startup completed
     startup_completed = getattr(app.state, "startup_completed", False)
 
-    # Check order safety controls are wired and active
-    safety_ok = True
-    safety_detail: Dict[str, Any] = {}
-    try:
-        from merid.startup_validations import validate_order_safety_controls
-        validate_order_safety_controls()
-        safety_detail = {"status": "ok", "reason": None}
-    except Exception as e:
-        safety_ok = False
-        safety_detail = {"status": "failed", "reason": str(e)}
+    # Check order safety controls are wired and active (cached for 5s to avoid import churn)
+    now_mono = time.monotonic()
+    if now_mono - _last_safety_check_time > 5.0:
+        try:
+            from merid.startup_validations import validate_order_safety_controls
+            validate_order_safety_controls()
+            _last_safety_check_result = (True, {"status": "ok", "reason": None})
+        except Exception as e:
+            _last_safety_check_result = (False, {"status": "failed", "reason": str(e)})
+        _last_safety_check_time = now_mono
+
+    safety_ok, safety_detail = _last_safety_check_result
     
     ready = startup_completed and loop_alive and safety_ok
     

@@ -358,14 +358,13 @@ class CoinbaseWebSocketClient:
         )
 
         # Update price history
-        self._price_history[product_id].append(spot_price)
+        hist = self._price_history[product_id]
+        hist.append(spot_price)
 
-        # Keep only last 5 minutes of history
+        # Keep only last 5 minutes of history (prune in O(1) popped from left)
         cutoff_time = timestamp - 300
-        self._price_history[product_id] = [
-            p for p in self._price_history[product_id]
-            if p.timestamp > cutoff_time
-        ]
+        while hist and hist[0].timestamp <= cutoff_time:
+            hist.pop(0)
 
         self._last_sequence[product_id] = sequence
 

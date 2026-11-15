@@ -365,6 +365,7 @@ class OrderAttemptStore:
             if db_path not in cls._instances:
                 instance = super().__new__(cls)
                 instance._db_path = db_path
+                instance._local = threading.local()
                 instance._persistent_conn: Optional[sqlite3.Connection] = None
                 instance._init_db()
                 instance._init_exit_tables()
@@ -372,18 +373,21 @@ class OrderAttemptStore:
             return cls._instances[db_path]
 
     def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         if self._persistent_conn is not None:
             return self._persistent_conn
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=30.0, check_same_thread=False)
+        conn = sqlite3.connect(self._db_path, timeout=5.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         # busy_timeout must precede journal_mode: the WAL pragma itself
         # acquires a lock and raises "database is locked" instantly under
-        # concurrent writers (observed 2026-10-18: finalize_order_identity
-        # crashed mid-route on a SOL exit whose order had already filled).
-        conn.execute("PRAGMA busy_timeout = 30000")
+        # concurrent writers. Bounded to 5s to avoid freezing caller threads.
+        conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        self._local.conn = conn
         return conn
 
     def _init_db(self) -> None:
@@ -416,6 +420,8 @@ class OrderAttemptStore:
                     ON order_attempts(status);
                 CREATE INDEX IF NOT EXISTS idx_order_attempts_replaces
                     ON order_attempts(replaces_order_attempt_id);
+                CREATE INDEX IF NOT EXISTS idx_order_attempts_fingerprint
+                    ON order_attempts(fingerprint, created_at DESC);
             """
             )
             conn.commit()
@@ -564,7 +570,7 @@ class OrderAttemptStore:
             logger.exception("[ORDER-ATTEMPT-STORE] Failed to claim submission")
             return False
         finally:
-            if conn is not self._persistent_conn:
+            if conn is not getattr(self._local, "conn", None) and conn is not self._persistent_conn:
                 conn.close()
 
     def claim_confirmed_rejection_for_replacement(self, order_attempt_id: str) -> bool:
@@ -582,7 +588,7 @@ class OrderAttemptStore:
             logger.exception("[ORDER-ATTEMPT-STORE] Failed to claim confirmed rejection")
             return False
         finally:
-            if conn is not self._persistent_conn:
+            if conn is not getattr(self._local, "conn", None) and conn is not self._persistent_conn:
                 conn.close()
 
     def update_status(
@@ -1521,3 +1527,21 @@ class OrderAttemptStore:
                 ),
             )
             return cur.rowcount > 0
+
+    def close(self) -> None:
+        """Close the thread-local connection for the calling thread."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
+    @classmethod
+    def close_all(cls) -> None:
+        """Close all cached connections across known store instances."""
+        with cls._lock:
+            for inst in cls._instances.values():
+                inst.close()
+

@@ -577,6 +577,8 @@ def _ensure_handlers() -> None:
     _stream_handler = logging.StreamHandler()
     _stream_handler.setFormatter(text_formatter)
     _stream_handler.addFilter(sensitive_filter)
+    _console_level_name = os.environ.get("MERID_CONSOLE_LOG_LEVEL", "WARNING").upper()
+    _stream_handler.setLevel(getattr(logging, _console_level_name, logging.WARNING))
 
     _queue_handler = _NonBlockingQueueHandler(_log_queue)
     _queue_handler.addFilter(_HotDiagnosticThrottleFilter())

@@ -1068,6 +1068,36 @@ def _save_state(path: Optional[str] = None) -> None:
             )
 
 
+_SAVE_DEBOUNCE_S = float(os.environ.get("MERID_CBP_SAVE_DEBOUNCE_S", "2.0"))
+_save_debounce_timer: Optional[threading.Timer] = None
+
+
+def _save_state_debounced(path: Optional[str] = None) -> None:
+    global _save_debounce_timer
+    if _SAVE_DEBOUNCE_S <= 0:
+        _save_state(path)
+        return
+    with _state_lock:
+        if _save_debounce_timer is not None:
+            _save_debounce_timer.cancel()
+        def _fire() -> None:
+            global _save_debounce_timer
+            _save_debounce_timer = None
+            _save_state(path)
+        _save_debounce_timer = threading.Timer(_SAVE_DEBOUNCE_S, _fire)
+        _save_debounce_timer.daemon = True
+        _save_debounce_timer.start()
+
+
+def _flush_state(path: Optional[str] = None) -> None:
+    global _save_debounce_timer
+    with _state_lock:
+        if _save_debounce_timer is not None:
+            _save_debounce_timer.cancel()
+            _save_debounce_timer = None
+        _save_state(path)
+
+
 def reset_provisional_state_cache() -> None:
     """Test helper: drop the in-memory state cache."""
     global _STATE_CACHE, _STATE_CACHE_PATH
@@ -2260,7 +2290,7 @@ def bump_provisional_funnel(stage: str, cell_id: Optional[str] = None) -> None:
     if cell_id:
         per = st.setdefault("funnel_by_cell", {}).setdefault(cell_id, {})
         per[stage] = int(per.get(stage) or 0) + 1
-    _save_state()
+    _save_state_debounced()
 
 
 def provisional_funnel_counters() -> Dict[str, Any]:

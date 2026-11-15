@@ -1684,7 +1684,8 @@ def persist_order_decision(record: dict) -> None:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
-                os.fsync(f.fileno())
+                if os.environ.get("MERID_FSYNC_ORDER_DECISIONS", "0") in ("1", "true", "yes"):
+                    os.fsync(f.fileno())
     except Exception as exc:
         logger.debug("[ORDER-DECISION-LOG] failed to persist: %s", exc)
 

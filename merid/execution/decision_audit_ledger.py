@@ -2815,9 +2815,14 @@ class DecisionAuditLedger:
                 force_full = os.environ.get(
                     "MERID_RECONCILE_FULL_SCAN", "0"
                 ).strip().lower() in ("1", "true", "yes")
+                allow_auto_full = os.environ.get(
+                    "MERID_RECONCILE_ALLOW_AUTO_FULL", "0"
+                ).strip().lower() in ("1", "true", "yes")
                 full_due = force_full or (
-                    time.time() - float(state.get("last_full_scan_ts") or 0.0)
-                    > full_every_s
+                    allow_auto_full and (
+                        time.time() - float(state.get("last_full_scan_ts") or 0.0)
+                        > full_every_s
+                    )
                 )
                 last_rowid = 0 if full_due else max(
                     int(state.get("resume_rowid") or 0),
@@ -2860,10 +2865,13 @@ class DecisionAuditLedger:
                 # oldest queued write exceeds the yield age, each page pauses
                 # (bounded per page) so live evidence drains first.
                 _recon_yield_age_s = float(
-                    os.environ.get("MERID_RECONCILE_YIELD_AGE_S", "180")
+                    os.environ.get("MERID_RECONCILE_YIELD_AGE_S", "5.0")
                 )
                 _recon_yield_max_s = float(
                     os.environ.get("MERID_RECONCILE_YIELD_MAX_S", "10")
+                )
+                _recon_page_pause_s = float(
+                    os.environ.get("MERID_RECONCILE_PAGE_PAUSE_S", "0.02")
                 )
                 # 2026-11-11: bound each page query to a rowid window so the
                 # yield check below actually engages.  Previously each query
@@ -2981,6 +2989,8 @@ class DecisionAuditLedger:
                             if _oldest_age <= _recon_yield_age_s:
                                 break
                             time.sleep(0.25)
+                    if _recon_page_pause_s > 0:
+                        time.sleep(_recon_page_pause_s)
                 self._reconcile_state_save(
                     resume_rowid=last_rowid,
                     complete_through_rowid=max(

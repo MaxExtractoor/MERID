@@ -20638,8 +20638,24 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
             intent.count = 0.0
 
     # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
+    # 2026-11-15: Offload to worker thread with timeout so synchronous SQLite
+    # operations in finalize_order_identity never block the main asyncio event loop.
     try:
-        finalize_order_identity(intent)
+        await asyncio.wait_for(
+            asyncio.to_thread(finalize_order_identity, intent),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.critical(
+            "[ORDER-IDENTITY-TIMEOUT] intent_id=%s timed out after 5.0s during identity finalization",
+            getattr(intent, "intent_id", None),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=get_venue_gate().mode,
+            reason="identity_error:timeout",
+            latency_ms=0.0,
+        )
     except OrderIdentityError as identity_err:
         logger.critical(
             "[ORDER-IDENTITY-REJECT] intent_id=%s error=%s",
