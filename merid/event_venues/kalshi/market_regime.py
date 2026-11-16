@@ -27,7 +27,7 @@ class SkewRegime:
     spread, and sizing to account for different risk profiles across the
     probability spectrum.
     """
-    name: Literal["balanced", "transition_low", "transition_high", "skewed_low", "skewed_high", "disabled_tail", "trend_yes_hi", "settlement_convergence", "pinned_fav", "late_edge_probe"]
+    name: Literal["balanced", "transition_low", "transition_high", "skewed_low", "skewed_high", "disabled_tail", "tail_low", "tail_high", "trend_yes_hi", "settlement_convergence", "pinned_fav", "late_edge_probe"]
     min_price_cents: int
     max_price_cents: int
     min_net_edge_cents: Decimal
@@ -117,6 +117,34 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
         min_time_to_expiry_seconds=180,
         max_time_to_expiry_seconds=1200,
     ),
+    "tail_low": SkewRegime(
+        name="tail_low",
+        min_price_cents=1,
+        max_price_cents=9,
+        min_net_edge_cents=Decimal("1.5"),
+        min_confidence=Decimal("0.80"),
+        max_spread_cents=1,
+        min_depth_multiple=Decimal("4.0"),
+        size_multiplier=Decimal("0.50"),
+        enabled=os.environ.get("MERID_TAIL_LOW_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"),
+        min_book_freshness_ms=1000,
+        min_time_to_expiry_seconds=15,
+        max_time_to_expiry_seconds=1200,
+    ),
+    "tail_high": SkewRegime(
+        name="tail_high",
+        min_price_cents=91,
+        max_price_cents=99,
+        min_net_edge_cents=Decimal("1.5"),
+        min_confidence=Decimal("0.80"),
+        max_spread_cents=1,
+        min_depth_multiple=Decimal("4.0"),
+        size_multiplier=Decimal("0.50"),
+        enabled=os.environ.get("MERID_TAIL_HIGH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on"),
+        min_book_freshness_ms=1000,
+        min_time_to_expiry_seconds=15,
+        max_time_to_expiry_seconds=1200,
+    ),
     "disabled_tail": SkewRegime(
         name="disabled_tail",
         min_price_cents=1,
@@ -135,10 +163,10 @@ REGIME_CONFIGS: Dict[str, SkewRegime] = {
 # 60-120s (and favorites outside 82-91c at 120-180s) before the decision
 # engine's economics could evaluate them — the same ordering bug fixed
 # 2026-10-14 by lowering skewed bands 240->180s.  The engine's own entry
-# floor (90s) still bounds actual entries; this only stops the classifier
+# floor (15s default) still bounds actual entries; this only stops the classifier
 # from pre-empting it.  Never raises a floor, never enables a band.
 _REGIME_MIN_TTE_FLOOR_S = float(
-    os.environ.get("MERID_REGIME_MIN_TTE_FLOOR_S", "0")
+    os.environ.get("MERID_REGIME_MIN_TTE_FLOOR_S", "15")
 )
 if _REGIME_MIN_TTE_FLOOR_S > 0:
     REGIME_CONFIGS = {

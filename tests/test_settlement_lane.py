@@ -414,12 +414,12 @@ def test_lane_not_reachable_when_disabled_or_bad_input(monkeypatch):
 
 
 def test_band_classifier_rejects_final_minute_without_bypass():
-    # Regression anchor for the ordering bug: with no bypass the classifier
-    # returns None for both sides at TTE<120s regardless of price.
+    # Regression anchor for the ordering bug: below the execution floor (<15s)
+    # the classifier returns None for both sides regardless of price.
     from merid.event_venues.kalshi.market_regime import classify_market_regime
 
-    assert classify_market_regime(50, 45) is None
-    assert classify_market_regime(83, 40) is None
+    assert classify_market_regime(50, 10) is None
+    assert classify_market_regime(83, 10) is None
     # Sanity: inside the normal TTE window the same prices classify.
     assert classify_market_regime(50, 300) is not None
 

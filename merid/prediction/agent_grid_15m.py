@@ -1730,7 +1730,8 @@ def _settlement_lane_reachable(seconds_to_expiry: Any) -> bool:
         return False
     if not math.isfinite(tte):
         return False
-    return _settlement_lane_min_tte() <= tte <= 60.0
+    max_tte = float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_TTE_S", "150.0"))
+    return _settlement_lane_min_tte() <= tte <= max_tte
 
 
 def _settlement_max_missing_samples() -> int:
@@ -16283,6 +16284,52 @@ class LeanAgent15m:
         except Exception:
             pass
 
+        # 2026-11-16: Threshold-cell reachability bypass.
+        # If a registered, approved threshold cell matches (asset, side, price, TTE),
+        # inject a pseudo-regime so the candidate reaches compute_trade_decision,
+        # where the threshold cell lane's own admission economics and markout gates
+        # can evaluate it rather than dying at the static regime pre-filter.
+        try:
+            from merid.prediction import threshold_cells as _tc_reach
+            from merid.event_venues.kalshi.market_regime import SkewRegime as _TC_SkewRegime
+            _tte_f = float(seconds_to_expiry) if seconds_to_expiry is not None else None
+            if yes_regime is None and yes_price_cents and _tte_f is not None:
+                _tc_hit = _tc_reach.resolve_threshold_cell(asset, "yes", yes_price_cents, _tte_f)
+                if _tc_hit is not None:
+                    yes_regime = _TC_SkewRegime(
+                        name="balanced",
+                        min_price_cents=int(_tc_hit.price_min_cents),
+                        max_price_cents=int(_tc_hit.price_max_cents),
+                        min_net_edge_cents=Decimal(str(_tc_hit.min_net_ev_cents)),
+                        min_confidence=Decimal("0.70"),
+                        max_spread_cents=2,
+                        min_depth_multiple=Decimal("1.0"),
+                        size_multiplier=Decimal("0.50"),
+                        enabled=True,
+                        min_book_freshness_ms=1000,
+                        min_time_to_expiry_seconds=int(_tc_hit.tte_min_seconds),
+                        max_time_to_expiry_seconds=int(_tc_hit.tte_max_seconds),
+                    )
+            if no_regime is None and no_price_cents and _tte_f is not None:
+                _tc_hit = _tc_reach.resolve_threshold_cell(asset, "no", no_price_cents, _tte_f)
+                if _tc_hit is not None:
+                    no_regime = _TC_SkewRegime(
+                        name="balanced",
+                        min_price_cents=int(_tc_hit.price_min_cents),
+                        max_price_cents=int(_tc_hit.price_max_cents),
+                        min_net_edge_cents=Decimal(str(_tc_hit.min_net_ev_cents)),
+                        min_confidence=Decimal("0.70"),
+                        max_spread_cents=2,
+                        min_depth_multiple=Decimal("1.0"),
+                        size_multiplier=Decimal("0.50"),
+                        enabled=True,
+                        min_book_freshness_ms=1000,
+                        min_time_to_expiry_seconds=int(_tc_hit.tte_min_seconds),
+                        max_time_to_expiry_seconds=int(_tc_hit.tte_max_seconds),
+                    )
+        except Exception:
+            pass
+
         # 2026-10-27 (observe-only): counterfactual tracker for the
         # pinned-fav maker band below MAKER_LO — 85-91c shadow window with
         # the live 90-91c edge as control.  The 2026-10-24 floor raise to
@@ -16384,6 +16431,7 @@ class LeanAgent15m:
                 _sd_max_px = _settlement_lane_max_price_cents()
                 _sd_min_edge = Decimal(str(os.environ.get("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "0.75")))
                 _sd_max_spread = int(os.environ.get("MERID_SETTLEMENT_LANE_MAX_SPREAD_CENTS", "5"))
+                _sd_max_tte = float(os.environ.get("MERID_SETTLEMENT_LANE_MAX_TTE_S", "150.0"))
                 _settle_regime = SkewRegime(
                     name="settlement_convergence",
                     min_price_cents=1,
@@ -16396,7 +16444,7 @@ class LeanAgent15m:
                     enabled=True,
                     min_book_freshness_ms=1000,
                     min_time_to_expiry_seconds=int(_sd_min_tte),
-                    max_time_to_expiry_seconds=60,
+                    max_time_to_expiry_seconds=int(_sd_max_tte),
                 )
                 if (
                     yes_regime is None
