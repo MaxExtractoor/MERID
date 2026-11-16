@@ -105,6 +105,29 @@ def test_pinned_fav_band_range_expanded():
     assert pinned_fav_band_match(100.0) is False
 
 
+def test_fractional_prices_and_boundary_cracks():
+    # Boundary cracks previously caused fractional prices (e.g. 9.3c, 14.5c, 24.8c,
+    # 75.4c, 85.5c, 90.5c) to return None and mislabel as 'above_ceiling' with enabled=False.
+    boundary_samples = [1.0, 2.3, 9.0, 9.3, 10.0, 14.5, 15.0, 24.8, 25.0, 50.0, 75.4, 76.0, 85.5, 86.0, 90.5, 91.0, 98.7, 99.0]
+    for p in boundary_samples:
+        r = classify_market_regime(p, 300)
+        assert r is not None, f"price {p} returned None regime"
+        d = describe_price_band(p)
+        assert d["enabled"] is True, f"price {p} reported enabled=False"
+        assert d["reason"] == "enabled_band", f"price {p} reported reason {d['reason']}"
+        assert d["band"] != "above_ceiling", f"price {p} mislabeled as above_ceiling"
+        assert d["band"] != "below_floor", f"price {p} mislabeled as below_floor"
+
+    # Strict out of bounds
+    d_below = describe_price_band(0.5)
+    assert d_below["enabled"] is False
+    assert d_below["band"] == "below_floor"
+
+    d_above = describe_price_band(99.5)
+    assert d_above["enabled"] is False
+    assert d_above["band"] == "above_ceiling"
+
+
 if __name__ == "__main__":
     test_tail_regimes_present_and_enabled()
     test_tail_regime_classification()
@@ -112,4 +135,5 @@ if __name__ == "__main__":
     test_dead_zone_closed_between_15s_and_90s()
     test_sub_15s_fails_closed()
     test_pinned_fav_band_range_expanded()
+    test_fractional_prices_and_boundary_cracks()
     print("All direct tests passed!")

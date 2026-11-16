@@ -186,7 +186,7 @@ if _REGIME_MIN_TTE_FLOOR_S > 0:
 
 
 def classify_market_regime(
-    price_cents: int,
+    price_cents: Any,
     time_to_expiry_seconds: Optional[int] = None,
 ) -> Optional[SkewRegime]:
     """Classify a market into its regime based on executable price.
@@ -212,23 +212,27 @@ def classify_market_regime(
         >>> classify_market_regime(3)
         None  # Disabled tail
     """
-    if not 1 <= price_cents <= 99:
-        logger.warning(f"Invalid price_cents for regime classification: {price_cents}")
+    try:
+        p_val = float(price_cents)
+    except (TypeError, ValueError):
         return None
+    if not (1.0 <= p_val <= 99.0):
+        return None
+    p_int = max(1, min(99, int(round(p_val))))
     
     for regime_name, regime in REGIME_CONFIGS.items():
-        if regime.enabled and regime.min_price_cents <= price_cents <= regime.max_price_cents:
+        if regime.enabled and regime.min_price_cents <= p_int <= regime.max_price_cents:
             # Validate time window if provided
             if time_to_expiry_seconds is not None:
                 if time_to_expiry_seconds < regime.min_time_to_expiry_seconds:
                     logger.debug(
-                        f"Regime {regime_name}: price={price_cents}c below min time window "
+                        f"Regime {regime_name}: price={p_int}c below min time window "
                         f"({time_to_expiry_seconds}s < {regime.min_time_to_expiry_seconds}s)"
                     )
                     continue
                 if time_to_expiry_seconds > regime.max_time_to_expiry_seconds:
                     logger.debug(
-                        f"Regime {regime_name}: price={price_cents}c above max time window "
+                        f"Regime {regime_name}: price={p_int}c above max time window "
                         f"({time_to_expiry_seconds}s > {regime.max_time_to_expiry_seconds}s)"
                     )
                     continue
@@ -238,7 +242,7 @@ def classify_market_regime(
     return None
 
 
-def describe_price_band(price_cents: int) -> Dict[str, Any]:
+def describe_price_band(price_cents: Any) -> Dict[str, Any]:
     """Return the band window containing ``price_cents`` for audit telemetry.
 
     Unlike :func:`classify_market_regime` this ignores TTE and reports the
@@ -246,10 +250,44 @@ def describe_price_band(price_cents: int) -> Dict[str, Any]:
     can show the exact bounds and rule the price violated.  Shared policy:
     identical result for any asset.
     """
+    try:
+        p_val = float(price_cents)
+    except (TypeError, ValueError):
+        return {
+            "band": "invalid",
+            "lo": None,
+            "hi": None,
+            "enabled": False,
+            "min_tte_s": None,
+            "rule_id": "market_regime_v1:invalid",
+            "reason": "invalid_price",
+        }
+    if p_val < 1.0:
+        return {
+            "band": "below_floor",
+            "lo": None,
+            "hi": 0,
+            "enabled": False,
+            "min_tte_s": None,
+            "rule_id": "market_regime_v1:below_floor",
+            "reason": "price_in_disabled_tail:below_floor",
+        }
+    if p_val > 99.0:
+        return {
+            "band": "above_ceiling",
+            "lo": 100,
+            "hi": None,
+            "enabled": False,
+            "min_tte_s": None,
+            "rule_id": "market_regime_v1:above_ceiling",
+            "reason": "price_in_disabled_tail:above_ceiling",
+        }
+
+    p_int = max(1, min(99, int(round(p_val))))
     for _name, _r in REGIME_CONFIGS.items():
         if _name == "disabled_tail":
             continue
-        if _r.min_price_cents <= price_cents <= _r.max_price_cents:
+        if _r.min_price_cents <= p_int <= _r.max_price_cents:
             return {
                 "band": _r.name,
                 "lo": _r.min_price_cents,
@@ -257,29 +295,15 @@ def describe_price_band(price_cents: int) -> Dict[str, Any]:
                 "enabled": bool(_r.enabled),
                 "min_tte_s": _r.min_time_to_expiry_seconds,
                 "rule_id": f"market_regime_v1:{_r.name}",
-                "reason": "enabled_band",
+                "reason": "enabled_band" if _r.enabled else f"price_in_disabled_tail:{_r.name}",
             }
-    if 1 <= price_cents <= 9:
+
+    if 1 <= p_int <= 9:
         _band = "disabled_tail_low"
         _lo, _hi = 1, 9
-    elif 91 <= price_cents <= 99:
-        _band = "disabled_tail_high"
-        _lo, _hi = 91, 99
-    elif 90 < price_cents < 91:
-        # 2026-11-06: the 90-91c crack — skewed_high caps at 90 and the
-        # disabled tail starts at 91, so a price here matched no band and was
-        # mislabeled 'above_ceiling'.  It is dead by evidence (the pf post-
-        # floor 90-91c cohort ran 73% win / -1405c), so it reports as the
-        # disabled tail it operationally is; classify_market_regime already
-        # returns None there and is unchanged.
-        _band = "disabled_tail_high"
-        _lo, _hi = 91, 99
-    elif price_cents < 1:
-        _band = "below_floor"
-        _lo, _hi = None, 0
     else:
-        _band = "above_ceiling"
-        _lo, _hi = 100, None
+        _band = "disabled_tail_high"
+        _lo, _hi = 91, 99
     return {
         "band": _band,
         "lo": _lo,
