@@ -284,6 +284,8 @@ class TestSettlementDistributionTradeDecisionIntegration:
     def test_trade_decision_ignores_distribution_when_p_yes_model_supplied(self, monkeypatch):
         monkeypatch.setattr("merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True)
         monkeypatch.setenv("MERID_TAIL_CALIBRATION_DEVIATION_GUARD", "1.0")
+        monkeypatch.setenv("MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", "60")
+        monkeypatch.setenv("MERID_STREAM_CAL_ENABLED", "0")
         # 2026-09-25: hybrid-vs-distribution plumbing test — legacy tail-only
         # calibration scope so the 40c scenario is not evidence-gated.
         monkeypatch.setattr(

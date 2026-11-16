@@ -224,6 +224,10 @@ def _residual_runner_floor_enabled() -> bool:
     restores the pre-fix hold-to-settlement behavior.
     """
     try:
+        if os.environ.get("MERID_DISABLE_LOSS_STOPS", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        ):
+            return False
         return os.environ.get("MERID_RESIDUAL_RUNNER_FLOOR", "1") != "0"
     except Exception:
         return True
@@ -798,10 +802,19 @@ MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS  shallower drop for no-edge entries
         except Exception:
             return default
 
+    # 2026-11-16 operator directive: tail-loss floor disabled when MERID_DISABLE_LOSS_STOPS=1
+    _loss_stops_dis = os.environ.get("MERID_DISABLE_LOSS_STOPS", "0").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    _tail_enabled = (
+        not _loss_stops_dis
+        and os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
     return {
         "drop_no_edge_cents": _int("MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS", 14),
-    "enabled": os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
-        in ("1", "true", "yes", "on"),
+        "enabled": _tail_enabled,
         "drop_cents": _int("MERID_TAIL_LOSS_DROP_CENTS", 30),
         "floor_cents": _int("MERID_TAIL_LOSS_FLOOR_CENTS", 18),
         "retry_s": _int("MERID_TAIL_LOSS_RETRY_S", 20),
@@ -6997,6 +7010,12 @@ class PositionMonitor:
         Returns (triggered=False, kind) so the old direct `_emit_exit_intent`
         path is never exercised.  `kind` is for diagnostics only.
         """
+        # 2026-11-16: Loss/price stops disabled end-to-end by operator policy
+        if os.environ.get("MERID_DISABLE_LOSS_STOPS", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        ):
+            return False, "disabled_by_policy"
+
         if not position.stop_loss_enabled or position.stop_loss_price_cents is None:
             return False, "none"
 

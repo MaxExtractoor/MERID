@@ -108,6 +108,10 @@ _os.environ["MERID_MONEYNESS_EV_RELIEF_ENABLED"] = "0"
 # expected terminal reasons.  Exercised explicitly in
 # tests/test_pinned_fav_lane.py.
 _os.environ["MERID_PINNED_FAV_ENABLED"] = "0"
+# 2026-11-16 (streaming calibration): production .env arms live-settlement
+# streaming calibration bounds; pin it off here so unit tests exercising
+# decision mechanics are isolated from live outcome state.
+_os.environ["MERID_STREAM_CAL_ENABLED"] = "0"
 # 2026-11-13: production .env arms lane-scoped moneyness cap overrides
 # (MERID_PINNED_FAV_MONEYNESS_CAP_CENTS_{SIDE}_{ASSET}=98/99) that
 # supersede the per-asset moneyness cap the suite was written against.

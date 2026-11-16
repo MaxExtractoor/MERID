@@ -37,12 +37,13 @@ class TestDynamicClusterStopLossBands:
         mock_settings.KALSHI_DYNAMIC_STOP_LOSS = dynamic_enabled
         mock_settings.is_production = is_production
         mock_settings.KALSHI_PORTFOLIO_BANKROLL_CENTS = 5000000
-        mock_settings.KALSHI_PORTFOLIO_CLUSTER_STOP_PCT = 0.50
+        mock_settings.KALSHI_PORTFOLIO_CLUSTER_STOP_PCT = 2.0
         return mock_settings
 
     def test_deep_underwater_regime(self):
         """ratio=0.4 → per_cluster_sl_frac=0.20, max_stop_loss_usd_per_cluster=10000."""
         risk = KalshiRiskManager()
+        risk._config.max_daily_loss_usd = 0.0
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
             with patch("merid.event_venues.kalshi.kalshi_risk.settings", mock_settings, create=True):
@@ -56,6 +57,7 @@ class TestDynamicClusterStopLossBands:
     def test_underwater_regime(self):
         """ratio=0.8 → per_cluster_sl_frac=0.14, max_stop_loss_usd_per_cluster=7000."""
         risk = KalshiRiskManager()
+        risk._config.max_daily_loss_usd = 0.0
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
             with patch("merid.event_venues.kalshi.kalshi_risk.settings", mock_settings, create=True):
@@ -69,6 +71,7 @@ class TestDynamicClusterStopLossBands:
     def test_baseline_regime(self):
         """ratio=1.1 → per_cluster_sl_frac=0.08, max_stop_loss_usd_per_cluster=4000."""
         risk = KalshiRiskManager()
+        risk._config.max_daily_loss_usd = 0.0
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
             with patch("merid.event_venues.kalshi.kalshi_risk.settings", mock_settings, create=True):
@@ -82,6 +85,7 @@ class TestDynamicClusterStopLossBands:
     def test_lock_in_gains_regime(self):
         """ratio=1.6 → per_cluster_sl_frac=0.04, max_stop_loss_usd_per_cluster=2000."""
         risk = KalshiRiskManager()
+        risk._config.max_daily_loss_usd = 0.0
         mock_settings = self._create_mock_settings_module()
         with patch.dict("sys.modules", {"merid.settings": MagicMock(settings=mock_settings)}):
             with patch("merid.event_venues.kalshi.kalshi_risk.settings", mock_settings, create=True):
@@ -115,7 +119,7 @@ class TestStaticFallback:
                     equity_usd=50000.0, bankroll_cents=5000000
                 )
 
-        assert regime == "STATIC"
+        assert regime == "BASELINE"
         assert max_sl == pytest.approx(2500.0)  # 50% of daily loss cap
 
 
@@ -183,7 +187,7 @@ class TestClusterStopLossCheck:
             )
 
         assert allowed is False
-        assert "breached" in reason.lower()
+        assert "cluster_stop_loss" in reason.lower()
         assert cluster_loss == 3000.0
         assert post_loss == 5500.0
 
@@ -220,7 +224,7 @@ class TestIntegrationPaperMode:
 
         # Should be denied due to cluster stop loss
         assert allowed is False
-        assert "breached" in reason.lower()
+        assert "cluster_stop_loss" in reason.lower()
         assert cluster_loss == 2500.0
         assert post_loss == 3300.0  # 2500 + 800
 

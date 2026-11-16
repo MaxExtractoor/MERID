@@ -1261,7 +1261,8 @@ class LiveConfigResolver:
         # env only when the B stop-candidate reducer and replay harness pass.
         exit_policy = raw.get("exit_policy", {})
         risk_reward = exit_policy.get("risk_reward", {})
-        stop_loss_enabled = bool(risk_reward.get("stop_loss_enabled", True))
+        _loss_stops_dis = str(env.get("MERID_DISABLE_LOSS_STOPS", "")).strip().lower() in ("1", "true", "yes", "on")
+        stop_loss_enabled = bool(risk_reward.get("stop_loss_enabled", True)) and not _loss_stops_dis
 
         env_submission_request = env.get("MERID_ENABLE_STOP_CANDIDATE_SUBMISSION")
         # Stop-candidate reducer and execution-risk-firewall suites pass; honor

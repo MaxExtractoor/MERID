@@ -202,10 +202,13 @@ def test_rejects_insufficient_edge():
     """A believed side with net edge below threshold must be rejected."""
     # Keep the NO ask above the tail-calibration floor so the YES edge-below
     # threshold path is the clean rejection reason (not a calibrated tie).
+    # Tight bids keep the spread within confidence bounds (<=5c).
     d = _make_decision(
         spot=100.5,
         strike=100.0,
+        yes_bid=93.0,
         yes_ask=95.0,  # very expensive, tiny edge
+        no_bid=33.0,
         no_ask=35.0,
         min_edge=0.10,
     )
@@ -383,9 +386,9 @@ def test_real_no_tail_cap_applies_moderate_raw_p_no(monkeypatch):
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_CHEAP_TAIL_P_EXCEPTION", 0.0
     )
-    # Spot ~0.18% above strike gives a moderate raw p_no (~0.25) for a 5c NO ask.
+    # Spot ~0.02% above strike gives a moderate raw p_no (~0.25) for a 5c NO ask.
     d = _make_decision(
-        spot=100.18,
+        spot=100.02,
         strike=100.0,
         yes_bid=90.0,
         yes_ask=95.0,
@@ -756,6 +759,8 @@ def test_pi_star_uses_exact_fractional_fee(monkeypatch):
     monkeypatch.setattr(
         "merid.prediction.trade_decision.MERID_TRADE_DECISION_ALLOW_HYBRID_P", True
     )
+    monkeypatch.setenv("MERID_STREAM_CAL_ENABLED", "0")
+    monkeypatch.setenv("MERID_CONVICTION_GATE_ENABLED", "0")
 
     # 40c NO contract, maker fee = 0.0175 * 1 * 0.40 * 0.60 * 100 = 0.42c.
     fee_cents = 0.42

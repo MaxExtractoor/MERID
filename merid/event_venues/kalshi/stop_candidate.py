@@ -67,6 +67,43 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def loss_stops_disabled() -> bool:
+    """2026-11-16 operator directive: all price/loss stop exits disabled.
+
+    Stop-loss exits keep converting recoverable drawdowns into realized
+    losses on 15m binaries — live evidence 2026-11-16: a SOL NO position
+    was sold by the LOSS_CAP tail floor at 52c (-$1.58) on a contract that
+    would have settled in-the-money.  ``MERID_DISABLE_LOSS_STOPS=1``
+    suppresses every loss/thesis stop trigger end-to-end: the monitor's
+    stop evaluation, the tail-loss floor, the residual-runner floor, the
+    loss-exit/salvage exemptions, and stop-candidate submission for the
+    loss-trigger set below.  Operational/safety triggers
+    (POSITION_MISMATCH, STALE_DATA, OPERATIONAL_RISK), settlement/expiry
+    exits, profit exits, and manual closes are unaffected — they fix
+    state or bank wins, they are not price stops.
+    """
+    return _env_bool("MERID_DISABLE_LOSS_STOPS", False)
+
+
+# Trigger reasons that are price/loss or thesis stops — suppressed while
+# ``loss_stops_disabled()`` is set.  Operational triggers
+# (POSITION_MISMATCH, STALE_DATA, OPERATIONAL_RISK) and profit/settlement
+# triggers are deliberately absent.
+LOSS_STOP_TRIGGER_REASONS = frozenset({
+    "LOSS_CAP",
+    "HARD_STOP",
+    "SOFT_STOP",
+    "TRAILING_STOP",
+    "POSITION_MONITOR_STOP",
+    "STOP_LOSS",
+    "LOSS_CUT",
+    "LOSS_CUT_40PCT",
+    "EDGE_STOP",
+    "EDGE_DECAY",
+    "UNIFIED_POLICY_STOP",
+})
+
+
 # Default: stop candidates are logged but never submitted automatically.
 ENABLE_STOP_CANDIDATE_SUBMISSION = _env_bool(
     "MERID_ENABLE_STOP_CANDIDATE_SUBMISSION", False
@@ -266,8 +303,9 @@ def loss_exits_enabled() -> bool:
     MARKET_EXPIRED, EXPIRY_LIQUIDATION, EMERGENCY, RECONCILE) stay
     exempt — they fix broken state, they are not economic stops.
     ``MERID_LOSS_EXITS_ENABLED=1`` restores the prior behavior.
+    ``MERID_DISABLE_LOSS_STOPS=1`` (2026-11-16) force-disables regardless.
     """
-    return _env_bool("MERID_LOSS_EXITS_ENABLED", False)
+    return _env_bool("MERID_LOSS_EXITS_ENABLED", False) and not loss_stops_disabled()
 
 
 def no_edge_loss_salvage_enabled() -> bool:
@@ -295,8 +333,11 @@ def no_edge_loss_salvage_enabled() -> bool:
     misclassify the whole cohort.  Model-edge positions (all claims > 0)
     keep the 2026-10-20 ride-to-settlement posture.
     ``MERID_NO_EDGE_LOSS_SALVAGE_ENABLED=0`` restores the full disable.
+    ``MERID_DISABLE_LOSS_STOPS=1`` (2026-11-16) force-disables regardless.
     """
-    return _env_bool("MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", True)
+    return _env_bool(
+        "MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", True
+    ) and not loss_stops_disabled()
 
 
 def model_edge_tail_floor_salvage_enabled() -> bool:
@@ -319,9 +360,12 @@ def model_edge_tail_floor_salvage_enabled() -> bool:
     mirroring the no-edge carve-out.  Drop-triggered and all other
     price-depth exits keep the ride-to-settlement posture for model-edge.
     ``MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED=0`` restores full
-    suppression.
+    suppression.  ``MERID_DISABLE_LOSS_STOPS=1`` (2026-11-16)
+    force-disables regardless.
     """
-    return _env_bool("MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED", True)
+    return _env_bool(
+        "MERID_MODEL_EDGE_TAIL_FLOOR_SALVAGE_ENABLED", True
+    ) and not loss_stops_disabled()
 
 
 # Price-depth loss triggers: capital-protection exits keyed on how far the
@@ -2281,6 +2325,22 @@ async def _maybe_submit_stop_candidate_impl(
     Returns the `OrderResult` if submitted, otherwise an ``OrderResult`` with
     status ``rejected`` and a diagnostic reason.
     """
+    # 2026-11-16 operator directive: stop losses disabled.  When
+    # ``MERID_DISABLE_LOSS_STOPS=1`` is set, price/loss/thesis stop triggers
+    # are suppressed entirely — returning None so the position is never sold
+    # by a loss stop and may ride to settlement or exit at profit.  Operational
+    # triggers (POSITION_MISMATCH, STALE_DATA, OPERATIONAL_RISK) stay active.
+    if loss_stops_disabled() and str(candidate.trigger_reason).upper() in LOSS_STOP_TRIGGER_REASONS:
+        logger.info(
+            "[STOP-CANDIDATE-SUPPRESSED] candidate=%s ticker=%s trigger=%s "
+            "- loss/thesis stop suppressed by MERID_DISABLE_LOSS_STOPS; rides to settlement or profit exit",
+            candidate.candidate_id,
+            candidate.market_ticker,
+            candidate.trigger_reason,
+        )
+        record_stop_candidate(candidate)
+        return None
+
     if not (stop_submission_enabled() or force) or _env_bool("MERID_STOP_SUBMISSION_KILL", False):
         kill = _env_bool("MERID_STOP_SUBMISSION_KILL", False)
         reason = (

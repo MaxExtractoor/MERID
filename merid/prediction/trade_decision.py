@@ -7444,8 +7444,8 @@ def _compute_trade_decision_impl(
             or _yes_drift_qualifies
             or _yes_rev_qualifies
             or (
-                not _yes_pf_price
-                and not _yes_hi_price
+                (settlement_lane or not _yes_pf_price)
+                and (settlement_lane or not _yes_hi_price)
                 and _yes_eff_edge >= _yes_edge_eff_bound
                 and (
                     _yes_cbp_neg_floor
@@ -7479,7 +7479,7 @@ def _compute_trade_decision_impl(
             or _no_cheap_qualifies
             or _no_rev_qualifies
             or (
-                not _no_pf_price
+                (settlement_lane or not _no_pf_price)
                 and _no_eff_edge >= _no_edge_eff_bound
                 and (
                     _no_cbp_neg_floor

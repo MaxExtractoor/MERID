@@ -34,6 +34,7 @@ def _patch_stop_submission_sync(monkeypatch):
     ``KalshiVenueClient.get_positions`` / ``maybe_submit_stop_candidate``
     tasks to be destroyed at teardown.
     """
+    monkeypatch.setenv("MERID_DISABLE_LOSS_STOPS", "0")
     monkeypatch.setattr(
         "merid.position_management.position_monitor.maybe_submit_stop_candidate_sync",
         Mock(),

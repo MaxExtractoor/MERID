@@ -8028,6 +8028,60 @@ def _pre_settlement_entry_denial(intent: OrderIntent) -> Optional[str]:
     return None
 
 
+def _is_stop_loss_exit_denied(intent: OrderIntent) -> Optional[str]:
+    """Return denial reason if this intent is a stop-loss / loss-cap exit and stop losses are disabled.
+
+    2026-11-16 operator directive: price/loss stops disabled across BTC, ETH, SOL, XRP, DOGE.
+    Prevents converting recoverable intra-window dips into realized losses.
+    Operational safety exits (POSITION_MISMATCH, STALE_DATA, OPERATIONAL_RISK),
+    profit exits (TAKE_PROFIT, HARD_PROFIT_LOCK, AUTO_EXIT_99C), and settlement
+    closeouts are never blocked.
+    """
+    dis = os.getenv("MERID_DISABLE_LOSS_STOPS", "0").strip().lower() in ("1", "true", "yes", "on")
+    if not dis:
+        return None
+
+    # Only inspect exit orders
+    is_exit = (
+        getattr(intent, "entry_or_exit", None) == "exit"
+        or getattr(intent, "reduce_only", False) is True
+        or _is_exit_order(intent)
+    )
+    if not is_exit:
+        return None
+
+    raw_reason = str(getattr(intent, "exit_reason", "") or getattr(intent, "reason", "") or "").lower()
+    source = str(getattr(intent, "source", "") or "").lower()
+    agent = str(getattr(intent, "agent_id", "") or "").lower()
+
+    STOP_LOSS_REASONS = {
+        "stop_loss", "exit_sl", "loss_cap", "hard_stop", "soft_stop",
+        "trailing_stop", "position_monitor_stop", "loss_cut", "loss_cut_40pct",
+        "edge_stop", "edge_decay", "unified_policy_stop",
+    }
+
+    if raw_reason in STOP_LOSS_REASONS:
+        return "stop_loss_disabled_by_policy"
+
+    try:
+        from merid.event_venues.kalshi.settlement_aligned_exit import canonicalize_exit_reason
+        _, canonical = canonicalize_exit_reason(raw_reason)
+        if canonical in ("stop_loss", "loss_cap"):
+            return "stop_loss_disabled_by_policy"
+    except Exception:
+        pass
+
+    if "stop_candidate" in source or agent == "stop_candidate":
+        try:
+            from merid.event_venues.kalshi.settlement_aligned_exit import ExitClass, classify_trigger_reason
+            if classify_trigger_reason(raw_reason.upper()) != ExitClass.OPERATIONAL:
+                return "stop_loss_disabled_by_policy"
+        except Exception:
+            return "stop_loss_disabled_by_policy"
+
+    return None
+
+
 def _resolve_gtc_expiration(intent: OrderIntent) -> int:
     """Resolve an absolute GTC expiration timestamp.
 
@@ -14608,6 +14662,20 @@ async def _route_live(
     denial = _pre_settlement_entry_denial(intent)
     if denial is not None:
         return OrderResult(status="rejected", mode=mode, reason=denial, latency_ms=0.0)
+    stop_denial = _is_stop_loss_exit_denied(intent)
+    if stop_denial is not None:
+        logger.warning(
+            "[STOP-LOSS-EXIT-REJECTED] ticker=%s intent_id=%s reason=%s - stop loss exit rejected by policy",
+            getattr(intent, "ticker", ""),
+            getattr(intent, "intent_id", ""),
+            getattr(intent, "exit_reason", "") or getattr(intent, "reason", ""),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=stop_denial,
+            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+        )
     # Durable identity finalization is idempotent. It is performed early in
     # _route_order_async_impl / _route_order_impl, but _route_live may be called
     # directly by tests or batch paths. Ensure the canonical coid exists before
@@ -17902,6 +17970,17 @@ async def _route_live(
             _mark_attempt_status(intent, "REJECTED")
             _release_allocated_slot(intent)
             return OrderResult(status="rejected", mode=mode, reason=denial, latency_ms=0.0)
+        stop_denial = _is_stop_loss_exit_denied(intent)
+        if stop_denial is not None:
+            _mark_attempt_status(intent, "REJECTED")
+            _release_allocated_slot(intent)
+            logger.warning(
+                "[STOP-LOSS-EXIT-REJECTED] ticker=%s intent_id=%s reason=%s - stop loss exit rejected by policy",
+                getattr(intent, "ticker", ""),
+                getattr(intent, "intent_id", ""),
+                getattr(intent, "exit_reason", "") or getattr(intent, "reason", ""),
+            )
+            return OrderResult(status="rejected", mode=mode, reason=stop_denial, latency_ms=0.0)
         if not _mark_attempt_status(intent, "SUBMITTING"):
             logger.error(
                 "[ORDER-ATTEMPT-STATUS] submission claim failed for intent_id=%s; not sending",

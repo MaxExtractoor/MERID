@@ -22,6 +22,12 @@ from merid.event_venues.kalshi.residual_exit import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_stop_candidate_suite_setup(monkeypatch):
+    """Ensure MERID_DISABLE_LOSS_STOPS=0 so fractional stop-exit mechanics can be tested."""
+    monkeypatch.setenv("MERID_DISABLE_LOSS_STOPS", "0")
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _candidate(position_cc, **kw):

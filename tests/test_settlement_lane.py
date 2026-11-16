@@ -20,6 +20,7 @@ from typing import List, Optional
 
 import pytest
 
+import merid.settings  # noqa: F401 - force early .env load so monkeypatch overrides work
 import merid.prediction.trade_decision as td
 from merid.prediction.settlement_distribution import (
     SettlementDistribution,
@@ -137,6 +138,7 @@ def _lane_enabled(monkeypatch):
     monkeypatch.setattr(td, "MERID_SETTLEMENT_LANE_MIN_TTE_S", 10.0)
     monkeypatch.setattr(td, "MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS", 97.0)
     monkeypatch.setattr(td, "MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", 180.0)
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "0")
     monkeypatch.setenv("MERID_EXIT_ONLY_CUTOFF_S", "30")
     monkeypatch.setenv("MERID_MONEYNESS_EV_RELIEF_ENABLED", "0")
     monkeypatch.setenv("MERID_PRICE_CAP_EXCEPT_NO", "0")
@@ -394,6 +396,7 @@ def test_lane_not_reachable_outside_window(monkeypatch):
 
     monkeypatch.setenv("MERID_SETTLEMENT_LANE_ENABLED", "1")
     monkeypatch.setenv("MERID_SETTLEMENT_LANE_MIN_TTE_S", "30")
+    monkeypatch.setenv("MERID_SETTLEMENT_LANE_MAX_TTE_S", "60.0")
     # Below the lane floor (engine's final-minute cutoff) and above the
     # 60s settlement window (phase is never in_window there).
     assert ag._settlement_lane_reachable(29.9) is False

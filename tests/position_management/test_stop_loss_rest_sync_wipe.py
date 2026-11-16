@@ -29,6 +29,12 @@ from merid.position_management.position import Position, PositionSide, RiskParam
 from merid.position_management.position_monitor import PositionMonitor
 from merid.position_management.exit_audit import ExitPriceSnapshot
 
+
+@pytest.fixture(autouse=True)
+def _legacy_stop_loss_suite_setup(monkeypatch):
+    """Ensure MERID_DISABLE_LOSS_STOPS=0 so legacy stop-loss wipe tests can run."""
+    monkeypatch.setenv("MERID_DISABLE_LOSS_STOPS", "0")
+
 # Future-dated ticker so _is_expired_market() never trips on wall clock.
 _MARKET = "KXXRP15M-27DEC312359-00"
 

@@ -27,6 +27,12 @@ from merid.event_venues.kalshi.stop_candidate import (
 from merid.event_venues.kalshi.order_intent_contract import CanonicalOrderIntent
 
 
+@pytest.fixture(autouse=True)
+def _legacy_stop_candidate_suite_setup(monkeypatch):
+    """Ensure MERID_DISABLE_LOSS_STOPS=0 so legacy stop-candidate mechanisms can be tested."""
+    monkeypatch.setenv("MERID_DISABLE_LOSS_STOPS", "0")
+
+
 class TestStopCandidateReplay:
     """Replay-style tests for the stop-candidate lifecycle."""
 
