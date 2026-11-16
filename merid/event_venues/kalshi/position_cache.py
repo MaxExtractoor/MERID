@@ -1712,6 +1712,52 @@ class KalshiPositionCache:
             self._fills_ledger = get_fills_ledger()
         return self._fills_ledger
 
+    def _has_recent_unresolved_exit_attempt(self, market_id: str) -> bool:
+        """True when a non-terminal durable exit attempt exists for ``market_id``.
+
+        2026-11-16 incident fix: the REST sync-close path deleted a position
+        while its exit order's fill was still propagating (the fills poller was
+        blind to it for 157s), so the late exit fill hit
+        EXIT-FILL-WITHOUT-POSITION and the monitor/intent state was orphaned.
+        Defer removal while a *recent* exit attempt is unresolved; attempts
+        older than the grace window are stale bookkeeping and must not pin a
+        phantom position forever.
+        """
+        try:
+            grace_s = float(
+                os.getenv("MERID_SYNC_CLOSE_EXIT_GRACE_S", "300") or 300
+            )
+        except Exception:
+            grace_s = 300.0
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+            )
+            now = _time.time()
+            for att in OrderAttemptStore().list_nonterminal_exit_attempts():
+                if getattr(att, "ticker", None) != market_id:
+                    continue
+                created = getattr(att, "created_at", None)
+                age = None
+                if isinstance(created, (int, float)):
+                    age = now - float(created)
+                elif isinstance(created, datetime):
+                    try:
+                        _c = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+                        age = (datetime.now(timezone.utc) - _c).total_seconds()
+                    except Exception:
+                        age = None
+                # Unknown age -> treat as unresolved (fail toward keeping the
+                # position; stale cleanup re-evaluates on the next pass).
+                if age is None or age <= grace_s:
+                    return True
+        except Exception as exc:
+            logger.debug(
+                "[POSITION-CACHE-SYNC-CLOSE] exit-attempt check failed for %s: %s",
+                market_id, exc,
+            )
+        return False
+
     def _get_cache_signed_yes(self, market_id: str) -> int:
         """Return the current cache position as signed-YES exposure in centi-contracts for reconciliation."""
         pos = self._positions.get(market_id)
@@ -6020,6 +6066,35 @@ class KalshiPositionCache:
                                 status='matched' if (exchange_signed_yes == ledger_signed_yes == cache_signed_yes) else 'mismatch',
                                 from_exchange=True,
                             )
+
+                        # 2026-11-16: halted tickers absent from the REST payload
+                        # are flat on the exchange but were never re-evaluated —
+                        # _reconciliation_halted could only clear via settlement,
+                        # leaving PORTFOLIO_FAULT_LATCHED engaged for minutes after
+                        # exchange=ledger=cache=0.  Evaluate them as exchange=0 so a
+                        # verified-flat three-way state clears the latch promptly.
+                        _payload_ids = {
+                            p.get('market_id') for p in positions if p.get('market_id')
+                        }
+                        for _ht in list(self._reconciliation_halted):
+                            if not self._reconciliation_halted.get(_ht):
+                                continue
+                            if _ht in _payload_ids:
+                                continue
+                            if _is_test_ticker(_ht) or _is_expired_ticker(_ht):
+                                continue
+                            _ledger_yes = expected_signed_yes.get(_ht, 0)
+                            _cache_yes = self._get_cache_signed_yes(_ht)
+                            self._emit_exposure_reconciliation(
+                                ticker=_ht,
+                                exchange_signed_yes=0,
+                                ledger_signed_yes=_ledger_yes,
+                                cache_signed_yes=_cache_yes,
+                                open_order_reserved_yes=0,
+                                source_timestamp=rest_timestamp,
+                                status='matched' if (0 == _ledger_yes == _cache_yes) else 'mismatch',
+                                from_exchange=True,
+                            )
                 except Exception as validation_err:
                     logger.warning("[POSITION-CACHE-VALIDATION] Cross-validation with fills ledger failed: %s", validation_err)
 
@@ -6069,6 +6144,14 @@ class KalshiPositionCache:
                             or pos.get("position_fp") == 0
                         )
                         if market_id in self._positions and is_zero:
+                            if self._has_recent_unresolved_exit_attempt(market_id):
+                                logger.warning(
+                                    "[POSITION-CACHE-SYNC-CLOSE-DEFER] Deferring expired-position "
+                                    "removal for %s: unresolved exit attempt still in flight",
+                                    market_id,
+                                )
+                                positions_filtered += 1
+                                continue
                             logger.warning(
                                 f"[POSITION-CACHE-SYNC-CLOSE] Removing settled expired position from cache: {market_id} (contracts=0)"
                             )
@@ -6124,6 +6207,14 @@ class KalshiPositionCache:
                     # settled/closed position is treated as an exit, not a data-quality failure.
                     if quantity_cc == 0:
                         if market_id in self._positions:
+                            if self._has_recent_unresolved_exit_attempt(market_id):
+                                logger.warning(
+                                    "[POSITION-CACHE-SYNC-CLOSE-DEFER] Deferring closed-position "
+                                    "removal for %s: unresolved exit attempt still in flight",
+                                    market_id,
+                                )
+                                positions_filtered += 1
+                                continue
                             logger.warning(
                                 f"[POSITION-CACHE-SYNC-CLOSE] Removing closed position from cache: {market_id} (contracts=0)"
                             )

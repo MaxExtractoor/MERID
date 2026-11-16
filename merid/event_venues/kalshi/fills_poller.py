@@ -136,6 +136,12 @@ class FillsPoller:
         
         # Metrics
         self._polls_completed = 0
+        # Newest exchange fill created_time (ms) observed by this poller.
+        # Anchors the poll lookback so a fill that propagates slower than the
+        # poll interval is re-fetched until ingested instead of falling out of
+        # a wall-clock window (2026-11-16 incident: exit fill invisible to the
+        # poller for 157s -> exchange=0 vs ledger=+600 reconciliation halt).
+        self._fills_watermark_ms: Optional[int] = None
         self._polls_failed = 0
         self._fills_ingested = 0
         self._fills_ingestion_errors = 0  # NEW: Track fill ingestion failures
@@ -424,6 +430,73 @@ class FillsPoller:
             except asyncio.TimeoutError:
                 pass  # Normal - time for next poll
     
+    def _poll_lookback_since_ts_ms(self) -> int:
+        """Return the ``min_ts`` (epoch ms) for the next fills fetch.
+
+        Anchors the window at the newest fill this poller has observed minus
+        a re-fetch overlap, clamped to a bounded max lookback.  This guarantees
+        a fill that propagates slower than the poll interval is re-fetched on
+        every poll until ingested — the old ``now - poll_interval*2`` window
+        permanently excluded it after ~20s (2026-11-16: a SELL exit fill was
+        invisible for 157s, producing exchange=0 vs ledger=+600 and a global
+        entry halt).  The periodic 24h backfill remains the deep gap repair.
+        """
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        try:
+            overlap_ms = int(float(_os.getenv("MERID_FILLS_POLL_OVERLAP_S", "120")) * 1000)
+            max_lookback_ms = int(float(_os.getenv("MERID_FILLS_POLL_MAX_LOOKBACK_S", "900")) * 1000)
+        except Exception:
+            overlap_ms, max_lookback_ms = 120_000, 900_000
+        floor_ms = now_ms - max_lookback_ms
+
+        wm = self._fills_watermark_ms
+        if wm is None:
+            # Seed once from the durable circuit-breaker fill watermark so a
+            # restart does not rescan the full max lookback when fills exist.
+            try:
+                from merid.governance.trading_circuit_breaker import (
+                    get_trading_circuit_breaker,
+                )
+                _wm_dt = getattr(
+                    get_trading_circuit_breaker(), "_http_fill_watermark", None
+                )
+                if isinstance(_wm_dt, datetime):
+                    wm = int(_wm_dt.timestamp() * 1000)
+            except Exception:
+                wm = None
+        if wm:
+            since_ts = max(wm - overlap_ms, floor_ms)
+        else:
+            # No fills known yet: bounded recent window still catches fills
+            # that landed while the process was down.
+            since_ts = floor_ms
+        return min(since_ts, now_ms)
+
+    def _note_fills_watermark(self, fills) -> None:
+        """Advance ``_fills_watermark_ms`` to the newest fill created_time seen."""
+        newest_ms: Optional[int] = None
+        for f in fills or ():
+            try:
+                ts = getattr(f, "created_time", None)
+                if ts is None:
+                    ts = getattr(f, "timestamp", None)
+                if isinstance(ts, datetime):
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    ms = int(ts.timestamp() * 1000)
+                elif isinstance(ts, (int, float)):
+                    ms = int(ts if ts > 10_000_000_000 else ts * 1000)
+                else:
+                    continue
+                if newest_ms is None or ms > newest_ms:
+                    newest_ms = ms
+            except Exception:
+                continue
+        if newest_ms is not None and (
+            self._fills_watermark_ms is None or newest_ms > self._fills_watermark_ms
+        ):
+            self._fills_watermark_ms = newest_ms
+
     async def _do_poll(self) -> int:
         """Execute one poll cycle.
         
@@ -446,10 +519,10 @@ class FillsPoller:
                 )
             return 0
         
-        # Calculate lookback window
-        # Start from 2x poll interval ago to catch any missed fills
-        # Kalshi API expects milliseconds since epoch
-        since_ts = int((datetime.now(timezone.utc) - timedelta(seconds=self._poll_interval * 2)).timestamp() * 1000)
+        # Calculate lookback window via the fill watermark — see
+        # _poll_lookback_since_ts_ms.  A wall-clock ``now - interval*2`` window
+        # permanently drops any fill that propagates slower than the window.
+        since_ts = self._poll_lookback_since_ts_ms()
         
         # Fetch fills through the normalized execution port
         _stages: Dict[str, float] = {}
@@ -469,6 +542,7 @@ class FillsPoller:
                 timeout=_fills_poll_timeout
             )
             _stages["fetch_s"] = round(time.monotonic() - _tf, 3)
+            self._note_fills_watermark(response.fills)
 
             # Convert normalized fills through the fail-closed adapter.
             # Any malformed DTO is skipped rather than fed to the legacy parser.
@@ -1635,6 +1709,7 @@ class FillsPoller:
         # Kalshi API expects milliseconds since epoch
         since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
         response = await client.get_fills(limit=500, since_ts=since_ts)
+        self._note_fills_watermark(response.fills)
 
         fills: List[Dict[str, Any]] = []
         for fill in response.fills:

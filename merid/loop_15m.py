@@ -3307,6 +3307,51 @@ def _run_exit_price_guard(
     return True, limit_cents, record, decision_id
 
 
+async def _venue_exit_order_terminal(result, position, intent, durable_exit_attempt) -> Optional[bool]:
+    """Refresh the venue order status for an exit whose local result is stale.
+
+    Returns True/False when the exchange reports the order terminal or still
+    working, and None when the status cannot be determined (lookup failed or
+    no identifier).  Used to avoid minting a duplicate exit order when
+    ``ORDER_NOT_TERMINAL`` is stale local bookkeeping rather than a live order
+    (2026-11-16: exit order had fully filled on the exchange while the local
+    result still read non-terminal, triggering a spurious remaining-close
+    re-arm).
+    """
+    order_id = getattr(result, "order_id", None)
+    client_order_id = getattr(intent, "client_order_id", None) or getattr(
+        durable_exit_attempt, "client_order_id", None
+    )
+    market_id = getattr(position, "market_id", None)
+    if not order_id and not client_order_id:
+        return None
+    try:
+        from merid.event_venues.kalshi.client import get_kalshi_client
+        client = get_kalshi_client()
+        order = None
+        if order_id:
+            res = await client.get_order_result(str(order_id), market_id)
+            if getattr(res, "success", False):
+                order = res.unwrap_or(None)
+        if order is None and client_order_id:
+            res = await client.get_order_by_client_id_result(
+                str(client_order_id), market_id
+            )
+            if getattr(res, "success", False):
+                order = res.unwrap_or(None)
+        if order is None:
+            return None
+        status = str(getattr(order, "status", "") or "").lower()
+        if status in ("filled", "executed", "canceled", "cancelled", "expired", "rejected"):
+            return True
+        if status in ("resting", "open", "pending", "accepted", "partially_filled",
+                      "submitted", "working", "live", "new"):
+            return False
+        return None
+    except Exception:
+        return None
+
+
 def _resolve_exit_order_id(result, durable_exit_attempt, position, intent, position_monitor=None) -> Optional[str]:
     """Resolve the authoritative exchange order_id for a confirmed exit.
 
@@ -5301,7 +5346,28 @@ async def _execute_exit_order(
                 # Dead partial (unfilled IOC remainder, expired, post-fill
                 # cancel): no working order covers the remainder — re-arm so
                 # the next evaluation retries exactly the residual quantity.
-                self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
+                #
+                # 2026-11-16: ORDER_NOT_TERMINAL can be stale local order
+                # bookkeeping — the order may already be terminal on the
+                # exchange (fill/status propagation lag).  Refresh the venue
+                # status once before minting a duplicate exit order for a
+                # position the exchange already closed.
+                _venue_terminal = None
+                if finalizer_reason == "ORDER_NOT_TERMINAL":
+                    _venue_terminal = await _venue_exit_order_terminal(
+                        result, position, intent, durable_exit_attempt
+                    )
+                if _venue_terminal is True:
+                    logger.warning(
+                        "[EXIT-ORDER-PARTIAL] position=%s market=%s order_id=%s "
+                        "venue reports terminal - skipping re-arm; fill/reconcile "
+                        "pipeline owns finalization",
+                        position.position_id[:8],
+                        position.market_id,
+                        getattr(result, "order_id", None),
+                    )
+                else:
+                    self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close=None)
         else:
             logger.error(
                 "[EXIT-ORDER] Exit order did not execute: status=%s error=%s reason=%s finalizer=%s",
