@@ -6566,10 +6566,10 @@ class LeanAgent15m:
                 best_ask = int(round(getattr(market_state, 'best_ask_cents', 0) or 0))
 
                 # YES price is the ASK (price to *buy* YES)
-                yes_price_cents = best_ask if best_ask > 0 else 0
+                yes_price_cents = best_ask if (1 <= best_ask <= 99) else 0
 
-                # NO price is the NO ask = 100 - best YES bid
-                no_price_cents = 100 - best_bid
+                # NO price is the NO ask = 100 - best YES bid (only valid if YES bid is in [1, 99])
+                no_price_cents = (100 - best_bid) if (1 <= best_bid <= 99) else 0
 
         except Exception as e:
 
@@ -12268,8 +12268,8 @@ class LeanAgent15m:
                     # Calculate spread width for observability
                     spread_width_cents = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0
 
-                    yes_market_price_cents = best_ask if best_ask > 0 else best_bid
-                    no_market_price_cents = 100 - best_bid if best_bid > 0 else 100 - best_ask
+                    yes_market_price_cents = best_ask if (1 <= best_ask <= 99) else (best_bid if (1 <= best_bid <= 99) else 0)
+                    no_market_price_cents = (100 - best_bid) if (1 <= best_bid <= 99) else ((100 - best_ask) if (1 <= best_ask <= 99) else 0)
 
                     yes_market_price = yes_market_price_cents / 100.0
                     no_market_price = no_market_price_cents / 100.0
@@ -16052,16 +16052,11 @@ class LeanAgent15m:
 
 
                 # YES price is the ASK (price to *buy* YES)
-
-                yes_price_cents = best_ask if best_ask > 0 else 0
-
-
+                yes_price_cents = int(round(best_ask)) if (best_ask and 1.0 <= float(best_ask) <= 99.0) else 0
 
                 # NO price is the NO ask = 100 - best YES bid
-
-                # In binary markets, YES + NO = 100 cents
-
-                no_price_cents = 100 - best_bid
+                # In binary markets, YES + NO = 100 cents. If there is no valid YES bid in [1, 99], there is no valid NO ask.
+                no_price_cents = int(round(100.0 - float(best_bid))) if (best_bid and 1.0 <= float(best_bid) <= 99.0) else 0
 
 
 
@@ -16668,8 +16663,8 @@ class LeanAgent15m:
                         getattr(market_state, "min_depth_no", None),
                     ),
                 ):
-                    if not _px or float(_px) <= 0:
-                        continue  # no executable price: nothing to score
+                    if not _px or float(_px) < 1.0 or float(_px) > 99.0:
+                        continue  # no executable price in [1, 99]c: nothing to score
                     _log_band_rc(
                         reason=f"{_band_reason}:{_side}",
                         run_id=_band_run_id,
@@ -19062,11 +19057,11 @@ class LeanAgent15m:
         # Only trade when edge > fee (net edge after fees)
 
         if signal_side == "yes":
-            price_cents = best_ask if best_ask > 0 else best_bid
+            price_cents = best_ask if (best_ask and 1 <= best_ask <= 99) else (best_bid if (best_bid and 1 <= best_bid <= 99) else 0)
         else:
-            price_cents = 100 - best_bid
+            price_cents = (100 - best_bid) if (best_bid and 1 <= best_bid <= 99) else 0
 
-        if price_cents > 0:
+        if 1 <= price_cents <= 99:
 
             # Calculate fee in cents for the winning side using canonical Kalshi fee function.
 
@@ -19159,15 +19154,13 @@ class LeanAgent15m:
         # Higher volatility assets (SOL, DOGE) need stricter multipliers
 
         if signal_side == "yes":
-            price_cents = best_ask if best_ask > 0 else best_bid
+            price_cents = best_ask if (best_ask and 1 <= best_ask <= 99) else (best_bid if (best_bid and 1 <= best_bid <= 99) else 0)
         else:
-            price_cents = 100 - best_bid
+            price_cents = (100 - best_bid) if (best_bid and 1 <= best_bid <= 99) else 0
 
         price_edge_multiplier = 1.0
 
-
-
-        if price_cents > 0:
+        if 1 <= price_cents <= 99:
 
             # Per-asset minimum bands (aligned with new minimums)
 
@@ -19376,11 +19369,11 @@ class LeanAgent15m:
 
                 # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
 
-                no_bid = 100 - best_ask
+                no_bid = (100 - best_ask) if (best_ask and 1 <= best_ask <= 99) else 0
 
-                no_ask = 100 - best_bid
+                no_ask = (100 - best_bid) if (best_bid and 1 <= best_bid <= 99) else 0
 
-                price_cents = int((no_bid + no_ask) / 2)
+                price_cents = int((no_bid + no_ask) / 2) if (no_bid > 0 and no_ask > 0) else 0
 
 
 
@@ -19402,13 +19395,12 @@ class LeanAgent15m:
 
             if signal_side == "yes":
 
-                price_cents = best_bid
+                price_cents = best_bid if (1 <= best_bid <= 99) else 0
 
             else:
 
                 # NO: NO_ask = 100 - YES_bid
-
-                price_cents = 100 - best_bid
+                price_cents = (100 - best_bid) if (1 <= best_bid <= 99) else 0
 
         elif best_ask:
 

@@ -1591,14 +1591,14 @@ class CanonicalBinaryMarketState:
         If YES_ask is missing but NO_bid is present, derive YES_ask = 100 - NO_bid.
         If NO_ask is missing but YES_bid is present, derive NO_ask = 100 - YES_bid.
         """
-        if self.yes_ask_cents is None and self.no_bid_cents is not None:
+        if self.yes_ask_cents is None and self.no_bid_cents is not None and 1 <= self.no_bid_cents <= 99:
             self.yes_ask_cents = derive_yes_ask_from_no_bid(self.no_bid_cents)
             logger.debug(
                 "[DERIVE-PRICE] ticker=%s derived YES_ask=%dc from NO_bid=%dc",
                 self.ticker, self.yes_ask_cents, self.no_bid_cents
             )
 
-        if self.no_ask_cents is None and self.yes_bid_cents is not None:
+        if self.no_ask_cents is None and self.yes_bid_cents is not None and 1 <= self.yes_bid_cents <= 99:
             self.no_ask_cents = derive_no_ask_from_yes_bid(self.yes_bid_cents)
             logger.debug(
                 "[DERIVE-PRICE] ticker=%s derived NO_ask=%dc from YES_bid=%dc",

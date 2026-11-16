@@ -4165,9 +4165,9 @@ def _compute_trade_decision_impl(
     else:
         yes_entry = yes_ask_cents / 100.0
         no_entry = no_ask_cents / 100.0
-        if yes_ask_cents <= 0 and no_bid_cents > 0:
+        if yes_ask_cents <= 0 and (1.0 <= no_bid_cents <= 99.0):
             yes_entry = (100.0 - no_bid_cents) / 100.0
-        if no_ask_cents <= 0 and yes_bid_cents > 0:
+        if no_ask_cents <= 0 and (1.0 <= yes_bid_cents <= 99.0):
             no_entry = (100.0 - yes_bid_cents) / 100.0
     indicators["entry_price_basis"] = entry_price_basis
     indicators["adverse_selection_reserve_cents"] = (

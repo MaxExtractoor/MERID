@@ -102,15 +102,13 @@ def _price_bucket(price_cents: Optional[float]) -> Optional[str]:
         p = float(price_cents)
     except (TypeError, ValueError):
         return None
-    if p < 0 or p > 100:
+    if p < 1 or p > 99:
         return None
     bands = ((1, 9), (10, 19), (20, 39), (40, 59), (60, 79), (80, 89), (90, 99))
     for lo, hi in bands:
         if lo <= p <= hi:
             return f"{lo}-{hi}c"
-    if p < 1:
-        return "0-1c"
-    return "100c"
+    return None
 
 
 # 2026-10-12: STRUCTURAL_RISK_VETO decomposition.  The canonical code bundles
@@ -263,6 +261,22 @@ def log_rejected_candidate(
                 underlying_distance = float(spot_price) - float(strike_price)
             except (TypeError, ValueError):
                 underlying_distance = None
+
+        # Sanitize executable prices to valid Kalshi contract space [1, 99] cents.
+        # Prices < 1c or > 99c are unexecutable phantom quotes that must not pollute
+        # downstream audits or counterfactual scoring.
+        def _sanitize_kalshi_price(val: Optional[float]) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                fv = float(val)
+                return fv if 1.0 <= fv <= 99.0 else None
+            except (TypeError, ValueError):
+                return None
+
+        held_price_cents = _sanitize_kalshi_price(held_price_cents)
+        yes_price_cents = _sanitize_kalshi_price(yes_price_cents)
+        no_price_cents = _sanitize_kalshi_price(no_price_cents)
 
         record = {
             "type": "rejected_candidate",

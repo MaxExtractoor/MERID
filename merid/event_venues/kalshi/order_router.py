@@ -10796,9 +10796,9 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
     if is_no_side:
         side_bid = _snapshot_best_no_bid
         side_ask = _snapshot_best_no_ask
-        if side_ask is None and best_bid_cents is not None:
+        if side_ask is None and best_bid_cents is not None and 1 <= best_bid_cents <= 99:
             side_ask = 100 - best_bid_cents
-        if side_bid is None and best_ask_cents is not None:
+        if side_bid is None and best_ask_cents is not None and 1 <= best_ask_cents <= 99:
             side_bid = 100 - best_ask_cents
     else:
         side_bid = best_bid_cents
@@ -11812,9 +11812,9 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
     validation_ask_cents = best_ask_cents
     validation_bid_cents = best_bid_cents
     if outcome_side == "no":
-        if best_bid_cents is not None:
+        if best_bid_cents is not None and 1 <= best_bid_cents <= 99:
             validation_ask_cents = 100 - best_bid_cents  # NO ask = 100 - YES bid
-        if best_ask_cents is not None:
+        if best_ask_cents is not None and 1 <= best_ask_cents <= 99:
             validation_bid_cents = 100 - best_ask_cents  # NO bid = 100 - YES ask
         logger.info(
             "[PRICE-VALIDATION-NO-SPACE] ticker=%s YES_ask=%dc YES_bid=%dc -> NO_ask=%dc NO_bid=%dc",
@@ -12332,8 +12332,8 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
         bid_cents = getattr(state, 'bid_cents', None)
         
         if is_no_side:
-            no_ask_cents = 100 - bid_cents if bid_cents is not None else None
-            no_bid_cents = 100 - ask_cents if ask_cents is not None else None
+            no_ask_cents = (100 - bid_cents) if (bid_cents is not None and 1 <= bid_cents <= 99) else None
+            no_bid_cents = (100 - ask_cents) if (ask_cents is not None and 1 <= ask_cents <= 99) else None
             logger.debug(
                 "[SWEET-SPOT-EXECUTION] ticker=%s side=%s using NO prices (ask=%dc, bid=%dc) derived from YES (ask=%dc, bid=%dc)",
                 intent.ticker, intent.side, no_ask_cents, no_bid_cents, ask_cents, bid_cents

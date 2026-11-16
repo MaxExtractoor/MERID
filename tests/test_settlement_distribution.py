@@ -225,6 +225,20 @@ class TestSettlementDistributionTradeDecisionIntegration:
         monkeypatch.setattr(
             "merid.prediction.trade_decision.MERID_CALIBRATION_CAP_FULL_RANGE", False
         )
+        # Isolate distribution plumbing from orthogonal market-anchor shrinkage,
+        # minimum-TTE boundary, and tail-LCB gates (matching sibling test isolation below).
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MIN_W", 0.0
+        )
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_MARKET_ANCHOR_MAX_W", 0.0
+        )
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_ENTRY_MIN_SECONDS_TO_EXPIRY", 60.0
+        )
+        monkeypatch.setattr(
+            "merid.prediction.trade_decision.MERID_TAIL_LCB_GATE_ENABLED", False
+        )
         dist = SettlementDistribution(
             mean=105.0,
             std=2.0,
