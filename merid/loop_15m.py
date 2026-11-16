@@ -1559,7 +1559,14 @@ class Kalshi15mLoop:
                                 ticker=_cand_ctx.get("ticker") or (context or {}).get("ticker"),
                                 asset=_cand_ctx.get("asset") or (context or {}).get("asset"),
                             ),
-                            priority="high",
+                            # 2026-11-16: candidate terminal transitions are
+                            # high-volume rejected-path telemetry, not
+                            # financial truth.  "high" never sheds, so under
+                            # backlog they flooded the writer queue until
+                            # audit_writer_unhealthy halted all entries.
+                            # "normal" keeps them required-evidence while
+                            # letting _shed_admit sample them under load.
+                            priority="normal",
                         )
                 except Exception:
                     pass

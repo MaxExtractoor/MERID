@@ -509,6 +509,25 @@ class DecisionAuditLedger:
         # NORMAL only samples at crit; HIGH (fills/settlements) never sheds.
         soft = int(os.environ.get("MERID_AUDIT_SHED_DEPTH", "700"))
         crit = int(os.environ.get("MERID_AUDIT_SHED_CRIT_DEPTH", "2500"))
+        # 2026-11-16: emergency tier.  The 2026-11-16 incident showed the
+        # queue reaching ~3900 with the writer ~1 item/s behind — at crit
+        # depth NORMAL still kept 1/4, so rejected-candidate telemetry
+        # arrival permanently exceeded drain and oldest_queued_age crossed
+        # the 2x lag budget -> audit_writer_unhealthy halted ALL entries for
+        # ~40min.  Past emergency depth, sample NORMAL far harder so the
+        # backlog can actually drain; HIGH (fills/orders/settlements/decision
+        # records) is still never shed — it is financial truth, not telemetry.
+        # Engage just past crit so the aggressive NORMAL shed bounds the
+        # backlog near ~crit depth — at the incident's ~3900 depth the
+        # oldest item was ~2x the lag budget and entries halted.  Keeping
+        # the ceiling low lets oldest_queued_age stay under budget while
+        # still preserving a 1/16 evidence sample.
+        emerg = int(
+            os.environ.get(
+                "MERID_AUDIT_SHED_EMERGENCY_DEPTH",
+                str(crit + 200),
+            )
+        )
         if depth < soft:
             return True
         self._shed_seq += 1
@@ -521,6 +540,11 @@ class DecisionAuditLedger:
                 keep = self._shed_seq % div == 0
                 if keep:
                     self._shed_stats["low_sampled"] += 1
+        elif depth >= emerg:
+            div = max(
+                1, int(os.environ.get("MERID_AUDIT_EMERGENCY_SAMPLE_DIV", "16"))
+            )
+            keep = self._shed_seq % div == 0
         elif depth >= crit:
             div = max(1, int(os.environ.get("MERID_AUDIT_NORMAL_SAMPLE_DIV", "4")))
             keep = self._shed_seq % div == 0

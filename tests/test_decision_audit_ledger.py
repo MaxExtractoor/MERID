@@ -1691,3 +1691,107 @@ def test_writer_health_oldest_required_tracks_non_low(
     ledger2._write_queue.put((lambda: None, now - 5.0, "high"))
     wh2 = ledger2.writer_health()
     assert wh2["unhealthy"] is False
+
+
+def test_shed_admit_emergency_tier_bounds_normal_telemetry(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: 2026-11-16 audit_writer_unhealthy entry halt.
+
+    Rejected-candidate telemetry submitted at ``priority="high"`` never shed,
+    so under writer backlog its arrival permanently exceeded drain; the queue
+    reached ~3900 and oldest_queued_age crossed the 2x lag budget, halting all
+    entries for ~40min.  Two-part fix under test:
+
+    1. Candidate terminal transitions and RISK_REJECTED events now submit at
+       ``priority="normal"`` so ``_shed_admit`` can sample them.
+    2. ``_shed_admit`` gained an emergency tier: past
+       ``MERID_AUDIT_SHED_EMERGENCY_DEPTH`` NORMAL writes keep only
+       ``1/MERID_AUDIT_EMERGENCY_SAMPLE_DIV`` so the backlog can drain.
+
+    HIGH (fills/orders/settlements/decision spine) must remain never-shed.
+    """
+    monkeypatch.setenv("MERID_AUDIT_SHED_DEPTH", "100")
+    monkeypatch.setenv("MERID_AUDIT_SHED_CRIT_DEPTH", "200")
+    monkeypatch.setenv("MERID_AUDIT_SHED_EMERGENCY_DEPTH", "400")
+    monkeypatch.setenv("MERID_AUDIT_NORMAL_SAMPLE_DIV", "4")
+    monkeypatch.setenv("MERID_AUDIT_EMERGENCY_SAMPLE_DIV", "16")
+
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+
+    # Below soft depth: everything admitted.
+    assert ledger._shed_admit("normal", 50) is True
+    assert ledger._shed_admit("low", 50) is True
+    assert ledger._shed_admit("high", 50) is True
+
+    # Soft band [100,200): low samples, normal+high admit.
+    admitted_normal_soft = sum(
+        1 for _ in range(40) if ledger._shed_admit("normal", 150)
+    )
+    assert admitted_normal_soft == 40  # normal unshed below crit
+
+    # Crit band [200,400): normal keeps ~1/4.
+    admitted_normal_crit = sum(
+        1 for _ in range(400) if ledger._shed_admit("normal", 300)
+    )
+    # Deterministic modulo sampling: exactly ceil/floor of 400/4 kept.
+    assert 90 <= admitted_normal_crit <= 110
+
+    # Emergency band [400,inf): normal keeps ~1/16 — far fewer survive so the
+    # queue can actually drain instead of growing unboundedly.
+    admitted_normal_emerg = sum(
+        1 for _ in range(1600) if ledger._shed_admit("normal", 500)
+    )
+    assert 80 <= admitted_normal_emerg <= 120  # ~1/16 of 1600
+
+    # HIGH never sheds at any depth — financial truth is never dropped.
+    assert all(ledger._shed_admit("high", d) for d in (500, 3900, 100000))
+
+
+def _priority_after_anchor(src: str, anchor: str, span: int = 3000) -> Optional[str]:
+    """Return the ``priority="..."`` literal nearest after ``anchor``."""
+    import re
+
+    idx = src.find(anchor)
+    if idx < 0:
+        return None
+    window = src[idx: idx + span]
+    m = re.search(r'priority="(high|normal|low)"', window)
+    return m.group(1) if m else None
+
+
+def test_candidate_terminal_and_risk_rejected_submit_normal_priority() -> None:
+    """Regression: rejected-path telemetry must be sheddable.
+
+    Candidate terminal transitions (loop_15m) and RISK_REJECTED events
+    (agent_grid) were submitted at ``priority="high"`` — never shed — which
+    let rejected-path telemetry flood the audit writer until
+    ``audit_writer_unhealthy`` halted all entries (2026-11-16).  They must be
+    ``priority="normal"`` so ``_shed_admit`` can sample them under backlog.
+    """
+    from pathlib import Path as _P
+
+    root = _P(__file__).resolve().parent.parent
+    loop_src = (root / "merid" / "loop_15m.py").read_text(encoding="utf-8")
+    grid_src = (
+        root / "merid" / "prediction" / "agent_grid_15m.py"
+    ).read_text(encoding="utf-8")
+
+    # Candidate terminal block: anchor on the terminal event_type kwarg.
+    assert (
+        _priority_after_anchor(loop_src, 'event_type=_audit_terminal[0]')
+        == "normal"
+    ), "candidate terminal audit must submit priority='normal'"
+
+    # RISK_REJECTED block in agent_grid.
+    assert (
+        _priority_after_anchor(grid_src, 'event_type="RISK_REJECTED"')
+        == "normal"
+    ), "RISK_REJECTED audit must submit priority='normal'"
+
+    # The decision spine (record_trade_decision) and fills/orders stay "high" —
+    # financial truth is never shed.  Guard against an accidental downgrade.
+    assert (
+        _priority_after_anchor(grid_src, "ledger.record_trade_decision")
+        == "high"
+    ), "decision spine must remain priority='high'"

@@ -13416,7 +13416,12 @@ class LeanAgent15m:
                             ticker=context.get("ticker") or context.get("market_id"),
                             asset=context.get("asset"),
                         ),
-                        priority="high",
+                        # 2026-11-16: RISK_REJECTED is rejected-path telemetry.
+                        # "high" never sheds and these events are the audit
+                        # flood that starved the writer -> audit_writer_unhealthy.
+                        # "normal" preserves them as required evidence while
+                        # allowing _shed_admit to sample under backlog.
+                        priority="normal",
                     )
                 return
             ctx = getattr(self, "_pdr_ctx", None) or {}
