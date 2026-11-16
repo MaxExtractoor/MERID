@@ -1022,7 +1022,16 @@ def _record_decision_audit(
         # was the dominant starvation source (faulthandler samples). The
         # return value is unused and this path is deliberately fail-open.
         from functools import partial as _partial
-        # Decision rows are audit spine: never shed.
+        # 2026-11-16: decision rows that selected a side are the audit spine
+        # — never shed.  Pure no-trade evaluations are the high-volume
+        # majority; at priority="high" they alone exceeded the writer drain
+        # rate on the spindle-bound multi-GB store, so the queue grew
+        # unboundedly and audit_writer_unhealthy halted all entries.  Mark
+        # them "normal" so _shed_admit samples them only under backlog —
+        # full evidence is still written whenever the queue is healthy.
+        _is_side_selected = (
+            getattr(decision, "selected_outcome", None) is not None
+        )
         ledger.submit_write(
             _partial(
                 ledger.record_trade_decision,
@@ -1034,7 +1043,7 @@ def _record_decision_audit(
                 settlement_reference_source=settlement_reference,
                 settlement_reference_age_ms=_rti_age_ms(cfb_observation),
             ),
-            priority="high",
+            priority="high" if _is_side_selected else "normal",
         )
     except Exception as audit_exc:
         logger.warning(
