@@ -4443,7 +4443,12 @@ def _compute_trade_decision_impl(
         ):
             tail_calibration_yes_configured = True
             tail_cap_yes_reason = "real_curve"
-            p_yes_for_yes = tail_calibrator.cap_p_yes(p_yes_for_yes, yes_entry, asset=asset)
+            # Two-sided recalibration: caps over-confidence and, only when the
+            # bucket clears the evidence gates, lifts under-confidence.  Falls
+            # back to cap-only when MERID_RECAL_TWO_SIDED is off or the bucket
+            # lacks per-knot counts.  The 0.15 deviation guard below still
+            # binds any upward move (lift cap is 0.10).
+            p_yes_for_yes = tail_calibrator.adjust_p_yes(p_yes_for_yes, yes_entry, asset=asset)
             if abs(p_yes_for_yes - p_yes_for_yes_pre_cap) > 1e-9:
                 tail_calibration_yes_applied = True
     # Kalshi venue-invariant [0.05, 0.95] so the downstream order router does
@@ -4515,7 +4520,10 @@ def _compute_trade_decision_impl(
                 )
             else:
                 tail_cap_no_reason = "real_curve"
-                p_no_for_no = tail_calibrator.cap_p_no(p_no_for_no, no_entry, asset=asset)
+                # Real (non-dual) NO curve: two-sided adjust.  The provisional
+                # dual path above stays cap-only — it is a derived mirror, not
+                # real NO-held evidence, so it must not lift.
+                p_no_for_no = tail_calibrator.adjust_p_no(p_no_for_no, no_entry, asset=asset)
                 if abs(p_no_for_no - p_no_for_no_pre_cap) > 1e-9:
                     tail_calibration_no_applied = True
     p_no_for_no = max(_lane_p_lo, min(_lane_p_hi, p_no_for_no))

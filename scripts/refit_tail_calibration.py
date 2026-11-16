@@ -15,6 +15,7 @@ the settlement-aligned exit evaluator approve justified NO-side salvage exits
 (model_inputs_satisfactory clears when the artifact is not dual-provisional).
 """
 import argparse
+import bisect
 import json
 import os
 import re
@@ -133,8 +134,28 @@ def _iter_fills(db_path, outcomes):
             yield tk, side, p
 
 
+def _knot_real_counts(knot_xs, by_p):
+    """Real observation count backing each PAVA knot.
+
+    Maps every raw price bucket to the knot that owns it under the
+    right-endpoint step rule (first knot >= bucket price; overflow buckets
+    fold into the last knot).  Returns REAL counts only — never the kappa
+    pseudo-counts used for per-asset shrinkage — so the two-sided lift gate's
+    standard error is not understated on thin cells.
+    """
+    counts = [0.0] * len(knot_xs)
+    if not knot_xs:
+        return counts
+    for x, (n, _w) in by_p.items():
+        i = bisect.bisect_left(knot_xs, x)
+        if i >= len(knot_xs):
+            i = len(knot_xs) - 1
+        counts[i] += float(n)
+    return counts
+
+
 def _fit_side(pairs):
-    """PAVA on weighted price buckets -> (knot_xs, knot_ys, n_pairs)."""
+    """PAVA on weighted price buckets -> (knot_xs, knot_ys, knot_ns, n_pairs)."""
     by_p = defaultdict(lambda: [0, 0])
     for p, win in pairs:
         b = round(p, 3)
@@ -144,7 +165,13 @@ def _fit_side(pairs):
     ys = [by_p[x][1] / by_p[x][0] for x in xs]
     ws = [float(by_p[x][0]) for x in xs]
     kx, ky = _pava_isotonic(xs, ys, ws)
-    return [round(v, 4) for v in kx], [round(v, 6) for v in ky], len(pairs)
+    kns = _knot_real_counts(kx, by_p)
+    return (
+        [round(v, 4) for v in kx],
+        [round(v, 6) for v in ky],
+        [round(v, 4) for v in kns],
+        len(pairs),
+    )
 
 
 def _step_lookup(knot_xs, knot_ys, price):
@@ -160,7 +187,11 @@ def _step_lookup(knot_xs, knot_ys, price):
 
 
 def _fit_side_shrunk(pairs, pooled_xs, pooled_ys, kappa):
-    """PAVA on bucket rates shrunk toward the pooled curve."""
+    """PAVA on bucket rates shrunk toward the pooled curve.
+
+    Returns (knot_xs, knot_ys, knot_ns, n_pairs) where knot_ns are the REAL
+    per-knot counts (kappa pseudo-counts excluded) for the lift gate.
+    """
     by_p = defaultdict(lambda: [0, 0])
     for p, win in pairs:
         b = round(p, 3)
@@ -174,7 +205,13 @@ def _fit_side_shrunk(pairs, pooled_xs, pooled_ys, kappa):
         ys.append((w + kappa * pooled) / (n + kappa))
         ws.append(float(n + kappa))
     kx, ky = _pava_isotonic(xs, ys, ws)
-    return [round(v, 4) for v in kx], [round(v, 6) for v in ky], len(pairs)
+    kns = _knot_real_counts(kx, by_p)
+    return (
+        [round(v, 4) for v in kx],
+        [round(v, 6) for v in ky],
+        [round(v, 4) for v in kns],
+        len(pairs),
+    )
 
 
 def main():
@@ -206,8 +243,8 @@ def main():
         side_pairs[side].append((p, outcomes[tk] == side))
         markets.add(tk)
 
-    yes_x, yes_y, n_yes = _fit_side(side_pairs["yes"])
-    no_x, no_y, n_no = _fit_side(side_pairs["no"])
+    yes_x, yes_y, yes_n, n_yes = _fit_side(side_pairs["yes"])
+    no_x, no_y, no_n, n_no = _fit_side(side_pairs["no"])
     n_total = len({(tk, s) for tk, s, _p in obs})
 
     # Per-asset curves, shrunk toward the pooled curve.  Assets with fewer
@@ -220,21 +257,25 @@ def main():
         if a:
             asset_side_pairs[a][side].append((p, outcomes[tk] == side))
     for a, spairs in sorted(asset_side_pairs.items()):
-        a_yes_x, a_yes_y, a_ny = _fit_side_shrunk(spairs["yes"], yes_x, yes_y, ASSET_SHRINK_KAPPA)
-        a_no_x, a_no_y, a_nn = _fit_side_shrunk(spairs["no"], no_x, no_y, ASSET_SHRINK_KAPPA)
+        a_yes_x, a_yes_y, a_yes_n, a_ny = _fit_side_shrunk(spairs["yes"], yes_x, yes_y, ASSET_SHRINK_KAPPA)
+        a_no_x, a_no_y, a_no_n, a_nn = _fit_side_shrunk(spairs["no"], no_x, no_y, ASSET_SHRINK_KAPPA)
         per_asset[a] = {
             "yes_held_prices": a_yes_x,
             "yes_actual_probs": a_yes_y,
+            "yes_held_n": a_yes_n,
             "no_held_prices": a_no_x,
             "no_actual_probs": a_no_y,
+            "no_held_n": a_no_n,
             "n": a_ny + a_nn,
         }
 
     artifact = {
         "yes_held_prices": yes_x,
         "yes_actual_probs": yes_y,
+        "yes_held_n": yes_n,
         "no_held_prices": no_x,
         "no_actual_probs": no_y,
+        "no_held_n": no_n,
         "buffer": 0.05,
         "n_trades": n_total,
         "per_asset": per_asset,
