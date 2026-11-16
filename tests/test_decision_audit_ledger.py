@@ -1789,9 +1789,15 @@ def test_candidate_terminal_and_risk_rejected_submit_normal_priority() -> None:
         == "normal"
     ), "RISK_REJECTED audit must submit priority='normal'"
 
-    # The decision spine (record_trade_decision) and fills/orders stay "high" —
-    # financial truth is never shed.  Guard against an accidental downgrade.
+    # The decision spine is now DYNAMIC: side-selected decisions stay "high"
+    # (audit spine for qualified candidates) while pure no-trade evaluations
+    # submit "normal" so _shed_admit can sample them under backlog.  Guard the
+    # dynamic priority expression so neither branch is accidentally flattened.
+    assert 'priority="high" if _is_side_selected else "normal"' in grid_src, (
+        "decision spine must use dynamic priority: "
+        'high for side-selected, normal for no-trade'
+    )
     assert (
-        _priority_after_anchor(grid_src, "ledger.record_trade_decision")
-        == "high"
-    ), "decision spine must remain priority='high'"
+        'getattr(decision, "selected_outcome", None) is not None'
+        in grid_src
+    ), "decision spine priority must key off selected_outcome"
