@@ -34,8 +34,19 @@ def expiry_clock(monkeypatch):
 
 
 @pytest.mark.parametrize("lane", ["cheap_no_settle", "settlement_convergence"])
-def test_settlement_lanes_rejected(expiry_clock, lane):
+def test_settlement_lanes_policy(monkeypatch, expiry_clock, lane):
+    # When operator explicitly disallows settlement lanes
+    monkeypatch.setenv("MERID_SETTLEMENT_LANES_ALLOW_ENTRIES", "0")
     assert router._pre_settlement_entry_denial(_intent(decision_lane=lane)) == "settlement_lane_incompatible_with_closeout"
+
+    # When enabled (production default), entries above min_tte (15s) are allowed
+    monkeypatch.setenv("MERID_SETTLEMENT_LANES_ALLOW_ENTRIES", "1")
+    monkeypatch.setattr(router, "_now_unix_s", lambda: expiry_clock - 60)
+    assert router._pre_settlement_entry_denial(_intent(decision_lane=lane)) is None
+
+    # Below min_tte (15s), fails closed
+    monkeypatch.setattr(router, "_now_unix_s", lambda: expiry_clock - 10)
+    assert router._pre_settlement_entry_denial(_intent(decision_lane=lane)) == "pre_settlement_entry_deadline"
 
 
 @pytest.mark.parametrize("remaining,denied", [(151, False), (150, True), (120, True), (0, True), (-1, True)])

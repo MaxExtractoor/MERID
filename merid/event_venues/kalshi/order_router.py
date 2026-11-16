@@ -8003,8 +8003,17 @@ def _resolve_rest_seconds(intent: OrderIntent) -> int:
 def _pre_settlement_entry_denial(intent: OrderIntent) -> Optional[str]:
     if not _is_15m_crypto_entry_order(intent):
         return None
-    if getattr(intent, "decision_lane", None) in ("cheap_no_settle", "settlement_convergence"):
-        return "settlement_lane_incompatible_with_closeout"
+    lane = getattr(intent, "decision_lane", None)
+    allow_settle_lanes = os.getenv("MERID_SETTLEMENT_LANES_ALLOW_ENTRIES", "1").strip().lower() in ("1", "true", "yes")
+    if lane in ("cheap_no_settle", "settlement_convergence"):
+        if not allow_settle_lanes:
+            return "settlement_lane_incompatible_with_closeout"
+        from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
+        expiry = parse_kalshi_15m_window_end_utc(intent.ticker)
+        min_tte = float(os.getenv("MERID_SETTLEMENT_LANE_MIN_TTE_S", "15.0"))
+        if expiry is not None and (expiry.timestamp() - _now_unix_s() <= min_tte):
+            return "pre_settlement_entry_deadline"
+        return None
     from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
     from merid.event_venues.kalshi.settlement_aligned_exit import (
         PRE_SETTLEMENT_CLOSEOUT_SECONDS, PRE_SETTLEMENT_ENTRY_BUFFER_SECONDS,
