@@ -143,6 +143,32 @@ first-observation-per-(ticker,side) joined to `settlement_outcomes`,
   averages over all held prices. A price-aware (side×price-bucket)
   recalibration layer is the correct next step — see
   `analysis/RECALIBRATION_SPEC.md` for the walk-forward methodology.
+- **EPC overlay exists but is inert**: `MERID_EMPIRICAL_CAL_MODE=shadow`
+  points at `data/epc_wide_fit.json` (fitted 2026-10-24, 128 cells). The
+  artifact aged past `MERID_EMPIRICAL_CAL_MAX_AGE_DAYS=14` on ~2026-11-07,
+  so `_epc.lookup` now fails closed and **shadow observations stopped
+  2026-11-07**. Its fit source `logs/rejected_candidates.jsonl` was rotated
+  to ~18h of hot data — the Sep–Oct calibration history now lives only in
+  the `data/archive/decision_audit_YYYY-MM.db(.gz)` monthly archives.
+  `logs/model_calibration_observations.jsonl` (~33 days, n≈23k
+  ticker-sides with `p_model`) joined to `settlement_outcomes.jsonl` is the
+  viable current calibration source — it is what the n=23,415 audit above
+  used. Note the prior EPC artifact was *falsified* (claimed +3..+9c,
+  realized −1.3..−3.3c, Brier worse than the book) — promotion to `live`
+  is gated on the OOS protocol in `.env`, do not shortcut it.
+- **Cheap-contract exposure already exists, bounded**: the `cheap_no` lane
+  (`MERID_CHEAP_NO_LANE_ENABLED=1`, NO 25–40c, TTE≥240s, min-p 0.12,
+  min-net-EV −10c, ≤11 contracts, 1/ticker, 96/day) is the sanctioned
+  cheap-side probe. The 23k-sample audit shows this cohort is net-negative
+  — treat its fills as *paid evidence*, and do not widen it on the
+  expectation of positive EV without fresh settled proof.
+- **Calibration ≠ profitability**: `p_yes`/`p_selected` are already
+  well-calibrated (Brier 0.158). Recalibrating p further has small
+  leverage; the binding constraint on trade count is the reserve stack
+  (giveback/impl/adverse/edge-bias) whose cohorts are starved (n=0–46)
+  because there are few fills. Generating fills via the bounded lanes is
+  what lets those reserves measure current conditions — that, not a p
+  recalibration, is the realistic path to more trades.
 
 ## Automatic live startup
 
