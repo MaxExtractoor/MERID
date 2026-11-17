@@ -76,11 +76,35 @@ def main() -> int:
             d = json.loads(line)
         except Exception:
             continue
-        ts = d.get("event_ts_utc") or ""
-        if d.get("type") != "rejected_candidate" or not (args.start <= ts < args.end):
+        # Source-tolerant field extraction (2026-11-17).  Two durable
+        # observation streams feed this fit: rejected_candidates.jsonl
+        # (type="rejected_candidate", event_ts_utc ISO, held_price_cents,
+        # tte_seconds - rotates to ~hours of hot data) and
+        # model_calibration_observations.jsonl (no type, ts epoch,
+        # entry_price_cents executable ask, seconds_to_expiry - ~33d
+        # retained, carries p_model).  Point --candidates at either file.
+        _typ = d.get("type")
+        if _typ is not None and _typ != "rejected_candidate":
+            continue
+        ts = d.get("event_ts_utc")
+        if ts is None:
+            _ets = d.get("ts")
+            if _ets is None:
+                continue
+            try:
+                ts = datetime.fromtimestamp(float(_ets), tz=timezone.utc).isoformat()
+            except Exception:
+                continue
+        ts = str(ts)
+        if not (args.start <= ts < args.end):
             continue
         t, side = d.get("ticker"), (d.get("side") or "").lower()
-        px, tte = d.get("held_price_cents"), d.get("tte_seconds")
+        px = d.get("held_price_cents")
+        if px is None:
+            px = d.get("entry_price_cents")
+        tte = d.get("tte_seconds")
+        if tte is None:
+            tte = d.get("seconds_to_expiry")
         if t not in outcomes or side not in ("yes", "no") or px is None or tte is None:
             continue
         px, tte = float(px), float(tte)
