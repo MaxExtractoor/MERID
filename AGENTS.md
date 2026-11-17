@@ -305,6 +305,39 @@ monitor -> profit-lock exit -> fills ledger -> reconcile MATCHED ->
 reentry guard.  This session produced exactly that trace once; more
 samples accrue as favorites emerge in later windows.
 
+### ⚠ CRITICAL OPERATIONAL FINDING — audit-writer saturation blocks entries (2026-11-17)
+
+Observed live during the 2026-11-17 restart+monitor session:
+
+- `decision_audit.db` is **8.49 GB**; writer heartbeat shows
+  `ledger_write_latency_ms` degraded to **~9-17 s per batch** under load.
+- The shed tiers work (`normal_dropped` cumulative >1,600) but
+  **high-priority side-selected writes are never shed** — with pf/lane
+  probes actively selecting sides every eval cycle, admitted volume still
+  exceeds drain rate.  Queue depth climbed 380 -> 734+ in ~15 min and
+  never recovered.
+- `audit_writer_unhealthy` -> `ENTRY_DISABLED_GLOBAL_GATE global_allow=False`
+  blocked **all** entries from 01:11:26 local onward this run.  The single
+  verified trade (DOGE pf probe, +$0.33) filled at 01:10:23 — inside the
+  ~6-minute healthy window after `LIVE_ENTRIES_ENABLED`.
+- **This is chronic, not new:** the previous run's err log
+  (`server_console_20261116_170903.err.log`) contains **2,567**
+  `audit_writer_unhealthy` entry-blocks spanning ~6h; the run before that
+  another 362.  pf-lane "allowed" verdicts in `rejected_candidates` that
+  produced no orders were very likely blocked by this same gate — the
+  lanes are not dead ends; the audit spine is the choke point.
+- `MERID_AUDIT_PRUNE_YIELD_QUEUE_DEPTH=400` means the scheduled
+  `prune_old_rows` (1800s cadence) *yields* while backlog >400 — it cannot
+  rescue a deep backlog; and on an 8.5GB DB a prune is itself expensive.
+
+**Root cause:** audit write latency scales with DB size; the DB has never
+been archived/VACUUMed to the monthly-archive layout, so every insert pays
+B-tree depth on ~8.5GB.  **Fix requires downtime** (stop server ->
+archive/prune/VACUUM or rotate to a fresh DB -> restart) or a code change
+that caps/shards the hot table.  Until then, expect entries to be blocked
+for the majority of uptime — restart clears only the *in-memory* backlog
+and buys minutes, not a fix.
+
 ## Automatic live startup
 
 When all of the following are true:
