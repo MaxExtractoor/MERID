@@ -237,6 +237,18 @@ ordinary path on positive edge (YES and NO); no double-admission / lane
 stamp stays non-pf on rescue; existing disabled-terminal-reason and
 NO-moneyness-cap-veto regressions still pass.
 
+**Suite verification (2026-11-17):** the pf/lane/regime/edge battery
+(~500 tests) passes with the rescue in place.  Two unrelated stale
+failures were repaired in `a67e5384` (regime-TTE floor vs conftest pin;
+bounded-lane set missing `late_taker_ioc`/`late_edge_probe`).  One
+**pre-existing** failure remains and is flagged, not silently fixed:
+`tests/prediction/test_maker_bid_lane.py::test_bid_basis_selects_and_stamps_lane`
+expects `decision_lane=="maker_bid"` but the candidate now resolves to a
+`current_build_provisional` cell — intentional since `34a8237f` (lane-owned
+admissions keep their lane id on bid routes).  Whether that provisional
+cell *should* own this 46c/300s candidate is a lane-design question for
+review; the bid-priced entry mechanics it also asserts still pass.
+
 ## Automatic live startup
 
 When all of the following are true:
