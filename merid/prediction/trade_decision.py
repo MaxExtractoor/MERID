@@ -7477,8 +7477,14 @@ def _compute_trade_decision_impl(
             or _yes_drift_qualifies
             or _yes_rev_qualifies
             or (
-                (settlement_lane or not _yes_pf_price)
-                and (settlement_lane or not _yes_hi_price)
+                # 2026-11-17 rescue-lane: suppress the normal path only
+                # when the owning lane actually qualified the side, not
+                # merely because the price is in-band (flag-independent).
+                # A pf/hi-band price that fails lane economics can still
+                # trade here on pure positive edge; a disabled lane no
+                # longer dead-zones its window.
+                (settlement_lane or not _yes_pf_qualifies)
+                and (settlement_lane or not _yes_trend_hi_qualifies)
                 and _yes_eff_edge >= _yes_edge_eff_bound
                 and (
                     _yes_cbp_neg_floor
@@ -7512,7 +7518,10 @@ def _compute_trade_decision_impl(
             or _no_cheap_qualifies
             or _no_rev_qualifies
             or (
-                (settlement_lane or not _no_pf_price)
+                # 2026-11-17 rescue-lane: same qualify-keyed suppression
+                # as YES (see above) - pf-band NO prices that fail lane
+                # economics remain reachable by the normal path on edge.
+                (settlement_lane or not _no_pf_qualifies)
                 and _no_eff_edge >= _no_edge_eff_bound
                 and (
                     _no_cbp_neg_floor

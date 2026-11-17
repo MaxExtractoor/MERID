@@ -188,6 +188,122 @@ def test_lane_disabled_owns_terminal_reason():
     assert d.indicators.get("yes_block") == "pinned_fav_disabled"
 
 
+# ------------------------------------------------- rescue-lane semantics ----
+# 2026-11-17: ``pinned_fav_band_match`` is flag-independent, but it must
+# suppress the ordinary qualify path only when the lane actually claims the
+# side (``_X_pf_qualifies``), not merely because the price sits in-band.  A
+# band price that fails the lane's own gates — disarmed, or a strict-gate
+# rejection — stays reachable by the normal path on genuine positive edge;
+# a disabled lane can no longer dead-zone its window.  A synthetic 65-75c
+# band exercises the semantic: real-band (92-98c) favorites cannot clear the
+# ordinary path's near-certainty min_p (~0.997), so the rescue is verified at
+# a price where the ordinary gates can actually pass.
+
+def _boost_side_edge(monkeypatch, side="yes", p_selected=0.90):
+    """Simulate a genuine model/market divergence on one breakdown so the
+    ordinary path sees real positive edge.  ``compute_edge`` is the single
+    funnel both breakdowns pass through; boosting only the requested side
+    keeps the opposite side honest."""
+    orig = _td.compute_edge
+    # For YES, p_selected == p_yes; for NO, p_selected == 1 - p_yes.
+    p_yes_arg = p_selected if side == "yes" else 1.0 - p_selected
+
+    def _wrap(p_yes, selected_side, **kw):
+        if selected_side == side:
+            p_yes = p_yes_arg
+        return orig(p_yes=p_yes, selected_side=selected_side, **kw)
+
+    monkeypatch.setattr(_td, "compute_edge", _wrap)
+
+
+def _rescue_decision(ask=70.0):
+    return _decision(
+        spot_price=105.0,
+        yes_bid_cents=ask - 2.0, yes_ask_cents=ask,
+        no_bid_cents=100.0 - ask, no_ask_cents=100.0 - ask + 2.0,
+    )
+
+
+def test_rescue_disabled_lane_normal_path_admits(tmp_path, monkeypatch):
+    """pf disarmed + in-band + positive edge -> the ordinary path admits; the
+    flag-independent band match alone no longer dead-zones the window."""
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_LO", "65")
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_HI", "75")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    _boost_side_edge(monkeypatch, "yes")
+    d = _rescue_decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), getattr(d, "no_trade_reason", None),
+    )
+    assert d.indicators.get("yes_pinned_fav_price") is True    # in-band
+    assert d.indicators.get("yes_pinned_fav_qualifies") is False  # lane did not claim
+    # Admitted via the ordinary path, never stamped as the pf lane.
+    assert d.indicators.get("decision_lane") != "pinned_fav"
+    assert d.indicators.get("entry_lane") != "pinned_fav"
+
+
+def test_rescue_lane_gate_fail_normal_path_admits(tmp_path, monkeypatch):
+    """pf armed but its strict gate rejects (impossible EV floor) -> the side
+    is not lane-owned, so the ordinary path still admits on genuine edge."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_LO", "65")
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_HI", "75")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "50")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    _boost_side_edge(monkeypatch, "yes")
+    d = _rescue_decision()
+    assert d.selected_outcome == "yes", (
+        d.indicators.get("yes_block"), getattr(d, "no_trade_reason", None),
+    )
+    assert d.indicators.get("yes_pinned_fav_block") == "pinned_fav_low_ev"
+    assert d.indicators.get("yes_pinned_fav_qualifies") is False
+    assert d.indicators.get("decision_lane") != "pinned_fav"
+    assert d.indicators.get("entry_lane") != "pinned_fav"
+
+
+def test_rescue_no_side_symmetric(tmp_path, monkeypatch):
+    """The NO side rescues identically: an in-band NO price whose pf gate
+    fails still reaches the ordinary path on positive edge."""
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_LO", "25")
+    monkeypatch.setenv("MERID_PINNED_FAV_PRICE_HI", "35")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    # NO-favored book: NO ask ~30c inside the synthetic 25-35 band.
+    _boost_side_edge(monkeypatch, "no", 0.90)
+    d = _decision(
+        spot_price=95.0,                       # spot below strike -> NO fav
+        yes_bid_cents=68.0, yes_ask_cents=70.0,
+        no_bid_cents=28.0, no_ask_cents=30.0,
+    )
+    assert d.selected_outcome == "no", (
+        d.indicators.get("no_block"), getattr(d, "no_trade_reason", None),
+    )
+    assert d.indicators.get("no_pinned_fav_price") is True
+    assert d.indicators.get("no_pinned_fav_qualifies") is False
+    assert d.indicators.get("decision_lane") != "pinned_fav"
+    assert d.indicators.get("entry_lane") != "pinned_fav"
+
+
+def test_rescue_pf_owned_admission_unchanged(tmp_path, monkeypatch):
+    """When the lane DOES qualify, ownership is unchanged: the decision is
+    stamped pinned_fav and the ordinary path is not double-admitted."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-6.0")
+    monkeypatch.setenv(
+        "MERID_LIVE_EVIDENCE_PATH", _write_live_evidence(tmp_path, {})
+    )
+    d = _decision()   # strong 93c YES pin, pf band 92-98 (fixture default)
+    assert d.selected_outcome == "yes"
+    assert d.indicators.get("decision_lane") == "pinned_fav"
+    assert d.indicators.get("entry_lane") == "pinned_fav"
+    assert d.indicators.get("yes_pinned_fav_qualifies") is True
+
+
 def _write_live_evidence(tmp_path, cells):
     """Minimal live-evidence artifact so the evidence loop runs in tests."""
     import json, time
