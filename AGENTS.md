@@ -121,21 +121,21 @@ first-observation-per-(ticker,side) joined to `settlement_outcomes`,
   fill cohorts are starved (n=0–46) in the current low-trade regime —
   several of those reserves cannot self-correct without fresh fills.
 
-### Known latent stack flaws (audit 2026-11-16 — not yet fixed)
+### Known latent stack flaws (audit 2026-11-16 — status noted per item)
 
-- **`pinned_fav_band_match()` is flag-independent** and `yes_qualifies` /
-  `no_qualifies` suppress the *normal* Bachelier/TWAP path whenever the held
-  price falls inside the pf band. Setting the pf band to 1–99c would match
-  ~every price and **disable the normal path entirely** — a genuine
-  architecture hazard. Any full-range widening must decouple the *admission*
-  band from the *ownership* band (rescue-lane semantics), not just widen env.
-- **pf lane bypasses directional-regime guards**: `_yes_regime_ok`,
-  `_yes_conv_block`, `_yes_ct_lane_block`, `_yes_price_cap_block` are only
-  evaluated in the normal-path branch; `_pf_qualifies` skips them. The pf
-  lane can therefore enter *against* a confirmed adverse regime signal
-  (observed: a SOL NO fill during `RALLY_CONFIRMED` that reversed → loss).
-  Whether that is intentional probe behavior or a missing veto is an open
-  design question — flagged, not silently changed.
+- **`pinned_fav_band_match()` flag-independent ownership — FIXED 2026-11-17**
+  (`a4ef87b2`): `yes_qualifies` / `no_qualifies` no longer suppress the normal
+  path on band *presence*; suppression is now keyed on the lane's actual
+  qualify verdict (`_X_pf_qualifies` / `_yes_trend_hi_qualifies`). A band
+  price that fails lane economics stays reachable by the ordinary path on
+  pure positive edge, and a disabled lane can no longer dead-zone its
+  window. See the rescue-lane section below.
+- **pf lane bypasses directional-regime guards — FIXED 2026-11-16**
+  (`206e5541`): `_yes_pf_qualifies` / `_no_pf_qualifies` are re-bound after
+  `_yes_regime_ok` / `_no_regime_ok` are computed, so a favorite can no
+  longer enter against a confirmed adverse regime (the SOL-loss class).
+  `regime_entry_block` still exempts deep-ITM favorites, so genuinely
+  settled contracts are unaffected.
 - **Walk-forward calibrator is stale and price-blind**:
   `data/calibration/walkforward_calibrator.json` (built 2026-11-08) segments
   only by (asset, tte_bucket); its "mid" cells are `identity` for BTC/DOGE/
@@ -206,22 +206,36 @@ first-observation-per-(ticker,side) joined to `settlement_outcomes`,
 - **No unintentional bypass found.** Every 85c+ fill is either a
   settlement-lane positive-edge entry or a bounded pf probe.
 
-**Open design item — rescue-lane semantics (NOT yet implemented):**
+**Rescue-lane semantics — IMPLEMENTED 2026-11-17 (`a4ef87b2`):**
 
-The pf band's *ownership* side-effect (`yes/no_qualifies` suppress the
-normal path whenever `pinned_fav_band_match(price)` is true) means a
-simple env widening to 1-99c would disable normal admission everywhere.
-The safe way to honor "trade wherever the model sees +EV" is to decouple
-*admission band* from *ownership band*: let a lane ADMIT an out-of-band
-candidate that clears pure positive edge WITHOUT owning/suppressing the
-window. Concretely, the `(settlement_lane or not _pf_price)` terms in
-`yes_qualifies`/`no_qualifies` should key on whether the pf lane actually
-*qualified* the side (`_pf_qualifies`), not merely whether the price is
-in-band — so a pf-band price that fails pf economics can still be admitted
-by the normal path when it independently clears positive edge. This is a
-core-path change; implement with tests proving (a) pf-owned admits
-unchanged, (b) pf-band-but-pf-rejected prices can still trade via normal
-path on pure edge, (c) no double-admission, (d) p_no=1-p_yes coherence.
+The `(settlement_lane or not _pf_price)` / `(settlement_lane or not
+_hi_price)` suppression terms in `yes_qualifies`/`no_qualifies` now key on
+the lane's actual qualify verdict (`_yes_pf_qualifies`,
+`_yes_trend_hi_qualifies`, `_no_pf_qualifies`) instead of the
+flag-independent band match. A pf/hi-band price that fails lane economics
+is no longer dead-zoned — it falls through to the ordinary path, which
+still applies its full gate stack (edge bound, min_p, regime, conv,
+ct-lane, price-cap, late). The rescue only ever *opens* the case the lane
+declined; it never closes a previously-open path, weakens no gate, and
+cannot double-admit (a side is owned by exactly one lane).
+
+**Honest impact note:** at the *current* pf band (85-99c) the ordinary path
+almost never rescues, because its own gates are stricter there — the
+near-certainty `min_p_selected` (~0.997 at 88c) plus the reserve stack mean
+an 85c+ favorite essentially cannot clear positive edge on the normal path
+(that is precisely why the pf lane exists, with its own higher p-cap
+headroom). The rescue is therefore primarily a *correctness/dead-zone fix*:
+it removes the latent suppression hazard so a widened band or relaxed
+gates cannot silently disable normal admission, and it lets any in-band
+price that genuinely clears ordinary economics trade. It does **not** by
+itself create new 85c+ trades — those still require the pf probe lane or
+the settlement lane's positive-edge bar.
+
+**Tests** (`tests/test_pinned_fav_lane.py`, all passing): pf-owned
+admission unchanged; disabled-lane and gate-fail rescue admit via the
+ordinary path on positive edge (YES and NO); no double-admission / lane
+stamp stays non-pf on rescue; existing disabled-terminal-reason and
+NO-moneyness-cap-veto regressions still pass.
 
 ## Automatic live startup
 
