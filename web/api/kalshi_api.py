@@ -2749,7 +2749,16 @@ async def get_balance() -> Dict[str, Any]:
     }
     
     if summary.available_cash_usd is not None:
-        balance_cents = int(summary.available_cash_usd * 100)
+        # Round to nearest cent, not floor: available_cash_usd carries
+        # sub-cent precision from Kalshi's balance_dollars string
+        # (e.g. $16.9183).  int() truncation reported $16.91 while the
+        # trading_shard_balance_usd field (full precision) displayed
+        # $16.92 — a phantom $0.01 bankroll-vs-shard discrepancy.
+        balance_cents = int(
+            (summary.available_cash_usd * 100).quantize(
+                Decimal("1"), rounding="ROUND_HALF_UP"
+            )
+        )
         total_value_cents = balance_cents + portfolio_cents
         response["usd"] = float(summary.available_cash_usd)
         response["balance_cents"] = balance_cents
