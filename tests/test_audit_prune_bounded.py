@@ -225,3 +225,96 @@ def test_failed_required_write_and_inflight_health(tmp_path, monkeypatch):
     led._failed_required_writes = 0
     led._last_commit_mono = time.monotonic()
     assert led.writer_health()["unhealthy"] is False
+
+
+# ── retention-prune daemon scheduling (2026-11-16) ──────────────────────
+# prune_old_rows existed but was never scheduled, so the hot audit DB grew
+# without bound.  _maybe_start_prune/_run_prune_loop run it on a dedicated
+# daemon thread outside the write queue.  These cover the start guards and
+# that the loop actually sweeps on the configured interval.
+
+
+def _prune_ready_ledger(tmp_path, monkeypatch):
+    led, _ = _ledger(tmp_path, monkeypatch)
+    led._db_ready = True
+    led._prune_started = False
+    return led
+
+
+def test_maybe_start_prune_disabled_by_interval(tmp_path, monkeypatch):
+    led = _prune_ready_ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(dal, "_AUDIT_PRUNE_INTERVAL_S", 0)
+    monkeypatch.setattr(dal.threading, "Thread", MagicMock())
+    led._maybe_start_prune()
+    assert led._prune_started is False
+    dal.threading.Thread.assert_not_called()
+
+
+def test_maybe_start_prune_disabled_by_retention(tmp_path, monkeypatch):
+    led = _prune_ready_ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(dal, "_AUDIT_RETENTION_DAYS", 0)
+    monkeypatch.setattr(dal.threading, "Thread", MagicMock())
+    led._maybe_start_prune()
+    assert led._prune_started is False
+    dal.threading.Thread.assert_not_called()
+
+
+def test_maybe_start_prune_requires_db_ready(tmp_path, monkeypatch):
+    led = _prune_ready_ledger(tmp_path, monkeypatch)
+    led._db_ready = False
+    monkeypatch.setattr(dal.threading, "Thread", MagicMock())
+    led._maybe_start_prune()
+    assert led._prune_started is False
+    dal.threading.Thread.assert_not_called()
+
+
+def test_maybe_start_prune_starts_daemon_once(tmp_path, monkeypatch):
+    led = _prune_ready_ledger(tmp_path, monkeypatch)
+    fake_thread = MagicMock()
+    monkeypatch.setattr(dal.threading, "Thread", MagicMock(return_value=fake_thread))
+    led._maybe_start_prune()
+    assert led._prune_started is True
+    fake_thread.start.assert_called_once()
+    # second call is a no-op (single-flight guard)
+    led._maybe_start_prune()
+    assert dal.threading.Thread.call_count == 1
+
+
+def test_run_prune_loop_sweeps_periodically(tmp_path, monkeypatch):
+    led, _ = _ledger(tmp_path, monkeypatch)
+    led.prune_old_rows = MagicMock(return_value=3)
+    monkeypatch.setattr(dal, "_AUDIT_PRUNE_INTERVAL_S", 1)
+    # _is_test_context -> start delay 0; drive two sweeps then stop the loop.
+    sleeps = {"n": 0}
+
+    def fake_sleep(_s):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(dal.time, "sleep", fake_sleep)
+    try:
+        led._run_prune_loop()
+    except KeyboardInterrupt:
+        pass
+    assert led.prune_old_rows.call_count == 2
+
+
+def test_run_prune_loop_survives_prune_error(tmp_path, monkeypatch):
+    led, _ = _ledger(tmp_path, monkeypatch)
+    led.prune_old_rows = MagicMock(side_effect=[RuntimeError("disk"), 0])
+    monkeypatch.setattr(dal, "_AUDIT_PRUNE_INTERVAL_S", 1)
+    sleeps = {"n": 0}
+
+    def fake_sleep(_s):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(dal.time, "sleep", fake_sleep)
+    try:
+        led._run_prune_loop()
+    except KeyboardInterrupt:
+        pass
+    # the raising first sweep must not kill the daemon; second still ran
+    assert led.prune_old_rows.call_count == 2

@@ -358,12 +358,21 @@ _WAL_CHECKPOINT_INTERVAL_S = float(
 # callback cost is noise.
 _EVIDENCE_PROGRESS_STEPS = 100000
 
-# Historical rows are audit evidence. Pruning is never scheduled by the live
-# writer; an explicitly authorized archival workflow is required before any
-# use of the manual maintenance helper.
+# Historical rows are audit evidence.  The hot window is bounded by
+# ``prune_old_rows`` on a dedicated daemon thread (see _run_prune_loop) so
+# the multi-GB store cannot grow without limit on the spindle — live
+# consumers only need the trailing ~5h evidence window, and deeper history
+# is preserved by the offline monthly-archive workflow / point-in-time
+# snapshots rather than the hot file.
 _AUDIT_RETENTION_DAYS = float(os.environ.get("MERID_AUDIT_RETENTION_DAYS", "7"))
 _PRUNE_BATCH = int(os.environ.get("MERID_AUDIT_PRUNE_BATCH", "5000"))
 _PRUNE_MAX_BATCHES = int(os.environ.get("MERID_AUDIT_PRUNE_MAX_BATCHES", "20"))
+# How often the prune daemon sweeps.  Each sweep is itself bounded
+# (batches x batch-size, yielding to write-queue depth), so a short interval
+# keeps the hot set small without a long lock hold.  <=0 disables pruning.
+_AUDIT_PRUNE_INTERVAL_S = float(
+    os.environ.get("MERID_AUDIT_PRUNE_INTERVAL_S", "1800")
+)
 
 
 @dataclass(frozen=True)
@@ -410,6 +419,13 @@ class DecisionAuditLedger:
         # (see _run_sweep_backfill).  Started lazily by _ensure_db once the
         # schema/migration has run.
         self._sweep_backfill_started = False
+        # 2026-11-16: one-shot guard for the retention-prune daemon thread
+        # (see _run_prune_loop).  prune_old_rows existed but was never
+        # scheduled, so the hot audit DB grew without bound (~8GB in 4 days
+        # on the spindle).  The daemon mirrors the sweep-backfill pattern:
+        # its own thread, outside the write queue, so batched writes never
+        # nest inside a prune transaction.
+        self._prune_started = False
         self._shared_conn: Optional[sqlite3.Connection] = None
         # 2026-11-10: dedicated WAL-checkpoint connection.  wal_checkpoint is
         # serviced as a queued write item, so it runs on the writer thread —
@@ -1128,6 +1144,7 @@ class DecisionAuditLedger:
                     self._register_known_gaps(conn)
                 self._db_ready = True
             self._maybe_start_sweep_backfill()
+            self._maybe_start_prune()
             if not self._startup_checkpoint_done:
                 self._startup_checkpoint_done = True
                 # Do not wait for other readers during startup maintenance.
@@ -1633,6 +1650,55 @@ class DecisionAuditLedger:
             name="audit-sweep-backfill",
             daemon=True,
         ).start()
+
+    def _maybe_start_prune(self) -> None:
+        """Start the retention-prune daemon exactly once per process."""
+        if self._prune_started or not self._db_ready:
+            return
+        if _AUDIT_PRUNE_INTERVAL_S <= 0 or _AUDIT_RETENTION_DAYS <= 0:
+            return
+        self._prune_started = True
+        threading.Thread(
+            target=self._run_prune_loop,
+            name="audit-retention-prune",
+            daemon=True,
+        ).start()
+
+    def _run_prune_loop(self) -> None:
+        """Periodically prune audit rows older than the hot retention window.
+
+        Runs on its own daemon thread — deliberately NOT a queued write item —
+        so a multi-statement DELETE sweep can never be nested inside
+        ``_run_queued_batch``'s outer BEGIN IMMEDIATE.  ``prune_old_rows``
+        still serializes against writers through ``self._lock`` and yields
+        early whenever the write queue is deep, so ingestion always wins.
+        Loop forever on the configured interval; each sweep is independently
+        bounded and safe to interrupt (the next pass resumes by decision_ts).
+        """
+        # Let startup contention settle before competing for the write lock —
+        # same rationale as the sweep-backfill start delay.  Skipped under
+        # pytest (hermetic tmp DBs have no startup contention).
+        delay = (
+            0.0
+            if _is_test_context()
+            else float(os.environ.get("MERID_AUDIT_PRUNE_START_DELAY_S", "120"))
+        )
+        if delay > 0:
+            time.sleep(delay)
+        while True:
+            try:
+                removed = self.prune_old_rows()
+                if removed:
+                    logger.info(
+                        "[DECISION-AUDIT-LEDGER] retention prune removed %s "
+                        "decisions (>%s days)", removed, _AUDIT_RETENTION_DAYS,
+                    )
+            except Exception as exc:  # defensive; prune_old_rows swallows too
+                logger.warning(
+                    "[DECISION-AUDIT-LEDGER] prune loop iteration failed: %s",
+                    exc,
+                )
+            time.sleep(_AUDIT_PRUNE_INTERVAL_S)
 
     def _run_sweep_backfill(self) -> None:
         """Backfill ``sweep_ticker``/``sweep_close_ts`` for pre-migration rows.
