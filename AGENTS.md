@@ -338,6 +338,47 @@ that caps/shards the hot table.  Until then, expect entries to be blocked
 for the majority of uptime — restart clears only the *in-memory* backlog
 and buys minutes, not a fix.
 
+### RESOLVED — audit-DB archive + maintenance restart (2026-11-17 ~05:24-06:05 local)
+
+The saturation above was fixed by **set-based archival**, not VACUUM:
+
+- `data/decision_audit.db` (8.49 GB, ~666k decisions) -> archived all rows
+  with `decision_ts` older than ~2 days (**435,000 parent decisions +
+  ~2.5M child rows** across side_ev/events/outcomes/snapshots) into
+  `data/archive/decision_audit_2026-11.db` (~5.5 GB), then deleted them
+  from the hot DB.  File stays ~8.5 GB on disk (VACUUM skipped — see
+  below) but row count dropped ~2/3, so write latency recovered.
+- **Method that worked:** materialize old `decision_id`s once into a
+  small indexed map, then `INSERT ... SELECT ... CROSS JOIN` per child —
+  forces one sequential scan per table.  The stock
+  `scripts/archive_decision_audit.py` chunked `IN (...)` pattern and an
+  `IN (SELECT ...)` variant both degenerate to ~0.2 MB/s random
+  autoindex probes on child tables (no decision_id index usage); do not
+  reuse them on this DB size/disk.
+- **Known gap (accepted):** the parent copy ran under an earlier cutoff
+  (~50 min drift between runs), so **~7,435 parent rows were deleted
+  without being archived**; their child rows remain in the archive
+  (orphaned by `decision_id`).  Analytical value is largely preserved
+  in children (side_ev probabilities/EV, events ticker/reasons,
+  snapshots book state); parent-level fields for that 1.7% slice are
+  lost.  Reconstructable from `decision_telemetry.jsonl` if ever needed.
+- **VACUUM deliberately skipped:** index rebuilds are random-I/O bound
+  (~0.13 MB/s observed) and would take hours on this disk; the freed
+  pages already restore write latency.  Revisit during a quiet window
+  or via `PRAGMA auto_vacuum=INCREMENTAL`.
+- **Live verification (run `20261117102744_6272_8c647085`, git
+  `15a732e7`):** preflight passed 05:28:23 local, `LIVE_ENTRIES_ENABLED`
+  via auto_enable.  **Zero `audit_writer_unhealthy` / zero
+  `ENTRY_DISABLED_GLOBAL_GATE` events across ~35+ min of live entries**
+  (vs 2,567 blocks/6h before).  Three live fills executed and settled:
+  SOL NO ~29c x6 ($1.74, cheap_no_settle probe — adverse-selected,
+  markout -10.5c @30s, rode to settlement), DOGE YES 95c x5 ($4.75,
+  pinned_fav), DOGE NO ~94c x6 ($5.64, pinned_fav).  DOGE post-only
+  orders twice rejected `post only cross` (stale maker price) — clean
+  no-fill, intent exhausted.  REST settlement/balance path is
+  rate-limited (30x HTTP 429) so settlement prints lag; positions
+  reconciled closed via `accept_exchange`.
+
 ## Automatic live startup
 
 When all of the following are true:
