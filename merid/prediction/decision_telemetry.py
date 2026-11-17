@@ -1252,21 +1252,32 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
         gate_ev = record.get(f"{best_side}_gate_ev_cents")
         route_bound = record.get(f"{best_side}_route_required_edge_cents")
         true_short = record.get(f"{best_side}_true_shortfall_cents")
-        if gate_ev is not None and route_bound is not None:
+        # 2026-11-17: the producer computes ``true_shortfall`` against the
+        # *enforced* bound — ``effective_gate_edge`` (post-slack, or the
+        # lane-floor substitution for pinned_fav/drift/cheap_no admissions) —
+        # not the pre-slack ``route_required_edge``.  Comparing against the
+        # route bound false-flagged every slackened or lane-admitted reject
+        # (observed live: ETH/DOGE NO_POSITIVE_EXECUTABLE_EDGE records where
+        # effective_gate_edge=-12 lane floor vs route_bound=+2.68).  Prefer the
+        # enforced bound; fall back to the route bound for older records.
+        enforced_bound = record.get(f"{best_side}_effective_gate_edge_cents")
+        if enforced_bound is None:
+            enforced_bound = route_bound
+        if gate_ev is not None and enforced_bound is not None:
             if true_short is not None and abs(
                 float(true_short)
-                - max(0.0, float(route_bound) - float(gate_ev))
+                - max(0.0, float(enforced_bound) - float(gate_ev))
             ) > 0.51:
                 violations.append(
                     f"{best_side}_true_shortfall={true_short} != "
-                    f"route_bound({route_bound}) - gate_ev({gate_ev})"
+                    f"enforced_bound({enforced_bound}) - gate_ev({gate_ev})"
                 )
             if code == "CANDIDATE_EMITTED" and (
-                float(gate_ev) < float(route_bound) - 0.51
+                float(gate_ev) < float(enforced_bound) - 0.51
             ):
                 violations.append(
                     f"CANDIDATE_EMITTED but gate_ev={gate_ev} < "
-                    f"route_bound={route_bound} (side={best_side})"
+                    f"enforced_bound={enforced_bound} (side={best_side})"
                 )
         elif best_ev is not None and bound is not None and shortfall is not None:
             if abs(float(shortfall) - max(0.0, bound - float(best_ev))) > 0.51:

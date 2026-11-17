@@ -355,3 +355,85 @@ def test_disabled_telemetry_is_noop(telemetry_tmp_path, monkeypatch):
     monkeypatch.setenv("MERID_DECISION_TELEMETRY", "0")
     assert dt.emit_cycle(1, _make_five_asset_records()) is True
     assert not telemetry_tmp_path.exists()
+
+
+def _econ_record(**overrides):
+    """Minimal economics-evaluated decision_record for invariant checks."""
+    base = {
+        "type": "decision_record",
+        "schema_version": 1,
+        "asset": "DOGE",
+        "ticker": "KXDOGE15M-T",
+        "terminal_code": "NO_POSITIVE_EXECUTABLE_EDGE",
+        "best_executable_ev_cents": -3.818,
+        "best_required_edge_cents": 2.68,
+        "edge_shortfall_cents": 6.498,
+        "yes_ev_net_cents": -13.353,
+        "no_ev_net_cents": -3.818,
+        "yes_gate_ev_cents": -13.353,
+        "no_gate_ev_cents": -3.818,
+        "yes_route_required_edge_cents": 6.4916,
+        "no_route_required_edge_cents": 2.68,
+        "yes_effective_gate_edge_cents": 6.4916,
+        "no_effective_gate_edge_cents": -12.0,
+        "yes_true_shortfall_cents": 19.844,
+        "no_true_shortfall_cents": 0.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_invariant_uses_enforced_bound_for_lane_admitted_side():
+    """2026-11-17: a lane-admitted side (pinned_fav) substitutes its own floor
+    for the route bound.  ``true_shortfall`` is computed against that enforced
+    bound, so the invariant must compare against ``effective_gate_edge`` —
+    not ``route_required_edge`` — or it false-flags every lane emit.
+
+    DOGE live record: NO pinned_fav floor=-12.0, route_bound=+2.68,
+    gate_ev=-3.818, true_shortfall=0.0.
+    """
+    record = _econ_record()
+    violations = dt._validate_record_invariants(record)
+    assert not any("true_shortfall" in v for v in violations), violations
+
+
+def test_invariant_falls_back_to_route_bound_when_no_effective_edge():
+    """Older records without ``effective_gate_edge`` still validate against
+    ``route_required_edge``."""
+    record = _econ_record()
+    del record["yes_effective_gate_edge_cents"]
+    del record["no_effective_gate_edge_cents"]
+    # Recompute shortfall against the route bound for a consistent record:
+    # no_true_shortfall = max(0, 2.68 - (-3.818)) = 6.498
+    record["no_true_shortfall_cents"] = 6.498
+    record["yes_true_shortfall_cents"] = max(0.0, 6.4916 - (-13.353))
+    violations = dt._validate_record_invariants(record)
+    assert not any("true_shortfall" in v for v in violations), violations
+
+
+def test_invariant_still_flags_genuine_shortfall_mismatch():
+    """A true_shortfall that disagrees with the enforced bound is still a
+    violation — the fix must not silence real inconsistencies."""
+    record = _econ_record()
+    # Corrupt the shortfall: enforced bound -12, gate_ev -3.818 -> expect 0.
+    record["no_true_shortfall_cents"] = 5.0
+    violations = dt._validate_record_invariants(record)
+    assert any("true_shortfall" in v for v in violations), violations
+
+
+def test_invariant_candidate_emitted_uses_enforced_bound():
+    """A lane-admitted CANDIDATE_EMITTED may clear the lane floor while sitting
+    below the route bound; that is a pass, not a violation."""
+    record = _econ_record(
+        terminal_code="CANDIDATE_EMITTED",
+        best_executable_ev_cents=0.5,
+        yes_ev_net_cents=-13.353,
+        no_ev_net_cents=0.5,
+        no_gate_ev_cents=0.5,
+        no_effective_gate_edge_cents=-12.0,
+        no_route_required_edge_cents=2.68,
+        no_true_shortfall_cents=0.0,
+        edge_shortfall_cents=0.0,
+    )
+    violations = dt._validate_record_invariants(record)
+    assert not any("CANDIDATE_EMITTED" in v for v in violations), violations
