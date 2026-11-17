@@ -107,6 +107,11 @@ class TestBoundedLaneMembership:
             # and the window-quota paid-telemetry fallback — both bounded
             # by their own admission floors and durable caps.
             "pinned_fav",
+            # 2026-11-13: late-taker IOC lane (ETH-NO 50-59c / TTE 120-240s
+            # counterfactual-positive cell) and the late-edge probe lane
+            # (10-69.99c bid, TTE 60-120s) - both bounded 1-contract lanes.
+            "late_taker_ioc",
+            "late_edge_probe",
             "window_quota",
             # 2026-10-21: bid-basis mid-band momentum lane (40-74c,
             # TTE 180-840s, entry+12c lock) and the NO-side 25-40c

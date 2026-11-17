@@ -28,6 +28,29 @@ from merid.prediction.directional_regime import (
 )
 
 
+def _apply_regime_tte_floor(monkeypatch, floor_s=15):
+    """Apply the production ``MERID_REGIME_MIN_TTE_FLOOR_S`` clamp that
+    ``tests/conftest.py`` disables suite-wide (it pins the var to ``0`` so
+    regime tests see raw code-default band floors).  The TTE dead-zone tests
+    below verify the *production* floor-clamped behaviour, so they rebuild
+    ``REGIME_CONFIGS`` with every enabled band's ``min_time_to_expiry_seconds``
+    lowered to the floor - mirroring ``market_regime``'s import-time clamp.
+    ``classify_market_regime`` resolves ``REGIME_CONFIGS`` through its module
+    globals, so patching the module attribute is sufficient."""
+    import dataclasses
+    import merid.event_venues.kalshi.market_regime as _mr
+
+    clamped = {
+        name: (
+            dataclasses.replace(r, min_time_to_expiry_seconds=int(floor_s))
+            if r.enabled and r.min_time_to_expiry_seconds > floor_s
+            else r
+        )
+        for name, r in _mr.REGIME_CONFIGS.items()
+    }
+    monkeypatch.setattr(_mr, "REGIME_CONFIGS", clamped)
+
+
 def test_tail_regimes_present_and_enabled():
     assert "tail_low" in REGIME_CONFIGS
     assert "tail_high" in REGIME_CONFIGS
@@ -63,7 +86,8 @@ def test_describe_price_band_tail_enabled():
     assert d_high["reason"] == "enabled_band"
 
 
-def test_dead_zone_closed_between_15s_and_90s():
+def test_dead_zone_closed_between_15s_and_90s(monkeypatch):
+    _apply_regime_tte_floor(monkeypatch)
     # Previous bug: between 60s and 90s, all standard regimes were disabled.
     for tte in [20, 45, 75, 89]:
         assert classify_market_regime(50, tte) is not None
@@ -73,7 +97,8 @@ def test_dead_zone_closed_between_15s_and_90s():
         assert classify_market_regime(95, tte) is not None
 
 
-def test_sub_15s_fails_closed():
+def test_sub_15s_fails_closed(monkeypatch):
+    _apply_regime_tte_floor(monkeypatch)
     # Below the 15s execution floor, entries are not admitted
     assert classify_market_regime(50, 10) is None
     assert classify_market_regime(95, 5) is None
