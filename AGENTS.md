@@ -249,6 +249,62 @@ admissions keep their lane id on bid routes).  Whether that provisional
 cell *should* own this 46c/300s candidate is a lane-design question for
 review; the bid-priced entry mechanics it also asserts still pass.
 
+### Live restart + first verified end-to-end trade (2026-11-17 ~06:03-06:16 UTC)
+
+Canonical restart via `start_15m.ps1` (uvicorn pid 9348, git_sha `e725c2a5`,
+`KALSHI_ENV=live`, auto_execution path — no manual token).  Preflight passed
+and emitted `live_startup_preflight_passed` + `live_entries_enabled` at
+06:05:06 UTC (`run_id=20261117060347_9348_0655c846`,
+`reconciliation_snapshot_id=recon_27b8bcee75b2`, `model_release_id=bachelier_twap`).
+205 stale order attempts + 25 exit attempts were quarantined as settled-market
+non-exposure during P0 preflight — correct, not resolved.
+
+**First live trade of the session — complete verified lifecycle:**
+
+- **Candidate:** `KXDOGE15M-26NOV170115-15`, side `no`, lane `pinned_fav`
+  (maker probe), emitted `CANDIDATE_EMITTED` 06:09:35 UTC at ~5.5min TTE,
+  `p_no=0.9696`, claimed edge -2.4c (inside the -12c maker floor — bounded
+  probe by design).  Prior pf-owned evals on BTC/DOGE in the same window
+  vetoed `pinned_fav_maker_only` until a maker route was selectable.
+- **Order:** `order_decisions` allowed=true, buy NO 600cc (6ct) limit 94c,
+  post-only GTC -> wire `POST /portfolio/events/orders` side=ask price=0.07
+  (= buy NO @~93c equivalent), exchange_index=2, success.
+- **Fill:** resting order filled 06:10:23 UTC (~38s after submit);
+  `kalshi_fills` row: sell YES 6.00 @0.07/0.93, proceeds -$5.58, fee 0.
+- **Position:** 6 NO @93c avg; market ran toward NO (held-side bid 98c).
+- **Exit:** `hard_profit_lock` triggered 06:11:26 UTC -> sell NO 600cc
+  limit 95c, `approved_by_firewall`; fills 06:11:42-45 UTC as buy YES
+  4.00+2.00 @0.013 (= sell NO @98.7c effective), exit fees $0.0054.
+- **PnL:** -$5.58 entry + $5.9166 exit - $0.0054 fees = **~+$0.33
+  (+5.9% on $5.58, ~2min hold)**.  Reentry guard then correctly refused
+  same-market re-entry (`prior_pnl=12c`).
+- **Reconciliation stress test (passed):** portfolio authority went
+  `MISMATCH_LEDGER` at 01:11:30 local while the just-filled position had
+  not yet propagated to exchange REST (`exchange_positions=[]` vs
+  ledger/cache 6 NO @93c).  The loop emitted `ENTRY_BLOCKED` for ~43s —
+  new entries correctly halted during uncertainty — then
+  `PORTFOLIO-AUTHORITY-TRANSITION state=RECOVERED ... MATCHED` at
+  reconcile_attempt=9.  This is the intended fail-closed behavior.
+- **Residual mid-flight:** `RESIDUAL_POSITION_DETECTED 600->200cc` during
+  the two-leg exit fill; resolved by the second fill leg.  TP-derivation
+  logged `INVALID_TP_*` clears and re-synthesized the exit contract —
+  noisy but non-blocking; worth a look if it recurs on normal exits.
+
+**Lane-activity pattern observed live:** pf-owned decisions appear as
+`decision_lane=pinned_fav` + `pinned_fav_maker_only` STRUCTURAL_RISK_VETO
+while the taker route is selected; the lane only emits once a maker-basis
+candidate is selectable (`CANDIDATE_EMITTED`).  All-favorite windows
+(e.g. 0130 market: XRP NO@94-97c p~0.93-0.96, ETH NO@93c, BTC NO@91c) were
+correctly vetoed maker-only rather than crossing the spread — consistent
+with maker-only `ExecutionPolicy`.
+
+**"What a win looks like" — the verified template:** preflight pass ->
+`LIVE_ENTRIES_ENABLED` -> lane-owned candidate -> `CANDIDATE_EMITTED` ->
+`order_decisions allowed` -> post-only wire ack -> fill -> position
+monitor -> profit-lock exit -> fills ledger -> reconcile MATCHED ->
+reentry guard.  This session produced exactly that trace once; more
+samples accrue as favorites emerge in later windows.
+
 ## Automatic live startup
 
 When all of the following are true:
