@@ -589,6 +589,22 @@ MERID_PINNED_FAV_REGIME_GUARD = os.environ.get(
     "MERID_PINNED_FAV_REGIME_GUARD", "1"
 ).strip().lower() in ("1", "true", "yes", "on")
 
+# 2026-11-17: sibling rescue-lane regime guard.  The drift_fav,
+# cheap_no_settle, late_taker and trend_yes_hi qualifiers are OR-branches
+# inside yes_qualifies/no_qualifies alongside the normal path, so — like
+# pinned_fav before 206e5541 — they never consulted ``_X_regime_ok`` and
+# could qualify against a confirmed adverse regime.  Observed live
+# 2026-11-17: five cheap_no_settle NO fills went 0/5 (-$9.08), including
+# RALLY_CONFIRMED entries on ETH and DOGE that regime_entry_block would
+# have vetoed on the normal path.  Rebind the same way as pf; the
+# deep-ITM exception and per-side penalty mode still apply through
+# ``_X_regime_ok``.  reversal_scalp lanes are exempt by design — they are
+# bounded countertrend instruments gated by their own regime+bounce
+# match.  Default on; set 0 to restore regime-free lane admission.
+MERID_RESCUE_LANE_REGIME_GUARD = os.environ.get(
+    "MERID_RESCUE_LANE_REGIME_GUARD", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
 # 2026-10-05 (entry-throughput canary): evidence "transferrable" tier.  A
 # sparse exact cell whose price-matched pooled level already cleared its
 # posterior-LCB margin check is supported evidence, not blind exploration —
@@ -6775,6 +6791,7 @@ def _compute_trade_decision_impl(
         "no_pinned_fav_block": _no_pf_block,
         "yes_pinned_fav_qualifies": bool(_yes_pf_qualifies),
         "no_pinned_fav_qualifies": bool(_no_pf_qualifies),
+        "no_cheap_qualifies": bool(_no_cheap_qualifies),
     })
 
     # 2026-09-30: side-specific depth eligibility.  A side whose executable
@@ -6912,6 +6929,35 @@ def _compute_trade_decision_impl(
             _no_pf_qualifies = False
             indicators["no_pf_regime_blocked"] = _no_regime_block
             indicators["no_pinned_fav_qualifies"] = False
+
+    # 2026-11-17: extend the same regime binding to the sibling rescue
+    # lanes.  Each qualifier was computed upstream of ``_X_regime_ok``;
+    # rebinding the variable (not just the yes/no_qualifies expression)
+    # keeps selection, lane stamping and block reasons consistent, exactly
+    # as the pf guard above.  ``regime_entry_block`` returns None for
+    # trend-aligned and deep-ITM sides, so this only restricts genuine
+    # countertrend admission; NEUTRAL-regime lane probes are unaffected.
+    if MERID_RESCUE_LANE_REGIME_GUARD:
+        if _yes_trend_hi_qualifies and not _yes_regime_ok:
+            _yes_trend_hi_qualifies = False
+            indicators["yes_trend_hi_regime_blocked"] = _yes_regime_block
+            indicators["yes_trend_hi_qualifies"] = False
+        if _yes_drift_qualifies and not _yes_regime_ok:
+            _yes_drift_qualifies = False
+            indicators["yes_drift_regime_blocked"] = _yes_regime_block
+        if _no_drift_qualifies and not _no_regime_ok:
+            _no_drift_qualifies = False
+            indicators["no_drift_regime_blocked"] = _no_regime_block
+        if _no_cheap_qualifies and not _no_regime_ok:
+            _no_cheap_qualifies = False
+            indicators["no_cheap_regime_blocked"] = _no_regime_block
+            indicators["no_cheap_qualifies"] = False
+        if _yes_late_taker_qualifies and not _yes_regime_ok:
+            _yes_late_taker_qualifies = False
+            indicators["yes_late_taker_regime_blocked"] = _yes_regime_block
+        if _no_late_taker_qualifies and not _no_regime_ok:
+            _no_late_taker_qualifies = False
+            indicators["no_late_taker_regime_blocked"] = _no_regime_block
 
     # 2026-10-04: marginal-band rescue slack.  Only positive thresholds in the
     # 50-89c executable band relax; bounded negative-floor lanes keep their own

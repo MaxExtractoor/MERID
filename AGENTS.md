@@ -248,6 +248,67 @@ expects `decision_lane=="maker_bid"` but the candidate now resolves to a
 admissions keep their lane id on bid routes).  Whether that provisional
 cell *should* own this 46c/300s candidate is a lane-design question for
 review; the bid-priced entry mechanics it also asserts still pass.
+  **RESOLVED same-day:** the stale expectation was repaired by pinning
+  `MERID_PROVISIONAL_LANE=0` in the test fixture (the lane legitimately
+  owns the cell; `maker_bid` is the generic fallback label).  See the
+  losing-streak section below for the companion suite repairs.
+
+### Losing-streak forensics + sibling-lane regime guard (2026-11-17)
+
+**Symptom:** post-maintenance window produced 10 settled entries,
+~-$1.39 realized; the bleed was concentrated in `cheap_no_settle`
+(5 fills, 0/5, -$9.08 gross): SOL NO@29c, DOGE NO@29c, SOL NO@28c,
+ETH NO@33c, DOGE NO@37c.
+
+**Root cause (code defect, fixed):** the rescue-lane qualifiers —
+`_no_cheap_qualifies`, `_no_drift_qualifies`, `_yes_drift_qualifies`,
+`_yes_trend_hi_qualifies`, `_yes_late_taker_qualifies`,
+`_no_late_taker_qualifies` — are OR-branches inside
+`yes_qualifies`/`no_qualifies` and, like `pinned_fav` before `206e5541`,
+never consulted `_X_regime_ok` (which binds only the normal-path
+branch).  `regime_entry_block` therefore never saw cheap-NO candidates:
+ETH 0700 and DOGE 0800 entered NO during `RALLY_CONFIRMED` — the exact
+countertrend class the Oct-1 audit and the directional-regime module
+exist to veto.  `reversal_scalp` lanes are exempt by design (bounded
+countertrend instruments gated by their own regime+bounce match).
+
+**Fix:** `MERID_RESCUE_LANE_REGIME_GUARD` (default on) in
+`trade_decision.py` re-binds all six sibling qualifiers to
+`_X_regime_ok` immediately after the pf re-bind — same variable-rebind
+discipline so selection, lane stamping and block reasons stay
+consistent; the deep-ITM exception and per-side penalty/veto mode still
+apply through `_X_regime_ok`.  NEUTRAL-regime lane probes are
+unaffected; only confirmed-adverse-regime countertrend admission is
+removed.  Indicators: `*_regime_blocked` per lane +
+`no_cheap_qualifies` snapshot key.
+
+**Regression coverage:** `tests/test_rescue_lane_regime_guard.py` —
+7 tests: rally blocks cheap NO (indicator + no selection), neutral
+admits via `cheap_no_settle`, selloff keeps trend-aligned NO (label
+aged past the trend-freshness arm), `MERID_RESCUE_LANE_REGIME_GUARD=0`
+restores admission, normal path stays independently regime-bound,
+trend-side symmetry, deep-ITM exception unchanged.
+
+**Companion fixes found by the suite sweep:**
+- `submit_revalidation.input_from_intent`: fraction-vs-cents bound
+  normalization used `req_edge_dec <= 1`, which also caught every
+  NEGATIVE cents value (-10c -> -1000c).  Now `abs(v) <= 1` — real
+  latent bug for any cents-stamped lane floor.
+- `unified_market_state.OrderbookSnapshot`: added missing
+  `best_no_bid`/`best_no_ask` (duality mirrors); `spread_cents` now
+  returns `abs(ask-bid)` matching `compute_side_microstructure` and all
+  threshold consumers.
+- `test_golden_path_15m.py`: removed three dead imports
+  (`Crypto15MIndicators`, `UnifiedEdge`, `Strategy`/`StrategyDecision`),
+  corrected `TTERegime` import path (`merid.risk.tte_regime`).
+
+**Honest residual:** the regime guard removes the confirmed-rally/selloff
+countertrend subset — 2 of the 5 cheap_no losses (ETH, DOGE-0800).  The
+remaining 3 losses entered in NEUTRAL regime where the lane is *designed*
+to probe; n=5 is too thin to declare the lane broken, but if the
+NEUTRAL-regime cheap-NO cohort keeps losing, the correct next step is a
+settled-cohort gate on the lane itself (same hysteresis pattern as
+`fade_gate`), not a wider regime block.
 
 ### Live restart + first verified end-to-end trade (2026-11-17 ~06:03-06:16 UTC)
 

@@ -69,9 +69,21 @@ class OrderbookSnapshot:
         return (100 - self.no_bids[0].price_cents) if self.no_bids else None
 
     @property
+    def best_no_bid(self) -> Optional[int]:
+        """Best NO bid (mirror of ``best_yes_bid``)."""
+        return self.no_bids[0].price_cents if self.no_bids else None
+
+    @property
+    def best_no_ask(self) -> Optional[int]:
+        """Best NO ask = 100 − best YES bid (Kalshi binary duality)."""
+        return (100 - self.yes_bids[0].price_cents) if self.yes_bids else None
+
+    @property
     def spread_cents(self) -> Optional[float]:
         ask, bid = self.best_yes_ask, self.best_yes_bid
-        return float(ask - bid) if ask is not None and bid is not None else None
+        # Non-negative by convention: matches compute_side_microstructure's
+        # abs() and every threshold consumer (spread <= max, pct of mid).
+        return float(abs(ask - bid)) if ask is not None and bid is not None else None
 
     @property
     def mid_cents(self) -> Optional[float]:

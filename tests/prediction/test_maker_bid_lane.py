@@ -31,6 +31,11 @@ def _configure_lane(monkeypatch):
     monkeypatch.setattr(
         _td, "MERID_CHEAP_TAIL_CANARY_DAILY_FILE", _tmp_daily
     )
+    # 2026-11-17: the current_build_provisional lane (34a8237f) legitimately
+    # owns ETH YES ~46c/TTE300 candidates and stamps decision_lane before
+    # the generic maker_bid label — the "maker_bid" expectation below is
+    # only meaningful with the provisional lane off.
+    monkeypatch.setenv("MERID_PROVISIONAL_LANE", "0")
 
 
 def _make_decision(decision_id: str = "test-mb", **kwargs):

@@ -522,7 +522,12 @@ def input_from_intent(
     try:
         req_edge_dec = Decimal(str(req_edge)) if req_edge is not None \
             else Decimal("0")
-        if req_edge_dec <= 1:
+        # Fraction-vs-cents disambiguation: stamped bounds are probability
+        # fractions (|v| <= 1 -> *100 to cents).  The old ``<= 1`` test also
+        # caught every NEGATIVE cents value (-10c -> -1000c), silently
+        # 100x-ing lane floors stamped in cents.  abs() keeps |v| <= 1 on
+        # the fraction side while letting |v| > 1 through as already-cents.
+        if abs(req_edge_dec) <= 1:
             req_edge_dec *= 100
     except Exception:
         req_edge_dec = Decimal("0")

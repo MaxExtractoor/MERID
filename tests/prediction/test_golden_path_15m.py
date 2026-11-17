@@ -22,10 +22,7 @@ from merid.event_venues.kalshi.microstructure import (
     cents_to_dollars,
 )
 from merid.prediction.spot_provider import SpotProvider, UnifiedSpotProvider
-from merid.signals.crypto_15m_indicators import Crypto15MIndicators
-from merid.prediction.unified_edge import UnifiedEdge, EdgeCheckResult
-from merid.prediction.strategy import Strategy, StrategyDecision
-from merid.risk.crypto_term_structure import TTERegime
+from merid.risk.tte_regime import TTERegime
 
 
 class TestGoldenPath15M:
