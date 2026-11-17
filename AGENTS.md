@@ -187,6 +187,42 @@ first-observation-per-(ticker,side) joined to `settlement_outcomes`,
   what lets those reserves measure current conditions — that, not a p
   recalibration, is the realistic path to more trades.
 
+### 85c+ admission audit + rescue-lane spec (2026-11-17)
+
+**Audit — what can admit an entry at held price >=85c:**
+
+- `settlement_convergence` lane (TTE 15-150s, p>=0.84, `MAX_PRICE=99`):
+  requires **positive** net edge >= `MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS`
+  (=0.75c). Pure-edge; not a bypass.
+- `pinned_fav` lane (band 85-99c, maker TTE 15-840s): admits down to
+  `MERID_PINNED_FAV_MAKER_MIN_EV_CENTS=-12` / taker `-15` — a **bounded
+  negative-EV probe**, gated by p>=0.90, band, TTE, daily cap (480),
+  <=11 contracts, maker-only, plus all common structural gates (depth,
+  evidence, throttle, bookflow, coinflip, trendside, regime-guard now
+  bound, risk, audit). This is the *only* non-pure-edge admission at
+  85c+ and it is deliberate, not a leak.
+- No other lane reaches 85c+: cheap_no 25-40c, drift 40-74c,
+  late_edge_probe 10-69.99c, mband/balanced bands cap below ~90c.
+- **No unintentional bypass found.** Every 85c+ fill is either a
+  settlement-lane positive-edge entry or a bounded pf probe.
+
+**Open design item — rescue-lane semantics (NOT yet implemented):**
+
+The pf band's *ownership* side-effect (`yes/no_qualifies` suppress the
+normal path whenever `pinned_fav_band_match(price)` is true) means a
+simple env widening to 1-99c would disable normal admission everywhere.
+The safe way to honor "trade wherever the model sees +EV" is to decouple
+*admission band* from *ownership band*: let a lane ADMIT an out-of-band
+candidate that clears pure positive edge WITHOUT owning/suppressing the
+window. Concretely, the `(settlement_lane or not _pf_price)` terms in
+`yes_qualifies`/`no_qualifies` should key on whether the pf lane actually
+*qualified* the side (`_pf_qualifies`), not merely whether the price is
+in-band — so a pf-band price that fails pf economics can still be admitted
+by the normal path when it independently clears positive edge. This is a
+core-path change; implement with tests proving (a) pf-owned admits
+unchanged, (b) pf-band-but-pf-rejected prices can still trade via normal
+path on pure edge, (c) no double-admission, (d) p_no=1-p_yes coherence.
+
 ## Automatic live startup
 
 When all of the following are true:
