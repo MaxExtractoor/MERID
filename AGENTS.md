@@ -19,6 +19,82 @@ This durable authorization applies only to the configured production process and
 
 The system must never submit an entry merely because it restarted. It may execute the **next eligible strategy decision** after successful preflight and normal entry gating.
 
+## Current runtime state — 2026-11-16 reconciliation
+
+This section is the authoritative statement of *resolved live config* as of
+2026-11-16. Where a dated section below conflicts with it, **this section
+wins**; the dated sections are retained as historical rationale, not current
+contract. Env vars override code defaults; `.env` is git-ignored, so a
+deployment must set these explicitly.
+
+### Loss stops are DISABLED (supersedes all stop-loss/loss-cap mechanics below)
+
+- `MERID_DISABLE_LOSS_STOPS=1` and `MERID_LOSS_EXITS_ENABLED=0` are set.
+- `LOSS_STOP_TRIGGER_REASONS` (LOSS_CAP, HARD/SOFT/TRAILING_STOP,
+  EDGE_STOP/DECAY, etc.) are suppressed at the `stop_candidate` choke point,
+  vetoed again in `order_router`, and `position_monitor._evaluate_stop_loss`
+  returns `disabled_by_policy`; both loss-salvage carve-outs are force-off.
+- **Still live:** `POSITION_MISMATCH`, `STALE_DATA`, `OPERATIONAL_RISK`,
+  `RECONCILIATION`, `expiry_liquidation`, manual/emergency exits,
+  take-profit, settlement closeouts, and the EV-gated discretionary path
+  (`MERID_ENABLE_EV_EXIT_GATE=1`, `MERID_DISCRETIONARY_EXIT_MODE=ev_gated`).
+- `MERID_ENABLE_STOP_CANDIDATE_SUBMISSION=1` stays on so the *operational*
+  exits above can still submit.
+- Every dated section below that describes `LOSS_CAP`, `HARD_STOP`,
+  `trailing_stop`, `loss_cut*`, `EDGE_STOP`/`edge_decay`, or
+  `model_invalidation` as an active mechanical loss exit is **superseded** —
+  those reasons no longer fire live. Re-enable only via an explicit,
+  evidence-backed reversal of `MERID_DISABLE_LOSS_STOPS`.
+
+### Audit writer: shed tiers + bounded prune (new since the writer notes below)
+
+- Decision-spine priority is **dynamic**: side-selected decisions stay
+  `high` (never shed); pure no-trade evaluations submit `normal`.
+- `_shed_admit` tiers: `high` never shed; `normal` shed past
+  `MERID_AUDIT_SHED_DEPTH` (120); `low` sampled; an **emergency tier** past
+  `MERID_AUDIT_SHED_CRIT_DEPTH` (350) keeps only 1/`MERID_AUDIT_EMERGENCY_SAMPLE_DIV`
+  (16) of `normal` writes so the backlog drains.
+- `decision_audit.db` hot retention is now **scheduled**: a daemon thread runs
+  bounded `prune_old_rows()` every `MERID_AUDIT_PRUNE_INTERVAL_S` (1800s),
+  yielding to the writer via the existing lock/progress-handler protections.
+  `audit_writer_unhealthy` still gates entries — readiness is earned by
+  draining, never by relaxing the gate.
+
+### Reconciliation / fills (repairs since the contract text below)
+
+- `fills_poller` uses a **watermark-anchored lookback**
+  (`_poll_lookback_since_ts_ms`: newest-observed fill − 120s, clamped 15m,
+  seeded from the durable circuit-breaker watermark) instead of the old
+  `now − 20s` window that permanently dropped delayed fills.
+- `position_cache` defers `SYNC-CLOSE`/expired-position removal while a
+  non-terminal exit attempt ≤300s exists for the ticker, and clears
+  `_reconciliation_halted` on a verified-flat three-way match (including
+  tickers absent from the REST payload) rather than waiting for settlement.
+- `ORDER_NOT_TERMINAL` exit re-arms now check venue order status first and
+  skip re-arming a terminal order.
+
+### pinned_fav lane — ⚠ RESOLVED CONFIG CONTRADICTS THE AUDITED CONTAINMENT
+
+AGENTS.md's 2026-10-31 containment documents band **94–98c** and
+`MERID_PINNED_FAV_MAX_CONTRACTS=6`. The resolved `.env` now reads:
+
+```text
+MERID_PINNED_FAV_PRICE_LO=85   PRICE_HI=99
+MERID_PINNED_FAV_MAKER_LO=85   MAKER_HI=99
+MERID_PINNED_FAV_MAX_CONTRACTS=11
+MERID_PINNED_FAV_MIN_EV_CENTS=-15.0   MAKER_MIN_EV_CENTS=-12.0
+MERID_PINNED_FAV_DAILY_MAX=480   MAKER_MIN_P=0.90
+```
+
+That is a materially wider band (85–99c vs 94–98c) and ~2× the per-order
+size (11 vs 6 contracts) than the containment that was imposed *because* the
+wider band lost money. Treat this as **unverified until the operator
+confirms** whether the lane was deliberately reopened or `.env` drifted.
+Until confirmed, do not cite the 94–98/6 figures as current; the env-resolved
+values above are what the live process actually enforces. All other lane
+gates (min_p, EV floors, moneyness caps, daily budget, maker-only
+`ExecutionPolicy`) still bind as documented.
+
 ## Automatic live startup
 
 When all of the following are true:
