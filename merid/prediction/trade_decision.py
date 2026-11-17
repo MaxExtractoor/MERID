@@ -576,6 +576,19 @@ MERID_COUNTER_REGIME_MODE_NO = os.environ.get(
     "MERID_COUNTER_REGIME_MODE_NO", MERID_COUNTER_REGIME_MODE
 ).strip().lower()
 
+# 2026-11-16: bind the pinned-favorite lane to the directional-regime guard.
+# The pf qualify path previously skipped ``_yes_regime_ok``/``_no_regime_ok``
+# entirely (those checks live only in the normal-path branch of
+# ``yes_qualifies``/``no_qualifies``), so a pf-band favorite could enter
+# against a confirmed adverse regime signal — observed live as a SOL NO fill
+# during ``RALLY_CONFIRMED`` that reversed to a loss.  When enabled, an
+# in-band pf side must also clear the same countertrend regime check the
+# normal path uses (including its deep-ITM exception and per-side
+# veto/penalty mode).  Default on; set 0 to restore the regime-free probe.
+MERID_PINNED_FAV_REGIME_GUARD = os.environ.get(
+    "MERID_PINNED_FAV_REGIME_GUARD", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+
 # 2026-10-05 (entry-throughput canary): evidence "transferrable" tier.  A
 # sparse exact cell whose price-matched pooled level already cleared its
 # posterior-LCB margin check is supported evidence, not blind exploration —
@@ -6879,6 +6892,26 @@ def _compute_trade_decision_impl(
             _no_regime_block is not None and _no_regime_ok
         ),
     })
+
+    # 2026-11-16: pinned-fav regime guard.  ``_yes_pf_qualifies`` /
+    # ``_no_pf_qualifies`` were computed upstream of ``_yes_regime_ok`` /
+    # ``_no_regime_ok`` and never consulted them, so an in-band favorite
+    # could qualify against a confirmed adverse regime.  Re-bind the pf
+    # qualifiers now that the regime verdict is known.  Rebinding the
+    # variables (not just the yes/no_qualifies expression) keeps every
+    # downstream consumer — selection, lane stamping, per-side block
+    # reasons — consistent.  The deep-ITM exception inside
+    # ``regime_entry_block`` still applies, so genuinely settled favorites
+    # are unaffected; this only tightens the marginal-z countertrend cases.
+    if MERID_PINNED_FAV_REGIME_GUARD:
+        if _yes_pf_qualifies and not _yes_regime_ok:
+            _yes_pf_qualifies = False
+            indicators["yes_pf_regime_blocked"] = _yes_regime_block
+            indicators["yes_pinned_fav_qualifies"] = False
+        if _no_pf_qualifies and not _no_regime_ok:
+            _no_pf_qualifies = False
+            indicators["no_pf_regime_blocked"] = _no_regime_block
+            indicators["no_pinned_fav_qualifies"] = False
 
     # 2026-10-04: marginal-band rescue slack.  Only positive thresholds in the
     # 50-89c executable band relax; bounded negative-floor lanes keep their own
