@@ -95,6 +95,55 @@ values above are what the live process actually enforces. All other lane
 gates (min_p, EV floors, moneyness caps, daily budget, maker-only
 `ExecutionPolicy`) still bind as documented.
 
+### Model anchoring vs. reality — verified calibration audit (2026-11-16)
+
+Deduplicated full prediction stream (`model_calibration_observations`,
+first-observation-per-(ticker,side) joined to `settlement_outcomes`,
+**n=23,415** market-side evals):
+
+- **Brier = 0.158** (SOL 0.155, XRP 0.154, DOGE 0.156, ETH 0.158, BTC 0.166).
+  Per-asset meanPred ≈ realized ≈ 50.0%, gap ≈ 0.0pp. The model is *reasonably
+  anchored* on average — not badly miscalibrated.
+- **Systematic favorite-longshot bias (FLB)** remains:
+  - p∈[0.1,0.3) predicted 15–25%, realized 12–24% → **over-confident on
+    longshots/cheap contracts** (they win less than priced → −EV).
+  - p∈[0.8,0.9) predicted 85%, realized 88% → **under-confident on
+    favorites** (they win more than priced → small +EV).
+- **Cheap contracts (0–40c) confirmed net-negative on 23k samples**
+  (realized −0.7 to −2.5c/contract both sides). Do **not** interpret
+  "venture into cheaper contracts" as supported — the data rejects it.
+  The realized +EV concentrates in the **high-price favorite band
+  (~70–90c)**, which is exactly the pinned_fav lane's audited domain.
+- **Caveat:** this measures *calibration of p*, not *profitability*. A
+  calibrated model still needs executable edge after reserves/fees. The
+  reserves stack (model-uncertainty, giveback, impl-shortfall,
+  adverse-selection, edge-bias) is largely **unmeasured priors** because
+  fill cohorts are starved (n=0–46) in the current low-trade regime —
+  several of those reserves cannot self-correct without fresh fills.
+
+### Known latent stack flaws (audit 2026-11-16 — not yet fixed)
+
+- **`pinned_fav_band_match()` is flag-independent** and `yes_qualifies` /
+  `no_qualifies` suppress the *normal* Bachelier/TWAP path whenever the held
+  price falls inside the pf band. Setting the pf band to 1–99c would match
+  ~every price and **disable the normal path entirely** — a genuine
+  architecture hazard. Any full-range widening must decouple the *admission*
+  band from the *ownership* band (rescue-lane semantics), not just widen env.
+- **pf lane bypasses directional-regime guards**: `_yes_regime_ok`,
+  `_yes_conv_block`, `_yes_ct_lane_block`, `_yes_price_cap_block` are only
+  evaluated in the normal-path branch; `_pf_qualifies` skips them. The pf
+  lane can therefore enter *against* a confirmed adverse regime signal
+  (observed: a SOL NO fill during `RALLY_CONFIRMED` that reversed → loss).
+  Whether that is intentional probe behavior or a missing veto is an open
+  design question — flagged, not silently changed.
+- **Walk-forward calibrator is stale and price-blind**:
+  `data/calibration/walkforward_calibrator.json` (built 2026-11-08) segments
+  only by (asset, tte_bucket); its "mid" cells are `identity` for BTC/DOGE/
+  ETH/SOL. It cannot correct the price-dimension FLB above because it
+  averages over all held prices. A price-aware (side×price-bucket)
+  recalibration layer is the correct next step — see
+  `analysis/RECALIBRATION_SPEC.md` for the walk-forward methodology.
+
 ## Automatic live startup
 
 When all of the following are true:
