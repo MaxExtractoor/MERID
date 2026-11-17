@@ -156,6 +156,23 @@ first-observation-per-(ticker,side) joined to `settlement_outcomes`,
   used. Note the prior EPC artifact was *falsified* (claimed +3..+9c,
   realized −1.3..−3.3c, Brier worse than the book) — promotion to `live`
   is gated on the OOS protocol in `.env`, do not shortcut it.
+- **Decisive unbiased-data result (2026-11-17)**: refitting EPC on
+  `model_calibration_observations` (101,834 obs, Oct14-Nov11, both sides,
+  10-89c, 3-10min TTE) yields **0 of 128 cells validated** - mean cell edge
+  **-2.12c**, best cell LCB -0.7c, and top cells' two halves disagree in
+  sign. On an unbiased sample there is **no reliable price x TTE edge net
+  of fees**; the earlier validated cells were a `rejected_candidates`
+  selection artifact (that log only records already-suspect rejects). The
+  fit script now accepts either source (`--candidates`), but an empty
+  validated set means EPC correctly stays inert - do not force it live.
+  The pf lane's audited edge lives at 92-98c / 300-840s, mostly *above* the
+  EPC grid's 89c/10min ceiling, so this cell granularity would not capture
+  it anyway.
+- **Feedback loops verified live, not broken**: `live_entry_evidence.json`
+  (Nov 16), `exit_markouts.jsonl` (Nov 16), `kalshi_fills_intent_index.json`
+  (Nov 16) all write fresh data. The reserve cohorts are starved of *fills*
+  (few trades -> thin markout/giveback/impl/adverse samples), a throughput
+  constraint, not a pipeline defect.
 - **Cheap-contract exposure already exists, bounded**: the `cheap_no` lane
   (`MERID_CHEAP_NO_LANE_ENABLED=1`, NO 25–40c, TTE≥240s, min-p 0.12,
   min-net-EV −10c, ≤11 contracts, 1/ticker, 96/day) is the sanctioned
