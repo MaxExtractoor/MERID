@@ -3975,14 +3975,34 @@ class DecisionAuditLedger:
                 # re-scan on every retry.
                 _ev_sconn.commit()
                 # One bounded backfill chunk per refresh, newest-first.
-                if _ev_backfill_hi > since:
-                    _ev_chunk_lo = max(since, _ev_backfill_hi - _ev_chunk_s)
-                    _ev_store.extract_range(
-                        conn, _ev_sconn, _ev_chunk_lo, _ev_backfill_hi,
-                        include_vetoes=_ev_include_vetoes,
-                    )
-                    _ev_store.state_set(
-                        _ev_sconn, "backfill_hi", repr(_ev_chunk_lo))
+                # 2026-11-18: the chunk shares this refresh's query deadline
+                # (q_deadline covers every statement on ``conn``).  On the
+                # contended audit DB a chunk can exceed it — observed live as
+                # "query: interrupted" at ~308s — and the outer handler then
+                # fails the WHOLE refresh, so the artifact stops rebuilding
+                # even though the live trickle already committed fresh rows.
+                # Backfill is catch-up work: isolate its failure, gate the
+                # attempt on remaining budget, and let the artifact rebuild
+                # from whatever the store holds.  The cursor only advances
+                # on success (retried next refresh) and row_key dedup makes
+                # any partial commit harmless.
+                try:
+                    if _ev_backfill_hi > since and (
+                        q_deadline - time.monotonic()
+                    ) > float(os.environ.get(
+                        "MERID_EVIDENCE_BACKFILL_MIN_BUDGET_S", "60")):
+                        _ev_chunk_lo = max(
+                            since, _ev_backfill_hi - _ev_chunk_s)
+                        _ev_store.extract_range(
+                            conn, _ev_sconn, _ev_chunk_lo, _ev_backfill_hi,
+                            include_vetoes=_ev_include_vetoes,
+                        )
+                        _ev_store.state_set(
+                            _ev_sconn, "backfill_hi", repr(_ev_chunk_lo))
+                except Exception as exc:
+                    logger.warning(
+                        "[DECISION-AUDIT-LEDGER] evidence backfill chunk "
+                        "deferred (cursor unchanged, will retry): %s", exc)
                 _ev_sconn.commit()
                 _ev_all = _ev_store.read_since(
                     _ev_sconn, since, include_vetoes=_ev_include_vetoes)

@@ -104,7 +104,7 @@ print(get_category_exposure_tracker().get_snapshot().to_dict())
 
 Run **before** each production restart / session:
 
-- [ ] Verify `MERID_KALSHI_ENV=prod` and `KALSHI_USE_DEMO=false` are resolved by the launcher (it sets them).
+- [ ] Verify `MERID_KALSHI_ENV=prod` is set; the launcher derives `KALSHI_ENV=live` from it and **refuses to boot if `KALSHI_ENV` is set independently to a conflicting value**. Never start `uvicorn web.main_15m_lean:app` directly for live trading — without the launcher, `KALSHI_ENV` is unset and the client falls back to the legacy `KALSHI_USE_DEMO` path in `models.py`.
 - [ ] Confirm `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` match the intended live account.
 - [ ] Check kill switch is clear and committed `data/kill_switch.json` has `active != true`.
 - [ ] Watch startup: `STARTING → PREFLIGHT_RUNNING → LIVE_ENTRIES_ENABLED`; if `LIVE_ENTRIES_HALTED`, read the structured denial reason — do not unset protections to force it green.

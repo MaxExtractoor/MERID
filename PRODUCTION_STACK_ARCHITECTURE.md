@@ -1,5 +1,10 @@
 # Production Stack Architecture - 15m Kalshi Crypto Trading System
 
+> **Superseded for layer-by-layer runtime mapping:** see `STACK_MAP.md`
+> (verified end-to-end architecture, 2026-11-18). This document predates the
+> evidence-outcome store, the lane registry expansion, audit shed tiers, and
+> several lane-specific gates; `STACK_MAP.md` §9 lists the drift.
+
 ## Overview
 
 This document describes the production stack for the 15-minute Kalshi crypto trading system. The production stack is designed to be isolated from legacy code paths to ensure reliable operation.

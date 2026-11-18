@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -293,6 +294,22 @@ class UnifiedSpotService:
         self._running = False
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_interval_s = 1.0  # CRITICAL FIX: Reduced from 3s to 1s for faster price updates. Prediction markets move fast and stale data is costly. 1s polling is within rate limits while providing fresher data.
+        # 2026-11-18: heartbeat-log throttle.  The 1s refresh loop plus
+        # per-fetch logs emitted ~9 lines/s (~800k/day) of pure heartbeat on
+        # the same spindle that hosts the audit DB — measurable writer
+        # contention.  Heartbeats now log at most once per key per
+        # ``MERID_SPOT_LOG_THROTTLE_S`` (default 60s); failures and state
+        # transitions still log every time.
+        self._hb_log_ts: Dict[str, float] = {}
+        self._hb_log_interval_s = float(
+            os.getenv("MERID_SPOT_LOG_THROTTLE_S", "60"))
+
+    def _hb_log(self, key: str, level: int, msg: str, *args) -> None:
+        now = time.time()
+        last = self._hb_log_ts.get(key, 0.0)
+        if now - last >= self._hb_log_interval_s:
+            self._hb_log_ts[key] = now
+            logger.log(level, msg, *args)
 
         # Per-asset last successful fetch timestamp (legacy tests/health compatibility)
         self._asset_success_ts: Dict[str, float] = {}
@@ -386,7 +403,8 @@ class UnifiedSpotService:
     
     async def _refresh_all(self):
         """Refresh all assets from Coinbase API."""
-        logger.info("[UNIFIED-SPOT] Refreshing all assets")
+        self._hb_log("refresh_all", logging.DEBUG,
+                     "[UNIFIED-SPOT] Refreshing all assets")
         
         tasks = []
         for asset in self.SUPPORTED_ASSETS:
@@ -401,7 +419,10 @@ class UnifiedSpotService:
             elif result:
                 success_count += 1
         
-        logger.info(f"[UNIFIED-SPOT] Refresh complete: {success_count}/{len(self.SUPPORTED_ASSETS)} successful")
+        _lvl = logging.INFO if success_count < len(self.SUPPORTED_ASSETS) else logging.DEBUG
+        self._hb_log("refresh_complete", _lvl,
+                     "[UNIFIED-SPOT] Refresh complete: %d/%d successful",
+                     success_count, len(self.SUPPORTED_ASSETS))
     
     async def _fetch_asset(self, asset: str) -> bool:
         """Fetch single asset data from Coinbase Exchange API.
@@ -442,7 +463,9 @@ class UnifiedSpotService:
         try:
             ticker_data = await self._fetch_ticker_public(pair)
             if ticker_data:
-                logger.info(f"[UNIFIED-SPOT] Fetched {asset} ticker: ${format_price(asset, ticker_data['price'])}")
+                self._hb_log(f"fetched_{asset}", logging.DEBUG,
+                             "[UNIFIED-SPOT] Fetched %s ticker: $%s",
+                             asset, format_price(asset, ticker_data['price']))
         except Exception as e:
             logger.warning(f"[UNIFIED-SPOT] Ticker fetch failed for {asset}: {e}")
         
@@ -974,7 +997,16 @@ class UnifiedSpotService:
         open_decimal = data.get('open')
         high_decimal = data.get('high')
         low_decimal = data.get('low')
-        logger.info(f"[UNIFIED-SPOT] Returning spot price for {asset}: price={format_price(asset, price_decimal)} age={age_s:.1f}s state={state.value} sqs={sqs.composite:.1f}")
+        # Per-asset heartbeat: throttle; log every state != live and every
+        # ``_hb_log_interval_s`` otherwise so transitions stay visible.
+        self._hb_log(
+            f"return_{asset}_{state.value}",
+            logging.INFO if state != DataState.LIVE else logging.DEBUG,
+            "[UNIFIED-SPOT] Returning spot price for %s: price=%s age=%.1fs "
+            "state=%s sqs=%.1f",
+            asset, format_price(asset, price_decimal), age_s,
+            state.value, sqs.composite,
+        )
         return SpotPrice(
             price=float(price_decimal) if price_decimal is not None else None,
             price_decimal=price_decimal,

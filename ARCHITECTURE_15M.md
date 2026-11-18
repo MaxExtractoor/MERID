@@ -1,5 +1,10 @@
 # Kalshi 15m Stack - Architectural Separation
 
+> **Superseded for layer-by-layer runtime mapping:** see `STACK_MAP.md`
+> (verified end-to-end architecture, 2026-11-18). This document remains the
+> authority on *boundaries* (what is forbidden); `STACK_MAP.md` is the
+> authority on *wiring* (what actually runs).
+
 ## Overview
 
 The Kalshi 15m stack is a completely separate system from the legacy MERID system. This document defines the architectural boundaries and operational safeguards to ensure clean separation.

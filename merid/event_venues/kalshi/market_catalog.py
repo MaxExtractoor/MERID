@@ -253,6 +253,11 @@ def _get_trading_allowed_assets():
 
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
 
+# 2026-11-18: shared last-emit timestamps for throttled snapshot-heartbeat
+# logs (wall clock — throttling is an ops concern, not replay time).
+_SNAP_LOG_STATE: Dict[str, float] = {}
+
+
 def log_market_catalog_version() -> None:
     """Log market catalog version at startup (not import time)."""
     logger.info("[CATALOG-MODULE-LOADED] path=%s", __file__)
@@ -2415,7 +2420,7 @@ class KalshiMarketCatalog:
                 # Parse ISO format string (e.g., "2026-07-11T10:15:00+00:00")
                 close_time_utc = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
                 close_ts = int(close_time_utc.timestamp())
-                logger.info("[CLOSE-TIME-PARSE] Successfully parsed close_time string: %s -> close_ts=%s", close_time_str, close_ts)
+                logger.debug("[CLOSE-TIME-PARSE] Successfully parsed close_time string: %s -> close_ts=%s", close_time_str, close_ts)
             except (ValueError, TypeError) as e:
                 logger.warning("[CLOSE-TIME-PARSE] Failed to parse close_time string: %s error: %s", raw_data.get("close_time"), e)
 
@@ -3388,7 +3393,15 @@ class KalshiMarketCatalog:
         
         now = datetime.fromtimestamp(replay_time(), tz=timezone.utc)
         
-        logger.info("[SNAPSHOT-CREATE] Starting snapshot creation, total_catalog_markets=%d catalog_id=%s", len(self._markets), id(self))
+        # 2026-11-18: throttle snapshot-heartbeat logs (they emit per call
+        # every few seconds on the trading loop); state stays in metrics.
+        _snap_log_due = (
+            time.time() - _SNAP_LOG_STATE.get("create", 0.0)
+            >= float(os.getenv("MERID_CATALOG_LOG_THROTTLE_S", "60"))
+        )
+        if _snap_log_due:
+            _SNAP_LOG_STATE["create"] = time.time()
+            logger.info("[SNAPSHOT-CREATE] Starting snapshot creation, total_catalog_markets=%d catalog_id=%s", len(self._markets), id(self))
         
         for m in self._markets:
             # Filter: non-settled and non-finalized 15m crypto markets within entry window
@@ -3449,13 +3462,18 @@ class KalshiMarketCatalog:
                 filtered_count, total_markets, len(active_markets)
             )
         
-        logger.info(
-            "[CATALOG-SNAPSHOT] Returning %d active tickers: %s (last_refresh=%s, time_since=%.1fs)",
-            len(tickers_in_snapshot),
-            sorted(tickers_in_snapshot),
-            last_refresh.isoformat() if last_refresh else None,
-            time_since_refresh
-        )
+        if (
+            time.time() - _SNAP_LOG_STATE.get("return", 0.0)
+            >= float(os.getenv("MERID_CATALOG_LOG_THROTTLE_S", "60"))
+        ):
+            _SNAP_LOG_STATE["return"] = time.time()
+            logger.info(
+                "[CATALOG-SNAPSHOT] Returning %d active tickers: %s (last_refresh=%s, time_since=%.1fs)",
+                len(tickers_in_snapshot),
+                sorted(tickers_in_snapshot),
+                last_refresh.isoformat() if last_refresh else None,
+                time_since_refresh
+            )
 
         return CatalogSnapshot(
             markets=active_markets,
