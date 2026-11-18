@@ -96,9 +96,10 @@ class TestEnvironmentGuarantees:
         """Test that prod URL is correct."""
         from merid.event_venues.kalshi.kalshi_config import _ENV_CONFIGS
         
-        # CRITICAL FIX: 2026-07-07 - Elections API endpoints for crypto markets
-        assert _ENV_CONFIGS["prod"]["rest_base_url"] == "https://api.elections.kalshi.com/trade-api/v2"
-        assert _ENV_CONFIGS["prod"]["ws_base_url"] == "wss://api.elections.kalshi.com/trade-api/ws/v2"
+        # Production uses Kalshi's recommended external-api host; the older
+        # api.elections.kalshi.com host remains only for elections markets.
+        assert _ENV_CONFIGS["prod"]["rest_base_url"] == "https://external-api.kalshi.com/trade-api/v2"
+        assert _ENV_CONFIGS["prod"]["ws_base_url"] == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
     def test_demo_url_correct(self):
         """Test that demo URL is correct."""

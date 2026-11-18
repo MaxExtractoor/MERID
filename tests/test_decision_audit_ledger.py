@@ -1716,6 +1716,7 @@ def test_shed_admit_emergency_tier_bounds_normal_telemetry(
     monkeypatch.setenv("MERID_AUDIT_SHED_EMERGENCY_DEPTH", "400")
     monkeypatch.setenv("MERID_AUDIT_NORMAL_SAMPLE_DIV", "4")
     monkeypatch.setenv("MERID_AUDIT_EMERGENCY_SAMPLE_DIV", "16")
+    monkeypatch.setenv("MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV", "2")
 
     ledger = DecisionAuditLedger(db_path=tmp_db)
 
@@ -1724,11 +1725,13 @@ def test_shed_admit_emergency_tier_bounds_normal_telemetry(
     assert ledger._shed_admit("low", 50) is True
     assert ledger._shed_admit("high", 50) is True
 
-    # Soft band [100,200): low samples, normal+high admit.
+    # Soft band [100,200): low samples; normal now samples at
+    # MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV so the queue equilibrates below the
+    # crit ceiling instead of pinning at it (2026-11-17 entry-halt fix).
     admitted_normal_soft = sum(
         1 for _ in range(40) if ledger._shed_admit("normal", 150)
     )
-    assert admitted_normal_soft == 40  # normal unshed below crit
+    assert 15 <= admitted_normal_soft <= 25  # ~1/2 of 40 at div=2
 
     # Crit band [200,400): normal keeps ~1/4.
     admitted_normal_crit = sum(
@@ -1746,6 +1749,44 @@ def test_shed_admit_emergency_tier_bounds_normal_telemetry(
 
     # HIGH never sheds at any depth — financial truth is never dropped.
     assert all(ledger._shed_admit("high", d) for d in (500, 3900, 100000))
+
+
+def test_shed_admit_soft_band_samples_normal(
+    tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: 2026-11-17 soft-band normal shed.
+
+    NORMAL writes were admitted at 100% throughout [soft, crit), so the
+    writer queue pinned at the crit ceiling and ``oldest_required`` rode the
+    lag budget — a writer slowdown pushed it over and
+    ``audit_writer_unhealthy`` halted all entries.  The soft band now samples
+    NORMAL at ``1/MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV`` so the queue can
+    equilibrate below crit.  HIGH stays never-shed; div=1 restores admit-all.
+    """
+    monkeypatch.setenv("MERID_AUDIT_SHED_DEPTH", "100")
+    monkeypatch.setenv("MERID_AUDIT_SHED_CRIT_DEPTH", "200")
+    monkeypatch.setenv("MERID_AUDIT_SHED_EMERGENCY_DEPTH", "400")
+    monkeypatch.setenv("MERID_AUDIT_LOW_SAMPLE_DIV", "10")
+
+    # Default soft divisor = 2: ~half of normal writes survive in [100,200).
+    monkeypatch.setenv("MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV", "2")
+    ledger = DecisionAuditLedger(db_path=tmp_db)
+    kept = sum(1 for _ in range(200) if ledger._shed_admit("normal", 150))
+    assert 80 <= kept <= 120  # ~1/2 of 200
+
+    # HIGH is never shed even inside the soft band.
+    assert all(ledger._shed_admit("high", 150) for _ in range(50))
+
+    # div=1 disables the soft shed entirely (admit-all, pre-2026-11-17).
+    monkeypatch.setenv("MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV", "1")
+    ledger2 = DecisionAuditLedger(db_path=tmp_db)
+    assert all(ledger2._shed_admit("normal", 150) for _ in range(100))
+
+    # A larger divisor sheds harder: div=4 keeps ~1/4 in the soft band.
+    monkeypatch.setenv("MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV", "4")
+    ledger3 = DecisionAuditLedger(db_path=tmp_db)
+    kept3 = sum(1 for _ in range(400) if ledger3._shed_admit("normal", 150))
+    assert 80 <= kept3 <= 120  # ~1/4 of 400
 
 
 def _priority_after_anchor(src: str, anchor: str, span: int = 3000) -> Optional[str]:

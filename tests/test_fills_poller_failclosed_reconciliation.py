@@ -190,8 +190,13 @@ async def test_cache_confirmation_is_atomic_and_never_rebuilds(monkeypatch):
     assert cache._positions["BTC"]["quantity_cc"] == 123
     await cache.confirm_matched_rest_projection({"BTC": 123}, 2.0)
     assert cache._last_rest_sync_timestamp == 2.0
-    with pytest.raises(RuntimeError, match="not newer"):
-        await cache.confirm_matched_rest_projection({"BTC": 123}, 1.0)
+    # A stale-but-consistent snapshot loses the ordering race: it is
+    # SUPERSEDED (not a portfolio-authority failure) and must neither raise
+    # nor regress the accepted-observation watermark / rebuild the cache.
+    disposition = await cache.confirm_matched_rest_projection({"BTC": 123}, 1.0)
+    assert disposition == "SUPERSEDED_BY_NEWER_REFRESH"
+    assert cache._last_rest_sync_timestamp == 2.0
+    assert cache._positions["BTC"]["quantity_cc"] == 123
 
 
 @pytest.mark.asyncio

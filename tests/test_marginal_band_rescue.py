@@ -42,6 +42,16 @@ def _isolate(monkeypatch):
     # Production .env arms the mid-window NO relief (8c) - it collapses the
     # NO bound alongside slack and would re-attribute the rescue cohort.
     monkeypatch.setattr(_td, "MERID_EDGE_MIDWIN_RELIEF_CENTS_NO", 0.0)
+    # Pin the release cohort to the documented live set.  The module reads
+    # MERID_MARGINAL_BAND_LIVE_ASSETS once at import, and production .env
+    # currently lists every asset — without this pin BTC/ETH stop being
+    # shadow cohorts and the denied-cohort tests become environment-dependent.
+    # (module constant is a frozenset built at import; setattr rebinds it.)
+    monkeypatch.setattr(
+        _td,
+        "MERID_MARGINAL_BAND_LIVE_ASSETS",
+        frozenset({"SOL", "DOGE", "XRP"}),
+    )
 
 
 def _decision(

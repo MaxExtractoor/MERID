@@ -564,6 +564,22 @@ class DecisionAuditLedger:
         elif depth >= crit:
             div = max(1, int(os.environ.get("MERID_AUDIT_NORMAL_SAMPLE_DIV", "4")))
             keep = self._shed_seq % div == 0
+        else:
+            # 2026-11-17: soft-band shed for NORMAL telemetry.  Previously a
+            # normal write was admitted at 100% throughout [soft, crit), so
+            # the queue pinned at the crit ceiling (~350) and oldest_required
+            # rode the lag budget — any writer slowdown (cold 8GB audit DB at
+            # startup, WAL checkpoint, CPU contention) pushed it over budget
+            # and audit_writer_unhealthy halted ALL entries.  Sampling normal
+            # writes in the soft band lets the queue equilibrate below crit,
+            # keeping oldest_required comfortably under budget.  HIGH
+            # (fills/orders/settlements/side-selected decision spine) is
+            # still never shed; div=1 restores the old admit-all behavior.
+            div = max(
+                1,
+                int(os.environ.get("MERID_AUDIT_NORMAL_SOFT_SAMPLE_DIV", "2")),
+            )
+            keep = self._shed_seq % div == 0
         if not keep:
             self._shed_stats[
                 "low_dropped" if priority == "low" else "normal_dropped"

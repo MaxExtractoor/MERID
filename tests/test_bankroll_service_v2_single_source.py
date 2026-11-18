@@ -536,6 +536,21 @@ class TestBankrollServiceV2SingleSource:
 class TestBankrollDrawdownCircuitBreaker:
     """Tests for the bankroll drawdown / consecutive-loss circuit breaker (Fix 5)."""
 
+    @pytest.fixture(autouse=True)
+    def _pin_breaker_thresholds(self, monkeypatch):
+        """Pin the module-level breaker thresholds to the code defaults.
+
+        ``bankroll_service_v2`` reads ``MERID_BANKROLL_MAX_DRAWDOWN_PCT`` and
+        ``MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS`` once at import; production
+        ``.env`` disables the breaker (100% / 1e6) so without this pin every
+        drawdown assertion below is environment-dependent and fails closed.
+        """
+        from merid.event_venues.kalshi import bankroll_service_v2 as _bsv2
+        from decimal import Decimal as _D
+
+        monkeypatch.setattr(_bsv2, "_BANKROLL_MAX_DRAWDOWN_PCT", _D("10.0"))
+        monkeypatch.setattr(_bsv2, "_BANKROLL_CONSECUTIVE_LOSS_TICKS", 3)
+
     def test_drawdown_opens_breaker_and_blocks_entries(self):
         """A 10%+ drawdown from the high watermark opens the breaker."""
         from merid.event_venues.kalshi import bankroll_service_v2

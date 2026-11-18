@@ -36,6 +36,11 @@ def env_for_shadow(monkeypatch):
     monkeypatch.setenv("MERID_LIVE_CANARY", "1")
     monkeypatch.setenv("MERID_CFB_RTI_ADAPTER", "0")
     monkeypatch.setenv("MERID_REQUIRE_EXIT_PARENTAGE", "0")
+    # The shadow harness constructs its exit intent directly rather than via
+    # the exit pipeline, so it has no live ExitArbiter-approved attempt.
+    # Demote the arbiter to observe-only (staged-rollout flag) so the paper
+    # exit can exercise the ledger lifecycle it is meant to cover.
+    monkeypatch.setenv("MERID_EXIT_ARBITER_REQUIRED", "0")
     monkeypatch.setenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
     # pytest-asyncio is not in the router caller allowlist; pretend the test
     # module itself is the caller so the paper path can run.
@@ -64,6 +69,45 @@ def env_for_shadow(monkeypatch):
     monkeypatch.setattr(
         "merid.event_venues.kalshi.order_router.can_submit_live_entry",
         lambda: True,
+    )
+    # Same isolation as the other data-dependent gates above: submit
+    # revalidation requires a live book/prob snapshot the shadow harness does
+    # not have, so it would reject with submit_book_invalid before the paper
+    # path runs.  This test covers the ledger lifecycle, not revalidation.
+    monkeypatch.setenv("MERID_SUBMIT_REVALIDATION_ENABLED", "0")
+    # The module-level startup grace period (5s) rejects any order submitted
+    # soon after import; the shadow harness is not a fresh process boot, so
+    # age the startup stamp past the grace window.
+    import time as _time
+    import merid.event_venues.kalshi.order_router as _or
+    monkeypatch.setattr(_or, "_startup_time", _time.time() - 120.0)
+    # Risk-based sizing and the bankroll drawdown gate both read the
+    # ``_BANKROLL_SERVICE_V2`` singleton; the shadow harness has no FastAPI
+    # lifespan startup, so install a stub that reports a fresh, open bankroll.
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    _bankroll = Mock()
+    _bankroll._current = SimpleNamespace(equity_usd=Decimal("100.0"))
+    _bankroll.get_equity_for_risk_calc_sync_cached.return_value = 100.0
+    _bankroll.is_entry_allowed.return_value = True
+    _bankroll.is_exit_allowed.return_value = True
+    _bankroll.is_bankroll_fresh.return_value = True
+    _bankroll.get_circuit_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value="CLOSED"), drawdown_pct=Decimal("0")
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.bankroll_service_v2._BANKROLL_SERVICE_V2",
+        _bankroll,
+    )
+    # Exit canonical validation requires a fresh exchange position snapshot.
+    # The shadow harness's paper fill is not visible to the live Kalshi REST
+    # position endpoint, so report the synthetic long-NO position the entry
+    # just established (signed-YES exposure is negative for a NO holding).
+    async def _fake_signed_yes_exposure(ticker, timeout=1.0, fallback_to_cache=True):
+        return (-100, 45, "no")
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_intent_contract.fetch_fresh_signed_yes_exposure",
+        _fake_signed_yes_exposure,
     )
 
 

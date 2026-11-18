@@ -265,6 +265,38 @@ for _env_key, _fname in {
     # data/ in production; any test touching position fills can write them.
     "MERID_EXIT_STATE_PATH": "position_exit_state.json",
     "MERID_EXIT_ATTEMPTS_PATH": "exit_attempts.json",
+    # Fade gate (drift-lane cohort evidence): state + samples persist under
+    # data/ and the settlement read-source under logs/ in production.  Any
+    # trade-decision test that reaches the drift lane writes them — redirect
+    # all three so the durable-state diff stays clean.  The settlements
+    # source shares the redirected settlement_outcomes.jsonl so the gate
+    # reads the same isolated file the rest of the suite writes.
+    "MERID_FADE_GATE_STATE_PATH": "fade_gate_state.json",
+    "MERID_FADE_GATE_SAMPLES_PATH": "fade_gate_samples.jsonl",
+    "MERID_FADE_GATE_SETTLEMENTS_PATH": "settlement_outcomes.jsonl",
+    # Lane state / evidence stores that persist under data/ in production.
+    # Any trade-decision test reaching these lanes writes fills counters,
+    # daily budgets, or cohort state — redirect so the durable diff stays
+    # clean.  (2026-11-17: fade_gate + drift/pf/cheap lane states surfaced
+    # as pollution when the trading server was down.)
+    "MERID_DRIFT_LANE_STATE_PATH": "drift_lane_state.json",
+    "MERID_PINNED_FAV_STATE_PATH": "pinned_fav_fills.json",
+    # NOTE: MERID_LIVE_EVIDENCE_PATH is intentionally NOT redirected here —
+    # trade_decision._load_live_evidence and the ledger refresh treat an
+    # unset var under pytest as "ignore the machine-local artifact" and
+    # tests opt in by setting it explicitly.  Force-setting it to an empty
+    # tmp file flips the gate to artifact_missing/unusable and changes
+    # unrelated decision outcomes.
+    "MERID_EVIDENCE_ESCAPE_STATE_PATH": "evidence_escape_fills.json",
+    "MERID_EVIDENCE_REHAB_STATE_PATH": "evidence_rehab_probes.json",
+    "MERID_CANARY_DAILY_FILE": "canary_taker_lane.json",
+    "MERID_EMM_DAILY_FILE": "emm_lane.json",
+    "MERID_MAKER_BID_DAILY_FILE": "maker_bid_lane.json",
+    "MERID_MBAND_DAILY_FILE": "marginal_band_lane.json",
+    "MERID_GOLDEN_RECORDS_JSONL": "golden_records.jsonl",
+    "MERID_SETTLEMENT_GRADED_PATH": "settlement_graded_keys.jsonl",
+    "MERID_WINDOW_PLAN_STATE_PATH": "window_plan_state.json",
+    "MERID_WINDOW_QUOTA_STATE_PATH": "window_quota_fills.json",
 }.items():
     # Force-set (not setdefault): a developer env pointing at real data/ paths
     # must not leak production state into the test process.
@@ -1517,6 +1549,21 @@ _durable_snapshot: _Dict[str, _Tuple] = {}
 # data/shadow store) use an aggregate signature.
 _DURABLE_DETAIL_LIMIT = 20000
 
+# Continuous-output files owned by the always-on Kalshi book archiver
+# (scripts/kalshi_book_archiver.py): its archive DB (+ -wal/-shm), the
+# single-instance lock, and the liveness heartbeat all live under data/ and
+# churn every few seconds.  They are production collector output, not test
+# state — excluding them keeps the diff from failing every run while the
+# trading server is down (the _live_server_running downgrade only covers the
+# server's own writes, and no test writes book-archive files).  The
+# "kalshi_book_archive" prefix covers both the archive DB family and the
+# "kalshi_book_archiver.*" heartbeat/lock names.
+_ARCHIVER_STATE_PREFIX = "kalshi_book_archive"
+
+
+def _is_archiver_state_file(name: str) -> bool:
+    return name.startswith(_ARCHIVER_STATE_PREFIX)
+
 
 def _snapshot_durable_state() -> _Dict[str, _Tuple]:
     """Fingerprint every directory under data/.
@@ -1536,7 +1583,9 @@ def _snapshot_durable_state() -> _Dict[str, _Tuple]:
     def _scan(root: str) -> None:
         try:
             with _os2.scandir(root) as it:
-                entries = list(it)
+                entries = [
+                    e for e in it if not _is_archiver_state_file(e.name)
+                ]
         except OSError:
             return
         newest = 0
