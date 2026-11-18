@@ -205,7 +205,13 @@ class TestPinnedFavTakerRouting(unittest.TestCase):
     def test_pinned_probe_keeps_taker_cross(self):
         src = self._src()
         assert '_pf_taker_probe' in src
-        assert 'not _probe_restricted or _pf_taker_probe' in src
+        # The probe-restriction release is an OR-list that has since grown
+        # lane exceptions (_wq_taker, _lt_taker); pin the pf term inside the
+        # _cross_as_taker block rather than the exact one-line spelling.
+        seg = src[src.find('_cross_as_taker = ('):]
+        block = seg[:seg.find(')')]
+        assert 'not _probe_restricted' in block
+        assert '_pf_taker_probe' in block
 
 
 if __name__ == "__main__":

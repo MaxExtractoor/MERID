@@ -6326,15 +6326,41 @@ def _compute_trade_decision_impl(
 
     def _pf_low_p_bypass(_blk: Optional[str], _bd, _s: str) -> bool:
         # ``pinned_fav_block`` returns ``pinned_fav_maker_low_p`` before the
-        # min-EV floor is evaluated, so a bypassed side must re-assert the
-        # lane floor here or the pin release would admit claims the lane
-        # itself bounds out.
+        # min-EV floor and the daily cap are evaluated, so a bypassed side
+        # must re-assert both here or the pin release would admit claims
+        # the lane itself bounds out — including submissions past
+        # ``pinned_fav_daily_max``.
+        # 2026-11-18 (DOGE NO@87c -$4.94 replay): the bypass also carries a
+        # hard reachability floor — measured cell evidence substitutes for
+        # the *pin*, never for reachability itself.  A calibrated claim
+        # below ``_pinned_fav_evidence_bypass_min_p`` keeps the veto even
+        # on CHALLENGE_ELIGIBLE/CELL_EVIDENCE_PASS evidence.
         if _blk != "pinned_fav_maker_low_p" or not _pf_evidence_admitted(_s):
+            return False
+        _p = getattr(_bd, "p_selected", None)
+        try:
+            _pf = float(_p) if _p is not None else None
+        except (TypeError, ValueError):
+            _pf = None
+        if _pf is None or not math.isfinite(_pf):
+            return False
+        if _pf < _dr._pinned_fav_evidence_bypass_min_p():
             return False
         _ne = getattr(_bd, "net_edge", None)
         if _ne is None:
             return False
-        return float(_ne) * 100.0 >= _dr._pinned_fav_min_ev_cents()
+        try:
+            _nev = float(_ne) * 100.0
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(_nev) or _nev < _dr._pinned_fav_min_ev_cents():
+            return False
+        try:
+            if _dr.pinned_fav_cap_remaining() <= 0:
+                return False
+        except Exception:
+            return False
+        return True
 
     indicators["yes_pf_block_reason"] = _yes_pf_block
     indicators["no_pf_block_reason"] = _no_pf_block

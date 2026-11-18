@@ -1067,6 +1067,67 @@ def test_maker_low_p_bypass_hard_block_still_binds(
     assert d.selected_outcome is None
 
 
+# --------------------------------- 2026-11-18 bypass hardening -------------
+# DOGE NO@87c replay (KXDOGE15M-26NOV172130-30, -$4.94): a CHALLENGE_ELIGIBLE
+# cell on a regime-hot streak waived the 0.90 pin for p_cal=0.8999 inside
+# the since-quarantined <94c floor pocket, and the bypass path never
+# re-asserted the lane's daily cap (``pinned_fav_block`` returns
+# ``pinned_fav_maker_low_p`` before both the EV floor and the cap run).
+# These tests pin the two repairs: a hard reachability floor the evidence
+# cannot waive, and the daily-cap re-assertion.
+
+
+def test_maker_low_p_bypass_respects_reachability_floor(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """Measured evidence substitutes for the *pin*, never for reachability:
+    a calibrated claim below MERID_PINNED_FAV_EVIDENCE_BYPASS_MIN_P keeps
+    ``pinned_fav_maker_low_p`` even on CHALLENGE_ELIGIBLE evidence that
+    clears the EV floor."""
+    monkeypatch.setenv("MERID_PINNED_FAV_EVIDENCE_BYPASS_MIN_P", "0.87")
+    d = _low_p_decision(tmp_path, monkeypatch, _challenge_cells())
+    ind = d.indicators
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    assert ind.get("yes_evidence_binding_gate") == "CHALLENGE_ELIGIBLE"
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None
+    assert ind.get("decision_lane") != "pinned_fav"
+
+
+def test_maker_low_p_bypass_default_floor_admits_marginal_pin(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """The default 0.80 floor still releases the pin for marginal-pin
+    claims (p~0.85 vs the 0.85 test pin): the bypass keeps working for
+    the cohort it was built for."""
+    d = _low_p_decision(tmp_path, monkeypatch, _challenge_cells())
+    ind = d.indicators
+    assert ind.get("yes_evidence_binding_gate") == "CHALLENGE_ELIGIBLE"
+    assert ind.get("yes_pinned_fav_qualifies") is True
+    assert d.selected_outcome == "yes"
+    assert ind.get("decision_lane") == "pinned_fav"
+
+
+def test_maker_low_p_bypass_respects_daily_cap(
+    tmp_path, monkeypatch, _maker_mode
+):
+    """Cap exhaustion must bind on the bypass path end-to-end.
+
+    ``pinned_fav_block`` returns ``pinned_fav_maker_low_p`` before the
+    daily-cap check runs, so the bypass re-asserts
+    ``pinned_fav_cap_remaining()`` itself (defense-in-depth).  In practice
+    the evidence layer stamps ``PINNED_FAV_CAP_EXHAUSTED`` first, so the
+    observable invariant is simply: an exhausted lane budget never admits
+    a low-p evidence-bypass candidate."""
+    monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", "0")
+    d = _low_p_decision(tmp_path, monkeypatch, _challenge_cells())
+    ind = d.indicators
+    assert ind.get("yes_pf_block_reason") == "pinned_fav_maker_low_p"
+    assert ind.get("yes_pinned_fav_qualifies") is False
+    assert d.selected_outcome is None
+    assert ind.get("decision_lane") != "pinned_fav"
+
+
 # --------------------------------- escape late-window vs measured pf cohort ----
 # 2026-10-21: ``evidence_escape_late_window`` (BTC/SOL/DOGE @ TTE 120-240s)
 # was measured on the GENERIC escape probe cohort (-15c/fill realized), but

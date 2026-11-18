@@ -1886,6 +1886,22 @@ def _pinned_fav_maker_min_p() -> float:
     return _env_float("MERID_PINNED_FAV_MAKER_MIN_P", 0.85)
 
 
+def _pinned_fav_evidence_bypass_min_p() -> float:
+    """Hard reachability floor for the measured-evidence pin bypass.
+
+    ``compute_trade_decision`` lets a ``pinned_fav_maker_low_p`` block be
+    waived when the evidence layer admitted the side on measured cell
+    evidence (CHALLENGE_ELIGIBLE / CELL_EVIDENCE_PASS).  That substitution
+    releases the *pin* (``MAKER_MIN_P``), never reachability itself: a
+    candidate whose calibrated claim sits below this floor keeps the veto
+    even on measured evidence.  Defaults to 0.80 — below both the live pin
+    (0.90) and the test pin (0.85), and near the lowest p at which an
+    ~85c favorite still has a coherent settlement story; the -12c EV floor
+    remains the binding economic bound above it.
+    """
+    return _env_float("MERID_PINNED_FAV_EVIDENCE_BYPASS_MIN_P", 0.80)
+
+
 def pinned_fav_maker_min_spread_cents() -> float:
     """Spread floor for the maker-mode cohort inside the maker_bid pass.
 

@@ -73,27 +73,34 @@ deployment must set these explicitly.
 - `ORDER_NOT_TERMINAL` exit re-arms now check venue order status first and
   skip re-arming a terminal order.
 
-### pinned_fav lane — ⚠ RESOLVED CONFIG CONTRADICTS THE AUDITED CONTAINMENT
+### pinned_fav lane — containment RESTORED 2026-11-18 (post DOGE pin-break replay)
 
 AGENTS.md's 2026-10-31 containment documents band **94–98c** and
-`MERID_PINNED_FAV_MAX_CONTRACTS=6`. The resolved `.env` now reads:
+`MERID_PINNED_FAV_MAX_CONTRACTS=6`. The resolved `.env` had drifted to
+85–99c / 11 contracts (flagged below as unverified). On 2026-11-18 a
+DOGE NO@87c pinned-fav maker fill (`KXDOGE15M-26NOV172130-30`, 6ct,
+−$4.94, settled YES) landed deep inside the thrice-falsified <94c floor
+pocket — the exact cohort the 2026-10-31 audit quarantined (−705c/37mkts
+at held 92–93, −249c at held <92). The pending band decision is now
+decided by ledger evidence: `.env` restored to the audited containment:
 
 ```text
-MERID_PINNED_FAV_PRICE_LO=85   PRICE_HI=99
-MERID_PINNED_FAV_MAKER_LO=85   MAKER_HI=99
-MERID_PINNED_FAV_MAX_CONTRACTS=11
+MERID_PINNED_FAV_PRICE_LO=94   PRICE_HI=98
+MERID_PINNED_FAV_MAKER_LO=94   MAKER_HI=98
+MERID_PINNED_FAV_MAX_CONTRACTS=6
 MERID_PINNED_FAV_MIN_EV_CENTS=-15.0   MAKER_MIN_EV_CENTS=-12.0
 MERID_PINNED_FAV_DAILY_MAX=480   MAKER_MIN_P=0.90
 ```
 
-That is a materially wider band (85–99c vs 94–98c) and ~2× the per-order
-size (11 vs 6 contracts) than the containment that was imposed *because* the
-wider band lost money. Treat this as **unverified until the operator
-confirms** whether the lane was deliberately reopened or `.env` drifted.
-Until confirmed, do not cite the 94–98/6 figures as current; the env-resolved
-values above are what the live process actually enforces. All other lane
-gates (min_p, EV floors, moneyness caps, daily budget, maker-only
-`ExecutionPolicy`) still bind as documented.
+Companion code hardening (same replay): the measured-evidence
+`pinned_fav_maker_low_p` bypass in `compute_trade_decision` now enforces a
+hard reachability floor (`MERID_PINNED_FAV_EVIDENCE_BYPASS_MIN_P`, default
+0.80) — cell evidence substitutes for the *pin*, never for reachability —
+and re-asserts the lane daily cap the block returns before checking.
+Regression coverage: `tests/test_pinned_fav_lane.py` low-p/bypass block.
+Note: `.env` is loaded into `os.environ` at process start, so the running
+process keeps the old 85–99/11 values until the next production restart —
+the restored band binds on restart, not live.
 
 ### Model anchoring vs. reality — verified calibration audit (2026-11-16)
 
