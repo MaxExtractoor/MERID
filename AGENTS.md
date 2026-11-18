@@ -147,6 +147,38 @@ Remaining known bleeder for a future pass: `mid_yes` (YES 41–93c) is
 −$4.82/35 since Nov 1 — not an inversion (majority holds), likely
 mid-band adverse selection worth its own cohort audit.
 
+### Third loss replay — pf floors tightened to −3c (2026-11-18)
+
+Replay of `KXDOGE15M-26NOV180545-45` (NO buy 95c, `pinned_fav` maker,
+`p_no=0.950`, edge=−5.6c, TTE~330s): pin broke mid-window; the bid's
+toxic-mid cancel raced the fill and lost (fill at ~17s — inherent to
+resting maker orders, not a bug).  `expiry_liquidation` salvaged 42c at
+TTE~115s → −$3.18; settled YES so the salvage was correct.
+
+**Ledger verdict on the favorite lane:** every fill in the ledger is a
+negative-EV probe (edge<0 at admission by construction).  The only
+positive-edge entry in the window (XRP yes@51c, edge=+0.001) won
++108c.  The pf band wins ~90% at +4..6c and loses −50..−95c on breaks —
+a ~19:1 asymmetry where realized cohort incl. tail is ~breakeven at
+best.  The 94–98c band containment is right; the −12c EV floor is not:
+it admits *parity-priced* favorites (p≈price), whose only edge is the
+hoped-for FLB understatement.
+
+**`.env` (2026-11-18):**
+`MERID_PINNED_FAV_MAKER_MIN_EV_CENTS` −12.0→−3.0 and
+`MERID_PINNED_FAV_MIN_EV_CENTS` −15.0→−3.0.  At −3 an admit needs gross
+p−price ≳ +2.5c — the model must see genuine underpricing.  Would have
+blocked both recent in-band losers (−5.6c and −5.0c).  Escalation if
+still bleeding: 0 (effectively off at favorite prices) or
+`MERID_PINNED_FAV_ENABLED=0`.
+
+**Deliberately NOT changed:** the mid-window discretionary exit.
+`loss_stops_disabled` kills the stop trigger path; a `value_switch_exit`
+trigger would still be vetoed by the evidence envelope below bid 85c /
+TTE>120s — and the 173-exit audit measured that cohort forfeiting ~+$8
+(58% of stopped-out positions recovered).  The expiry salvage is the
+measured-correct close for broken pins.
+
 ### Model anchoring vs. reality — verified calibration audit (2026-11-16)
 
 Deduplicated full prediction stream (`model_calibration_observations`,

@@ -1868,10 +1868,13 @@ def _pinned_fav_min_ev_cents() -> float:
     # p-bid minus ASR/model-uncertainty/giveback) while the external
     # realized basis for the same configuration was +2.07c/contract — the
     # min-p gate is the discriminator, the floor bounds the probe.
-    # -12c admits the observed claim distribution; a deeper claim means
-    # the pin thesis itself is mispriced, not the reserve stack.
+    # 2026-11-18: default -12.0 -> -3.0 after two in-band pin-breaks at
+    # parity pricing (edge -5.6c/-5.0c, -$3.18/-$4.92 realized).  At
+    # ~19:1 payoff asymmetry the model must see genuine underpricing
+    # (gross p-price ~+2.5c), not parity, before spending probe budget.
+    # A deeper claim means the pin thesis itself is mispriced.
     if pinned_fav_maker_mode():
-        return _env_float("MERID_PINNED_FAV_MAKER_MIN_EV_CENTS", -12.0)
+        return _env_float("MERID_PINNED_FAV_MAKER_MIN_EV_CENTS", -3.0)
     return _env_float("MERID_PINNED_FAV_MIN_EV_CENTS", 2.0)
 
 
