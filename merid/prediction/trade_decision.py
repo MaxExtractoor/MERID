@@ -860,6 +860,57 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     "reversal_scalp",
 })
 
+# 2026-11-18 (anti-directional hold guard): lanes that may legitimately
+# emit a selected side whose calibrated p is below 0.5 — i.e. a hold on
+# the side the model itself calls less likely than not.  Replay of the
+# DOGE NO@27c cheap_no_settle loss (model p_yes=0.721 while the system
+# bought NO at p_no=0.279, settled YES, -$1.44) showed the stack can hold
+# the minority side through a lane designed to buy cheap underpriced
+# contracts — coherent behavior, but indistinguishable from a side-mapping
+# inversion without an explicit contract.  ``held_side_minority`` is
+# stamped on every selection for audit joins; an admission below
+# MERID_ANTI_DIRECTIONAL_P_FLOOR from a lane NOT in this set vetoes with
+# ``anti_directional_<side>`` — the formula path, maker_bid, pinned_fav,
+# settlement_convergence, trend_yes_hi and late_taker must always hold
+# the side the model calls more likely than not.  Probe lanes that are
+# minority-hold by construction stay registered here so the veto remains
+# a deliberate, auditable choice rather than an emergent one; falsified
+# lanes (cheap_no_settle) are dropped so re-enabling them is a two-key
+# operator decision.
+def _minority_hold_lanes() -> frozenset:
+    # cheap_no_settle is deliberately absent: the lane is disabled and
+    # falsified on the ledger (-$9.08 0/5 cluster; -$5.75/18 since Nov 1).
+    # Re-enabling it requires BOTH MERID_CHEAP_NO_LANE_ENABLED=1 and
+    # re-registering it here — a two-key decision, not a one-flag flip.
+    raw = os.environ.get(
+        "MERID_MINORITY_HOLD_LANES",
+        "drift_fav,reversal_scalp,threshold_cell,"
+        "current_build_provisional,evidence_cell_escape,marginal_band,"
+        "late_edge_probe,cheap_tail_canary",
+    )
+    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+def _anti_directional_p_floor() -> float:
+    try:
+        return float(os.environ.get("MERID_ANTI_DIRECTIONAL_P_FLOOR", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _anti_directional_hard_floor() -> float:
+    # Absolute bound: no lane — registered minority-hold or not — may
+    # hold a side the calibrated model prices below this floor.  The
+    # 23k-sample audit shows the model *overstates* longshot p (FLB), so
+    # realized odds at p<0.10 are worse than priced; there is no
+    # coherent entry whose held side loses >90% of the time on the
+    # model's own read.
+    try:
+        return float(
+            os.environ.get("MERID_ANTI_DIRECTIONAL_HARD_FLOOR", "0.10"))
+    except (TypeError, ValueError):
+        return 0.10
+
 # Bounded live-entry domain + tail LCB admission gate (2026-10-01).
 #
 # The controlled dual-side rollout restricts *live* entries to the bounded
@@ -9357,6 +9408,60 @@ def _compute_trade_decision_impl(
             indicators[f"midwin_{selected_outcome}_admission_bound_cents"] = (
                 float(selected_threshold) * 100.0
             )
+
+        # 2026-11-18 (anti-directional hold guard): every selection now
+        # carries ``held_side_minority`` — whether the held side's
+        # calibrated p sits below the anti-directional floor (default
+        # 0.5, i.e. the model calls the *other* side more likely).  A
+        # minority hold is coherent only for lanes registered in
+        # ``_minority_hold_lanes()`` (drift_fav and the cell-research
+        # lanes are minority-hold by construction); any
+        # other owner — including the unstamped formula path — emitting
+        # p_selected below the floor means either an upstream
+        # side-mapping/direction break or an unregistered minority-hold
+        # lane.  Veto rather than ship an inverted-looking hold.  Trigger
+        # for this repair: KXDOGE15M-26NOV172330-30 held NO at p_no=0.279
+        # while the model called p_yes=0.721 — settled YES.
+        if edge_breakdown is not None:
+            try:
+                _held_p_adr = float(edge_breakdown.p_selected)
+            except (TypeError, ValueError):
+                _held_p_adr = None
+            if _held_p_adr is not None and math.isfinite(_held_p_adr):
+                _adr_floor = _anti_directional_p_floor()
+                _adr_hard = _anti_directional_hard_floor()
+                _adr_minority = _held_p_adr < _adr_floor
+                indicators["held_side_minority"] = _adr_minority
+                _adr_lane = str(indicators.get("decision_lane") or "").lower()
+                if _held_p_adr < _adr_hard:
+                    logger.info(
+                        "[ANTI-DIR-VETO] asset=%s ticker=%s vetoed %s@%.1fc: "
+                        "held-side p=%.3f < hard floor=%.2f (lane=%s) — no "
+                        "lane may hold a side the model prices this low",
+                        asset, ticker, selected_outcome.upper(),
+                        float(edge_breakdown.executable_entry_price) * 100.0,
+                        _held_p_adr, _adr_hard, _adr_lane or "(unstamped)",
+                    )
+                    no_trade_reason = f"anti_directional_hard_{selected_outcome}"
+                    indicators["anti_directional_veto"] = True
+                    indicators["anti_directional_hard_veto"] = True
+                    selected_outcome = None
+                    selected_action = None
+                    edge_breakdown = None
+                elif _adr_minority and _adr_lane not in _minority_hold_lanes():
+                    logger.info(
+                        "[ANTI-DIR-VETO] asset=%s ticker=%s vetoed %s@%.1fc: "
+                        "held-side p=%.3f < floor=%.2f and lane=%s is not a "
+                        "registered minority-hold lane",
+                        asset, ticker, selected_outcome.upper(),
+                        float(edge_breakdown.executable_entry_price) * 100.0,
+                        _held_p_adr, _adr_floor, _adr_lane or "(unstamped)",
+                    )
+                    no_trade_reason = f"anti_directional_{selected_outcome}"
+                    indicators["anti_directional_veto"] = True
+                    selected_outcome = None
+                    selected_action = None
+                    edge_breakdown = None
 
     # 2026-10-20: bounded-lane admission bound must flow into
     # decision.min_required_edge -> intent.min_required_edge -> the

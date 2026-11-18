@@ -302,7 +302,8 @@ def canonical_terminal_code(
     if rl.startswith("late_edge_probe"):
         return TerminalCode.STRUCTURAL_RISK_VETO.value
     if (
-        rl.startswith("countertrend_")
+        rl.startswith("anti_directional_")
+        or rl.startswith("countertrend_")
         or rl.startswith("bookflow_")
         or rl.startswith("strip_same_side_")
         or rl.startswith("side_suspended")

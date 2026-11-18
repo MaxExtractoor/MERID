@@ -300,9 +300,10 @@ def _resolve(
         for k in candidate_keys:
             if k in candidate and candidate[k] is not None:
                 return candidate[k]
-    for k in decision_keys:
-        if k in decision and decision[k] is not None:
-            return decision[k]
+    if decision:
+        for k in decision_keys:
+            if k in decision and decision[k] is not None:
+                return decision[k]
     return default
 
 

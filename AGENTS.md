@@ -102,6 +102,51 @@ Note: `.env` is loaded into `os.environ` at process start, so the running
 process keeps the old 85–99/11 values until the next production restart —
 the restored band binds on restart, not live.
 
+### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
+
+Replay of `KXDOGE15M-26NOV172330-30` (NO buy 27c via `cheap_no_settle`,
+exited ~3c, settled YES, −$1.44): the model priced `p_yes=0.721` while
+the system bought the NO side at `p_no=0.279`.  End-to-end audit found
+**no side-mapping inversion**: intent, wire payload (`contract:no,
+action:buy`), fill canonicalization, and signed-YES exposure all agree
+(`side_conflict=1` on the ledger is a benign counterparty-form artifact,
+`exposure_mismatch=0`); a 9,555-entry scan shows `p_selected` always
+equals the held side's calibrated probability.  The failure is
+structural: `cheap_no_settle` requires a YES-heavy book (complement
+≥55c) then buys the minority NO side — anti-directional *by design*,
+gated only by p≥0.12 and net_ev≥−10c.  Ledger verdict: −$9.08 on the
+0/5 cluster, −$5.75/18 trades since Nov 1, and the 23k-sample
+calibration audit shows cheap contracts are net-negative (FLB — the
+model overstates longshot p).
+
+Repairs (asset-agnostic, all five assets share the path):
+
+- **`MERID_CHEAP_NO_LANE_ENABLED=0`** in `.env` — the lane is disabled.
+- **Anti-directional hold guard** in `trade_decision.py`: every
+  selection stamps `held_side_minority` (held-side p below
+  `MERID_ANTI_DIRECTIONAL_P_FLOOR`, default 0.5).  A minority hold from
+  a lane NOT in `MERID_MINORITY_HOLD_LANES` vetoes
+  `anti_directional_<side>` — the formula path, maker_bid, pinned_fav,
+  settlement_convergence, trend_yes_hi and late_taker must always hold
+  the side the model calls more likely.  Registered minority-hold lanes:
+  drift_fav, reversal_scalp, threshold_cell, current_build_provisional,
+  evidence_cell_escape, marginal_band, late_edge_probe,
+  cheap_tail_canary.
+- **Hard floor** `MERID_ANTI_DIRECTIONAL_HARD_FLOOR` (default 0.10):
+  vetoes EVERY lane regardless of registration — no coherent entry
+  holds a side the model prices <10% likely (FLB makes realized worse).
+- **`cheap_no_settle` dropped from the default registry** —
+  re-enabling it is now a two-key operator decision
+  (`MERID_CHEAP_NO_LANE_ENABLED=1` AND re-registering it in
+  `MERID_MINORITY_HOLD_LANES`), not a one-flag flip.
+- Regression coverage: `tests/test_anti_directional_guard.py` (5 tests:
+  registered-lane admit+stamp, unregistered veto, floor override,
+  hard-floor veto, majority stamp).
+
+Remaining known bleeder for a future pass: `mid_yes` (YES 41–93c) is
+−$4.82/35 since Nov 1 — not an inversion (majority holds), likely
+mid-band adverse selection worth its own cohort audit.
+
 ### Model anchoring vs. reality — verified calibration audit (2026-11-16)
 
 Deduplicated full prediction stream (`model_calibration_observations`,
