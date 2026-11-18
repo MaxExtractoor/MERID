@@ -1844,22 +1844,68 @@ def _pinned_fav_hi() -> float:
 
 
 def _pinned_fav_min_tte() -> float:
-    # 300s, not 120s: the measured edge lives at TTE >= 300s; the 120-300s
-    # bucket realized ~0 (-0.05c) and the settlement lane owns <120s.
-    # Maker mode: 121s — the whole passive path is skipped when is_late
-    # (TTE <= MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS=120), so 120 itself is
-    # unreachable; the maker cohort's edge is the late converged window.
+    # 2026-11-18 (external-tape epoch): the pre-expiry cancel floor is 45s
+    # and the exit-only cutoff is 30s, so 45s is the shallowest reachable
+    # entry.  The verified +EV stretch is the settlement-convergence window
+    # (TTE <= ~150s — the 60-print settlement average collapses uncertainty
+    # faster than the book prices it); mid-window entries now face the
+    # stricter mid-window EV floor instead of a hard TTE ban.
     if pinned_fav_maker_mode():
-        return _env_float("MERID_PINNED_FAV_MAKER_MIN_TTE_S", 121.0)
-    return _env_float("MERID_PINNED_FAV_MIN_TTE_S", 300.0)
+        return _env_float("MERID_PINNED_FAV_MAKER_MIN_TTE_S", 45.0)
+    return _env_float("MERID_PINNED_FAV_MIN_TTE_S", 45.0)
 
 
 def _pinned_fav_max_tte() -> float:
-    # Maker mode: 420s — the measured winner entered "late in the market",
-    # not early-window where pin claims are weakest.
     if pinned_fav_maker_mode():
-        return _env_float("MERID_PINNED_FAV_MAKER_MAX_TTE_S", 420.0)
+        return _env_float("MERID_PINNED_FAV_MAKER_MAX_TTE_S", 840.0)
     return _env_float("MERID_PINNED_FAV_MAX_TTE_S", 840.0)
+
+
+def _pinned_fav_late_tte_s() -> float:
+    """Boundary between the settlement-convergence window and mid-window.
+
+    2026-11-18 external-tape epoch: two independent live-money datasets on
+    this exact product disagree with the lane's earlier "edge lives at
+    TTE >= 300s" doctrine:
+
+    * PredictionMarketsPicks tape study (1,258 KXBTC15M windows, real
+      taker fills, 80-99c favorites): TTE > 150s netted -0.76c/contract
+      after fees, 60-150s ~breakeven, final 60s +2.67c/contract — the
+      only profitable stretch.  Mechanism: settlement averages 60
+      one-second RTI prints, so each second fixes 1/60th of the outcome
+      and uncertainty collapses faster than spot-vs-strike pricing
+      assumes.
+    * moltbook live bot (993 real trades, $11.9k): 90-93c favorites at
+      4-8min out -> 91.7% win rate vs ~92-93% breakeven -> -2% net.
+      Parity-priced mid-window favorites lose.
+    * Internal replay is consistent: the pf cohort at 300-840s is
+      ~breakeven including tail (maker fills earn ~1c better than the
+      taker tape's -0.76c), and both in-band pin-break losses entered at
+      TTE ~330s on negative model edge.
+    """
+    return _env_float("MERID_PINNED_FAV_LATE_TTE_S", 150.0)
+
+
+def _pinned_fav_mid_min_ev_cents() -> float:
+    """EV floor applied to mid-window (TTE > late boundary) admissions.
+
+    Default 0.0: outside the settlement-convergence window a favorite
+    must be genuinely underpriced on the model's own net math — parity
+    pricing is the measured -EV cohort, not a probe worth funding.
+    """
+    return _env_float("MERID_PINNED_FAV_MID_MIN_EV_CENTS", 0.0)
+
+
+def _pinned_fav_min_ev_cents_at_tte(tte_seconds: Optional[float]) -> float:
+    """TTE-conditioned lane floor: probe floor late, edge floor mid-window."""
+    floor = _pinned_fav_min_ev_cents()
+    try:
+        tte = float(tte_seconds) if tte_seconds is not None else None
+    except (TypeError, ValueError):
+        tte = None
+    if tte is not None and math.isfinite(tte) and tte > _pinned_fav_late_tte_s():
+        return max(floor, _pinned_fav_mid_min_ev_cents())
+    return floor
 
 
 def _pinned_fav_min_ev_cents() -> float:
@@ -2230,7 +2276,7 @@ def pinned_fav_block(
         ):
             return "pinned_fav_maker_low_p"
     ev = _finite_or_none(net_ev_cents)
-    if ev is None or ev < _pinned_fav_min_ev_cents():
+    if ev is None or ev < _pinned_fav_min_ev_cents_at_tte(tte_seconds):
         return "pinned_fav_low_ev"
     if pinned_fav_cap_remaining() <= 0:
         return "pinned_fav_daily_cap"

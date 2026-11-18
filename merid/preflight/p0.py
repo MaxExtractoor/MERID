@@ -785,7 +785,8 @@ async def run_p0_preflight_checks(
                 "pinned_fav_policy_resolution",
                 True,
                 "enabled=%s maker=%s band=%g-%g src=%s tte=%g-%g min_p=%s "
-                "min_ev=%s daily_max=%s max_contracts=%s src=%s %s caps{%s}"
+                "min_ev=%s late_tte=%s mid_min_ev=%s daily_max=%s "
+                "max_contracts=%s src=%s %s caps{%s}"
                 % (
                     _dr_p0.pinned_fav_enabled(),
                     _maker,
@@ -796,6 +797,8 @@ async def run_p0_preflight_checks(
                     _dr_p0._pinned_fav_max_tte(),
                     _dr_p0._pinned_fav_maker_min_p() if _maker else "n/a",
                     _dr_p0._pinned_fav_min_ev_cents(),
+                    _dr_p0._pinned_fav_late_tte_s(),
+                    _dr_p0._pinned_fav_mid_min_ev_cents(),
                     _dr_p0.pinned_fav_daily_max(),
                     _eff_cap,
                     _cap_src,

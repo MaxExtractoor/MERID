@@ -88,9 +88,29 @@ decided by ledger evidence: `.env` restored to the audited containment:
 MERID_PINNED_FAV_PRICE_LO=94   PRICE_HI=98
 MERID_PINNED_FAV_MAKER_LO=94   MAKER_HI=98
 MERID_PINNED_FAV_MAX_CONTRACTS=6
-MERID_PINNED_FAV_MIN_EV_CENTS=-15.0   MAKER_MIN_EV_CENTS=-12.0
+MERID_PINNED_FAV_MIN_EV_CENTS=-3.0    MAKER_MIN_EV_CENTS=-3.0
+MERID_PINNED_FAV_LATE_TTE_S=150       MID_MIN_EV_CENTS=0.0
+MERID_PINNED_FAV_MIN_TTE_S=45         MAKER_MIN_TTE_S=45
 MERID_PINNED_FAV_DAILY_MAX=480   MAKER_MIN_P=0.90
 ```
+
+**TTE-conditioned EV floor (2026-11-18, external-tape epoch).** The flat
+`-3` probe floor is now `max(base, mid)` conditioned on TTE via
+`_pinned_fav_min_ev_cents_at_tte()`: inside `LATE_TTE_S=150` the bounded
+`-3` probe floor binds; past it `MID_MIN_EV_CENTS=0.0` requires
+non-negative model net edge.  External live-money evidence on this exact
+product (KXBTC15M favorites): PMP tape study — 1,258 windows, TTE>150s
+netted −0.76¢/contract after fees while the final 60s netted +2.67¢ (the
+60-print settlement average collapses uncertainty faster than the book
+prices it); moltbook live bot — 993 trades, 90–93¢ favorites at 4–8min
+ran 91.7% win vs ~92–93% breakeven = −2% net.  Internal replay is
+consistent: the 300–840s cohort is ~breakeven incl. tail (maker fills
+earn ~1¢ better than the taker tape), and both in-band pin-breaks
+(DOGE@87¢ edge −5.6¢, DOGE NO@95¢ edge −5.0¢, TTE ~330s) were
+parity-priced mid-window entries — the exact measured-losing cohort.
+Rollback: `MERID_PINNED_FAV_LATE_TTE_S=840` disables the split.
+`MIN_TTE_S=45` opens the verified +EV window to entries (maker floor 45s
+= the pf resting-cancel floor; sub-45s is owned by the settlement lane).
 
 Companion code hardening (same replay): the measured-evidence
 `pinned_fav_maker_low_p` bypass in `compute_trade_decision` now enforces a

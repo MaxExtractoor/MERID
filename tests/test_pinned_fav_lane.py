@@ -47,6 +47,11 @@ def _iso(tmp_path, monkeypatch):
         "MERID_PINNED_FAV_MIN_TTE_S": "300",
         "MERID_PINNED_FAV_MAX_TTE_S": "840",
         "MERID_PINNED_FAV_MIN_EV_CENTS": "2",
+        # 2026-11-18: production sets the mid-window floor to 0.0 (TTE-
+        # conditioned policy); this suite pins legacy single-floor
+        # semantics so each test exercises the floor it names.  The
+        # conditioned-floor tests below override this pin explicitly.
+        "MERID_PINNED_FAV_MID_MIN_EV_CENTS": "-999",
         "MERID_MONEYNESS_EV_RELIEF_ENABLED": "0",
         "MERID_MONEYNESS_GATE_ENABLED": "0",
         "MERID_CONVICTION_GATE_ENABLED": "0",
@@ -150,6 +155,53 @@ def test_block_negative_floor_probe(monkeypatch):
     assert dr.pinned_fav_block(93.0, -4.0, 600.0) is None
     assert dr.pinned_fav_block(93.0, -6.0, 600.0) is None
     assert dr.pinned_fav_block(93.0, -6.5, 600.0) == "pinned_fav_low_ev"
+
+
+def test_mid_window_requires_nonnegative_ev(monkeypatch):
+    """2026-11-18 external-tape epoch: parity-priced mid-window favorites
+    are the measured -EV cohort (PMP tape: -0.76c/contract at TTE>150s on
+    1,258 KXBTC15M windows; moltbook live bot: -2% on 993 trades at
+    4-8min).  Past the late boundary the lane requires non-negative model
+    net edge; the bounded probe floor only binds inside the
+    settlement-convergence window where the 60-print settlement average
+    makes the pin structurally stronger than its price."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-3.0")
+    monkeypatch.setenv("MERID_PINNED_FAV_MID_MIN_EV_CENTS", "0.0")
+    monkeypatch.setenv("MERID_PINNED_FAV_LATE_TTE_S", "150")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_TTE_S", "45")
+    # Mid-window: parity/negative model edge vetoes — both 2026-11-18
+    # pin-break losses (edge -5.6c / -5.0c at TTE ~330s) sit here.
+    assert dr.pinned_fav_block(93.0, -0.5, 300.0) == "pinned_fav_low_ev"
+    assert dr.pinned_fav_block(93.0, -5.6, 330.0) == "pinned_fav_low_ev"
+    # Mid-window with genuine model edge still admits.
+    assert dr.pinned_fav_block(93.0, 0.0, 300.0) is None
+    assert dr.pinned_fav_block(93.0, 0.5, 300.0) is None
+    # Settlement-convergence window: the bounded probe floor still binds.
+    assert dr.pinned_fav_block(93.0, -3.0, 120.0) is None
+    assert dr.pinned_fav_block(93.0, -3.5, 120.0) == "pinned_fav_low_ev"
+
+
+def test_late_tte_at_max_disables_mid_floor(monkeypatch):
+    """Rollback key: pushing the late boundary to the window max disables
+    the mid-window floor entirely — the flat probe floor then applies
+    everywhere as before the split."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-3.0")
+    monkeypatch.setenv("MERID_PINNED_FAV_MID_MIN_EV_CENTS", "0.0")
+    monkeypatch.setenv("MERID_PINNED_FAV_LATE_TTE_S", "840")
+    assert dr.pinned_fav_block(93.0, -3.0, 300.0) is None
+    assert dr.pinned_fav_block(93.0, -3.5, 300.0) == "pinned_fav_low_ev"
+
+
+def test_mid_floor_never_widens_past_probe_floor(monkeypatch):
+    """A mid floor looser than the base floor cannot widen admission:
+    the effective bound is max(base, mid)."""
+    monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
+    monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", "-3.0")
+    monkeypatch.setenv("MERID_PINNED_FAV_MID_MIN_EV_CENTS", "-20.0")
+    assert dr.pinned_fav_block(93.0, -3.5, 300.0) == "pinned_fav_low_ev"
+    assert dr.pinned_fav_block(93.0, -3.0, 300.0) is None
 
 
 def test_block_daily_cap(monkeypatch):
@@ -785,6 +837,9 @@ def _maker_mode(monkeypatch):
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MAX_TTE_S", "420")
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_EV_CENTS", "-12")
     monkeypatch.setenv("MERID_PINNED_FAV_MAKER_MIN_P", "0.85")
+    # Legacy single-floor semantics; the conditioned-floor tests pin their
+    # own mid-window bound explicitly.
+    monkeypatch.setenv("MERID_PINNED_FAV_MID_MIN_EV_CENTS", "-999")
     yield
 
 

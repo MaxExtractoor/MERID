@@ -2469,7 +2469,9 @@ def apply_bounded_live_domain_gate(
         # honest bound; model_edge_floor still requires raw gap >= 4c.
         try:
             from merid.prediction import directional_regime as _dr_tail
-            required_cents = float(_dr_tail._pinned_fav_min_ev_cents())
+            required_cents = float(
+                _dr_tail._pinned_fav_min_ev_cents_at_tte(tte)
+            )
         except Exception:
             required_cents = 200.0
     if _is_settlement_lane or _is_pinned_fav:
@@ -5733,7 +5735,9 @@ def _compute_trade_decision_impl(
                                 _lane_floor_c: Optional[float] = None
                                 if _pf_reach:
                                     _lane_floor_c = (
-                                        _dr_pf._pinned_fav_min_ev_cents()
+                                        _dr_pf._pinned_fav_min_ev_cents_at_tte(
+                                            seconds_to_expiry
+                                        )
                                     )
                                 if not _pf_reach:
                                     try:
@@ -6013,7 +6017,9 @@ def _compute_trade_decision_impl(
                             and _dl_bound.cheap_no_band_match(float(_px))
                         )
                         _side_bound_c = (
-                            _dr_bound._pinned_fav_min_ev_cents()
+                            _dr_bound._pinned_fav_min_ev_cents_at_tte(
+                                seconds_to_expiry
+                            )
                             if _pf_bound
                             else (
                                 _dl_bound.drift_min_ev_cents()
@@ -6404,7 +6410,9 @@ def _compute_trade_decision_impl(
             _nev = float(_ne) * 100.0
         except (TypeError, ValueError):
             return False
-        if not math.isfinite(_nev) or _nev < _dr._pinned_fav_min_ev_cents():
+        if not math.isfinite(_nev) or _nev < _dr._pinned_fav_min_ev_cents_at_tte(
+            seconds_to_expiry
+        ):
             return False
         try:
             if _dr.pinned_fav_cap_remaining() <= 0:
@@ -7276,7 +7284,7 @@ def _compute_trade_decision_impl(
                 or _yes_late_taker_qualifies
             )
             _lane_floor_s = (
-                _dr._pinned_fav_min_ev_cents()
+                _dr._pinned_fav_min_ev_cents_at_tte(seconds_to_expiry)
                 if _pf_admitted_s
                 else (
                     _dl.drift_min_ev_cents()
@@ -7292,7 +7300,7 @@ def _compute_trade_decision_impl(
                 or _no_late_taker_qualifies
             )
             _lane_floor_s = (
-                _dr._pinned_fav_min_ev_cents()
+                _dr._pinned_fav_min_ev_cents_at_tte(seconds_to_expiry)
                 if _pf_admitted_s
                 else (
                     _dl.drift_min_ev_cents()
@@ -9008,7 +9016,10 @@ def _compute_trade_decision_impl(
         )
         if _sel_pf_lane:
             from merid.prediction import directional_regime as _dr_evg
-            _side_min_edge = _dr_evg._pinned_fav_min_ev_cents() / 100.0
+            _side_min_edge = (
+                _dr_evg._pinned_fav_min_ev_cents_at_tte(seconds_to_expiry)
+                / 100.0
+            )
         # 2026-10-21 (drift-lane epoch): a drift_fav / cheap_no_settle
         # selection's bound is its own lane floor — same re-veto hazard as
         # pinned_fav; the EV gate's negative-floor passthrough bounds the

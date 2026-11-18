@@ -1227,7 +1227,7 @@ def evaluate(
     # ticker for the per-ticker bound); pf keeps its own read-side cap check.
     if _pf and _pf_dr is not None:
         _lane_req_edge: Optional[float] = float(
-            _pf_dr._pinned_fav_min_ev_cents()
+            _pf_dr._pinned_fav_min_ev_cents_at_tte(tte_seconds)
         )
     elif _drift and _dl is not None:
         _lane_req_edge = float(_dl.drift_min_ev_cents())

@@ -97,7 +97,7 @@ def _eval_side_gates(
         "tte_required_lo_s": _dr._pinned_fav_min_tte(),
         "tte_required_hi_s": _dr._pinned_fav_max_tte(),
         "min_p_required": _dr._pinned_fav_maker_min_p(),
-        "min_ev_floor_cents": _dr._pinned_fav_min_ev_cents(),
+        "min_ev_floor_cents": _dr._pinned_fav_min_ev_cents_at_tte(tte_seconds),
     }
 
     try:
