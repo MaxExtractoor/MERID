@@ -3924,128 +3924,77 @@ class DecisionAuditLedger:
             # settled history (~620s timeouts on 48h AND 12h windows).  With
             # the settled_at range forced, the scan is proportional to the
             # window.
-            ebias_rows: List[sqlite3.Row] = []
-            rows = conn.execute(
-                """
-                SELECT d.asset AS asset,
-                       d.selected_side AS side,
-                       d.ticker AS ticker,
-                       d.decision_id AS decision_id,
-                       d.seconds_to_close AS seconds_to_close,
-                       COALESCE(o.actual_fill_price_cents,
-                                se.executable_entry_price_cents) AS entry_cents,
-                       o.actual_fill_price_cents AS fill_px_cents,
-                       se.executable_entry_price_cents AS decision_px_cents,
-                       se.expected_entry_slippage_cents AS exp_slip_cents,
-                       COALESCE(se.decision_lane, d.admission_lane) AS lane,
-                       se.calibrated_probability AS calibrated_probability,
-                       o.settled_yes AS settled_yes,
-                       o.settled_at AS settled_at,
-                       'fill' AS src,
-                       d.decision_ts AS decision_ts,
-                       d.ticker AS mkey
-                FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
-                JOIN strategy_decisions d ON d.decision_id = o.decision_id
-                LEFT JOIN strategy_decision_side_ev se
-                  ON se.decision_id = d.decision_id
-                 AND se.side = d.selected_side
-                WHERE o.outcome_status = 'SETTLED'
-                  AND o.settled_at >= ?
-                  AND d.decision_ts >= ?
-                  AND d.decision = 'ENTER'
-                  AND d.selected_side IN ('yes', 'no')
-                  AND d.is_eligible_for_research = 1
-                """,
-                (since, since - 3600.0),
-            ).fetchall()
-            # 2026-10-15: survivorship-bias repair.  Vetoed candidates are
-            # evidence too — scoring only ENTER fills filters the cohort to
-            # whatever yesterday's gates already allowed, so a bad gate can
-            # never accumulate the evidence that would clear it and a good
-            # gate's cost is invisible.  Every settled NO_TRADE decision
-            # contributes each side_ev row that carried an executable price:
-            # "would this side have won at the quoted entry?"  Normalization
-            # keys on (ticker, side) inside build_cells so repeated evals of
-            # one market-side pair collapse to ~1 observation.  Disable with
-            # MERID_EVIDENCE_INCLUDE_VETOES=0.
-            if os.environ.get(
-                "MERID_EVIDENCE_INCLUDE_VETOES", "1"
-            ).strip().lower() in ("1", "true", "yes", "on"):
-                veto_rows = conn.execute(
-                    """
-                    SELECT d.asset AS asset,
-                           se.side AS side,
-                           d.ticker AS ticker,
-                           d.decision_id AS decision_id,
-                           d.seconds_to_close AS seconds_to_close,
-                           se.executable_entry_price_cents AS entry_cents,
-                           NULL AS fill_px_cents,
-                           NULL AS decision_px_cents,
-                           NULL AS exp_slip_cents,
-                           NULL AS lane,
-                           se.calibrated_probability AS calibrated_probability,
-                           o.settled_yes AS settled_yes,
-                           o.settled_at AS settled_at,
-                           d.decision_ts AS decision_ts,
-                           se.exclusion_reason AS exclusion_reason,
-                           se.passed_edge_gate AS passed_edge_gate,
-                           se.counterfactual_execution_status AS cf_status,
-                           'veto' AS src,
-                           d.ticker || '|' || se.side AS mkey
-                    FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
-                    JOIN strategy_decisions d ON d.decision_id = o.decision_id
-                    JOIN strategy_decision_side_ev se
-                      ON se.decision_id = d.decision_id
-                    WHERE o.outcome_status = 'SETTLED'
-                      AND o.settled_at >= ?
-                      AND d.decision_ts >= ?
-                      AND d.decision = 'NO_TRADE'
-                      AND se.side IN ('yes', 'no')
-                      AND se.executable_entry_price_cents IS NOT NULL
-                      AND se.executable_entry_price_cents BETWEEN 1 AND 100
-                      AND d.is_eligible_for_research = 1
-                    """,
-                    (since, since - 3600.0),
-                ).fetchall()
-                rows = list(rows) + list(veto_rows)
-            # 2026-10-16: claim-vs-realized edge bias.  For every settled
-            # side eval with an executable counterfactual, the artifact
-            # measures ``expected_net_ev - cf_pnl/contract`` — the realized
-            # error of the gate's own claim on that cohort, including the
-            # selection bias the gate induces on the veto side.  Feeds the
-            # ``edge_bias`` block consumed by
-            # evidence_policy.edge_bias_correction_cents.  Runs regardless
-            # of INCLUDE_VETOES: fills-side bias is signal too.
-            ebias_rows = conn.execute(
-                """
-                SELECT d.asset AS asset,
-                       se.side AS side,
-                       d.ticker AS ticker,
-                       se.expected_net_ev_cents AS net_ev,
-                       se.counterfactual_entry_source AS esrc,
-                       se.counterfactual_execution_status AS cf_status,
-                       se.counterfactual_assumed_filled_contracts AS q_assumed,
-                       o.counterfactual_yes_pnl_cents AS cf_yes,
-                       o.counterfactual_no_pnl_cents AS cf_no,
-                       o.settled_at AS settled_at,
-                       d.decision_ts AS decision_ts,
-                       d.ticker || '|' || se.side AS mkey
-                FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
-                JOIN strategy_decisions d ON d.decision_id = o.decision_id
-                JOIN strategy_decision_side_ev se
-                  ON se.decision_id = d.decision_id
-                WHERE o.outcome_status = 'SETTLED'
-                  AND o.settled_at >= ?
-                  AND d.decision_ts >= ?
-                  AND se.side IN ('yes', 'no')
-                  AND se.expected_net_ev_cents IS NOT NULL
-                  AND (se.counterfactual_execution_status IS NULL
-                       OR se.counterfactual_execution_status IN
-                          ('FULLY_EXECUTABLE', 'PARTIALLY_EXECUTABLE'))
-                  AND d.is_eligible_for_research = 1
-                """,
-                (since, since - 3600.0),
-            ).fetchall()
+            # 2026-11-18: incremental evidence-outcome store.  The three
+            # window scans below used to rescan the whole configured window
+            # of the multi-GB audit DB every refresh; on the production
+            # spindle they repeatedly exceeded the query deadline
+            # ("query: interrupted"), so the artifact aged toward the 8h
+            # staleness cliff and cells starved on old sparse data.  Settled
+            # outcomes are append-only, so each settlement's evidence rows
+            # are now extracted ONCE into a small companion store
+            # (evidence_outcome_store.py) and the artifact is rebuilt from
+            # it.  Extraction is watermark-bounded: a live trickle covers
+            # new settlements and one backfill chunk per refresh walks
+            # newest-first toward the window start, so the freshest
+            # 15-minute-market evidence lands immediately while older
+            # chunks accumulate.  Cursors persist in the store, so
+            # restarts resume mid-backfill.
+            from merid.execution.evidence_outcome_store import (
+                EvidenceOutcomeStore,
+                store_path_for,
+            )
+            _ev_store = EvidenceOutcomeStore(store_path_for(self.db_path))
+            _ev_sconn = _ev_store._connect()
+            try:
+                _ev_include_vetoes = os.environ.get(
+                    "MERID_EVIDENCE_INCLUDE_VETOES", "1"
+                ).strip().lower() in ("1", "true", "yes", "on")
+                _ev_seed_s = float(os.environ.get(
+                    "MERID_EVIDENCE_EXTRACT_SEED_S", "7200"))
+                _ev_chunk_s = float(os.environ.get(
+                    "MERID_EVIDENCE_EXTRACT_CHUNK_S", "7200"))
+                _ev_live_mark = float(
+                    _ev_store.state_get(_ev_sconn, "live_ts")
+                    or (now - _ev_seed_s)
+                )
+                _ev_backfill_hi = float(
+                    _ev_store.state_get(_ev_sconn, "backfill_hi")
+                    or (now - _ev_seed_s)
+                )
+                # Live trickle: settlements since the last mark, with a
+                # small overlap so same-timestamp rows are never skipped
+                # (row_key dedup makes the overlap idempotent).
+                _ev_store.extract_range(
+                    conn, _ev_sconn,
+                    max(0.0, _ev_live_mark - 5.0), now,
+                    include_vetoes=_ev_include_vetoes,
+                )
+                _ev_store.state_set(_ev_sconn, "live_ts", repr(now))
+                # Persist the live cursor before backfill work: a backfill
+                # timeout must not force the (expensive) live seed to
+                # re-scan on every retry.
+                _ev_sconn.commit()
+                # One bounded backfill chunk per refresh, newest-first.
+                if _ev_backfill_hi > since:
+                    _ev_chunk_lo = max(since, _ev_backfill_hi - _ev_chunk_s)
+                    _ev_store.extract_range(
+                        conn, _ev_sconn, _ev_chunk_lo, _ev_backfill_hi,
+                        include_vetoes=_ev_include_vetoes,
+                    )
+                    _ev_store.state_set(
+                        _ev_sconn, "backfill_hi", repr(_ev_chunk_lo))
+                _ev_sconn.commit()
+                _ev_all = _ev_store.read_since(
+                    _ev_sconn, since, include_vetoes=_ev_include_vetoes)
+                _ev_retention_s = float(os.environ.get(
+                    "MERID_EVIDENCE_STORE_RETENTION_DAYS", "14")) * 86400.0
+                _ev_store.prune(_ev_sconn, now - _ev_retention_s)
+            finally:
+                _ev_sconn.close()
+            rows = [r for r in _ev_all if r["src"] in ("fill", "veto")]
+            ebias_rows: List[Dict[str, Any]] = [
+                r for r in _ev_all if r["src"] == "ebias"
+            ]
         except Exception as exc:
             logger.warning(
                 "[DECISION-AUDIT-LEDGER] live evidence query failed: %s", exc

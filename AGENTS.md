@@ -245,6 +245,65 @@ p95 stays >500ms or entries halt on `audit_writer_unhealthy`, the next
 lever is writer throughput (SSD move / batch tuning), not gate
 relaxation — readiness is earned by draining.
 
+### Evidence layer — incremental outcome store (2026-11-18)
+
+Post-restart audit found the evidence layer was the next self-sealing
+layer: `live_entry_evidence.refresh.json` showed refresh **failing**
+(`query: interrupted`, ~240s vs the 90s deadline, fail_streak=2, artifact
+~5h old approaching the 8h `MERID_EVIDENCE_STALE_S` cliff).  The 4h
+`MERID_LIVE_EVIDENCE_WINDOW_HOURS` was itself an Oct-17 disk-crisis
+workaround; inside it, cells got n_eff 0.1–4 → `CELL_EVIDENCE_INSUFFICIENT`
+dominated, and `recent_days` clamped to ~1h starved the challenge
+mechanism.  Cap-shadow analysis confirmed evidence-insufficient was a
+co-failure label, not the sole blocker (economics/reserves bind first) —
+but once the artifact stales, evidence becomes the blocker for the
+formula path.
+
+**Research basis:** recency-weighted sufficient statistics are the
+correct model for regime-tracking evidence (exponential halflife ≡ EWMA
+of cell stats; QuantMemo/wraquant literature); the failure was
+computational, not statistical — periodic full-window rescans of a 19GB
+append-only outcomes table.  The canonical fix is incremental consumption
+with a watermark (Doris table-streams, Redshift incremental statistics):
+extract each settlement's evidence rows ONCE.
+
+**Fix — `merid/execution/evidence_outcome_store.py` + ledger wiring:**
+`_refresh_live_entry_evidence` no longer runs the three whole-window
+scans.  It extracts settlement evidence rows into a small companion
+store (`<audit>_evidence_outcomes.db`, derived from `db_path`,
+`MERID_EVIDENCE_OUTCOME_STORE` override) via `extract_range`, which runs
+the same three queries bounded to `[lo, hi]` (inclusive — frozen-clock
+tests settle exactly at `now`).  Two cursors persist in the store:
+`live_ts` (trickle, 5s overlap, idempotent via `row_key` dedup) and
+`backfill_hi` (one `MERID_EVIDENCE_EXTRACT_CHUNK_S`=3600s chunk per
+refresh, **newest-first** so the freshest 15m-market evidence lands on
+the first refresh while older chunks accumulate; restarts resume
+mid-backfill).  The live cursor commits before backfill so a chunk
+timeout can't force the expensive seed to re-scan.  The artifact is then
+rebuilt by `read_since(window)` on the small store — any window size is
+now a cheap indexed read.
+
+**`.env`:** `WINDOW_HOURS` 4→24 (6× evidence density; 48h is the target
+once aggregation GIL cost is measured — the Python rollup over ~85k
+rows/24h is the remaining cost, watch `latency_ms`), `QUERY_TIMEOUT_S`
+90→180 (now bounds one chunk, not a window scan), `EXTRACT_SEED_S=7200`,
+`EXTRACT_CHUNK_S=3600`, `STORE_RETENTION_DAYS=14`.
+
+**Eval-spike update (measured 19:17 UTC):** `latency_ms` p50 ≈ 4–5s/cycle
+with `audit_write_wait_ms` p95 ≈ 12s and `audit_write_exec_ms` p95 ≈
+0.9–1.0s — the HDD-bound writer thread is saturated (45 rows/cycle vs
+~1 row/s effective throughput; shed tiers hold queue ~30).  The writer's
+constant GIL-held SQLite work is what starves the eval loop; per-eval
+decision compute remains p50≈33ms.  Next levers if spikes persist:
+writer batch/transaction tuning, `side_ev` shed-tier review, or moving
+`decision_audit.db` to SSD — NOT gate relaxation.
+
+**Regression coverage:** `tests/test_evidence_outcome_store.py` (6 tests:
+path derivation, three-src extraction, idempotent re-extract,
+frozen-clock `settled_at==hi` boundary, window/veto-filter reads,
+prune+state).  `test_live_entry_evidence_gate.py` refresh tests pass
+unchanged through the store path.
+
 ### Model anchoring vs. reality — verified calibration audit (2026-11-16)
 
 Deduplicated full prediction stream (`model_calibration_observations`,
