@@ -68,12 +68,24 @@ def test_tte_floor_is_identical_across_assets(asset):
 
 @pytest.mark.parametrize("asset", ASSETS)
 def test_price_band_is_identical_across_assets(asset):
-    from merid.event_venues.kalshi.market_regime import classify_market_regime
+    from merid.event_venues.kalshi.market_regime import (
+        REGIME_CONFIGS,
+        classify_market_regime,
+    )
 
-    # 5c is below every enabled band (tails are disabled): no regime.
-    assert classify_market_regime(5, 600) is None
-    # 96c likewise above the enabled bands.
-    assert classify_market_regime(96, 600) is None
+    # 2026-11-16 (fce317ec): the 1-9c and 91-99c tail bands are enabled by
+    # default, so 5c -> tail_low and 96c -> tail_high when the tail regimes
+    # are on; with MERID_TAIL_{LOW,HIGH}_ENABLED=0 they fall below/above
+    # every enabled band and return None.  Either way the classification
+    # must be identical for every asset.
+    r5 = classify_market_regime(5, 600)
+    assert (r5.name if r5 else None) == (
+        "tail_low" if REGIME_CONFIGS["tail_low"].enabled else None
+    )
+    r96 = classify_market_regime(96, 600)
+    assert (r96.name if r96 else None) == (
+        "tail_high" if REGIME_CONFIGS["tail_high"].enabled else None
+    )
     # 50c -> balanced for every asset.
     assert classify_market_regime(50, 600).name == "balanced"
 

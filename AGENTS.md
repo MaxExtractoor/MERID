@@ -199,6 +199,52 @@ TTE>120s — and the 173-exit audit measured that cohort forfeiting ~+$8
 (58% of stopped-out positions recovered).  The expiry salvage is the
 measured-correct close for broken pins.
 
+### Fourth replay — measured-loss veto was self-sealing (2026-11-18)
+
+Post-`fdd2a448` flat-scan audit: 536 in-band YES candidates (NO complement
+2–8c, YES 92–98c) were all evaluated by `admission_owner: pinned_fav`,
+but **zero** `pinned_fav_low_ev`/`pinned_fav_tte` vetoes appeared — every
+one died at `pinned_fav_measured_loss` (43), `evidence_transfer_margin`
+(257), or `challenge_insufficient` (99/75).  The measured-loss veto
+compared the cell's weighted win rate to entry-price breakeven and fired
+**unconditionally**, including for candidates carrying non-negative model
+net edge.  That is self-sealing: the cell's loss record was built by the
+negative-edge probe admits the tightened floor can no longer make, so
+every future admit — including the edge≥0 cohort the new mid-window floor
+now permits — was vetoed by losses of a config that no longer exists.
+The lane could never re-measure; trade count stayed zero by construction.
+
+**Fix (`trade_decision.py`):** `_pf_measured_loss` now also requires
+`float(_ne_c) < 0.0` — the veto binds only the negative-edge probe tier
+whose admits produced the record.  A non-negative-edge candidate is a
+different claim (model sees genuine underpricing) that the cell's loss
+history does not refute, so it proceeds to the normal evidence gates.
+Negative-edge probe admits in toxic cells still veto exactly as before.
+Applies uniformly to every lane flowing through the shared measured-loss
+block (pinned_fav, drift_fav, cheap_no_settle) — for the −2c-floor lanes
+nothing changes because their admits are negative-edge by construction.
+
+**Regression coverage:** `tests/test_evidence_lane_floor_probes.py::
+test_measured_loss_veto_is_config_scoped` asserts the veto expression
+gates on the side's net-edge sign while keeping the weighted
+win-rate-vs-breakeven test.  The existing toxic-cell pf test (dense
+measured loser at the candidate's own bucket, negative-edge admit)
+still vetoes — the tier split preserves it.
+
+**Eval-latency finding (no code change):** the ~5s flat-scan spikes the
+operator observed are audit-writer contention, not decision compute.
+Per-eval `compute_trade_decision` is p50≈33ms/p99≈144ms (17k samples);
+the audit heartbeat's `latency_ms` is the *sum* of synchronous
+`record_trade_decision` row-build calls (~60/cycle), and
+`audit_write_wait_ms` p95 ≈ 9.7–13.8s shows the HDD-bound writer thread
+backlogged.  Enqueue is already `put_nowait` on an unbounded queue with
+shed tiers (`high` never shed, `normal` shed past depth 120, emergency
+tier past 350) and `MERID_AUDIT_WRITER_BATCH=128` — the pipeline is
+correctly degraded, not blocked.  Watch: if `quote_age_at_decision_ms`
+p95 stays >500ms or entries halt on `audit_writer_unhealthy`, the next
+lever is writer throughput (SSD move / batch tuning), not gate
+relaxation — readiness is earned by draining.
+
 ### Model anchoring vs. reality — verified calibration audit (2026-11-16)
 
 Deduplicated full prediction stream (`model_calibration_observations`,

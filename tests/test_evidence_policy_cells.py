@@ -829,6 +829,12 @@ def _pf_env(monkeypatch, floor="-6.0", daily_max="12"):
     monkeypatch.setenv("MERID_PINNED_FAV_ENABLED", "1")
     monkeypatch.setenv("MERID_PINNED_FAV_MIN_EV_CENTS", floor)
     monkeypatch.setenv("MERID_PINNED_FAV_DAILY_MAX", daily_max)
+    # 2026-11-18: the lane floor is TTE-conditioned (late<=150s probe floor,
+    # mid-window max(base, 0c)).  These tests exercise floor *substitution*
+    # mechanics at tte=600 — pin the split off so they see the flat base
+    # floor they were written against; TTE conditioning is covered in
+    # tests/test_pinned_fav_lane.py.
+    monkeypatch.setenv("MERID_PINNED_FAV_LATE_TTE_S", "840")
     # .env raised the lane band to 94-98 (2026-10-31 containment); these
     # tests were written against the authored 92-98 domain — pin the
     # band so the 93c fixture stays in-lane.

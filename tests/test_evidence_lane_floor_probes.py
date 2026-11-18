@@ -253,3 +253,22 @@ def test_probe_skip_late_window_requires_measured_support():
     block = src[idx:idx + 600]
     assert "min_cell_neff" in block
     assert "_pf_measured_loss" in block
+
+
+def test_measured_loss_veto_is_config_scoped():
+    """2026-11-18 self-sealing fix: the lane measured-loss veto must only
+    bind the negative-edge probe tier that produced the losses.  A
+    non-negative-edge candidate is a different claim the cell record does
+    not refute — vetoing it forever makes the lane unable to re-measure.
+    Assert the veto expression gates on the side's net edge sign."""
+    import merid.prediction.trade_decision as td
+    src = inspect.getsource(td)
+    idx = src.find("_pf_measured_loss = (")
+    assert idx > 0
+    block = src[idx:idx + 2200]
+    # The veto still computes the weighted win-rate-vs-breakeven test...
+    assert "wins_weighted" in block and "_pf_wn" in block
+    # ...and it is config-scoped: it only fires when the candidate's own
+    # net edge is negative (the tier whose admits built the loss record).
+    assert "_ne_c" in block
+    assert "< 0.0" in block

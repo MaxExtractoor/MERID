@@ -5871,6 +5871,22 @@ def _compute_trade_decision_impl(
                                             / _pf_wn
                                         )
                                         < float(_px) / 100.0 + float(fee)
+                                        # 2026-11-18: config-scoped veto.
+                                        # The cell's loss record was built
+                                        # by negative-edge probe admits
+                                        # (parity-priced favorites).  A
+                                        # candidate carrying non-negative
+                                        # model net edge is a different
+                                        # claim the record does not
+                                        # refute — without this the veto
+                                        # is self-sealing: every admit is
+                                        # blocked by losses of admits the
+                                        # tightened floor can no longer
+                                        # make, so the lane can never
+                                        # re-measure.  Negative-edge probe
+                                        # admits in toxic cells still
+                                        # veto exactly as before.
+                                        and float(_ne_c) < 0.0
                                     )
                                     if _pf_measured_loss:
                                         _lane_veto = f"{_lane_name}_measured_loss"
