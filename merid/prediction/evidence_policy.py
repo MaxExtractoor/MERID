@@ -1748,7 +1748,7 @@ def build_cells(
                 {"w": 0.0, "l": 0.0, "n_eff": 0.0, "n_raw": 0,
                  "_markets": set(), "entry_wsum": 0.0,
                  "recent_w": 0.0, "recent_l": 0.0, "recent_n": 0,
-                 "n_veto": 0, "n_fill": 0,
+                 "n_veto": 0, "n_fill": 0, "n_observed_fill": 0,
                  "w_post": 0.0, "l_post": 0.0, "n_eff_post": 0.0,
                  "n_raw_post": 0, "entry_wsum_post": 0.0},
             )
@@ -1760,6 +1760,12 @@ def build_cells(
                 c["n_veto"] += 1
             elif r.get("src") == "fill":
                 c["n_fill"] += 1
+                # 'fill' rows are settled ENTER decisions; only those
+                # with an actual_fill_price_cents are observed executions
+                # -- the rest are executable-price counterfactuals
+                # (see evidence_outcome_store._FILL_SQL).
+                if r.get("fill_px_cents") is not None:
+                    c["n_observed_fill"] += 1
             c["_markets"].add(mkey)
             c["entry_wsum"] += rw * entry_cents
             settled_at = float(r.get("settled_at") or now)
