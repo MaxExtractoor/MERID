@@ -1287,7 +1287,14 @@ def _validate_record_invariants(record: Dict[str, Any]) -> List[str]:
                     f"side_bound({bound}) - best_ev({best_ev})"
                 )
         if code == "NO_POSITIVE_EXECUTABLE_EDGE" and best_ev is not None:
-            if float(best_ev) > 0.05:
+            # 2026-11-19: cost_basis_override_* deliberately assigns this
+            # code when the candidate clears the dynamic edge bound but the
+            # stricter all-in cost-basis probability floor vetoes it —
+            # best_executable_ev_cents is measured on the dynamic reserve
+            # stack, so a positive value here is expected, not a mislabel
+            # (observed live: XRP +0.45..+3.47c flagged as invariant spam).
+            _rr = str(record.get("rejection_reason") or "")
+            if float(best_ev) > 0.05 and not _rr.startswith("cost_basis_override"):
                 violations.append(
                     f"NO_POSITIVE_EXECUTABLE_EDGE but best_ev={best_ev} > 0"
                 )
