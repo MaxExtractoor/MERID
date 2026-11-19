@@ -11670,21 +11670,35 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
     maker_net = gross_edge_cents - maker_round_trip_cents
     taker_net = gross_edge_cents - taker_round_trip_cents
 
+    # 2026-11-19 units fix: gross_edge_cents and the round-trip costs above
+    # are ORDER TOTALS that scale with count_value, while _lane_floor_c is a
+    # PER-CONTRACT bound — min_required_edge is a fraction -> cents/contract,
+    # the same basis the decision layer, the intent-contract negative-EV
+    # guard, and _check_fill_adjusted_edge all compare against per-contract
+    # ev_net_cents.  Comparing totals against the unscaled floor held
+    # multi-contract bounded-lane probes to a bound count_value x too strict
+    # (and fractional orders count_value x too loose).  Normalize the nets
+    # to per-contract cents before the floor comparison; for the zero floor
+    # used by non-bounded lanes the sign is unchanged because every cost
+    # term is linear in count_value up to sub-0.01c fee quantization.
+    maker_net_pc = maker_net / count_value
+    taker_net_pc = taker_net / count_value
+
     # Determine the cheapest viable role.  For bounded lanes the viability
     # bound is the stamped lane floor (negative), not breakeven — the lane
     # has already authorized the probe's worst-case cost upstream.
-    if taker_net > _lane_floor_c and (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
+    if taker_net_pc > _lane_floor_c and (getattr(intent, "aggressiveness", 0.0) or 0.0) > 0.0:
         # Upstream already requested taker and it pays.
         intent.policy_mode = "AGGRESSIVE_CONVICTION"
         return None
 
-    if maker_net > _lane_floor_c:
+    if maker_net_pc > _lane_floor_c:
         # Passive/maker is the default; the policy engine will be forced to
         # maker-only NEUTRAL_MM below.
         intent.policy_mode = "NEUTRAL_MM"
         return None
 
-    if taker_net > _lane_floor_c:
+    if taker_net_pc > _lane_floor_c:
         # Taker is viable even if it was not requested, but we still prefer
         # maker when maker is also viable. Since maker is not viable, allow
         # taker only if the strategy explicitly wants aggressiveness; otherwise
@@ -11695,7 +11709,8 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
 
     logger.info(
         "[NET-OF-COST] REJECTED ticker=%s price=%dc count=%s edge_pct=%.2f "
-        "gross_edge=%.2fc taker_net=%.2fc maker_net=%.2fc",
+        "gross_edge=%.2fc taker_net=%.2fc maker_net=%.2fc "
+        "maker_net_pc=%.2fc taker_net_pc=%.2fc floor_pc=%.2fc",
         intent.ticker,
         price_cents,
         count,
@@ -11703,6 +11718,9 @@ def _round_trip_net_of_cost_gate(intent: OrderIntent) -> Optional[str]:
         gross_edge_cents,
         taker_net,
         maker_net,
+        maker_net_pc,
+        taker_net_pc,
+        _lane_floor_c,
     )
     return (
         f"net_of_cost:edge={edge_pct:.2f}% "
