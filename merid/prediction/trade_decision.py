@@ -643,6 +643,51 @@ MERID_MARKET_ANCHOR_MIN_W = float(os.environ.get("MERID_MARKET_ANCHOR_MIN_W", "0
 MERID_MARKET_ANCHOR_MAX_W = float(os.environ.get("MERID_MARKET_ANCHOR_MAX_W", "0.85"))
 MERID_MARKET_ANCHOR_WINDOW_S = float(os.environ.get("MERID_MARKET_ANCHOR_WINDOW_S", "900"))
 
+
+# 2026-11-19: staleness-conditioned market precision.  The anchor premise
+# ("arbitraged book = calibrated") holds only while the quote is fresh and
+# price discovery is tight.  A stale quote or wide spread means the book
+# has not repriced to current spot — exactly when raw-model deviation is
+# signal rather than noise (forensics 2026-11-18: tail deviations beat the
+# market +3.8% realized).  Scale market authority multiplicatively:
+# quote age halves weight each MERID_ANCHOR_STALENESS_HALFLIFE_MS;
+# spread wider than MERID_ANCHOR_SPREAD_REF_C scales linearly.  Never below
+# MERID_ANCHOR_STALENESS_FLOOR — a stale prior still beats none.
+# Mode (MERID_ANCHOR_STALENESS_MODE): off | shadow (default — indicators
+# only, no behavior change) | live.
+def _anchor_staleness_mode() -> str:
+    m = os.environ.get("MERID_ANCHOR_STALENESS_MODE", "shadow").strip().lower()
+    return m if m in ("off", "shadow", "live") else "off"
+
+
+def _anchor_staleness_factor(
+    quote_age_ms: Optional[float],
+    spread_c: Optional[float],
+) -> float:
+    f = 1.0
+    if quote_age_ms is not None:
+        try:
+            age = max(0.0, float(quote_age_ms))
+        except (TypeError, ValueError):
+            age = 0.0
+        half_ms = max(
+            float(os.environ.get("MERID_ANCHOR_STALENESS_HALFLIFE_MS", "3000")),
+            1.0,
+        )
+        f *= 0.5 ** (age / half_ms)
+    if spread_c is not None:
+        try:
+            spr = float(spread_c)
+        except (TypeError, ValueError):
+            spr = 0.0
+        if spr > 0:
+            ref = max(
+                float(os.environ.get("MERID_ANCHOR_SPREAD_REF_C", "4.0")), 0.1
+            )
+            f *= min(1.0, ref / max(spr, ref))
+    floor = float(os.environ.get("MERID_ANCHOR_STALENESS_FLOOR", "0.25"))
+    return max(floor, min(1.0, f))
+
 # 2026-09-23: Settlement-convergence lane.  Kalshi crypto 15m binaries settle
 # on the mean of 60 one-second CF RTI samples in the final minute.  Once most
 # of those samples are banked the outcome is near-determined while the order
@@ -4410,6 +4455,18 @@ def _compute_trade_decision_impl(
         ):
             _n_rem = float(getattr(settlement_distribution, "remaining_count", 60) or 0)
             market_anchor_weight *= max(0.0, min(1.0, _n_rem / 60.0))
+        # Staleness-conditioned precision (see _anchor_staleness_factor).
+        # shadow mode (default) records the factor without applying it so the
+        # counterfactual weight can be audited before going live.
+        _stale_f = _anchor_staleness_factor(
+            quote_age_ms=quote_age_ms,
+            spread_c=(yes_ask_cents - yes_bid_cents),
+        )
+        indicators["anchor_staleness_factor"] = _stale_f
+        indicators["anchor_staleness_mode"] = _anchor_staleness_mode()
+        indicators["anchor_weight_pre_staleness"] = market_anchor_weight
+        if _anchor_staleness_mode() == "live":
+            market_anchor_weight *= _stale_f
         if market_anchor_weight > 0.0:
             def _logit(x: float) -> float:
                 x = max(1e-6, min(1.0 - 1e-6, x))
