@@ -321,6 +321,17 @@ class EvidenceOutcomeStore:
         sql += " ORDER BY settled_at"
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         for r in rows:
+            # Read-time canonical override: grouping identity is
+            # derived from authoritative ticker+side columns, not the
+            # stored mkey.  A v1 writer (pre-migration code) can still
+            # append bare-ticker fill keys after the store version
+            # marker advances; overriding here keeps every consumer
+            # on canonical keys regardless of mixed-version writes.
+            # The stored value is preserved as provenance.
+            _tk, _sd = r.get("ticker"), r.get("side")
+            if _tk and _sd:
+                r["stored_mkey"] = r.get("mkey")
+                r["mkey"] = f"{_tk}|{_sd}"
             if r.get("src") == "fill":
                 observed = r.get("fill_px_cents") is not None
                 # ENTER decisions carry no order-type field, so an

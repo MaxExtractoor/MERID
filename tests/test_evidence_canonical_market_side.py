@@ -361,6 +361,30 @@ def test_ebias_tagged_counterfactual_and_excluded_from_cells(tmp_path,
     assert eb[0]["execution_observed"] is False
     sconn.close()
 
+def test_read_since_recanonicalizes_mixed_version_writes(tmp_path, audit_db):
+    """A v1 writer appending bare-ticker fill keys after migration must not
+    reintroduce split normalization groups: read_since derives mkey from
+    authoritative ticker+side columns and preserves the stored value as
+    provenance."""
+    now = time.time()
+    store = EvidenceOutcomeStore(store_path_for(audit_db))
+    sconn = store._connect()
+    # Simulate a post-migration v1 write: stored mkey is the OLD bare
+    # ticker form even though the store version marker is already v2.
+    sconn.execute(
+        "INSERT INTO evidence_outcome_rows (row_key, src, asset, side,"
+        " ticker, decision_id, mkey, entry_cents, settled_yes,"
+        " settled_at, decision_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("legacy1", "fill", "BTC", "yes", "KXBTC15M-leg", "leg1",
+         "KXBTC15M-leg", 50.0, 1, now - 100, now - 100),
+    )
+    sconn.commit()
+    rows = store.read_since(sconn, now - 86400)
+    r = next(x for x in rows if x["decision_id"] == "leg1")
+    assert r["mkey"] == "KXBTC15M-leg|yes"       # canonical at read time
+    assert r["stored_mkey"] == "KXBTC15M-leg"    # stored provenance kept
+    sconn.close()
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-x", "-q"]))
