@@ -1972,3 +1972,11 @@ discrete variance schedule adds real information.  This measures raw
 forecast quality on the settlement instrument, NOT edge over market mid
 (book history isn't in the tick DB — the forecast_audit remains the
 model-vs-market verdict, currently FAIL overall).
+
+`walk_forward_analysis` now populates the DSR leg honestly: every
+(window × param_grid) train evaluation's Sharpe is pooled into
+`BacktestReport.trial_sharpes` (annualized→per-period via the module's
+sqrt(252) daily convention) with `n_trials=len(param_grid)` — the WFA
+param search is exactly the selection process DSR exists to deflate.
+Single-run producers (`kalshi_backtest.run_backtest_2y`) honestly report
+n_trials=1.

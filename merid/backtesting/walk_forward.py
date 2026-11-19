@@ -77,6 +77,11 @@ def walk_forward_analysis(
 
     windows: List[Dict] = []
     oos_returns: List[float] = []
+    # 2026-11-19: honest trial accounting for the DSR promotion leg — every
+    # (window, param) train evaluation is a real backtest run; pooled for the
+    # empirical trial-Sharpe variance, converted annualized -> per-period
+    # (daily bars, sqrt(252) convention used throughout this module).
+    trial_sharpes_annualized: List[float] = []
     i = 0
 
     while i + train_bars + test_bars <= n:
@@ -104,6 +109,7 @@ def walk_forward_analysis(
                 continue
 
             sharpe = (mean / std) * math.sqrt(252)
+            trial_sharpes_annualized.append(sharpe)
             if sharpe > best_sharpe:
                 best_sharpe = sharpe
                 best_params = params
@@ -185,6 +191,11 @@ def walk_forward_analysis(
         sharpe=oos_sharpe,
         trades=trades,
         years=years,
+        n_trials=len(param_grid),
+        trial_sharpes=(
+            [s / math.sqrt(252) for s in trial_sharpes_annualized]
+            if trial_sharpes_annualized else None
+        ),
     )
 
     logger.info(
