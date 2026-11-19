@@ -33,12 +33,28 @@ def _snapshot(ticker, yes_levels, no_levels):
     }
 
 
+def _apply_snapshot_sync(store, msg, via="test"):
+    """Apply a snapshot through the public enqueue path, then drain the
+    per-ticker queue synchronously.
+
+    Since 2026-11-04 ``apply_orderbook_message`` routes ALL snapshots through
+    ``_enqueue_snapshot`` (per-ticker FIFO vs deltas) and returns ``None``;
+    the batch worker applies them asynchronously.  Tests call the same drain
+    the worker submits to ``_drain_executor`` so assertions stay deterministic
+    without weakening the production path.
+    """
+    store.apply_orderbook_message(msg, via=via)
+    ticker = msg.get("market_ticker") or msg.get("ticker")
+    store._drain_ticker_delta_batch(ticker)
+    return store._states.get(ticker)
+
+
 def test_healthy_snapshot_is_executable(store):
     """A non-crossed, dual YES/NO snapshot produces an executable market."""
     ticker = "KXBTC15M-TEST-001"
     msg = _snapshot(ticker, yes_levels=[(0.40, 10), (0.35, 5)], no_levels=[(0.59, 10), (0.55, 5)])
 
-    state = store.apply_orderbook_message(msg, via="test")
+    state = _apply_snapshot_sync(store, msg, via="test")
 
     assert state is not None
     assert state.ticker == ticker
@@ -56,7 +72,7 @@ def test_duality_violation_blocks_then_clean_snapshot_recovers(store):
 
     # Gap of 90c (5 + 5 = 10) exceeds the configured duality tolerance (80c).
     bad = _snapshot(ticker, yes_levels=[(0.05, 10)], no_levels=[(0.05, 10)])
-    state = store.apply_orderbook_message(bad, via="test")
+    state = _apply_snapshot_sync(store, bad, via="test")
 
     assert state is not None
     assert state.executable is False
@@ -65,7 +81,7 @@ def test_duality_violation_blocks_then_clean_snapshot_recovers(store):
 
     # Clean snapshot restores executable state.
     good = _snapshot(ticker, yes_levels=[(0.40, 10), (0.35, 5)], no_levels=[(0.59, 10), (0.55, 5)])
-    state = store.apply_orderbook_message(good, via="test")
+    state = _apply_snapshot_sync(store, good, via="test")
 
     assert state is not None
     assert state.book_initialized is True
@@ -80,7 +96,7 @@ def test_crossed_book_blocks_and_clean_snapshot_recovers(store):
 
     # Crossed: YES bid 60 >= YES ask 50 (from NO bid 50)
     crossed = _snapshot(ticker, yes_levels=[(0.60, 10)], no_levels=[(0.50, 10)])
-    state = store.apply_orderbook_message(crossed, via="test")
+    state = _apply_snapshot_sync(store, crossed, via="test")
 
     assert state is not None
     assert state.executable is False
@@ -90,7 +106,7 @@ def test_crossed_book_blocks_and_clean_snapshot_recovers(store):
 
     # Clean snapshot resets the violation and restores executable state.
     good = _snapshot(ticker, yes_levels=[(0.40, 10)], no_levels=[(0.59, 10)])
-    state = store.apply_orderbook_message(good, via="test")
+    state = _apply_snapshot_sync(store, good, via="test")
 
     assert state is not None
     assert state.data_quality == "GOOD"
@@ -105,7 +121,7 @@ def test_empty_snapshot_initializes_but_not_executable(store):
     ticker = "KXBTC15M-TEST-004"
     empty = _snapshot(ticker, yes_levels=[], no_levels=[])
 
-    state = store.apply_orderbook_message(empty, via="test")
+    state = _apply_snapshot_sync(store, empty, via="test")
 
     assert state is not None
     assert state.book_initialized is True
@@ -126,7 +142,7 @@ def test_empty_snapshot_initializes_but_not_executable(store):
 def _seed_ws_verified(store, ticker):
     """Apply a WS snapshot (40/41) and mark the book fully WS-verified."""
     snap = _snapshot(ticker, yes_levels=[(0.40, 10)], no_levels=[(0.59, 10)])
-    store.apply_orderbook_message(snap, via="bridge_queue")
+    _apply_snapshot_sync(store, snap, via="test")
     st = store._states[ticker]
     st.snapshot_complete = True
     st.live_sequence_confirmed = True
@@ -141,7 +157,7 @@ def _rest_poll(store, ticker, *, yes_bid, no_bid):
     msg = _snapshot(
         ticker, yes_levels=[(yes_bid, 10)], no_levels=[(no_bid, 10)]
     )
-    return store.apply_orderbook_message(msg, via="rest_polling")
+    return _apply_snapshot_sync(store, msg, via="rest_polling")
 
 
 def _drive_ws_delta(store, ticker, *, side="yes", price_cents=40, size_delta=1):
@@ -208,8 +224,11 @@ def test_ws_deltas_require_parity_streak_to_reclaim_from_rest(store):
 
     # The shared book now holds REST's levels; deltas that keep the
     # delta-derived BBO in parity (60/61) build the promotion streak.
+    # NOTE: the streak may already be >0 — the REST poll's own post-drain
+    # parity evaluation counts once before any test delta — so assertions
+    # are threshold-relative, not absolute delta counts.
     needed = ms_mod._WS_PROMOTE_STREAK
-    for i in range(needed - 1):
+    for i in range(needed + 2):
         _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
         assert st.quote_owner == "REST_VERIFIED_DEGRADED", (
             f"WS reclaimed after only {i + 1} in-parity deltas"
@@ -217,11 +236,14 @@ def test_ws_deltas_require_parity_streak_to_reclaim_from_rest(store):
         assert st.degraded_mode is True
         assert st.best_bid_cents == 60
         assert st.best_ask_cents == 61
+        if store._ws_promote_streak.get(ticker, 0) >= needed:
+            break
+    else:
+        raise AssertionError("promote streak never reached threshold")
 
     # Streak alone is not enough: parity must also be sustained for
     # MERID_WS_PROMOTE_MIN_S before WS reclaims the quote.
-    _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
-    assert store._ws_promote_streak[ticker] == needed
+    assert store._ws_promote_streak[ticker] >= needed
     assert st.quote_owner == "REST_VERIFIED_DEGRADED"
 
     # Simulate the parity window having been held long enough.
@@ -277,9 +299,10 @@ def test_divergent_delta_resets_promote_streak(store):
     _rest_poll(store, ticker, yes_bid=0.60, no_bid=0.39)
     assert st.quote_owner == "REST_VERIFIED_DEGRADED"
 
+    streak_base = store._ws_promote_streak.get(ticker, 0)
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
-    assert store._ws_promote_streak[ticker] == 2
+    assert store._ws_promote_streak[ticker] == streak_base + 2
 
     # Move the delta-derived book to a divergent-but-valid 50/51 market:
     # remove REST's 60 bid, add a 50 bid and a 49 NO bid (ask=51).  The book
@@ -298,9 +321,13 @@ def test_divergent_delta_resets_promote_streak(store):
     _drive_ws_delta(store, ticker, side="no", price_cents=49, size_delta=-10)
     assert st.quote_owner == "REST_VERIFIED_DEGRADED"
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=10)
-    for i in range(ms_mod._WS_PROMOTE_STREAK - 2):
+    for i in range(ms_mod._WS_PROMOTE_STREAK + 2):
         _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)
         assert st.quote_owner == "REST_VERIFIED_DEGRADED"
+        if store._ws_promote_streak.get(ticker, 0) >= ms_mod._WS_PROMOTE_STREAK:
+            break
+    else:
+        raise AssertionError("promote streak never rebuilt to threshold")
     # Parity streak rebuilt; simulate the held window, then promote.
     store._ws_parity_since[ticker] = time.monotonic() - (ms_mod._WS_PROMOTE_MIN_S + 0.1)
     _drive_ws_delta(store, ticker, side="yes", price_cents=60, size_delta=1)

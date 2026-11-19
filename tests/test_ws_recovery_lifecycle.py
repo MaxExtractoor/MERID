@@ -39,17 +39,28 @@ def _snap(ticker, yes, no, seq=None):
     return m
 
 
+def _apply_snapshot_sync(store, msg, via="test"):
+    """Enqueue via the public API, then drain the per-ticker queue
+    synchronously (same drain the batch worker submits to its executor).
+
+    Since 2026-11-04 ``apply_orderbook_message`` returns ``None`` for every
+    snapshot and applies it asynchronously; tests drain explicitly so
+    assertions stay deterministic.
+    """
+    store.apply_orderbook_message(msg, via=via)
+    ticker = msg.get("market_ticker") or msg.get("ticker")
+    store._drain_ticker_delta_batch(ticker)
+    return store._states.get(ticker)
+
+
 class TestRolloverIsolation:
     def test_rollover_windows_have_independent_books(self, store):
         """A new contract window must not inherit the prior window's book."""
         old = "KXBTC15M-26NOV192300-00"
         new = "KXBTC15M-26NOV192315-15"
-        r1 = store.apply_orderbook_message(_snap(old, [(0.60, 10)], [(0.40, 10)]), via="test")
-        if r1 is None:
-            pytest.skip("store eligibility layer rejects non-catalog test markets "
-                        "(pre-existing fixture gap; see test_market_state_recovery_state_machine)")
-        r2 = store.apply_orderbook_message(_snap(new, [(0.55, 8)], [(0.45, 8)]), via="test")
-        assert r2 is not None
+        r1 = _apply_snapshot_sync(store, _snap(old, [(0.60, 10)], [(0.40, 10)]), via="test")
+        r2 = _apply_snapshot_sync(store, _snap(new, [(0.55, 8)], [(0.45, 8)]), via="test")
+        assert r1 is not None and r2 is not None
 
         ob_new = store._ob.get_book(new)
         ob_old = store._ob.get_book(old)
@@ -91,15 +102,13 @@ class TestDeterminedMarketClearsBook:
         accepted via the sequenced WS path; REST/bootstrap retains the
         empty-book rejection policy."""
         ticker = "KXXRP15M-26NOV192300-002"
-        r = store.apply_orderbook_message(_snap(ticker, [(0.70, 20)], [(0.30, 20)]), via="test")
-        if r is None:
-            pytest.skip("store eligibility layer rejects non-catalog test markets "
-                        "(pre-existing fixture gap; see test_market_state_recovery_state_machine)")
+        r = _apply_snapshot_sync(store, _snap(ticker, [(0.70, 20)], [(0.30, 20)]), via="test")
+        assert r is not None
         ob = store._ob.get_book(ticker)
         assert ob.yes_levels
 
         # REST-provenance empty snapshot must NOT wipe a populated book.
-        store.apply_orderbook_message(_snap(ticker, [], []), via="rest_snapshot")
+        _apply_snapshot_sync(store, _snap(ticker, [], []), via="rest_polling")
         assert ob.yes_levels, "REST empty snapshot wiped populated book"
 
 
@@ -108,14 +117,12 @@ class TestLateRestVsNewerWs:
         """A REST snapshot arriving after a WS snapshot must not present
         REST-derived prices as fresh WS-verified state."""
         ticker = "KXSOL15M-26NOV192300-00"
-        state_ws = store.apply_orderbook_message(
-            _snap(ticker, [(0.62, 10)], [(0.38, 10)]), via="test")
-        if state_ws is None:
-            pytest.skip("store eligibility layer rejects non-catalog test markets "
-                        "(pre-existing fixture gap; see test_market_state_recovery_state_machine)")
+        state_ws = _apply_snapshot_sync(
+            store, _snap(ticker, [(0.62, 10)], [(0.38, 10)]), via="test")
+        assert state_ws is not None
 
-        state_after = store.apply_orderbook_message(
-            _snap(ticker, [(0.50, 10)], [(0.50, 10)]), via="rest_snapshot")
+        state_after = _apply_snapshot_sync(
+            store, _snap(ticker, [(0.50, 10)], [(0.50, 10)]), via="rest_polling")
         assert state_after is not None
         src = getattr(state_after, "data_source", None) or getattr(state_after, "quote_owner", None)
         # REST ingestion is allowed, but provenance must reflect REST,
