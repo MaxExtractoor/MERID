@@ -531,6 +531,16 @@ def build_asset_record(
         "fe_final_p_no_for_no": _first_float(
             _resolve(candidate, decision, ["fe_final_p_no_for_no"], ["fe_final_p_no_for_no"])
         ),
+        # 2026-11-19 coherence telemetry
+        "probability_complement_residual": _first_float(
+            _resolve(candidate, decision, ["probability_complement_residual"], ["probability_complement_residual"])
+        ),
+        "probability_semantics": _resolve(
+            candidate, decision, ["probability_semantics"], ["probability_semantics"]
+        ),
+        "both_sides_positive_net_edge": _resolve(
+            candidate, decision, ["both_sides_positive_net_edge"], ["both_sides_positive_net_edge"]
+        ),
         "tail_calibration_yes_applied": _resolve(
             candidate, decision, ["tail_calibration_yes_applied"], ["tail_calibration_yes_applied"]
         ),

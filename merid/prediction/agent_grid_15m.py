@@ -13732,6 +13732,10 @@ class LeanAgent15m:
                 "fe_post_stream_p_no_for_no": _ind.get("fe_post_stream_p_no_for_no"),
                 "fe_final_p_yes": _ind.get("fe_final_p_yes"),
                 "fe_final_p_no_for_no": _ind.get("fe_final_p_no_for_no"),
+                # 2026-11-19 coherence telemetry
+                "probability_complement_residual": _ind.get("probability_complement_residual"),
+                "probability_semantics": _ind.get("probability_semantics"),
+                "both_sides_positive_net_edge": _ind.get("both_sides_positive_net_edge"),
                 # 2026-10-24 (Phase-A ledger): EdgeBreakdown cost components —
                 # this row is the sole conduit into decision_record's
                 # `candidate`, so net_edge = gross - Σcomponents reconciles.

@@ -4715,6 +4715,16 @@ def _compute_trade_decision_impl(
     # deviation guard, and edge gates below never modify them again.
     indicators["fe_final_p_yes"] = p_yes_for_yes
     indicators["fe_final_p_no_for_no"] = p_no_for_no
+    # 2026-11-19 (coherence telemetry): the per-side calibration stack —
+    # independent tail curves plus tighten-only streaming bounds applied
+    # after EPC — can leave the two candidates' final probabilities
+    # non-complementary.  Record the residual and label the semantics:
+    # these are side-calibrated bounded estimates, not a guaranteed
+    # coherent forecast pair.
+    indicators["probability_complement_residual"] = (
+        float(p_yes_for_yes) + float(p_no_for_no) - 1.0
+    )
+    indicators["probability_semantics"] = "side_calibrated_bounds"
 
     # 2026-10-15 (FIX 15): calibration-drift alarm.  A cell whose CUSUM of
     # (claim - outcome) trips the threshold carries systematic overconfidence
@@ -6263,6 +6273,13 @@ def _compute_trade_decision_impl(
             )
 
     best_side, best_net_edge, best_reason = _select_best_side(yes_breakdown, no_breakdown)
+    # 2026-11-19 (coherence telemetry): flag evaluations where BOTH sides
+    # cleared positive net edge — possible only under non-complementary
+    # per-side probability claims or inconsistent quote/cost inputs.
+    indicators["both_sides_positive_net_edge"] = bool(
+        float(yes_breakdown.net_edge) > 0.0
+        and float(no_breakdown.net_edge) > 0.0
+    )
     # Best-side executable economics snapshot: the single line that separates
     # "no positive edge exists" from "edge exists but the reserve ate it".
     if best_side is not None:
