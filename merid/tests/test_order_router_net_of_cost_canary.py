@@ -97,10 +97,22 @@ class TestNetOfCostCanary:
         assert reason and "stale_book" in reason
 
     def test_locked_book_rejects(self):
-        self._market_state = self._state(best_bid_cents=52, best_ask_cents=48)
+        # kalshi_15m_thresholds.yaml sets duality_tolerance_cents=80 for
+        # thin 15m crypto books; only a cross beyond that rejects.
+        self._market_state = self._state(best_bid_cents=95, best_ask_cents=10)
         intent = self._intent(edge_pct=3.0)
         reason = _round_trip_net_of_cost_gate(intent)
-        assert reason and "locked_or_crossed_book" in reason
+        assert reason and "crossed_book" in reason
+
+    def test_cross_within_duality_tolerance_proceeds(self):
+        # Sub-tolerance crosses are intentionally tolerated: Kalshi YES/NO
+        # books lag each other during volatile 15m windows, so the gate
+        # falls through to economics instead of rejecting on book shape.
+        self._market_state = self._state(best_bid_cents=60, best_ask_cents=50)
+        intent = self._intent(edge_pct=3.0)
+        reason = _round_trip_net_of_cost_gate(intent)
+        assert reason is None
+        assert intent.policy_mode == "NEUTRAL_MM"
 
     def test_exit_orders_bypass_gate(self):
         self._market_state = None
