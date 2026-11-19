@@ -1,0 +1,545 @@
+{
+  "coverage": {
+    "src|A_mechanistic_raw": {
+      "n_rows": 259,
+      "n_settlement_active": 259,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "src|B_production_cal": {
+      "n_rows": 259,
+      "n_settlement_active": null,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv|A_mechanistic_raw": {
+      "n_rows": 259,
+      "n_settlement_active": 259,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv|B_production_cal": {
+      "n_rows": 259,
+      "n_settlement_active": null,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv_p500|A_mechanistic_raw": {
+      "n_rows": 259,
+      "n_settlement_active": 259,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv_p500|B_production_cal": {
+      "n_rows": 259,
+      "n_settlement_active": null,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv_p1000|A_mechanistic_raw": {
+      "n_rows": 259,
+      "n_settlement_active": 259,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    },
+    "recv_p1000|B_production_cal": {
+      "n_rows": 259,
+      "n_settlement_active": null,
+      "n_with_p0": 259,
+      "n_feature_complete": 255,
+      "n_days": 2,
+      "n_tickers": 72
+    }
+  },
+  "folds": [
+    {
+      "anchor": "src",
+      "experiment": "A_mechanistic_raw",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.46956892609368334,
+          "brier": 0.1607739694920383
+        },
+        "P0_cal": {
+          "log_loss": 0.46928348848172047,
+          "brier": 0.16440790211453377
+        },
+        "P1": {
+          "log_loss": 0.7301550032875372,
+          "brier": 0.21509831129869053,
+          "n_test": 28,
+          "mean_p": 0.3627,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.6724600846004598,
+          "brier": 0.2214184721133726,
+          "n_test": 28,
+          "mean_p": 0.3902,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.6208498494922684,
+          "brier": 0.18605948162453276,
+          "n_test": 28,
+          "mean_p": 0.3694,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5105659430541939,
+          "brier": 0.18148975906022338,
+          "n_test": 28,
+          "mean_p": 0.394,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.6362800659635177,
+          "brier": 0.22168893381469892,
+          "n_test": 19,
+          "mean_p": 0.3318,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "src",
+      "experiment": "B_production_cal",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.47641754158772004,
+          "brier": 0.16706604396273367
+        },
+        "P0_cal": {
+          "log_loss": 0.4858064857187822,
+          "brier": 0.17269455183956253
+        },
+        "P1": {
+          "log_loss": 0.7329053605364881,
+          "brier": 0.21694351391304492,
+          "n_test": 28,
+          "mean_p": 0.362,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.6726999411745841,
+          "brier": 0.22126239135754375,
+          "n_test": 28,
+          "mean_p": 0.3887,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.611894083192135,
+          "brier": 0.18420390456217597,
+          "n_test": 28,
+          "mean_p": 0.3666,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.509693357209117,
+          "brier": 0.18221639752293564,
+          "n_test": 28,
+          "mean_p": 0.384,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.6541927882168123,
+          "brier": 0.22922343456206673,
+          "n_test": 19,
+          "mean_p": 0.3325,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv",
+      "experiment": "A_mechanistic_raw",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.46956892609368334,
+          "brier": 0.1607739694920383
+        },
+        "P0_cal": {
+          "log_loss": 0.46928348848172047,
+          "brier": 0.16440790211453377
+        },
+        "P1": {
+          "log_loss": 0.7490410980998102,
+          "brier": 0.2172679874083761,
+          "n_test": 28,
+          "mean_p": 0.3611,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.6591382955191062,
+          "brier": 0.2174477114661493,
+          "n_test": 28,
+          "mean_p": 0.3904,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.6427106625619993,
+          "brier": 0.18740181574851217,
+          "n_test": 28,
+          "mean_p": 0.3661,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.49706464862724237,
+          "brier": 0.17585972803147257,
+          "n_test": 28,
+          "mean_p": 0.3884,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.5984879496595931,
+          "brier": 0.20549562785988415,
+          "n_test": 19,
+          "mean_p": 0.3334,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv",
+      "experiment": "B_production_cal",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.47641754158772004,
+          "brier": 0.16706604396273367
+        },
+        "P0_cal": {
+          "log_loss": 0.4858064857187822,
+          "brier": 0.17269455183956253
+        },
+        "P1": {
+          "log_loss": 0.7460745339221196,
+          "brier": 0.21751008988385184,
+          "n_test": 28,
+          "mean_p": 0.3601,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.6593256798415955,
+          "brier": 0.2173569812920337,
+          "n_test": 28,
+          "mean_p": 0.3889,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.6364380533379836,
+          "brier": 0.1868880154620893,
+          "n_test": 28,
+          "mean_p": 0.3648,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5001515446158739,
+          "brier": 0.17870581246169542,
+          "n_test": 28,
+          "mean_p": 0.3803,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.6130255562064744,
+          "brier": 0.21185887536427486,
+          "n_test": 19,
+          "mean_p": 0.334,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv_p500",
+      "experiment": "A_mechanistic_raw",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.46956892609368334,
+          "brier": 0.1607739694920383
+        },
+        "P0_cal": {
+          "log_loss": 0.46928348848172047,
+          "brier": 0.16440790211453377
+        },
+        "P1": {
+          "log_loss": 0.9700125507707504,
+          "brier": 0.2784601940749883,
+          "n_test": 28,
+          "mean_p": 0.4036,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.646156862964465,
+          "brier": 0.21086070514530778,
+          "n_test": 28,
+          "mean_p": 0.4134,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.7925501693643154,
+          "brier": 0.24822815568579792,
+          "n_test": 28,
+          "mean_p": 0.3922,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5345458001957699,
+          "brier": 0.19389468257761114,
+          "n_test": 28,
+          "mean_p": 0.3754,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.5698182331037945,
+          "brier": 0.17431810175246404,
+          "n_test": 19,
+          "mean_p": 0.3198,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv_p500",
+      "experiment": "B_production_cal",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.47641754158772004,
+          "brier": 0.16706604396273367
+        },
+        "P0_cal": {
+          "log_loss": 0.4858064857187822,
+          "brier": 0.17269455183956253
+        },
+        "P1": {
+          "log_loss": 0.9673731158661875,
+          "brier": 0.2782271130714105,
+          "n_test": 28,
+          "mean_p": 0.4024,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.6478366215189055,
+          "brier": 0.21201231463593426,
+          "n_test": 28,
+          "mean_p": 0.4127,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.7879181721853696,
+          "brier": 0.24845138929381902,
+          "n_test": 28,
+          "mean_p": 0.3913,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5452393425680252,
+          "brier": 0.2000353655524396,
+          "n_test": 28,
+          "mean_p": 0.3682,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.5794293776012353,
+          "brier": 0.1785361617027265,
+          "n_test": 19,
+          "mean_p": 0.3235,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv_p1000",
+      "experiment": "A_mechanistic_raw",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.46956892609368334,
+          "brier": 0.1607739694920383
+        },
+        "P0_cal": {
+          "log_loss": 0.46928348848172047,
+          "brier": 0.16440790211453377
+        },
+        "P1": {
+          "log_loss": 1.0861782202517178,
+          "brier": 0.2968375550874712,
+          "n_test": 28,
+          "mean_p": 0.4194,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.7249360568993307,
+          "brier": 0.23908433863672968,
+          "n_test": 28,
+          "mean_p": 0.4115,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.8758168911188873,
+          "brier": 0.2632666669750882,
+          "n_test": 28,
+          "mean_p": 0.4123,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5619735503328486,
+          "brier": 0.2014536323974339,
+          "n_test": 28,
+          "mean_p": 0.3747,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.6273484570177402,
+          "brier": 0.19594487668487637,
+          "n_test": 19,
+          "mean_p": 0.3057,
+          "base_rate": 0.1579
+        }
+      }
+    },
+    {
+      "anchor": "recv_p1000",
+      "experiment": "B_production_cal",
+      "fold": "pre_2026-11-13__post",
+      "n_train": 227,
+      "n_test": 28,
+      "test_days": [
+        "2026-11-13"
+      ],
+      "variants": {
+        "P0": {
+          "log_loss": 0.47641754158772004,
+          "brier": 0.16706604396273367
+        },
+        "P0_cal": {
+          "log_loss": 0.4858064857187822,
+          "brier": 0.17269455183956253
+        },
+        "P1": {
+          "log_loss": 1.0869941147349924,
+          "brier": 0.29654837558532937,
+          "n_test": 28,
+          "mean_p": 0.4181,
+          "base_rate": 0.1429
+        },
+        "P1_noBTC": {
+          "log_loss": 0.7268619205405006,
+          "brier": 0.2400495570954308,
+          "n_test": 28,
+          "mean_p": 0.4108,
+          "base_rate": 0.1429
+        },
+        "P1_noMkt": {
+          "log_loss": 0.8920061656673764,
+          "brier": 0.26670537639738945,
+          "n_test": 28,
+          "mean_p": 0.4098,
+          "base_rate": 0.1429
+        },
+        "P1_min": {
+          "log_loss": 0.5766183987266297,
+          "brier": 0.20834474685501828,
+          "n_test": 28,
+          "mean_p": 0.3681,
+          "base_rate": 0.1429
+        },
+        "P1_future": {
+          "log_loss": 0.638037423070533,
+          "brier": 0.2000711769162278,
+          "n_test": 19,
+          "mean_p": 0.3094,
+          "base_rate": 0.1579
+        }
+      }
+    }
+  ],
+  "paired": {
+    "A_mechanistic_raw|src|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "B_production_cal|src|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "A_mechanistic_raw|recv|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "B_production_cal|recv|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "A_mechanistic_raw|recv_p500|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "B_production_cal|recv_p500|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "A_mechanistic_raw|recv_p1000|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    },
+    "B_production_cal|recv_p1000|pre_2026-11-13__post": {
+      "n_obs": 28,
+      "comparisons": []
+    }
+  },
+  "n_pred_records": 1496
+}

@@ -1,0 +1,5 @@
+{
+  "failures_plus_errors": null,
+  "updated": "2026-11-19",
+  "note": "Report-only extended-suite ratchet for nightly-soak.yml. Set failures_plus_errors to the not-passing total (failures+errors) observed on a completed run; later runs above it emit a ::warning:: annotation. null = unarmed — the summary still reports observed counts."
+}

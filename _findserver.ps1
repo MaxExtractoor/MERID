@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'uvicorn|main_15m|start_15m' } | Select-Object ProcessId,ParentProcessId,Name,CreationDate,@{n='Cmd';e={$_.CommandLine.Substring(0,[Math]::Min(160,$_.CommandLine.Length))}} | Format-List

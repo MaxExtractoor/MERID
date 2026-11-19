@@ -1,0 +1,160 @@
+{
+  "rti_archive": {
+    "BTC": {
+      "rows": 21782,
+      "first_src_utc": "2026-11-05T19:03:41+00:00",
+      "last_src_utc": "2026-11-13T00:32:16+00:00",
+      "null_recv": 0,
+      "avg_recv_lag_ms": 59.1,
+      "max_recv_lag_ms": 517
+    },
+    "DOGE": {
+      "rows": 21781,
+      "first_src_utc": "2026-11-05T19:03:41+00:00",
+      "last_src_utc": "2026-11-13T00:32:15+00:00",
+      "null_recv": 0,
+      "avg_recv_lag_ms": 57.2,
+      "max_recv_lag_ms": 480
+    },
+    "ETH": {
+      "rows": 21781,
+      "first_src_utc": "2026-11-05T19:03:41+00:00",
+      "last_src_utc": "2026-11-13T00:32:15+00:00",
+      "null_recv": 0,
+      "avg_recv_lag_ms": 58.4,
+      "max_recv_lag_ms": 513
+    },
+    "SOL": {
+      "rows": 21782,
+      "first_src_utc": "2026-11-05T19:03:41+00:00",
+      "last_src_utc": "2026-11-13T00:32:16+00:00",
+      "null_recv": 0,
+      "avg_recv_lag_ms": 58.1,
+      "max_recv_lag_ms": 520
+    },
+    "XRP": {
+      "rows": 21781,
+      "first_src_utc": "2026-11-05T19:03:41+00:00",
+      "last_src_utc": "2026-11-13T00:32:15+00:00",
+      "null_recv": 0,
+      "avg_recv_lag_ms": 57.4,
+      "max_recv_lag_ms": 521
+    },
+    "per_day_rows": {
+      "2026-11-05": 7360,
+      "2026-11-06": 13500,
+      "2026-11-08": 1055,
+      "2026-11-10": 1485,
+      "2026-11-12": 75825,
+      "2026-11-13": 9682
+    }
+  },
+  "rti_window_epoch_s": [
+    1793905421.0,
+    1794529936.0
+  ],
+  "decision_window_epoch_s": [
+    1794512400.0,
+    1794530100.0
+  ],
+  "decision_window_utc": [
+    "2026-11-12T19:40:00+00:00",
+    "2026-11-13T00:35:00+00:00"
+  ],
+  "decisions_total_in_window": 44953,
+  "decisions_by_asset": {
+    "BTC": 9130,
+    "DOGE": 9042,
+    "ETH": 9026,
+    "SOL": 9001,
+    "XRP": 8754
+  },
+  "decisions_by_env_eligibility": [
+    {
+      "record_environment": "production",
+      "is_eligible_for_research": 1,
+      "n": 44953
+    }
+  ],
+  "decisions_by_model_version": [
+    {
+      "model_version": "trade_decision_v2",
+      "n": 41382
+    },
+    {
+      "model_version": "pre_decision_rejection",
+      "n": 3571
+    }
+  ],
+  "decisions_by_config_version": [
+    {
+      "config_version": "d31cdca24741f07910a92134b6bc97f899c901bbc7ddc08a7b5982e8e6cd2451",
+      "n": 41382
+    },
+    {
+      "config_version": "unknown",
+      "n": 3571
+    }
+  ],
+  "decisions_by_outcome": [
+    {
+      "decision": "NO_TRADE",
+      "n": 43624
+    },
+    {
+      "decision": "ENTER",
+      "n": 1329
+    }
+  ],
+  "decisions_per_day": [
+    {
+      "day_utc": "2026-11-12",
+      "n": 38874
+    },
+    {
+      "day_utc": "2026-11-13",
+      "n": 6079
+    }
+  ],
+  "distinct_tickers": 96,
+  "rows_per_candidate_hist": [
+    {
+      "rows_per_candidate": 1,
+      "n_candidates": 3903
+    },
+    {
+      "rows_per_candidate": 2,
+      "n_candidates": 1
+    },
+    {
+      "rows_per_candidate": 3,
+      "n_candidates": 6476
+    },
+    {
+      "rows_per_candidate": 4,
+      "n_candidates": 5405
+    }
+  ],
+  "with_snapshot": 44953,
+  "with_settled_outcome": 44451,
+  "prob_field_coverage": [
+    {
+      "field": "raw_p_yes",
+      "nonnull": 41382
+    },
+    {
+      "field": "calibrated_p_yes",
+      "nonnull": 41382
+    }
+  ],
+  "settlement_reference_values": [
+    {
+      "settlement_reference": "cfb_rti_live",
+      "n": 41382
+    },
+    {
+      "settlement_reference": "unknown",
+      "n": 3571
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "captured_at": "2026-11-02T06:53:14Z",
+  "release_commit": "67cec276",
+  "contract": "canonical-fill-view/1.0",
+  "exchange": {
+    "balance": "{'USD': Decimal('12.6431'), 'locked': Decimal('0')}",
+    "positions": [],
+    "open_orders": []
+  },
+  "live_router_rows_in_db": 24,
+  "total_fills": 1788,
+  "position_exit_state": {
+    "keys": [
+      "schema_version",
+      "updated_at",
+      "records"
+    ],
+    "size": 3
+  },
+  "hydrated": 1788,
+  "superseded_mirror_count": 23,
+  "summary_coverage": {
+    "canonical_contract_version": "canonical-fill-view/1.0",
+    "excluded_fill_count": 25,
+    "provisional_fill_count": 1,
+    "non_execution_fill_count": 346,
+    "total_fills": 1765,
+    "total_fees_usd": 10.47692,
+    "total_realized_pnl_usd": -29.8453
+  },
+  "coverage": {
+    "KXXRP15M-26SEP241000-00": {
+      "verified_record_count": 1,
+      "coverage_status": "conflict_quarantined",
+      "excluded_record_count": 3,
+      "provisional_record_count": 0,
+      "non_execution_record_count": 1,
+      "exclusion_reasons": [
+        "07239d14-c381-b772-f243-b172adc70ea9:excluded",
+        "07239d14-2141-bc25-efda-a17be6a7e15d:excluded",
+        "live_router_01a0d3ae-a040-70bf-9a14-b67ddbf0701b_0:excluded"
+      ],
+      "canonical_contract_version": "canonical-fill-view/1.0"
+    },
+    "KXXRP15M-26SEP251730-30": {
+      "verified_record_count": 0,
+      "coverage_status": "provisional_unverified",
+      "excluded_record_count": 0,
+      "provisional_record_count": 1,
+      "non_execution_record_count": 1,
+      "exclusion_reasons": [
+        "live_router_01a0da6e-97a0-7c36-aae3-69e5e1c04bd9_0:provisional"
+      ],
+      "canonical_contract_version": "canonical-fill-view/1.0"
+    },
+    "KXBTC15M-26SEP182245-45": {
+      "verified_record_count": 4,
+      "coverage_status": "verified_with_excluded_mirrors",
+      "excluded_record_count": 1,
+      "provisional_record_count": 0,
+      "non_execution_record_count": 1,
+      "exclusion_reasons": [
+        "live_router_01a0b78c-1c80-72d5-b066-e4334a66338a_0:excluded"
+      ],
+      "canonical_contract_version": "canonical-fill-view/1.0"
+    }
+  },
+  "residuals": {
+    "KXBTC15M-26SEP182245-45": 0,
+    "KXBTC15M-26SEP210800-00": 0,
+    "KXBTC15M-26SEP210830-30": 0,
+    "KXBTC15M-26SEP210915-15": 0,
+    "KXBTC15M-26SEP230145-45": 0,
+    "KXBTC15M-26SEP230245-45": 0,
+    "KXBTC15M-26SEP232215-15": 0,
+    "KXDOGE15M-26SEP202300-00": 0,
+    "KXDOGE15M-26SEP210730-30": 0,
+    "KXDOGE15M-26SEP210830-30": 0,
+    "KXETH15M-26SEP150445-45": 0,
+    "KXETH15M-26SEP210915-15": 0,
+    "KXSOL15M-26SEP182315-15": 0,
+    "KXSOL15M-26SEP190100-00": 0,
+    "KXSOL15M-26SEP190215-15": 0,
+    "KXSOL15M-26SEP202345-45": 0,
+    "KXSOL15M-26SEP210815-15": 0,
+    "KXSOL15M-26SEP210830-30": 0,
+    "KXSOL15M-26SEP210915-15": 0,
+    "KXXRP15M-26SEP182230-30": 0,
+    "KXXRP15M-26SEP202345-45": 0,
+    "KXXRP15M-26SEP210915-15": 0
+  }
+}

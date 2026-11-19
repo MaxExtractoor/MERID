@@ -1,0 +1,119 @@
+{
+  "book_coverage": {
+    "method": "heartbeat+filesystem (no book_events reads)",
+    "archives": [
+      {
+        "path": "data/kalshi_book_archive_live2.db",
+        "size_mb": 6619.0,
+        "mtime_utc": "2026-11-07T19:37:06.512976+00:00",
+        "wal_size_mb": 71355.2
+      },
+      {
+        "path": "data/kalshi_book_archive_active.db",
+        "size_mb": 10614.7,
+        "mtime_utc": "2026-11-06T10:45:19.944586+00:00",
+        "wal_size_mb": 0.0
+      },
+      {
+        "path": "data/kalshi_book_archive.db",
+        "size_mb": 10614.7,
+        "mtime_utc": "2026-11-06T10:04:34.506859+00:00",
+        "wal_size_mb": 0.0
+      },
+      {
+        "path": "data/preserved_book_archive_2026-11-06/kalshi_book_archive.db",
+        "size_mb": 10614.7,
+        "mtime_utc": "2026-11-06T09:37:08.890810+00:00"
+      },
+      {
+        "path": "data/preserved_book_archive_2026-11-07/kalshi_book_archive_live.db",
+        "size_mb": 3882.6,
+        "mtime_utc": "2026-11-06T15:15:56.792826+00:00"
+      },
+      {
+        "path": "data/preserved_book_archive_2026-11-07/kalshi_book_archive_live2.db",
+        "size_mb": 0.0,
+        "mtime_utc": "2026-11-06T15:38:24.219695+00:00"
+      }
+    ],
+    "heartbeat": {
+      "ts_utc": "2026-11-13T00:53:36.433920+00:00",
+      "collector_instance_id": "col-4236-1794512375",
+      "db_path": "data/kalshi_book_archive_live2.db",
+      "queue_depth": 1500000,
+      "overflow_total": 2100000,
+      "dropped_total": 1289133,
+      "n_tickers_covered": 40,
+      "ticker_range": [
+        "KXBTC15M-26NOV121815-15",
+        "KXXRP15M-26NOV122000-00"
+      ]
+    }
+  },
+  "n_ev_rows": 1036,
+  "depth_field_present": 259,
+  "p_raw|yes": {
+    "n": 259,
+    "mean_net_ev_cents": -0.561,
+    "median_net_ev_cents": -0.587,
+    "pct_net_ev_gt_0": 0.425,
+    "pct_net_ev_gt_1c": 0.32,
+    "pct_net_ev_gt_2c": 0.236,
+    "sum_net_ev_cents_if_all_taken": -145.2
+  },
+  "p_raw|no": {
+    "n": 259,
+    "mean_net_ev_cents": -2.246,
+    "median_net_ev_cents": -1.363,
+    "pct_net_ev_gt_0": 0.378,
+    "pct_net_ev_gt_1c": 0.27,
+    "pct_net_ev_gt_2c": 0.205,
+    "sum_net_ev_cents_if_all_taken": -581.8
+  },
+  "p_cal|yes": {
+    "n": 259,
+    "mean_net_ev_cents": -0.67,
+    "median_net_ev_cents": -0.786,
+    "pct_net_ev_gt_0": 0.336,
+    "pct_net_ev_gt_1c": 0.205,
+    "pct_net_ev_gt_2c": 0.17,
+    "sum_net_ev_cents_if_all_taken": -173.5
+  },
+  "p_cal|no": {
+    "n": 259,
+    "mean_net_ev_cents": -2.137,
+    "median_net_ev_cents": -1.469,
+    "pct_net_ev_gt_0": 0.32,
+    "pct_net_ev_gt_1c": 0.216,
+    "pct_net_ev_gt_2c": 0.154,
+    "sum_net_ev_cents_if_all_taken": -553.6
+  },
+  "by_checkpoint_p_cal": {
+    "h600": {
+      "n": 144,
+      "mean_net_ev_cents": -2.119,
+      "pct_gt_1c": 0.139
+    },
+    "h300": {
+      "n": 142,
+      "mean_net_ev_cents": -1.459,
+      "pct_gt_1c": 0.141
+    },
+    "h120": {
+      "n": 132,
+      "mean_net_ev_cents": -0.975,
+      "pct_gt_1c": 0.265
+    },
+    "h60": {
+      "n": 100,
+      "mean_net_ev_cents": -0.859,
+      "pct_gt_1c": 0.34
+    }
+  },
+  "caveats": [
+    "Top-of-book 1-contract indicative EV; no depth walk, no fill model, no reserves/slippage beyond the exact entry fee.",
+    "Settlement pays $1/$0 with no exit fee assumed (verify contract terms).",
+    "Snapshot asks are decision-time quotes; staleness = book_age_ms.",
+    "Shadow-model EV comparison requires per-row shadow probabilities \u2014 the offline screen did not persist them; the prospective lane must emit p_shadow per eval to enable this join."
+  ]
+}
