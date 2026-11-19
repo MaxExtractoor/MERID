@@ -258,31 +258,42 @@ def _integrity_for(
 def _murphy_decomposition(
     probs: np.ndarray, y: np.ndarray, n_bins: int = 10
 ) -> Dict[str, Any]:
-    """Murphy (1973) Brier decomposition over fixed-width probability bins.
+    """Murphy (1973) Brier decomposition over equal-frequency probability bins.
 
     ``brier ~= reliability - resolution + uncertainty`` — approximate when
-    forecasts vary within a bin (exact only for per-value bins).  REL is
-    the calibration error (lower is better); RES is discriminative power
-    (higher is better); UNC depends only on the outcome base rate.  Splits
-    a FAIL verdict into "miscalibrated — potentially fixable by
-    recalibration" vs "no resolution — structurally redundant with the
-    market".
+    forecasts vary within a bin (exact only for per-value bins; the
+    Stephenson-Coelho-Jolliffe WBV/WBC correction terms apply to binned
+    continuous forecasts).  REL is the calibration error (lower is better);
+    RES is discriminative power (higher is better); UNC depends only on the
+    outcome base rate.  Splits a FAIL verdict into "miscalibrated —
+    potentially fixable by recalibration" vs "no resolution — structurally
+    redundant with the market".
+
+    Bins are equal-frequency (quantile) on the forecast values, per standard
+    reliability-diagram practice: forecast probabilities cluster near the
+    extremes, so fixed-width bins leave most bins empty and a few huge —
+    quantile bins keep every bin populated.  Tied forecast values are kept
+    in one bin by deduplicating quantile edges.
     """
     n = int(probs.size)
     if n == 0:
         return {"n": 0}
     y = np.asarray(y, dtype=float)
-    p_clip = np.clip(np.asarray(probs, dtype=float), 0.0, 1.0)
+    probs_arr = np.asarray(probs, dtype=float)
+    p_clip = np.clip(probs_arr, 0.0, 1.0)
     ybar = float(y.mean())
     unc = ybar * (1.0 - ybar)
-    bs = float(np.mean((np.asarray(probs, dtype=float) - y) ** 2))
+    bs = float(np.mean((probs_arr - y) ** 2))
     rel = res = 0.0
     nb = 0
     bin_rows: List[Dict[str, Any]] = []
-    edges = np.linspace(0.0, 1.0, n_bins + 1)
-    for k in range(n_bins):
+    # Equal-frequency edges spanning [0,1]; dedupe so identical forecast
+    # values never split across bins (reliability-diagram convention).
+    qs = np.linspace(0.0, 1.0, n_bins + 1)
+    edges = np.unique(np.concatenate(([0.0], np.quantile(p_clip, qs), [1.0])))
+    for k in range(len(edges) - 1):
         lo, hi = float(edges[k]), float(edges[k + 1])
-        if k == n_bins - 1:
+        if k == len(edges) - 2:
             m = (p_clip >= lo) & (p_clip <= hi)
         else:
             m = (p_clip >= lo) & (p_clip < hi)

@@ -8,8 +8,9 @@ evolve system behaviour across phases.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,12 @@ class BacktestReport:
     Richer than StrategyStats: includes equity_curve and raw returns so
     positive-expectancy can be verified directly from the run output.
     Produced by merid/backtesting/kalshi_backtest.run_backtest_2y().
+
+    ``n_trials`` / ``trial_sharpes`` feed the Deflated Sharpe Ratio check in
+    validate_before_lift: the count (or per-trial Sharpes) of every variant
+    tried to produce this report — winners and abandoned losers alike.  A
+    single-run report honestly reports n_trials=1 (DSR reduces to the
+    probabilistic Sharpe vs zero).
     """
     equity_curve: List[float]
     returns: List[float]
@@ -187,6 +194,36 @@ class BacktestReport:
     sharpe: float
     trades: int
     years: float
+    n_trials: int = 1
+    trial_sharpes: Optional[List[float]] = None
+
+
+# 2026-11-19: Deflated-Sharpe promotion floor (Bailey & Lopez de Prado 2014).
+# A Sharpe selected as the best of N trials is inflated by construction;
+# the gate requires P(true SR > expected-max-under-null) >= this threshold.
+# Env override for experiments; 0 disables the DSR leg entirely.
+_PROMOTION_DSR_MIN_DEFAULT = 0.95
+
+
+def _promotion_dsr_min() -> float:
+    try:
+        return float(os.environ.get("MERID_PROMOTION_DSR_MIN", _PROMOTION_DSR_MIN_DEFAULT))
+    except (TypeError, ValueError):
+        return _PROMOTION_DSR_MIN_DEFAULT
+
+
+def _evaluate_dsr(bt: BacktestReport) -> Dict[str, Any]:
+    """Run the DSR leg of the promotion gate; returns audit detail."""
+    from merid.backtesting.deflated_sharpe import deflated_sharpe_ratio
+
+    res = deflated_sharpe_ratio(
+        bt.returns,
+        trial_sharpes=bt.trial_sharpes,
+        n_trials=bt.n_trials,
+    )
+    if res is None:
+        return {"evaluated": False, "reason": "returns_too_short_or_degenerate"}
+    return {"evaluated": True, **res.to_dict()}
 
 
 def validate_before_lift(bt: BacktestReport) -> dict:
@@ -194,16 +231,32 @@ def validate_before_lift(bt: BacktestReport) -> dict:
     Stricter gate used immediately before relaxing per-trade caps or
     enabling live execution.  All checks must pass.
 
-    Returns {"ok": bool, "reason": str}.
+    Returns {"ok": bool, "reason": str, "dsr": dict}.
     """
     if bt.years < 1.0:
-        return {"ok": False, "reason": "history_lt_1y"}
+        return {"ok": False, "reason": "history_lt_1y", "dsr": {"evaluated": False}}
     if bt.trades < 100:
-        return {"ok": False, "reason": "too_few_trades"}
+        return {"ok": False, "reason": "too_few_trades", "dsr": {"evaluated": False}}
     if bt.max_drawdown > 0.30:
-        return {"ok": False, "reason": "max_dd_gt_30pct"}
+        return {"ok": False, "reason": "max_dd_gt_30pct", "dsr": {"evaluated": False}}
     if bt.sharpe < 0.7:
-        return {"ok": False, "reason": "sharpe_lt_0p7"}
+        return {"ok": False, "reason": "sharpe_lt_0p7", "dsr": {"evaluated": False}}
     if sum(bt.returns) <= 0:
-        return {"ok": False, "reason": "non_positive_pnl"}
-    return {"ok": True, "reason": "ok"}
+        return {"ok": False, "reason": "non_positive_pnl", "dsr": {"evaluated": False}}
+
+    dsr_min = _promotion_dsr_min()
+    dsr_detail = _evaluate_dsr(bt)
+    if dsr_min > 0.0:
+        if not dsr_detail.get("evaluated"):
+            return {
+                "ok": False,
+                "reason": "dsr_not_evaluable",
+                "dsr": dsr_detail,
+            }
+        if float(dsr_detail["dsr"]) < dsr_min:
+            return {
+                "ok": False,
+                "reason": f"dsr_below_{dsr_min}",
+                "dsr": dsr_detail,
+            }
+    return {"ok": True, "reason": "ok", "dsr": dsr_detail}

@@ -1920,3 +1920,55 @@ Lifting the cap is therefore a two-key change: profile cap AND
 `real_time_monitoring: true` — they cannot drift apart.  Note env overrides
 can never raise the cap above the profile value anyway (existing
 fail-closed rule); this guard covers the profile-edit path.
+
+## 2026-11-19 (pm) DSR promotion gate + first settlement-path results
+
+### Deflated Sharpe now gates `validate_before_lift`
+
+`merid/backtesting/deflated_sharpe.py` was corrected to the canonical
+Bailey & López de Prado form: the benchmark `SR0` uses the **empirical
+variance of the trial Sharpes** (`trial_sharpes` arg — every variant tried,
+winners and losers alike), with `n_trials`-only as a null-variance fallback.
+Adds `min_track_record_length` (MinTRL).  `BacktestReport` gained
+`n_trials`/`trial_sharpes` fields; `validate_before_lift` now runs the DSR
+leg after the legacy checks and fails closed on
+`dsr_not_evaluable`/`dsr_below_<thr>`; `MERID_PROMOTION_DSR_MIN` (default
+0.95, 0 disables) tunes the floor.  Verified: sharpe=0.8/8760-obs report
+with n_trials=500 → DSR 0.638 → **FAIL** where the legacy gate passed —
+the selection-inflation catch working.  Callers populate `n_trials`/
+`trial_sharpes` honestly or the gate sees N=1 (PSR vs zero).
+
+### Murphy decomposition now uses equal-frequency bins
+
+`_murphy_decomposition` switched from fixed-width to quantile edges
+spanning [0,1] (deduped so tied forecasts never split) — forecast
+probabilities cluster near the extremes, so fixed bins left most empty.
+`identity_residual` still reports the WBV/WBC approximation gap for binned
+continuous forecasts (Stephenson-Coelho-Jolliffe caveat, documented).
+
+### First RTI-path backtest run — settlement-model validation
+
+`reports/rti_path_2026-11-07_16.json` (gitignored artifact): 865 expiries,
+3,355 scored decisions across all 5 assets over the full tick archive.
+Archive coverage is bursty — 23k `no_strike` skips (no tick within 30s of
+window open) are honest data gaps, not bugs.  Headline Brier (model vs
+terminal-spot Bachelier vs 0.5):
+
+| TTE | model | terminal_spot | 0.5 |
+|-----|-------|---------------|-----|
+| 900s | 0.2500 | 0.2500 | 0.2500 |
+| 600s | 0.1996 | 0.1996 | 0.2500 |
+| 300s | 0.1204 | 0.1210 | 0.2500 |
+| 120s | 0.0600 | 0.0630 | 0.2500 |
+| 60s  | 0.0302 | 0.0366 | 0.2500 |
+| 45s  | 0.0185 | 0.0286 | 0.2500 |
+| 30s  | 0.0103 | 0.0238 | 0.2500 |
+
+Read: at window open the model is a coin flip (Brier = 0.25 exactly — the
+60-print average hasn't diverged from spot yet); the settlement-aware
+pricer beats terminal-spot at EVERY horizon and the gap widens as TTE
+shrinks (2.3x at 30s) — direct evidence the observed-sample fixing +
+discrete variance schedule adds real information.  This measures raw
+forecast quality on the settlement instrument, NOT edge over market mid
+(book history isn't in the tick DB — the forecast_audit remains the
+model-vs-market verdict, currently FAIL overall).
