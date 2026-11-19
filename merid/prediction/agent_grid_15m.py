@@ -9417,7 +9417,21 @@ class LeanAgent15m:
             time_in_force = "ioc"
             execution_mode = "taker"
             fee_cents = taker_fee_cents
-        elif maker_entries_enabled and not is_late:
+        elif maker_entries_enabled:
+            # 2026-11-19 (pinned-fav dead-window fix): this branch used to be
+            # gated on ``not is_late`` (TTE <= MERID_MOMENTUM_FVG_LATE_WINDOW_S,
+            # 120s), which made the else-branch below — the bid-priced
+            # ``maker_bid`` pass, sole emission vehicle for pinned_fav maker
+            # mode, drift_fav, and the late-edge probe — unreachable in
+            # exactly the TTE 45-120s window those lanes are armed for.
+            # Observable: every pf maker-mode ENTER at TTE<120 died as
+            # ``pinned_fav_maker_only`` with zero :maker_bid evals.  The
+            # engine's own floors govern per-lane now: generic bid-basis
+            # lanes still fail ``min_tte_entry_disabled`` below 120s, and
+            # only lanes with an explicit TTE exemption (pinned_fav 45-840s,
+            # settlement 15-150s, late_edge_probe 60-120s) can emit here.
+            # is_late still routes taker selections IOC above, and EMM's own
+            # 240-600s window keeps it inert in this branch.
             if _maker_sel:
                 decision = decision_maker
                 liquidity_role = "maker"
@@ -9443,7 +9457,14 @@ class LeanAgent15m:
                 # edge at the bid with an explicit adverse-selection
                 # reserve — bounded (1-contract lane, daily cap, min spread)
                 # and only attempted when maker entries are enabled.
-                decision = decision_maker
+                # decision_maker is None when is_late (the ask-priced maker
+                # eval is skipped) — keep the failed taker eval for the
+                # reject record in that case.
+                decision = (
+                    decision_maker
+                    if decision_maker is not None
+                    else decision_taker
+                )
                 liquidity_role = "taker"
                 aggressiveness = 1.0
                 post_only = False
@@ -16182,7 +16203,15 @@ class LeanAgent15m:
                 float(best_bid) if _pf_maker else yes_price_cents
             )
             _pf_no_px = (
-                (100.0 - float(best_ask)) if _pf_maker else no_price_cents
+                (
+                    (100.0 - float(best_ask))
+                    if best_ask
+                    else (
+                        float(getattr(market_state, "best_no_bid_cents", None) or 0.0)
+                        or None
+                    )
+                )
+                if _pf_maker else no_price_cents
             )
             _pf_tte = float(seconds_to_expiry) if seconds_to_expiry is not None else None
             _pf_lo = int(_dr_pf._pinned_fav_lo())
@@ -16255,7 +16284,12 @@ class LeanAgent15m:
             # maker-mode reachability convention above.
             _lep_yes_px = float(best_bid) if best_bid else None
             _lep_no_px = (
-                (100.0 - float(best_ask)) if best_ask else None
+                (100.0 - float(best_ask))
+                if best_ask
+                else (
+                    float(getattr(market_state, "best_no_bid_cents", None) or 0.0)
+                    or None
+                )
             )
             _lep_tte_lo = int(_dr_lep._late_edge_probe_min_tte())
             _lep_tte_hi = int(_dr_lep._late_edge_probe_max_tte())

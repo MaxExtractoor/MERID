@@ -238,3 +238,48 @@ signal that is this system's only measured positive-edge cohort.
 (c) trim `MAX_W` — crudest, loses mid-band protection.
 Before acting: re-run this bucket split per asset × side × TTE bucket —
 the +3.8% tail effect could be regime/subset-driven.
+
+## 2026-11-19 addendum — pinned-fav dead-window fix (audit + applied)
+
+**Finding (structural, fixed):** `agent_grid_15m.py` gated the entire maker
+branch on `not is_late` (`MERID_MOMENTUM_FVG_LATE_WINDOW_SECONDS=120`).  The
+else-branch contains the `route="maker_bid"` eval — the **sole emission
+vehicle** for pinned_fav maker mode, drift_fav, and the late-edge probe.
+At TTE<=120s the pass never ran: every pf maker-mode ENTER died as
+`pinned_fav_maker_only` with zero `:maker_bid` evals ever emitted — a dead
+window covering exactly the TTE 45-120s slice the lane was re-armed for on
+2026-11-06 (`MERID_PINNED_FAV_TTE_FLOOR_EXEMPT=1`, lane window 45-840s).
+Runtime census confirmed: 9/9 `pinned_fav_maker_only` suppressions this run
+fell in the 1-2min TTE buckets; zero maker_bid decision records existed.
+
+**Fix applied:** the `elif` now runs whenever `maker_entries_enabled`;
+`decision` falls back to `decision_taker` when `decision_maker` is None
+(is_late skips the ask-priced maker eval — unchanged, since pf suppresses
+it anyway).  The engine's per-lane floors decide admission: generic
+bid-basis lanes still die at `min_tte_entry_disabled` below 120s; only
+TTE-exempt lanes (pinned_fav 45-840s, settlement 15-150s, late_edge_probe
+60-120s) can emit.  EMM's own 240-600s window keeps it inert.
+
+**Second defect (fixed):** pf/lep NO-side reachability derived the NO bid
+as `100 - yes_ask`; with `yes_ask=0` (one-sided converged book) that yields
+a fake 100c.  Now falls back to `market_state.best_no_bid_cents`.
+
+**Band audit (clean):** `price_band_both_sides_disabled` kills all landed
+at TTE 0-2m on converged books (bids 99.3-99.8c, asks empty) or pre-open
+(stale/missing quotes) — legit domain exclusions, not pin-fav blocking.
+The 94-98c pin-fav zone is covered: `tail_high` (91-99c, floor-clamped to
+15s) classifies the ask; the pf injection covers bid-side reachability.
+
+**EV-threshold audit (clean):** the 3.9-5.5c "dynamic thresholds" decompose
+to base floor (2-2.5c) + convexity (~0.8c) + FLB premium (~1-1.7c) on
+sub-35c longshots — all settled-data-justified (20,744-candidate join).
+Thresholds are not the starvation cause; upstream gross edge is.  Noted
+open design item: `model_uncertainty` is a static 5% x price reserve
+(~4.5c at favorite prices) that partially double-counts uncertainty the
+anchor shrink + walkforward calibration already remove — documented as a
+question, not changed.
+
+**Regression test:** `tests/test_bid_pass_late_window_reachability.py`
+(AST invariant: the maker_bid-bearing branch must never re-acquire an
+`is_late` guard; decision fallback and `best_no_bid_cents` fallback must
+stay present).
