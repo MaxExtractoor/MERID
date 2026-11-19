@@ -155,9 +155,11 @@ def test_p_yes_model_admitted_only_when_flag_permits(monkeypatch):
 
 _RTI_MEAN_RULES = {
     "rules_primary": (
-        "The expiration value is the arithmetic mean of the CF Benchmarks "
-        "Bitcoin Real-Time Index (BRTI) values published at one-second "
-        "intervals during the final 60 seconds preceding expiration."
+        "If the expiration value is at least the opening reference value, "
+        "then the market resolves to Yes. The expiration value is the "
+        "arithmetic mean of the CF Benchmarks Bitcoin Real-Time Index "
+        "(BRTI) values published at one-second intervals during the final "
+        "60 seconds preceding expiration."
     ),
     "rules_secondary": None,
     "resolution_source": "CF Benchmarks",
