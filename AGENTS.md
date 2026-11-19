@@ -1695,3 +1695,28 @@ settlement — ETH NO 50-59c settled +4.57c mean (n~89, 60% win) with
 scope stays ETH+NO until equivalent evidence exists.  Verification:
 `tests/test_late_taker_lane.py` (11 tests) +
 `tests/test_evidence_lane_floor_probes.py`.
+
+### 2026-11-19 pytest hang diagnosis + evidence key migration
+
+- **Pytest "hang" root cause:** `tests/conftest.py::pytest_sessionstart`
+  fingerprints every directory under `data/` before collection output.
+  On the production box the tree is large enough that the walk exceeds
+  any sane budget — pytest appears dead at 0% CPU before printing
+  anything.  Bypass for focused runs:
+  `MERID_TEST_SKIP_DURABLE_SCAN=1 python -m pytest <files>`
+  (the conftest's own documented opt-out; CI keeps the default).
+  Verified 2026-11-19: 36 tests pass in ~50s with the flag.
+- **Evidence store key version:** `evidence_outcome_rows.mkey` is now
+  canonical `ticker|side` for ALL sources (was bare `ticker` for
+  'fill', `ticker|side` for veto/ebias — one market-side could hold
+  ~2x effective weight).  `EvidenceOutcomeStore._connect()` migrates
+  v1->v2 in place once (version marker in `evidence_extract_state`);
+  the artifact records `evidence_key_version` + `coverage` fields.
+  Offline 24h comparison (2026-11-19, ~568 market-sides): sum n_eff
+  623 -> 531; 101 cells changed, largest drops in the 90-100c
+  late/mid band (e.g. ETH|no|90-100|late 7.98 -> 2.62) — the fix is
+  conservative-direction (sparser cells), not a loosening.
+- **Store coverage caveat:** the companion store only backfills what
+  `extract_range` has reached (newest-first, 1h chunks); configured
+  lookback != available history.  The artifact's `coverage` block now
+  reports `backfill_hi`/`coverage_fraction`/`latest_settled_at`.
