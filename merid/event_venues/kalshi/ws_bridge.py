@@ -1904,9 +1904,8 @@ class KalshiWebSocketBridge:
                                         bid_size = float(b.size)
                                     
                                     if bid_price is not None and bid_size is not None:
-                                        # REST API returns prices in DOLLARS; round to integer cents.
-                                        bid_price_cents = int(round(bid_price * 100.0))
-                                        yes_levels.append([bid_price_cents, bid_size])
+                                        # Snapshot levels are price_dollars; pass the REST dollar price through at full precision (LocalOrderbook quantizes to the 0.01c grid).
+                                        yes_levels.append([bid_price, bid_size])
                             
                             # CRITICAL DIAGNOSTIC: Log raw NO levels from REST API before conversion
                             logger.info(
@@ -1933,9 +1932,8 @@ class KalshiWebSocketBridge:
                                         ask_size = float(a.size)
                                     
                                     if ask_price is not None and ask_size is not None:
-                                        # REST API returns prices in DOLLARS; round to integer cents.
-                                        ask_price_cents = int(round(ask_price * 100.0))
-                                        no_levels.append([ask_price_cents, ask_size])
+                                        # Snapshot levels are price_dollars; pass the REST dollar price through at full precision (LocalOrderbook quantizes to the 0.01c grid).
+                                        no_levels.append([ask_price, ask_size])
                             
                             # CRITICAL DIAGNOSTIC: Log converted NO levels
                             logger.info(
@@ -2007,8 +2005,7 @@ class KalshiWebSocketBridge:
                                                 bid_size = float(b.size)
                                             
                                             if bid_price is not None and bid_size is not None:
-                                                bid_price_cents = int(round(bid_price * 100.0))
-                                                yes_levels.append([bid_price_cents, bid_size])
+                                                yes_levels.append([bid_price, bid_size])
                                     
                                     no_levels = []
                                     if orderbook.asks:
@@ -2023,8 +2020,7 @@ class KalshiWebSocketBridge:
                                                 ask_size = float(a.size)
                                             
                                             if ask_price is not None and ask_size is not None:
-                                                ask_price_cents = int(round(ask_price * 100.0))
-                                                no_levels.append([ask_price_cents, ask_size])
+                                                no_levels.append([ask_price, ask_size])
                                     
                                     msg = {
                                         "type": "orderbook_snapshot",
