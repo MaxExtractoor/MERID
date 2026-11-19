@@ -180,3 +180,61 @@ process keeps old behavior; there is no runtime reload of log sites.
 cell state, entry-trap guard parameters, lane caps. The measured verdict
 stands — the dominant blocker is genuinely-thin gross edge vs the ~5.5c
 reserve stack, not a malfunctioning gate.
+
+## F1 resolved — what kills the edge (measured, restart session)
+
+Setup: `strategy_decision_side_ev.raw_probability` is the **pre-anchor**
+Bachelier output; `calibrated_probability` is the final p after
+market-anchor shrink + walkforward + evidence caps. Joined 1,480 recent
+evals + 7,348 settled evals against `strategy_decision_outcomes`.
+
+**Finding 1 — EPC is not the anchor.** `MERID_EMPIRICAL_CAL_MODE=shadow`
+and `MERID_EMPIRICAL_CAL_PATH=data/epc_wide_fit.json`: telemetry only,
+never touches a live probability. The parity is produced elsewhere.
+
+**Finding 2 — the market-anchor shrink IS the parity machine.**
+`MERID_MARKET_ANCHOR_MIN_W=0.25→MAX_W=0.85` ramps over the *whole* 900s
+window (`trade_decision.py:4385-4428`), shrinking `p_model` toward market
+mid in **logit space**. At typical entry TTE≈300s, w≈0.61 — ~60% of every
+quoted probability is the book itself. Measured compression on 1,480
+evals: raw deviation p90 = ±5.7c (tail to +12.7c) collapses to calibrated
+gross edge p90 = +1.57c (max +5.4c). After the ~5.5c reserve stack, almost
+nothing clears.
+
+**Finding 3 — is the anchor destroying real signal? Mostly no — except
+the tails.** Realized-vs-forecast on 7,348 settled evals, bucketed by raw
+model deviation (raw_p − exec_price):
+
+```
+bucket      n    realized_wr  mkt_px   cal_p   vs_mkt   vs_cal
+<-5c      582     51.9%      49.6c    46.1%   +2.3     +5.8
+-5..-1   2186     55.5%      55.3c    52.0%   +0.2     +3.5
+-1..+1   1881     49.7%      50.0c    46.6%   -0.3     +3.1
++1..+5   2099     43.9%      44.5c    41.0%   -0.5     +2.9
+>+5c      600     50.3%      46.5c    49.5%   +3.8     +0.9
+```
+
+- Mid-band: market ≈ realized within ±0.5% — the anchor premise ("book is
+  near-calibrated") **holds**, and the raw model's mid-band deviations
+  are noise. Shrinking there is protective.
+- Tail (`>+5c` raw deviation): realized beat the market by **+3.8%**
+  (n=600, borderline-significant ~±4% stderr) while cal_p sat 0.9% low —
+  the raw model caught real underpricing, the anchor pulled a right
+  answer back toward a wrong market. Convergent with the EPC artifact's
+  independent +6.8..9.4c out-of-sample measurement — same FLB pocket.
+- cal_p is **systematically 1-6% low in every bucket** — the full chain
+  (anchor + walkforward + evidence caps + edge-bias corrections) shaves
+  real edge off every eval, compounding the reserve-stack squeeze.
+
+**Verdict:** not "the model has no opinion" — the pipeline *designs away*
+most of it and is correct to do so mid-band, but throws away the tail
+signal that is this system's only measured positive-edge cohort.
+
+**Operator options (documented, NOT applied):**
+(a) deviation-adaptive anchor weight — keep strong shrink when raw agrees
+    with market, release when |raw−market| is large (the tail is exactly
+    where the anchor hurts);
+(b) EPC `shadow→live` inside its validated cells only;
+(c) trim `MAX_W` — crudest, loses mid-band protection.
+Before acting: re-run this bucket split per asset × side × TTE bucket —
+the +3.8% tail effect could be regime/subset-driven.

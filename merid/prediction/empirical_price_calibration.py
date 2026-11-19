@@ -127,6 +127,19 @@ def lookup(side: str, held_price_cents: float, seconds_to_expiry: float) -> Opti
         return None
     cells, meta = _load()
     if not cells or _stale(meta):
+        # 2026-11-19: surface the staleness failure — the overlay previously
+        # died silently for 11 days when the artifact aged past the gate.
+        if cells and _stale(meta):
+            now = time.time()
+            last = _cache.get("stale_warn_ts") or 0.0
+            if now - last > 3600.0:
+                _cache["stale_warn_ts"] = now
+                logger.warning(
+                    "[EMPIRICAL-CAL] artifact stale (mtime=%s, max_age=%sd) — "
+                    "overlay returning no matches; refit "
+                    "scripts/fit_empirical_price_calibration.py",
+                    meta.get("mtime"), max_artifact_age_days(),
+                )
         return None
     c = cells.get((side, int(px // 10) * 10, int(tte // 60)))
     if c is None:
