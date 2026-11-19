@@ -79,7 +79,7 @@ SELECT d.asset AS asset,
        o.settled_at AS settled_at,
        'fill' AS src,
        d.decision_ts AS decision_ts,
-       d.ticker AS mkey
+       d.ticker || '|' || d.selected_side AS mkey
 FROM strategy_decision_outcomes o INDEXED BY idx_outcomes_settled_at
 JOIN strategy_decisions d ON d.decision_id = o.decision_id
 LEFT JOIN strategy_decision_side_ev se
@@ -195,7 +195,54 @@ class EvidenceOutcomeStore:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(_STORE_SCHEMA)
+        self._migrate_key_version(conn)
         return conn
+
+    # Canonical market-side key version.  v1 stored ``mkey`` as the bare
+    # ticker for 'fill' rows but ``ticker|side`` for 'veto'/'ebias' rows,
+    # so one market-side could occupy two normalization groups and carry
+    # ~2x weight.  v2 unifies every source on ``ticker|side`` -- venue,
+    # market, and outcome side, the independence unit.
+    KEY_VERSION = 2
+    _KEY_VERSION_STATE_KEY = "evidence_key_version"
+
+    def key_version(self, conn: sqlite3.Connection) -> int:
+        try:
+            return int(
+                self.state_get(conn, self._KEY_VERSION_STATE_KEY) or "1"
+            )
+        except (TypeError, ValueError):
+            return 1
+
+    def _migrate_key_version(self, conn: sqlite3.Connection) -> None:
+        """Re-key stored rows to canonical ``ticker|side`` mkeys (v1 -> v2).
+
+        The canonical key is derivable from stored authoritative columns
+        (``ticker``, ``side``), so retained rows are re-keyed in place
+        rather than re-extracted from the multi-GB audit DB.  ``row_key``
+        is rebuilt with the same formula ``extract_range`` uses so future
+        overlap re-extraction stays idempotent; ``UPDATE OR IGNORE``
+        protects the PRIMARY KEY against any unforeseen collision.
+        Idempotent and cheap -- runs once per store connection.
+        """
+        if self.key_version(conn) >= self.KEY_VERSION:
+            return
+        conn.execute(
+            "UPDATE evidence_outcome_rows "
+            "SET mkey = ticker || '|' || side "
+            "WHERE mkey IS NULL OR mkey != ticker || '|' || side"
+        )
+        conn.execute(
+            "UPDATE OR IGNORE evidence_outcome_rows "
+            "SET row_key = src || '|' || "
+            "COALESCE(decision_id, 'None') || '|' || "
+            "COALESCE(side, 'None') || '|' || "
+            "COALESCE(mkey, 'None')"
+        )
+        self.state_set(
+            conn, self._KEY_VERSION_STATE_KEY, str(self.KEY_VERSION)
+        )
+        conn.commit()
 
     # -- cursor state -----------------------------------------------------
 
@@ -272,7 +319,28 @@ class EvidenceOutcomeStore:
         if not include_vetoes:
             sql += " AND src != 'veto'"
         sql += " ORDER BY settled_at"
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        for r in rows:
+            if r.get("src") == "fill":
+                observed = r.get("fill_px_cents") is not None
+                # ENTER decisions carry no order-type field, so an
+                # unfilled ENTER is classified by its price basis
+                # (executable taker price), not by assumed order style.
+                r["evidence_kind"] = (
+                    "observed_fill" if observed else "counterfactual_taker"
+                )
+                r["price_source"] = (
+                    "actual_fill" if observed else "executable_fallback"
+                )
+                r["execution_observed"] = observed
+            else:
+                # 'veto'/'ebias' rows are settlement-labeled
+                # counterfactuals at recorded executable prices --
+                # never observed executions.
+                r["evidence_kind"] = "counterfactual_taker"
+                r["price_source"] = "counterfactual_executable"
+                r["execution_observed"] = False
+        return rows
 
     def max_settled_at(self, conn: sqlite3.Connection) -> Optional[float]:
         row = conn.execute(

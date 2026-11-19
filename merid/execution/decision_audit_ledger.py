@@ -3945,6 +3945,8 @@ class DecisionAuditLedger:
             )
             _ev_store = EvidenceOutcomeStore(store_path_for(self.db_path))
             _ev_sconn = _ev_store._connect()
+            _ev_key_version = 1
+            _ev_backfill_hi: Optional[float] = None
             try:
                 _ev_include_vetoes = os.environ.get(
                     "MERID_EVIDENCE_INCLUDE_VETOES", "1"
@@ -4006,6 +4008,8 @@ class DecisionAuditLedger:
                 _ev_sconn.commit()
                 _ev_all = _ev_store.read_since(
                     _ev_sconn, since, include_vetoes=_ev_include_vetoes)
+                _ev_key_version = _ev_store.key_version(_ev_sconn)
+                _ev_backfill_hi = float(_ev_backfill_hi)
                 _ev_retention_s = float(os.environ.get(
                     "MERID_EVIDENCE_STORE_RETENTION_DAYS", "14")) * 86400.0
                 _ev_store.prune(_ev_sconn, now - _ev_retention_s)
@@ -4407,6 +4411,34 @@ class DecisionAuditLedger:
             "version": 2,
             "generated_at": now,
             "window_hours": window_hours,
+            # Canonical market-side key version (v2 = ticker|side for all
+            # sources) and honest backfill coverage: newest-first chunks
+            # mean a FRESH leading edge does not imply full-window history.
+            "evidence_key_version": _ev_key_version,
+            "coverage": {
+                "requested_since": since,
+                "backfill_hi": _ev_backfill_hi,
+                "coverage_fraction": (
+                    1.0
+                    if _ev_backfill_hi is None
+                    or _ev_backfill_hi <= since
+                    else max(
+                        0.0,
+                        min(
+                            1.0,
+                            (now - _ev_backfill_hi) / max(1.0, now - since),
+                        ),
+                    )
+                ),
+                "latest_settled_at": (
+                    max(
+                        (float(r.get("settled_at") or 0.0) for r in rows),
+                        default=None,
+                    )
+                    if rows
+                    else None
+                ),
+            },
             "halflife_days_primary": h1,
             "halflife_days_alt": h2,
             "assets": _rollup(assets),

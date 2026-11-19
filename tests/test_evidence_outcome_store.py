@@ -127,7 +127,7 @@ def test_extract_range_writes_all_three_srcs(tmp_path, audit_db):
     assert srcs == ["ebias", "ebias", "fill", "veto", "veto"]
     fill = next(r for r in rows if r["src"] == "fill")
     assert fill["asset"] == "BTC" and fill["side"] == "no"
-    assert fill["entry_cents"] == 55 and fill["mkey"] == "KXBTC15M-f1"
+    assert fill["entry_cents"] == 55 and fill["mkey"] == "KXBTC15M-f1|no"  # canonical ticker|side
     eb = next(r for r in rows if r["src"] == "ebias")
     assert eb["net_ev"] in (3.0, -2.0) and eb["cf_yes"] == 10
     sconn.close()

@@ -1750,7 +1750,8 @@ def build_cells(
                  "recent_w": 0.0, "recent_l": 0.0, "recent_n": 0,
                  "n_veto": 0, "n_fill": 0, "n_observed_fill": 0,
                  "w_post": 0.0, "l_post": 0.0, "n_eff_post": 0.0,
-                 "n_raw_post": 0, "entry_wsum_post": 0.0},
+                 "n_raw_post": 0, "entry_wsum_post": 0.0,
+                 "_obs_fill_markets": set()},
             )
             c["w"] += rw * won
             c["l"] += rw * (1.0 - won)
@@ -1766,6 +1767,7 @@ def build_cells(
                 # (see evidence_outcome_store._FILL_SQL).
                 if r.get("fill_px_cents") is not None:
                     c["n_observed_fill"] += 1
+                    c["_obs_fill_markets"].add(mkey)
             c["_markets"].add(mkey)
             c["entry_wsum"] += rw * entry_cents
             settled_at = float(r.get("settled_at") or now)
@@ -1789,8 +1791,11 @@ def build_cells(
         k: {
             kk: (round(vv, 4) if isinstance(vv, float) else vv)
             for kk, vv in c.items()
-            if kk != "_markets"
-        } | {"n_markets": len(c["_markets"])}
+            if kk not in ("_markets", "_obs_fill_markets")
+        } | {
+            "n_markets": len(c["_markets"]),
+            "n_observed_fill_markets": len(c["_obs_fill_markets"]),
+        }
         for k, c in cells.items()
     }
 
