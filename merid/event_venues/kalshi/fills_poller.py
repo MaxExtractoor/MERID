@@ -1156,11 +1156,22 @@ class FillsPoller:
             )
             now = time.time()
             reconciled = 0
+            processed = 0
+            # Fair scheduling state (in-memory): failed/ambiguous lookups
+            # back off exponentially so a head of unresolved rows cannot
+            # monopolize every cycle; resolved rows drop out of the PERSISTED
+            # query and their state is pruned below.
+            recon_state = getattr(self, "_persisted_recon_state", None)
+            if recon_state is None:
+                recon_state = self._persisted_recon_state = {}
 
             for rec in persisted:
-                if reconciled >= max_per_cycle:
+                if processed >= max_per_cycle:
                     break
                 try:
+                    _st = recon_state.get(rec.order_attempt_id) or {}
+                    if float(_st.get("next_at") or 0.0) > now:
+                        continue
                     age_s = now - float(rec.created_at or 0)
                     if age_s < grace_s:
                         continue
@@ -1207,6 +1218,7 @@ class FillsPoller:
                     coid = rec.client_order_id
                     if not coid:
                         continue
+                    processed += 1
 
                     order_data: Any = None
                     lookup_ok = False
@@ -1261,6 +1273,12 @@ class FillsPoller:
                                 _le,
                             )
                     if not lookup_ok:
+                        _att = int(_st.get("attempts") or 0) + 1
+                        recon_state[rec.order_attempt_id] = {
+                            "attempts": _att,
+                            "next_at": now + min(60.0 * (2 ** _att), 1800.0),
+                            "last_result": "lookup_unresolved",
+                        }
                         continue
 
                     if order_data is not None:
@@ -1275,6 +1293,11 @@ class FillsPoller:
                                 TradingMode.LIVE,
                             )
                             reconciled += 1
+                            recon_state[rec.order_attempt_id] = {
+                                "attempts": int(_st.get("attempts") or 0),
+                                "next_at": now + 300.0,
+                                "last_result": "venue_present_reconciled",
+                            }
                         except Exception as _re:
                             logger.debug(
                                 "[PERSISTED-RECONCILE] full reconcile failed "
@@ -1288,7 +1311,7 @@ class FillsPoller:
                         rec.order_attempt_id,
                         "REJECTED",
                         actor="fills_poller",
-                        reason="persisted_never_transmitted_venue_absent",
+                        reason="persisted_venue_absent_after_reconciliation",
                         evidence={
                             "client_order_id": coid,
                             "age_s": round(age_s, 1),
@@ -1296,8 +1319,9 @@ class FillsPoller:
                         },
                     ):
                         reconciled += 1
+                        recon_state.pop(rec.order_attempt_id, None)
                         logger.warning(
-                            "[PERSISTED-RECONCILE] terminalized never-transmitted "
+                            "[PERSISTED-RECONCILE] terminalized venue-absent "
                             "attempt=%s coid=%s ticker=%s age_s=%.0f",
                             rec.order_attempt_id[:8],
                             coid,
@@ -1310,6 +1334,10 @@ class FillsPoller:
                         rec.order_attempt_id,
                         _ee,
                     )
+
+            _live_ids = {r.order_attempt_id for r in persisted}
+            for _k in [k for k in recon_state if k not in _live_ids]:
+                recon_state.pop(_k, None)
 
             if reconciled:
                 logger.warning(

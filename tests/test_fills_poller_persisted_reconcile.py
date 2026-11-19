@@ -104,7 +104,7 @@ async def test_venue_absent_terminalizes_rejected(store):
     assert after is not None and after.status == "REJECTED"
     payload = json.loads(after.payload_json)
     ev = payload["reconciliation_evidence"]
-    assert ev["terminal_reason"] == "persisted_never_transmitted_venue_absent"
+    assert ev["terminal_reason"] == "persisted_venue_absent_after_reconciliation"
     assert ev["client_order_id"] == "merid_coid_absent1"
 
 
@@ -277,7 +277,7 @@ async def test_idempotent_second_pass(store):
     payload = json.loads(after.payload_json)
     # Evidence merged once — no duplicate reconciliation_evidence churn.
     assert payload["reconciliation_evidence"]["terminal_reason"] == (
-        "persisted_never_transmitted_venue_absent"
+        "persisted_venue_absent_after_reconciliation"
     )
     assert after.updated_at == after.updated_at  # sanity
     # Second pass must not have re-terminalized (guard returns False).
@@ -398,6 +398,89 @@ async def test_store_query_failure_is_swallowed(store, monkeypatch):
     # class attribute the import resolves to.
     await poller._reconcile_persisted_attempts(SimpleNamespace())
     # No exception propagated.
+
+
+@pytest.mark.asyncio
+async def test_unresolved_head_cannot_starve_later_rows(store):
+    """Failed lookups back off: rows behind a failing head still get checked."""
+    # Head row always fails the venue lookup.
+    _seed(store, coid="merid_coid_head")
+    # Later rows are venue-absent and should terminalize.
+    for i in range(3):
+        _seed(store, coid=f"merid_coid_tail{i}")
+
+    class _HeadRaw:
+        def __init__(self):
+            self.calls = []
+
+        async def get_order_by_client_id_result(self, coid, market_id=None, min_ts=None):
+            self.calls.append(coid)
+            if coid == "merid_coid_head":
+                return SimpleNamespace(success=False, data=None, error="down")
+            return SimpleNamespace(success=True, data=None, error=None)
+
+    raw = _HeadRaw()
+    poller = FillsPoller()
+    monkey_env = {"MERID_STALE_PERSISTED_MAX_PER_CYCLE": "2"}
+    import os
+    old_env = os.environ.get("MERID_STALE_PERSISTED_MAX_PER_CYCLE")
+    os.environ["MERID_STALE_PERSISTED_MAX_PER_CYCLE"] = "2"
+    try:
+        # Cycle 1: head + one tail processed (bound=2 lookups).
+        await poller._reconcile_persisted_attempts(_port_with_raw(raw))
+        # Cycle 2: head is backed off (next_at in future) -> tails proceed.
+        await poller._reconcile_persisted_attempts(_port_with_raw(raw))
+    finally:
+        if old_env is None:
+            os.environ.pop("MERID_STALE_PERSISTED_MAX_PER_CYCLE", None)
+        else:
+            os.environ["MERID_STALE_PERSISTED_MAX_PER_CYCLE"] = old_env
+
+    tails = [f"merid_coid_tail{i}" for i in range(3)]
+    done = [
+        c for c in tails
+        if store.get_by_client_order_id(c).status == "REJECTED"
+    ]
+    # The failing head must not prevent ALL tails from being reached.
+    assert len(done) >= 2
+    head = store.get_by_client_order_id("merid_coid_head")
+    assert head is not None and head.status == "PERSISTED"
+
+
+@pytest.mark.asyncio
+async def test_lookup_failure_backs_off(store):
+    _seed(store, coid="merid_coid_backoff")
+    raw = _RawClient(_fail("down"))
+    poller = FillsPoller()
+    client = _port_with_raw(raw)
+
+    await poller._reconcile_persisted_attempts(client)
+    n1 = len(raw.calls)
+    assert n1 == 1
+    # Immediate second pass: row is not due -> no new venue call.
+    await poller._reconcile_persisted_attempts(client)
+    assert len(raw.calls) == n1
+    after = store.get_by_client_order_id("merid_coid_backoff")
+    assert after is not None and after.status == "PERSISTED"
+
+
+@pytest.mark.asyncio
+async def test_venue_present_recheck_is_bounded(store, monkeypatch):
+    """A venue-present row gets a periodic recheck, not every-cycle spam."""
+    _seed(store, coid="merid_coid_vp")
+    raw = _RawClient(_ok(SimpleNamespace(order_id="o9")))
+    full = AsyncMock()
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_router.reconcile_submission_unknown_client_order_id",
+        full,
+    )
+    poller = FillsPoller()
+    client = _port_with_raw(raw)
+
+    await poller._reconcile_persisted_attempts(client)
+    await poller._reconcile_persisted_attempts(client)
+    # Second pass: venue-present rows are throttled to ~300s recheck.
+    assert full.await_count == 1
 
 
 if __name__ == "__main__":
