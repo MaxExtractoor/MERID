@@ -2,10 +2,13 @@
 
 ```yaml
 ---
-auto_execution_mode: 1
+auto_execution_mode: 1   # legend: 1 = run the startup state machine automatically and execute the next eligible decision after preflight; 0/absent = fail-closed, no auto-enable. Env MERID_AUTO_EXECUTION_MODE overrides (1/true/yes on, 0/false/no off).
+contract_version: 1.0.0
+last_reviewed: 2026-11-19
 description: MERID/Kalshi 15m automatic live-trading startup and execution contract
 live_startup_policy: auto_enable_after_preflight
 live_entry_authorization: durable_operator_config
+live_authorization_artifact: this file's front matter + resolved .env — both agent-writable; arming is NOT persisted, it is re-earned every process boot by the full preflight (runtime state defaults LIVE_ENTRIES_HALTED; a new process_id forces re-preflight)
 ---
 ```
 
@@ -1720,3 +1723,115 @@ scope stays ETH+NO until equivalent evidence exists.  Verification:
   `extract_range` has reached (newest-first, 1h chunks); configured
   lookback != available history.  The artifact's `coverage` block now
   reports `backfill_hi`/`coverage_fraction`/`latest_settled_at`.
+
+## 2026-11-19 external-review response — financial brakes, backtest fees, forecast-audit verdict, EV floors
+
+Response to the second external review round.  Items below are either
+implemented in this change or documented resolved values; nothing here
+re-enables the operator-disabled loss stops.
+
+### Financial brakes (env-gated, OFF by default)
+
+The review correctly identified that every financial downside bound was
+disabled or unreachable (`MERID_DISABLE_LOSS_STOPS=1`,
+`MERID_LOSS_EXITS_ENABLED=0`, `MERID_LOSS_BRAKES_ENABLED=0`,
+`daily_loss_enabled=false`, `drawdown_halt_enabled=false`,
+`MERID_BANKROLL_MAX_DRAWDOWN_PCT=100.0`,
+`MERID_BANKROLL_CONSECUTIVE_LOSS_TICKS=1000000`).  Rather than
+re-enable those mechanisms, `merid/risk/kill_switches.py` now carries
+two deliberately loose, derived/auto-reset brakes evaluated inside
+`can_trade()` — they halt NEW entries only; exits always pass the
+order-router kill-switch gate:
+
+- `MERID_KS_TRAILING_EQUITY_HALT_PCT` — halt when bankroll equity falls
+  this fraction below its persisted peak (e.g. `0.25` = −25% from
+  peak).  Peak equity persists in `risk_kill_switch.json` so restarts
+  cannot silently reset the reference point.
+- `MERID_KS_CONSECUTIVE_LOSS_HALT` — halt after this many consecutive
+  losing `record_pnl()` outcomes (e.g. `8`).  The streak persists while
+  armed and clears on the next winning settlement.
+
+Both default to `0` = disabled, preserving the current operator posture.
+They reuse `BANKROLL_DRAWDOWN` / new `CONSECUTIVE_LOSS` kill reasons,
+auto-reset when the condition recovers or the brake is disarmed, never
+override a manual emergency halt, and surface under
+`get_status()["financial_brakes"]`.  Suggested starting values for an
+explicit operator decision: `0.25` and `8` — loose enough never to fire
+in normal operation, tight enough to bound the experiment-ending tail.
+
+### Backtest fee modeling (opt-in)
+
+`merid/backtesting/backtest_engine.py` now accepts
+`fee_model="kalshi"` (default `"none"` preserves existing callers).
+Fees use the canonical Kalshi parabolic model
+(`rate·C·P·(1−P)`, taker 0.07 / maker 0.0175, Decimal-exact via
+`merid.event_venues.kalshi.parabolic_fees`), are charged per side with
+`entry_role`/`exit_role` maker|taker selection, and settlement/expiry
+exits are exempt from trading fees.  `BacktestResult` reports
+`total_fees_usd`, `net_total_pnl_usd`, `net_total_pnl_pct`; each `Trade`
+carries `fees_usd`.  **Limitation:** this prices the traded contract's
+entry/exit economics only — OHLC/candle history cannot reconstruct the
+60-print RTI settlement average, so a fee-aware candle backtest still
+prices terminal spot, not the averaged-settlement instrument.  The
+settlement-aware path is the RTI tick store below.
+
+### RTI tick store — settlement-path backtest is feasible
+
+`data/cf_rti_ticks.db` retains ~1s CF Benchmarks RTI observations per
+asset (rti_archiver; ~200MB and growing).  This is the same feed Kalshi
+settles on, so an RTI-path backtest can replay the exact 60-sample
+settlement construction the live `settlement_distribution.py` model
+prices — including realized in-window samples fixing part of the mean.
+Wiring this into `merid/backtesting/` is the correct next step; candle
+backtests remain useful only for gross-path sanity, never for
+settlement-instrument edge claims.
+
+### Forecast-audit verdict — the model loses to the market mid
+
+`merid/analysis/forecast_audit/` (brier + logloss, Brier Skill Score,
+2000-replicate block bootstrap, paired comparisons) ran authoritative
+audit 2026-11-14 on n=1449 units, integrity VALID.  Results:
+
+- `final_vs_mid` d=−0.0125, CI [−0.0199, −0.0057], BSS=−0.082 — **FAIL**
+- `raw_vs_mid` d=−0.0118, CI excludes 0 — **FAIL**
+- `final_vs_q0` (vs calibrated market) d=−0.0176 — **FAIL**
+- `mid_vs_baserate` BSS=+0.39 — PASS (sanity)
+- `final_vs_const_half` BSS=+0.38 — PASS (trivial; prices ≠ 50c)
+
+The unconditional forecast is a statistically significant *worse*
+predictor than the market mid it trades against, including after the
+market-anchor blend.  Any realized edge must come from the selection
+layer (cells/lanes/evidence gates), not the base forecast — the audit
+population is all forecast units across 60–600s horizons, so a model
+can lose Brier overall yet remain +EV inside selected cells, but the
+verdict means no unconditional forecast claim is currently defensible.
+Per-horizon damage concentrates at 300s/600s (FAIL) vs 120s
+(inconclusive).  The audit is currently a report, not a trading gate.
+
+### EV floors and fee derivation (resolved values)
+
+Entry economics require model net edge after the full cost stack
+(spread + slippage + exact parabolic fees) to clear a decomposed
+threshold (`_decompose_dynamic_min_required_edge` in
+`trade_decision.py`): 2pp global floor + asset tier (BTC 1.5pp,
+DOGE/XRP 2.5pp) + convexity `K·p(1−p)` + FLB premium <35c.  Per-lane
+floors resolved from `.env` (cents of net edge per contract):
+
+- `pinned_fav` probe tier (TTE ≤ `MERID_PINNED_FAV_LATE_TTE_S`=150):
+  −3c by design (bounded negative-edge probe); mid-window floor 0c.
+- `pinned_fav` maker tier: −3c (post-2026-11-18 tightening).
+- `late_edge_probe`: +3c; `model_edge_floor`: 4c;
+  `counter_regime`: 4c/2c; `veto_release`: 2c.
+- pf resting-cancel floor at maker TTE ≥45s.
+
+Fee derivation: Kalshi taker fee = `ceil(0.07·C·P·(1−P)·100)/100`
+per order up to $0.0001 rounding (parabolic_fees.py); at 50c the
+round-trip taker cost is ~7.3% of notional (≈4.75pp/side at 11ct), at
+85–98c favorites ~1.1–2.2% — which is why the pinned-fav band targets
+the cheap part of the fee curve.  **Sizing note:**
+`MERID_PER_TRADE_LOSS_BUDGET_CENTS=1100` equals
+`MERID_FIXED_EXPOSURE_CAP_USD=11.00` — per-trade and total portfolio
+risk are the same constant; at current equity the $11 global cap makes
+the portfolio effectively one-position-at-a-time, and the correlation
+matrix/Kelly discount stays inert until that cap is lifted (restore
+correlation-aware sizing in the same commit if it is).

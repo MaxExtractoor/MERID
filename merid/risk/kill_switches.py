@@ -189,6 +189,7 @@ class KillSwitchReason(str, Enum):
     LOOP_LAG_HALT = "loop_lag_halt"       # Event loop latency critical
     PORTFOLIO_INTEGRITY = "portfolio_integrity"  # Cross-system consistency failure
     BANKROLL_DRAWDOWN = "bankroll_drawdown"  # Trailing bankroll watermark breached (Fix 5)
+    CONSECUTIVE_LOSS = "consecutive_loss"  # N consecutive losing recorded trade outcomes (env-gated financial brake)
 
 
 @dataclass
@@ -244,6 +245,29 @@ class RiskController:
             except (ValueError, TypeError):
                 pass
 
+        # Financial brakes (2026-11-19): the only loss-magnitude entry halts in
+        # the stack, deliberately env-gated and OFF by default to preserve the
+        # operator-directed loss-brake-free posture (AGENTS.md 2026-11-16
+        # reconciliation).  Both are derived/auto-reset like the daily-loss
+        # check: they halt NEW entries via can_trade() (exits always pass the
+        # order-router kill-switch gate) and clear when the condition recovers.
+        #   MERID_KS_TRAILING_EQUITY_HALT_PCT: halt when equity falls this
+        #     fraction below its persisted peak (e.g. 0.25 = -25% from peak).
+        #   MERID_KS_CONSECUTIVE_LOSS_HALT: halt after this many consecutive
+        #     losing record_pnl() outcomes (e.g. 8).
+        try:
+            self._trail_equity_halt_pct = float(
+                os.getenv("MERID_KS_TRAILING_EQUITY_HALT_PCT", "0") or 0
+            )
+        except (ValueError, TypeError):
+            self._trail_equity_halt_pct = 0.0
+        try:
+            self._consec_loss_halt = int(
+                float(os.getenv("MERID_KS_CONSECUTIVE_LOSS_HALT", "0") or 0)
+            )
+        except (ValueError, TypeError):
+            self._consec_loss_halt = 0
+
         # PROFILE-KILL-SWITCH: Use profile daily loss limit and enabled flag for kalshi_crypto_15m_v2
         if self.daily_loss_limit == 0.0:
             profile_limit, profile_enabled = get_profile_daily_loss_limit()
@@ -290,6 +314,10 @@ class RiskController:
         self._daily_pnl: float = 0.0
         self._daily_pnl_reset_date: str = self._today()
         self._total_position_value: float = 0.0
+
+        # Financial-brake state (restored from disk by _load_persisted_kill_switch).
+        self._peak_equity_usd: Optional[float] = None
+        self._consecutive_losses: int = 0
         
         self._error_count: int = 0
         self._weighted_error_count: float = 0.0
@@ -370,6 +398,10 @@ class RiskController:
                 "reason": self._kill_reason.value if self._kill_reason else None,
                 "details": self._kill_details,
                 "activated_at": self._kill_timestamp.isoformat() if self._kill_timestamp else None,
+                # Financial-brake state: peak equity and loss streak must survive
+                # restarts or the brakes silently reset their reference points.
+                "peak_equity_usd": self._peak_equity_usd,
+                "consecutive_losses": self._consecutive_losses,
             }
             _tmp = ks_path.with_suffix(".tmp")
             _tmp.write_text(json.dumps(payload, indent=2))
@@ -396,6 +428,17 @@ class RiskController:
                     "[risk] Kill switch persistence file found: %s | active=%s | manual_halt=%s | reason=%s",
                     ks_path, data.get("active"), data.get("manual_emergency_halt"), data.get("reason")
                 )
+                # Financial-brake state restores regardless of halt type —
+                # a manual halt must not wipe the equity peak or loss streak.
+                try:
+                    _pk = data.get("peak_equity_usd")
+                    if _pk is not None:
+                        self._peak_equity_usd = float(_pk)
+                    _cl = data.get("consecutive_losses")
+                    if _cl is not None:
+                        self._consecutive_losses = int(_cl)
+                except (TypeError, ValueError):
+                    pass
                 # Only restore if it was a manual emergency halt (sticky)
                 if data.get("manual_emergency_halt"):
                     self._manual_emergency_halt = True
@@ -647,6 +690,73 @@ class RiskController:
                         self._total_position_value, self.max_position_value
                     )
 
+            # Financial brakes (2026-11-19): env-gated, OFF by default.  These
+            # are the only loss-magnitude entry halts; both are derived and
+            # auto-reset like the daily-loss check.  Exits are unaffected —
+            # the order router lets exit orders through kill switches.
+            _trail_breached = False
+            _trail_evaluated = False
+            if self._trail_equity_halt_pct > 0:
+                _eq = self._read_brake_equity_usd()
+                if _eq is not None and _eq > 0:
+                    _trail_evaluated = True
+                    if self._peak_equity_usd is None or _eq > self._peak_equity_usd:
+                        self._peak_equity_usd = _eq
+                        self._persist_kill_switch()
+                    _dd = 1.0 - (_eq / self._peak_equity_usd)
+                    _trail_breached = _dd >= self._trail_equity_halt_pct
+                    if _trail_breached and not self._manual_emergency_halt:
+                        self._global_kill = True
+                        if self._kill_reason in (None, KillSwitchReason.BANKROLL_DRAWDOWN):
+                            self._kill_reason = KillSwitchReason.BANKROLL_DRAWDOWN
+                            self._kill_details = (
+                                f"Trailing equity halt: equity ${_eq:.2f} is {_dd:.1%} below "
+                                f"peak ${self._peak_equity_usd:.2f} (limit {self._trail_equity_halt_pct:.1%})"
+                            )
+                            self._kill_timestamp = self._now()
+                        logger.warning(
+                            "[TRAILING-EQUITY-KILL] Trading blocked: equity=$%.2f peak=$%.2f dd=%.1f%% limit=%.1f%%",
+                            _eq, self._peak_equity_usd, _dd * 100.0, self._trail_equity_halt_pct * 100.0,
+                        )
+            if (
+                self._kill_reason == KillSwitchReason.BANKROLL_DRAWDOWN
+                and not self._manual_emergency_halt
+                and (not _trail_evaluated or not _trail_breached)
+            ):
+                self._global_kill = False
+                self._kill_reason = None
+                self._kill_details = None
+                self._kill_timestamp = None
+                logger.info("[TRAILING-EQUITY-RESET] Auto-resumed: equity inside halt band or brake disarmed")
+
+            _loss_breached = (
+                self._consec_loss_halt > 0
+                and self._consecutive_losses >= self._consec_loss_halt
+            )
+            if _loss_breached and not self._manual_emergency_halt:
+                self._global_kill = True
+                if self._kill_reason in (None, KillSwitchReason.CONSECUTIVE_LOSS):
+                    self._kill_reason = KillSwitchReason.CONSECUTIVE_LOSS
+                    self._kill_details = (
+                        f"Consecutive-loss halt: {self._consecutive_losses} consecutive losing "
+                        f"outcomes >= {self._consec_loss_halt}"
+                    )
+                    self._kill_timestamp = self._now()
+                logger.warning(
+                    "[CONSECUTIVE-LOSS-KILL] Trading blocked: %d consecutive losses >= %d",
+                    self._consecutive_losses, self._consec_loss_halt,
+                )
+            if (
+                self._kill_reason == KillSwitchReason.CONSECUTIVE_LOSS
+                and not self._manual_emergency_halt
+                and not _loss_breached
+            ):
+                self._global_kill = False
+                self._kill_reason = None
+                self._kill_details = None
+                self._kill_timestamp = None
+                logger.info("[CONSECUTIVE-LOSS-RESET] Auto-resumed: loss streak below halt threshold or brake disarmed")
+
             return not self._global_kill
     
     def get_state(self) -> KillSwitchState:
@@ -730,6 +840,10 @@ class RiskController:
             # This fixes the discrepancy where fills_ledger tracked real P&L but
             # risk_controller had stale value because record_pnl() was never called
             _daily_pnl = self._daily_pnl  # fallback default
+            _peak_equity = self._peak_equity_usd
+            _consec_losses = self._consecutive_losses
+            _trail_halt = self._trail_equity_halt_pct
+            _consec_halt = self._consec_loss_halt
             try:
                 from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
                 _ledger = get_fills_ledger()
@@ -764,6 +878,12 @@ class RiskController:
             "daily_pnl": _daily_pnl,
             "daily_loss_limit": self.daily_loss_limit,
             "daily_loss_enabled": self.daily_loss_enabled,
+            "financial_brakes": {
+                "trailing_equity_halt_pct": _trail_halt,
+                "consecutive_loss_halt": _consec_halt,
+                "peak_equity_usd": _peak_equity,
+                "consecutive_losses": _consec_losses,
+            },
             "daily_pnl_pct": (abs(_daily_pnl) / self.daily_loss_limit * 100) if self.daily_loss_limit > 0 and self.daily_loss_enabled else 0,
             "position_value": _position_value,
             "max_position_value": self.max_position_value,
@@ -916,6 +1036,23 @@ class RiskController:
         """Acquire lock then trigger kill switch (external callers)."""
         with self._lock:
             self._trigger_kill_locked(reason, details)
+
+    @staticmethod
+    def _read_brake_equity_usd() -> Optional[float]:
+        """Best-effort synchronous equity read for the financial brakes.
+
+        Returns None when the bankroll cache is unavailable — callers treat
+        None as 'cannot evaluate' and skip the brake (bankroll freshness
+        gates elsewhere already halt entries on stale equity).
+        """
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import (
+                get_equity_for_risk_calc_sync,
+            )
+            eq = get_equity_for_risk_calc_sync()
+            return float(eq) if eq is not None else None
+        except Exception:
+            return None
 
     def _trigger_kill_locked(self, reason: KillSwitchReason, details: str) -> None:
         """Internal: trigger kill switch. Caller MUST hold self._lock."""
@@ -1133,6 +1270,16 @@ class RiskController:
             except Exception:
                 pass
             self._daily_pnl += pnl
+            # Financial brake: track consecutive losing outcomes.  The streak
+            # is cheap state; persisted only while the brake is armed so a
+            # disarmed system pays no extra disk writes per settlement.
+            _prev_streak = self._consecutive_losses
+            if pnl < 0:
+                self._consecutive_losses += 1
+            elif pnl > 0:
+                self._consecutive_losses = 0
+            if self._consec_loss_halt > 0 and self._consecutive_losses != _prev_streak:
+                self._persist_kill_switch()
             if self._daily_pnl < 0 and abs(self._daily_pnl) >= self.daily_loss_limit:
                 self._trigger_kill_locked(
                     KillSwitchReason.DAILY_LOSS,

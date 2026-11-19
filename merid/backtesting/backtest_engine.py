@@ -5,6 +5,19 @@ This module provides backtesting capabilities for:
 - PnL calculation and analysis
 - Win rate and drawdown metrics
 - Strategy comparison and optimization
+
+Fee modeling (2026-11-19): pass ``fee_model="kalshi"`` to
+``BacktestEngine``/``run_simple_backtest`` to deduct canonical Kalshi
+trading fees from every trade.  Fees follow the venue's parabolic schedule
+``rate * C * P * (1-P)`` (taker 0.07 / maker 0.0175, see
+``merid.event_venues.kalshi.parabolic_fees``) and are charged on the entry
+order always and on the exit order only when the exit is an actual trade
+(0 < exit_price_cents < 100).  Settlement at expiry (0c/100c) carries no
+trading fee, matching the venue.  ``Trade.pnl_usd`` remains gross;
+``Trade.net_pnl_usd`` and the ``BacktestResult`` ``net_*``/``total_fees_usd``
+fields carry the fee-adjusted numbers.  Note: return-series backtests
+(``walk_forward``, ``kalshi_backtest``) cannot model fees — they have no
+per-trade notionals — and remain unsuitable for edge gating on their own.
 """
 
 import numpy as np
@@ -14,6 +27,27 @@ from datetime import datetime
 from utils.logger import get_logger
 
 logger = get_logger("merid.backtesting.backtest_engine")
+
+
+def _kalshi_fee_usd(price_cents: int, contracts: int, role: str) -> float:
+    """Canonical Kalshi trading fee in USD for one order leg.
+
+    Delegates to the venue-verified parabolic model (6dp model ceil,
+    balance-precision alignment is a conservative bound handled upstream).
+    Returns 0.0 on any resolution failure so backtests degrade to gross.
+    """
+    try:
+        from merid.event_venues.kalshi.parabolic_fees import model_trade_fee_dollars
+
+        return float(
+            model_trade_fee_dollars(
+                price_dollars=float(price_cents) / 100.0,
+                contracts=contracts,
+                role="maker" if str(role).lower() == "maker" else "taker",
+            )
+        )
+    except Exception:
+        return 0.0
 
 
 @dataclass
@@ -28,7 +62,11 @@ class Trade:
     quantity: int
     entry_reason: str
     exit_reason: Optional[str] = None
-    
+    entry_role: str = "taker"   # "taker" | "maker" — venue fee role for the entry order
+    exit_role: str = "taker"    # venue fee role for the exit order
+    entry_fee_usd: float = 0.0  # populated when BacktestEngine fee_model="kalshi"
+    exit_fee_usd: float = 0.0
+
     @property
     def entry_price_usd(self) -> float:
         return self.entry_price_cents / 100.0
@@ -70,6 +108,19 @@ class Trade:
             return None
         return (self.exit_time - self.entry_time).total_seconds()
 
+    @property
+    def fees_usd(self) -> float:
+        """Total Kalshi trading fees for this trade (0 when fee model off)."""
+        return float(self.entry_fee_usd or 0.0) + float(self.exit_fee_usd or 0.0)
+
+    @property
+    def net_pnl_usd(self) -> Optional[float]:
+        """PnL net of trading fees; None while the trade is open."""
+        pnl = self.pnl_usd
+        if pnl is None:
+            return None
+        return pnl - self.fees_usd
+
 
 @dataclass
 class BacktestResult:
@@ -88,23 +139,32 @@ class BacktestResult:
     profit_factor: float
     avg_trade_duration_seconds: float
     trades: List[Trade] = field(default_factory=list)
+    total_fees_usd: float = 0.0
+    net_total_pnl_usd: float = 0.0
+    net_total_pnl_pct: float = 0.0
 
 
 class BacktestEngine:
     """Backtesting engine for strategy evaluation."""
-    
-    def __init__(self, initial_capital_usd: float = 1.00):
+
+    def __init__(self, initial_capital_usd: float = 1.00, fee_model: str = "none"):
         """
         Initialize backtest engine.
-        
+
         Args:
             initial_capital_usd: Starting capital in USD (default $1.00 for Kalshi)
+            fee_model: "none" (gross PnL, legacy) or "kalshi" (deduct canonical
+                Kalshi trading fees on entry and on non-settlement exits).
         """
         self.initial_capital_usd = initial_capital_usd
+        self.fee_model = str(fee_model or "none").lower()
         self.trades: List[Trade] = []
         self.current_capital_usd = initial_capital_usd
         self.peak_capital_usd = initial_capital_usd
         self.capital_history: List[Tuple[datetime, float]] = []
+
+    def _fees_enabled(self) -> bool:
+        return self.fee_model == "kalshi"
     
     def add_trade(
         self,
@@ -113,11 +173,12 @@ class BacktestEngine:
         side: str,
         entry_price_cents: int,
         quantity: int,
-        entry_reason: str
+        entry_reason: str,
+        entry_role: str = "taker",
     ) -> Trade:
         """
         Add a new trade to the backtest.
-        
+
         Args:
             entry_time: Entry timestamp
             asset: Asset symbol
@@ -125,7 +186,8 @@ class BacktestEngine:
             entry_price_cents: Entry price in cents
             quantity: Number of contracts
             entry_reason: Reason for entering the trade
-        
+            entry_role: Venue fee role for the entry order ("taker"/"maker")
+
         Returns:
             Trade object
         """
@@ -137,36 +199,51 @@ class BacktestEngine:
             entry_price_cents=entry_price_cents,
             exit_price_cents=None,
             quantity=quantity,
-            entry_reason=entry_reason
+            entry_reason=entry_reason,
+            entry_role=entry_role,
         )
+        if self._fees_enabled():
+            trade.entry_fee_usd = _kalshi_fee_usd(entry_price_cents, quantity, entry_role)
         self.trades.append(trade)
         return trade
-    
+
     def close_trade(
         self,
         trade: Trade,
         exit_time: datetime,
         exit_price_cents: int,
-        exit_reason: str
+        exit_reason: str,
+        exit_role: Optional[str] = None,
     ) -> None:
         """
         Close an existing trade.
-        
+
         Args:
             trade: Trade to close
             exit_time: Exit timestamp
             exit_price_cents: Exit price in cents
             exit_reason: Reason for exiting the trade
+            exit_role: Venue fee role for the exit order ("taker"/"maker");
+                defaults to the trade's exit_role ("taker")
         """
         trade.exit_time = exit_time
         trade.exit_price_cents = exit_price_cents
         trade.exit_reason = exit_reason
-        
-        # Update capital
+        if exit_role is not None:
+            trade.exit_role = exit_role
+
+        # Kalshi charges trading fees on orders, not on expiry settlement.
+        # A 0c/100c exit is the settlement payoff; only real sell prices pay.
+        if self._fees_enabled() and 0 < int(exit_price_cents) < 100:
+            trade.exit_fee_usd = _kalshi_fee_usd(
+                int(exit_price_cents), int(trade.quantity), trade.exit_role
+            )
+
+        # Update capital (net of fees when the Kalshi fee model is enabled)
         if trade.pnl_usd is not None:
-            self.current_capital_usd += trade.pnl_usd
+            self.current_capital_usd += trade.net_pnl_usd if trade.net_pnl_usd is not None else trade.pnl_usd
             self.capital_history.append((exit_time, self.current_capital_usd))
-            
+
             # Track peak capital
             if self.current_capital_usd > self.peak_capital_usd:
                 self.peak_capital_usd = self.current_capital_usd
@@ -240,7 +317,11 @@ class BacktestEngine:
         # Calculate average trade duration
         durations = [t.duration_seconds for t in completed_trades if t.duration_seconds is not None]
         avg_trade_duration_seconds = np.mean(durations) if durations else 0.0
-        
+
+        total_fees_usd = sum(t.fees_usd for t in completed_trades)
+        net_total_pnl_usd = total_pnl_usd - total_fees_usd
+        net_total_pnl_pct = (net_total_pnl_usd / self.initial_capital_usd) * 100
+
         result = BacktestResult(
             total_trades=total_trades,
             winning_trades=len(winning_trades),
@@ -255,7 +336,10 @@ class BacktestEngine:
             sharpe_ratio=sharpe_ratio,
             profit_factor=profit_factor,
             avg_trade_duration_seconds=avg_trade_duration_seconds,
-            trades=completed_trades
+            trades=completed_trades,
+            total_fees_usd=total_fees_usd,
+            net_total_pnl_usd=net_total_pnl_usd,
+            net_total_pnl_pct=net_total_pnl_pct,
         )
         
         logger.info(
@@ -277,11 +361,14 @@ class BacktestEngine:
 
 def run_simple_backtest(
     trades_data: List[Dict],
-    initial_capital_usd: float = 1.00
+    initial_capital_usd: float = 1.00,
+    fee_model: str = "none",
+    entry_role: str = "taker",
+    exit_role: str = "taker",
 ) -> BacktestResult:
     """
     Run a simple backtest from trade data.
-    
+
     Args:
         trades_data: List of trade dicts with keys:
             - entry_time: datetime
@@ -294,12 +381,15 @@ def run_simple_backtest(
             - entry_reason: str
             - exit_reason: str
         initial_capital_usd: Starting capital
-    
+        fee_model: "none" (gross) or "kalshi" (canonical Kalshi trading fees)
+        entry_role: Venue fee role for entries ("taker"/"maker")
+        exit_role: Venue fee role for non-settlement exits ("taker"/"maker")
+
     Returns:
         BacktestResult
     """
-    engine = BacktestEngine(initial_capital_usd)
-    
+    engine = BacktestEngine(initial_capital_usd, fee_model=fee_model)
+
     for trade_data in trades_data:
         trade = engine.add_trade(
             entry_time=trade_data["entry_time"],
@@ -307,14 +397,16 @@ def run_simple_backtest(
             side=trade_data["side"],
             entry_price_cents=trade_data["entry_price_cents"],
             quantity=trade_data["quantity"],
-            entry_reason=trade_data["entry_reason"]
+            entry_reason=trade_data["entry_reason"],
+            entry_role=trade_data.get("entry_role", entry_role),
         )
-        
+
         engine.close_trade(
             trade=trade,
             exit_time=trade_data["exit_time"],
             exit_price_cents=trade_data["exit_price_cents"],
-            exit_reason=trade_data["exit_reason"]
+            exit_reason=trade_data["exit_reason"],
+            exit_role=trade_data.get("exit_role", exit_role),
         )
     
     return engine.calculate_results()
