@@ -67,6 +67,7 @@ REPORT_SCHEMA_VERSION = 2
 # (name, candidate_stage, baseline_stage, audit_question)
 COMPARISONS: List[Tuple[str, str, str, str]] = [
     ("q1_vs_q0", "q1", "q0", "pre-anchor incremental information"),
+    ("q2_vs_q0", "q2", "q0", "deployed incremental information vs calibrated market (encompassing)"),
     ("final_vs_mid", "final", "mid", "deployed forecast vs contemporaneous market"),
     ("raw_vs_mid", "raw", "mid", "pre-anchor signal vs market"),
     ("anchwf_vs_raw", "anch_wf", "raw", "anchor+walk-forward benefit"),
@@ -241,7 +242,7 @@ def _integrity_for(
             if status != "INVALID":
                 status = "PROVISIONAL"
             reasons.append("anch_join_reused_across_decisions")
-    if deps & {"q0", "q1", "base_rate"}:
+    if deps & {"q0", "q1", "q2", "base_rate"}:
         if cfg.label_policy == LABEL_POLICY_GRACE and assumed_train_labels > 0:
             if status != "INVALID":
                 status = "PROVISIONAL"
@@ -251,6 +252,61 @@ def _integrity_for(
         "integrity_reasons": reasons,
         "evidence_eligible": status == "VALID",
         "deployment_gate_passed": False,
+    }
+
+
+def _murphy_decomposition(
+    probs: np.ndarray, y: np.ndarray, n_bins: int = 10
+) -> Dict[str, Any]:
+    """Murphy (1973) Brier decomposition over fixed-width probability bins.
+
+    ``brier ~= reliability - resolution + uncertainty`` — approximate when
+    forecasts vary within a bin (exact only for per-value bins).  REL is
+    the calibration error (lower is better); RES is discriminative power
+    (higher is better); UNC depends only on the outcome base rate.  Splits
+    a FAIL verdict into "miscalibrated — potentially fixable by
+    recalibration" vs "no resolution — structurally redundant with the
+    market".
+    """
+    n = int(probs.size)
+    if n == 0:
+        return {"n": 0}
+    y = np.asarray(y, dtype=float)
+    p_clip = np.clip(np.asarray(probs, dtype=float), 0.0, 1.0)
+    ybar = float(y.mean())
+    unc = ybar * (1.0 - ybar)
+    bs = float(np.mean((np.asarray(probs, dtype=float) - y) ** 2))
+    rel = res = 0.0
+    nb = 0
+    bin_rows: List[Dict[str, Any]] = []
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    for k in range(n_bins):
+        lo, hi = float(edges[k]), float(edges[k + 1])
+        if k == n_bins - 1:
+            m = (p_clip >= lo) & (p_clip <= hi)
+        else:
+            m = (p_clip >= lo) & (p_clip < hi)
+        nk = int(m.sum())
+        if nk == 0:
+            continue
+        nb += 1
+        pk = float(np.asarray(probs, dtype=float)[m].mean())
+        ok = float(y[m].mean())
+        rel += (nk / n) * (pk - ok) ** 2
+        res += (nk / n) * (ok - ybar) ** 2
+        bin_rows.append({
+            "bin": k, "lo": lo, "hi": hi, "n": nk,
+            "mean_p": pk, "freq": ok,
+        })
+    return {
+        "n": n,
+        "brier": bs,
+        "reliability": float(rel),
+        "resolution": float(res),
+        "uncertainty": float(unc),
+        "identity_residual": float(bs - (rel - res + unc)),
+        "n_bins_used": nb,
+        "bins": bin_rows,
     }
 
 
@@ -471,6 +527,18 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
         slices[f"horizon_{int(h)}s"] = [i for i in all_idx if scored_units[i].horizon_s == h]
     for a in sorted({u.asset for u in scored_units if u.asset}):
         slices[f"asset_{a}"] = [i for i in all_idx if scored_units[i].asset == a]
+    # Price-band slices: fixed 0.10-wide bands on contemporaneous mid —
+    # the "by price decile" stratification.  Units without m_mid appear
+    # in no band slice; band_9 is inclusive of mid == 1.0.
+    for b in range(10):
+        lo = b / 10.0
+        hi = None if b == 9 else (b + 1) / 10.0
+        slices[f"pband_{b}"] = [
+            i for i in all_idx
+            if scored_units[i].m_mid is not None
+            and scored_units[i].m_mid >= lo
+            and (hi is None or scored_units[i].m_mid < hi)
+        ]
 
     comp_meta: Dict[str, Tuple[str, str, str]] = {
         c[0]: (c[1], c[2], c[3]) for c in COMPARISONS}
@@ -487,6 +555,36 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
             support_cache[(sname, comp_name)] = {
                 "idx": idx, "pc": pc, "pb": pb, "losses": losses,
             }
+
+    # ---- Murphy decomposition (block-independent point estimates) ----------
+    # Per (slice, stage): reliability/resolution/uncertainty split of the
+    # Brier score.  Answers "is the model's loss to mid a calibration
+    # problem (fixable) or a resolution problem (structural)?".  Stage
+    # availability mirrors the comparisons; price-band slices give the
+    # decile breakout.
+    stage_names_for_decomp = ("const_half", "base_rate", "mid", "raw",
+                              "anch_wf", "final", "q0", "q1", "q2")
+    decomposition: Dict[str, Any] = {}
+    for sname, idxs in slices.items():
+        sdec: Dict[str, Any] = {}
+        for s in stage_names_for_decomp:
+            pp: List[float] = []
+            yy: List[int] = []
+            for i in idxs:
+                u = scored_units[i]
+                if u.y is None:
+                    continue
+                pv = stage_probability(u, s, fitted.get(i), base_rates.get(i))
+                if pv is None:
+                    continue
+                pp.append(float(pv))
+                yy.append(int(u.y))
+            if not pp:
+                continue
+            sdec[s] = _murphy_decomposition(
+                np.asarray(pp), np.asarray(yy, dtype=float))
+        if sdec:
+            decomposition[sname] = sdec
 
     # ---- bootstrap: one statistic implementation, shared draws per length --
     results: Dict[str, Any] = {}
@@ -531,8 +629,9 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
 
     primary = results[f"block_len_{int(cfg.primary_block_len_s)}s"]
 
-    # ---- q1 coefficient diagnostic (encompassing residual) ------------------
+    # ---- q1/q2 coefficient diagnostics (encompassing residuals) ------------
     gamma_diag: Dict[str, Any] = {}
+    gamma2_diag: Dict[str, Any] = {}
     for h in horizons:
         gs = [fitted[i] for i in all_idx
               if scored_units[i].horizon_s == h and fitted.get(i) and fitted[i].gamma is not None]
@@ -543,6 +642,16 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
                 "gamma_se_mean": float(np.mean([g.gamma_se for g in gs if g.gamma_se is not None]))
                 if any(g.gamma_se is not None for g in gs) else None,
                 "train_n_mean": float(np.mean([g.train_n_q1 for g in gs])),
+            }
+        gs2 = [fitted[i] for i in all_idx
+               if scored_units[i].horizon_s == h and fitted.get(i) and fitted[i].gamma2 is not None]
+        if gs2:
+            gamma2_diag[f"horizon_{int(h)}s"] = {
+                "n_fits": len(gs2),
+                "gamma2_mean": float(np.mean([g.gamma2 for g in gs2])),
+                "gamma2_se_mean": float(np.mean([g.gamma2_se for g in gs2 if g.gamma2_se is not None]))
+                if any(g.gamma2_se is not None for g in gs2) else None,
+                "train_n_mean": float(np.mean([g.train_n_q2 for g in gs2])),
             }
 
     # ---- economics (descriptive only, opt-in full scan) --------------------
@@ -801,6 +910,8 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
             "mid": "(yes_bid_cents + yes_ask_cents) / 200 — contemporaneous book mid",
             "q0": "logit(q) = a + b*logit(m), same-horizon expanding-window fit",
             "q1": "logit(q) = a + b*logit(m) + g*z, z = logit(raw) - logit(m)",
+            "q2": ("logit(q) = a + b*logit(m) + g2*(logit(final) - logit(m)) — "
+                   "Chong-Hendry encompassing test for the deployed forecast"),
             "base_rate": "per-asset expanding mean of official outcomes (label-available)",
             "const_half": "0.5",
         },
@@ -901,6 +1012,25 @@ def build_report(cfg: AuditConfig, progress: bool = False) -> Dict[str, Any]:
                      "evaluation population. Coefficient is a diagnostic; the "
                      "primary evidence is the q1_vs_q0 score improvement."),
         },
+        "q2_residual_diagnostic": {
+            "definition": "q2 coefficient on z2 = logit(final) - logit(mid); "
+                          "expanding-window per-horizon fits — the deployed-"
+                          "forecast encompassing coefficient",
+            "by_horizon": gamma2_diag,
+            "note": ("gamma2 > 0 with the q2_vs_q0 comparison PASS means the "
+                     "deployed probability carries information beyond the "
+                     "calibrated market. gamma2 ~ 0 means the post-anchor "
+                     "pipeline is (near-)redundant with mid on this support."),
+        },
+        "decomposition": decomposition,
+        "decomposition_semantics": (
+            "Murphy (1973) Brier decomposition per (slice, stage) over fixed "
+            "0.10 probability bins: brier ~= reliability - resolution + "
+            "uncertainty (approximate within-bin). pband_N slices are "
+            "contemporaneous-mid bands [N/10, (N+1)/10) — the price-decile "
+            "breakout. Stratified verdicts across horizon/asset/pband slices "
+            "are EXPLORATORY: apply Sidak or BH-FDR correction before acting "
+            "on any single stratum."),
         "results": results,
         "primary_results": primary,
         "verdict_summary": verdict_summary,
@@ -952,7 +1082,7 @@ def _export_population(
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     stage_names = ("const_half", "base_rate", "mid", "raw", "anch_wf",
-                   "final", "q0", "q1")
+                   "final", "q0", "q1", "q2")
     with open(p, "w", encoding="utf-8") as f:
         f.write(json.dumps({
             "record_type": "manifest",
@@ -1046,8 +1176,18 @@ def print_summary(report: Dict[str, Any]) -> None:
             continue
         print(f"{sname}:")
         for name, res in report["primary_results"][sname].items():
-            if name == "q1_vs_q0" or name == "final_vs_mid":
+            if name in ("q1_vs_q0", "q2_vs_q0", "final_vs_mid"):
                 print(_fmt_verdict_line(name, res))
+    dec = (report.get("decomposition") or {}).get("pooled", {})
+    if dec:
+        print("-" * 78)
+        print("MURPHY DECOMPOSITION pooled (brier = REL - RES + UNC):")
+        for s in ("mid", "raw", "final", "q0", "q1", "q2"):
+            d = dec.get(s)
+            if d:
+                print(f"  {s:<8} n={d['n']:<6} BS={d['brier']:.4f} "
+                      f"REL={d['reliability']:.4f} RES={d['resolution']:.4f} "
+                      f"UNC={d['uncertainty']:.4f}")
     print("-" * 78)
     print("VERDICTS:", json.dumps(report["verdict_summary"]).replace("\n", " "))
     print("=" * 78)

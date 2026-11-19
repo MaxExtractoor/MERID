@@ -10,6 +10,10 @@ Comparators (all probabilities in canonical YES space)
 - ``mkt_plus_sig`` (q1): ``logit(q1) = a + b * logit(m) + g * z`` with
   ``z = logit(r) - logit(m)`` (r = pre-anchor probability). Same fitting
   discipline as q0. This is the incremental-information comparator.
+- ``mkt_plus_final`` (q2): same form as q1 but ``z = logit(f) - logit(m)``
+  (f = deployed ``final`` probability). The Chong-Hendry encompassing test
+  for the forecast that actually trades: does the deployed probability add
+  information beyond the calibrated market?
 - ``raw`` / ``anch_wf`` / ``final`` / ``mid``: pass-through stages.
 
 Fitted comparators use only units whose LABEL was available before the
@@ -175,7 +179,8 @@ def irls_logistic(
 # Comparator forecasts
 # ---------------------------------------------------------------------------
 
-STAGE_KEYS = ("const_half", "base_rate", "mid", "raw", "anch_wf", "final", "q0", "q1")
+STAGE_KEYS = ("const_half", "base_rate", "mid", "raw", "anch_wf", "final",
+              "q0", "q1", "q2")
 
 
 @dataclass
@@ -240,12 +245,17 @@ def build_fold_plan(
 class FittedForecast:
     p_q0: Optional[float] = None
     p_q1: Optional[float] = None
+    p_q2: Optional[float] = None
     train_n_q0: int = 0
     train_n_q1: int = 0
+    train_n_q2: int = 0
     gamma: Optional[float] = None
     gamma_se: Optional[float] = None
+    gamma2: Optional[float] = None
+    gamma2_se: Optional[float] = None
     q0_converged: Optional[bool] = None
     q1_converged: Optional[bool] = None
+    q2_converged: Optional[bool] = None
 
 
 def compute_fitted_forecasts(
@@ -305,9 +315,11 @@ def compute_fitted_forecasts(
                 if tavail is not None and (latest_avail is None or tavail > latest_avail):
                     latest_avail = tavail
             train_idx_q1 = [i for i in train_idx if units[i].p_raw is not None]
+            train_idx_q2 = [i for i in train_idx if units[i].p_final is not None]
             q1_pos = {i: k for k, i in enumerate(train_idx)}
             fit0: Optional[LogisticFit] = None
             fit1: Optional[LogisticFit] = None
+            fit2: Optional[LogisticFit] = None
             if len(train_idx) >= min_train_n:
                 X0 = np.array([[1.0, logit(units[i].m_mid)] for i in train_idx])
                 yv = np.array(train_y, dtype=float)
@@ -320,9 +332,19 @@ def compute_fitted_forecasts(
                 ])
                 yv1 = np.array([train_y[q1_pos[i]] for i in train_idx_q1], dtype=float)
                 fit1 = irls_logistic(X1, yv1)
+            if len(train_idx_q2) >= min_train_n:
+                X2 = np.array([
+                    [1.0, logit(units[i].m_mid),
+                     logit(units[i].p_final) - logit(units[i].m_mid)]
+                    for i in train_idx_q2
+                ])
+                yv2 = np.array([train_y[q1_pos[i]] for i in train_idx_q2], dtype=float)
+                fit2 = irls_logistic(X2, yv2)
             h_stats[f"fold_{f}"] = {
                 "boundary_ts": b,
                 "train_n": len(train_idx),
+                "train_n_q1": len(train_idx_q1),
+                "train_n_q2": len(train_idx_q2),
                 "train_labels_observed": n_obs,
                 "train_labels_assumed": n_assumed,
                 "train_labels_excluded_no_availability": n_excluded,
@@ -336,6 +358,7 @@ def compute_fitted_forecasts(
                 rec = FittedForecast(
                     train_n_q0=len(train_idx),
                     train_n_q1=len(train_idx_q1),
+                    train_n_q2=len(train_idx_q2),
                 )
                 if fit0 is not None and u.m_mid is not None:
                     rec.p_q0 = fit0.predict([1.0, logit(u.m_mid)])
@@ -346,6 +369,12 @@ def compute_fitted_forecasts(
                     rec.gamma = float(fit1.coef[2])
                     rec.gamma_se = float(fit1.se[2]) if fit1.se.size > 2 else None
                     rec.q1_converged = fit1.converged
+                if fit2 is not None and u.m_mid is not None and u.p_final is not None:
+                    z2 = logit(u.p_final) - logit(u.m_mid)
+                    rec.p_q2 = fit2.predict([1.0, logit(u.m_mid), z2])
+                    rec.gamma2 = float(fit2.coef[2])
+                    rec.gamma2_se = float(fit2.se[2]) if fit2.se.size > 2 else None
+                    rec.q2_converged = fit2.converged
                 out[i] = rec
         fold_stats[f"horizon_{int(h)}s"] = h_stats
     return out, fold_stats
@@ -434,4 +463,6 @@ def stage_probability(
         return fitted.p_q0 if fitted else None
     if stage == "q1":
         return fitted.p_q1 if fitted else None
+    if stage == "q2":
+        return fitted.p_q2 if fitted else None
     raise KeyError(stage)

@@ -167,6 +167,50 @@ class _EnvOverride:
     maximum: Optional[Decimal] = None
 
 
+# 2026-11-19: Audited global exposure bound. The resolved
+# fixed_exposure_cap_usd may only exceed this when the profile's
+# correlation-aware sizing stack is live (see _apply_correlation_cap_guard).
+_AUDITED_EXPOSURE_CAP_USD = Decimal("11.00")
+
+
+def _apply_correlation_cap_guard(
+    fixed_exposure_cap: Decimal,
+    profile: Any,
+    conflicts: List[str],
+    invariants_checked: List[str],
+) -> Decimal:
+    """Enforce the correlation-mode precondition on exposure-cap lifts.
+
+    The audited $11 cap is sized for a book where one position is effectively
+    the whole portfolio. Above it, correlated crypto underlyings share a
+    single risk factor, so a cap lift is only safe when correlation-aware
+    sizing is actually live — the profile's ``correlation_tracking.enabled``
+    AND ``correlation_tracking.real_time_monitoring`` (the flag the 0.80 /
+    3-asset thresholds hang off; inert while False). If the resolved cap
+    exceeds the audited bound without that stack, fail closed to the audited
+    cap and record the rejected lift.
+    """
+    if fixed_exposure_cap <= _AUDITED_EXPOSURE_CAP_USD:
+        return fixed_exposure_cap
+
+    corr_enabled = bool(getattr(profile, "correlation_tracking_enabled", False))
+    corr_rt = bool(getattr(profile, "correlation_tracking_real_time_monitoring", False))
+    if corr_enabled and corr_rt:
+        invariants_checked.append(
+            f"Exposure cap lift permitted: {fixed_exposure_cap} USD > audited "
+            f"{_AUDITED_EXPOSURE_CAP_USD} USD with correlation-aware sizing live"
+        )
+        return fixed_exposure_cap
+
+    conflicts.append(
+        f"Exposure cap lift rejected: resolved={fixed_exposure_cap} USD exceeds "
+        f"audited cap {_AUDITED_EXPOSURE_CAP_USD} USD but correlation-aware sizing "
+        f"is not live (correlation_tracking.enabled={corr_enabled}, "
+        f"real_time_monitoring={corr_rt}); resolved to audited cap"
+    )
+    return _AUDITED_EXPOSURE_CAP_USD
+
+
 # Typed schema for environment overrides.  Only keys in this list may influence
 # safety-critical live configuration.  All other MERID_* environment variables
 # that touch risk/caps are treated as unknown and are rejected.
@@ -1067,6 +1111,13 @@ class LiveConfigResolver:
             f"Exposure cap: profile={profile_cap} USD; "
             f"env={requested_env_cap if requested_env_cap is not None else 'none'}; "
             f"resolved={fixed_exposure_cap} USD"
+        )
+
+        fixed_exposure_cap = _apply_correlation_cap_guard(
+            fixed_exposure_cap,
+            profile,
+            self._conflicts,
+            self._invariants_checked,
         )
 
         # ── Contracts per order ───────────────────────────────────────────────

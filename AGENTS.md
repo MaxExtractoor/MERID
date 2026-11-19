@@ -1835,3 +1835,88 @@ risk are the same constant; at current equity the $11 global cap makes
 the portfolio effectively one-position-at-a-time, and the correlation
 matrix/Kelly discount stays inert until that cap is lifted (restore
 correlation-aware sizing in the same commit if it is).
+
+## 2026-11-19 forecast-audit decomposition + settlement-path tooling
+
+Follow-on to the forecast-audit FAIL verdict above — the audit now produces
+the diagnostics needed to localize *where* (if anywhere) the model adds
+information over the market mid, plus the settlement-path tooling the
+fee-aware backtest gap required.
+
+### Forecast audit v2 (`merid/analysis/forecast_audit/`)
+
+- **q2 encompassing comparator** (`inference.py`, `report.py`):
+  `logit(q) = a + b·logit(m) + g2·(logit(final) − logit(m))`, same
+  walk-forward fitting discipline as q1 but on the *deployed* `final`
+  probability — the Chong–Hendry encompassing test for the forecast that
+  actually trades.  Reported as `q2_vs_q0` plus a `q2_residual_diagnostic`
+  (gamma2 > 0 with `q2_vs_q0` PASS = deployed forecast carries incremental
+  information beyond the calibrated market).
+- **Murphy decomposition** per stage: Brier = Reliability − Resolution +
+  Uncertainty over fixed-width probability bins.  Splits the FAIL into
+  calibration error (fixable by recalibration) vs discriminative power
+  (structural).  Interpretation guide: if Resolution ≈ market's, the model
+  adds nothing; if Reliability dominates, isotonic/Platt recalibration is
+  the repair.
+- **Price-band slices**: 0.10-wide bands on contemporaneous mid
+  (`pband_0`..`pband_9`, band_9 inclusive of mid==1.0) — the "by price
+  decile" stratification.  The pinned-fav lane lives in the FLB-biased
+  85–98c region, so per-band Brier skill matters more than the global
+  verdict.  When stratifying for edge claims, apply Šidák/BH-FDR across
+  the grid — uncorrected mining will find a lucky cell.
+
+### Jump-robust realized vol (`merid/prediction/realized_vol.py`)
+
+`MERID_REALIZED_VOL_ESTIMATOR` selects the per-second variance estimator:
+`rv` (default, unchanged EWMA of squared returns), `bpv` (bipower
+variation, `π/2·|r_{t-1}|·|r_t|` scaling), `medrv` (median-of-three absolute
+returns — Andersen/Dobrev/Schaumburg 2012; recommended for 1s sampling
+because it also steps over zero-return intervals that bias MinRV/bipower
+down).  All feed the same EWMA/dt-normalization path; the
+`_ANNUALIZED_VOL_BANDS` clamps in `trade_decision.py` still bind every
+source.  Verified: a single 0.5% jump triples `rv` (~1.84 ann.) while
+`bpv`/`medrv` stay ~0.5–0.6.  `RealizedVolEstimate.estimator` stamps which
+variant produced each estimate.
+
+### Settlement-path backtest (`merid/backtesting/rti_path_backtest.py`)
+
+Replays `data/cf_rti_ticks.db` (~1s CF RTI prints, 5 assets, archive spans
+2026-11-06 → present but coverage is bursty — long feed gaps are reported
+as `no_ticks`/`no_strike`/`low_coverage` skips, never fabricated).  For
+each 15-minute expiry it reconstructs the settlement window at configurable
+TTE decision points (`--tte-grid`), feeds the real
+`compute_settlement_distribution` code path (observed 60-print slots fixed,
+remaining variance on the actual elapsed schedule — arithmetic-average
+Gaussian is exact under Bachelier, no moment-matching needed), and scores
+model vs spot-implied vs constant-0.5 Brier/log-loss by horizon and asset.
+Timestamps are precomputed per asset with bisect slicing (no per-decision
+O(n) rebuilds).  This is the artifact that makes fee-aware edge claims
+possible: it prices the *averaged settlement instrument*, not terminal
+spot.  Smoke run (BTC, 2026-11-15 partial coverage): model Brier beat both
+baselines at every scored horizon, but n was small — treat as harness
+validation, not evidence.
+
+### Deflated Sharpe Ratio (`merid/backtesting/deflated_sharpe.py`)
+
+Bailey & López de Prado (2014) DSR for promotion-gate return series:
+`deflated_sharpe_ratio(returns, n_trials, periods_per_year=None)` returns
+the probability the true Sharpe exceeds the expected-max-under-null
+benchmark given `n_trials` variants tried.  `n_trials` must count *every*
+variant screened, not just the winner — that is the whole point.  Use
+`passes(threshold=0.95)` as the gate; `to_dict()` for audit records.  N=1
+reduces to the Probabilistic Sharpe Ratio.  Companion to (not a
+replacement for) CSCV/PBO if parameter grids are ever searched.
+
+### Correlation-mode precondition on exposure-cap lift (`merid/config/live_config.py`)
+
+`_apply_correlation_cap_guard` enforces the review invariant structurally:
+the resolved `fixed_exposure_cap_usd` may exceed the audited $11
+(`_AUDITED_EXPOSURE_CAP_USD`) **only** when the profile's correlation stack
+is actually live — `correlation_tracking.enabled` AND
+`correlation_tracking.real_time_monitoring` (the flag the 0.80/3-asset
+thresholds hang off; inert while False).  A cap lift without that stack
+fails closed to $11 with the rejection recorded in `conflicts_caught`.
+Lifting the cap is therefore a two-key change: profile cap AND
+`real_time_monitoring: true` — they cannot drift apart.  Note env overrides
+can never raise the cap above the profile value anyway (existing
+fail-closed rule); this guard covers the profile-edit path.
