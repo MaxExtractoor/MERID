@@ -347,3 +347,77 @@ class TestVetoRelease:
         assert rec["gate"] == "cost_basis"
         assert rec["asset"] == "BTC"
         assert rec["px"] == 42.0
+
+
+# ── win_cap_cents: profit-lock-aware counterfactual (2026-11-19) ────────────
+# drift scope-release samples price the win leg under the lane's
+# entry+MERID_DRIFT_LOCK_GAIN_CENTS exit, not hold-to-settlement — the
+# settle-hold estimator overstated realized EV ~5-6c/contract and
+# re-admitted the XRP-YES 70-79c bleed cohort.
+
+class TestWinCapCounterfactual:
+    def _shadow(self, fg, ticker, px, side="yes", asset="XRP", cap=12.0):
+        fg.record_shadow_sample(
+            gate="drift",
+            asset=asset,
+            side=side,
+            ticker=ticker,
+            px=px,
+            route="drift_fav",
+            win_cap_cents=cap,
+        )
+
+    def _trail(self, fg, gate="drift", asset="XRP", side="yes"):
+        return fg._cohorts[(gate, asset, side)]["trailing"]
+
+    def test_win_leg_capped_at_lock_gain(self):
+        fg = _fresh_module()
+        # px=70 yes win pays +30 settle-hold; cap 12 -> +12
+        self._shadow(fg, "KXXRP15M-C1-00", px=70.0)
+        _write_settlements([("KXXRP15M-C1-00", 1)])
+        fg._last_refresh_ts = 0.0
+        fg.cohort_stats("drift", "XRP", "yes")
+        assert self._trail(fg) == [12.0]
+
+    def test_loss_leg_uncapped(self):
+        fg = _fresh_module()
+        self._shadow(fg, "KXXRP15M-C2-00", px=70.0)
+        _write_settlements([("KXXRP15M-C2-00", 0)])  # yes loses
+        fg._last_refresh_ts = 0.0
+        fg.cohort_stats("drift", "XRP", "yes")
+        assert self._trail(fg) == [-70.0]
+
+    def test_cap_never_raises_payoff(self):
+        fg = _fresh_module()
+        # px=95 -> settle win +5 already below the 12c cap
+        self._shadow(fg, "KXXRP15M-C3-00", px=95.0)
+        _write_settlements([("KXXRP15M-C3-00", 1)])
+        fg._last_refresh_ts = 0.0
+        fg.cohort_stats("drift", "XRP", "yes")
+        assert self._trail(fg) == [5.0]
+
+    def test_uncapped_sample_keeps_settle_hold(self):
+        fg = _fresh_module()
+        fg.record_shadow_sample(
+            gate="drift",
+            asset="XRP",
+            side="yes",
+            ticker="KXXRP15M-C4-00",
+            px=70.0,
+            route="drift_fav",
+        )
+        _write_settlements([("KXXRP15M-C4-00", 1)])
+        fg._last_refresh_ts = 0.0
+        fg.cohort_stats("drift", "XRP", "yes")
+        assert self._trail(fg) == [30.0]
+
+    def test_cap_survives_state_roundtrip(self):
+        fg = _fresh_module()
+        self._shadow(fg, "KXXRP15M-C5-00", px=70.0)
+        fg._save_state()
+        # fresh module reloads persisted pending sample incl. the cap
+        fg2 = _fresh_module()
+        _write_settlements([("KXXRP15M-C5-00", 1)])
+        fg2._last_refresh_ts = 0.0
+        fg2.cohort_stats("drift", "XRP", "yes")
+        assert self._trail(fg2) == [12.0]

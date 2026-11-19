@@ -72,6 +72,30 @@ def _to_edge_percent(edge: float) -> float:
     return edge if abs(edge) >= 1.0 else edge * 100.0
 
 
+def required_net_edge_cents(
+    *,
+    asset_min_edge_frac: float,
+    degraded: bool,
+    degraded_reserve_frac: float,
+    lane_bound_cents: Optional[float],
+    is_lane: bool,
+    decision_lane: Optional[str] = None,
+) -> float:
+    """Required net edge for the allocator EDGE stage, in cents.
+
+    Single authority for the edge hurdle.  Generic candidates pay the
+    per-asset profile floor; lane-admitted candidates pay their stamped
+    lane bound; degraded quotes pay the degraded reserve on top of either
+    base.  ``decision_lane`` is carried for lane-scoped hurdle overrides
+    (the settlement lane's cost-plus hurdle) and is unused by the default
+    path, which reproduces the pre-refactor inline computation exactly.
+    """
+    degraded_reserve_cents = degraded_reserve_frac * 100.0 if degraded else 0.0
+    if is_lane and lane_bound_cents is not None:
+        return float(lane_bound_cents) + degraded_reserve_cents
+    return asset_min_edge_frac * 100.0 + degraded_reserve_cents
+
+
 @dataclass
 class OrderCandidate:
     """Represents a potential order from an agent."""
@@ -549,30 +573,29 @@ class GlobalAllocator:
             # Degraded-mode reserve: a REST-owned effective quote carries
             # latency/uncertainty the raw edge cannot see.  It must clear the
             # base bar plus an explicit reserve — degraded quotes are allowed
-            # to trade, never eased.
+            # to trade, never eased.  The reserve lives inside
+            # required_net_edge_cents() so lane-scoped hurdle overrides own
+            # the whole stack in one place.
             _degraded = bool(getattr(c, "degraded_mode", False)) or (
                 getattr(c, "quote_owner", "") == "REST_VERIFIED_DEGRADED"
             )
-            _required_edge_frac = asset_min_edge_frac + (
-                float(os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01"))
-                if _degraded else 0.0
-            )
-            # 2026-10-02: bounded-lane candidates were admitted against the
-            # lane's own effective threshold on the executable price — a
-            # value lane may deliberately carry a negative bound.  Re-check
-            # against that bound (still plus the degraded reserve) instead of
-            # the generic profile floor; non-lane candidates are unchanged.
             _lane_bound_cents = getattr(c, "effective_required_edge_cents", None)
             _is_lane = bool(
                 getattr(c, "decision_lane", None) in BOUNDED_POST_ONLY_LANES
                 or getattr(c, "threshold_cell_id", None) is not None
                 or getattr(c, "provisional_cell_id", None) is not None
             )
-            if _is_lane and _lane_bound_cents is not None:
-                _required_edge_frac = float(_lane_bound_cents) / 100.0 + (
-                    float(os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01"))
-                    if _degraded else 0.0
-                )
+            _required_edge_cents = required_net_edge_cents(
+                asset_min_edge_frac=asset_min_edge_frac,
+                degraded=_degraded,
+                degraded_reserve_frac=float(
+                    os.getenv("MERID_DEGRADED_EDGE_RESERVE_PCT", "0.01")
+                ),
+                lane_bound_cents=_lane_bound_cents,
+                is_lane=_is_lane,
+                decision_lane=getattr(c, "decision_lane", None),
+            )
+            _required_edge_frac = _required_edge_cents / 100.0
             if candidate_edge_frac >= _required_edge_frac:
                 d.stage_results["EDGE"] = "PASS"
                 edge_passed.append((c, d))
@@ -581,10 +604,11 @@ class GlobalAllocator:
                 _mark_terminal(d, "EDGE", REASON_EXPECTED_VALUE_BELOW_MINIMUM)
                 logger.info(
                     "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < required=%.3f%% "
-                    "(min=%.3f%% degraded=%s lane=%s lane_bound_cents=%s "
-                    "compared=%s)",
+                    "(edge_cents=%.4f required_cents=%.4f min=%.3f%% degraded=%s "
+                    "lane=%s lane_bound_cents=%s compared=%s)",
                     c.asset, _to_edge_percent(candidate_edge_frac),
                     _to_edge_percent(_required_edge_frac),
+                    candidate_edge_frac * 100.0, _required_edge_cents,
                     _to_edge_percent(asset_min_edge), _degraded,
                     getattr(c, "decision_lane", None),
                     getattr(c, "effective_required_edge_cents", None),

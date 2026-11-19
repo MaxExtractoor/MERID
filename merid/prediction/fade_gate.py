@@ -91,11 +91,33 @@ def gate_mode() -> str:
     return _MODE
 
 
-def _cohort_pnl(side: str, px: float, resolved_yes: int) -> float:
+def _cohort_pnl(
+    side: str,
+    px: float,
+    resolved_yes: int,
+    win_cap_cents: Optional[float] = None,
+) -> float:
+    """Counterfactual settle PnL for one sample.
+
+    Default is hold-to-settlement: win pays ``100 - px``, loss ``-px``.
+    ``win_cap_cents`` models a per-position profit-lock exit policy (the
+    drift lane banks entry + MERID_DRIFT_LOCK_GAIN_CENTS instead of the
+    full settlement payoff): a winning sample then pays
+    ``min(100 - px, cap)``.  The cap is frozen into the sample at record
+    time so a later env change cannot rewrite pending evidence.
+    """
     win = (resolved_yes == 1 and side == "yes") or (
         resolved_yes == 0 and side == "no"
     )
-    return (100.0 - px) if win else -px
+    if not win:
+        return -px
+    payoff = 100.0 - px
+    if win_cap_cents is not None:
+        try:
+            payoff = min(payoff, float(win_cap_cents))
+        except (TypeError, ValueError):
+            pass
+    return payoff
 
 
 def _load_state() -> None:
@@ -147,6 +169,11 @@ def _load_state() -> None:
                         "px": float(s.get("px") or 0.0),
                         "ts": float(s.get("ts") or 0.0),
                         "route": s.get("route"),
+                        "win_cap_cents": (
+                            float(s["win_cap_cents"])
+                            if s.get("win_cap_cents") is not None
+                            else None
+                        ),
                     }
                 except (KeyError, TypeError, ValueError):
                     continue
@@ -179,6 +206,7 @@ def _save_state() -> None:
                     "px": p["px"],
                     "ts": p["ts"],
                     "route": p.get("route"),
+                    "win_cap_cents": p.get("win_cap_cents"),
                 }
                 for (g, t, _s), p in _pending.items()
             ],
@@ -234,7 +262,12 @@ def _refresh_if_due(now: float) -> None:
                     {"state": "allowed", "trailing": [], "last_settled_ts": 0.0},
                 )
                 rec["trailing"].append(
-                    _cohort_pnl(side, float(sample["px"]), int(ry))
+                    _cohort_pnl(
+                        side,
+                        float(sample["px"]),
+                        int(ry),
+                        win_cap_cents=sample.get("win_cap_cents"),
+                    )
                 )
                 rec["trailing"] = rec["trailing"][-_WINDOW:]
                 rec["last_settled_ts"] = now
@@ -311,6 +344,7 @@ def _record_sample(
     ticker: str,
     px: float,
     route: Optional[str],
+    win_cap_cents: Optional[float] = None,
 ) -> None:
     """Append one gated-candidate sample.  Dedupes per (gate, ticker, side)."""
     try:
@@ -326,6 +360,9 @@ def _record_sample(
             "px": float(px),
             "ts": time.time(),
             "route": route,
+            "win_cap_cents": (
+                float(win_cap_cents) if win_cap_cents is not None else None
+            ),
         }
         _pending[key] = sample
         _SAMPLES_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -373,6 +410,7 @@ def record_shadow_sample(
     ticker: str,
     px: float,
     route: Optional[str] = None,
+    win_cap_cents: Optional[float] = None,
 ) -> None:
     """Record a counterfactual sample for a candidate excluded upstream.
 
@@ -382,6 +420,11 @@ def record_shadow_sample(
     API lets them emit the same (gate, asset, side, ticker, px) sample the
     fade gate uses; ``cohort_stats`` then measures the excluded cohort's
     settled counterfactual EV and the gate can release on proof.
+
+    ``win_cap_cents`` prices the win leg under a profit-lock exit policy
+    (``min(100 - px, cap)`` instead of full settlement ``100 - px``) —
+    pass the lane's lock gain so release evidence matches what admitted
+    positions actually bank.  ``None`` keeps hold-to-settlement semantics.
     Never raises; samples dedupe per (gate, ticker, side).
     """
     try:
@@ -393,6 +436,7 @@ def record_shadow_sample(
             ticker=ticker,
             px=float(px),
             route=route,
+            win_cap_cents=win_cap_cents,
         )
         with _lock:
             _refresh_if_due(time.time())

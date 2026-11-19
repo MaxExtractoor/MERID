@@ -212,7 +212,15 @@ def _drift_scope_eval(
     ticker: Optional[str],
     px: Optional[float],
 ) -> None:
-    """Emit a counterfactual sample for a scope-excluded drift candidate."""
+    """Emit a counterfactual sample for a scope-excluded drift candidate.
+
+    The win leg is capped at the lane's profit-lock gain
+    (``MERID_DRIFT_LOCK_GAIN_CENTS``): every released candidate is stamped
+    ``drift_fav`` and banks entry+gain on winners, not the full settlement
+    payoff — settle-hold counterfactuals overstated realized EV by ~5-6c
+    on the 2026-11 XRP-YES bleed and re-admitted the exact cohort the
+    2026-10-21 audit excluded.
+    """
     try:
         from merid.prediction import fade_gate as _fg
 
@@ -223,6 +231,7 @@ def _drift_scope_eval(
             ticker=str(ticker or ""),
             px=float(px or 0.0),
             route=DRIFT_LANE_ID,
+            win_cap_cents=float(drift_lock_gain_cents()),
         )
     except Exception:
         pass

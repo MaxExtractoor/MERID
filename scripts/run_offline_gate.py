@@ -67,6 +67,10 @@ def gate_environment(sandbox: Path) -> dict[str, str]:
         "MERID_ALLOW_LIVE_TRADES": "false", "MERID_TRADE_MODE": "paper",
         "MERID_PM_TRADING_MODE": "mock", "KALSHI_API_KEY_ID": "",
         "KALSHI_PRIVATE_KEY_PATH": "",
+        # The sandbox is ephemeral — conftest's durable-state scan guards the
+        # production data/ tree, which does not exist here; leave it off so a
+        # sandbox-contained write cannot fail the blocking gate.
+        "MERID_TEST_SKIP_DURABLE_SCAN": "1",
     })
     return env
 

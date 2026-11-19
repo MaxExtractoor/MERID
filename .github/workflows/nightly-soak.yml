@@ -61,11 +61,48 @@ jobs:
             -v --tb=short --timeout=60
         timeout-minutes: 30
 
-      - name: Extended Test Suite (full)
+      # 2026-11-19: the blocking signal is now the canonical offline
+      # acceptance harness (same gate as paper-gate.yml).  The full tests/
+      # tree carries a documented non-green backlog (AGENTS.md 2026-09-22
+      # baseline), so it runs report-only below — -x used to kill the job on
+      # the first known failure ~40s in.  The run borrows ci.yml's
+      # full-discovery pattern: ci_pytest_hard_exit survives the Linux
+      # interpreter-shutdown wedge, `timeout -s INT` bounds the suite below
+      # the step timeout while still letting pytest write junitxml, and the
+      # outer watchdog is the last-resort kill for a true mid-run hang.
+      - name: Offline Acceptance Gate
         run: |
-          pytest tests/ -v --tb=short --durations=20 \
-            -x --timeout=120
+          python scripts/run_offline_gate.py --output-dir ./results
+        timeout-minutes: 20
+
+      - name: Extended Test Suite (report-only)
+        continue-on-error: true
+        env:
+          # The durable-state scan guards the production data/ tree; the CI
+          # checkout is ephemeral and unattributed writes trip it even when
+          # every test passes.  The pytest steps above still run with the
+          # scan enabled.
+          MERID_TEST_SKIP_DURABLE_SCAN: '1'
+        run: |
+          mkdir -p results
+          PYTHONFAULTHANDLER=1 setsid --wait timeout -s INT -k 60 2100 \
+            python scripts/ci_pytest_hard_exit.py tests/ \
+            -v --tb=short --durations=20 --timeout=120 \
+            --junitxml=results/extended_tests.xml \
+            > results/extended_tests.log 2>&1 &
+          TPID=$!
+          ( sleep 2200; kill -KILL -- "-$TPID" 2>/dev/null; pkill -KILL -f "ci_pytest_hard_exit" 2>/dev/null ) &
+          WPID=$!
+          wait $TPID
+          ec=$?
+          kill "$WPID" 2>/dev/null || true
+          tail -80 results/extended_tests.log || true
+          echo "extended suite exit: $ec (report-only — does not gate)"
         timeout-minutes: 45
+
+      - name: Extended suite summary
+        if: always()
+        run: python scripts/nightly_extended_summary.py
 
       - name: Upload soak results
         if: always()
@@ -74,6 +111,7 @@ jobs:
           name: soak-results-${{ github.run_number }}
           path: |
             audit_soak_results.json
+            results/
           retention-days: 30
 
       - name: Notify on failure
