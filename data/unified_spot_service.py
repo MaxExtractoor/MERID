@@ -304,13 +304,6 @@ class UnifiedSpotService:
         self._hb_log_interval_s = float(
             os.getenv("MERID_SPOT_LOG_THROTTLE_S", "60"))
 
-    def _hb_log(self, key: str, level: int, msg: str, *args) -> None:
-        now = time.time()
-        last = self._hb_log_ts.get(key, 0.0)
-        if now - last >= self._hb_log_interval_s:
-            self._hb_log_ts[key] = now
-            logger.log(level, msg, *args)
-
         # Per-asset last successful fetch timestamp (legacy tests/health compatibility)
         self._asset_success_ts: Dict[str, float] = {}
 
@@ -346,6 +339,13 @@ class UnifiedSpotService:
         self._state_transitions: Dict[str, list] = {}  # asset -> list of (timestamp, from_state, to_state)
         
         logger.info("[UNIFIED-SPOT] UnifiedSpotService initialized with SQS and recovery states (2026 best practices)")
+
+    def _hb_log(self, key: str, level: int, msg: str, *args) -> None:
+        now = time.time()
+        last = self._hb_log_ts.get(key, 0.0)
+        if now - last >= self._hb_log_interval_s:
+            self._hb_log_ts[key] = now
+            logger.log(level, msg, *args)
 
     def is_ready(self) -> bool:
         """Check if spot service has completed initial fetch and is ready for use."""
