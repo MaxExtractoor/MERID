@@ -1110,6 +1110,215 @@ class FillsPoller:
         except Exception as _e:
             logger.warning("[SUBMISSION-RECONCILE-POLLER] setup failed: %s", _e)
 
+    async def _reconcile_persisted_attempts(self, client: Any) -> None:
+        """Reconcile stale PERSISTED entry attempts against the venue.
+
+        ``PERSISTED`` means ``persist_attempt`` wrote the durable row but
+        ``claim_for_submission`` never ran — the atomic claim is the gate
+        immediately before the exchange request, so these orders were almost
+        certainly never transmitted.  Each stale row is still verified
+        against the venue by ``client_order_id`` across resting/executed/
+        canceled views: a venue hit routes through the full
+        submission-unknown reconcile (fills, quantities, gate promotion); a
+        confirmed venue miss terminalizes ``REJECTED`` with an explicit
+        never-transmitted reason.  Lookup failures leave the row untouched —
+        transport failure is not evidence of absence.  Never resubmits.
+        """
+        try:
+            from merid.event_venues.kalshi.order_attempt_store import (
+                OrderAttemptStore,
+            )
+            from merid.event_venues.kalshi.order_router import (
+                TradingMode,
+                reconcile_submission_unknown_client_order_id,
+            )
+
+            store = OrderAttemptStore()
+            try:
+                persisted = store.get_unresolved(
+                    lookback_seconds=None, statuses=["PERSISTED"]
+                )
+            except Exception as _qe:
+                logger.debug("[PERSISTED-RECONCILE] query failed: %s", _qe)
+                return
+            if not persisted:
+                return
+
+            grace_s = float(_os.environ.get("MERID_STALE_PERSISTED_GRACE_S", "900"))
+            max_per_cycle = int(
+                _os.environ.get("MERID_STALE_PERSISTED_MAX_PER_CYCLE", "10")
+            )
+            timeout_s = float(
+                _os.environ.get("MERID_STALE_PERSISTED_LOOKUP_TIMEOUT_S", "8.0")
+            )
+            tag_ticker_re = re.compile(
+                r"^15m_(KX[A-Z0-9]+15M-[0-9A-Z-]+?)_[0-9a-f]{4,}$"
+            )
+            now = time.time()
+            reconciled = 0
+
+            for rec in persisted:
+                if reconciled >= max_per_cycle:
+                    break
+                try:
+                    age_s = now - float(rec.created_at or 0)
+                    if age_s < grace_s:
+                        continue
+                    try:
+                        _p = json.loads(rec.payload_json or "{}")
+                    except Exception:
+                        _p = {}
+                    _order = (
+                        _p.get("order")
+                        if isinstance(_p.get("order"), dict)
+                        else _p
+                    )
+                    ticker = (
+                        _order.get("ticker")
+                        or _p.get("ticker")
+                        or _p.get("market_ticker")
+                        or _order.get("market_id")
+                    )
+                    if not ticker and rec.client_tag:
+                        _m = tag_ticker_re.match(str(rec.client_tag))
+                        if _m:
+                            ticker = _m.group(1)
+                    _blob = " ".join(
+                        str(x or "").lower()
+                        for x in (
+                            rec.decision_id,
+                            rec.client_order_id,
+                            rec.client_tag,
+                            rec.intent_id,
+                        )
+                    )
+                    if (
+                        _order.get("type") == "exit_order_attempt"
+                        or _order.get("entry_or_exit") == "exit"
+                        or _order.get("is_exit")
+                        or _order.get("reduce_only")
+                        or "exit" in (rec.decision_id or "").lower()
+                        or "exit_" in _blob
+                        or "stop_candidate" in _blob
+                        or "stopcand" in _blob
+                        or "flatten" in _blob
+                    ):
+                        continue
+                    coid = rec.client_order_id
+                    if not coid:
+                        continue
+
+                    order_data: Any = None
+                    lookup_ok = False
+                    raw_client = getattr(client, "_client", None)
+                    lookup = (
+                        getattr(raw_client, "get_order_by_client_id_result", None)
+                        if raw_client is not None
+                        else None
+                    )
+                    if lookup is not None:
+                        try:
+                            _res = await asyncio.wait_for(
+                                lookup(coid, market_id=ticker or None),
+                                timeout=timeout_s,
+                            )
+                            if getattr(_res, "success", False):
+                                lookup_ok = True
+                                order_data = getattr(_res, "data", None)
+                            else:
+                                logger.debug(
+                                    "[PERSISTED-RECONCILE] venue lookup failed "
+                                    "for %s: %s",
+                                    coid,
+                                    getattr(_res, "error", _res),
+                                )
+                        except Exception as _le:
+                            logger.debug(
+                                "[PERSISTED-RECONCILE] venue lookup error for %s: %s",
+                                coid,
+                                _le,
+                            )
+                    else:
+                        # Port-level fallback: Optional[Order].  A None here is
+                        # ambiguous (the port collapses lookup errors), so it
+                        # cannot prove venue absence — skip rather than
+                        # terminalize on an unverified miss.
+                        try:
+                            _ord = await asyncio.wait_for(
+                                client.get_order(
+                                    client_order_id=coid,
+                                    market_id=ticker or None,
+                                ),
+                                timeout=timeout_s,
+                            )
+                            if _ord is not None:
+                                lookup_ok = True
+                                order_data = _ord
+                        except Exception as _le:
+                            logger.debug(
+                                "[PERSISTED-RECONCILE] port lookup error for %s: %s",
+                                coid,
+                                _le,
+                            )
+                    if not lookup_ok:
+                        continue
+
+                    if order_data is not None:
+                        # The venue does carry this client_order_id — route
+                        # through the full reconcile so fills, quantities,
+                        # fees, and the pre-trade gate all converge.
+                        try:
+                            await reconcile_submission_unknown_client_order_id(
+                                client,
+                                coid,
+                                str(ticker or ""),
+                                TradingMode.LIVE,
+                            )
+                            reconciled += 1
+                        except Exception as _re:
+                            logger.debug(
+                                "[PERSISTED-RECONCILE] full reconcile failed "
+                                "for %s: %s",
+                                coid,
+                                _re,
+                            )
+                        continue
+
+                    if store.terminalize_entry_attempt(
+                        rec.order_attempt_id,
+                        "REJECTED",
+                        actor="fills_poller",
+                        reason="persisted_never_transmitted_venue_absent",
+                        evidence={
+                            "client_order_id": coid,
+                            "age_s": round(age_s, 1),
+                            "ticker": str(ticker) if ticker else None,
+                        },
+                    ):
+                        reconciled += 1
+                        logger.warning(
+                            "[PERSISTED-RECONCILE] terminalized never-transmitted "
+                            "attempt=%s coid=%s ticker=%s age_s=%.0f",
+                            rec.order_attempt_id[:8],
+                            coid,
+                            ticker or "-",
+                            age_s,
+                        )
+                except Exception as _ee:
+                    logger.debug(
+                        "[PERSISTED-RECONCILE] attempt=%s failed: %s",
+                        rec.order_attempt_id,
+                        _ee,
+                    )
+
+            if reconciled:
+                logger.warning(
+                    "[PERSISTED-RECONCILE] reconciled %d stale PERSISTED attempt(s)",
+                    reconciled,
+                )
+        except Exception as _e:
+            logger.warning("[PERSISTED-RECONCILE] pass failed: %s", _e)
+
     async def _do_reconcile(self) -> Dict[str, Any]:
         """Execute one reconciliation cycle."""
         logger.info("[RECONCILE] Starting reconciliation cycle")
@@ -1126,6 +1335,11 @@ class FillsPoller:
             # primary recovery path for lost create-order acks; the in-route
             # fast path only runs a 1.5s ``get_order`` lookup.
             await self._reconcile_submission_unknown_records(client)
+
+            # Reconcile stale PERSISTED attempts (persisted but never
+            # claimed for submission) against the venue.  The
+            # ACKNOWLEDGED-only expired-market sweep cannot see them.
+            await self._reconcile_persisted_attempts(client)
 
             # Terminalize non-terminal order/exit attempts on expired markets.
             # Resting orders are auto-canceled by the exchange at market close,
