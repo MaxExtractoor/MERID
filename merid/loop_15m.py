@@ -6320,14 +6320,38 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
 
             ticker_portfolio_authoritative = portfolio_authoritative and not reconciliation_halted
 
+            # 2026-11-20 (operator directive): inside the settlement tail the
+            # venue book is often one-sided/thin and the WS feed flaps under
+            # the closing update burst — quote_fresh/coherent/owner checks
+            # dead-letter every lane candidate exactly when the favorite is
+            # decided.  Bounded lane entries self-protect via the approved
+            # limit price (taker-IOC worst case = no fill, never overpay;
+            # maker lanes keep their own resting-order cancels), so quote
+            # *trust* is relaxed inside MERID_ENTRY_QUOTE_RELAX_TTE_S while
+            # quote *existence* (market_state_applied), portfolio authority,
+            # reconciliation, intent-state, and queue checks still bind.
+            # Set MERID_ENTRY_QUOTE_RELAX_TTE_S=0 to restore strict gating.
+            _quote_relax_s = float(os.environ.get("MERID_ENTRY_QUOTE_RELAX_TTE_S", "150"))
+            _quote_relaxed = False
+            if _quote_relax_s > 0:
+                try:
+                    from merid.event_venues.kalshi.expiry_fallback import (
+                        parse_kalshi_15m_window_end_utc,
+                    )
+                    _exp = parse_kalshi_15m_window_end_utc(ticker)
+                    if _exp is not None and (_exp.timestamp() - time.time()) <= _quote_relax_s:
+                        _quote_relaxed = True
+                except Exception:
+                    _quote_relaxed = False
+
             checks = [
                 ("catalog_ready", r["catalog_ready"]),
                 ("selected", r["selected"]),
                 ("ws_subscribed", ws_subscribed),
                 ("ws_snapshot_complete", ws_snapshot_complete),
-                ("quote_fresh", quote_fresh),
-                ("quote_coherent", quote_coherent),
-                ("quote_owner_trusted", quote_owner_trusted),
+                ("quote_fresh", quote_fresh or _quote_relaxed),
+                ("quote_coherent", quote_coherent or _quote_relaxed),
+                ("quote_owner_trusted", quote_owner_trusted or _quote_relaxed),
                 ("market_state_applied", market_state_applied),
                 ("portfolio_authoritative", ticker_portfolio_authoritative),
                 ("reconciliation_halted", not reconciliation_halted),
@@ -6361,6 +6385,7 @@ def _compute_allow_new_entries(self, cycle_bankroll: Optional[float]) -> bool:
                 "quote_coherent": quote_coherent,
                 "quote_owner": _q_owner,
                 "quote_owner_trusted": quote_owner_trusted,
+                "quote_relaxed": _quote_relaxed,
                 "degraded_mode": bool(qgate.get("degraded_mode")),
                 "ws_parity_healthy": qgate.get("ws_parity_healthy"),
                 "ws_rest_div_c": _ws_rest_div_c,
