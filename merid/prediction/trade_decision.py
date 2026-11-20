@@ -4517,6 +4517,7 @@ def _compute_trade_decision_impl(
                 entry_price_cents=float(_mc_entry) * 100.0,
                 seconds_to_expiry=float(seconds_to_expiry),
                 fee_cents=float(fee_per_contract_cents) if fee_per_contract_cents is not None else None,
+                decision_id=decision_id,
             )
 
     # 2026-10-04: empirical price-calibration overlay (favorite-longshot).

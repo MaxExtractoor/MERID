@@ -88,6 +88,7 @@ def log_model_observation(
     entry_price_cents: float,
     seconds_to_expiry: float,
     fee_cents: Optional[float],
+    decision_id: Optional[str] = None,
 ) -> None:
     if not enabled() or not ticker or side not in ("yes", "no"):
         return
@@ -119,6 +120,14 @@ def log_model_observation(
             "fee_cents": None if fee is None else round(fee, 3),
             "gross_edge_c": round(100.0 * p - px, 3),
         }
+        # 2026-11-19 audit: decision_id gives exact eval->decision->fill
+        # lineage (the old fuzzy ticker+side+ts join missed ~99.7% of
+        # claim-tail evals).  Dedup still keys on (ticker, side, TTE
+        # minute) so at most one decision_id is stamped per bucket —
+        # the decision spine remains authoritative for per-decision
+        # joins; this field makes cal-log records joinable at all.
+        if decision_id:
+            rec["decision_id"] = str(decision_id)
         with _pending_cv:
             _ensure_writer()
             if len(_pending) < _MAX_PENDING:

@@ -1980,3 +1980,147 @@ sqrt(252) daily convention) with `n_trials=len(param_grid)` — the WFA
 param search is exactly the selection process DSR exists to deflate.
 Single-run producers (`kalshi_backtest.run_backtest_2y`) honestly report
 n_trials=1.
+
+## 2026-11-19 (late) Edge-vs-memory deep audit — verdict + claim-tail finding
+
+Full write-up: `reports/EDGE_AUDIT_2026-11-19.md`; machine artifact
+`reports/edge_audit_v2.json`; scripts `scripts/audit_edge_v2.py`,
+`scripts/audit_edge_history.py`, `scripts/audit_edge_vs_memory.py`.
+
+**Verdict: the model has real tail-calibration skill; cell memory has
+none; the traded book is ~breakeven-to-negative.**
+
+- All-eval pooled edge −1.78¢/contract is a *structural* fee+spread
+  floor (YES/NO evals cancel within each market; per-ticker cluster-σ
+  only 0.58¢). Do not read it as "no information".
+- **Claim tail is real:** model-implied net edge `claim_gap ≥ +2¢` at
+  eval → realized **+3.41¢/contract, CI [+1.66,+4.80], positive all 6
+  weeks**; ≥+3¢ → +4.71¢; ≥+5¢ → +7.27¢. Monotone dose-response.
+  Composition: mid-band 25–89¢, early/final TTE, SOL/DOGE/ETH carry,
+  BTC weakest. Within-band claim→realized slopes 0.47–0.88 (all CI>0)
+  — claims directionally real, overstated ~25–50%.
+- **Decay warning:** the same top-decile at last-minute (TTE<60s)
+  snapshot is +0.75¢ CI incl. 0 — the edge is entry-timing, not a
+  hold-to-settle anomaly. Eval-price fills also overstate: shadow
+  orders at ask+slippage stress are required before sizing.
+- **Cell memory fails OOS:** walk-forward trailing-cell-edge → next-day
+  realized spread −0.10¢, positive 16/34 days. The 27 BH-significant
+  last-minute cells are small-n favorite pockets; no cell promotion
+  without a pre-registered grid + held-out time split.
+- **Real money (fills ledger, settlement pseudo-fills excluded,
+  terminal = residual YES exposure × settlement):** −$36.41 over 957
+  markets Sep 14→Nov 18; Sep −$5.35, Oct −$30.68, **Nov −$0.38**
+  (162 mkts, post-containment breakeven). ENTER fill cohort n=9,928:
+  mean −4.30¢/contract at median entry 96¢ — the pinned_fav band
+  (−1.87¢/contract on 4,527 rows) is what the policy actually trades.
+- **The gap:** positive-expectancy evals (~8/day, mid-band early/final)
+  are not what the gate stack selects for; it selects negative-EV
+  favorite probes instead. Next step is shadow-capture of the ≥+2¢
+  claim cohort with realistic fill/slippage stress — NOT gate
+  relaxation, NOT cell promotion.
+
+Caveats: eval→fill join not yet built (cal log lacks decision_id);
+fills-ledger `fee_cost` coverage partial (recorded total $14.97);
+`net_ev` sparse in the evidence extract.
+
+### Edge-audit execution addendum (same day, second pass)
+
+- `scripts/audit_fill_slippage.py` joined cal-log evals to
+  `kalshi_fills` entries: only **11 of 3,112 claim≥+2¢ eval-keys ever
+  produced a fill** (~0.3% harvest) — the +EV tail is essentially
+  untraded. Rare high-claim fills slipped +5.2¢ vs eval ask but kept
+  +19.5¢ realized (n=5). Actual maker/maker_bid fills ran −5 to −9.5¢
+  at fill price — worse than eval-price estimates.
+- Decision-spine corroboration (`decision_audit_evidence_outcomes.db`,
+  ~40h/309mkts): vetoed FULLY_EXECUTABLE claim≥+2¢ → +0.57¢
+  CI[−2.94,+4.47]; fill claim≥+2¢ (pinned_fav) → +4.31¢ (n=68);
+  50–74¢ sub-band +18¢ CI>0 (n=55); 01–09¢ claims −1.23¢ (FLB).
+- `strategy_decision_side_ev`/`_outcomes` in `decision_audit.db` is the
+  authoritative eval→fill spine (per-side expected_net_ev_cents +
+  actual_fill_price_cents) but full-table scans are HDD-bound — query
+  by decision_ts slices, never bare count(*).
+- Next step spec'd in `reports/EDGE_AUDIT_2026-11-19.md` §7: book-
+  archive depth replay at claim-tail eval timestamps before any
+  shadow-order work.
+
+### Edge-audit third pass — decision spine extracted (2026-11-19 late)
+
+- `data/decision_spine.pkl`: 1,026,130 side_evals / 956,534 settled /
+  1,359 mkts / ~4.7d via `scripts/extract_decision_spine.py`
+  (6h-sliced reads; **never use `immutable=1`** — it skips the WAL and
+  throws "malformed"; `mode=ro` only).
+- Spine audit (`scripts/analyze_decision_spine.py` →
+  `reports/decision_spine_edge_audit.json`): claim≥+2 → +3.58¢ ns;
+  FULLY_EXECUTABLE-only → +2.44¢; **NOT_EXECUTABLE_* statuses inflate
+  edge 4-8× (phantom — always filter)**; thin-book depth<1 → +12¢
+  fiction vs deep-book +2.4¢ honest; early/final TTE carry.
+- **pinned_fav claim inversion:** its own claim≥+2 evals realized
+  **−2.05¢ CI[−2.64,−1.26]** — anti-predictive, consistent with FLB
+  (model calls favorites underpriced; market is right). Decompose
+  claim into model-vs-mid vs mid-vs-price components next.
+- In-window actual fills (n=94): capital P&L −$12.41; median edge at
+  actual fill −12.7¢/contract.
+- Book replay (`scripts/audit_book_replay.py`) built; archive coverage
+  bursty (~873 mkts Nov 17-20 with collector gaps) — rerun
+  periodically for markouts, don't block on it.
+- Literature applied: queue-position fill modeling (never fill-on-
+  touch), markout adverse-selection measurement, executable-status
+  filtering, BH-FDR/DSR/PBO multiplicity discipline.
+
+### pinned_fav FLB decomposition (decision spine, same night)
+
+Splitting `decision_lane='pinned_fav'` evals by exec price on
+`decision_spine.pkl` resolves the "claim≥2 → −2.05¢" finding into
+textbook FLB on both tails:
+
+- Cheap side (≤9¢, n=21.7k): model p 4.2% vs realized wr 2.9% —
+  longshots OVERSTATED ~1.4×; edge −0.1..−4.7¢ rising with price;
+  all selected=0 (diagnostic only). Any cheap-side lane inherits
+  this bias — keep `MERID_CHEAP_NO_LANE_ENABLED=0`.
+- Favorite side (≥90¢, n=22.6k): model p 95.3% vs realized 97% —
+  favorites UNDERSTATED ~1.7pp; eval-edge +4.4¢@90-93, +1.4¢@94-96,
+  −0.2¢@97-98. Real pocket, consumed by pin-break tail + slippage.
+- The +2.4-3.6¢ executable claim-tail edge lives in
+  evidence_escape/unlabeled mid-band early/final admissions — NOT in
+  pinned_fav.
+
+### FLB mid-decomposition + 90-93 NO-pocket (decision spine, late 11-19)
+
+`scripts/analyze_flb_decomposition.py` → `reports/flb_decomposition.json`
+reconstructs market mid per decision from paired side entry prices
+(99.3% coverage; sign of yes+no−100 reveals taker/bid basis) and splits
+claim into model_vs_mid / mid_vs_entry / costs. Verified
+`calibrated_probability` = P(held side). Findings:
+
+- pinned_fav cheap side (≤9c, n=21.7k): FLB ratio 1.45 — model p 4.2%
+  vs wr 2.9%; claim≥2 subset mvm +2.9c but realized −2.05c CI excl 0.
+  Longshot-zone model-vs-mid deviations are fiction.
+- pinned_fav favorite side: model UNDERSTATES favorites ~1.7pp;
+  eval-edge +4.4c@90-93, +1.4c@94-96, −0.2c@97-98; reserve stack
+  ~−6.4c means model claim is negative even where realized is +.
+- claim≥2 tail (n=3,046): lives in unlabeled lane at px~16.6c —
+  mvm +3.66c, wr 20.5%≈p 20.1% (calibrated), +3.85c realized;
+  costs only −0.45c. Mid-band model-vs-mid deviations are REAL.
+- 90-93c NO-side pinned_fav (n=2,512/118mkts): +5.20c ALL,
+  +4.45c FULLY_EXEC CI[+0.85,+7.17], +4.92c depth≥100 — FLB harvested
+  from favorite side (cheap-YES overpriced → NO underpriced). Eval
+  prices only (3 fills +27c); decays Nov16 +8.2→Nov18 +0.3; band
+  excluded by containment. Shadow-capture candidate, NOT a reopen.
+
+### Cal-log decision_id lineage (2026-11-19, audit instrumentation)
+
+`model_calibration_observations.jsonl` records now carry `decision_id`
+(optional field, `log_model_observation(decision_id=...)` called from
+`_compute_trade_decision_impl`). Fixes the fuzzy ticker+side+ts join
+that missed ~99.7% of claim-tail evals in the edge audit. Dedup still
+keys on (ticker, side, TTE-minute) — one decision_id per bucket; the
+decision spine (`decision_audit.db` side_ev) remains authoritative for
+per-decision joins. Lane/depth/model-release are NOT in the cal log
+(they are admission outcomes determined after this call site); the
+spine already carries them.
+
+Audit scripts (manual/on-demand, not scheduled — spine extract is
+HDD-bound ~30-60min, analyze steps ~2-5min on the pkl):
+`extract_decision_spine.py` → `analyze_decision_spine.py` →
+`analyze_flb_decomposition.py`; `audit_fill_slippage.py`,
+`audit_book_replay.py` for execution-side checks.
