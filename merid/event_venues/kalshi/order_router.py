@@ -8014,6 +8014,40 @@ def _pre_settlement_entry_denial(intent: OrderIntent) -> Optional[str]:
         if expiry is not None and (expiry.timestamp() - _now_unix_s() <= min_tte):
             return "pre_settlement_entry_deadline"
         return None
+    if lane == "pinned_fav":
+        # 2026-11-20: pinned_fav owns a designed late window — its maker floor
+        # (MERID_PINNED_FAV_MAKER_MIN_TTE_S, the resting-cancel bound ~45s) is
+        # deliberately inside the generic 150s closeout buffer.  The blanket
+        # deadline dead-lettered every pf intent generated at TTE in
+        # [45,150]s: orders the lane's own gates admitted but the router
+        # always rejected (observed: repeated pre_settlement_entry_deadline
+        # terminals on pf-band maker intents).  Enforce the lane's own
+        # configured floor here instead; all downstream risk gates still
+        # apply.  Rollback: MERID_PINNED_FAV_LATE_WINDOW_EXEMPT=0 restores the
+        # blanket deadline for pf intents.
+        _pf_exempt = os.getenv(
+            "MERID_PINNED_FAV_LATE_WINDOW_EXEMPT", "1"
+        ).strip().lower() in ("1", "true", "yes")
+        if _pf_exempt:
+            from merid.event_venues.kalshi.expiry_fallback import (
+                parse_kalshi_15m_window_end_utc,
+            )
+            expiry = parse_kalshi_15m_window_end_utc(intent.ticker)
+            if expiry is None:
+                return None
+            _tif = str(getattr(intent, "time_in_force", "") or "").strip().lower()
+            _floor_env = (
+                "MERID_PINNED_FAV_MAKER_MIN_TTE_S"
+                if _tif in ("", "gtc", "gtt")
+                else "MERID_PINNED_FAV_MIN_TTE_S"
+            )
+            try:
+                _pf_min_tte = float(os.getenv(_floor_env, "45"))
+            except Exception:
+                _pf_min_tte = 45.0
+            if expiry.timestamp() - _now_unix_s() <= _pf_min_tte:
+                return "pre_settlement_entry_deadline"
+            return None
     from merid.event_venues.kalshi.expiry_fallback import parse_kalshi_15m_window_end_utc
     from merid.event_venues.kalshi.settlement_aligned_exit import (
         PRE_SETTLEMENT_CLOSEOUT_SECONDS, PRE_SETTLEMENT_ENTRY_BUFFER_SECONDS,
