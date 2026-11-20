@@ -580,11 +580,30 @@ class GlobalAllocator:
                 getattr(c, "quote_owner", "") == "REST_VERIFIED_DEGRADED"
             )
             _lane_bound_cents = getattr(c, "effective_required_edge_cents", None)
+            _decision_lane = getattr(c, "decision_lane", None)
             _is_lane = bool(
-                getattr(c, "decision_lane", None) in BOUNDED_POST_ONLY_LANES
+                _decision_lane in BOUNDED_POST_ONLY_LANES
+                or _decision_lane == "settlement_convergence"
                 or getattr(c, "threshold_cell_id", None) is not None
                 or getattr(c, "provisional_cell_id", None) is not None
             )
+            if _decision_lane == "settlement_convergence":
+                # 2026-11-20: settlement_convergence is deliberately outside
+                # BOUNDED_POST_ONLY_LANES (its entries are taker IOCs — a
+                # resting order cannot fill in-window), but its candidates
+                # still carry a lane bound.  The stamped
+                # effective_required_edge_cents derives from min_edge units
+                # that do not match the lane's cent-denominated floor, so
+                # bind the configured lane floor directly — the same source
+                # the decision gate and router deadline already use.
+                try:
+                    _lane_bound_cents = float(
+                        os.environ.get(
+                            "MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "1.5"
+                        )
+                    )
+                except Exception:
+                    pass
             _required_edge_cents = required_net_edge_cents(
                 asset_min_edge_frac=asset_min_edge_frac,
                 degraded=_degraded,
