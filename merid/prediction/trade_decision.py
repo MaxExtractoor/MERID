@@ -743,6 +743,14 @@ MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S = float(
         os.environ.get("MERID_SETTLEMENT_LANE_MAX_TTE_S", "150"),
     )
 )
+# 2026-11-20: inside the pre-window admission band the lane's claim IS the
+# settlement forecast — the market anchor must not re-collapse p_selected to
+# the book mid or the lane's own economics can never express an edge.  Keep a
+# small anchor fraction as a model-overconfidence guard; every downstream
+# reserve/evidence/wire gate still binds.  0.0 = full release (pure p_raw).
+MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP", "0.20")
+)
 
 # In the settlement window the book prices the *terminal tick* while the
 # settlement distribution prices the *banked average* — the model is strictly
@@ -4500,6 +4508,18 @@ def _compute_trade_decision_impl(
         ):
             _n_rem = float(getattr(settlement_distribution, "remaining_count", 60) or 0)
             market_anchor_weight *= max(0.0, min(1.0, _n_rem / 60.0))
+        elif (
+            settlement_lane
+            and settlement_distribution is not None
+            and getattr(settlement_distribution, "phase", None) == "pre_window"
+            and float(seconds_to_expiry) <= MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S
+        ):
+            # Pre-window settlement-lane candidate: release most of the market
+            # anchor so the lane's settlement-forecast claim reaches the
+            # economics instead of collapsing to the book mid.
+            market_anchor_weight *= max(
+                0.0, min(1.0, MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP)
+            )
         # Staleness-conditioned precision (see _anchor_staleness_factor).
         # shadow mode (default) records the factor without applying it so the
         # counterfactual weight can be audited before going live.
