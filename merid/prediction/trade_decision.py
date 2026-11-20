@@ -719,6 +719,31 @@ MERID_SETTLEMENT_LANE_MIN_NET_EDGE = float(
     os.environ.get("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "1.5")
 ) / 100.0
 
+# 2026-11-20 (operator-directed late-favorite canary): pre-window settlement
+# admission.  The lane previously required phase=="in_window" (TTE<=60s) plus
+# banked samples — but by then the book has converged to ~p and net EV is
+# ~0/negative.  The unmeasured window is TTE in (60, MAX_TTE_S]: the market
+# has made its move (85-95c favorites) while the 60-sample settlement window
+# has not started, so p_yes_raw is the Bachelier forecast with full residual
+# variance — the lane's own economics (favored-side tail reserve, fixed
+# MIN_NET_EDGE hurdle, p_cap, ASR=0) still price it honestly.  Admission here
+# only hands the candidate to those same gates; every downstream veto still
+# binds.  ``MERID_SETTLEMENT_LANE_PRE_WINDOW_ENABLED=0`` restores the
+# in-window-only behavior.  MIN_P defaults higher than the in-window floor
+# because the claim is forecast-based, not banked-sample arithmetic.
+MERID_SETTLEMENT_LANE_PRE_WINDOW_ENABLED = os.environ.get(
+    "MERID_SETTLEMENT_LANE_PRE_WINDOW_ENABLED", ""
+).strip().lower() in ("1", "true", "yes")
+MERID_SETTLEMENT_LANE_PRE_WINDOW_MIN_P = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_PRE_WINDOW_MIN_P", "0.90")
+)
+MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S = float(
+    os.environ.get(
+        "MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S",
+        os.environ.get("MERID_SETTLEMENT_LANE_MAX_TTE_S", "150"),
+    )
+)
+
 # In the settlement window the book prices the *terminal tick* while the
 # settlement distribution prices the *banked average* — the model is strictly
 # better informed there, so the market anchor is released in proportion to the
@@ -4165,18 +4190,38 @@ def _compute_trade_decision_impl(
         MERID_SETTLEMENT_LANE_ENABLED
         and settlement_distribution is not None
         and float(seconds_to_expiry) >= MERID_SETTLEMENT_LANE_MIN_TTE_S
-        and getattr(settlement_distribution, "phase", None) == "in_window"
-        and int(getattr(settlement_distribution, "observed_count", 0) or 0) >= MERID_SETTLEMENT_LANE_MIN_OBSERVED
     ):
+        _sd_phase = getattr(settlement_distribution, "phase", None)
+        _sd_obs = int(getattr(settlement_distribution, "observed_count", 0) or 0)
         _sd_p = getattr(settlement_distribution, "p_yes_raw", None)
+        _sd_p_side = 0.0
         if _sd_p is not None and math.isfinite(_sd_p):
             _sd_p_side = max(float(_sd_p), 1.0 - float(_sd_p))
-            if _sd_p_side >= MERID_SETTLEMENT_LANE_MIN_P:
-                settlement_lane = True
-                indicators["entry_lane"] = "settlement_convergence"
-                indicators["settlement_lane_p_side"] = _sd_p_side
-                indicators["settlement_lane_observed"] = int(settlement_distribution.observed_count)
-                indicators["settlement_lane_filled"] = int(getattr(settlement_distribution, "filled_count", 0) or 0)
+        if (
+            _sd_phase == "in_window"
+            and _sd_obs >= MERID_SETTLEMENT_LANE_MIN_OBSERVED
+            and _sd_p_side >= MERID_SETTLEMENT_LANE_MIN_P
+        ):
+            settlement_lane = True
+            indicators["entry_lane"] = "settlement_convergence"
+            indicators["settlement_lane_p_side"] = _sd_p_side
+            indicators["settlement_lane_observed"] = _sd_obs
+            indicators["settlement_lane_filled"] = int(getattr(settlement_distribution, "filled_count", 0) or 0)
+        elif (
+            MERID_SETTLEMENT_LANE_PRE_WINDOW_ENABLED
+            and _sd_phase == "pre_window"
+            and float(seconds_to_expiry) <= MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S
+            and _sd_p_side >= MERID_SETTLEMENT_LANE_PRE_WINDOW_MIN_P
+        ):
+            # Forecast-phase admission: no banked samples exist yet (the
+            # 60s settlement window has not started), so MIN_OBSERVED does
+            # not apply — the claim is the Bachelier forecast itself and the
+            # lane's favored-side tail reserve prices its residual variance.
+            settlement_lane = True
+            indicators["entry_lane"] = "settlement_convergence"
+            indicators["settlement_lane_pre_window"] = True
+            indicators["settlement_lane_p_side"] = _sd_p_side
+            indicators["settlement_lane_observed"] = _sd_obs
 
     # EXIT_ONLY window: no new entries inside the pre-close cutoff.
     # Exits (take-profit, stop, manual close) remain enabled.
