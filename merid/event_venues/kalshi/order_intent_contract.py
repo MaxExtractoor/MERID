@@ -1493,6 +1493,15 @@ def validate_canonical_intent(
             # probe the lane's own bound admits (e.g. 95-97c quota band).
             if _ev_floor_c < 0:
                 _min_ev_extreme = _ev_floor_c
+            # 2026-11-21: taker lanes with a stamped positive lane bound
+            # (settlement_convergence) already price fees/reserves inside
+            # ev_net_cents; the generic 2.5x-fee surcharge is unreachable at
+            # 95c+ (max gross edge <=5c) and dead-letters every late favorite
+            # the lane admitted.  Use the lane's own bound as the floor.
+            if i.decision_lane == "settlement_convergence":
+                _mre_lane = getattr(i, "min_required_edge", None)
+                if _mre_lane is not None:
+                    _min_ev_extreme = max(0.0, float(_mre_lane) * 100.0)
             if i.ev_net_cents is not None and i.ev_net_cents < _min_ev_extreme:
                 raise OrderIntentValidationError(
                     f"insufficient_ev_extreme:ev={i.ev_net_cents:.4f}<min={_min_ev_extreme:.4f}"
