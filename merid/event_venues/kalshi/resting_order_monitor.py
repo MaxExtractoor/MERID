@@ -1637,6 +1637,18 @@ class RestingOrderMonitor:
                             record, trigger=result.reason, verified_status=_ostatus,
                         )
                         self.unregister_order(record.kalshi_order_id)
+                        # 2026-11-21: same dedupe-release gap as the ack path —
+                        # once unregistered the venue-terminal poll can no
+                        # longer observe this order, so an unfilled canceled/
+                        # expired ENTRY must free its (ticker, contract)
+                        # idempotency record here or re-entries die as
+                        # duplicate_entry for the rest of the window.
+                        if (
+                            _ostatus in ("canceled", "expired")
+                            and (record.filled_size or 0) <= 0
+                            and record.kalshi_order_id not in self._exit_states
+                        ):
+                            self._release_entry_dedupe_for_terminal(record, _ostatus)
                     else:
                         _emit_resting_lifecycle(
                             "RESTING_ORDER_CANCEL_FAILED",
@@ -1653,6 +1665,23 @@ class RestingOrderMonitor:
                     )
                     # Unregister only after a confirmed cancel
                     self.unregister_order(record.kalshi_order_id)
+                    # 2026-11-21: a confirmed cancel of an unfilled ENTRY order
+                    # must release the canonical (ticker, contract)
+                    # idempotency record.  The venue-terminal poll can no
+                    # longer observe this order after unregister_order, so
+                    # without this the record stayed "submitted" for its 900s
+                    # TTL and every re-entry intent raised duplicate_entry
+                    # for the remainder of the 15-min window (live:
+                    # settlement_convergence BUY_YES@96c rejected ~90s after
+                    # a toxic-mid cancel of the 53c bid, 2026-11-21).
+                    # release_entry_idempotency() still refuses when the
+                    # record shows has_execution, and the filled_size /
+                    # _exit_states guards mirror the venue-terminal path.
+                    if (
+                        (record.filled_size or 0) <= 0
+                        and record.kalshi_order_id not in self._exit_states
+                    ):
+                        self._release_entry_dedupe_for_terminal(record, "canceled")
             elif result.action == "adjust" and result.new_price_cents:
                 # Bounded chase requote: amend price in place via the Kalshi
                 # amend endpoint (keeps order_id/intent lineage and fill
