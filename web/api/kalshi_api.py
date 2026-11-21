@@ -4298,6 +4298,163 @@ def _daily_equity_anchor(equity_now_usd: float, *, fresh: bool) -> Tuple[float, 
         return 0.0, "", False
 
 
+# ── External cash flows (deposits / withdrawals) ─────────────────────────
+# daily_pnl_usd is an equity delta (equity_now - day-start anchor).  Money that
+# enters or leaves the account outside of trading is NOT P&L: a $25 deposit
+# must not read as +$25 profit.  Kalshi exposes GET /portfolio/deposits and
+# GET /portfolio/withdrawals; we net applied flows finalized at/after the
+# anchor timestamp out of the delta.  Deposit balance credit =
+# amount_cents - fee_cents (verified live: a $25 debit deposit with a $0.50
+# fee credited exactly $24.50); withdrawal balance debit =
+# amount_cents + fee_cents.
+# key -> (last_success_mono, last_attempt_mono, flows_or_None)
+_EXTERNAL_FLOWS_CACHE: Dict[str, Tuple[float, float, Optional[Tuple[float, float]]]] = {}
+_EXTERNAL_FLOWS_CACHE_TTL_S = float(os.environ.get("MERID_PNL_FLOWS_CACHE_S", "60"))
+_EXTERNAL_FLOWS_STALE_S = float(os.environ.get("MERID_PNL_FLOWS_STALE_S", "600"))
+_EXTERNAL_FLOWS_MAX_PAGES = 3
+
+
+def _flow_effective_ts(item: Dict[str, Any]) -> Optional[float]:
+    """Unix seconds when a deposit/withdrawal hit the balance.
+
+    ``finalized_ts`` is set when the transfer resolves (applied/failed/
+    returned); ``created_ts`` is the fallback for applied rows lacking it.
+    """
+    ts = item.get("finalized_ts") or item.get("created_ts")
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _flow_cents(item: Dict[str, Any], key: str) -> int:
+    try:
+        return int(item.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _fetch_flow_rows(
+    client: Any, path: str, list_key: str, anchor_epoch: float
+) -> Optional[List[Dict[str, Any]]]:
+    """Applied deposit/withdrawal rows whose balance effect is >= anchor_epoch.
+
+    Returns None on any fetch/parse failure so callers can distinguish
+    'no flows' from 'flows unknown'.
+    """
+    rows: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    try:
+        for _ in range(_EXTERNAL_FLOWS_MAX_PAGES):
+            params: Dict[str, Any] = {"limit": 500}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await client._request(
+                "GET",
+                path,
+                params=params,
+                timeout=10.0,
+                skip_rate_limiter=True,
+                allow_retry=False,
+            )
+            if getattr(resp, "status_code", None) != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            page = data.get(list_key) or []
+            rows.extend(r for r in page if isinstance(r, dict))
+            cursor = data.get("cursor") or None
+            if not cursor:
+                break
+    except Exception as exc:
+        logger.debug("PnL flows fetch %s failed: %s", path, exc)
+        return None
+    return [
+        r
+        for r in rows
+        if r.get("status") == "applied"
+        and (_flow_effective_ts(r) or 0.0) >= anchor_epoch
+    ]
+
+
+async def _external_cash_flows_since(
+    anchor_ts_iso: str, service: Any = None
+) -> Optional[Tuple[float, float]]:
+    """(deposits_usd, withdrawals_usd) applied to the Kalshi balance since anchor.
+
+    Returns None when flows cannot be verified — callers must treat the
+    equity delta as unverified rather than assume zero flows.  Results are
+    cached briefly (the /pnl endpoint is polled); a stale success is served
+    for up to MERID_PNL_FLOWS_STALE_S while refreshes are retried.
+    """
+    try:
+        anchor_epoch = datetime.fromisoformat(anchor_ts_iso).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+    now_mono = time.monotonic()
+    entry = _EXTERNAL_FLOWS_CACHE.get(anchor_ts_iso)
+
+    # Fresh attempt within the TTL: serve the cached verdict without a fetch.
+    # flows=None is a recent fetch failure (negative cache); a stale success
+    # (last_ok older than TTL) is served only inside the stale window.
+    if entry is not None and now_mono - entry[1] < _EXTERNAL_FLOWS_CACHE_TTL_S:
+        flows_cached = entry[2]
+        if flows_cached is None:
+            return None
+        if now_mono - entry[0] < _EXTERNAL_FLOWS_CACHE_TTL_S:
+            return flows_cached
+        if now_mono - entry[0] < _EXTERNAL_FLOWS_STALE_S:
+            return flows_cached
+        return None
+
+    flows = await _fetch_external_flows(service, anchor_epoch)
+    if entry is None:
+        entry = (0.0, 0.0, None)
+    last_ok = now_mono if flows is not None else entry[0]
+    kept_flows = flows if flows is not None else entry[2]
+    _EXTERNAL_FLOWS_CACHE[anchor_ts_iso] = (last_ok, now_mono, kept_flows)
+
+    if flows is not None:
+        return flows
+    # Fetch failed: serve the last good value while it is still inside the
+    # stale window; otherwise report flows as unverified.
+    if kept_flows is not None and now_mono - last_ok < _EXTERNAL_FLOWS_STALE_S:
+        return kept_flows
+    return None
+
+
+async def _fetch_external_flows(
+    service: Any, anchor_epoch: float
+) -> Optional[Tuple[float, float]]:
+    """Fetch deposits + withdrawals and return (deposits_usd, withdrawals_usd)."""
+    client = getattr(service, "_client", None) if service is not None else None
+    if client is None or not hasattr(client, "_request"):
+        return None
+    deposits, withdrawals = await asyncio.gather(
+        _fetch_flow_rows(client, "/portfolio/deposits", "deposits", anchor_epoch),
+        _fetch_flow_rows(client, "/portfolio/withdrawals", "withdrawals", anchor_epoch),
+    )
+    if deposits is None or withdrawals is None:
+        return None
+    deposits_usd = (
+        sum(
+            _flow_cents(r, "amount_cents") - _flow_cents(r, "fee_cents")
+            for r in deposits
+        )
+        / 100.0
+    )
+    withdrawals_usd = (
+        sum(
+            _flow_cents(r, "amount_cents") + _flow_cents(r, "fee_cents")
+            for r in withdrawals
+        )
+        / 100.0
+    )
+    return deposits_usd, withdrawals_usd
+
+
 @router.get("/pnl")
 async def get_pnl() -> Dict[str, Any]:
     """Portfolio PnL summary — canonical source: fills ledger.
@@ -4365,10 +4522,25 @@ async def get_pnl() -> Dict[str, Any]:
                 equity_now, fresh=_bs.state == BalanceState.FRESH
             )
             if anchor_ok:
-                result["daily_pnl_usd"] = round(equity_now - anchor, 2)
+                # External cash flows (deposits/withdrawals) are not trading
+                # P&L — net them out of the equity delta or a deposit reads
+                # as profit.  None means flows are unverified: keep the raw
+                # delta and flag it rather than assume zero flows.
+                flows = await _external_cash_flows_since(anchor_ts, _svc)
+                if flows is not None:
+                    deposits_usd, withdrawals_usd = flows
+                    net_flows = round(deposits_usd - withdrawals_usd, 2)
+                    result["daily_pnl_usd"] = round(equity_now - anchor - net_flows, 2)
+                    result["daily_pnl_cash_flows_usd"] = net_flows
+                    result["daily_pnl_deposits_usd"] = round(deposits_usd, 2)
+                    result["daily_pnl_withdrawals_usd"] = round(withdrawals_usd, 2)
+                    daily_pnl_source = "equity_delta_net_flows"
+                else:
+                    result["daily_pnl_usd"] = round(equity_now - anchor, 2)
+                    result["daily_pnl_cash_flows_usd"] = None
+                    daily_pnl_source = "equity_delta"
                 result["daily_pnl_anchor_usd"] = round(anchor, 2)
                 result["daily_pnl_anchor_ts"] = anchor_ts
-                daily_pnl_source = "equity_delta"
             else:
                 daily_pnl_source = "equity_delta_unanchored"
     except Exception as exc:

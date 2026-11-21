@@ -2124,3 +2124,27 @@ HDD-bound ~30-60min, analyze steps ~2-5min on the pkl):
 `extract_decision_spine.py` → `analyze_decision_spine.py` →
 `analyze_flb_decomposition.py`; `audit_fill_slippage.py`,
 `audit_book_replay.py` for execution-side checks.
+
+### Daily P&L deposit/withdrawal netting (2026-11-20, UI fix)
+
+`/api/v1/kalshi/pnl` `daily_pnl_usd` is an equity delta
+(`equity_now − data/kalshi_daily_equity_anchor.json` day-start anchor).
+External cash movements are not trading P&L — a $25 debit deposit
+(net $24.50 after the $0.50 fee) was rendering as +$24.50 "P&L" in the
+top bar.  `get_pnl()` now subtracts applied deposits/withdrawals
+(`GET /portfolio/deposits` + `/portfolio/withdrawals` via the bankroll
+service's `KalshiClientV2`) finalized at/after `anchored_at`:
+deposit credit = `amount_cents − fee_cents`, withdrawal debit =
+`amount_cents + fee_cents` (fee semantics verified against live balance:
+anchor $3.36 + $24.50 net deposit = $27.86 equity).  Only `status ==
+"applied"` rows count; pending/failed/returned never moved balance.
+New response fields: `daily_pnl_cash_flows_usd` (net flows subtracted,
+`null` when unverified), `daily_pnl_deposits_usd`,
+`daily_pnl_withdrawals_usd`; `daily_pnl_source` is
+`equity_delta_net_flows` when adjusted, plain `equity_delta` when the
+flows endpoints fail (raw delta kept — flagged, not silently zeroed).
+Flows fetch is TTL-cached (`MERID_PNL_FLOWS_CACHE_S`=60s) with a stale
+success window (`MERID_PNL_FLOWS_STALE_S`=600s) since /pnl is polled.
+`/kalshi/risk` and grid P&L were already ledger-based and unaffected.
+Regression coverage: `tests/api/test_kalshi_pnl_endpoint.py` flow-netting
+block (deposit, withdrawal, pre-anchor, pending/failed, unverified).
