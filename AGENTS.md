@@ -4,7 +4,7 @@
 ---
 auto_execution_mode: 1   # legend: 1 = run the startup state machine automatically and execute the next eligible decision after preflight; 0/absent = fail-closed, no auto-enable. Env MERID_AUTO_EXECUTION_MODE overrides (1/true/yes on, 0/false/no off).
 contract_version: 1.0.0
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-21
 description: MERID/Kalshi 15m automatic live-trading startup and execution contract
 live_startup_policy: auto_enable_after_preflight
 live_entry_authorization: durable_operator_config
@@ -88,8 +88,8 @@ at held 92–93, −249c at held <92). The pending band decision is now
 decided by ledger evidence: `.env` restored to the audited containment:
 
 ```text
-MERID_PINNED_FAV_PRICE_LO=94   PRICE_HI=98
-MERID_PINNED_FAV_MAKER_LO=94   MAKER_HI=98
+MERID_PINNED_FAV_PRICE_LO=94   PRICE_HI=96   # HI narrowed 98->96 on 2026-11-20 (see below)
+MERID_PINNED_FAV_MAKER_LO=94   MAKER_HI=96   # same
 MERID_PINNED_FAV_MAX_CONTRACTS=6
 MERID_PINNED_FAV_MIN_EV_CENTS=-3.0    MAKER_MIN_EV_CENTS=-3.0
 MERID_PINNED_FAV_LATE_TTE_S=150       MID_MIN_EV_CENTS=0.0
@@ -124,6 +124,70 @@ Regression coverage: `tests/test_pinned_fav_lane.py` low-p/bypass block.
 Note: `.env` is loaded into `os.environ` at process start, so the running
 process keeps the old 85–99/11 values until the next production restart —
 the restored band binds on restart, not live.
+
+### Claim-tail T0 amendments (2026-11-20/21, post split-audit)
+
+Decision-spine split audit (`scripts/audit_claim_tail_splits.py` →
+`reports/claim_tail_splits.json`; plan `reports/T0_DIFF_PLAN_2026-11-20.md`)
+on the claim≥+2¢ cohort (n=3,061 evals / 232 mkts / ~4.7d):
+
+- **pf band narrowed 94–98c → 94–96c** (`PRICE_HI`/`MAKER_HI`=96).
+  FLB decomposition: eval-edge +4.4¢@90–93, **+1.4¢@94–96, −0.2¢@97–98**;
+  pf claim≥+2¢ evals realized **−2.05¢ CI[−2.64,−1.26]** — the only
+  CI-clean negative in the split set.  pf is ~1.4% of the cohort:
+  small-bore change, must not absorb attention from the emission bug.
+  **P1 (n-floor: do not score failed on n<25/bucket):** pf realized-
+  by-bucket at 94–96 goes non-negative post-cap; if not → pin-break
+  adverse selection, needs pin-distance work not basis change.
+  96–98c exits band ownership → generic gate stack (not dark).
+  Rollback: both HI back to 98.
+- **Financial brakes ARMED:** `MERID_KS_TRAILING_EQUITY_HALT_PCT=0.40`
+  (amended from proposed 0.25 after equity check — live equity FRESH
+  $27.86 @ 2026-11-21T04:23Z; 25% band = $6.97 < one ~$11 max loss
+  ≈39–41% dd would trip on first loser; 0.40 tolerates one max-size
+  loss, halts on sustained bleed) + `MERID_KS_CONSECUTIVE_LOSS_HALT=12`.
+  Peak initializes at first-seen equity (no persisted peak on disk);
+  auto-resets on recovery; exits unaffected.
+- **`cheap_tail_canary` de-registered** from `_minority_hold_lanes()`
+  default — two-key semantics like `cheap_no_settle` (flag + registry).
+- **Escape cap HELD at 480** (amended — was proposed 480→96): the
+  claim≥+2¢ cohort shows **zero actual fills in 4.7d**; 81% of it is
+  `admission_owner=evidence_escape` with `decision_lane` mostly NaN.
+  Tightening the cap now would stack a second suppressor on an
+  undiagnosed first one.  Set the cap only after emission rate and
+  post-fix fill rate are known.
+- **Canary/EPC deletion DEFERRED** until after the emission diagnosis —
+  `trade_decision.py` is the suspect file; don't widen bisect surface
+  mid-investigation.
+- **Pre-registered measurement endpoint** (anti-retrofit): primary =
+  **taker × FULLY_EXECUTABLE, pooled across lanes**; read at
+  **n≥10,000 cohort evals or 3 weeks**, whichever first (4.7d/n=3,061
+  is underpowered — CI ±7¢ at this n).  Decision rule: CI still
+  straddling 0 at n=10,000 ⇒ kill the thesis.  No BH-FDR surface on
+  tiny cells.
+- **Emission die-off RESOLVED 2026-11-21 (spine + audit DB, no router
+  involvement):** the claim≥+2¢ escape cohort never reaches the
+  router — it dies inside `compute_trade_decision`.  Of 2,505
+  `admission_owner=evidence_escape` claim≥+2¢ side-evals: **94%
+  (2,363) fail the side edge gate** (`passed_edge_gate=0`;
+  `exclusion_reason=*_edge_below_threshold`; median `required_edge`
+  ≈7.5¢ vs claims of +2–6¢).  The remaining **142 pass the side gate**
+  and still produce `decision=NO_TRADE / primary_reason_code=NO_EDGE`
+  on every one — diverse decision-level vetoes
+  (`countertrend_yes_selloff_regime` 17, `cost_basis_override_*` 24,
+  `calibration_evidence_*` 16, `insufficient_depth_*` 10,
+  `moneyness_coin_flip` 5, `bookflow_no_pressure` 5, …).  Selection
+  rates by owner: escape 0/2,505, pooled_transfer 0/263,
+  threshold_cell 0/37, provisional 3/216, settlement_convergence
+  8/54, cheap_no 21/24 (disabled), pf 5/7.  **The router/provenance/
+  post-only hypothesis is falsified** — zero candidates are emitted,
+  so no router events exist to reject.  Implication: side_ev
+  `expected_net_ev_cents` is a pre-decision-comparison claim; the
+  measured "+3.85¢ realized" cohort is largely evals the engine's own
+  economics already refuses.  The harvest question is now "does the
+  decision-level NO_EDGE math agree with the eval-price counterfactual"
+  — answerable by joining `reason_codes`/`gate_ev_cents` on the 142
+  passers, not by router instrumentation.
 
 ### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
 

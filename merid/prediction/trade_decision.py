@@ -964,7 +964,7 @@ def _minority_hold_lanes() -> frozenset:
         "MERID_MINORITY_HOLD_LANES",
         "drift_fav,reversal_scalp,threshold_cell,"
         "current_build_provisional,evidence_cell_escape,marginal_band,"
-        "late_edge_probe,cheap_tail_canary",
+        "late_edge_probe",
     )
     return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
 
