@@ -12324,15 +12324,23 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
         trace_id = str(uuid.uuid4())[:8]
         candidate["trace_id"] = trace_id
 
-        # PRE-SEND ASSERT: Ensure order price is within canonical entry range 10-75c.
-        if not (min_price_cents <= price_cents <= max_price_cents):
+        # PRE-SEND ASSERT: order price must sit inside the admitted domain —
+        # canonical side range UNION the candidate's lane band.  The allocator
+        # already admitted lane-stamped prices via _lane_entry_band_cents
+        # (settlement_convergence tops at MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+        # default 97c); checking only the canonical/wq/pf-widened min/max here
+        # killed every bounded-lane order priced 96-97c as a dispatch_error
+        # (observed 2026-11-21: settlement_convergence BUY_YES@96c x2).
+        # _cand_in_range is the same resolver used for price selection above.
+        if not _cand_in_range(price_cents):
             logger.error(
-                "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside dynamic price_range [%d,%d] ticker=%s side=%s edge_pct=%s "
+                "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside admitted domain canonical=[%d,%d] lane=%s ticker=%s side=%s edge_pct=%s "
                 "candidate_price_cents=%s source=%s time_to_expiry=%ds",
-                trace_id, price_cents, min_price_cents, max_price_cents, ticker, kalshi_side, edge_pct,
+                trace_id, price_cents, min_price_cents, max_price_cents,
+                candidate.get("decision_lane"), ticker, kalshi_side, edge_pct,
                 candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m", candidate.get("time_to_expiry_sec", 0)
             )
-            raise AssertionError(f"Order price {price_cents}c outside dynamic price_range [{min_price_cents},{max_price_cents}] for ticker={ticker}")
+            raise AssertionError(f"Order price {price_cents}c outside admitted domain for ticker={ticker}")
 
         # CRITICAL FIX: Removed hardcoded count=1 assertion
         # The sizing calculation (compute_order_size) now determines count based on edge, confidence, and $1 cap
