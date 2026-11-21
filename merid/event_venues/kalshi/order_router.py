@@ -11454,13 +11454,33 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
             # (YES 10-95 / NO 25-95), so without this a divergence reprice
             # could land above the allocator ceiling and pass every remaining
             # check after the allocator gate.
+            # 2026-11-21: resolve the LANE band first — allocate() replaces the
+            # generic min/max with _lane_entry_band_cents for every bounded
+            # lane (settlement_convergence <=97c, cbp/escape 20-89c, etc.).
+            # Using only the generic 80c ceiling here clamped every
+            # settlement_convergence taker repricing (cap~91c) down to 80c —
+            # below the ask — so the order could never cross (live:
+            # KXBTC15M-26NOV211615-15 BUY_YES, ask=89, clamp->80, reject).
             try:
-                from merid.risk.global_slot_allocator import get_global_slot_allocator
-                _gsa = get_global_slot_allocator()
-                ALLOCATOR_MIN_PRICE = int(getattr(_gsa, "min_entry_cents", ALLOCATOR_MIN_PRICE))
-                ALLOCATOR_MAX_PRICE = int(getattr(_gsa, "max_entry_cents", ALLOCATOR_MAX_PRICE))
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents as _alloc_lane_band,
+                )
+                _alloc_band = _alloc_lane_band(
+                    getattr(intent, "decision_lane", None)
+                )
             except Exception:
-                pass
+                _alloc_band = None
+            if _alloc_band is not None:
+                ALLOCATOR_MIN_PRICE = int(_alloc_band[0])
+                ALLOCATOR_MAX_PRICE = int(_alloc_band[1])
+            else:
+                try:
+                    from merid.risk.global_slot_allocator import get_global_slot_allocator
+                    _gsa = get_global_slot_allocator()
+                    ALLOCATOR_MIN_PRICE = int(getattr(_gsa, "min_entry_cents", ALLOCATOR_MIN_PRICE))
+                    ALLOCATOR_MAX_PRICE = int(getattr(_gsa, "max_entry_cents", ALLOCATOR_MAX_PRICE))
+                except Exception:
+                    pass
 
         if (
             adjusted_price < ALLOCATOR_MIN_PRICE
