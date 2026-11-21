@@ -5468,6 +5468,8 @@ async def _revalidate_entry_economics(
                 MERID_MARKET_ANCHOR_MIN_W,
                 MERID_MARKET_ANCHOR_WINDOW_S,
                 MERID_SETTLEMENT_ANCHOR_RELEASE,
+                MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP,
+                MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S,
                 MERID_TAIL_CALIBRATION_ENABLED,
                 MERID_TAIL_CALIBRATION_PRICE_FLOOR,
             )
@@ -5554,6 +5556,21 @@ async def _revalidate_entry_economics(
                 if MERID_SETTLEMENT_ANCHOR_RELEASE and _tte_now <= 60.0:
                     # remaining_count = max(0, 60 - elapsed_in_window) = int(tte)
                     _anchor_w *= max(0.0, min(1.0, float(int(_tte_now)) / 60.0))
+                elif (
+                    MERID_SETTLEMENT_ANCHOR_RELEASE
+                    and getattr(intent, "decision_lane", "") == "settlement_convergence"
+                    and _tte_now <= MERID_SETTLEMENT_LANE_PRE_WINDOW_MAX_TTE_S
+                ):
+                    # 2026-11-20: mirror the decision layer's pre-window release
+                    # (trade_decision ~4511).  A settlement-lane-claimed intent
+                    # was admitted with the anchor at ANCHOR_KEEP; re-imposing
+                    # full anchor weight here collapses the fresh probability
+                    # toward the book mid and manufactures a phantom
+                    # edge-decay veto (observed: p_sel 0.954 -> 0.754 -> reject
+                    # on a still-valid settlement claim).
+                    _anchor_w *= max(
+                        0.0, min(1.0, MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP)
+                    )
             if _anchor_w > 0.0:
                 def _lg(x: float) -> float:
                     x = max(1e-6, min(1.0 - 1e-6, x))
