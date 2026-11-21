@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import math
@@ -2940,6 +2941,18 @@ logger = get_logger("merid.event_venues.kalshi.order_router")
 _IN_FLIGHT_COIDS: set[str] = set()
 _IN_FLIGHT_LOCK = asyncio.Lock()
 
+# 2026-11-21: dedicated executor for durable order-identity finalization.
+# finalize_order_identity does synchronous SQLite work that normally takes
+# ~ms but queues behind EVERY other asyncio.to_thread/run_in_executor user
+# on the shared default pool (min(32, cpu+4)=12 threads on the production
+# host).  Observed intent->canonical ~4000ms — queue wait, not work time.
+# A 2-thread bulkhead keeps identity finalization off the shared pool so a
+# burst of REST/poller work cannot delay the durable identity write that
+# must precede any network call.
+_ORDER_IDENTITY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="order-identity"
+)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Agent Wiring Audit — Caller Module Tracking (AGENT_WIRING_AUDIT.md)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3159,6 +3172,21 @@ def _emit_execution_stage_latency(
             "intent_to_canonical_ms": _exec_delta_ms(
                 intent, "intent_created", "canonical_pass"
             ),
+            # 2026-11-21 decomposition of the intent->canonical window:
+            # loop tail, submit-revalidation, identity finalization, and the
+            # synchronous pre-wire checks + canonical validation.
+            "route_entry_ms": _exec_delta_ms(
+                intent, "intent_created", "route_async_entry"
+            ),
+            "route_entry_to_finalize_ms": _exec_delta_ms(
+                intent, "route_async_entry", "identity_finalize_start"
+            ),
+            "identity_finalize_ms": _exec_delta_ms(
+                intent, "identity_finalize_start", "identity_finalize_end"
+            ),
+            "post_identity_to_canonical_ms": _exec_delta_ms(
+                intent, "identity_finalize_end", "canonical_pass"
+            ),
             "canonical_to_risk_ms": _exec_delta_ms(
                 intent, "canonical_pass", "risk_check_start"
             ),
@@ -3248,7 +3276,9 @@ def _emit_execution_stage_latency(
                 record_metric,
             )
             for _k in (
-                "intent_to_canonical_ms", "risk_ms", "edge_gate_ms",
+                "intent_to_canonical_ms", "route_entry_ms",
+                "route_entry_to_finalize_ms", "identity_finalize_ms",
+                "post_identity_to_canonical_ms", "risk_ms", "edge_gate_ms",
                 "revalidation_ms", "prepare_gate_ms",
                 "construct_to_send_ms", "send_to_ack_ms",
                 "total_to_send_ms", "total_to_terminal_ms",
@@ -6096,6 +6126,16 @@ async def _ws_rest_divergence_guard(intent: OrderIntent, port: Any, mode: Any, t
                 rest_ts = rest_book.get("timestamp")
                 if rest_ts:
                     rest_age_ms = max(0.0, (replay_time() - float(rest_ts)) * 1000.0)
+                # 2026-11-21: share this fresh REST pull with the
+                # pre-submit passivity check — without it the passivity
+                # block issued a SECOND ad-hoc get_orderbook for the same
+                # ticker ~1s later (observed construct_to_send ~1.5s).
+                try:
+                    intent._divergence_rest_book = (
+                        rest_book, _time.monotonic()
+                    )
+                except Exception:
+                    pass
 
         rest_usable = rest_book is not None and rest_age_ms <= max_rest_age_ms
         _is_exit = _is_exit_order(intent)
@@ -17970,6 +18010,22 @@ async def _route_live(
                         _ps_age_ms = max(0.0, (_time.monotonic() - _lb) * 1000.0)
                 _ps_fresh_ms = float(os.getenv("MERID_PRE_SUBMIT_BOOK_FRESH_MS", "1500"))
                 if _ps_book is None or _ps_age_ms > _ps_fresh_ms:
+                    # 2026-11-21: reuse the divergence guard's fresh REST pull
+                    # while it is still inside the accepted freshness window —
+                    # avoids a second ad-hoc get_orderbook RTT per order.
+                    _stash = getattr(intent, "_divergence_rest_book", None)
+                    if (
+                        isinstance(_stash, tuple) and len(_stash) == 2
+                        and _stash[0] is not None
+                    ):
+                        _stash_age_ms = max(
+                            0.0,
+                            (_time.monotonic() - float(_stash[1])) * 1000.0,
+                        )
+                        if _stash_age_ms <= _ps_fresh_ms:
+                            _ps_book = _stash[0]
+                            _ps_age_ms = _stash_age_ms
+                if _ps_book is None or _ps_age_ms > _ps_fresh_ms:
                     _ps_ob = None
                     try:
                         _ps_ob = await asyncio.wait_for(
@@ -20797,11 +20853,18 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # ── DURABLE ORDER-IDENTITY FINALIZATION (2026-08-12) ───────────────────
     # 2026-11-15: Offload to worker thread with timeout so synchronous SQLite
     # operations in finalize_order_identity never block the main asyncio event loop.
+    # 2026-11-21: run on the dedicated 2-thread identity executor — the shared
+    # default pool queued this call behind unrelated REST/poller work and
+    # produced ~4s intent->canonical stalls on every order.
+    _exec_stamp(intent, "identity_finalize_start")
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(finalize_order_identity, intent),
+            asyncio.get_running_loop().run_in_executor(
+                _ORDER_IDENTITY_EXECUTOR, finalize_order_identity, intent
+            ),
             timeout=5.0,
         )
+        _exec_stamp(intent, "identity_finalize_end")
     except asyncio.TimeoutError:
         logger.critical(
             "[ORDER-IDENTITY-TIMEOUT] intent_id=%s timed out after 5.0s during identity finalization",
@@ -22051,6 +22114,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # reconciliation rather than blindly retried.
     t0 = _time.monotonic()
     mode = _resolve_mode(intent.mode)
+    _exec_stamp(intent, "route_async_entry")
 
     # 2026-08-27: Concurrent duplicate emission guard.  The same client_order_id
     # must never be in two in-flight routes at the same time.  This is a fast

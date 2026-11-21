@@ -511,6 +511,30 @@ async def lifespan(app: FastAPI):
     except Exception as _rl_err:
         logger.warning("[LIFESPAN] uvicorn logger reroute failed: %s", _rl_err)
 
+    # 2026-11-21: enlarge the shared default executor.  asyncio.to_thread /
+    # run_in_executor(None, ...) work — SQLite commits, sync REST wrappers,
+    # file I/O across ~30 modules — shares one pool sized
+    # min(32, cpu+4)=12 threads on this host.  Saturation queues silently and
+    # presented as multi-second order-path stalls (intent->canonical ~4s).
+    # These are I/O-bound calls, so oversubscribing logical cores is safe.
+    try:
+        import asyncio as _aio
+        import concurrent.futures as _cf
+        _desired_workers = int(os.environ.get(
+            "MERID_ASYNCIO_DEFAULT_EXECUTOR_WORKERS", "24"))
+        _aio.get_running_loop().set_default_executor(
+            _cf.ThreadPoolExecutor(
+                max_workers=_desired_workers,
+                thread_name_prefix="asyncio-default",
+            )
+        )
+        logger.info(
+            "[LIFESPAN] default executor resized to %d workers",
+            _desired_workers,
+        )
+    except Exception as _ex_err:
+        logger.warning("[LIFESPAN] default executor resize failed: %s", _ex_err)
+
     # CRITICAL FIX (2026-09-27): Single-instance guard — the FIRST startup
     # check, before any side effects.  FastAPI runs the lifespan before
     # uvicorn binds its port, so a second uvicorn previously completed the

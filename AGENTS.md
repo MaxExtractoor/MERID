@@ -189,6 +189,40 @@ on the claim≥+2¢ cohort (n=3,061 evals / 232 mkts / ~4.7d):
   — answerable by joining `reason_codes`/`gate_ev_cents` on the 142
   passers, not by router instrumentation.
 
+### Order-path latency repair (2026-11-21, post audit_writer fix)
+
+With entries unblocked, orders reached the wire but died to staleness:
+`EXECUTION-STAGE-LATENCY` showed `intent_to_canonical≈4000ms` and
+`construct_to_send≈1531ms` on every attempt (eval→wire ~7s; post-only
+prices crossed before submission).  Root causes measured on the
+production host (WD Blue 7200rpm HDD + i7-3770/8 threads, disk shared
+with the 11GB audit store):
+
+- **Per-commit fsync**: WAL+FULL `PRAGMA synchronous` commits measured
+  p50=75ms / p95=303ms; each order pays ~5 serialized commits across
+  identity/lifecycle.  `MERID_ORDER_ATTEMPT_SYNCHRONOUS=NORMAL` now
+  applies per-connection in `OrderAttemptStore._get_conn` — WAL+NORMAL
+  keeps full durability across process/app crashes (WAL replays on
+  open); the only exposure is the un-checkpointed WAL tail on OS
+  crash/power loss, which unmatched-order reconciliation already fails
+  closed on.  `=FULL` restores per-commit fsync.
+- **Executor starvation**: `finalize_order_identity` ran via
+  `asyncio.to_thread` on the shared default pool
+  (`min(32,cpu+4)=12` threads) and queued behind unrelated REST/poller
+  work.  It now runs on a dedicated 2-thread
+  `_ORDER_IDENTITY_EXECUTOR` bulkhead, and lifespan resizes the default
+  executor to `MERID_ASYNCIO_DEFAULT_EXECUTOR_WORKERS` (default 24).
+- **Duplicate REST book fetch**: `_ws_rest_divergence_guard` always
+  pulls `port.get_orderbook`, then the pre-submit passivity check could
+  pull it AGAIN when the WS book was stale.  The guard's fresh REST
+  book is now stashed on the intent and reused by passivity while inside
+  `MERID_PRE_SUBMIT_BOOK_FRESH_MS` (1500ms) — same freshness contract,
+  one fewer RTT.
+- **Decomposition stamps**: `route_entry_ms`,
+  `route_entry_to_finalize_ms`, `identity_finalize_ms`,
+  `post_identity_to_canonical_ms` added to EXECUTION-STAGE-LATENCY so
+  the next stall localizes without another instrumentation round.
+
 ### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
 
 Replay of `KXDOGE15M-26NOV172330-30` (NO buy 27c via `cheap_no_settle`,

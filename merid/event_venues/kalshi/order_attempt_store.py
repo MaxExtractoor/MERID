@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -387,6 +388,19 @@ class OrderAttemptStore:
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # 2026-11-21: per-commit fsync cost on the production spindle measured
+        # p50=75ms / p95=303ms under WAL+FULL — every identity/lifecycle commit
+        # on the order path paid that toll (observed intent->canonical ~4s).
+        # WAL+NORMAL keeps full durability across process/app crashes (WAL
+        # replays on open); the only exposure is the un-checkpointed WAL tail
+        # on OS crash/power loss, which unmatched-order reconciliation already
+        # fails closed on.  Env knob keeps FULL available:
+        # MERID_ORDER_ATTEMPT_SYNCHRONOUS=FULL|NORMAL|OFF (default FULL).
+        _sync = os.environ.get(
+            "MERID_ORDER_ATTEMPT_SYNCHRONOUS", "FULL"
+        ).strip().upper()
+        if _sync in ("NORMAL", "OFF"):
+            conn.execute(f"PRAGMA synchronous={_sync}")
         self._local.conn = conn
         return conn
 
