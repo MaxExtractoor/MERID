@@ -161,6 +161,37 @@ def _lane_entry_band_cents(decision_lane: Optional[str]) -> Optional[Tuple[int, 
             # 50-89c executable (ask) band per the rescue contract; the
             # emm route rests at the bid below it.
             return (50 - _LANE_BID_SPREAD_ALLOWANCE_CENTS, 89)
+        if decision_lane == "empirical_marginal_maker":
+            # Experiment-A domain is 50<=p<90c executable ask, bid-priced
+            # post-only — the same shape as marginal_band's band.  Without
+            # this entry the lane's 80-89c admissions fell through to the
+            # profile band (max 80c) and died at the allocator.
+            from merid.prediction.trade_decision import (
+                EMM_PRICE_HI_CENTS,
+                EMM_PRICE_LO_CENTS,
+            )
+            return (
+                max(
+                    1,
+                    int(EMM_PRICE_LO_CENTS) - _LANE_BID_SPREAD_ALLOWANCE_CENTS,
+                ),
+                int(EMM_PRICE_HI_CENTS) - 1,
+            )
+        if decision_lane == "late_edge_probe":
+            # Lane domain is 10-69.99c own-side bid, TTE 60-120s, post-only —
+            # bids rest below the ask-domain floor, so the lower bound
+            # carries the same spread allowance the other bid-basis lanes
+            # use.  Without this entry the 10-24c sliver fell through to
+            # the profile band (min 25c) and died at the allocator.
+            from merid.prediction import directional_regime as _dr_lep
+            return (
+                max(
+                    1,
+                    int(_dr_lep._late_edge_probe_lo())
+                    - _LANE_BID_SPREAD_ALLOWANCE_CENTS,
+                ),
+                int(_dr_lep._late_edge_probe_hi()),
+            )
         if decision_lane == "trend_yes_hi":
             from merid.prediction import directional_regime as _dr_tcb
             return (
