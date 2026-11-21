@@ -1035,6 +1035,25 @@ def normalize_order(
             except Exception:
                 _in_canon = False
         if not _in_canon:
+            # 2026-11-21: remaining bounded lanes resolve through the shared
+            # lane-band map — settlement_convergence tops at
+            # MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS (97c), cbp/escape 20-89c,
+            # threshold_cell union, marginal_band, late_edge_probe,
+            # trend_yes_hi, empirical_marginal_maker.  The downstream intent
+            # gate (~L1333) already extends _open_max_cents for
+            # settlement_convergence/pinned_fav; without the same admission
+            # here a lane-valid 96-97c order died as invalid_price before
+            # ever reaching it (live: settlement BUY_NO@97c 2026-11-21).
+            try:
+                from merid.risk.global_slot_allocator import (
+                    _lane_entry_band_cents as _oic_lane_band,
+                )
+                _oic_band = _oic_lane_band(getattr(intent, "decision_lane", None))
+                if _oic_band is not None:
+                    _in_canon = int(_oic_band[0]) <= int(price_cents) <= int(_oic_band[1])
+            except Exception:
+                pass
+        if not _in_canon:
             raise OrderIntentValidationError(f"invalid_price:price_cents={price_cents},contract={contract}")
 
     # Canonical quantity resolution.  ``count_fp`` (Decimal contracts) is the
