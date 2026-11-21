@@ -2536,7 +2536,11 @@ def apply_bounded_live_domain_gate(
             "settlement_lane_favored_side"
         )
         if _favored is None or sel == _favored:
-            required_cents = MERID_SETTLEMENT_LANE_MIN_NET_EDGE * 100.0
+            # MERID_SETTLEMENT_LANE_MIN_NET_EDGE is cent-denominated
+            # (env _CENTS, default 1.5c); required_cents/lcb_cents are
+            # cents — use the constant raw, not *100 (was 75c, which
+            # would reject every favored-side settlement selection).
+            required_cents = float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE)
     if _is_pinned_fav:
         # 2026-10-17: same single-charge rule as the settlement lane — the
         # pinned-favorite lane was admitted against its own 2c net-edge
@@ -5347,10 +5351,16 @@ def _compute_trade_decision_impl(
         # when the settlement claim is near-certain).  The unfavored side
         # keeps its dynamic bound; its ~1-p claim fails edge regardless.
         _lane_favored = "yes" if float(p_yes_raw) >= 0.5 else "no"
+        # yes_min_edge/no_min_edge are dollar-denominated (thr.total,
+        # caution bumps add cents/100) — the lane floor env is cents, so
+        # convert.  Raw assignment made the favored-side bound 75c and
+        # min_required_edge=0.75 downstream, which zeroed the router's
+        # edge-preserving cap (live: settlement BUY_NO@96c reprice_would_cross
+        # 2026-11-21).
         if _lane_favored == "yes":
-            yes_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+            yes_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE / 100.0
         else:
-            no_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+            no_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE / 100.0
         indicators["settlement_lane_favored_side"] = _lane_favored
         indicators["settlement_lane_min_edge"] = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
     if not settlement_lane and entry_price_basis == "bid":
@@ -9661,9 +9671,15 @@ def _compute_trade_decision_impl(
             float(selected_threshold), _eff_bound_mre / 100.0)
     elif _mre_lane == "settlement_convergence":
         try:
+            # Same cent→dollar conversion as the favored-side override
+            # above: selected_threshold is dollar-denominated, the lane
+            # floor env is cents.  Raw min() could never select 0.75
+            # against ~0.04 thresholds, so the lane floor never reached
+            # intent.min_required_edge and the router re-capped at the
+            # generic ~4c bound (reprice_would_cross at the ask).
             selected_threshold = min(
                 float(selected_threshold),
-                float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE),
+                float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE) / 100.0,
             )
         except Exception:
             pass
