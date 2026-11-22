@@ -228,7 +228,7 @@ class TestEndToEndMetadataFlow:
         client_order_id = "test-order-789"
         cache.register_tp_targets(
             client_order_id=client_order_id,
-            take_profit_price_cents=60,
+            take_profit_price_cents=70,
             take_profit_r_multiple=1.5,
             stop_loss_price_cents=45,
             entry_price_cents=50,
@@ -257,7 +257,7 @@ class TestEndToEndMetadataFlow:
         # Verify metadata propagated correctly
         assert position.vol_regime == "normal"
         assert position.confidence == "high"
-        assert position.take_profit_price_cents == 60
+        assert position.take_profit_price_cents == 70
         assert position.stop_loss_price_cents == 45
     
     @pytest.mark.asyncio
