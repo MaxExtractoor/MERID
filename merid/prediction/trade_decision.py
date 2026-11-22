@@ -718,6 +718,36 @@ MERID_SETTLEMENT_LANE_P_CAP = float(os.environ.get("MERID_SETTLEMENT_LANE_P_CAP"
 MERID_SETTLEMENT_LANE_MIN_NET_EDGE = float(
     os.environ.get("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "1.5")
 ) / 100.0
+# 2026-11-22: price-conditioned deep-band floor.  Settled-eval counterfactual
+# (decision_audit_evidence_outcomes, ~231 px>=98c tail-window evals over
+# ~3.5d, buy-at-ask): +1.0-1.14c/contract realized at ~99.6% wins, while the
+# 94-97c cohorts were negative (84-96% win vs ~95-98c breakeven).  At >=98c
+# the gross-edge ceiling is ~2c so the 0.75c base floor is unreachable even
+# when the banked-sample distribution is at maximum confidence; the deep
+# floor still requires ~0.3c net edge after fee+reserves.  Same edge-fraction
+# units as MERID_SETTLEMENT_LANE_MIN_NET_EDGE (0.01 = 1c).
+MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS", "98")
+)
+MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS", "0.30")
+) / 100.0
+
+
+def settlement_lane_min_edge(price_cents) -> float:
+    """Settlement-lane net-edge floor in edge-fraction units (0.01 = 1c).
+
+    Returns the deep-band floor when the held-side executable price is at or
+    above MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS, else the base floor.
+    Non-numeric/missing prices fall back to the base floor (fail-closed).
+    """
+    try:
+        if float(price_cents) >= MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS:
+            return MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE
+    except (TypeError, ValueError):
+        pass
+    return MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+
 
 # 2026-11-20 (operator-directed late-favorite canary): pre-window settlement
 # admission.  The lane previously required phase=="in_window" (TTE<=60s) plus
@@ -2536,11 +2566,13 @@ def apply_bounded_live_domain_gate(
             "settlement_lane_favored_side"
         )
         if _favored is None or sel == _favored:
-            # MERID_SETTLEMENT_LANE_MIN_NET_EDGE is cent-denominated
-            # (env _CENTS, default 1.5c); required_cents/lcb_cents are
-            # cents — use the constant raw, not *100 (was 75c, which
-            # would reject every favored-side settlement selection).
-            required_cents = float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE)
+            # MERID_SETTLEMENT_LANE_MIN_NET_EDGE is edge-fraction
+            # (env _CENTS / 100 at module load); required_cents/lcb_cents
+            # are cents — convert back with *100 and apply the
+            # price-conditioned deep-band floor (px>=98c -> ~0.3c).
+            required_cents = (
+                settlement_lane_min_edge(price_cents) * 100.0
+            )
     if _is_pinned_fav:
         # 2026-10-17: same single-charge rule as the settlement lane — the
         # pinned-favorite lane was admitted against its own 2c net-edge
@@ -5351,18 +5383,22 @@ def _compute_trade_decision_impl(
         # when the settlement claim is near-certain).  The unfavored side
         # keeps its dynamic bound; its ~1-p claim fails edge regardless.
         _lane_favored = "yes" if float(p_yes_raw) >= 0.5 else "no"
-        # yes_min_edge/no_min_edge are dollar-denominated (thr.total,
-        # caution bumps add cents/100) — the lane floor env is cents, so
-        # convert.  Raw assignment made the favored-side bound 75c and
-        # min_required_edge=0.75 downstream, which zeroed the router's
-        # edge-preserving cap (live: settlement BUY_NO@96c reprice_would_cross
-        # 2026-11-21).
+        # yes_min_edge/no_min_edge are dollar-denominated edge fractions
+        # (thr.total, caution bumps add cents/100) — the same units
+        # settlement_lane_min_edge returns, so assign directly with the
+        # price-conditioned deep-band floor on the favored side's price.
+        _fav_px_cents = (
+            float(yes_price_cents)
+            if _lane_favored == "yes"
+            else float(no_price_cents)
+        )
+        _fav_min_edge = settlement_lane_min_edge(_fav_px_cents)
         if _lane_favored == "yes":
-            yes_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE / 100.0
+            yes_min_edge = _fav_min_edge
         else:
-            no_min_edge = MERID_SETTLEMENT_LANE_MIN_NET_EDGE / 100.0
+            no_min_edge = _fav_min_edge
         indicators["settlement_lane_favored_side"] = _lane_favored
-        indicators["settlement_lane_min_edge"] = MERID_SETTLEMENT_LANE_MIN_NET_EDGE
+        indicators["settlement_lane_min_edge"] = _fav_min_edge
     if not settlement_lane and entry_price_basis == "bid":
         # 2026-11-06 counterfactual probe: inside the armed 70-89.99c window
         # the side floor goes negative (bounded-lane semantics downstream —
@@ -9671,15 +9707,20 @@ def _compute_trade_decision_impl(
             float(selected_threshold), _eff_bound_mre / 100.0)
     elif _mre_lane == "settlement_convergence":
         try:
-            # Same cent→dollar conversion as the favored-side override
-            # above: selected_threshold is dollar-denominated, the lane
-            # floor env is cents.  Raw min() could never select 0.75
-            # against ~0.04 thresholds, so the lane floor never reached
-            # intent.min_required_edge and the router re-capped at the
-            # generic ~4c bound (reprice_would_cross at the ask).
+            # selected_threshold is dollar-denominated edge fraction — the
+            # same units settlement_lane_min_edge returns — so assign the
+            # conditioned floor directly (base 0.75c, deep-band ~0.3c at
+            # px>=98c).  This keeps intent.min_required_edge honest so the
+            # router's edge-preserving cap prices against the floor the
+            # lane was actually admitted under.
+            _sel_lane_px = None
+            if edge_breakdown is not None:
+                _sel_lane_px = (
+                    float(edge_breakdown.executable_entry_price) * 100.0
+                )
             selected_threshold = min(
                 float(selected_threshold),
-                float(MERID_SETTLEMENT_LANE_MIN_NET_EDGE) / 100.0,
+                settlement_lane_min_edge(_sel_lane_px),
             )
         except Exception:
             pass

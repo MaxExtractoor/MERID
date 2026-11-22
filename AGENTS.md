@@ -246,6 +246,53 @@ with the 11GB audit store):
   `post_identity_to_canonical_ms` added to EXECUTION-STAGE-LATENCY so
   the next stall localizes without another instrumentation round.
 
+### Sure-bet tail execution + settlement-floor units repair (2026-11-22)
+
+Operator directive: execute the tail-end "sure bets" (15m windows resolve
+to a clear winner; buy the favored side late).  Rather than force trades,
+the settled-eval record was used as the arbiter
+(`decision_audit_evidence_outcomes.evidence_outcome_rows`, src=veto/fill,
+`settled_yes` joined, `cf_status=FULLY_EXECUTABLE`, TTE 10–150s,
+`calibrated_probability>=0.90`, held-side price>=85c, deduped to the
+last look per ticker-side):
+
+- **px>=98c band: +1.0–1.14c/contract realized, ~99.6% wins (n≈231 over
+  ~3.5d).**  px 99c sub-band went 115W/0L; px 98–99c 115W/1L.
+- **px 94–97c bands were NEGATIVE** (84.8–95.7% win vs ~95–98c
+  breakeven): 94–96c −14.5c avg, 96–98c −0.9 to −2.2c, 97–98c −1.26c.
+  The "sure bet" edge exists only where the banked settlement samples
+  make the outcome near-mechanical AND the price still leaves >=~1c.
+- Conclusion: a blanket late-favorite override would have lost money;
+  the profitable slice is narrow (px>=98c).  Implemented as a
+  **price-conditioned settlement-lane floor**, not a quota.
+
+**Units regression found and fixed:** `d3c82004` treated
+`MERID_SETTLEMENT_LANE_MIN_NET_EDGE` as cent-denominated, but the
+constant has been edge-fraction since `fe5d612a`
+(`env_CENTS/100` at module load → 0.0075 = 0.75c).  The "fix"
+double-converted at all three consumers — LCB `required_cents`,
+favored-side `min_edge`, and `selected_threshold` — leaving the
+decision-path floor at ~0.0075c while the allocator still bound the
+env 0.75c.  All sites now use `settlement_lane_min_edge(price_cents)`
+(edge-fraction units, correct conversion per consumer) and the
+allocator binds the same conditioned value — decision, intent
+(`min_required_edge`), LCB gate, and allocator EDGE stage agree.
+
+**New env (resolved .env):**
+`MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS=98` and
+`MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS=0.30`.  At held-side
+price >=98c the lane floor drops 0.75c→0.30c (still requires positive
+net edge after fee+reserves, p-side gates, book trust, depth, sizing,
+idempotency unchanged).  Below 98c the 0.75c base floor is restored
+(the d3c82004 regression is reverted — effective behavior there is
+unchanged because the allocator already enforced 0.75c).
+
+Rollback: `MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS=101` disables
+the deep band (no price reaches it); `MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS=0.75`
+matches base.  Watch: settlement-lane fills at >=98c vs the
+counterfactual's +1.0–1.14c/contract; a realized pin-break cluster
+(>=2 losses in the first ~20 fills) reverts the deep floor.
+
 ### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
 
 Replay of `KXDOGE15M-26NOV172330-30` (NO buy 27c via `cheap_no_settle`,

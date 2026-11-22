@@ -591,16 +591,19 @@ class GlobalAllocator:
                 # 2026-11-20: settlement_convergence is deliberately outside
                 # BOUNDED_POST_ONLY_LANES (its entries are taker IOCs — a
                 # resting order cannot fill in-window), but its candidates
-                # still carry a lane bound.  The stamped
-                # effective_required_edge_cents derives from min_edge units
-                # that do not match the lane's cent-denominated floor, so
-                # bind the configured lane floor directly — the same source
-                # the decision gate and router deadline already use.
+                # still carry a lane bound.  Bind the same price-conditioned
+                # floor the decision gate uses (base 0.75c, deep-band ~0.3c
+                # at px>=98c) so the allocator re-check agrees with admission
+                # instead of re-imposing the generic base floor.
                 try:
-                    _lane_bound_cents = float(
-                        os.environ.get(
-                            "MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "1.5"
+                    from merid.prediction.trade_decision import (
+                        settlement_lane_min_edge,
+                    )
+                    _lane_bound_cents = (
+                        settlement_lane_min_edge(
+                            getattr(c, "price_cents", None)
                         )
+                        * 100.0
                     )
                 except Exception:
                     pass
