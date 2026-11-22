@@ -7843,6 +7843,10 @@ def _compute_trade_decision_impl(
                     or _yes_cb_epc_exempt
                     or yes_breakdown.p_selected > yes_min_p
                     or _cb_evidence_release("yes")
+                    # 2026-11-22: settlement favored side — lane eff_ev
+                    # bound above is the authoritative economics; generic
+                    # p_selected understates settlement-distribution p.
+                    or (settlement_lane and float(p_yes_raw) >= 0.5)
                 )
                 and _yes_regime_ok
                 and _yes_conv_block is None
@@ -7880,6 +7884,8 @@ def _compute_trade_decision_impl(
                     or _no_cb_epc_exempt
                     or no_breakdown.p_selected > no_min_p
                     or _cb_evidence_release("no")
+                    # 2026-11-22: settlement favored side (NO-favored).
+                    or (settlement_lane and float(p_yes_raw) < 0.5)
                 )
                 and _no_regime_ok
                 and _no_conv_block is None
@@ -7927,6 +7933,7 @@ def _compute_trade_decision_impl(
         rev_block_s: Optional[str] = None,
         late_price_applies_s: bool = False,
         late_block_s: Optional[str] = None,
+        settle_favored_s: bool = False,
     ) -> Optional[str]:
         _edge_s = float(eff_edge_s) if eff_edge_s is not None else float(bd.net_edge)
         # 2026-11-08 (reversal-scalp): a matched candidate is owned by the
@@ -8013,6 +8020,7 @@ def _compute_trade_decision_impl(
                 and bd.p_selected <= min_p_s
                 and not cb_epc_exempt_s
                 and not cb_release_s
+                and not settle_favored_s
             ):
                 if _lane_window_s:
                     if not _lane_rescued_s:
@@ -8059,6 +8067,21 @@ def _compute_trade_decision_impl(
                 yes_evidence_reason if side == "yes" else no_evidence_reason
             ) or f"evidence_{side}"
         return None
+
+    # 2026-11-22 (settlement-lane cost-basis): the favored side's claim is
+    # banked-sample settlement arithmetic, not the generic calibrated
+    # p_selected — p_yes_raw IS settlement_distribution.p_yes_raw here, and
+    # the lane's eff_ev gate (checked above before this cascade reaches
+    # cost_basis) already proved the distribution's p covers entry+fee+
+    # tail reserve.  p_selected is a shrunk generic estimate that
+    # systematically understates the tail conviction (ETH-YES@98 measured
+    # p_selected=0.987 vs settlement p~0.995 -> min_p 1.0014, an
+    # unsatisfiable floor).  Exempt ONLY the favored side and ONLY after
+    # the lane edge bound cleared; the unfavored side and every structural
+    # gate below still bind.
+    _settle_favored_side = (
+        ("yes" if float(p_yes_raw) >= 0.5 else "no") if settlement_lane else None
+    )
 
     indicators.update({
         "yes_bid_cents": yes_bid_cents,
@@ -8120,6 +8143,7 @@ def _compute_trade_decision_impl(
             rev_block_s=_yes_rev_block,
             late_price_applies_s=_yes_late_price,
             late_block_s=_yes_late_block,
+            settle_favored_s=(_settle_favored_side == "yes"),
         ),
         "no_block": _side_block_reason(
             "no", no_breakdown, no_min_edge, no_min_p,
@@ -8148,6 +8172,7 @@ def _compute_trade_decision_impl(
             rev_block_s=_no_rev_block,
             late_price_applies_s=_no_late_price,
             late_block_s=_no_late_block,
+            settle_favored_s=(_settle_favored_side == "no"),
         ),
     })
 
