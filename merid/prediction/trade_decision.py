@@ -727,7 +727,7 @@ MERID_SETTLEMENT_LANE_MIN_NET_EDGE = float(
 # floor still requires ~0.3c net edge after fee+reserves.  Same edge-fraction
 # units as MERID_SETTLEMENT_LANE_MIN_NET_EDGE (0.01 = 1c).
 MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS = float(
-    os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS", "98")
+    os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS", "90")
 )
 MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE = float(
     os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS", "0.30")

@@ -10296,7 +10296,9 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             min_total_depth=profile.momentum_fvg_liquidity_min_threshold  # CRITICAL FIX (2026-07-23): Use profile threshold for total depth gating
                         )
                     _micro_lane = getattr(intent, "decision_lane", None)
-                    _bounded_lane_micro_bypass = _micro_lane == "window_quota"
+                    _bounded_lane_micro_bypass = (
+                        _micro_lane in ("window_quota", "settlement_convergence")
+                    )
                     if not _bounded_lane_micro_bypass:
                         try:
                             from merid.prediction.trade_decision import (
@@ -20877,18 +20879,22 @@ async def _route_order_async_impl(intent: OrderIntent) -> OrderResult:
     # default pool queued this call behind unrelated REST/poller work and
     # produced ~4s intent->canonical stalls on every order.
     _exec_stamp(intent, "identity_finalize_start")
+    _identity_timeout_s = float(
+        os.environ.get("MERID_ORDER_IDENTITY_TIMEOUT_S", "15.0")
+    )
     try:
         await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
                 _ORDER_IDENTITY_EXECUTOR, finalize_order_identity, intent
             ),
-            timeout=5.0,
+            timeout=_identity_timeout_s,
         )
         _exec_stamp(intent, "identity_finalize_end")
     except asyncio.TimeoutError:
         logger.critical(
-            "[ORDER-IDENTITY-TIMEOUT] intent_id=%s timed out after 5.0s during identity finalization",
+            "[ORDER-IDENTITY-TIMEOUT] intent_id=%s timed out after %.1fs during identity finalization",
             getattr(intent, "intent_id", None),
+            _identity_timeout_s,
         )
         return OrderResult(
             status="rejected",

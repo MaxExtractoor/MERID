@@ -462,9 +462,14 @@ def evaluate_all_gates(
             threshold={"min_net_edge_cents": min_edge_cents},
         )
 
+        is_settle_fav = (
+            ind.get("entry_lane") == "settlement_convergence"
+            and ind.get("settlement_lane_favored_side") == side
+        )
         cb_eval = (
             p_selected is not None and min_p is not None
             and not neg_floor_bypass
+            and not is_settle_fav
         )
         _add(
             f"{side}_cost_basis",

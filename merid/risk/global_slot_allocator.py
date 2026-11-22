@@ -202,6 +202,12 @@ def _lane_entry_band_cents(decision_lane: Optional[str]) -> Optional[Tuple[int, 
                 ),
                 int(_dr_tcb._trend_yes_hi_hi()),
             )
+        if decision_lane == "maker_bid":
+            from merid.prediction import directional_regime as _dr_mb_alloc
+            return (
+                GlobalSlotAllocator.MIN_ENTRY_CENTS,
+                int(_dr_mb_alloc.moneyness_max_entry_price_cents()),
+            )
     except Exception:
         return None
     return None
@@ -274,7 +280,7 @@ class GlobalSlotAllocator:
     # Hard limits (env-overridable; default to the $11 / 11-contract policy values)
     MAX_EXPOSURE_USD = float(os.getenv("MERID_MAX_EXPOSURE_USD", "11.00"))
     MIN_ENTRY_CENTS = int(os.getenv("MERID_MIN_ENTRY_CENTS", "25"))
-    MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "80"))
+    MAX_ENTRY_CENTS = int(os.getenv("MERID_MAX_ENTRY_CENTS", "89"))
     MAX_CONTRACTS_PER_ORDER = int(os.getenv("MERID_MAX_CONTRACTS_PER_ORDER", "11"))
     MAX_POSITIONS_PER_ASSET = int(os.getenv("MERID_MAX_POSITIONS_PER_ASSET", "1"))
 
