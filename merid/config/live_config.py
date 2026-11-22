@@ -524,6 +524,7 @@ _ENV_OVERRIDES.update({
         ("MERID_SETTLEMENT_LANE_MIN_NET_EDGE_CENTS", "decimal", 0, 50),
         ("MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS", "decimal", 1, 99),
         ("MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS", "decimal", 0, 50),
+        ("MERID_SETTLEMENT_LANE_DEEP_MAX_TAIL_LOSS", "decimal", 0, 1),
         ("MERID_SETTLEMENT_LANE_P_CAP", "decimal", 0, 1),
         # 2026-10-27: bounded chase requote for resting entry orders —
         # amend toward ask-1 only when the gap clears the queue-value

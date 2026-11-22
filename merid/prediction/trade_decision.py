@@ -732,6 +732,12 @@ MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS = float(
 MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE = float(
     os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MIN_NET_EDGE_CENTS", "0.30")
 ) / 100.0
+# Empirical break-rate cap for the deep band's tail-loss reserve: settled-
+# eval counterfactual measured ~0.4% at px>=98c; 1% keeps >2x margin over
+# the observed rate while still charging real pin-break risk.
+MERID_SETTLEMENT_LANE_DEEP_MAX_TAIL_LOSS = float(
+    os.environ.get("MERID_SETTLEMENT_LANE_DEEP_MAX_TAIL_LOSS", "0.01")
+)
 
 
 def settlement_lane_min_edge(price_cents) -> float:
@@ -5313,6 +5319,19 @@ def _compute_trade_decision_impl(
             _fav_p = _lp if _fav_yes else 1.0 - _lp
             _fav_entry = float(yes_entry if _fav_yes else no_entry)
             _lane_mrr = max(0.0, (1.0 - _fav_p) * _fav_entry)
+            # 2026-11-22 deep-band empirical cap: the counterfactual on
+            # settled evals (px>=98c, TTE<=150s, n~231/~3.5d) realized a
+            # ~0.4% break rate — the banked-sample distribution's point p
+            # (0.977-0.999) overstates residual risk 3-5x at the extreme
+            # tail and the (1-p)*px reserve eats the entire ~1-2c gross
+            # edge.  Cap the implied loss rate at the empirical band rate
+            # (+>2x margin) so the reserve prices measured outcomes, not
+            # model tail pessimism.  Every other gate still binds.
+            if _fav_entry * 100.0 >= MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS:
+                _lane_mrr = min(
+                    _lane_mrr,
+                    _fav_entry * MERID_SETTLEMENT_LANE_DEEP_MAX_TAIL_LOSS,
+                )
             if _fav_yes:
                 _mrr_yes = _lane_mrr
             else:
