@@ -2572,7 +2572,9 @@ def _run_exit_price_guard(
     # otherwise the system holds losing positions into settlement.
     is_forced = canonical in ("expiry_liquidation", "time_exit")
     from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
-    mandatory_closeout = canonical == "expiry_liquidation" and pre_settlement_closeout_due(seconds_to_expiry)
+    _pos_lane = getattr(position, "decision_lane", None) or getattr(position, "entry_admission_lane", None)
+    is_settle_conv = _pos_lane == "settlement_convergence"
+    mandatory_closeout = (not is_settle_conv) and canonical == "expiry_liquidation" and pre_settlement_closeout_due(seconds_to_expiry)
     record["mandatory_closeout"] = mandatory_closeout
     record["is_emergency"] = is_emergency
     record["is_forced"] = is_forced

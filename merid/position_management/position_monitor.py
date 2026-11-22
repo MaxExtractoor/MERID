@@ -1100,9 +1100,28 @@ def _position_decision_lane(position) -> Optional[str]:
     rule must degrade to the generic contract on ``None``."""
     try:
         lane = getattr(position, "decision_lane", None)
-        return str(lane) if lane else None
+        if lane:
+            return str(lane)
+        lane = getattr(position, "entry_admission_lane", None)
+        if lane:
+            return str(lane)
     except Exception:
-        return None
+        pass
+    try:
+        coid = getattr(position, "client_order_id", None) or getattr(position, "entry_order_id", None)
+        if coid:
+            from merid.event_venues.kalshi.order_attempt_store import get_order_attempt_store
+            store = get_order_attempt_store()
+            rec = store.get_by_client_order_id(coid)
+            if rec and rec.payload_json:
+                import json
+                pl = json.loads(rec.payload_json)
+                dl = pl.get("order", {}).get("decision_lane")
+                if dl:
+                    return str(dl)
+    except Exception:
+        pass
+    return None
 
 
 def _lock_threshold_for(position) -> int:
@@ -1143,12 +1162,14 @@ def _lock_threshold_for(position) -> int:
 
 
 def _settle_hold(position) -> bool:
-    """Deprecated under pre_settlement_closeout_v2.
+    """Return True if this position belongs to a hold-to-settlement lane.
 
-    Settlement-claim lanes may no longer suppress automatic exits: every
-    filled position must remain eligible for profitable scalps and the
-    mandatory pre-expiry closeout.  Kept as a stable False predicate so old
-    callers/tests do not reintroduce hold-to-settlement behavior."""
+    settlement_convergence is entered in the final minutes specifically to
+    collect the settlement payoff and must never be dumped before settlement.
+    """
+    lane = _position_decision_lane(position)
+    if lane == "settlement_convergence":
+        return True
     return False
 
 
@@ -4732,7 +4753,9 @@ class PositionMonitor:
         from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
 
         remaining = _closeout_seconds_remaining(position, snapshot)
-        if pre_settlement_closeout_due(remaining):
+        lane = _position_decision_lane(position)
+        is_settle_conv = (lane == "settlement_convergence")
+        if not is_settle_conv and pre_settlement_closeout_due(remaining):
             decision = ExitDecision(
                 reason=ExitReason.SETTLEMENT_GUARD,
                 priority=get_priority_for_reason(ExitReason.SETTLEMENT_GUARD),
@@ -4811,7 +4834,7 @@ class PositionMonitor:
         try:
             _secs_to_expiry = _seconds_to_expiry_from_ticker(position.market_id)
             if _secs_to_expiry is not None and 0 < _secs_to_expiry <= _settlement_guard_seconds:
-                if _settlement_guard_sell_justified(position, snapshot, _secs_to_expiry):
+                if not is_settle_conv and _settlement_guard_sell_justified(position, snapshot, _secs_to_expiry):
                     logger.warning(
                         "[POSITION-MONITOR] SETTLEMENT-GUARD forced exit: position=%s market=%s side=%s "
                         "tte=%.1fs <= %.0fs - market premium over settle value, exiting before settlement",
@@ -7878,7 +7901,9 @@ class PositionMonitor:
             snapshot: Optional ExitPriceSnapshot used for the trigger
         """
         from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
-        if pre_settlement_closeout_due(_closeout_seconds_remaining(position, snapshot)):
+        lane = _position_decision_lane(position)
+        is_settle_conv = (lane == "settlement_convergence")
+        if not is_settle_conv and pre_settlement_closeout_due(_closeout_seconds_remaining(position, snapshot)):
             exit_reason = ExitReason.SETTLEMENT_GUARD
             contracts_to_close = None
         if _exit_policy_disabled() and exit_reason not in (
