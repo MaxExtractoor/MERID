@@ -4595,7 +4595,15 @@ def _compute_trade_decision_impl(
     # correction on the anchored p_yes; the NO lane derives the complement so
     # YES and NO remain coherent.  Per-side evidence caps below still bind as
     # safety bounds on whichever lane is evaluated.
-    _p_yes_wf = _walkforward_calibrate_p_yes(asset, seconds_to_expiry, p_yes_for_yes)
+    # Settlement lane: p_yes_for_yes is the settlement-distribution claim, not
+    # the point-expiry model p_yes.  The asset x TTE walk-forward corrector is
+    # fitted on point-expiry outcomes and clamps output to [0.01,0.99], which
+    # would cap a >0.99 banked-sample certainty before the lane's own P_CAP.
+    _p_yes_wf = (
+        None
+        if settlement_lane
+        else _walkforward_calibrate_p_yes(asset, seconds_to_expiry, p_yes_for_yes)
+    )
     if _p_yes_wf is not None:
         indicators["p_yes_pre_walkforward"] = p_yes_for_yes
         indicators["walkforward_cal_applied"] = True
@@ -4603,6 +4611,7 @@ def _compute_trade_decision_impl(
         p_no_for_no = 1.0 - p_yes_for_yes
     else:
         indicators["walkforward_cal_applied"] = False
+        indicators["walkforward_cal_skipped_settlement_lane"] = bool(settlement_lane)
     indicators["fe_post_walkforward_p_yes"] = p_yes_for_yes
 
     # 2026-10-14: model-probability telemetry independent of the EPC
