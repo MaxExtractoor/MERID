@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -106,8 +107,27 @@ def _position():
     return Position(position_id="closeout-position", market_id=_intent().ticker, side=PositionSide.YES, size=4, avg_entry_price_cents=50)
 
 
-def _snapshot(position):
-    return ExitPriceSnapshot(market_id=position.market_id, position_side=position.side, mid_cents=10, own_side_bid_cents=10, own_side_ask_cents=12, opposite_bid_cents=88, opposite_ask_cents=90, book_age_ms=0, data_source="ws", data_quality="GOOD", executable=True, has_bid_size=True, snapshot_id="closeout-book", seconds_to_expiry=100)
+def _snapshot(position, seconds_to_expiry=100):
+    return ExitPriceSnapshot(market_id=position.market_id, position_side=position.side, mid_cents=10, own_side_bid_cents=10, own_side_ask_cents=12, opposite_bid_cents=88, opposite_ask_cents=90, book_age_ms=0, data_source="ws", data_quality="GOOD", executable=True, has_bid_size=True, snapshot_id="closeout-book", seconds_to_expiry=seconds_to_expiry)
+
+
+def _winning_snapshot(position, seconds_to_expiry=100):
+    snapshot = _snapshot(position, seconds_to_expiry=seconds_to_expiry)
+    snapshot.mid_cents = 94
+    snapshot.own_side_bid_cents = 94
+    snapshot.own_side_ask_cents = 95
+    snapshot.opposite_bid_cents = 5
+    snapshot.opposite_ask_cents = 6
+    return snapshot
+
+
+def _bare_monitor():
+    monitor = object.__new__(pm.PositionMonitor)
+    monitor._is_exit_intent_in_flight = Mock(return_value=False)
+    monitor._emit_exit_intent = AsyncMock()
+    monitor._is_expired_market = Mock(return_value=False)
+    monitor._entry_gate_context = {}
+    return monitor
 
 
 def test_monitor_emits_full_closeout_before_other_candidates(monkeypatch):
@@ -137,6 +157,120 @@ def test_confirmed_flat_position_not_rearmed(monkeypatch):
     position = _position()
     position.size = 0
     assert asyncio.run(monitor._check_position(position, _snapshot(position))) is None
+    monitor._emit_exit_intent.assert_not_awaited()
+
+
+def test_position_decision_lane_sources(monkeypatch):
+    position = _position()
+
+    position.decision_lane = "settlement_convergence"
+    assert pm._position_decision_lane(position) == "settlement_convergence"
+    assert pm._settle_hold(position) is True
+
+    position.decision_lane = None
+    position.entry_admission_lane = "settlement_convergence"
+    assert pm._position_decision_lane(position) == "settlement_convergence"
+
+    position.entry_admission_lane = None
+    position.client_order_id = "coid-settle"
+    record = SimpleNamespace(
+        payload_json=json.dumps({"order": {"decision_lane": "settlement_convergence"}})
+    )
+    store = SimpleNamespace(get_by_client_order_id=Mock(return_value=record))
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.order_attempt_store.OrderAttemptStore",
+        Mock(return_value=store),
+    )
+    assert pm._position_decision_lane(position) == "settlement_convergence"
+
+    position.client_order_id = None
+    position.entry_order_id = None
+    position.decision_lane = "cheap_no_settle"
+    assert pm._position_decision_lane(position) == "cheap_no_settle"
+    assert pm._settle_hold(position) is False
+
+
+def test_missing_lane_still_gets_mandatory_closeout(monkeypatch):
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 90
+    snapshot = _winning_snapshot(position, seconds_to_expiry=100)
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is not None
+    assert decision.reason == ExitReason.SETTLEMENT_GUARD
+    assert decision.metadata["mandatory_closeout"] is True
+    monitor._emit_exit_intent.assert_awaited_once()
+
+
+def test_settlement_convergence_skips_mandatory_closeout(monkeypatch):
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    sell_justified = Mock(return_value=True)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", sell_justified)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 90
+    position.decision_lane = "settlement_convergence"
+    snapshot = _winning_snapshot(position, seconds_to_expiry=100)
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is None
+    monitor._emit_exit_intent.assert_not_awaited()
+    sell_justified.assert_not_called()
+
+
+def test_settlement_convergence_skips_emergency_flatten(monkeypatch):
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 30)
+    fake_store = SimpleNamespace(
+        get=lambda ticker: SimpleNamespace(seconds_to_expiry=30)
+    )
+    monkeypatch.setattr(
+        "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
+        lambda: fake_store,
+    )
+    sell_justified = Mock(return_value=True)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", sell_justified)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 90
+    position.decision_lane = "settlement_convergence"
+    snapshot = _winning_snapshot(position, seconds_to_expiry=30)
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is None
+    monitor._emit_exit_intent.assert_not_awaited()
+    sell_justified.assert_not_called()
+
+
+def test_settlement_convergence_suppresses_hard_profit_lock(monkeypatch):
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 90
+    position.decision_lane = "settlement_convergence"
+    snapshot = _winning_snapshot(position, seconds_to_expiry=100)
+    snapshot.mid_cents = 97
+    snapshot.own_side_bid_cents = 97
+    snapshot.own_side_ask_cents = 98
+    snapshot.opposite_bid_cents = 2
+    snapshot.opposite_ask_cents = 3
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is None
+    monitor._emit_exit_intent.assert_not_awaited()
+
+
+def test_settlement_convergence_suppresses_auto_exit_99c(monkeypatch):
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 90
+    position.decision_lane = "settlement_convergence"
+    snapshot = _winning_snapshot(position, seconds_to_expiry=100)
+    snapshot.mid_cents = 99
+    snapshot.own_side_bid_cents = 99
+    snapshot.own_side_ask_cents = 99
+    snapshot.opposite_bid_cents = 1
+    snapshot.opposite_ask_cents = 1
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is None
     monitor._emit_exit_intent.assert_not_awaited()
 
 

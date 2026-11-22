@@ -1110,8 +1110,8 @@ def _position_decision_lane(position) -> Optional[str]:
     try:
         coid = getattr(position, "client_order_id", None) or getattr(position, "entry_order_id", None)
         if coid:
-            from merid.event_venues.kalshi.order_attempt_store import get_order_attempt_store
-            store = get_order_attempt_store()
+            from merid.event_venues.kalshi.order_attempt_store import OrderAttemptStore
+            store = OrderAttemptStore()
             rec = store.get_by_client_order_id(coid)
             if rec and rec.payload_json:
                 import json
@@ -5505,7 +5505,7 @@ class PositionMonitor:
         _lock_stale_exit_flag = bool(
             position.exit_triggered and getattr(position, "exited_at", None) is None
         )
-        if _hard_profit_lock_enabled() and (
+        if not _settle_hold_pos and _hard_profit_lock_enabled() and (
             not position.exit_triggered or _lock_stale_exit_flag
         ):
             # 2026-10-21: lane-keyed threshold — drift_fav positions latch
@@ -5827,7 +5827,7 @@ class PositionMonitor:
         # AUTO_EXIT_99C: Cash out at 99c (near-settlement) - highest priority after RISK
         # Per Kalshi semantics, contracts settle at exactly $1 if correct and $0 if not
         # Selling early at 99c locks in almost all of the payoff
-        if position.should_trigger_auto_exit_99c(current_price_cents) and not position.exit_triggered:
+        if not _settle_hold_pos and position.should_trigger_auto_exit_99c(current_price_cents) and not position.exit_triggered:
             # CRITICAL FIX (2026-07-23): Log multi-trigger state for audit
             # Distinguish between "position already exited" vs "multiple triggers evaluated"
             if position.exit_reason:
@@ -6582,7 +6582,7 @@ class PositionMonitor:
         # reconciled, so a sell is only justified when the market pays a premium
         # over calibrated settle value — otherwise the position settles for free.
         if time_to_expiry_seconds <= 60.0:
-            if _settlement_guard_sell_justified(position, snapshot, float(time_to_expiry_seconds)):
+            if not is_settle_conv and _settlement_guard_sell_justified(position, snapshot, float(time_to_expiry_seconds)):
                 logger.warning(
                     "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs pnl=%dc - market premium over settle value, forcing exit",
                     position.position_id[:8],

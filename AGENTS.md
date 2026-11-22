@@ -293,6 +293,23 @@ matches base.  Watch: settlement-lane fills at >=98c vs the
 counterfactual's +1.0–1.14c/contract; a realized pin-break cluster
 (>=2 losses in the first ~20 fills) reverts the deep floor.
 
+**Hold-to-settlement enforcement (2026-11-22, post BTC NO loss):** a
+`settlement_convergence` fill was force-sold at 87c with ~115s to expiry by
+the generic pre-settlement closeout / settlement-guard path even though the
+held side later settled YES.  Lane provenance is now authoritative
+end-to-end: `position_cache` stamps `decision_lane` on fill and REST
+reconstruction, and `_position_decision_lane` falls back through
+`entry_admission_lane` to the durable `order_attempts.payload_json.order.decision_lane`
+(the store getter is `OrderAttemptStore()`, not a `get_order_attempt_store`
+helper).  For `decision_lane=settlement_convergence` the monitor skips
+mandatory closeout, settlement-guard candidates, the <=60s emergency
+flatten, hard-profit-lock, and `AUTO_EXIT_99C`; `_emit_exit_intent` no longer
+reclassifies its exits as `SETTLEMENT_GUARD`; and
+`loop_15m._run_exit_price_guard` marks `mandatory_closeout`, `is_forced`,
+and `is_emergency` false so the settlement EV gate / hold veto decide.
+Ordinary lanes keep the T-120s mandatory closeout.  Regression coverage:
+`tests/test_pre_settlement_closeout.py`.
+
 ### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
 
 Replay of `KXDOGE15M-26NOV172330-30` (NO buy 27c via `cheap_no_settle`,
