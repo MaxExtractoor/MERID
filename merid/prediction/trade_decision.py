@@ -795,6 +795,14 @@ MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP = float(
 MERID_SETTLEMENT_ANCHOR_RELEASE = os.environ.get(
     "MERID_SETTLEMENT_ANCHOR_RELEASE", "1"
 ).strip().lower() in ("1", "true", "yes")
+# 2026-11-22: inside the settlement window the same deep-band full release
+# already used pre-window must apply — banked samples make the distribution
+# strictly better informed than the book mid, and the ~1-2c sure-bet gross
+# cannot survive even a partial anchor pull.  Rollback: =0 restores the
+# proportional remaining_count/60 shrink for every in-window candidate.
+MERID_SETTLEMENT_LANE_IN_WINDOW_DEEP_ANCHOR_RELEASE = os.environ.get(
+    "MERID_SETTLEMENT_LANE_IN_WINDOW_DEEP_ANCHOR_RELEASE", "1"
+).strip().lower() in ("1", "true", "yes")
 
 # 2026-08-29: Executable-cost EV gate becomes the final entry authority.
 # When enabled, the gate is evaluated after the existing edge/π* computation
@@ -4548,8 +4556,18 @@ def _compute_trade_decision_impl(
             and settlement_distribution is not None
             and getattr(settlement_distribution, "phase", None) == "in_window"
         ):
-            _n_rem = float(getattr(settlement_distribution, "remaining_count", 60) or 0)
-            market_anchor_weight *= max(0.0, min(1.0, _n_rem / 60.0))
+            if settlement_lane and MERID_SETTLEMENT_LANE_IN_WINDOW_DEEP_ANCHOR_RELEASE:
+                _fav_yes_iw = float(p_yes_raw) >= 0.5
+                _fav_entry_iw = yes_entry if _fav_yes_iw else no_entry
+                if (
+                    float(_fav_entry_iw) * 100.0
+                    >= MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS
+                ):
+                    market_anchor_weight = 0.0
+                    indicators["settlement_lane_deep_anchor_release_in_window"] = True
+            if market_anchor_weight > 0.0:
+                _n_rem = float(getattr(settlement_distribution, "remaining_count", 60) or 0)
+                market_anchor_weight *= max(0.0, min(1.0, _n_rem / 60.0))
         elif (
             settlement_lane
             and settlement_distribution is not None
