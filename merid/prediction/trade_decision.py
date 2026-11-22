@@ -5272,6 +5272,23 @@ def _compute_trade_decision_impl(
     indicators["yes_edge_bias_correction_cents"] = _bias_yes * 100.0
     indicators["no_edge_bias_correction_cents"] = _bias_no * 100.0
 
+    if settlement_lane:
+        # 2026-11-22 (settlement-lane reserve parity): the lane claims the
+        # banked-sample settlement distribution and holds to expiry — it
+        # never pays an active-trading exit, never eats a resting-fill
+        # markout, and never makes a live-model EV claim.  implementation_
+        # shortfall and edge_bias are measured on exactly those cohorts
+        # (taker latency slippage, live-model claim-vs-realized bias of
+        # +6..+19c on over-claiming assets) and double-charge costs the
+        # lane's own empirical bound + tail-loss reserve already price.
+        # Charging them pushed every favored-side candidate net_edge<=0 ->
+        # no_positive_executable_edge.  Indicators above still record the
+        # would-be charges for audit; only the breakdown inputs are zeroed.
+        _impl_sf_yes = _impl_sf_no = 0.0
+        _bias_yes = _bias_no = 0.0
+        indicators["settlement_lane_impl_sf_zeroed"] = True
+        indicators["settlement_lane_edge_bias_zeroed"] = True
+
     # 2026-10-25 (EV-reconciliation provenance): name the exact measured
     # cohorts each hidden reserve consumed — the missing 2.92c class of bug
     # only reconstructs when giveback/impl/bias each carry their source key
