@@ -709,6 +709,12 @@ class KalshiWebSocketBridge:
         # REST polling loop lifecycle
         self._rest_polling_active: bool = False
         self._rest_polling_task: Optional[asyncio.Task] = None
+        # 2026-11-21: the REST orderbook poller now runs on a dedicated
+        # thread+loop (kalshi-rest-poll) instead of the WS I/O loop.  Its
+        # synchronous book applies + transition evals were queueing behind
+        # orderbook_delta processing every 2s, producing the
+        # ws_lagged_or_unverified -> REST_VERIFIED_DEGRADED flap cycle.
+        self._rest_polling_thread: Optional[threading.Thread] = None
         
         # Auto-resync cooldown to prevent churning
         self._auto_resync_cooldown_until: float = 0.0  # Timestamp until which auto-resync is disabled
@@ -991,28 +997,31 @@ class KalshiWebSocketBridge:
         store must be continuously refreshed from REST. This loop runs for the
         lifetime of the bridge and polls all active tickers.
         """
-        if self._rest_polling_task and not self._rest_polling_task.done():
+        if self._rest_polling_thread is not None and self._rest_polling_thread.is_alive():
             logger.info(
-                "[WS-REST-POLLING-START] already running (task=%s, active=%s)",
-                self._rest_polling_task, self._rest_polling_active,
+                "[WS-REST-POLLING-START] already running (thread=%s, active=%s)",
+                self._rest_polling_thread, self._rest_polling_active,
             )
-            return self._rest_polling_task
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning("[WS-REST-POLLING-START] no running event loop - cannot start polling")
-            return None
+            return self._rest_polling_thread
 
         tickers = list(self._subscribed_tickers or self._desired_tickers)
         logger.info(
-            "[WS-REST-POLLING-START] starting REST polling loop for %d tickers", len(tickers)
+            "[WS-REST-POLLING-START] starting REST polling thread for %d tickers", len(tickers)
         )
         self._rest_polling_active = False
-        self._rest_polling_task = self._spawn_task(
-            self._rest_polling_loop(tickers), name="kalshi-rest-polling"
+        self._rest_polling_task = None
+
+        def _rest_poll_thread_main() -> None:
+            try:
+                asyncio.run(self._rest_polling_loop(tickers))
+            except Exception as e:
+                logger.error("[WS-FALLBACK] REST polling thread exited: %s", e)
+
+        self._rest_polling_thread = threading.Thread(
+            target=_rest_poll_thread_main, name="kalshi-rest-poll", daemon=True
         )
-        return self._rest_polling_task
+        self._rest_polling_thread.start()
+        return self._rest_polling_thread
 
     def _coalesce_queue(self) -> None:
         """Simplified coalescing: keep only latest event per (ticker, kind).
@@ -2765,6 +2774,9 @@ class KalshiWebSocketBridge:
             return True
         rest_task = getattr(self, "_rest_polling_task", None)
         if rest_task is not None and not rest_task.done():
+            return True
+        rest_thread = getattr(self, "_rest_polling_thread", None)
+        if rest_thread is not None and rest_thread.is_alive():
             return True
         return False
 

@@ -4487,7 +4487,7 @@ async def get_pnl() -> Dict[str, Any]:
     try:
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
         ledger = get_fills_ledger()
-        s = ledger.summary()
+        s = await asyncio.to_thread(ledger.summary)
         daily_realized = _safe_float_val(s.get("daily_realized_pnl_usd", 0))
         total_unrealized = _safe_float_val(s.get("total_unrealized_pnl_usd", 0))
         daily_unrealized_change = _safe_float_val(s.get("daily_unrealized_change_usd", 0))
@@ -4656,7 +4656,7 @@ async def get_risk() -> Dict[str, Any]:
     try:
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
         ledger = get_fills_ledger()
-        ledger_summary = ledger.summary()
+        ledger_summary = await asyncio.to_thread(ledger.summary)
         
         # Canonical PnL values from fills ledger (NaN-safe)
         base["daily_pnl_usd"] = _safe_float_val(ledger_summary.get("daily_realized_pnl_usd", 0))

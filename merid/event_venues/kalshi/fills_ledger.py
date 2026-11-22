@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import copy
 import json
 import numbers
 import os
@@ -1463,6 +1464,15 @@ class KalshiFillsLedger:
             return
 
         self._initialized = True
+
+        # TTL cache for summary(): the dashboard/risk endpoints call this on
+        # every poll and each call scans every market in _fills_by_market with
+        # strptime-based expiry parsing — ~0.5s+ of main-loop blocking per call
+        # on this host (py-spy 2026-11-21).  A short TTL collapses repeated
+        # calls into one compute; MERID_LEDGER_SUMMARY_CACHE_S=0 disables.
+        self._summary_cache_lock = threading.Lock()
+        self._summary_cache_ts = 0.0
+        self._summary_cache_result: Optional[Dict[str, Any]] = None
 
         # In-memory cache: fill_id -> KalshiFill
         self._fills: Dict[str, KalshiFill] = {}
@@ -4687,6 +4697,15 @@ class KalshiFillsLedger:
         For daily unrealized PnL change, would need: daily_pnl = daily_realized + (current_unrealized - prior_close_unrealized).
         This requires tracking unrealized_pnl_at_prior_close across process restarts.
         """
+        _cache_s = float(os.environ.get("MERID_LEDGER_SUMMARY_CACHE_S", "2.0") or 0)
+        if _cache_s > 0:
+            with self._summary_cache_lock:
+                if (
+                    self._summary_cache_result is not None
+                    and time.monotonic() - self._summary_cache_ts < _cache_s
+                ):
+                    return copy.deepcopy(self._summary_cache_result)
+
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -4901,7 +4920,7 @@ class KalshiFillsLedger:
         # _open_positions internal state may not be synchronized correctly
         canonical_open_positions_count = len(open_markets)
 
-        return {
+        result = {
             # Keys expected by kalshi_api.py risk endpoint
             "daily_realized_pnl_usd": float(daily_realized_pnl),
             "total_realized_pnl_usd": float(total_realized_pnl),
@@ -4956,6 +4975,12 @@ class KalshiFillsLedger:
             # Observability counters from kalshi_ledger_metrics
             **_metrics_snap(),
         }
+
+        if _cache_s > 0:
+            with self._summary_cache_lock:
+                self._summary_cache_ts = time.monotonic()
+                self._summary_cache_result = result
+        return copy.deepcopy(result)
 
     def record_eod_snapshot(self, account_id: str, cash_eod_cents: int,
                            portfolio_value_eod_cents: int, unrealized_pnl_eod_cents: int) -> None:
