@@ -837,6 +837,52 @@ The saturation above was fixed by **set-based archival**, not VACUUM:
   rate-limited (30x HTTP 429) so settlement prints lag; positions
   reconciled closed via `accept_exchange`.
 
+### Economics/evidence deep audit + edge_bias price bands (2026-11-22)
+
+Full audit: `reports/ECON_EVIDENCE_AUDIT_2026-11-22.md`.  Headline:
+~88% of side-eval kills are economic (`edge_below_threshold` +
+`no_positive_executable_edge`) and economically *correct* — the
+counterfactual cohort settles ≈ −1.56¢/contract.  The reserve stack has
+no unconditional double-count; evidence artifact is fresh
+(coverage_fraction=1.0, incremental store healthy).
+
+**Confirmed measurement bug — edge_bias price pooling (FIXED, dark):**
+`edge_bias.by_source` cohorts were keyed `ASSET|side|entry_source`
+only, pooling the favorite-band under-claim (FLB) across the whole
+price axis.  Deduped rebate-cap (−4¢) evals realized **+9.5¢/93% wr at
+px90-101** but **~0¢/0.6% wr at px0-10** — cheap longshots were being
+rebated for a bias measured on favorites, manufacturing phantom
+claim≥+2¢ evals and contaminating the pre-registered claim-tail cohort.
+
+- `evidence_outcome_store._EBIAS_SQL` now selects
+  `executable_entry_price_cents`/`seconds_to_close` for ebias rows
+  (columns pre-existed; old store rows keep NULL → pooled fallback,
+  24h artifact window self-cleans).
+- Ledger emits banded twins `ASSET|side|src|price_bucket` +
+  `ASSET|side|*|price_bucket` alongside pooled keys (additive).
+- `evidence_policy._edge_bias_lookup` prefers banded keys under
+  **`MERID_EDGE_BIAS_PRICE_BANDS`** (default **OFF**): candidates
+  `src|band → *|band → src → *`, first rec with epoch-aware n_eff ≥
+  `EDGE_BIAS_MIN_NEFF` wins.  Flag off = byte-identical legacy lookup.
+- `trade_decision` passes side exec price into
+  `edge_bias_correction_cents`/`edge_bias_provenance`.
+- Tests: `tests/test_edge_bias_price_bands.py` (9) +
+  `test_edge_bias_correction.py` — 25 passed.
+
+**Enable criteria:** after the claim-tail read at n≥10,000 evals / 3
+weeks, or on explicit operator call (it makes claims more honest; does
+not loosen gates — but it does shift the claim≥+2¢ cohort definition,
+so mid-window enablement is an operator decision, not a default).
+
+**External research cross-check** (in the report): Kalshi FLB is real
+but ~1–3¢ max and sub-fee after spread on naive rules; makers > takers;
+prices already well-calibrated near resolution; adverse selection is
+the passive-fill tax.  Confirms: do not loosen the core edge gate;
+the measured pockets are settlement px≥98 (live), pf 94–96c, and the
+pending claim-tail read.  Next model-side item per
+`analysis/RECALIBRATION_SPEC.md`: two-sided recalibration lift for
+under-confident favorites (approved, ships dark).
+
 ## Automatic live startup
 
 When all of the following are true:

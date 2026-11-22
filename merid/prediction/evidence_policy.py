@@ -540,6 +540,14 @@ def edge_bias_rebate_z() -> float:
     return _env_float("MERID_EDGE_BIAS_REBATE_Z", 1.0)
 
 
+def edge_bias_price_bands_enabled() -> bool:
+    """When on, the edge-bias lookup prefers held-price-banded cohort keys
+    (``ASSET|side|src|price_bucket`` / ``ASSET|side|*|price_bucket``)
+    emitted by the evidence refresh, falling back through the pooled keys.
+    Off (default) preserves the pooled-only lookup exactly."""
+    return _env_flag("MERID_EDGE_BIAS_PRICE_BANDS", False)
+
+
 def _edge_bias_source(asset: str, side: str, basis: str) -> str:
     """Decision-side entry-source key matching counterfactual_entry_source:
     ask-basis evals price at ``{side}_ask``; bid-basis (post-only maker)
@@ -550,30 +558,69 @@ def _edge_bias_source(asset: str, side: str, basis: str) -> str:
     return f"{s}_ask"
 
 
+def _edge_bias_neff(rec: Dict[str, Any]) -> float:
+    """Epoch-aware effective sample count for an edge-bias cohort record."""
+    if evidence_epoch_ts() > 0.0:
+        return float(rec.get("n_eff_post") or 0.0)
+    return float(rec.get("n_eff") or 0.0)
+
+
 def _edge_bias_lookup(
-    evidence: Optional[Dict[str, Any]], asset: str, side: str, basis: str
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+    price_cents: Optional[float] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Resolve the edge-bias cohort record and the key that supplied it."""
+    """Resolve the edge-bias cohort record and the key that supplied it.
+
+    Legacy path (price bands off): first existing of
+    ``ASSET|side|src`` then ``ASSET|side|*``.  Banded path: candidates run
+    most-specific to most-pooled — ``src|band``, ``*|band``, ``src``,
+    ``*`` — and the first record whose epoch-aware n_eff clears
+    ``edge_bias_min_neff`` wins, so a thin band cannot shadow a thicker
+    pooled cohort (and vice versa a measured band beats the pooled mix).
+    """
     block = (evidence or {}).get("edge_bias")
     recs = (block or {}).get("by_source")
     if not isinstance(recs, dict):
         return None, None
     a = (str(asset).upper()) or "UNKNOWN"
     s = str(side).lower()
-    for key in (
-        f"{a}|{s}|{_edge_bias_source(a, s, basis)}",
+    src = _edge_bias_source(a, s, basis)
+    if not (edge_bias_price_bands_enabled() and price_cents is not None):
+        for key in (f"{a}|{s}|{src}", f"{a}|{s}|*"):
+            rec = recs.get(key)
+            if isinstance(rec, dict):
+                return key, rec
+        return None, None
+    band = price_bucket(price_cents)
+    candidates = (
+        f"{a}|{s}|{src}|{band}",
+        f"{a}|{s}|*|{band}",
+        f"{a}|{s}|{src}",
         f"{a}|{s}|*",
-    ):
+    )
+    first: Optional[Tuple[str, Dict[str, Any]]] = None
+    for key in candidates:
         rec = recs.get(key)
-        if isinstance(rec, dict):
+        if not isinstance(rec, dict):
+            continue
+        if first is None:
+            first = (key, rec)
+        if _edge_bias_neff(rec) >= edge_bias_min_neff():
             return key, rec
-    return None, None
+    return first if first is not None else (None, None)
 
 
 def _edge_bias_rec(
-    evidence: Optional[Dict[str, Any]], asset: str, side: str, basis: str
+    evidence: Optional[Dict[str, Any]],
+    asset: str,
+    side: str,
+    basis: str,
+    price_cents: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    return _edge_bias_lookup(evidence, asset, side, basis)[1]
+    return _edge_bias_lookup(evidence, asset, side, basis, price_cents)[1]
 
 
 def edge_bias_provenance(
@@ -581,6 +628,7 @@ def edge_bias_provenance(
     asset: str,
     side: str,
     basis: str,
+    price_cents: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Resolved cohort identity for the edge-bias correction (metadata only).
 
@@ -589,7 +637,7 @@ def edge_bias_provenance(
     with its effective sample count — the audit fields needed to reproduce
     which measured population a charge or rebate came from.
     """
-    key, rec = _edge_bias_lookup(evidence, asset, side, basis)
+    key, rec = _edge_bias_lookup(evidence, asset, side, basis, price_cents)
     if rec is None:
         return {"key": None, "n_eff": 0.0, "gap_wsum": None, "correction_cents": 0.0}
     if evidence_epoch_ts() > 0.0:
@@ -602,7 +650,9 @@ def edge_bias_provenance(
         "key": key,
         "n_eff": n_eff,
         "gap_wsum": wsum,
-        "correction_cents": edge_bias_correction_cents(evidence, asset, side, basis),
+        "correction_cents": edge_bias_correction_cents(
+            evidence, asset, side, basis, price_cents
+        ),
     }
 
 
@@ -611,6 +661,7 @@ def edge_bias_correction_cents(
     asset: str,
     side: str,
     basis: str,
+    price_cents: Optional[float] = None,
 ) -> float:
     """Signed claim-vs-realized correction for this cohort (cents).
 
@@ -623,7 +674,7 @@ def edge_bias_correction_cents(
     """
     if not edge_bias_enabled():
         return 0.0
-    rec = _edge_bias_rec(evidence, asset, side, basis)
+    rec = _edge_bias_rec(evidence, asset, side, basis, price_cents)
     if rec is None:
         return 0.0
     if evidence_epoch_ts() > 0.0:

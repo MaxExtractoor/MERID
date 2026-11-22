@@ -4357,7 +4357,30 @@ class DecisionAuditLedger:
                 epoch_ts <= 0.0
                 or float(r["decision_ts"] or 0.0) >= epoch_ts
             )
-            for key in (f"{asset}|{side}|{src}", f"{asset}|{side}|*"):
+            # 2026-11-22 (edge-bias price bands): the pooled
+            # ASSET|side|src cohort mixes favorite-band under-claims
+            # (FLB: px>=90 realized > claimed) with cheap-band
+            # over-claims, so its signed gap is not transportable
+            # across the price axis — measured live: rebate-cap evals
+            # realized +9.5c at px90-101 but ~0c/0.6% wr at px0-10.
+            # Emit banded twins of both cohort keys (additive; the
+            # lookup consumes them only under MERID_EDGE_BIAS_PRICE_BANDS)
+            # so per-band measured bias accumulates before enablement.
+            _pb_fn = getattr(_ep, "price_bucket", None) if _ep else None
+            _pb = None
+            if _pb_fn is not None:
+                try:
+                    _ec = r.get("entry_cents")
+                    _pb = _pb_fn(_ec) if _ec is not None else None
+                except Exception:
+                    _pb = None
+            _eb_keys = [f"{asset}|{side}|{src}", f"{asset}|{side}|*"]
+            if _pb:
+                _eb_keys += [
+                    f"{asset}|{side}|{src}|{_pb}",
+                    f"{asset}|{side}|*|{_pb}",
+                ]
+            for key in _eb_keys:
                 rec = _eb.setdefault(
                     key,
                     {

@@ -5289,18 +5289,26 @@ def _compute_trade_decision_impl(
     _bias_prov_yes: Dict[str, Any] = {"key": None, "n_eff": 0.0, "gap_wsum": None}
     _bias_prov_no: Dict[str, Any] = {"key": None, "n_eff": 0.0, "gap_wsum": None}
     try:
+        # 2026-11-22: pass the side's executable price so the lookup can
+        # prefer price-banded edge_bias cohorts when
+        # MERID_EDGE_BIAS_PRICE_BANDS is on (pooled keys remain the
+        # fallback; flag off = byte-identical legacy behavior).
         _bias_yes = evidence_policy.edge_bias_correction_cents(
-            _cal_ev, asset, "yes", entry_price_basis
+            _cal_ev, asset, "yes", entry_price_basis,
+            price_cents=yes_entry * 100.0,
         ) / 100.0
         _bias_no = evidence_policy.edge_bias_correction_cents(
-            _cal_ev, asset, "no", entry_price_basis
+            _cal_ev, asset, "no", entry_price_basis,
+            price_cents=no_entry * 100.0,
         ) / 100.0
         try:
             _bias_prov_yes = evidence_policy.edge_bias_provenance(
-                _cal_ev, asset, "yes", entry_price_basis
+                _cal_ev, asset, "yes", entry_price_basis,
+                price_cents=yes_entry * 100.0,
             )
             _bias_prov_no = evidence_policy.edge_bias_provenance(
-                _cal_ev, asset, "no", entry_price_basis
+                _cal_ev, asset, "no", entry_price_basis,
+                price_cents=no_entry * 100.0,
             )
         except Exception:
             pass
