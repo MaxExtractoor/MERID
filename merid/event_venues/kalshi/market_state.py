@@ -4634,11 +4634,28 @@ class KalshiMarketStateStore:
             not book.yes_levels or not book.no_levels
         )
         if _ws_snapshot_one_sided:
-            # An older REST BBO must not replace a newer empty WS side.
-            state.best_bid_cents = None
-            state.best_ask_cents = None
-            state.yes_bids = []
-            state.no_bids = []
+            # 2026-11-22 (tail-window sure-bet fix): a one-sided WS snapshot
+            # does NOT invalidate the populated side's top-of-book.  In the
+            # binary book, YES ask = 100 - best NO bid and NO ask =
+            # 100 - best YES bid — the two derived quotes are backed by
+            # INDEPENDENT ladders.  ``_sync_book_fields`` already left
+            # best_bid_cents valid iff yes_levels is non-empty and
+            # best_ask_cents valid iff no_levels is non-empty; wiping BOTH
+            # here zeroed the favorite-side ask in converged tail books
+            # (e.g. YES bids empty + NO bids live -> YES ask ~98c was still
+            # the freshest WS truth) and surfaced as
+            # price_band_both_sides_disabled for the entire settlement
+            # window.  Preserve only the side backed by real levels; the
+            # empty side stays None and REST references are still cleared
+            # so a stale REST BBO cannot fake it.
+            _keep_bid = state.best_bid_cents if book.yes_levels else None
+            _keep_ask = state.best_ask_cents if book.no_levels else None
+            state.best_bid_cents = _keep_bid
+            state.best_ask_cents = _keep_ask
+            if not book.yes_levels:
+                state.yes_bids = []
+            if not book.no_levels:
+                state.no_bids = []
             state.quote_owner = "NONE_UNTRUSTED"
             state.degraded_mode = False
             state.last_rest_bid_cents = None
