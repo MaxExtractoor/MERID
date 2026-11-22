@@ -63,6 +63,29 @@ deployment must set these explicitly.
   `audit_writer_unhealthy` still gates entries — readiness is earned by
   draining, never by relaxing the gate.
 
+### Data-plane isolation + ledger summary cache (2026-11-21, py-spy driven)
+
+- **REST orderbook polling moved off the WS I/O loop** (`e6805c54`):
+  `_rest_polling_loop` now runs on a dedicated daemon thread
+  (`kalshi-rest-poll`, own asyncio loop + per-loop httpx client via the
+  client's existing `_clients_by_loop` binding).  Previously its 2s
+  full-book applies + transition evals shared the `kalshi-ws-io` loop
+  with `orderbook_delta` processing.  `is_running()` counts the thread.
+- **`fills_ledger.summary()` TTL cache**: `MERID_LEDGER_SUMMARY_CACHE_S`
+  (default 2.0, 0 disables).  The full fills scan (per-market
+  `parse_expiry_from_ticker` strptime) was ~20s/90s of MainThread time
+  under dashboard polling; cache + `asyncio.to_thread` in
+  `get_pnl`/`get_risk` removed it.  All `summary()` callers share the
+  cache — risk-path readers see ≤TTL staleness (fills arrive
+  poller-latency anyway).
+- **Book-state flap persists by design**: `HEALTHY↔DEGRADED_REST_ONLY`
+  transitions (~60/min) are the owner-latch hysteresis working —
+  promotions need `_WS_PROMOTE_STREAK`+parity time, demotions are
+  instant on divergence (>3¢) or unverified flags.  Degraded books
+  remain `executable` and submittable; the flap is telemetry noise,
+  not an entry blocker.  Do NOT relax `MERID_WS_ENTRY_MAX_AGE_MS` or
+  `MERID_REST_BBO_MIN_DIV_CENTS` without cohort evidence.
+
 ### Reconciliation / fills (repairs since the contract text below)
 
 - `fills_poller` uses a **watermark-anchored lookback**
