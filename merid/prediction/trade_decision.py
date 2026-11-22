@@ -4558,10 +4558,20 @@ def _compute_trade_decision_impl(
         ):
             # Pre-window settlement-lane candidate: release most of the market
             # anchor so the lane's settlement-forecast claim reaches the
-            # economics instead of collapsing to the book mid.
-            market_anchor_weight *= max(
-                0.0, min(1.0, MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP)
-            )
+            # economics instead of collapsing to the book mid.  In the
+            # evidence-backed deep band (favored-side px >=
+            # MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS) the sure-bet edge is
+            # only ~1-2c gross, so even the small keep can erase it; release
+            # the anchor fully there and keep the guarded shrink below it.
+            _fav_yes = float(p_yes_raw) >= 0.5
+            _fav_entry = yes_entry if _fav_yes else no_entry
+            if float(_fav_entry) * 100.0 >= MERID_SETTLEMENT_LANE_DEEP_MIN_PRICE_CENTS:
+                market_anchor_weight = 0.0
+                indicators["settlement_lane_deep_anchor_release"] = True
+            else:
+                market_anchor_weight *= max(
+                    0.0, min(1.0, MERID_SETTLEMENT_LANE_PRE_WINDOW_ANCHOR_KEEP)
+                )
         # Staleness-conditioned precision (see _anchor_staleness_factor).
         # shadow mode (default) records the factor without applying it so the
         # counterfactual weight can be audited before going live.
