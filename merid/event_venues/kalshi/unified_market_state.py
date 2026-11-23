@@ -287,7 +287,17 @@ class UnifiedMarketState:
         # None = never set, 0.0 = set to epoch (both indicate missing/invalid timestamp)
         if self.book_updated_ts is None or self.book_updated_ts == 0.0:
             return float('inf')
-        return _time.time() - self.book_updated_ts
+        # 2026-11-23 FIX: book_updated_ts is MONOTONIC (copied verbatim from
+        # KalshiMarketState.last_book_update_ts, which is stamped with
+        # time.monotonic() minus measured data age).  Every other consumer
+        # (resting_order_monitor, settlement_aligned_exit, stop_candidate)
+        # subtracts it from time.monotonic().  Using time.time() here mixed
+        # clock domains and returned ~1.7e12s, which forced every entry-fill
+        # book capture to POST_FILL and permanently blocked model-driven exits.
+        ts = self.book_updated_ts
+        if ts > 1e9:  # epoch-like magnitude -> wall-clock domain
+            return _time.time() - ts
+        return _time.monotonic() - ts
 
     @property
     def candle_age_s(self) -> float:

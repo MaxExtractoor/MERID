@@ -3685,7 +3685,14 @@ class KalshiPositionCache:
                             no_bid = 100 - yes_ask
                         if no_ask is None and yes_bid is not None:
                             no_ask = 100 - yes_bid
-                        if side.lower() == "yes":
+                        # 2026-11-23: capture the book in the HELD side's price
+                        # space, not the fill leg's.  ``side`` here is the fill
+                        # record's canonical_position_side (the traded leg —
+                        # e.g. SELL_YES for a BUY_NO position), so using it
+                        # stored YES-space bid/ask on NO positions (observed:
+                        # DOGE NO@71 persisted entry_executable 29/30 = YES
+                        # book).  thesis_side_from_intent is the held outcome.
+                        if thesis_side_from_intent.lower() == "yes":
                             entry_executable_bid_cents = yes_bid
                             entry_executable_ask_cents = yes_ask
                         else:
@@ -3693,9 +3700,6 @@ class KalshiPositionCache:
                             entry_executable_ask_cents = no_ask
 
                         entry_book_sequence = getattr(book, "seq", None)
-                        book_ts = getattr(book, "ts", None) or getattr(mkt_state, "book_updated_ts", None)
-                        if book_ts:
-                            entry_book_timestamp = datetime.fromtimestamp(book_ts, tz=timezone.utc)
                         entry_book_source = getattr(mkt_state, "source", None) or "market_state"
 
                         # Contemporaneous if the book is live and fresh right now.
@@ -3704,6 +3708,13 @@ class KalshiPositionCache:
                         # freshness window.  This preserves stop-loss arming when
                         # a WS/RTI fill race prevents a perfectly AT_FILL capture.
                         book_age_s = getattr(mkt_state, "book_age_s", float('inf'))
+                        # 2026-11-23: book.ts / book_updated_ts are MONOTONIC-domain
+                        # stamps (last_book_update_ts convention), so
+                        # datetime.fromtimestamp() on them persisted 1970
+                        # timestamps.  Reconstruct the wall-clock time the book
+                        # data represents from the (now clock-correct) age.
+                        if book_age_s != float('inf') and book_age_s >= 0:
+                            entry_book_timestamp = datetime.now(timezone.utc) - timedelta(seconds=book_age_s)
                         if not mkt_state.book_stale and book_age_s < 1.0:
                             entry_book_capture_quality = "AT_FILL"
                         elif book_age_s <= MERID_ENTRY_BOOK_NEAR_PRE_FILL_MAX_AGE_S:

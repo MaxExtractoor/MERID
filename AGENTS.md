@@ -883,6 +883,51 @@ pending claim-tail read.  Next model-side item per
 `analysis/RECALIBRATION_SPEC.md`: two-sided recalibration lift for
 under-confident favorites (approved, ships dark).
 
+### Exit-provenance clock-domain repair + resting-fill book capture (2026-11-23)
+
+Post-DOGE-fill audit of `EXIT-POLICY-PROVENANCE` blocks
+(`risk_params_state=ORIGINAL_PERSISTED` yet edge-decay/model-invalidation
+exits refused).  Root cause was NOT the risk-params state — it was the
+entry-book capture tier:
+
+- **`UnifiedMarketState.book_updated_ts` is monotonic-domain** — copied
+  verbatim from `KalshiMarketState.last_book_update_ts`
+  (`time.monotonic() - measured_data_age`, the 2026-08-22 convention;
+  `resting_order_monitor`, `settlement_aligned_exit`, `stop_candidate`
+  all subtract it from `time.monotonic()`).  `book_age_s` subtracted it
+  from `time.time()` (wall) → ~1.7e12s on every read → **every** entry
+  fill persisted `entry_book_capture_quality=POST_FILL` and
+  `entry_book_timestamp` rendered as 1970 (observed on the DOGE fill:
+  provenance snapshot `entry_book_timestamp=1970-01-08`).  `_can_act_on_model_exit`
+  then failed its `== "AT_FILL"` check → model-driven exits blocked for
+  ALL positions, not just DOGE.
+- **Fixes:**
+  - `unified_market_state.book_age_s` now subtracts `time.monotonic()`
+    (with a `>1e9` magnitude guard keeping legacy wall/epoch-stamped
+    fallback values on the wall clock).
+  - `_can_act_on_model_exit` accepts `AT_FILL_OR_NEAREST_PRE_FILL`
+    alongside `AT_FILL` — resting/maker fills are detected
+    asynchronously so the ingestion-time book is inherently post-fill;
+    the bounded ≤30s near tier is the contemporaneous proxy the cache
+    already assigns for that race.  `POST_FILL`/`UNAVAILABLE`/`UNKNOWN`
+    still fail closed, as does missing signal/model metadata.  Aligns
+    with the 2026-09-14 contract: book capture is a spread-stop
+    invariant, not a prerequisite for trusted entry economics.
+  - `position_cache` entry-book capture now keys off
+    `thesis_side_from_intent` (held side) instead of the fill leg's
+    `canonical_position_side` — SELL_YES-form fills (e.g. BUY_NO) were
+    persisting YES-space bid/ask on NO positions.
+  - `entry_book_timestamp` reconstructed as `now − book_age_s` (wall)
+    instead of `fromtimestamp(monotonic)` → no more 1970 stamps.
+- **Tests:** `tests/test_exit_provenance_clock_domain.py` (11) —
+  monotonic/wall/unset age domains, NEAR-tier acceptance, POST_FILL /
+  UNAVAILABLE / UNKNOWN / missing-metadata still blocked.
+- **Note:** `Position.__post_init__` still nulls `entry_executable_*`
+  for non-AT_FILL tiers — spread-stop book fields remain AT_FILL-only
+  by design; model exits do not consume them.  `OrderbookSnapshot.ts`
+  remains monotonic-domain in practice (doc says epoch — pre-existing
+  doc drift, consumers use monotonic subtraction).
+
 ## Automatic live startup
 
 When all of the following are true:

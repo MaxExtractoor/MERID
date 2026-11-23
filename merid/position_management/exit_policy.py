@@ -434,7 +434,16 @@ class ExitPolicy:
             return False
 
         # Must have captured the executable book at the time of the entry fill.
-        if pos.entry_book_capture_quality != "AT_FILL":
+        # 2026-11-23: accept AT_FILL_OR_NEAREST_PRE_FILL as well.  Resting/maker
+        # fills are detected asynchronously (fills poller / resting monitor), so
+        # the book read at ingestion is inherently post-decision; the bounded
+        # near-fill tier (<= MERID_ENTRY_BOOK_NEAR_PRE_FILL_MAX_AGE_S) is the
+        # contemporaneous proxy the cache already assigns for exactly this race.
+        # POST_FILL/UNAVAILABLE/UNKNOWN still fail closed.  Per the 2026-09-14
+        # provenance contract the book capture is a spread-stop invariant, not a
+        # prerequisite for trusted entry economics — but we keep a minimum
+        # contemporaneous-book bar rather than dropping the check entirely.
+        if pos.entry_book_capture_quality not in ("AT_FILL", "AT_FILL_OR_NEAREST_PRE_FILL"):
             return False
 
         # Must have the original signal/model metadata that the edge calculation
