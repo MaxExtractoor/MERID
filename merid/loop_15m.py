@@ -13231,6 +13231,22 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 entry_or_exit != "exit"
                 and _td_lane in BOUNDED_POST_ONLY_LANES
             )
+            # 2026-11-22 (settlement-lane parity deferral): settlement_convergence
+            # is a taker lane — deliberately not in BOUNDED_POST_ONLY_LANES —
+            # but its economics are enforced on the executable price upstream
+            # exactly like bounded lanes (breakdown net_edge > lane floor, then
+            # the submit-time executable-cost EV re-gate).  The midpoint
+            # edge-threshold recompute below prices a generic fee table that
+            # cannot represent the distribution tail-loss reserve, so it
+            # vetoed admitted candidates (KXXRP15M/KXBTC15M-26NOV222030-30
+            # NO@98c: mid edge_no=+1.43c vs ~2-4c generic required ->
+            # chosen_side=none -> BLOCKED_EDGE_THRESHOLD).  Defer side
+            # authority to the decision; price-parity and WINNER_MISMATCH
+            # integrity checks still run on the midpoint edges and still
+            # block a genuine inversion.
+            _side_authoritative = _is_bounded_lane or (
+                entry_or_exit != "exit" and _td_lane == "settlement_convergence"
+            )
 
             # The canonical asset was already resolved at the top of _execute_candidate;
             # re-use it here so fee/liquidity buffers are applied to the right asset.
@@ -13370,7 +13386,7 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
             # already enforced on the executable price upstream.  A side value
             # that is somehow not yes/no still fails closed via "none".
             _resolved_side, _deferred = resolve_gate_side(
-                chosen_side, side_raw, _is_bounded_lane
+                chosen_side, side_raw, _side_authoritative
             )
             if _deferred:
                 logger.info(
