@@ -111,14 +111,28 @@ at held 92–93, −249c at held <92). The pending band decision is now
 decided by ledger evidence: `.env` restored to the audited containment:
 
 ```text
-MERID_PINNED_FAV_PRICE_LO=94   PRICE_HI=96   # HI narrowed 98->96 on 2026-11-20 (see below)
-MERID_PINNED_FAV_MAKER_LO=94   MAKER_HI=96   # same
+MERID_PINNED_FAV_PRICE_LO=90   PRICE_HI=96   # LO re-widened 94->90 on 2026-11-23 (operator-directed; see below)
+MERID_PINNED_FAV_MAKER_LO=90   MAKER_HI=96   # same
 MERID_PINNED_FAV_MAX_CONTRACTS=6
 MERID_PINNED_FAV_MIN_EV_CENTS=-3.0    MAKER_MIN_EV_CENTS=-3.0
 MERID_PINNED_FAV_LATE_TTE_S=150       MID_MIN_EV_CENTS=0.0
 MERID_PINNED_FAV_MIN_TTE_S=45         MAKER_MIN_TTE_S=45
 MERID_PINNED_FAV_DAILY_MAX=480   MAKER_MIN_P=0.90
 ```
+
+**2026-11-23 operator-directed un-quarantine (90–96c).** LO lowered
+94→90 on both band pairs: the operator judged the thrice-falsified <94
+pocket's losses bug-attributable (units regression, exit-timing,
+latency — since fixed) and activity starvation at 94–96 too costly.
+**Retained contrary evidence for the next audit:** the <94 falsifications
+were realized-fill maker adverse selection (floor bids fill on the
+repricing-through), not only bugs — 92–93 ran −705c/37mkts, ≤91 ran
+−1405c/82ct.  The 2026-11-23 decision-spine dedup cut shows 90–94
+eval-edge +0.2..+3.1¢ (92–93 +3.07¢, p≤0=0.05) vs 94–96 −0.93¢ —
+eval-positive, unproven executable.  All other bounds unchanged
+(maker-only, p≥0.90, EV −3.0, TTE 45–840s, 6ct, 480/day).  Success
+metric: settled-fill + counterfactual audit of the 90–93.99 cohort
+vs the documented falsification baselines; rollback = LO back to 94.
 
 **TTE-conditioned EV floor (2026-11-18, external-tape epoch).** The flat
 `-3` probe floor is now `max(base, mid)` conditioned on TTE via

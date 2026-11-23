@@ -132,6 +132,7 @@ def _bare_monitor():
 
 def test_monitor_emits_full_closeout_before_other_candidates(monkeypatch):
     monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", Mock(return_value=True))
     monitor = object.__new__(pm.PositionMonitor)
     monitor._is_exit_intent_in_flight = Mock(return_value=False)
     monitor._emit_exit_intent = AsyncMock()
@@ -192,11 +193,80 @@ def test_position_decision_lane_sources(monkeypatch):
 
 def test_missing_lane_still_gets_mandatory_closeout(monkeypatch):
     monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", Mock(return_value=True))
     monitor = _bare_monitor()
     position = _position()
     position.avg_entry_price_cents = 90
     snapshot = _winning_snapshot(position, seconds_to_expiry=100)
     decision = asyncio.run(monitor._check_position(position, snapshot))
+    assert decision is not None
+    assert decision.reason == ExitReason.SETTLEMENT_GUARD
+    assert decision.metadata["mandatory_closeout"] is True
+    monitor._emit_exit_intent.assert_awaited_once()
+
+
+def test_closeout_holds_when_sell_not_justified(monkeypatch):
+    """2026-11-23 (DOGE-2330): the T-120s deadline forces a sell-vs-hold
+    decision via the EV arbiter — an unjustified sell rides to settlement
+    instead of donating spread+fee at the bid."""
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 100)
+    sell_justified = Mock(return_value=False)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", sell_justified)
+    monitor = _bare_monitor()
+    position = _position()
+    position.avg_entry_price_cents = 50
+    snapshot = _snapshot(position, seconds_to_expiry=100)
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    sell_justified.assert_called()
+    for call in monitor._emit_exit_intent.await_args_list:
+        assert call.args[1] != ExitReason.SETTLEMENT_GUARD
+    if decision is not None:
+        assert decision.reason != ExitReason.SETTLEMENT_GUARD
+
+
+def test_drift_fav_no_position_holds_at_t115_when_sell_unjustified(monkeypatch):
+    """DOGE-2330 replay shape: NO-side drift_fav position, ~115s to expiry,
+    entry 69c, bid ~59c, model untrusted -> sell_justified False -> the
+    mandatory closeout must NOT fire; the position rides to settlement."""
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 115)
+    sell_justified = Mock(return_value=False)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", sell_justified)
+    monitor = _bare_monitor()
+    position = Position(
+        position_id="doge-2330", market_id="KXDOGE15M-26NOV222330-30",
+        side=PositionSide.NO, size=6, avg_entry_price_cents=69,
+    )
+    position.decision_lane = "drift_fav"
+    position.outcome_side = "no"
+    position.thesis_side = "no"
+    snapshot = _snapshot(position, seconds_to_expiry=115)
+    snapshot.own_side_bid_cents = 59
+    snapshot.own_side_ask_cents = 60
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    sell_justified.assert_called()
+    for call in monitor._emit_exit_intent.await_args_list:
+        assert call.args[1] != ExitReason.SETTLEMENT_GUARD
+    if decision is not None:
+        assert decision.reason != ExitReason.SETTLEMENT_GUARD
+
+
+def test_drift_fav_no_position_sells_when_premium_over_hold(monkeypatch):
+    """Same shape, but the arbiter finds a real market premium -> the
+    mandatory closeout still fires (ordinary lanes keep closeout behavior)."""
+    monkeypatch.setattr(pm, "_seconds_to_expiry_from_ticker", lambda _: 115)
+    sell_justified = Mock(return_value=True)
+    monkeypatch.setattr(pm, "_settlement_guard_sell_justified", sell_justified)
+    monitor = _bare_monitor()
+    position = Position(
+        position_id="doge-2330b", market_id="KXDOGE15M-26NOV222330-30",
+        side=PositionSide.NO, size=6, avg_entry_price_cents=69,
+    )
+    position.decision_lane = "drift_fav"
+    position.outcome_side = "no"
+    position.thesis_side = "no"
+    snapshot = _snapshot(position, seconds_to_expiry=115)
+    decision = asyncio.run(monitor._check_position(position, snapshot))
+    sell_justified.assert_called()
     assert decision is not None
     assert decision.reason == ExitReason.SETTLEMENT_GUARD
     assert decision.metadata["mandatory_closeout"] is True

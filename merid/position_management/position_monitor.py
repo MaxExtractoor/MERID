@@ -4756,17 +4756,35 @@ class PositionMonitor:
         lane = _position_decision_lane(position)
         is_settle_conv = (lane == "settlement_convergence")
         if not is_settle_conv and pre_settlement_closeout_due(remaining):
-            decision = ExitDecision(
-                reason=ExitReason.SETTLEMENT_GUARD,
-                priority=get_priority_for_reason(ExitReason.SETTLEMENT_GUARD),
-                source_layer=ExitSourceLayer.POSITION_LEVEL,
-                exit_price_cents=current_price_cents,
-                metadata={"mandatory_closeout": True, "seconds_to_expiry": remaining},
-            )
-            await self._emit_exit_intent(
-                position, decision.reason, current_price_cents, snapshot=snapshot,
-            )
-            return decision
+            # 2026-11-23 (DOGE-2330): the T-120s deadline forces a sell-vs-hold
+            # DECISION, not an unconditional dump.  The same EV arbiter that
+            # gates the T<=60s flatten and the 2026-09-24 settlement guard
+            # decides here: sell only when the market pays a premium over the
+            # calibrated hold value; otherwise the position rides to
+            # settlement under normal reconciliation.  The unconditional
+            # ddf6c7b1 behavior is restored by MERID_SETTLEMENT_GUARD_EV_GATE=0
+            # (sell_justified short-circuits True).
+            if _settlement_guard_sell_justified(position, snapshot, remaining):
+                decision = ExitDecision(
+                    reason=ExitReason.SETTLEMENT_GUARD,
+                    priority=get_priority_for_reason(ExitReason.SETTLEMENT_GUARD),
+                    source_layer=ExitSourceLayer.POSITION_LEVEL,
+                    exit_price_cents=current_price_cents,
+                    metadata={"mandatory_closeout": True, "seconds_to_expiry": remaining},
+                )
+                await self._emit_exit_intent(
+                    position, decision.reason, current_price_cents, snapshot=snapshot,
+                )
+                return decision
+            if not getattr(position, "_closeout_hold_logged", False):
+                position._closeout_hold_logged = True
+                logger.info(
+                    "[POSITION-MONITOR] pre-settlement closeout HOLD: position=%s market=%s "
+                    "tte=%.1fs - sell not justified vs calibrated hold; riding to settlement",
+                    position.position_id[:8],
+                    position.market_id,
+                    remaining,
+                )
 
         candidates: List[ExitDecision] = []
 
