@@ -7,7 +7,65 @@ from merid.event_venues.kalshi.resting_order_monitor import (
     RestingOrderRecord,
     RecheckResult,
     RestingOrderMonitor,
+    _toxic_mid_cross,
 )
+
+
+class TestToxicMidCross:
+    """Regression: toxic-mid cancel must require a real adverse move.
+
+    2026-11-23 live incident: a resting BUY_NO@37c entry was flagged
+    ``toxic_mid_cross:mid=37.0<=limit=37`` ~66ms after placement — the
+    mid AT the limit is fair value, and the cancel raced an
+    already-filled order (verified_status=executed).  The pre-fix
+    ``mid <= limit`` / ``mid >= limit`` comparisons fired on equality.
+    """
+
+    def test_buy_mid_at_limit_is_not_toxic(self):
+        buy_toxic, sell_toxic = _toxic_mid_cross(
+            is_buy=True, limit_cents=37, side_mid=37.0, slack_cents=1.0
+        )
+        assert not buy_toxic
+        assert not sell_toxic
+
+    def test_buy_mid_one_cent_above_limit_is_toxic(self):
+        # mid = limit - slack exactly -> adverse move of one full cent
+        buy_toxic, _ = _toxic_mid_cross(
+            is_buy=True, limit_cents=37, side_mid=36.0, slack_cents=1.0
+        )
+        assert buy_toxic
+
+    def test_buy_mid_half_cent_below_limit_not_toxic(self):
+        # 0.5c adverse move is inside the 1c slack — keep resting
+        buy_toxic, _ = _toxic_mid_cross(
+            is_buy=True, limit_cents=37, side_mid=36.5, slack_cents=1.0
+        )
+        assert not buy_toxic
+
+    def test_sell_mid_at_limit_is_not_toxic(self):
+        buy_toxic, sell_toxic = _toxic_mid_cross(
+            is_buy=False, limit_cents=62, side_mid=62.0, slack_cents=1.0
+        )
+        assert not buy_toxic
+        assert not sell_toxic
+
+    def test_sell_mid_one_cent_above_limit_is_toxic(self):
+        _, sell_toxic = _toxic_mid_cross(
+            is_buy=False, limit_cents=62, side_mid=63.0, slack_cents=1.0
+        )
+        assert sell_toxic
+
+    def test_zero_limit_never_toxic(self):
+        assert _toxic_mid_cross(
+            is_buy=True, limit_cents=0, side_mid=0.0, slack_cents=1.0
+        ) == (False, False)
+
+    def test_custom_slack_env_equivalent(self):
+        # slack=0 restores strict-cross semantics (mid must pass limit)
+        buy_toxic, _ = _toxic_mid_cross(
+            is_buy=True, limit_cents=37, side_mid=36.9, slack_cents=0.0
+        )
+        assert buy_toxic
 
 
 class TestRestingOrderRecord:

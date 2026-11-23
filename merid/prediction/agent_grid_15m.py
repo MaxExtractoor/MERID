@@ -8546,7 +8546,16 @@ class LeanAgent15m:
             try:
                 _cat = get_market_catalog()
                 if _cat:
-                    _catalog_market = _cat.get_current_15m_market(asset)
+                    # 2026-11-23: resolve the EXACT ticker first.  During
+                    # every 15m rollover get_current_15m_market(asset)
+                    # returns the incoming window while agents evaluate the
+                    # closing one — the market_id guard below then nulls it
+                    # and contract fields degrade to whatever the candidate
+                    # snapshot carried (recurring INCOMPATIBLE CONTRACT
+                    # 'rules_text_absent'/'maker_fees_unverified' kills).
+                    _catalog_market = _cat.get_market(ticker)
+                    if _catalog_market is None:
+                        _catalog_market = _cat.get_current_15m_market(asset)
             except Exception:
                 _catalog_market = None
             _catalog_em = getattr(_catalog_market, "market", None)

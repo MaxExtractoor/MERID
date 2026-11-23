@@ -54,6 +54,30 @@ TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected", "executed"}
 RESTING_STATUSES = {"resting", "open", "partially_filled"}
 
 
+def _toxic_mid_cross(
+    *,
+    is_buy: bool,
+    limit_cents: int,
+    side_mid: float,
+    slack_cents: float = 1.0,
+) -> tuple:
+    """Toxic-mid decision for a resting entry (2026-11-23).
+
+    Returns ``(buy_toxic, sell_toxic)``.  A resting BUY is toxic only when
+    the side-aware mid has moved a full ``slack_cents`` adverse distance
+    *through* the limit (mid <= limit - slack); a resting SELL is toxic
+    when mid >= limit + slack.  Equality (mid == limit) is fair value,
+    not toxicity — the previous ``<=``/``>=`` comparison cancelled
+    mid-priced entries on the first recheck (~66ms after placement,
+    observed live on BUY_NO@37c) and raced already-filled orders.
+    """
+    if limit_cents <= 0:
+        return False, False
+    buy_toxic = is_buy and side_mid <= limit_cents - slack_cents
+    sell_toxic = (not is_buy) and side_mid >= limit_cents + slack_cents
+    return buy_toxic, sell_toxic
+
+
 def _normalize_status(raw_status: str) -> str:
     """Normalize Kalshi API status to internal vocabulary.
     
@@ -1020,11 +1044,26 @@ class RestingOrderMonitor:
                             getattr(_tox_state, "book_updated_ts", None)
                             or getattr(_tox_state, "last_book_update_ts", None)
                         )
-                        _book_age_ms = (
-                            max(0, int((time.monotonic() - float(_updated)) * 1000))
-                            if isinstance(_updated, (int, float)) and _updated > 0
-                            else None
-                        )
+                        _book_age_ms = None
+                        if isinstance(_updated, (int, float)) and _updated > 0:
+                            # 2026-11-23: book_updated_ts is dual-domain —
+                            # monotonic on the WS path
+                            # (last_book_update_ts = time.monotonic() - age)
+                            # but wall-clock where order_router/market_state
+                            # fallbacks stamp time.time().  Mirror
+                            # UnifiedMarketState.book_age_s: epoch-magnitude
+                            # values compare against time.time(), else
+                            # monotonic.  The old monotonic-only subtraction
+                            # yielded max(0, negative) = 0 for wall-clock
+                            # stamps — silently disabling the freshness bound.
+                            if float(_updated) > 1e9:
+                                _book_age_ms = max(
+                                    0, int((time.time() - float(_updated)) * 1000)
+                                )
+                            else:
+                                _book_age_ms = max(
+                                    0, int((time.monotonic() - float(_updated)) * 1000)
+                                )
                         _max_age_ms = float(
                             _os.environ.get("MERID_RESTING_TOXIC_MID_MAX_AGE_MS", "10000")
                         )
@@ -1041,7 +1080,27 @@ class RestingOrderMonitor:
                             _yes_mid = (float(_yb) + float(_ya)) / 2.0
                             _side_mid = 100.0 - _yes_mid if _is_no else _yes_mid
                             _lim = int(record.price_cents or 0)
-                            if _is_buy and _lim > 0 and _side_mid <= _lim:
+                            # 2026-11-23: require a real adverse move, not
+                            # equality.  ``mid <= limit`` fired on the very
+                            # first recheck for any entry resting at the
+                            # mid/bid (observed: BUY_NO@37c flagged
+                            # toxic_mid_cross:mid=37.0<=limit=37 ~66ms after
+                            # placement, cancel racing an already-filled
+                            # order).  A mid AT the limit is fair value —
+                            # the toxic case is the mid moving a full
+                            # adverse tick THROUGH the limit.
+                            _tox_slack = float(
+                                _os.environ.get(
+                                    "MERID_RESTING_TOXIC_MID_SLACK_CENTS", "1.0"
+                                )
+                            )
+                            _buy_toxic, _sell_toxic = _toxic_mid_cross(
+                                is_buy=_is_buy,
+                                limit_cents=_lim,
+                                side_mid=_side_mid,
+                                slack_cents=_tox_slack,
+                            )
+                            if _buy_toxic:
                                 logger.warning(
                                     "[RESTING-TOXIC-MID-CANCEL] kalshi_order_id=%s ticker=%s "
                                     "side=%s limit=%dc side_mid=%.1fc - mid crossed limit, "
@@ -1058,7 +1117,7 @@ class RestingOrderMonitor:
                                     current_vol_tier=window_vol_tier,
                                     model_quality_good=model_quality_good,
                                 )
-                            if not _is_buy and _lim > 0 and _side_mid >= _lim:
+                            if _sell_toxic:
                                 logger.warning(
                                     "[RESTING-TOXIC-MID-CANCEL] kalshi_order_id=%s ticker=%s "
                                     "side=%s limit=%dc side_mid=%.1fc - mid crossed limit, "

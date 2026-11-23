@@ -273,7 +273,7 @@ def filter_allowed_markets(markets: list) -> list:
         
         # CRITICAL DEBUG: Log all BTC/ETH markets
         if ticker and ("KXBTC" in ticker.upper() or "KXETH" in ticker.upper()):
-            logger.warning(
+            logger.debug(
                 "[CRITICAL-FILTER] BTC/ETH market: ticker=%s asset=%s series=%s category=%s",
                 ticker, asset, series, category
             )
@@ -293,7 +293,7 @@ def filter_allowed_markets(markets: list) -> list:
     # CRITICAL DEBUG: Log rejected BTC/ETH markets
     btc_eth_rejected = [(t, a, s, c) for t, a, s, c in rejected if t and ("KXBTC" in t.upper() or "KXETH" in t.upper())]
     if btc_eth_rejected:
-        logger.error(
+        logger.warning(
             "[CRITICAL-FILTER] %d BTC/ETH markets REJECTED: %s",
             len(btc_eth_rejected),
             btc_eth_rejected[:10]

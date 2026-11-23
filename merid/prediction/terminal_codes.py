@@ -301,6 +301,16 @@ def canonical_terminal_code(
         return TerminalCode.EVIDENCE_HARD_BLOCK.value
     if rl.startswith("late_edge_probe"):
         return TerminalCode.STRUCTURAL_RISK_VETO.value
+    # 2026-11-23: trend_yes_hi_low_ev is the lane's EV-floor miss — same
+    # family as pinned_fav_low_ev / drift_low_ev / reversal_scalp_low_ev /
+    # late_edge_probe_low_ev.  It must canonicalize to the threshold code
+    # BEFORE the broad ``trend_yes_hi`` structural prefix swallows it.
+    if rl.startswith("trend_yes_hi_low_ev") or rl.startswith("trend_yes_hi_tte"):
+        return (
+            TerminalCode.TTE_ENTRY_CUTOFF.value
+            if rl.startswith("trend_yes_hi_tte")
+            else TerminalCode.EDGE_BELOW_DYNAMIC_THRESHOLD.value
+        )
     if (
         rl.startswith("anti_directional_")
         or rl.startswith("countertrend_")
@@ -310,6 +320,19 @@ def canonical_terminal_code(
         or rl.startswith("side_throttle")
         or rl.startswith("trend_yes_hi")
         or rl.startswith("regime_block")
+        # 2026-11-23: directional_regime trend-side guards
+        # (trend_regime_fresh / trend_extreme_extension /
+        # trend_bounce_detected / trend_no_rally_regime /
+        # trend_hi_regime_blocked) are structural regime vetoes, not edge
+        # misses — without these they fell through to the evaluated-
+        # economics fallback and mislabeled EDGE_BELOW_DYNAMIC_THRESHOLD,
+        # tripping TELEMETRY-INVARIANT on positive-EV rejections.
+        # trend_yes_hi_low_ev / _tte are carved out above (edge/timing).
+        or rl.startswith("trend_regime")
+        or rl.startswith("trend_extreme")
+        or rl.startswith("trend_bounce")
+        or rl.startswith("trend_no_rally")
+        or rl.startswith("trend_hi_regime")
     ):
         return TerminalCode.STRUCTURAL_RISK_VETO.value
 
