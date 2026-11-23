@@ -21428,7 +21428,20 @@ class LeanAgent15m:
 
                 "minutes_to_expiry": minutes_to_expiry,
 
-                "edge_pct": signal.get("edge_pct", 0.0),  # CRITICAL: Single source of truth for edge (FRACTION units)
+                # 2026-11-23: agent_grid signal producers emit edge_pct in
+                # PERCENTAGE POINTS (FVG docstring, MARKETABLE_EDGE_PCT=4.0
+                # matching the 0.04 fraction threshold, %.2f%% log formats),
+                # while every downstream consumer (loop_15m, validate_edge,
+                # OrderIntent, fee-aware gate) treats candidate edge_pct as a
+                # FRACTION.  Live candidates showed both 1.6 (percent, 100x
+                # overstated downstream) and 0.0578 (fraction).  Normalize
+                # here: values >1.0 cannot be probability-fraction edges
+                # (max ~1.0), so they are percentage points -> /100.
+                "edge_pct": (
+                    (lambda _ep: _ep / 100.0 if _ep > 1.0 else _ep)(
+                        float(signal.get("edge_pct", 0.0) or 0.0)
+                    )
+                ),  # CRITICAL: Single source of truth for edge (FRACTION units)
 
                 "confidence": signal.get("confidence", 0.5),  # BUG #36 FIX: Carry confidence from signal
 
