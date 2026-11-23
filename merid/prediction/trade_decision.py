@@ -9283,11 +9283,30 @@ def _compute_trade_decision_impl(
     # so the recorded economics and the enforced verdict share one cost
     # stack instead of recomputing a different reserve post-selection.
     adverse_selection_reserve = Decimal("0")
+    uncertainty_reserve = Decimal(str(model_risk_reserve))
     if selected_outcome is not None and edge_breakdown is not None:
         adverse_selection_reserve = Decimal(
             str(getattr(edge_breakdown, "adverse_selection_reserve", 0.0) or 0.0)
         )
-    uncertainty_reserve = Decimal(str(model_risk_reserve))
+        # 2026-11-22 (submit-gate reserve parity): the loop-level EV re-gate
+        # consumes decision.uncertainty_reserve, so it must carry the SAME
+        # cost stack the selected side's EdgeBreakdown charged — not the
+        # raw model_risk_reserve component.  For settlement_convergence the
+        # breakdown's model-risk slot holds the distribution tail-loss
+        # reserve (~0.4c, deep-band capped) while the raw variable still
+        # holds the generic model+calib+drift stack the lane deliberately
+        # replaced (~2.3c); charging it post-selection vetoed admitted
+        # candidates (KXXRP15M-26NOV221715-15 NO@96c: side_ev net +2.5c/ct
+        # vs gate net_ev -4.9c/6ct).  giveback / impl-shortfall / edge-bias
+        # ride the same breakdown and fold in here so gate net_ev ==
+        # breakdown.net_edge * count — the recorded economics and the
+        # enforced verdict finally share one cost stack.
+        uncertainty_reserve = Decimal(str(
+            float(getattr(edge_breakdown, "model_risk_reserve", 0.0) or 0.0)
+            + float(getattr(edge_breakdown, "policy_giveback_reserve", 0.0) or 0.0)
+            + float(getattr(edge_breakdown, "implementation_shortfall_reserve", 0.0) or 0.0)
+            + float(getattr(edge_breakdown, "edge_bias_correction", 0.0) or 0.0)
+        ))
 
     if selected_outcome is not None:
         from merid.risk.executable_cost_ev_gate import evaluate_executable_cost_ev, EVInput

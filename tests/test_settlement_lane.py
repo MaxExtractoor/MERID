@@ -454,6 +454,58 @@ def test_lane_probability_ceiling_passes_distribution_p():
     assert d.indicators.get("settlement_lane_favored_side") == "yes"
 
 
+def test_submit_gate_reserve_parity_with_breakdown():
+    """2026-11-22: decision.uncertainty_reserve must carry the selected
+    side's EdgeBreakdown reserve stack.
+
+    The loop-level EV re-gate consumes ``decision.uncertainty_reserve``.
+    Charging the raw ``model_risk_reserve`` component instead of the
+    breakdown stack vetoed admitted settlement candidates post-selection
+    (KXXRP15M-26NOV221715-15 NO@96c: side_ev net +2.5c/ct vs gate
+    net_ev -4.9c/6ct) — for the lane the breakdown slot holds the
+    distribution tail-loss reserve while the raw variable still holds the
+    generic model+calib+drift stack the lane replaced.
+    """
+    dist = _make_dist(tte_s=15.0)
+    d = _make_lane_decision(
+        dist=dist, tte_s=45.0, yes_ask=88.0, yes_bid=86.0,
+        no_ask=14.0, no_bid=12.0,
+    )
+    assert d.selected_outcome == "yes", d.no_trade_reason
+    bd = d.yes_edge_breakdown
+    assert bd is not None
+    expected_unc = (
+        float(bd.model_risk_reserve)
+        + float(bd.policy_giveback_reserve)
+        + float(bd.implementation_shortfall_reserve)
+        + float(bd.edge_bias_correction)
+    )
+    assert float(d.uncertainty_reserve) == pytest.approx(expected_unc)
+    assert float(d.adverse_selection_reserve) == pytest.approx(
+        float(bd.adverse_selection_reserve)
+    )
+    # Gate identity: an EVInput rebuilt from the decision fields reproduces
+    # breakdown.net_edge * count — no reserve double-charged or dropped.
+    from merid.risk.executable_cost_ev_gate import (
+        EVInput,
+        evaluate_executable_cost_ev,
+    )
+
+    count = float(d.approved_size_cc) / 100.0
+    ev = evaluate_executable_cost_ev(
+        EVInput(
+            p_model=Decimal(str(d.p_selected)),
+            p_exec=Decimal(str(d.selected_outcome_price)),
+            qty_cc=int(d.approved_size_cc),
+            entry_fee_per_contract=Decimal(str(d.entry_fee_yes)),
+            expected_exit_cost_per_contract=Decimal(str(d.exit_cost_reserve_yes)),
+            adverse_selection_reserve_per_contract=d.adverse_selection_reserve,
+            uncertainty_reserve_per_contract=d.uncertainty_reserve,
+        )
+    )
+    assert float(ev.net_ev) == pytest.approx(float(bd.net_edge) * count, abs=1e-4)
+
+
 def test_lane_still_declines_when_book_converged():
     # Favored-side ask at 98c is above the lane price cap (97) -> declined.
     dist = _make_dist(tte_s=15.0)
