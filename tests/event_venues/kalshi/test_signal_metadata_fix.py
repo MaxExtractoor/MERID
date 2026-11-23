@@ -94,7 +94,15 @@ def test_agent_grid_15m_passes_signal_metadata():
     # Verify that signal metadata is carried in the signal dictionary (current implementation)
     # The implementation now carries model_prob in the signal dict rather than passing as named params
     assert '"model_prob": signal.get("model_prob"' in content, "model_prob not carried from signal"
-    assert '"edge_pct": signal.get("edge_pct"' in content, "edge_pct not carried from signal"
+    # 2026-11-23: edge_pct is still carried from the signal, but normalized
+    # percent->fraction at the candidate boundary (agent_grid producers emit
+    # percentage points; downstream consumers treat candidate edge_pct as a
+    # fraction).  The literal passthrough expression was replaced by the
+    # normalizing form — assert the semantic contract, not the exact text.
+    assert '"edge_pct":' in content and 'signal.get("edge_pct"' in content, \
+        "edge_pct not carried from signal"
+    assert "_ep > 1.0" in content, \
+        "edge_pct percent->fraction normalization missing from agent_grid_15m"
     
     print("✓ agent_grid_15m extracts and carries signal metadata")
 

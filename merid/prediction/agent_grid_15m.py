@@ -7845,6 +7845,7 @@ class LeanAgent15m:
             "confidence": confidence,
 
             "edge_pct": edge_pct,
+            "edge_pct_unit": "percent",  # percentage points (see calculate_velocity_edge / _fvg_edge_components)
 
             # Canonical model probability: clamped to (0, 1), never > 1, never rounded to an arbitrary band.
             "model_prob": max(MERID_MODEL_PROBABILITY_EPSILON, min(1.0 - MERID_MODEL_PROBABILITY_EPSILON, model_prob)),
@@ -12066,6 +12067,7 @@ class LeanAgent15m:
             "p_no": float(decision.p_no_calibrated),
             "p_selected": model_prob,
             "edge_pct": edge_pct * 100.0,
+            "edge_pct_unit": "percent",  # edge_pct fraction * 100 -> percentage points
             "edge_yes": float(decision.yes_net_edge) * 100.0,
             "edge_no": float(decision.no_net_edge) * 100.0,
             "gross_edge_cents": float(decision.gross_edge) * 100.0 if decision.gross_edge is not None else 0.0,
@@ -12928,6 +12930,7 @@ class LeanAgent15m:
             # Canonical model probability: clamped to (0, 1), never > 1.
             "model_prob": max(MERID_MODEL_PROBABILITY_EPSILON, min(1.0 - MERID_MODEL_PROBABILITY_EPSILON, model_prob)),
             "edge_pct": edge_pct,  # CRITICAL: Calculate edge for price-based strategy
+            "edge_pct_unit": "fraction",  # probability fraction (see edge_prob_adjustment cap at 0.20)
             # CRITICAL FIX: 2026-07-19 - Include both edge_yes and edge_no for parity checker
             "edge_yes": edge_yes,  # YES edge for downstream parity checks
             "edge_no": edge_no,    # NO edge for downstream parity checks
@@ -20075,6 +20078,7 @@ class LeanAgent15m:
             "venue_staleness": venue_staleness,
 
             "edge_pct": edge_pct,  # Phase 1: Edge from (p_model - p_mkt)
+            "edge_pct_unit": "percent",  # percentage points (calculate_velocity_edge contract)
 
             "confidence": confidence,  # Phase 1: Confidence from distance from 0.5
 
@@ -21429,17 +21433,22 @@ class LeanAgent15m:
                 "minutes_to_expiry": minutes_to_expiry,
 
                 # 2026-11-23: agent_grid signal producers emit edge_pct in
-                # PERCENTAGE POINTS (FVG docstring, MARKETABLE_EDGE_PCT=4.0
-                # matching the 0.04 fraction threshold, %.2f%% log formats),
-                # while every downstream consumer (loop_15m, validate_edge,
+                # MIXED units — FVG/velocity/trade_decision paths emit
+                # PERCENTAGE POINTS while the price_based path emits a
+                # probability FRACTION (edge_prob_adjustment capped at 0.20).
+                # Every downstream consumer (loop_15m, validate_edge,
                 # OrderIntent, fee-aware gate) treats candidate edge_pct as a
-                # FRACTION.  Live candidates showed both 1.6 (percent, 100x
-                # overstated downstream) and 0.0578 (fraction).  Normalize
-                # here: values >1.0 cannot be probability-fraction edges
-                # (max ~1.0), so they are percentage points -> /100.
+                # FRACTION.  Producers now tag the unit via edge_pct_unit;
+                # untagged signals fall back to the magnitude heuristic
+                # (>1.0 cannot be a probability-fraction edge -> percent).
                 "edge_pct": (
-                    (lambda _ep: _ep / 100.0 if _ep > 1.0 else _ep)(
-                        float(signal.get("edge_pct", 0.0) or 0.0)
+                    (lambda _ep, _unit: (
+                        _ep / 100.0
+                        if _unit == "percent" or (_unit is None and _ep > 1.0)
+                        else _ep
+                    ))(
+                        float(signal.get("edge_pct", 0.0) or 0.0),
+                        signal.get("edge_pct_unit"),
                     )
                 ),  # CRITICAL: Single source of truth for edge (FRACTION units)
 
