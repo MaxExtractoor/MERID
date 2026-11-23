@@ -273,3 +273,50 @@ def test_partial_path_price_decay_rejected(monkeypatch):
     res = _run(_intent(probability_inputs=None, ev_net_cents=0.2))
     assert res is not None
     assert "stale_decision_price_edge_decayed" in res.reason
+
+
+def _epc_wire(monkeypatch, mode, epc_p):
+    """EPC-augmented variant of ``_wire``: live/shadow cell lookup."""
+    import merid.prediction.empirical_price_calibration as _epc_mod
+
+    monkeypatch.setattr(_epc_mod, "mode", lambda: mode)
+    monkeypatch.setattr(
+        _epc_mod,
+        "lookup",
+        lambda side, held_price_cents, seconds_to_expiry: SimpleNamespace(p=epc_p),
+    )
+    # Spot below strike -> raw bachelier p_no ~0.94 so the calibration
+    # deviation guard (0.15) admits an EPC lift to ~0.93; the anchor blend
+    # still pulls fresh model p_no to ~0.80, so without the overlay the
+    # probability delta vetoes a p_selected=0.93 intent.
+    _wire(
+        monkeypatch,
+        book=_ob(yes_bid=48, no_bid=50),
+        rti=_rti(99.0),
+    )
+
+
+def test_model_revalidation_replays_epc_overlay(monkeypatch):
+    # 2026-11-23 regression: the decision layer's empirical price-
+    # calibration overlay can lift p_selected above what the model-only
+    # chain reproduces (production: p_sel0=0.984 vs recompute 0.891 ->
+    # -9.3c phantom edge -> stale_decision_model_edge_decayed on a
+    # still-valid pinned-fav claim).  Revalidation must replay the same
+    # live-mode upward cell replacement or every EPC-applied candidate
+    # dies on phantom probability decay.
+    _epc_wire(monkeypatch, "live", 0.93)
+    intent = _intent(p_selected=0.93, probability_inputs=_pin(annualized_vol=1.5))
+    res = _run(intent)
+    assert res is None
+    assert intent._execution_revalidated is True
+    assert intent.p_selected is not None and float(intent.p_selected) >= 0.90
+
+
+def test_model_revalidation_epc_shadow_mode_does_not_apply(monkeypatch):
+    # Shadow mode logs but never replaces the probability — revalidation
+    # must match: the model-only value stands and the intent vetoes.
+    _epc_wire(monkeypatch, "shadow", 0.93)
+    intent = _intent(p_selected=0.93, probability_inputs=_pin(annualized_vol=1.5))
+    res = _run(intent)
+    assert res is not None and res.status == "rejected"
+    assert "stale_decision_model_edge_decayed" in res.reason

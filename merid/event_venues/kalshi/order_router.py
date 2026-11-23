@@ -5612,6 +5612,35 @@ async def _revalidate_entry_economics(
             if _wf is not None:
                 _p_yes_f = _wf
 
+            # 2026-11-23: replay the decision layer's empirical
+            # price-calibration overlay (trade_decision ~4667).  In live
+            # mode a validated (side, price, TTE) cell replaces the
+            # held-side probability upward; omitting it here manufactures a
+            # phantom probability-decay veto on every EPC-applied
+            # candidate (observed: p_sel0=0.984 vs model-only recompute
+            # 0.891 -> -9.3c phantom edge -> stale_decision_model_edge_
+            # decayed on a still-valid pinned-fav claim).  Lookup uses the
+            # fresh executable price and TTE; any failure skips the
+            # overlay — the conservative direction, never inflating edge.
+            try:
+                from merid.prediction import empirical_price_calibration as _epc_rv
+                if _epc_rv.mode() == "live":
+                    _epc_est = _epc_rv.lookup(
+                        _side_l, float(_exec_px), float(_tte_now)
+                    )
+                    if _epc_est is not None:
+                        _p_held_pre = (
+                            _p_yes_f if _side_l == "yes" else 1.0 - _p_yes_f
+                        )
+                        if float(_epc_est.p) > _p_held_pre:
+                            _p_yes_f = (
+                                float(_epc_est.p)
+                                if _side_l == "yes"
+                                else 1.0 - float(_epc_est.p)
+                            )
+            except Exception:
+                pass
+
             _entry_frac = _exec_px / 100.0
             _tc = load_tail_calibrator() if MERID_TAIL_CALIBRATION_ENABLED else None
             # Lane-aware p ceiling: a pinned_fav (or settlement) intent was
