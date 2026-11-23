@@ -443,6 +443,10 @@ class DecisionAuditLedger:
         # and each multi-hundred-ms scan inflated audit_write_exec_ms.
         self._read_conn: Optional[sqlite3.Connection] = None
         self._read_conn_lock = threading.Lock()
+        # Serializes pragma execution on _ckpt_conn only — deliberately NOT
+        # self._lock: the checkpoint must run concurrently with writer
+        # batches (its whole purpose is merging frames the batch appends).
+        self._ckpt_exec_lock = threading.Lock()
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_wal_checkpoint = 0.0
         self._startup_checkpoint_done = False
@@ -4899,11 +4903,30 @@ class DecisionAuditLedger:
 
         # PASSIVE avoids waiting on long-lived readers. The WAL can retain its
         # high-water file size, so disk use must still be monitored.
+        # 2026-11-23: also fire on WAL size, not just the interval — under a
+        # deep write backlog the interval alone let the -wal reach 6.3GB
+        # before the first scheduled checkpoint ran.
         if _WAL_CHECKPOINT_INTERVAL_S > 0:
             now = time.time()
-            if now - self._last_wal_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
-                self._last_wal_checkpoint = now
-                self.wal_checkpoint("PASSIVE")
+            _wal_cap = int(
+                os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_MAX_BYTES", "268435456")
+            )
+            _wal_now = self._wal_size_bytes() or 0
+            _size_triggered = (
+                _wal_cap > 0 and _wal_now > _wal_cap
+                and now - self._last_wal_checkpoint < _WAL_CHECKPOINT_INTERVAL_S
+            )
+            if (
+                now - self._last_wal_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S
+                or _size_triggered
+            ):
+                # Stamp only on a non-deferred attempt: a busy-deferred
+                # checkpoint leaves the timestamp stale so the size trigger
+                # retries on the next heartbeat instead of waiting a full
+                # interval while the WAL keeps growing.
+                _deferred = self.wal_checkpoint("PASSIVE")
+                if not _deferred:
+                    self._last_wal_checkpoint = now
 
     def prune_old_rows(self, retention_days: Optional[float] = None,
                        batch: Optional[int] = None,
@@ -5032,11 +5055,24 @@ class DecisionAuditLedger:
         if mode not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
             mode = "PASSIVE"
         try:
-            with self._lock:
-                # Dedicated connection, never _shared_conn: this call is
-                # serviced on the writer thread, usually inside an open
-                # batch transaction, where the pragma fails SQLITE_LOCKED.
-                conn = self._ckpt_conn()
+            # Lazy conn init stays under self._lock (matches _shared_conn
+            # lifecycle); the pragma itself runs under _ckpt_exec_lock only.
+            # 2026-11-23: previously the pragma ran inside ``with self._lock``
+            # — during a deep write backlog every 128-item batch holds that
+            # lock for its whole BEGIN IMMEDIATE..COMMIT, so the periodic
+            # checkpoint starved indefinitely while the WAL grew past 6GB
+            # and every commit slowed further (observed: audit_writer_
+            # unhealthy entry block ~50min, ckpt pinned at frame 260).
+            # SQLite coordinates the checkpoint against live readers/writers
+            # itself; the dedicated _ckpt_conn has no open transaction, so
+            # PASSIVE can merge frames mid-batch.  _lock is only needed for
+            # the one-time lazy conn init — read the cached handle first so
+            # the steady-state path never queues behind a write batch.
+            conn = self._ckpt_conn_obj
+            if conn is None:
+                with self._lock:
+                    conn = self._ckpt_conn()
+            with self._ckpt_exec_lock:
                 busy, wal_frames, ckpt_frames = conn.execute(
                     "PRAGMA wal_checkpoint(%s)" % mode
                 ).fetchone()
