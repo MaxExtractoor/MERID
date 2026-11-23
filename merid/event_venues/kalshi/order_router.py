@@ -9880,11 +9880,47 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                 # Allow orders if book is in LIVE or DEGRADED state
                                 # Only reject if DEAD or MARKET_CLOSED
                                 if book_state.state in [BookState.LIVE, BookState.DEGRADED, BookState.FALLBACK]:
-                                    logger.info(
-                                        f"[MICROSTRUCTURE-GATE] Book state acceptable for routing: ticker={intent.ticker} "
-                                        f"state={book_state.state.value} - proceeding with current book data"
-                                    )
-                                    # Use current book data even if degenerate (state machine already validated freshness)
+                                    # 2026-11-23: freshness state governs
+                                    # staleness, NOT corruption.  The intent
+                                    # snapshot being degenerate is a data
+                                    # defect regardless of book freshness —
+                                    # the fresh market-state fields were
+                                    # already fetched above; apply them when
+                                    # they are non-degenerate instead of
+                                    # gating edge math on the corrupt book
+                                    # (which fabricated spreads and produced
+                                    # bogus non_positive_executable_edge
+                                    # rejects).  Near-settlement books can be
+                                    # legitimately degenerate, so when no
+                                    # clean replacement exists we still
+                                    # proceed with current data as before.
+                                    if (
+                                        _fresh_yes_bid is not None
+                                        and _fresh_yes_ask is not None
+                                        and _fresh_no_bid is not None
+                                        and _fresh_no_ask is not None
+                                        and not _refresh_degenerate
+                                    ):
+                                        logger.info(
+                                            "[MICROSTRUCTURE-GATE] Book state %s but intent book degenerate — "
+                                            "using fresh market-state book: ticker=%s yes_bid %s->%s yes_ask %s->%s "
+                                            "no_bid %s->%s no_ask %s->%s reason=%s",
+                                            book_state.state.value, intent.ticker,
+                                            gate_yes_bid_cents, _fresh_yes_bid,
+                                            gate_yes_ask_cents, _fresh_yes_ask,
+                                            gate_no_bid_cents, _fresh_no_bid,
+                                            gate_no_ask_cents, _fresh_no_ask,
+                                            degenerate_reason,
+                                        )
+                                        gate_yes_bid_cents = _fresh_yes_bid
+                                        gate_yes_ask_cents = _fresh_yes_ask
+                                        gate_no_bid_cents = _fresh_no_bid
+                                        gate_no_ask_cents = _fresh_no_ask
+                                    else:
+                                        logger.info(
+                                            f"[MICROSTRUCTURE-GATE] Book state acceptable for routing: ticker={intent.ticker} "
+                                            f"state={book_state.state.value} - proceeding with current book data"
+                                        )
                                     # Don't attempt refresh if state is acceptable
                                     _refresh_attempted = False
                                 elif book_state.state == BookState.STALE:
@@ -9950,6 +9986,18 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                                 intent.ticker, _refresh_err
                             )
                     
+                    # 2026-11-23: write the (possibly refreshed) gate book
+                    # back onto the intent.  Downstream consumers read
+                    # intent.yes_bid_cents / intent.yes_ask_cents directly
+                    # (spread, mid, depth, edge inputs at ~L10186-10426) —
+                    # without this write-back the degenerate-book refresh
+                    # only fixed the derived NO prices while every YES-side
+                    # check still ran on the corrupt snapshot.
+                    intent.yes_bid_cents = gate_yes_bid_cents
+                    intent.yes_ask_cents = gate_yes_ask_cents
+                    intent.no_bid_cents = gate_no_bid_cents
+                    intent.no_ask_cents = gate_no_ask_cents
+
                     # Derive NO prices from YES prices using Kalshi duality
                     no_bid_cents = 100 - gate_yes_ask_cents if gate_yes_ask_cents else None
                     no_ask_cents = 100 - gate_yes_bid_cents if gate_yes_bid_cents else None

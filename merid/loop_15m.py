@@ -7074,8 +7074,16 @@ async def _run_loop(self) -> None:
                             # Prevent same-side duplicate positions by checking existing position thesis_side
                             prior_candidate = self._executed_candidates_this_window.get(asset_window_key)
                             if prior_candidate:
-                                prior_edge = prior_candidate.get("edge_pct", 0) / 100.0
-                                current_edge = candidate.get("edge_pct", 0) / 100.0
+                                # 2026-11-23: edge_pct is FRACTION units
+                                # (0.0578 = 5.78pp) — the /100.0 here forced
+                                # re-entry to require a >50pp edge improvement
+                                # (current/100 > prior/100 + 0.005), making the
+                                # edge-improvement re-entry path unreachable.
+                                # Only the >=30s stale-timeout path could ever
+                                # re-enter; late-window edge formation — the
+                                # stated purpose of this block — was dead.
+                                prior_edge = prior_candidate.get("edge_pct", 0)
+                                current_edge = candidate.get("edge_pct", 0)
                                 edge_improvement_delta = 0.005  # 0.5% improvement required for re-entry
                                 pending_order_timeout = 30.0  # Match global allocator timeout
                                 
@@ -13339,12 +13347,18 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 # Fallback to candidate edges if orderbook unavailable
                 logger.warning("[PARITY-BLOCK] Orderbook unavailable for ticker=%s, using candidate edges", ticker)
                 # CRITICAL FIX: 2026-07-26 - Use canonical YES probability for fallback edge calculation
-                edge_yes = candidate.get("edge_yes", edge_pct / 100.0)
+                # 2026-11-23: edge_pct is already FRACTION units — the /100.0
+                # fallback produced a 100x-too-small edge_yes (0.0006 for a
+                # 5.78pp claim) and would fail the parity gate whenever the
+                # orderbook was unavailable and edge_yes was absent.
+                edge_yes = candidate.get("edge_yes", edge_pct)
                 # For NO candidates, derive edge_no from canonical YES probability
                 if side_raw.lower() == "no":
-                    # model_prob is P(NO), convert to P(YES) for canonical edge computation
-                    fallback_model_prob_yes = 1.0 - model_prob if model_prob is not None else None
-                    edge_no = candidate.get("edge_no", fallback_model_prob_yes - (1.0 - price_cents / 100.0) if fallback_model_prob_yes is not None else 0.0)
+                    # 2026-11-23: model_prob is P(NO) and price_cents is the
+                    # NO-side price, so edge_no = P(NO) - NO_price directly.
+                    # The old fallback computed P(YES) - (1 - NO_px) which
+                    # equals -(model_prob - NO_px) — the SIGN-FLIPPED edge_no.
+                    edge_no = candidate.get("edge_no", model_prob - price_cents / 100.0 if model_prob is not None else 0.0)
                 else:
                     edge_no = candidate.get("edge_no", (1.0 - model_prob) - (1.0 - price_cents / 100.0) if model_prob else 0.0)
             
