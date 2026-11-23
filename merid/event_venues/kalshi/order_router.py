@@ -10717,7 +10717,16 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
         p_selected = Decimal(str(p_selected))
         if not p_selected.is_finite() or not 0 < p_selected <= 1:
             return None
-        theoretical_max = int((p_selected * 100 - 1).to_integral_value(rounding=ROUND_FLOOR))
+        _lane = getattr(intent, "decision_lane", None)
+        if _lane == "settlement_convergence":
+            # 2026-11-23: settlement_convergence explicitly trades the 98-99c sure-bet
+            # tail. Clamping to p_selected*100 - 1 capped every 99c entry at 98c (since
+            # p_selected < 1.0 -> theoretical_max = 98), rejecting valid 99c convergence
+            # orders as "side_ask 99c exceeds edge budget 98c". Allow up to the lane ceiling
+            # (99c) as long as the fee-aware net edge walk below clears threshold_cents.
+            theoretical_max = 99
+        else:
+            theoretical_max = int((p_selected * 100 - 1).to_integral_value(rounding=ROUND_FLOOR))
         if theoretical_max < 1:
             return None
         # Bounded lanes with a stamped negative floor (window_quota etc.)
@@ -10732,7 +10741,7 @@ def _max_edge_preserving_buy_price(intent: OrderIntent) -> Optional[int]:
                 BOUNDED_POST_ONLY_LANES as _BOUNDED_LANES,
             )
             _lane_negative_floor = (
-                getattr(intent, "decision_lane", None) in _BOUNDED_LANES
+                _lane in _BOUNDED_LANES
                 and threshold_cents < 0
             )
         except Exception:
@@ -11169,7 +11178,29 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                     )
 
                 _ask_buf = int(os.environ.get("MERID_TAKER_BUY_ASK_BUFFER_CENTS", "2"))
-                _ceil = 98 if getattr(intent, "decision_lane", None) == "pinned_fav" else 95
+                _lane_ceil = getattr(intent, "decision_lane", None)
+                if _lane_ceil == "settlement_convergence":
+                    try:
+                        from merid.prediction.trade_decision import (
+                            MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+                        )
+                        _ceil = int(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS)
+                    except Exception:
+                        _ceil = 99
+                elif _lane_ceil == "pinned_fav":
+                    try:
+                        from merid.prediction import directional_regime as _dr_ceil
+                        _ceil = int(_dr_ceil._pinned_fav_hi())
+                    except Exception:
+                        _ceil = 98
+                elif _lane_ceil == "window_quota":
+                    try:
+                        from merid.prediction import window_quota as _wq_ceil
+                        _ceil = int(_wq_ceil.quota_price_hi())
+                    except Exception:
+                        _ceil = 97
+                else:
+                    _ceil = 95
                 if edge_preserve_cap is not None:
                     # 2026-10-19: with an edge-preserving budget the mid-anchored
                     # fair cap must not bind — the 2026-09-24 contract says it only
@@ -11197,7 +11228,7 @@ def _adjust_order_price_for_fill_rate(intent: OrderIntent, state: Optional[Any])
                     )
                     taker_cap = _buffered_ask_cap
                     p_selected = getattr(intent, "p_selected", None)
-                    if p_selected is not None and getattr(intent, "decision_lane", None) not in ("window_quota", "pinned_fav"):
+                    if p_selected is not None and getattr(intent, "decision_lane", None) not in ("window_quota", "pinned_fav", "settlement_convergence"):
                         fee = getattr(intent, "estimated_fee_cents", None)
                         if fee is None:
                             try:
@@ -12043,6 +12074,21 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any],
 
     if execution_mode in ("taker",):
         if is_buy:
+            if validation_ask_cents is not None and order_price < validation_ask_cents:
+                # 2026-11-23: Handle sub-cent ticks above 90c / below 10c (e.g. ask=95.3c,
+                # order_price=95c). A whole-cent limit of 95c is non-marketable against 95.3c.
+                # If order_price is within 1 tick of the ask and rounding up to ceil clears
+                # the edge budget/max price, snap to ceil(validation_ask_cents) so the IOC fills.
+                _ceil_ask = int(math.ceil(float(validation_ask_cents)))
+                if _ceil_ask == order_price + 1 and _ceil_ask <= 99:
+                    _epc = _max_edge_preserving_buy_price(intent)
+                    if _epc is None or _ceil_ask <= _epc:
+                        logger.info(
+                            "[PRICE-VALIDATION] ticker=%s snapping sub-cent taker BUY price %dc -> %dc for ask=%.1fc",
+                            intent.ticker, order_price, _ceil_ask, float(validation_ask_cents),
+                        )
+                        order_price = _ceil_ask
+                        intent.price_cents = _ceil_ask
             if validation_ask_cents is not None and order_price < validation_ask_cents:
                 logger.warning(
                     "[PRICE-VALIDATION] ticker=%s taker BUY price=%dc below ask=%dc (non-marketable IOC)",
@@ -17234,6 +17280,14 @@ async def _route_live(
                 _max_price = int(_wq_mp.quota_price_hi())
             except Exception:
                 _max_price = 97
+        if not _is_reduce and getattr(intent, "decision_lane", None) == "settlement_convergence":
+            try:
+                from merid.prediction.trade_decision import (
+                    MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS,
+                )
+                _max_price = int(MERID_SETTLEMENT_LANE_MAX_PRICE_CENTS)
+            except Exception:
+                _max_price = 99
         if (
             intent.count <= 0
             or intent.price_cents < _min_price

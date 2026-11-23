@@ -143,20 +143,33 @@ class TestMakerToTakerConversion(unittest.TestCase):
 class TestRouteSelectionIntegration(unittest.TestCase):
     """Pin the routing contract around the selection block:
 
-    taker-qualified + maker-failed => IOC (post_only=False, tif=ioc).
+    taker-qualified => IOC (post_only=False, tif=ioc).
     """
 
-    def test_source_routes_taker_when_maker_pass_fails(self):
-        """Static check: the 'not _maker_sel' shortcut sends IOC."""
+    def test_source_routes_taker_when_taker_qualified(self):
+        """Static check: a taker-qualified selection always routes IOC.
+
+        2026-11-23: the ask-priced maker pass was removed — an order priced
+        at the ASK crosses the book and can never rest as post_only
+        (Kalshi 'post only cross'; submit_revalidation 'post_only_crosses').
+        Ask-priced selections that clear taker economics route IOC;
+        resting maker orders come only from the bid-priced pass.
+        """
         import inspect
         from merid.prediction import agent_grid_15m as ag
 
         src = inspect.getsource(ag)
-        # The precomputed maker pass must exist before route selection so
-        # 'forced passive' can never be decided without maker economics.
-        self.assertIn("decision_maker = _call_trade_decision(", src)
-        # Taker-qualified + no qualified passive alternative -> IOC.
-        self.assertIn("or not _maker_sel", src)
+        # The precomputed passes must still exist before route selection.
+        self.assertIn("decision_taker = _call_trade_decision(", src)
+        self.assertIn("decision_maker_bid = _call_trade_decision(", src)
+        # Taker-qualified => IOC unconditionally.
+        sel_pos = src.find("_taker_sel = decision_taker.selected_outcome")
+        self.assertGreater(sel_pos, 0)
+        seg = src[sel_pos:sel_pos + 7000]
+        self.assertIn("if _taker_sel:", seg)
+        self.assertIn("use_taker = True", seg)
+        # The ask-priced post_only maker emission must be gone.
+        self.assertNotIn("decision = decision_maker\n", src)
         # The IOC contract flags are still set in the taker branch.
         self.assertIn('time_in_force = "ioc"', src)
         self.assertIn("post_only = False", src)
@@ -185,11 +198,15 @@ class TestPinnedFavTakerRouting(unittest.TestCase):
 
     def test_pf_lane_forces_taker_route(self):
         src = self._src()
-        # Taker mode keeps the force-taker condition; maker mode is
-        # excluded from it (its only vehicle is the bid-priced pass).
-        seg = src[src.find('_taker_sel = decision_taker.selected_outcome'):]
-        sel_block = seg[:seg.find('if use_taker:')]
-        assert 'or (_pf_lane and not _pf_maker_mode)' in sel_block
+        # 2026-11-23: taker-qualified selections route IOC unconditionally
+        # (``if _taker_sel: use_taker = True``) — the pf taker-mode force is
+        # subsumed.  Maker mode still suppresses both ask-priced selections
+        # so only the bid-priced pass can emit.
+        sel_pos = src.find("_taker_sel = decision_taker.selected_outcome")
+        self.assertGreater(sel_pos, 0)
+        seg = src[sel_pos:sel_pos + 7000]
+        self.assertIn("if _taker_sel:", seg)
+        self.assertIn("use_taker = True", seg)
 
     def test_maker_only_pinned_admission_suppressed(self):
         src = self._src()

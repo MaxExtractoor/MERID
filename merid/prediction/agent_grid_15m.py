@@ -9367,47 +9367,19 @@ class LeanAgent15m:
             )
             _maker_sel = False
 
-        if not maker_entries_enabled:
-            # Maker lane disabled: the taker EV gate is the sole arbiter — if
-            # the trade does not clear executable-cost economics at taker fees
-            # it does not trade at all.
-            use_taker = _taker_sel
-        elif not _taker_sel:
-            use_taker = False
-        elif (
-            is_late or is_high_edge or _taker_rescued or not _maker_sel
-            or (_pf_lane and not _pf_maker_mode)
-        ):
-            # Positive taker surplus + no qualified passive alternative:
-            # forcing this candidate to rest forfeits a certain fill for the
-            # maker-fee delta.  Route IOC (bounded by the economic cap).
-            # Pinned-fav selections route taker unconditionally — see the
-            # _pf_lane note above (taker mode only; maker mode suppressed
-            # both ask-priced selections already).
+        # 2026-11-23 (ask-priced maker cross fix): the ask-priced maker pass
+        # evaluates edge at the ASK. An order priced at the ask crosses the
+        # book and cannot rest as post_only (Kalshi rejects 'post only cross';
+        # submit_revalidation rejects 'post_only_crosses').
+        # When taker economics clear at the ask (_taker_sel is True), it must route
+        # as taker IOC — an ask-priced trade cannot be converted into a post_only
+        # resting order at the ask.  When taker economics do not clear at the ask,
+        # an ask-priced maker selection cannot rest either; resting maker orders
+        # belong in the bid-priced pass below (decision_maker_bid).
+        if _taker_sel:
             use_taker = True
         else:
-            # Both routes qualify: prefer maker only when its
-            # fill-probability-adjusted edge beats the certain taker surplus.
-            # Measured resting-entry fill rate is the honest weight
-            # (MERID_MAKER_FILL_PROB_EST, default 0.20 — resting entries
-            # historically fill ~15-25% before rollover/cancel); a maker
-            # order's edge exists only conditional on execution.
-            _p_fill = (
-                _numeric_pref(os.environ.get("MERID_MAKER_FILL_PROB_EST")) or 0.20
-            )
-            _pref_margin_c = (
-                _numeric_pref(os.environ.get("MERID_TAKER_PREF_MARGIN_CENTS")) or 0.0
-            )
-            _t_net_c = float(decision_taker.net_edge or 0.0) * 100.0
-            _m_net_c = float(decision_maker.net_edge or 0.0) * 100.0
-            use_taker = _route_prefers_taker(_t_net_c, _m_net_c, _p_fill, _pref_margin_c)
-            logger.info(
-                "[ROUTE-CHOICE] asset=%s ticker=%s side=%s taker_net=%.2fc "
-                "maker_net=%.2fc p_fill_est=%.2f margin=%.2fc -> %s",
-                asset, ticker, decision_taker.selected_outcome,
-                _t_net_c, _m_net_c, _p_fill, _pref_margin_c,
-                "taker" if use_taker else "maker",
-            )
+            use_taker = False
 
         if use_taker:
             decision = decision_taker
@@ -9432,39 +9404,24 @@ class LeanAgent15m:
             # settlement 15-150s, late_edge_probe 60-120s) can emit here.
             # is_late still routes taker selections IOC above, and EMM's own
             # 240-600s window keeps it inert in this branch.
-            if _maker_sel:
-                decision = decision_maker
-                liquidity_role = "maker"
-                aggressiveness = 0.0
-                post_only = True
-                time_in_force = "gtc"
-                execution_mode = "maker"
-                fee_cents = maker_fee_cents
-            elif decision_taker.selected_outcome is not None:
-                # Taker is economically viable but not preferred; fall back to it
-                # so we do not throw away a passing trade.
-                decision = decision_taker
-                liquidity_role = "taker"
-                aggressiveness = 1.0
-                post_only = False
-                time_in_force = "ioc"
-                execution_mode = "taker"
-                fee_cents = taker_fee_cents
+            # 2026-11-23: the ask-priced maker pass is removed — an order
+            # priced at the ASK crosses the book and can never rest as
+            # post_only (Kalshi 'post only cross' 400; submit_revalidation
+            # 'post_only_crosses').  Ask-priced selections that cleared
+            # taker economics already routed IOC above; resting maker
+            # orders belong to the bid-priced pass below.  This branch
+            # therefore always falls through to the bid-priced evaluation.
+            if False:  # Ask-priced maker pass deprecated: cannot rest at ask
+                pass
             else:
-                # 2026-10-02: queue-priced maker pass.  The taker and
-                # maker-fee passes both price entry at the ASK; a resting
-                # post-only buy actually pays the own-side BID.  Evaluate
-                # edge at the bid with an explicit adverse-selection
-                # reserve — bounded (1-contract lane, daily cap, min spread)
-                # and only attempted when maker entries are enabled.
-                # decision_maker is None when is_late (the ask-priced maker
-                # eval is skipped) — keep the failed taker eval for the
-                # reject record in that case.
-                decision = (
-                    decision_maker
-                    if decision_maker is not None
-                    else decision_taker
-                )
+                # 2026-11-23: keep the FAILED taker eval as the retained
+                # decision.  decision_maker is ask-priced with maker-fee
+                # economics — its selection is not realizable as taker IOC
+                # (taker fee was already rejected by decision_taker) and
+                # cannot rest at the ask as post_only.  Only the bid-priced
+                # pass below may emit a resting order; if it does not,
+                # selected_outcome stays None and the cycle rejects.
+                decision = decision_taker
                 liquidity_role = "taker"
                 aggressiveness = 1.0
                 post_only = False

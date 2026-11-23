@@ -249,13 +249,23 @@ def _load_config() -> ReplayConfig:
     """Build replay config from MERID settings / env."""
     from merid.settings import settings
 
-    tape_dir = os.environ.get("MERID_REPLAY_TAPE") or settings.MERID_REPLAY_TAPE or None
+    tape_dir_raw = os.environ.get("MERID_REPLAY_TAPE") or settings.MERID_REPLAY_TAPE or None
+    # In tests where settings is mocked with MagicMock(), string conversion
+    # or isinstance check prevents MagicMock path coercion.
+    if tape_dir_raw is not None and not isinstance(tape_dir_raw, (str, Path)):
+        tape_dir_raw = None
+    tape_dir = Path(tape_dir_raw) if tape_dir_raw else None
     seed = os.environ.get("MERID_REPLAY_SEED") or settings.MERID_REPLAY_SEED or None
-    active_sources = _parse_active_sources(
+    if seed is not None and not isinstance(seed, (int, str)):
+        seed = None
+    active_sources_raw = (
         os.environ.get("MERID_REPLAY_ACTIVE_SOURCES")
         or settings.MERID_REPLAY_ACTIVE_SOURCES
         or None
     )
+    if active_sources_raw is not None and not isinstance(active_sources_raw, str):
+        active_sources_raw = None
+    active_sources = _parse_active_sources(active_sources_raw)
     return ReplayConfig(
         tape_dir=Path(tape_dir) if tape_dir else None,
         active_sources=active_sources,

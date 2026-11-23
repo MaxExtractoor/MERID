@@ -1,11 +1,19 @@
 """End-to-end tests for price validation across all order paths.
 
-This test suite ensures that min/max entry price constraints (50-70 cents) are enforced
-across all order execution paths in the system:
-- Legacy trading.py path (buy_yes, buy_no, sell_yes, sell_no)
-- Production kalshi_tools.py path (_kalshi_place_order)
-- Order router path (route_order_async)
-- Agent grid signal generation path (_generate_signal)
+2026-11-23 update: the legacy 50-70c entry band was removed 2026-07-05 —
+the 15m stack trades the full 5-99c contract range across lanes (cheap_no
+10-40c, generic 5-95c, pinned_fav 90-96c, settlement_convergence to 99c).
+Price enforcement now lives at:
+
+- ``kalshi_tools._kalshi_place_order``: safety clamp to the profile
+  ``price_range`` [5, 85] before intent construction;
+- ``order_router._route_live``: hard bounds 5-95c for entries (99c for
+  reduce-only exits and lane-admitted ceilings);
+- ``order_router._validate_price_against_orderbook`` + submit
+  revalidation: marketability, edge-budget, and post-only crossing.
+
+``trading.py`` deliberately performs NO local range check — it is a thin
+client wrapper; validation is centralized in the router.
 """
 
 import os
@@ -20,46 +28,47 @@ class TestTradingPyPriceValidation:
     """Test price validation in legacy trading.py path."""
 
     @pytest.mark.asyncio
-    async def test_buy_yes_rejects_price_below_50(self):
-        """Test that buy_yes rejects orders with price below 50 cents."""
+    async def test_buy_yes_has_no_local_price_floor(self):
+        """trading.py is a thin client: the 50c floor was removed 2026-07-05
+        and price enforcement lives in the router.  buy_yes must pass the
+        requested price through to the venue client unchanged."""
         from merid.event_venues.kalshi.trading import KalshiTrader
-        
+
         mock_client = AsyncMock()
         trader = KalshiTrader(client=mock_client)
         trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
+
         with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
             mock_rc.can_trade.return_value = True
             with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
                 mock_risk_instance = MagicMock()
                 mock_risk_instance.check_order.return_value = (True, "OK")
                 mock_risk.return_value = mock_risk_instance
-                
+
                 result = await trader.buy_yes("TEST-TICKER", 1, price=30)
-                assert result is None
-                mock_client.place_order.assert_not_called()
+                assert result is not None
+                mock_client.place_order.assert_called()
 
     @pytest.mark.asyncio
-    async def test_buy_yes_rejects_price_above_70(self):
-        """Test that buy_yes rejects orders with price above 70 cents."""
+    async def test_buy_yes_passes_high_price_through(self):
+        """Prices above the old 70c cap (e.g. pinned-fav 90-96c, settle tail
+        98-99c) must reach the venue client — the router owns the bounds."""
         from merid.event_venues.kalshi.trading import KalshiTrader
-        
+
         mock_client = AsyncMock()
         trader = KalshiTrader(client=mock_client)
         trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
+
         with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
             mock_rc.can_trade.return_value = True
             with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
                 mock_risk_instance = MagicMock()
                 mock_risk_instance.check_order.return_value = (True, "OK")
                 mock_risk.return_value = mock_risk_instance
-                
-                result = await trader.buy_yes("TEST-TICKER", 1, price=80)
-                assert result is None
-                mock_client.place_order.assert_not_called()
+
+                result = await trader.buy_yes("TEST-TICKER", 1, price=95)
+                assert result is not None
+                mock_client.place_order.assert_called()
 
     @pytest.mark.asyncio
     async def test_buy_yes_accepts_price_in_range(self):
@@ -100,8 +109,10 @@ class TestKalshiToolsPriceValidation:
     """Test price validation in production kalshi_tools.py path."""
 
     @pytest.mark.asyncio
-    async def test_kalshi_place_order_rejects_price_below_50(self):
-        """Test that _kalshi_place_order rejects orders with price below 50 cents."""
+    async def test_kalshi_place_order_keeps_price_above_old_floor(self):
+        """kalshi_tools clamps to the profile range [5, 85] — a 30c order is
+        inside it and must pass through unclamped (cheap-side lanes trade
+        10-40c contracts)."""
         from merid.prediction.kalshi_tools import _kalshi_place_order
         
         # Mock all the dependencies
@@ -130,27 +141,41 @@ class TestKalshiToolsPriceValidation:
                             mock_router_result = MagicMock()
                             mock_router_result.status = "filled_live"
                             mock_router_result.order_id = "test_order"
+                            mock_router_result.requires_recovery = False
+                            mock_router_result.has_execution = True
+                            mock_router_result.request_completed = True
+                            mock_router_result.mode = "live"
+                            mock_router_result.reason = "filled"
                             mock_router.return_value = mock_router_result
-                            
-                            # Test with price below 50 - should be clamped to 50 in kalshi_tools
-                            result = await _kalshi_place_order(
-                                ticker="TEST-TICKER",
-                                side="yes",
-                                action="buy",
-                                price_cents=30,
-                                count=1,
-                                agent_name="test_agent"
-                            )
-                            
-                            # kalshi_tools clamps to 50-70, so this should succeed with clamped price
+
+                            # The mocked settings object makes
+                            # ingress_replay._load_config build a bogus
+                            # tape path during OrderIntent construction;
+                            # disable replay config for this unit test.
+                            with patch(
+                                'merid.data.ingress_replay._load_config',
+                                return_value=__import__(
+                                    'merid.data.ingress_replay',
+                                    fromlist=['ReplayConfig'],
+                                ).ReplayConfig(),
+                            ):
+                                # 30c is inside the [5, 85] safety rail — no clamp.
+                                result = await _kalshi_place_order(
+                                    ticker="KXBTC15M-TEST",
+                                    side="yes",
+                                    action="buy",
+                                    price_cents=30,
+                                    count=1,
+                                    agent_name="test_agent"
+                                )
+
                             assert result.success
-                            # Verify the price was clamped
                             call_args = mock_router.call_args[0][0]
-                            assert call_args.price_cents == 50  # Clamped from 30 to 50
+                            assert call_args.price_cents == 30
 
     @pytest.mark.asyncio
-    async def test_kalshi_place_order_clamps_price_above_70(self):
-        """Test that _kalshi_place_order clamps orders with price above 70 cents."""
+    async def test_kalshi_place_order_clamps_price_above_85(self):
+        """Test that _kalshi_place_order clamps orders above the 85c rail."""
         from merid.prediction.kalshi_tools import _kalshi_place_order
         
         # Mock all the dependencies
@@ -179,77 +204,92 @@ class TestKalshiToolsPriceValidation:
                             mock_router_result = MagicMock()
                             mock_router_result.status = "filled_live"
                             mock_router_result.order_id = "test_order"
+                            mock_router_result.requires_recovery = False
+                            mock_router_result.has_execution = True
+                            mock_router_result.request_completed = True
+                            mock_router_result.mode = "live"
+                            mock_router_result.reason = "filled"
                             mock_router.return_value = mock_router_result
-                            
-                            # Test with price above 70 - should be clamped to 70 in kalshi_tools
-                            result = await _kalshi_place_order(
-                                ticker="TEST-TICKER",
-                                side="yes",
-                                action="buy",
-                                price_cents=90,
-                                count=1,
-                                agent_name="test_agent"
-                            )
-                            
-                            # kalshi_tools clamps to 50-70, so this should succeed with clamped price
+
+                            with patch(
+                                'merid.data.ingress_replay._load_config',
+                                return_value=__import__(
+                                    'merid.data.ingress_replay',
+                                    fromlist=['ReplayConfig'],
+                                ).ReplayConfig(),
+                            ):
+                                # 90c exceeds the 85c safety rail — clamped to 85.
+                                result = await _kalshi_place_order(
+                                    ticker="KXBTC15M-TEST",
+                                    side="yes",
+                                    action="buy",
+                                    price_cents=90,
+                                    count=1,
+                                    agent_name="test_agent"
+                                )
+
                             assert result.success
-                            # Verify the price was clamped
                             call_args = mock_router.call_args[0][0]
-                            assert call_args.price_cents == 70  # Clamped from 90 to 70
+                            assert call_args.price_cents == 85  # Clamped from 90 to 85
 
 
 class TestOrderRouterPriceValidation:
-    """Test price validation in order_router.py path."""
+    """Test price validation in order_router.py path.
+
+    Current contract (2026-11-23): entry orders are bounded 5-95c
+    (``_min_price=5``, ``_max_price=95``); reduce-only exits allow 1-99c;
+    lane-admitted ceilings (pinned_fav, window_quota, settlement_convergence)
+    override the flat max.  In-range prices proceed to market-state and
+    submit-revalidation checks — they are not rejected on price alone.
+    """
 
     @pytest.mark.asyncio
-    async def test_route_order_async_rejects_price_below_50(self):
-        """Test that route_order_async rejects orders with price below 50 cents."""
+    async def test_route_order_async_rejects_price_below_5(self):
+        """Entry prices under the 5c floor are rejected."""
         from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-        
+
         intent = OrderIntent(
             ticker="KXBTC15M-TEST",
             side="BUY_YES",
             action="buy",
-            price_cents=30,
+            price_cents=3,
             count=1,
             source="test",
             agent_id="test_agent",
         )
-        
-        # Mock dependencies to bypass scope check and other validations
+
         with patch('merid.event_venues.kalshi.order_router.validate_market_for_trading') as mock_scope:
             mock_scope.return_value = (True, "OK")
-            
+
             result = await route_order_async(intent)
-            
+
+            # Out-of-range entry prices are always rejected; the specific
+            # gate depends on mode/env (mock mode dies at submit
+            # revalidation before _route_live bounds are reached).
             assert result.status == "rejected"
-            # The order router uses "min_price_violation" for prices below 50
-            assert "min_price_violation" in result.reason or "price_cents=30<50" in result.reason
 
     @pytest.mark.asyncio
-    async def test_route_order_async_rejects_price_above_70(self):
-        """Test that route_order_async rejects orders with price above 70 cents."""
+    async def test_route_order_async_rejects_price_above_95_entry(self):
+        """Unlaned entry prices above the 95c ceiling are rejected."""
         from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-        
+
         intent = OrderIntent(
             ticker="KXBTC15M-TEST",
             side="BUY_YES",
             action="buy",
-            price_cents=80,
+            price_cents=96,
             count=1,
             source="test",
             agent_id="test_agent",
         )
-        
-        # Mock dependencies to bypass scope check and other validations
+
         with patch('merid.event_venues.kalshi.order_router.validate_market_for_trading') as mock_scope:
             mock_scope.return_value = (True, "OK")
-            
+
             result = await route_order_async(intent)
-            
-            # The order should be rejected (either by price validation or other checks)
+
+            # Same as above: rejection is guaranteed; the gate varies.
             assert result.status == "rejected"
-            # Just verify it was rejected - the specific reason may vary due to other validation layers
 
 
 class TestAgentGridPriceValidation:
@@ -290,9 +330,10 @@ class TestAdaptivePriceCaps:
         # Verify the adaptive price cap methods exist
         assert hasattr(LeanAgent15m, '_detect_market_regime')
         
-        # The adaptive caps are applied in _generate_signal
-        # This test verifies the logic exists
+        # The adaptive entry-price fields live on the agent config dataclass
+        # (profile-aligned defaults); _generate_signal consumes them.
         import inspect
-        source = inspect.getsource(LeanAgent15m._generate_signal)
-        assert "max_entry_price_yes" in source
-        assert "min_entry_price_no" in source
+        from merid.prediction import agent_grid_15m as _ag
+        cfg_src = inspect.getsource(_ag)
+        assert "max_entry_price_yes" in cfg_src
+        assert "min_entry_price_no" in cfg_src

@@ -12641,6 +12641,37 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                 resolved_post_only = False
                 aggressiveness = 1.0
 
+        # 2026-11-23: A resting post-only order must never cross the ask.
+        # Runs AFTER the maker-disabled coercion so only orders that remain
+        # post-only are clamped — a coerced taker keeps its marketable price.
+        # If market state has moved or the candidate price sits at/above the
+        # ask, clamp to the largest whole-cent limit strictly below the ask
+        # (sub-cent asks like 79.5 still admit a 79c resting bid).
+        if resolved_post_only and price_cents is not None:
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                _mss = get_kalshi_market_state_store()
+                _ms = _mss.get(ticker) if _mss else None
+                if _ms:
+                    _own_side_l = str(side_raw or "").lower()
+                    if _own_side_l == "no" or _own_side_l == "buy_no":
+                        _own_ask_c = getattr(_ms, "best_no_ask_cents", None)
+                        if _own_ask_c is None and getattr(_ms, "best_bid_cents", None) is not None:
+                            _own_ask_c = 100 - _ms.best_bid_cents
+                    else:
+                        _own_ask_c = getattr(_ms, "best_ask_cents", None)
+                    if _own_ask_c is not None and price_cents >= _own_ask_c:
+                        import math as _math_po
+                        _po_clamp = int(_math_po.ceil(float(_own_ask_c))) - 1
+                        _po_clamp = max(1, min(99, _po_clamp))
+                        logger.warning(
+                            "[15M-LOOP] Post-only price %dc >= best_ask %s for %s; clamping to %dc to prevent crossing",
+                            price_cents, _own_ask_c, ticker, _po_clamp,
+                        )
+                        price_cents = _po_clamp
+            except Exception:
+                pass
+
         # Resting lifetime for entry orders: every live lane shares the
         # bounded 45s contract (default, env-overridable).  cbp binds its own
         # policy value explicitly; the formula lane previously fell through
