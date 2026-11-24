@@ -982,6 +982,22 @@ BOUNDED_POST_ONLY_LANES = frozenset({
     "reversal_scalp",
 })
 
+# 2026-11-24 (settlement-convergence unblocking): superset of
+# BOUNDED_POST_ONLY_LANES for *pure-economics* deferral only.  Lanes in
+# this set are admitted under their own stamped floors inside
+# ``compute_trade_decision`` — the generic 2.5% edge floor, Kelly
+# positive-edge sizing requirement, and window-plan lift allowance are
+# structurally unreachable or duplicative for them and must defer to the
+# lane's own gates.  ``settlement_convergence`` qualifies: it is a
+# near-certain-favorite taker lane whose net edge (~0.6-2% after fees) can
+# never reach the generic 2.5% abs floor, and whose strict admission
+# (p>=0.84 banked-sample majority, MIN_NET_EDGE_CENTS, TTE 15-150s,
+# MAX_PRICE<=99) already ran upstream.  Execution-mode coercion
+# (post-only/maker enforcement) must keep keying off
+# BOUNDED_POST_ONLY_LANES alone — settlement orders are taker-IOC and
+# must NOT be coerced to post-only.
+LANE_STAMPED_ECONOMICS_LANES = frozenset(set(BOUNDED_POST_ONLY_LANES) | {"settlement_convergence"})
+
 # 2026-11-18 (anti-directional hold guard): lanes that may legitimately
 # emit a selected side whose calibrated p is below 0.5 — i.e. a hold on
 # the side the model itself calls less likely than not.  Replay of the

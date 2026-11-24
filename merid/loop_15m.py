@@ -524,7 +524,7 @@ from merid.utils.kalshi_identity import extract_asset
 
 # Single source of truth for cycle rejection breakdown and lifecycle events
 from merid.prediction.agent_grid_15m import CycleResult
-from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES
+from merid.prediction.trade_decision import BOUNDED_POST_ONLY_LANES, LANE_STAMPED_ECONOMICS_LANES
 
 
 def _get_max_contracts_per_order() -> int:
@@ -6999,7 +6999,14 @@ async def _run_loop(self) -> None:
                             # Their floor is enforced at _validate_candidate_edge and the
                             # executable-cost EV re-gate downstream; skipping here removes only
                             # the duplicate, unreachable barrier.
-                            _bounded_lane = candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
+                            # 2026-11-24: LANE_STAMPED_ECONOMICS_LANES adds
+                            # settlement_convergence — a near-certain-favorite taker lane
+                            # whose ~0.6-2% net edge can never reach the generic 2.5%
+                            # abs floor; its strict admission (p>=0.84 banked-sample,
+                            # MIN_NET_EDGE_CENTS, TTE 15-150s) already ran in
+                            # compute_trade_decision.  Execution-mode coercion still
+                            # keys off BOUNDED_POST_ONLY_LANES (settlement stays taker).
+                            _bounded_lane = candidate.get("decision_lane") in LANE_STAMPED_ECONOMICS_LANES
                             if _bounded_lane:
                                 is_valid, reason = True, "bounded_lane_floor_deferred"
                             else:
@@ -7747,10 +7754,15 @@ async def _run_loop(self) -> None:
                                     # size is bounded by the lane contract cap,
                                     # so withhold model_prob to skip the Kelly
                                     # gate; exposure-cap sizing still applies.
+                                    # 2026-11-24: LANE_STAMPED_ECONOMICS_LANES
+                                    # adds settlement_convergence — its near-
+                                    # certain-favorite EV is small but real and
+                                    # already floor-checked upstream; Kelly's
+                                    # generic positive-edge sizing would zero it.
                                     model_prob=(
                                         model_prob
                                         if candidate.get("decision_lane")
-                                        not in BOUNDED_POST_ONLY_LANES
+                                        not in LANE_STAMPED_ECONOMICS_LANES
                                         else None
                                     ),  # 2026-07-12: Kelly Criterion
                                     side=candidate_side  # 2026-07-13: Pass side for Kelly
@@ -7901,9 +7913,13 @@ async def _run_loop(self) -> None:
                                         # Bounded lanes carry their own stamped
                                         # contract caps — the plan may clamp them
                                         # but never lift above the lane's count.
+                                        # 2026-11-24: settlement_convergence joins
+                                        # via LANE_STAMPED_ECONOMICS_LANES — its
+                                        # count is decision-approved upstream and
+                                        # must not be inflated by plan lift.
                                         allow_lift=(
                                             candidate.get("decision_lane")
-                                            not in BOUNDED_POST_ONLY_LANES
+                                            not in LANE_STAMPED_ECONOMICS_LANES
                                         ),
                                         # 2026-11-XX: decision-approved ceiling
                                         # (centi-contracts).  Lift sizing may
@@ -11756,6 +11772,11 @@ async def _execute_candidate(self, candidate: Dict, tick: int) -> bool:
                     # provisional_cell_id are secondary provenance stamped on
                     # every cell-matched admission (even unbounded lanes), so
                     # they must not pull non-lane candidates under the lane floor.
+                    # settlement_convergence deliberately stays OFF this set:
+                    # it admits at *positive* EV, so the generic min_dollar_ev=0
+                    # bound already matches its decision-time gate — a positive
+                    # lane floor here would be strictly tighter and re-veto
+                    # valid submissions.
                     if (
                         candidate.get("decision_lane") in BOUNDED_POST_ONLY_LANES
                         or candidate.get("marginal_band_rescue")
