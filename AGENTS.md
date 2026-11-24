@@ -63,6 +63,52 @@ deployment must set these explicitly.
   `audit_writer_unhealthy` still gates entries — readiness is earned by
   draining, never by relaxing the gate.
 
+### Audit DB corruption event + WAL ops rules (2026-11-23)
+
+`decision_audit.db` suffered main-file page corruption after a manual
+`wal_checkpoint` process was killed mid-merge; combined with an 8.6GB
+un-checkpointed WAL (starvation fixed in `37637ac5`) the next boot paid
+~1h of WAL-index recovery with entries fail-closed, then surfaced
+`database disk image is malformed` on every write.  Recovery performed:
+corrupt trio preserved as `decision_audit.db*.corrupt-20261123` in
+`data/` (14.7GB db + 8.6GB wal + partial shm — offline salvage pending),
+fresh `decision_audit.db` cut over at the canonical path, 400 queued-write
+failures reconciled `accepted_loss` via
+`DecisionAuditLedger.acknowledge_failed_writes`, and a
+`decision_audit_gaps` row (`audit_db_corruption_2026_11_23_2030_2128`)
+marks the telemetry gap.  Live trading path does NOT read this DB for
+decisions (EPC reads `data/empirical_price_calibration.json`); loss is
+telemetry/analysis only.
+
+**Operational rules (recurrence prevention):**
+
+- **Never `taskkill /F` (or kill) the server, a checkpoint, or a long
+  calibrator/analytics scan mid-operation.** Checkpoint page-writes are
+  not atomic — a kill mid-merge tears main-DB pages (this event).  Stop
+  the server gracefully and let in-flight checkpoints finish; if a
+  process must die, prefer letting PASSIVE checkpoints complete first
+  (they are seconds-scale now that the WAL is capped).
+- **WAL recovery cost ∝ WAL size** on the production 7200rpm spindle
+  (~tens of minutes per GB).  The `37637ac5` fixes (dedicated
+  `_ckpt_conn`, size-triggered checkpoints, `journal_size_limit`) keep
+  the WAL ≤ ~256MB so recovery is seconds — the 8.6GB event required the
+  starvation bug.  A boot-time `oversized WAL at startup` CRITICAL now
+  logs when the -wal exceeds `MERID_AUDIT_WAL_CHECKPOINT_ESCALATE_BYTES`
+  (512MB).
+- **Reader-pinned read-marks**: PASSIVE checkpoints defer forever under
+  a long-lived analytics reader.  The heartbeat now escalates to a
+  RESTART checkpoint after `MERID_AUDIT_WAL_CHECKPOINT_DEFERRALS` (3)
+  consecutive
+  deferrals once the WAL exceeds the escalate threshold — RESTART waits
+  (bounded by busy_timeout) for readers to drain instead of starving.
+- **Killing orphaned readers still matters**: background calibrator
+  scans and ad-hoc audit queries hold WAL read snapshots; kill them
+  before they pin the mark for hours.
+- **Fail-closed is correct**: `audit_writer_unhealthy` blocking entries
+  during the outage was the designed behavior — do not relax the gate;
+  reconcile via `acknowledge_failed_writes` after verifying the writer
+  is healthy on a clean DB.
+
 ### Data-plane isolation + ledger summary cache (2026-11-21, py-spy driven)
 
 - **REST orderbook polling moved off the WS I/O loop** (`e6805c54`):

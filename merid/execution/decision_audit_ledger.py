@@ -352,6 +352,22 @@ _WAL_CHECKPOINT_INTERVAL_S = float(
     os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_S", "900")
 )
 
+# Escalation thresholds (2026-11-23): PASSIVE never waits on readers, so a
+# long-lived analytics read pins the WAL read-mark and every scheduled
+# checkpoint defers — observed live: an orphaned calibrator scan pinned the
+# mark for hours while the -wal grew to 8.6GB, after which the next boot
+# paid ~1h of WAL-index recovery with entries fail-closed.  When the WAL
+# exceeds _WAL_CHECKPOINT_ESCALATE_BYTES and PASSIVE has deferred
+# _WAL_CHECKPOINT_DEFERRALS heartbeats in a row, retry once with RESTART
+# (waits up to busy_timeout for readers to drain, then resets the log)
+# instead of waiting another full interval.
+_WAL_CHECKPOINT_ESCALATE_BYTES = int(
+    os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_ESCALATE_BYTES", "536870912")
+)
+_WAL_CHECKPOINT_DEFERRALS = int(
+    os.environ.get("MERID_AUDIT_WAL_CHECKPOINT_DEFERRALS", "3")
+)
+
 # VM instructions between progress-handler callbacks on the evidence-refresh
 # read connection (sqlite3_progress_handler N parameter).  Small enough that a
 # runaway query is aborted promptly after its deadline, large enough that the
@@ -449,6 +465,7 @@ class DecisionAuditLedger:
         self._ckpt_exec_lock = threading.Lock()
         self._cycle_stats: Dict[str, Dict[str, Any]] = {}
         self._last_wal_checkpoint = 0.0
+        self._ckpt_passive_deferrals = 0
         self._startup_checkpoint_done = False
         self._last_evidence_refresh = 0.0
         self._evidence_refresh_guard = threading.Lock()
@@ -1170,6 +1187,21 @@ class DecisionAuditLedger:
                 # Do not wait for other readers during startup maintenance.
                 self._submit_write(
                     lambda: self.wal_checkpoint("PASSIVE"), priority="low"
+                )
+            # 2026-11-23: surface oversized WALs at boot.  Recovery cost is
+            # already paid by the time this runs (first connect rebuilds the
+            # wal-index), but the size is the diagnostic that distinguishes
+            # "normal restart" from "unclean shutdown / checkpoint starvation"
+            # — on the production spindle recovery runs ~tens of minutes per
+            # GB, during which audit_writer_unhealthy fail-closes entries.
+            _wal_boot = self._wal_size_bytes() or 0
+            if _wal_boot > _WAL_CHECKPOINT_ESCALATE_BYTES:
+                logger.critical(
+                    "[DECISION-AUDIT-LEDGER] oversized WAL at startup: "
+                    "%.1fMB — WAL-index recovery was required at connect; "
+                    "scheduled checkpoints will drain it. Recurrence vector: "
+                    "unclean shutdown or checkpoint starvation (see AGENTS.md).",
+                    _wal_boot / 1048576.0,
                 )
         except Exception as exc:
             logger.warning("[DECISION-AUDIT-LEDGER] schema init failed: %s", exc)
@@ -4927,6 +4959,29 @@ class DecisionAuditLedger:
                 _deferred = self.wal_checkpoint("PASSIVE")
                 if not _deferred:
                     self._last_wal_checkpoint = now
+                    self._ckpt_passive_deferrals = 0
+                else:
+                    self._ckpt_passive_deferrals += 1
+                    # 2026-11-23 escalation: persistent PASSIVE deferrals on
+                    # an oversized WAL mean readers are pinning the read-mark
+                    # (the 8.6GB-WAL failure mode).  RESTART waits up to
+                    # busy_timeout for those readers to drain, then resets
+                    # the log — bounded cost vs unbounded WAL growth.
+                    if (
+                        _wal_now > _WAL_CHECKPOINT_ESCALATE_BYTES
+                        and self._ckpt_passive_deferrals
+                        >= _WAL_CHECKPOINT_DEFERRALS
+                    ):
+                        self._ckpt_passive_deferrals = 0
+                        logger.warning(
+                            "[DECISION-AUDIT-LEDGER] wal %.1fMB pinned by "
+                            "readers across %d PASSIVE deferrals — "
+                            "escalating to RESTART checkpoint",
+                            _wal_now / 1048576.0,
+                            _WAL_CHECKPOINT_DEFERRALS,
+                        )
+                        if not self.wal_checkpoint("RESTART"):
+                            self._last_wal_checkpoint = now
 
     def prune_old_rows(self, retention_days: Optional[float] = None,
                        batch: Optional[int] = None,
