@@ -305,7 +305,12 @@ async def test_health_blocked_by_old_unresolved(ledger, monkeypatch):
         return 0
 
     monkeypatch.setattr(ledger, "_settlement_proceeds_db_write", blocked)
-    monkeypatch.setenv("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "0.2")
+    # The health gate reads MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S fresh on
+    # every call, so drive both phases deterministically: a large bound for
+    # the "young pending op is healthy" check (executor-queue jitter on CI
+    # can exceed a 0.2s budget — observed flake), then tighten the bound
+    # below the accrued age for the unhealthy check.  No wall-clock race.
+    monkeypatch.setenv("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "300")
     try:
         task = asyncio.ensure_future(
             ledger.record_settlement_proceeds_async(
@@ -318,7 +323,8 @@ async def test_health_blocked_by_old_unresolved(ledger, monkeypatch):
         assert started.is_set()
         # Op is pending but young — still healthy.
         assert ledger.settlement_write_health()["ok"] is True
-        await asyncio.sleep(0.3)
+        monkeypatch.setenv("MERID_SETTLEMENT_UNRESOLVED_MAX_AGE_S", "0.01")
+        await asyncio.sleep(0.05)
         health = ledger.settlement_write_health()
         assert health["ok"] is False
         assert health["reason"].startswith("settlement_unresolved_age")
