@@ -370,6 +370,46 @@ and `is_emergency` false so the settlement EV gate / hold veto decide.
 Ordinary lanes keep the T-120s mandatory closeout.  Regression coverage:
 `tests/test_pre_settlement_closeout.py`.
 
+### Loss replay — drift_fav + settlement pre_window falsified, both disabled (2026-11-23)
+
+24h+14d attribution-ledger replay (`kalshi_order_attempts` FILLED
+`admitting_economics` joined to `trade_attribution_fact` realized PnL):
+
+- **drift_fav: −894c/14d** (32 entries, 29 settled, 19 wins = 65.5% WR).
+  Winners bank the +12c lock (+35..+62c); losers ride to settlement 0
+  (−70..−402c).  The lane's 2026-10-21 pooled audit assumed the
+  entry-14c salvage floor, but `MERID_DISABLE_LOSS_STOPS=1` +
+  `MERID_NO_EDGE_LOSS_SALVAGE_ENABLED=0` (operator 2026-11-16) removed
+  every downside exit — the bounded-loss economics the audit priced no
+  longer exist.  Even +EV admissions lost (XRP no@67 EV+2.8 → −402c).
+  → `MERID_DRIFT_LANE_ENABLED=0`.  Same falsification standard as
+  cheap_no_settle (−1458c, disabled 2026-11-18).  Re-enable only with a
+  settled-fill audit priced under ride-to-settlement semantics.
+- **settlement_convergence: −496c/4 fills** — and ALL FOUR were
+  `pre_window` forecast admissions (TTE 80–147s); the in_window
+  banked-sample phase has never produced a fill.  KXDOGE15M-26NOV231515-15
+  NO@97 → settled YES (−560c) on `bachelier_digital_anchor_wf_tailcap`
+  p_no=0.9943 vs ~93c market-implied at fill — a 6pp model-over-market
+  gap the 10% anchor keep could not absorb.  External tape evidence
+  agrees the cohort is −EV: 100k+-contract studies show TTE>60s favorites
+  lose after fees (−0.22c @90s test; −0.76c TTE>150s; −0.59..−1.45c
+  80–99c favorites every minute) while the final-60s banked-sample
+  window is the documented +EV slice (+2.67c/contract, PMP tape).
+  Consistent with the 2026-11-22 audit: px 94–97c bands were negative,
+  only px>=98c went +1.0–1.14c/contract.
+  → `MERID_SETTLEMENT_LANE_PRE_WINDOW_ENABLED=0`.  The in_window lane
+  (MIN_OBSERVED banked RTI samples = realized arithmetic) stays enabled.
+- **Open position:** KXSOL15M-26NOV232230-30 drift_fav NO@54 (6ct) is
+  un-exitable — held-side NO bids empty on a YES-heavy book
+  (`HELD_SIDE_BID_UNAVAILABLE` / `BOOK_NOT_EXECUTABLE`); rides to
+  settlement.  Structural, not a bug; lane disable prevents recurrence.
+- **No code inversions found** — EV signs, fee units, side canonicalization
+  (buy_no routes as sell_yes economically), and gate ordering all verified
+  consistent.  The losses are falsified-lane economics + honest-market
+  tail risk under the no-loss-exit regime, not pipeline defects.
+- Lane PnL context (14d): pinned_fav +274c/56 (profit engine, keep),
+  evidence_cell_escape +106c/3, threshold_cell +49c/1 — all retained.
+
 ### Anti-directional hold guard + cheap_no disabled (2026-11-18, second DOGE replay)
 
 Replay of `KXDOGE15M-26NOV172330-30` (NO buy 27c via `cheap_no_settle`,

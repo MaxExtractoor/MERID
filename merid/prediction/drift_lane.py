@@ -31,14 +31,23 @@ Lane contracts:
   lane only rescues candidates the formula bound rejects.  Positions
   stamped with the lane carry a per-position profit-lock target of
   entry + MERID_DRIFT_LOCK_GAIN_CENTS (default 12c) instead of the global
-  90c threshold, and retain the standard salvage floor.
+  90c threshold.  2026-11-23: the lane is DISABLED by default
+  (.env MERID_DRIFT_LANE_ENABLED=0) — its pooled-audit economics assumed
+  the entry-14c salvage floor, but MERID_DISABLE_LOSS_STOPS=1 removed
+  every downside exit on 2026-11-16, so losers ride to settlement 0.
+  Realized replay: -894c/14d (65.5% WR, full-stake losers vs +6-12c lock
+  winners).  Re-enable only with a settled-fill audit priced under
+  ride-to-settlement semantics.
 - ``decision_lane="cheap_no_settle"``: NO-side-only settle sleeve for
   10-40c books on YES-heavy markets (complement >=55c).  Bounded claim
   floor (default -6c, matching the window-quota premium bound), p_no
   sanity floor, fractional size cap (default 0.75 contracts), and a
   per-ticker/daily attempt budget.  The position is stamped settle_hold —
-  the monitor emits NO take-profit / trail / hard-lock exits for it; the
-  no-edge LOSS_CAP salvage floor remains as the catastrophe protection.
+  the monitor emits NO take-profit / trail / hard-lock exits for it.  The
+  no-edge LOSS_CAP salvage floor was designed as the catastrophe
+  protection but is suppressed under MERID_DISABLE_LOSS_STOPS=1
+  (2026-11-16) — the lane is disabled by default for exactly this
+  reason (.env MERID_CHEAP_NO_LANE_ENABLED=0).
 
 Bounds (env-tunable):
 
