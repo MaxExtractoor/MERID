@@ -2524,3 +2524,42 @@ success window (`MERID_PNL_FLOWS_STALE_S`=600s) since /pnl is polled.
 `/kalshi/risk` and grid P&L were already ledger-based and unaffected.
 Regression coverage: `tests/api/test_kalshi_pnl_endpoint.py` flow-netting
 block (deposit, withdrawal, pre-anchor, pending/failed, unverified).
+
+### Operator-directed fill-rate levers (2026-11-24, post-TIF-fix funnel audit)
+
+After `ebf8e155` fixed the post_only+IOC TIF starvation, the funnel audit
+(~100k evals / ~2h) decomposed the remaining 85k->router attrition into
+stacked walls.  Operator elected maximize-PnL/trade over raw fill count
+and approved four bounded levers (all env-tunable, rollback = revert):
+
+- **`MERID_ENTRY_TRAP_STICKY_P_DROP_PINNED_FAV_C` (default 5.0)** —
+  `entry_trap_guard.sticky_p_drop_c_for_lane()` widens the sticky-p veto
+  for `pinned_fav` only.  The lane's calibrated p is static *by design*
+  (converged favorite), so the generic 3c trigger fired on ordinary
+  repricing noise.  The shared `MERID_ENTRY_TRAP_DROP_C=5c` hard veto
+  still binds — only a >=5c collapse counts as a broken pin.  Generic
+  lanes keep 3c.
+- **`MERID_EDGE_THRESHOLD_MAX_CENTS` (default 4.0)** — formula-path cap
+  inside `_decompose_dynamic_min_required_edge`.  The FLB longshot
+  premium (slope 0.15 below 35c) + convexity stacked required edge to
+  5-7.6c in already-uncertain regimes; capped at 4c.  Threshold and
+  provisional cells keep empirically qualified authority (they override
+  `total` downstream); `formula_total`/`clamped_ceiling` telemetry
+  preserved.
+- **`MERID_ENTRY_MIN_SECONDS_TO_EXPIRY` 120 -> 60** — measured 1,586
+  `min_tte_entry_disabled` kills over ~15h (invisible to
+  rejected_candidates.jsonl — they die before side-eval).  Lane-exempt
+  cohorts (settlement in_window, pinned_fav 45-840s, late probes)
+  already own the profitable sub-120s tail.
+- **`MERID_MODEL_UNCERTAINTY` 0.05 -> 0.025** — the largest single
+  reserve (~5c -> ~2.5c) in the ~4-5c stack that turned p90 +2.4c gross
+  edge negative.  Halved per operator directive; data-quality/regime/
+  near-expiry bumps unchanged; per-asset `MERID_MODEL_UNCERTAINTY_{X}`
+  overrides still work.
+
+NOT changed (deliberate): `MERID_MODEL_EDGE_FLOOR_CENTS=4.0` (settled
+n=2,121 evidence: <4c model edge realized negative), fee_aware_gate
+required edge, lane EV floors, `MERID_ENTRY_TRAP_DROP_C` hard veto,
+exempt/flat-exempt lane sets.  Regression coverage:
+`tests/test_entry_trap_guard.py::TestPinnedFavStickyPWidening`,
+`tests/test_entry_execution_hardening.py::test_dynamic_threshold_formula_ceiling`.

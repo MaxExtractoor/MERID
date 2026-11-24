@@ -23,6 +23,7 @@ import merid.prediction.trade_decision as td
 from merid.prediction.trade_decision import (
     _compute_bachelier_components,
     _compute_dynamic_min_required_edge,
+    _decompose_dynamic_min_required_edge,
     compute_trade_decision,
 )
 
@@ -255,6 +256,34 @@ def test_convexity_halved_on_favorites(monkeypatch):
     )
     # base 3% + 0.02 * 0.6 * 0.4 = 0.0048 -> 0.0348
     assert math.isclose(fav, 0.03 + 0.02 * 0.6 * 0.4, abs_tol=1e-9)
+
+
+def test_dynamic_threshold_formula_ceiling(monkeypatch):
+    """2026-11-24: the FLB longshot premium + convexity stacked to a 5-7.6c
+    required edge in already-uncertain regimes.  The formula path is now
+    capped at MERID_EDGE_THRESHOLD_MAX_CENTS (default 4c); ``formula_total``
+    preserves the post-cap formula value even when a threshold cell overrides
+    ``total``."""
+    monkeypatch.setattr(td, "MERID_EDGE_MID_BAND_RELIEF_CENTS", 0.0)
+    monkeypatch.setattr(td, "MERID_EDGE_MARGINAL_RELIEF_CENTS", 0.0)
+    d = _decompose_dynamic_min_required_edge(
+        asset="BTC", price_cents=10, side="yes",
+        yes_bid_cents=9.0, yes_ask_cents=11.0,
+        no_bid_cents=89.0, no_ask_cents=91.0,
+        floor_min_required_edge=0.03,
+    )
+    # Uncapped dynamic would be ~0.03 + 0.0036 + 0.0375 = 0.0711 -> capped 4c.
+    assert d.formula_total == pytest.approx(0.04, abs=0.001)
+
+    # Env override retunes the ceiling.
+    monkeypatch.setenv("MERID_EDGE_THRESHOLD_MAX_CENTS", "6.0")
+    d2 = _decompose_dynamic_min_required_edge(
+        asset="BTC", price_cents=10, side="yes",
+        yes_bid_cents=9.0, yes_ask_cents=11.0,
+        no_bid_cents=89.0, no_ask_cents=91.0,
+        floor_min_required_edge=0.03,
+    )
+    assert d2.formula_total == pytest.approx(0.06, abs=0.001)
 
 
 # --------------------------------------------------------------------------

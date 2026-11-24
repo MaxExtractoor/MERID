@@ -76,6 +76,20 @@ def sticky_p_drop_c() -> float:
     return _env_float("MERID_ENTRY_TRAP_STICKY_P_DROP_C", 3.0)
 
 
+def sticky_p_drop_c_for_lane(lane: Optional[str]) -> float:
+    """Lane-aware sticky-p drop threshold.
+
+    pinned_fav's calibrated p is static *by design* — the lane only fires on
+    converged favorites, so ordinary 3c ask oscillation is repricing noise,
+    not staleness evidence.  Its pin-break bound remains the shared
+    ``MERID_ENTRY_TRAP_DROP_C`` hard veto; the sticky-p branch is widened to
+    match so it cannot fire below the hard veto for this lane.
+    """
+    if "pinned_fav" in str(lane or ""):
+        return _env_float("MERID_ENTRY_TRAP_STICKY_P_DROP_PINNED_FAV_C", 5.0)
+    return sticky_p_drop_c()
+
+
 def sticky_p_max_dp() -> float:
     """Max |Δp_calibrated| (probability units) tolerated as 'static'."""
     return _env_float("MERID_ENTRY_TRAP_STICKY_P_MAX_DP", 0.02)
@@ -98,9 +112,9 @@ def exempt_lanes() -> Tuple[str, ...]:
 def flat_exempt_lanes() -> Tuple[str, ...]:
     """Lanes exempt only from the flat-book veto — lanes whose normal entry
     state IS a flat book (settlement convergence at 95-99c, pinned favorite
-    at 92-98c).  They still face the own-side drop veto, and pinned_fav
-    additionally keeps the sticky-p veto: a favorite whose ask reprices
-    while the model sits static is a broken pin, not an edge."""
+    at 92-98c).  They still face the own-side drop veto; pinned_fav's
+    sticky-p veto is widened to the hard-veto level (2026-11-24) since its
+    calibrated p is static by design — only a >=5c collapse is a broken pin."""
     raw = os.environ.get(
         "MERID_ENTRY_TRAP_FLAT_EXEMPT_LANES",
         "settlement_convergence,pinned_fav",
@@ -230,7 +244,7 @@ def entry_book_veto(
         # static — the apparent edge is staleness, not signal.  Exempt lanes
         # (settlement_convergence) legitimately hold a static banked-sample p.
         _exempt = str(lane or "") in exempt_lanes()
-        if drop >= sticky_p_drop_c() and not _exempt:
+        if drop >= sticky_p_drop_c_for_lane(lane) and not _exempt:
             ps = [
                 p for p in (side_p(s, side) for s in samples)
                 if p is not None

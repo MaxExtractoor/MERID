@@ -24,6 +24,7 @@ def _clean_env(monkeypatch):
     monkeypatch.setenv("MERID_ENTRY_TRAP_LOOKBACK_S", "45")
     monkeypatch.setenv("MERID_ENTRY_TRAP_DROP_C", "5.0")
     monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_DROP_C", "3.0")
+    monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_DROP_PINNED_FAV_C", "5.0")
     monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_MAX_DP", "0.02")
     monkeypatch.setenv("MERID_ENTRY_TRAP_EXEMPT_LANES", "settlement_convergence")
     monkeypatch.setenv(
@@ -187,6 +188,63 @@ class TestStickyModelVeto:
         )
         assert reason is not None
         assert reason.startswith("own_side_ask_falling")
+
+
+class TestPinnedFavStickyPWidening:
+    """2026-11-24: pinned_fav's calibrated p is static by design, so the
+    generic 3c sticky-p trigger fired on ordinary repricing noise.  The
+    lane gets its own threshold (default = hard-veto level) via
+    ``sticky_p_drop_c_for_lane``; the shared 5c drop veto still binds."""
+
+    @staticmethod
+    def _rows_3c_drop(now):
+        return [
+            _s(now - 40, 62, 64, 35, 37, 0.64, 0.36),
+            _s(now - 20, 61, 62, 37, 39, 0.64, 0.36),
+            _s(now - 5, 59, 61, 38, 40, 0.645, 0.355),
+        ]
+
+    def test_pinned_fav_tolerates_3c_static_p_dip(self):
+        """3c ask drop + static p: vetoes generic lanes, not pinned_fav."""
+        now = 1000.0
+        rows = self._rows_3c_drop(now)
+        assert (
+            etg.entry_book_veto(
+                _hist(rows)["T"], "yes", lane="pinned_fav", now=now,
+            )
+            is None
+        )
+        # Same rows, generic lane still vetoes.
+        reason = etg.entry_book_veto(
+            _hist(rows)["T"], "yes", lane="maker_bid", now=now,
+        )
+        assert reason is not None
+        assert reason.startswith("stale_model_divergence")
+
+    def test_pinned_fav_hard_drop_veto_still_binds(self):
+        """A >=5c collapsing ask is a real pin-break for pinned_fav too."""
+        now = 1000.0
+        rows = [
+            _s(now - 40, 96, 98, 1, 3, 0.995, 0.005),
+            _s(now - 20, 93, 95, 4, 6, 0.995, 0.005),
+            _s(now - 5, 91, 92, 6, 8, 0.995, 0.005),
+        ]
+        reason = etg.entry_book_veto(
+            _hist(rows)["T"], "yes", lane="pinned_fav", now=now,
+        )
+        assert reason is not None
+        assert reason.startswith("own_side_ask_falling")
+
+    def test_lane_threshold_env_override(self, monkeypatch):
+        """MERID_ENTRY_TRAP_STICKY_P_DROP_PINNED_FAV_C retunes the lane."""
+        monkeypatch.setenv("MERID_ENTRY_TRAP_STICKY_P_DROP_PINNED_FAV_C", "2.5")
+        now = 1000.0
+        rows = self._rows_3c_drop(now)
+        reason = etg.entry_book_veto(
+            _hist(rows)["T"], "yes", lane="pinned_fav", now=now,
+        )
+        assert reason is not None
+        assert reason.startswith("stale_model_divergence")
 
 
 class TestFlatTrapVeto:

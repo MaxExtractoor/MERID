@@ -1970,7 +1970,18 @@ def _decompose_dynamic_min_required_edge(
     )
 
     dynamic = base + price_adj + flb_adj - band_relief - marginal_relief
-    total = max(0.0 if _marginal_eligible else 0.02, min(dynamic, 0.15))
+    # 2026-11-24: operator-directed formula ceiling — the FLB longshot premium
+    # (slope 0.15 below 35c) + convexity stacked to a 5-7.6c required edge in
+    # already-uncertain regimes, a tail that only fires where the model is
+    # least reliable.  Cap the formula path at MERID_EDGE_THRESHOLD_MAX_CENTS
+    # (default 4c); threshold/provisional cells keep their empirically
+    # qualified values (they override ``total`` below regardless).
+    _formula_ceiling = min(
+        0.15, _env_float("MERID_EDGE_THRESHOLD_MAX_CENTS", 4.0) / 100.0
+    )
+    total = max(
+        0.0 if _marginal_eligible else 0.02, min(dynamic, _formula_ceiling)
+    )
 
     # 2026-09-30: conditional threshold cells (merid.prediction.threshold_cells)
     # replace the formula output inside the empirically-qualified
@@ -2032,7 +2043,11 @@ def _decompose_dynamic_min_required_edge(
         flb_premium=flb_adj,
         band_relief=band_relief,
         clamped_floor=(cell is None and total == 0.02 and dynamic < 0.02),
-        clamped_ceiling=(cell is None and total == 0.15 and dynamic > 0.15),
+        clamped_ceiling=(
+            cell is None
+            and total == _formula_ceiling
+            and dynamic > _formula_ceiling
+        ),
         cell_id=cell.cell_id if cell is not None else None,
         cell_min_ev_cents=(
             float(cell.min_net_ev_cents) if cell is not None else None
