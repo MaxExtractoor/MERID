@@ -342,6 +342,58 @@ def test_other_subscription_ack_is_not_orderbook_control(pipeline):
     assert ws._parse_message({"type": "ok", "sid": 9, "seq": 2, "msg": {}}) is None
 
 
+def test_rollover_control_frames_account_sid_sequence(pipeline):
+    """2026-11-24: subscribed/unsubscribed frames consume the orderbook sid
+    seq just like ``ok`` acks.  Dropping them before sequence accounting
+    produced unexplained full-sid gaps at every 15m window rollover."""
+    ws, _ = pipeline
+    ws._subscription_ids["orderbook_delta"] = 4
+    for mtype in ("subscribed", "unsubscribed"):
+        event = ws._parse_message({
+            "type": mtype,
+            "msg": {"channel": "orderbook_delta", "sid": 4, "seq": 7},
+        })
+        assert event is not None
+        assert event["type"] == "orderbook_sequence_control"
+        assert event["sid"] == 4
+        assert event["seq"] == 7
+    # Top-level placement (ok-style envelope) resolves identically.
+    event = ws._parse_message({"type": "ok", "sid": 4, "seq": 8, "msg": {}})
+    assert event is not None
+    assert event["type"] == "orderbook_sequence_control"
+    assert event["seq"] == 8
+    # No seq -> still dropped downstream exactly as before.
+    assert ws._parse_message({
+        "type": "subscribed",
+        "msg": {"channel": "orderbook_delta", "sid": 4},
+    }) is None
+    # A control frame on a different subscription is untouched.
+    assert ws._parse_message({
+        "type": "subscribed",
+        "msg": {"channel": "ticker", "sid": 9, "seq": 3},
+    }) is None
+
+
+def test_check_sequence_ignores_orderbook_sid_control_frames(pipeline):
+    """The ws.py seq tracker only ever sees sparse subscription-control
+    frames on the orderbook sid (deltas bypass via the raw fast path), so
+    gap math there is meaningless — it produced phantom 'WS seq gap'
+    warnings and spurious per-ticker REST resyncs."""
+    ws, _ = pipeline
+    ws._subscription_ids["orderbook_delta"] = 4
+    assert ws._check_sequence({
+        "type": "subscribed",
+        "msg": {"channel": "orderbook_delta", "sid": 4},
+        "seq": 5000,
+    }) is True
+    assert ws._check_sequence({"type": "ok", "sid": 4, "seq": 9000}) is True
+    assert "sid:4" not in ws._last_seq
+    assert "conn" not in ws._last_seq
+    # Other subscriptions keep normal seq tracking.
+    assert ws._check_sequence({"type": "fill", "sid": 9, "seq": 3}) is True
+    assert ws._last_seq["sid:9"] == 3
+
+
 def test_unattributed_large_control_gap_does_not_expand_missing_range(pipeline, monkeypatch):
     from merid.event_venues.kalshi import market_state
 

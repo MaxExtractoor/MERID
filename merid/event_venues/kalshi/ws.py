@@ -3410,6 +3410,23 @@ class KalshiWebSocket(EventVenueStream):
         # "duplicates" and freshly (re)subscribed sids — which restart at
         # seq=1 — stayed dead until they passed the connection max.
         sid = data.get("sid")
+        # The orderbook_delta sid's dense seq stream bypasses this tracker
+        # entirely via the raw-orderbook fast path; only sparse subscription-
+        # control frames (subscribed/unsubscribed/ok) still arrive here, and
+        # their seqs interleave with thousands of deltas.  Gap/duplicate math
+        # on that sparse view is meaningless — it only produced phantom
+        # "WS seq gap" warnings and spurious per-ticker REST resyncs.  Order-
+        # book seq continuity is enforced downstream in market_state, which
+        # sees every seq-bearing frame on the sid.
+        _ctl_msg = data.get("msg")
+        _eff_sid = sid if sid is not None else (
+            _ctl_msg.get("sid") if isinstance(_ctl_msg, dict) else None
+        )
+        if (
+            _eff_sid is not None
+            and _eff_sid == self._subscription_ids.get("orderbook_delta")
+        ):
+            return True
         market_id = f"sid:{sid}" if sid is not None else "conn"
         nested = data.get("msg")
         recovery_ticker = (
@@ -3800,15 +3817,32 @@ class KalshiWebSocket(EventVenueStream):
 
             # Subscription updates can consume the same SID sequence as
             # orderbook frames; forward them in order rather than inventing
-            # a downstream gap at the next delta.
-            if (
-                channel == "ok"
-                and data.get("sid") is not None
-                and data.get("sid") == self._subscription_ids.get("orderbook_delta")
-                and isinstance(data.get("seq"), int)
-                and not isinstance(data.get("seq"), bool)
-            ):
-                return {**data, "type": "orderbook_sequence_control"}
+            # a downstream gap at the next delta.  ``sid``/``seq`` may sit at
+            # the top level (``ok``/list_subscriptions) or inside ``msg``
+            # (``subscribed``/``unsubscribed``); rollover churn emits those
+            # too, and dropping them here is what produced unexplained
+            # full-sid sequence gaps at every 15m window boundary.
+            if channel not in ("orderbook_delta", "orderbook_snapshot"):
+                _ob_sid = self._subscription_ids.get("orderbook_delta")
+                _ctl_msg = data.get("msg")
+                _ctl_sid = data.get("sid")
+                if _ctl_sid is None and isinstance(_ctl_msg, dict):
+                    _ctl_sid = _ctl_msg.get("sid")
+                _ctl_seq = data.get("seq")
+                if _ctl_seq is None and isinstance(_ctl_msg, dict):
+                    _ctl_seq = _ctl_msg.get("seq")
+                if (
+                    _ob_sid is not None
+                    and _ctl_sid == _ob_sid
+                    and isinstance(_ctl_seq, int)
+                    and not isinstance(_ctl_seq, bool)
+                ):
+                    return {
+                        **data,
+                        "type": "orderbook_sequence_control",
+                        "sid": _ob_sid,
+                        "seq": _ctl_seq,
+                    }
 
             # Infer channel from payload structure if channel is empty
             # Kalshi sometimes sends valid orderbook deltas with empty channel
