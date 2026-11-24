@@ -9238,8 +9238,29 @@ class LeanAgent15m:
                 )
             except Exception as _sh_err:
                 logger.debug("[SHADOW] scheduled emit failed: %s", _sh_err)
+            # 2026-11-24: the ask-priced ``route="maker"`` eval is unemittable
+            # by construction — a post_only order cannot rest at the ask, and
+            # the ask-priced maker pass was deprecated 2026-11-23.  Its ENTER
+            # rows were phantom selections (real emission requires the
+            # bid-priced ``maker_bid`` pass), polluting ENTER metrics ~2-3x
+            # and masquerading as pipeline attrition.  Record the eval as
+            # NO_TRADE with an explicit reason; the returned decision object
+            # is unchanged so route comparison and pinned_fav lane detection
+            # still consume the real selection.
+            _audit_decision = decision
+            if (
+                route == "maker"
+                and getattr(decision, "selected_outcome", None) is not None
+            ):
+                _audit_decision = replace(
+                    decision,
+                    selected_outcome=None,
+                    selected_action=None,
+                    selected_outcome_price=None,
+                    no_trade_reason="ask_priced_route_unemittable",
+                )
             _record_decision_audit(
-                decision,
+                _audit_decision,
                 market_state,
                 settlement_input_price,
                 settlement_reference,
