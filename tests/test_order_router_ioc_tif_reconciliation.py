@@ -115,6 +115,54 @@ class TestResolveTif:
         # settlement clamp (window_end - 120s) at this injected time.
         assert exp == future
 
+    def _mock_near_expiry_store(self, monkeypatch, seconds_to_expiry: float = 60.0):
+        """Force _resolve_tif's near-expiry branch by stubbing the market
+        state store's seconds_to_expiry (the live path reads it per call)."""
+        import merid.event_venues.kalshi.market_state as ms
+
+        class _St:
+            pass
+
+        st = _St()
+        st.seconds_to_expiry = seconds_to_expiry
+
+        class _Store:
+            def get(self, ticker):
+                return st
+
+        monkeypatch.setattr(ms, "get_kalshi_market_state_store", lambda: _Store())
+
+    def test_near_expiry_ioc_override_skips_post_only(self, monkeypatch):
+        """post_only resting orders must keep a resting TIF near expiry —
+        the venue rejects post_only+IOC/FOK outright.  Regression for
+        KXSOL15M-26NOV240130-30 pinned_fav maker at TTE<120s (2026-11-24):
+        _resolve_tif forced IOC 'regardless of role', recreating the invalid
+        combo the client wire layer rejected."""
+        from merid.event_venues.kalshi.order_router import _resolve_tif
+        self._mock_near_expiry_store(monkeypatch, seconds_to_expiry=60.0)
+        intent = self._intent(post_only=True, aggressiveness=0.0, execution_mode="maker")
+        tif, exp = _resolve_tif(intent)
+        assert tif == "GTC"
+
+    def test_near_expiry_ioc_override_skips_maker_mode_without_post_only_flag(self, monkeypatch):
+        """Same exemption via execution_mode posture: a maker-mode intent
+        resolves to post_only downstream, so the terminal-TIF override must
+        not fire even when the post_only attribute is not yet stamped."""
+        from merid.event_venues.kalshi.order_router import _resolve_tif
+        self._mock_near_expiry_store(monkeypatch, seconds_to_expiry=60.0)
+        intent = self._intent(post_only=False, aggressiveness=0.0, execution_mode="maker")
+        tif, exp = _resolve_tif(intent)
+        assert tif == "GTC"
+
+    def test_near_expiry_ioc_still_fires_for_taker(self, monkeypatch):
+        """The override still binds aggressive intents — only resting
+        posture is exempt."""
+        from merid.event_venues.kalshi.order_router import _resolve_tif
+        self._mock_near_expiry_store(monkeypatch, seconds_to_expiry=60.0)
+        intent = self._intent(execution_mode="taker", aggressiveness=1.0, post_only=False)
+        tif, exp = _resolve_tif(intent)
+        assert tif == "IOC"
+
 
 class TestApplyExecutionMode:
     """Tests for _apply_execution_mode inference."""

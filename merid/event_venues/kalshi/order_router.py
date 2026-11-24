@@ -1584,14 +1584,38 @@ def _apply_execution_mode(intent: OrderIntent) -> tuple:
         intent.time_in_force = "ioc"
 
     resolved_tif = _resolve_tif(intent)
+    # Final coherence re-check on the RESOLVED posture: _resolve_tif's
+    # near-expiry/reduce-only overrides run after the invariant above and
+    # can return a terminal TIF for what resolves to a post_only order —
+    # the client wire layer rejects post_only+IOC/FOK outright
+    # (KXSOL15M-26NOV240130-30, 2026-11-24).  post_only is a venue contract:
+    # the order MUST rest, so a post_only resolution keeps a resting TIF;
+    # an aggressive non-post_only resolution keeps IOC.  ResolvedTIF.tif is
+    # uppercase; comparisons normalize.
+    _final_tif = resolved_tif.tif
+    _final_tif_l = str(_final_tif or "").strip().lower()
+    if post_only and _final_tif_l in ("ioc", "fok"):
+        logger.warning(
+            "[EXECUTION-MODE-INVARIANT] post_only=True but _resolve_tif "
+            "returned tif=%s; coercing to gtc (ticker=%s)",
+            _final_tif,
+            intent.ticker,
+        )
+        _final_tif = "GTC"
+    elif (
+        not post_only
+        and _final_tif_l in ("gtc", "gtt")
+        and float(aggressiveness or 0.0) > 0.0
+    ):
+        _final_tif = "IOC"
     _c = _execution_contract(intent)
     _c.update(
         resolved_execution_mode=execution_mode,
         post_only=post_only,
-        time_in_force=(getattr(intent, "time_in_force", None) or resolved_tif.tif),
+        time_in_force=(getattr(intent, "time_in_force", None) or _final_tif),
         selected_side_limit=getattr(intent, "price_cents", None),
     )
-    return post_only, aggressiveness, "limit", resolved_tif.tif
+    return post_only, aggressiveness, "limit", _final_tif
 
 
 def _apply_exit_marketable_ioc(intent: OrderIntent, state: Optional[Any] = None) -> None:
@@ -8279,7 +8303,9 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
       - Legacy ``time_in_force`` values (ioc/fok/gtc/gtt) are honored; ``gtt``
         requires a future ``order_expiration_ts`` or is treated as GTC with the
         configured rest horizon.
-      - Orders near expiry (<= ``ioc_threshold`` seconds) are forced to IOC.
+      - Orders near expiry (<= ``ioc_threshold`` seconds) are forced to IOC,
+        except resting-posture (post_only / maker / passive_quote) intents
+        which must keep a resting TIF — the venue rejects post_only+IOC.
     """
     from merid.event_venues.kalshi.market_state import (
         get_kalshi_market_state_store,
@@ -8320,7 +8346,17 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
     if getattr(intent, "reduce_only", False):
         return ResolvedTIF("IOC")
 
-    # Near expiry: don't rest a limit order; force IOC regardless of role.
+    # Near expiry: don't rest a limit order; force IOC regardless of role —
+    # except resting-posture intents.  post_only is a venue contract (the
+    # order MUST rest; Kalshi rejects post_only+IOC/FOK outright), and
+    # maker/passive_quote modes resolve to post_only=True downstream.
+    # Forcing IOC here recreated that invalid combo for late pinned_fav
+    # maker entries inside the 45-120s overlap (KXSOL15M-26NOV240130-30,
+    # 2026-11-24) — the client wire layer rejected it.  Resting orders
+    # near expiry are already bounded by max_rest_seconds / GTT expiration
+    # and the pre-expiry cancel path; silently converting maker->taker
+    # would also change the fee economics the lane's EV floor was admitted
+    # under.
     secs: Optional[float] = None
     try:
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
@@ -8330,7 +8366,13 @@ def _resolve_tif(intent: OrderIntent) -> ResolvedTIF:
             secs = float(st.seconds_to_expiry)
     except Exception:
         secs = None
-    if secs is not None and secs <= ioc_threshold:
+    _resting_posture = bool(getattr(intent, "post_only", False)) or (
+        str(getattr(intent, "execution_mode", None) or "")
+        .strip()
+        .lower()
+        in ("maker", "passive_quote")
+    )
+    if secs is not None and secs <= ioc_threshold and not _resting_posture:
         return ResolvedTIF("IOC")
 
     # Resolve execution mode: explicit -> legacy TIF / aggressiveness/post_only heuristic.
