@@ -159,6 +159,60 @@ class TestDequeueValidator:
         ) == (True, None, None)
 
 
+class TestRejectedSnapshotSeqAccounting:
+    """2026-11-24: subscribe-time marker snapshots are rejected for missing
+    book keys but still consume a sid seq.  The seq must be accounted before
+    validation gates return early — otherwise each rejected snapshot surfaces
+    ~1s later as an unexplained WS-SID-SEQUENCE-GAP that invalidates every
+    book multiplexed on the subscription (observed live: gap=5 after every
+    5-market subscribe burst)."""
+
+    @staticmethod
+    def _marker_snapshot(sid: int, seq: int, ticker: str) -> dict:
+        # Kalshi's subscribe-time snapshot marker: sequenced, but the msg
+        # payload carries no bids/asks/no/yes book keys.
+        return {
+            "type": "orderbook_snapshot",
+            "sid": sid,
+            "seq": seq,
+            "msg": {"market_ticker": ticker},
+        }
+
+    def test_rejected_snapshot_still_advances_sid_cursor(self, store):
+        ticker = "KXBTC15M-26NOV241400-00"
+        result = store.apply_orderbook_message(
+            self._marker_snapshot(1, 100, ticker), via="bridge_queue"
+        )
+        assert result is None  # rejected: no book keys
+        # The seq was still consumed — the sid cursor must reflect it so the
+        # next frame on the subscription is contiguous, not a phantom gap.
+        assert store._sid_last_seq[1] == 100
+        assert store._check_sid_delta_sequence(1, 101, "KXETH15M-26NOV241400-00") == 0
+
+    def test_rejected_snapshot_gap_still_invalidates(self, store):
+        ticker = "KXBTC15M-26NOV241400-00"
+        store.apply_orderbook_message(
+            self._marker_snapshot(1, 100, ticker), via="bridge_queue"
+        )
+        store._handle_sid_sequence_gap = MagicMock()
+        # seq 105 skips 101-104 — a real gap revealed by a rejected snapshot
+        # must still fail closed across the shared subscription.
+        store.apply_orderbook_message(
+            self._marker_snapshot(1, 105, "KXETH15M-26NOV241400-00"),
+            via="bridge_queue",
+        )
+        assert store._handle_sid_sequence_gap.call_count == 1
+        args = store._handle_sid_sequence_gap.call_args.args
+        assert args[0] == 1 and args[2] == 4
+
+    def test_non_bridge_via_does_not_touch_sid_cursor(self, store):
+        ticker = "KXBTC15M-26NOV241400-00"
+        store.apply_orderbook_message(
+            self._marker_snapshot(1, 100, ticker), via="rest_bootstrap"
+        )
+        assert 1 not in store._sid_last_seq
+
+
 class TestUpdateIntervalMs:
     def test_default_realtime(self, monkeypatch):
         monkeypatch.delenv("MERID_KALSHI_OB_UPDATE_INTERVAL_MS", raising=False)

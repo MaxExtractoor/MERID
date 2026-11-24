@@ -4150,6 +4150,30 @@ class KalshiMarketStateStore:
         #     ticker, channel
         # )
 
+        # 2026-11-24: WS orderbook_snapshot frames consume a sid seq even when
+        # the payload is later rejected (Kalshi sends minimal/empty marker
+        # snapshots on every subscribe — observed as 5 rejections per 5-market
+        # subscribe burst, each leaving its seq unaccounted and surfacing ~1s
+        # later as an unexplained WS-SID-SEQUENCE-GAP that invalidates every
+        # book on the shared subscription).  Account the seq BEFORE any
+        # validation gate can return early.  Deltas are already accounted at
+        # bridge enqueue; REST/manual vias carry no sid seq.
+        _snap_sid_seq_done = False
+        if via == "bridge_queue" and channel == "orderbook_snapshot":
+            _early_sid = msg.get("sid")
+            _early_seq = msg.get("seq") if msg.get("seq") is not None else msg.get("sequence")
+            try:
+                if _early_sid is None or _early_seq is None or isinstance(_early_seq, bool):
+                    raise ValueError("snapshot missing subscription sequence")
+                _early_seq_i = int(_early_seq)
+            except (TypeError, ValueError):
+                _early_seq_i = None
+            if _early_sid is not None and _early_seq_i is not None:
+                _snap_sid_seq_done = True
+                _early_check = self._check_sid_delta_sequence(_early_sid, _early_seq_i, ticker)
+                if _early_check > 0:
+                    self._handle_sid_sequence_gap(_early_sid, _early_seq_i, _early_check, ticker)
+
         # DISABLED: Excessive diagnostic logging for snapshot/delta messages - causing slow WS callbacks
         # if "snapshot" in channel.lower() or "delta" in channel.lower():
         #     import json
@@ -4519,9 +4543,10 @@ class KalshiMarketStateStore:
                         self._ws_book_requires_snapshot.add(ticker)
                     self._mark_book_untrusted_and_resync(ticker, "invalid_ws_snapshot_sequence")
                 return None
-            _sid_check = self._check_sid_delta_sequence(_s_sid, _s_seq, ticker)
-            if _sid_check > 0:
-                self._handle_sid_sequence_gap(_s_sid, _s_seq, _sid_check, ticker)
+            if not _snap_sid_seq_done:
+                _sid_check = self._check_sid_delta_sequence(_s_sid, _s_seq, ticker)
+                if _sid_check > 0:
+                    self._handle_sid_sequence_gap(_s_sid, _s_seq, _sid_check, ticker)
             # 2026-11-09: the replay guard must compare against this ticker's
             # applied book position (``ob.last_seq``), not the shared sid
             # stream.  ``_sid_last_seq`` is advanced at enqueue time by
