@@ -1101,3 +1101,105 @@ class TestOrderPriceAdjustment:
         # Should be adjusted but not below mid (min 51)
         assert adjusted_price >= 51
         assert adjusted_price <= 52
+
+
+# =============================================================================
+# 2026-11-23: stamped min_required_edge lane-floor alignment
+# =============================================================================
+# Live evidence: settlement_convergence BTC YES candidates with 2.65%/2.84%
+# edge were killed by the flat 3% "test expectation" floor, and tail-lane
+# candidates by the flat 2c/0.07c fee gate — both ignoring the lane-stamped
+# min_required_edge bound every downstream gate honors.
+
+def test_signal_validation_honors_stamped_min_required_edge():
+    """Bounded-lane intents use their stamped floor, not the flat 3% constant."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    from unittest.mock import patch, Mock
+
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=93,
+        count=6,
+        edge_pct=0.0265,   # 2.65% edge — below legacy 3% floor, above 0.30c lane floor
+        confidence=0.65,
+        model_prob=0.9565,
+        rationale="trade_decision: settlement_convergence test",
+        decision_lane="settlement_convergence",
+        min_required_edge=0.003,  # settlement deep-band floor (0.30c)
+        source="merid.prediction.agent_grid_15m",
+    )
+
+    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter') as mock_adapter:
+        mock_profile = Mock()
+        mock_profile.fee_aware_edge_enabled = False
+        mock_adapter.return_value.profile = mock_profile
+        error = _validate_signal_metadata(intent)
+
+    assert not (error or "").startswith("edge_pct_too_low"), \
+        f"Stamped lane floor should replace flat 3%: {error}"
+
+
+def test_signal_validation_unstamped_keeps_legacy_floor():
+    """Intents without a stamped floor keep the legacy 3% sanity bound."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    from unittest.mock import patch, Mock
+
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=10,
+        edge_pct=0.025,
+        confidence=0.65,
+        model_prob=0.50,
+        rationale="velocity_based: velocity=0.000050 edge_pct=2.5%",
+        source="merid.prediction.agent_grid_15m",
+    )
+
+    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter') as mock_adapter:
+        mock_profile = Mock()
+        mock_profile.fee_aware_edge_enabled = False
+        mock_adapter.return_value.profile = mock_profile
+        error = _validate_signal_metadata(intent)
+
+    assert error == "edge_pct_too_low:0.0250"
+
+
+def test_fee_aware_gate_uses_stamped_floor_and_role_fee():
+    """Fee gate honors min_required_edge and maker/taker fee identity."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    from unittest.mock import patch, Mock
+
+    # 2% probability edge at 95c = 2.0c gross.  Maker fee ~0.08c, stamped
+    # floor 0.30c -> net ~1.9c >= 0.30c passes.  Legacy flat gate required
+    # 2.0c net and used edge_pct*price (1.9c) -> failed.
+    intent = OrderIntent(
+        ticker="KXETH15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=95,
+        count=5,
+        edge_pct=0.02,
+        confidence=0.65,
+        model_prob=0.97,
+        rationale="trade_decision: settlement_convergence test",
+        decision_lane="settlement_convergence",
+        min_required_edge=0.003,
+        post_only=True,
+        source="merid.prediction.agent_grid_15m",
+    )
+
+    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter') as mock_adapter:
+        mock_profile = Mock()
+        mock_profile.fee_aware_edge_enabled = True
+        mock_profile.fee_aware_edge_min_edge_cents = 2.0
+        mock_profile.fee_aware_edge_fee_per_contract = 0.07
+        mock_profile.market_microstructure_enabled = False
+        mock_adapter.return_value.profile = mock_profile
+        error = _validate_signal_metadata(intent)
+
+    assert not (error or "").startswith("fee_aware_gate_failed"), \
+        f"Stamped floor + maker fee should pass: {error}"

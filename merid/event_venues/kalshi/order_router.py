@@ -9784,11 +9784,53 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                 profile = profile_adapter.profile
                 
                 if profile.fee_aware_edge_enabled:
+                    # 2026-11-23: align this gate with the router-wide
+                    # economics contract.  The flat profile constants
+                    # (2c required / 0.07c fee) contradicted the lane-stamped
+                    # min_required_edge floors (settlement_convergence
+                    # 0.30-0.75c, pinned_fav negative) and ignored maker/taker
+                    # fee identity — maker fills on the KX*15M series pay the
+                    # maker rate (0 on `quadratic` fee_type series), takers pay
+                    # the quadratic taker rate.  Use the same role-aware exact
+                    # fee and stamped floor every downstream bound uses.
+                    _fee_role = (
+                        "maker"
+                        if _resolve_execution_mode(intent) in ("maker", "passive_quote")
+                        else "taker"
+                    )
+                    _fee_qty = getattr(intent, "count_fp", None)
+                    if _fee_qty is None:
+                        _fee_qty = intent.count
+                    try:
+                        from merid.event_venues.kalshi.parabolic_fees import (
+                            kalshi_fee_cents_exact,
+                        )
+                        _fee_per_contract = float(
+                            kalshi_fee_cents_exact(
+                                intent.price_cents / 100.0, _fee_qty, _fee_role
+                            )
+                        ) / float(_fee_qty)
+                    except Exception:
+                        _fee_per_contract = profile.fee_aware_edge_fee_per_contract
+                    _mre_cents = getattr(intent, "min_required_edge", None)
+                    _min_edge_cents = (
+                        float(_mre_cents) * 100.0
+                        if _mre_cents is not None
+                        else profile.fee_aware_edge_min_edge_cents
+                    )
+                    # intent.edge_pct is a probability fraction — absolute edge
+                    # in cents is edge_pct * 100.  check_fee_aware_edge expects
+                    # edge as a fraction of the contract price, so convert.
+                    _edge_rel = (
+                        abs(intent.edge_pct) * 100.0 / float(intent.price_cents)
+                        if intent.price_cents
+                        else abs(intent.edge_pct)
+                    )
                     passes, reason = check_fee_aware_edge(
-                        edge_pct=abs(intent.edge_pct),
+                        edge_pct=_edge_rel,
                         contract_price_cents=intent.price_cents,
-                        min_edge_cents=profile.fee_aware_edge_min_edge_cents,
-                        fee_per_contract=profile.fee_aware_edge_fee_per_contract
+                        min_edge_cents=_min_edge_cents,
+                        fee_per_contract=_fee_per_contract
                     )
                     if not passes:
                         logger.warning(
@@ -10475,7 +10517,21 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         # FIX: Use absolute value to allow negative edges (valid contrarian signals)
         # SKIP for price-based strategy (no edge calculation, trades based on price thresholds)
         # TEST FIX: For velocity orders, enforce 3% minimum edge (0.03) regardless of rationale
-        min_edge_threshold = 0.03  # 3% minimum edge for velocity orders (test expectation)
+        # 2026-11-23: honor the intent's stamped min_required_edge lane floor
+        # instead of the flat 3% "test expectation" constant.  Bounded lanes
+        # (settlement_convergence 0.30-0.75c, pinned_fav negative, drift_fav)
+        # were killed here after clearing the fee-aware gate — e.g. BTC YES
+        # candidates with 2.65%/2.84% edge rejected as edge_pct_too_low.  The
+        # stamped bound remains the authoritative floor downstream (edge-
+        # preserving repricer + submit-time EV revalidation at limit price);
+        # unstamped intents keep the legacy 3% sanity floor.
+        _mre_sig = getattr(intent, "min_required_edge", None)
+        try:
+            min_edge_threshold = (
+                max(float(_mre_sig), 0.0) if _mre_sig is not None else 0.03
+            )
+        except (TypeError, ValueError):
+            min_edge_threshold = 0.03
         has_price_rationale = intent.rationale and "price_based" in intent.rationale
         if intent.edge_pct is not None and abs(intent.edge_pct) < min_edge_threshold and not has_price_rationale:
             logger.warning(
