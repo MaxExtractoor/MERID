@@ -3832,6 +3832,15 @@ class KalshiWebSocket(EventVenueStream):
                         _ctl_sid = _ctl_msg.get("sid")
                     if _ctl_seq is None:
                         _ctl_seq = _ctl_msg.get("seq")
+                # Coerce a stringified seq — a control frame carrying
+                # "seq": "123" would otherwise fail the int check below and
+                # leak its sid sequence silently.
+                if isinstance(_ctl_seq, str):
+                    try:
+                        _ctl_seq = int(_ctl_seq)
+                    except ValueError:
+                        pass
+                if isinstance(_ctl_msg, dict):
                     # A frame that declares the orderbook_delta channel is
                     # self-identifying even while ``_subscription_ids`` is
                     # momentarily cleared by an unsubscribe ack mid-rollover.
@@ -3853,6 +3862,20 @@ class KalshiWebSocket(EventVenueStream):
                         "sid": _ctl_sid,
                         "seq": _ctl_seq,
                     }
+                # 2026-11-24: a seq-bearing frame on the *orderbook* sid that
+                # fails conversion is dropped below without accounting its seq
+                # — exactly the leak behind residual rollover gaps after the
+                # marker-snapshot fix.  Other sids have their own seq spaces
+                # and are none of our concern; log only orderbook-sid misses.
+                if (
+                    _ctl_sid is not None
+                    and _ctl_seq is not None
+                    and (_ob_sid is not None and _ctl_sid == _ob_sid or _is_ob)
+                ):
+                    logger.warning(
+                        "[WS-SEQ-UNACCOUNTED] type=%s sid=%s seq=%s ob_sid=%s is_ob=%s",
+                        channel, _ctl_sid, _ctl_seq, _ob_sid, _is_ob,
+                    )
 
             # Infer channel from payload structure if channel is empty
             # Kalshi sometimes sends valid orderbook deltas with empty channel
