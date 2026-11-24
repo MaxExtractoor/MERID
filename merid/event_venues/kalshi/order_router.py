@@ -5755,6 +5755,31 @@ async def _revalidate_entry_economics(
         if (_p_sel_fresh is not None and _p_sel0_f is not None)
         else 0.0
     )
+    # pinned_fav's admitted edge is empirical cell evidence (realized pin
+    # win-rate), not the Bachelier model p.  Revalidating it against fresh
+    # model-p decay re-imposes the very uncertainty the lane overrides — the
+    # model mean-reverts on favorites while the settlement-pin effect the lane
+    # monetizes is invisible to it.  Exempt the model-p term for this lane;
+    # the real price delta, edge cap, and post_only/maker mechanics still bound
+    # the fill (a broken pin never touches our resting bid; a runaway pin
+    # leaves it unfilled).  MERID_PINNED_FAV_REVAL_MODEL_P=0 restores the
+    # decay check.
+    _pf_lane = str(getattr(intent, "decision_lane", "") or "") == "pinned_fav"
+    _pf_exempt_model_p = _pf_lane and os.environ.get(
+        "MERID_PINNED_FAV_REVAL_MODEL_P", "1"
+    ).strip().lower() not in ("0", "false", "no", "off")
+    if _pf_exempt_model_p:
+        _delta_p = 0.0
+        _prov["pinned_fav_model_p_exempt"] = True
+        # Safety floor: exempt mean-reversion noise, but still fail closed if
+        # the fresh model p collapses below the reachability bound — that is a
+        # genuine pin-break signal, not lane-overridden uncertainty.
+        _pf_min_p = float(os.environ.get("MERID_PINNED_FAV_REVAL_MIN_P", "0.80"))
+        if _p_sel_fresh is not None and _p_sel_fresh < _pf_min_p:
+            return _rej(
+                f"stale_decision_model_edge_decayed:"
+                f"pf_p={_p_sel_fresh:.3f}<{_pf_min_p:.2f}"
+            )
     _ev_new = float(_ev0) + float(_delta_px) + float(_delta_p)
     _prov["ev_new"] = _ev_new
     if _ev_new < _req_cents:
