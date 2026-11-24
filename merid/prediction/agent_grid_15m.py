@@ -8886,6 +8886,7 @@ class LeanAgent15m:
                     )
                 )
                 return None
+            sd_state = None
             try:
                 from merid.data.cf_rti_adapter import get_rti_history
 
@@ -8955,27 +8956,39 @@ class LeanAgent15m:
                         asset, _sd_pub_err,
                     )
             except Exception as sd_exc:
-                # Expected near the settlement-sample window boundary: elapsed
-                # slots exist before the sampler has recorded any values.
-                # Fail-closed refuse is correct; the reason is already in the
-                # message and the durable reject record — no stack spam.
+                # 2026-11-24: degrade instead of hard-veto.  A build failure
+                # (incomplete/inconsistent elapsed settlement samples near the
+                # window boundary, or RTI feed jitter) previously returned None
+                # here, vetoing EVERY lane for this asset/tick — including lanes
+                # that never consume the settlement distribution.  Now continue
+                # with settlement_distribution=None, identical to the
+                # V2-flag-off path: the settlement lane cannot claim
+                # banked-sample edge without the distribution so it simply does
+                # not fire this eval, while all other lanes evaluate normally.
+                # _last_v2_dist_status persists "build_failed" for audit.
+                self._last_v2_dist_status = "build_failed"
+                _sd_diag = ""
+                try:
+                    if sd_state is not None:
+                        _sd_diag = (
+                            " phase=%s observed=%s remaining=%s tte=%s"
+                            % (
+                                getattr(sd_state, "phase", "?"),
+                                getattr(sd_state, "observed_count", "?"),
+                                getattr(sd_state, "remaining_count", "?"),
+                                getattr(sd_state, "seconds_to_expiry", "?"),
+                            )
+                        )
+                except Exception:
+                    pass
                 logger.warning(
-                    "[SETTLEMENT-DISTRIBUTION] asset=%s V2 enabled but distribution build failed; refusing entry: %s",
+                    "[SETTLEMENT-DISTRIBUTION] asset=%s V2 build failed; degrading to "
+                    "Bachelier (settlement lane disabled this eval)%s: %s",
                     asset,
+                    _sd_diag,
                     sd_exc,
                 )
-                self._record_signal_rejection(
-                    "settlement_distribution_unavailable",
-                    **self._build_trade_decision_rejection_context(
-                        asset,
-                        spot_price,
-                        bachelier_spot_price,
-                        settlement_reference,
-                        seconds_to_expiry,
-                        extra={"settlement_distribution_error": str(sd_exc)},
-                    )
-                )
-                return None
+                settlement_distribution = None
 
         run_id = getattr(self, "run_id", None) or f"{self.config.name}_{time.time():.6f}_{uuid.uuid4().hex[:8]}"
 
