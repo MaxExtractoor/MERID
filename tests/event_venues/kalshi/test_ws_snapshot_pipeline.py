@@ -372,6 +372,16 @@ def test_rollover_control_frames_account_sid_sequence(pipeline):
         "type": "subscribed",
         "msg": {"channel": "ticker", "sid": 9, "seq": 3},
     }) is None
+    # Channel-declared orderbook control still converts after the sid
+    # mapping was cleared mid-rollover (unsubscribe ack pops it).
+    ws._subscription_ids.pop("orderbook_delta", None)
+    event = ws._parse_message({
+        "type": "unsubscribed",
+        "msg": {"channel": "orderbook_delta", "sid": 4, "seq": 11},
+    })
+    assert event is not None
+    assert event["type"] == "orderbook_sequence_control"
+    assert event["sid"] == 4 and event["seq"] == 11
 
 
 def test_check_sequence_ignores_orderbook_sid_control_frames(pipeline):

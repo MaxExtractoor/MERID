@@ -3826,21 +3826,31 @@ class KalshiWebSocket(EventVenueStream):
                 _ob_sid = self._subscription_ids.get("orderbook_delta")
                 _ctl_msg = data.get("msg")
                 _ctl_sid = data.get("sid")
-                if _ctl_sid is None and isinstance(_ctl_msg, dict):
-                    _ctl_sid = _ctl_msg.get("sid")
                 _ctl_seq = data.get("seq")
-                if _ctl_seq is None and isinstance(_ctl_msg, dict):
-                    _ctl_seq = _ctl_msg.get("seq")
+                if isinstance(_ctl_msg, dict):
+                    if _ctl_sid is None:
+                        _ctl_sid = _ctl_msg.get("sid")
+                    if _ctl_seq is None:
+                        _ctl_seq = _ctl_msg.get("seq")
+                    # A frame that declares the orderbook_delta channel is
+                    # self-identifying even while ``_subscription_ids`` is
+                    # momentarily cleared by an unsubscribe ack mid-rollover.
+                    _is_ob = (
+                        _ctl_msg.get("channel") == "orderbook_delta"
+                        or (_ob_sid is not None and _ctl_sid == _ob_sid)
+                    )
+                else:
+                    _is_ob = _ob_sid is not None and _ctl_sid == _ob_sid
                 if (
-                    _ob_sid is not None
-                    and _ctl_sid == _ob_sid
+                    _is_ob
+                    and _ctl_sid is not None
                     and isinstance(_ctl_seq, int)
                     and not isinstance(_ctl_seq, bool)
                 ):
                     return {
                         **data,
                         "type": "orderbook_sequence_control",
-                        "sid": _ob_sid,
+                        "sid": _ctl_sid,
                         "seq": _ctl_seq,
                     }
 
