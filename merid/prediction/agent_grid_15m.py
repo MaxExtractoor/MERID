@@ -8964,7 +8964,11 @@ class LeanAgent15m:
                     annualized_vol=resolved_dist_vol,
                     max_missing_samples=_settlement_max_missing_samples(),
                 )
-                self._last_v2_dist_status = "built"
+                self._last_v2_dist_status = (
+                    "built+auth"
+                    if getattr(settlement_distribution, "used_authoritative_window", False)
+                    else "built"
+                )
                 # Publish the settlement-distribution probability so exit-side
                 # evaluators consume the same final-60-second RTI-average fair
                 # value that authorized the entry, not the point-expiry

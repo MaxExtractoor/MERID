@@ -84,6 +84,9 @@ class SettlementDistribution:
     forecast_method: str
     model_version: str = _MODEL_VERSION
     filled_count: int = 0
+    # True when Kalshi's own last_60s_windowed_average_15min accumulator
+    # supplied the banked observed average+count (vs rti_history slots).
+    used_authoritative_window: bool = False
 
 
 @dataclass(frozen=True)
@@ -502,6 +505,7 @@ def compute_settlement_distribution(
             phase="expired",
             forecast_method="observed_average",
             filled_count=filled_count,
+            used_authoritative_window=_auth is not None,
         )
 
     if state.phase == "pre_window":
@@ -565,6 +569,7 @@ def compute_settlement_distribution(
         phase="in_window",
         forecast_method="partial_realization_forward_average",
         filled_count=filled_count,
+        used_authoritative_window=_auth is not None,
     )
 
 
