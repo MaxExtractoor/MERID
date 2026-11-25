@@ -806,10 +806,18 @@ MERID_TAIL_LOSS_DROP_NO_EDGE_CENTS  shallower drop for no-edge entries
     _loss_stops_dis = os.environ.get("MERID_DISABLE_LOSS_STOPS", "0").strip().lower() in (
         "1", "true", "yes", "on"
     )
+    # 2026-11-25: scoped re-arm — when the no-edge salvage ignore-disable is
+    # set, keep evaluating so bounded-lane (entry_edge<=0) positions can emit
+    # their designed drop/floor salvage.  Model-edge positions still suppress
+    # downstream via _no_edge_salvage/_floor_salvage gates, so the eval is
+    # telemetry-complete without re-arming model-edge stops.
+    _no_edge_ignore_dis = os.environ.get(
+        "MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
     _tail_enabled = (
-        not _loss_stops_dis
-        and os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
+        os.environ.get("MERID_TAIL_LOSS_ENABLED", "1").strip().lower()
         in ("1", "true", "yes", "on")
+        and (not _loss_stops_dis or _no_edge_ignore_dis)
     )
 
     return {
@@ -1144,6 +1152,19 @@ def _lock_threshold_for(position) -> int:
             )
             if entry is not None:
                 return max(2, min(97, int(entry) + gain))
+        except Exception:
+            pass
+    # 2026-11-25 (entry/exit alignment): pinned_fav entries at 94-96c carry a
+    # +3-4c convergence claim (streaming_calibration mid/late cells) — the
+    # generic entry+5 lock clamps to 98c and only fires on the settlement-
+    # minute lottery.  A lane-scoped +3c lock (97-98c band) banks the
+    # measured convergence pop mid-window; pin-breaks still fall through to
+    # the no-edge tail-loss salvage.  Rollback: set gain <=0 or remove lane.
+    if lane == "pinned_fav":
+        try:
+            pf_gain = int(os.getenv("MERID_PINNED_FAV_LOCK_GAIN_CENTS", "3"))
+            if pf_gain > 0 and entry is not None:
+                return max(2, min(98, int(entry) + pf_gain))
         except Exception:
             pass
     # 2026-10-26: Dynamic profit lock for favorite entries (>=75c).

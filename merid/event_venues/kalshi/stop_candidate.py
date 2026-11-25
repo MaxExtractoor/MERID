@@ -333,11 +333,19 @@ def no_edge_loss_salvage_enabled() -> bool:
     misclassify the whole cohort.  Model-edge positions (all claims > 0)
     keep the 2026-10-20 ride-to-settlement posture.
     ``MERID_NO_EDGE_LOSS_SALVAGE_ENABLED=0`` restores the full disable.
-    ``MERID_DISABLE_LOSS_STOPS=1`` (2026-11-16) force-disables regardless.
+    ``MERID_DISABLE_LOSS_STOPS=1`` (2026-11-16) force-disables regardless —
+    unless ``MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE=1`` re-arms this
+    scoped carve-out (2026-11-25: bounded-lane pin breaks rode unbounded —
+    DOGE YES@94 -156c, XRP NO@92-equiv -474c — while the designed 14c
+    no-edge drop floor stayed suppressed; model-edge entries keep the
+    ride-to-settlement posture either way).
     """
     return _env_bool(
         "MERID_NO_EDGE_LOSS_SALVAGE_ENABLED", True
-    ) and not loss_stops_disabled()
+    ) and (
+        not loss_stops_disabled()
+        or _env_bool("MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE", False)
+    )
 
 
 def model_edge_tail_floor_salvage_enabled() -> bool:
@@ -641,6 +649,45 @@ def _candidate_floor_entry_edge(candidate: "StopCandidate") -> Optional[float]:
         except (TypeError, ValueError):
             pass
     return getattr(candidate, "entry_edge_cents", None)
+
+
+def _candidate_no_edge_claim(candidate: "StopCandidate") -> bool:
+    """True when the candidate's *stamped entry claims* are non-positive —
+    a bounded-lane (pinned_fav / quota / probe) admission that never carried
+    a ride-to-settlement thesis.
+
+    2026-11-25: unlike ``_candidate_floor_entry_edge`` this deliberately
+    ignores the ``entry_edge_cents`` current-edge fallback — the bypass must
+    identify the admission cohort, not a temporarily-underwater model-edge
+    entry (the dips-recover evidence ``MERID_DISABLE_LOSS_STOPS`` protects).
+    """
+    claims = [
+        v
+        for v in (
+            getattr(candidate, "claimed_entry_edge_pct", None),
+            getattr(candidate, "claimed_entry_edge", None),
+        )
+        if v is not None
+    ]
+    if not claims:
+        return False
+    try:
+        return min(float(v) for v in claims) <= 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _candidate_no_edge_salvage_armed(candidate: "StopCandidate") -> bool:
+    """True when this candidate is a re-armable no-edge price-depth salvage:
+    LOSS_CAP/HARD_STOP trigger + salvage carve-out enabled + stamped
+    non-positive entry claims.  Consulted at every ``loss_stops_disabled``
+    choke point so the scoped bypass stays consistent."""
+    return (
+        str(getattr(candidate, "trigger_reason", "") or "").upper()
+        in _PRICE_DEPTH_LOSS_TRIGGERS
+        and no_edge_loss_salvage_enabled()
+        and _candidate_no_edge_claim(candidate)
+    )
 
 
 # Settlement-aware phase constants (seconds).
@@ -2331,15 +2378,29 @@ async def _maybe_submit_stop_candidate_impl(
     # by a loss stop and may ride to settlement or exit at profit.  Operational
     # triggers (POSITION_MISMATCH, STALE_DATA, OPERATIONAL_RISK) stay active.
     if loss_stops_disabled() and str(candidate.trigger_reason).upper() in LOSS_STOP_TRIGGER_REASONS:
-        logger.info(
-            "[STOP-CANDIDATE-SUPPRESSED] candidate=%s ticker=%s trigger=%s "
-            "- loss/thesis stop suppressed by MERID_DISABLE_LOSS_STOPS; rides to settlement or profit exit",
-            candidate.candidate_id,
-            candidate.market_ticker,
-            candidate.trigger_reason,
-        )
-        record_stop_candidate(candidate)
-        return None
+        # 2026-11-25: scoped re-arm — a no-edge (bounded-lane) price-depth
+        # salvage carries stamped non-positive entry claims and bypasses the
+        # global disable when MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE=1.
+        # Model-edge stops and every other trigger stay suppressed.
+        if _candidate_no_edge_salvage_armed(candidate):
+            logger.warning(
+                "[STOP-CANDIDATE-NO-EDGE-SALVAGE] candidate=%s ticker=%s "
+                "trigger=%s - no-edge loss salvage re-armed under "
+                "MERID_DISABLE_LOSS_STOPS (bounded-lane admission)",
+                candidate.candidate_id,
+                candidate.market_ticker,
+                candidate.trigger_reason,
+            )
+        else:
+            logger.info(
+                "[STOP-CANDIDATE-SUPPRESSED] candidate=%s ticker=%s trigger=%s "
+                "- loss/thesis stop suppressed by MERID_DISABLE_LOSS_STOPS; rides to settlement or profit exit",
+                candidate.candidate_id,
+                candidate.market_ticker,
+                candidate.trigger_reason,
+            )
+            record_stop_candidate(candidate)
+            return None
 
     if not (stop_submission_enabled() or force) or _env_bool("MERID_STOP_SUBMISSION_KILL", False):
         kill = _env_bool("MERID_STOP_SUBMISSION_KILL", False)
@@ -2774,6 +2835,10 @@ async def _maybe_submit_stop_candidate_impl(
         candidate.trigger_reason, "STOP_LOSS"
     )
 
+    # 2026-11-25: mark re-armed no-edge salvages so the order-router's
+    # MERID_DISABLE_LOSS_STOPS veto can exempt exactly this cohort.
+    _no_edge_salvage_marker = _candidate_no_edge_salvage_armed(candidate)
+
     intent = OrderIntent(
         ticker=candidate.market_ticker,
         side=held_side,
@@ -2808,6 +2873,9 @@ async def _maybe_submit_stop_candidate_impl(
         parent_entry_order_id=parent_entry_order_id,
         parent_entry_signal_id=parent_entry_signal_id,
         snapshot_age_ms=float(candidate.quote_age_ms or 0),
+        metadata=(
+            {"no_edge_salvage": True} if _no_edge_salvage_marker else None
+        ),
         # Structured emergency authorization: the classification computed at
         # the top of this function plus the issuing controller identity.
         # The firewall validates these fields — not ``reason`` — before

@@ -8230,6 +8230,23 @@ def _is_stop_loss_exit_denied(intent: OrderIntent) -> Optional[str]:
     }
 
     if raw_reason in STOP_LOSS_REASONS:
+        # 2026-11-25: scoped no-edge salvage bypass — a bounded-lane
+        # (entry_edge<=0) LOSS_CAP/HARD_STOP tail-floor exit re-armed under
+        # MERID_DISABLE_LOSS_STOPS carries metadata.no_edge_salvage=True.
+        # Only that stamped cohort is exempt; every other loss stop stays
+        # denied.  See stop_candidate._candidate_no_edge_salvage_armed.
+        try:
+            _md = getattr(intent, "metadata", None)
+            if (
+                isinstance(_md, dict)
+                and _md.get("no_edge_salvage") is True
+                and os.getenv(
+                    "MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE", "0"
+                ).strip().lower() in ("1", "true", "yes", "on")
+            ):
+                return None
+        except Exception:
+            pass
         return "stop_loss_disabled_by_policy"
 
     try:
