@@ -403,16 +403,34 @@ class KalshiCfRtiStream:
         last_60s_15min = msg.get("last_60s_windowed_average_15min")
         if isinstance(last_60s_15min, dict):
             last_60s_15min_value = last_60s_15min.get("value")
+            last_60s_15min_size = last_60s_15min.get("window_size")
+            last_60s_15min_start = last_60s_15min.get("window_start_ts_ms")
+            last_60s_15min_end = last_60s_15min.get("window_end_ts_exclusive")
         else:
             last_60s_15min_value = None
+            last_60s_15min_size = None
+            last_60s_15min_start = None
+            last_60s_15min_end = None
 
         data: Dict[str, Any] = dict(raw_data)
         if "received_at" not in data and received_at is not None:
             data["received_at"] = received_at
         if "average_60s" not in data and avg_60s_value is not None:
             data["average_60s"] = avg_60s_value
+        # 2026-11-24: propagate the AUTHORITATIVE quarter-hour settlement
+        # accumulator (Kalshi's own running average + second-indexed count +
+        # window bounds, present only in the final minute before :00/:15/:30/:45
+        # close).  The settlement lane previously reconstructed the banked
+        # samples from raw 1Hz prints and failed closed on any missing slot;
+        # this field is the exact value Kalshi settles on.
         if "last_60s_average_15min" not in data and last_60s_15min_value is not None:
             data["last_60s_average_15min"] = last_60s_15min_value
+        if "last_60s_window_size" not in data and last_60s_15min_size is not None:
+            data["last_60s_window_size"] = last_60s_15min_size
+        if "last_60s_window_start_ms" not in data and last_60s_15min_start is not None:
+            data["last_60s_window_start_ms"] = last_60s_15min_start
+        if "last_60s_window_end_ms" not in data and last_60s_15min_end is not None:
+            data["last_60s_window_end_ms"] = last_60s_15min_end
         if "seq" not in data and seq is not None:
             data["seq"] = seq
         if "sid" not in data and sid is not None:

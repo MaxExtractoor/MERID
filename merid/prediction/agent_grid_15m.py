@@ -186,6 +186,7 @@ except ImportError:
 # Disabled by default until shadow validation is complete.
 try:
     from merid.prediction.settlement_distribution import (
+        AuthoritativeSettlementWindow,
         build_settlement_state,
         compute_settlement_distribution,
         SettlementDistribution,
@@ -8905,6 +8906,27 @@ class LeanAgent15m:
                         except Exception:
                             latest_rti_ts = None
 
+                # Kalshi's own final-minute settlement accumulator
+                # (last_60s_windowed_average_15min): the exact banked average +
+                # second-indexed count the contract settles on.  Present only
+                # during (close-60s, close]; window alignment is validated
+                # downstream against the market expiry, so a stale frame simply
+                # falls back to per-second slot reconstruction.
+                _auth_window = None
+                if (cfb_observation is not None
+                        and getattr(cfb_observation, "settle_window_avg_decimal", None) is not None
+                        and getattr(cfb_observation, "settle_window_count", None) is not None
+                        and getattr(cfb_observation, "settle_window_end_ms", None) is not None):
+                    try:
+                        _auth_window = AuthoritativeSettlementWindow(
+                            observed_avg=cfb_observation.settle_window_avg_decimal,
+                            observed_count=int(cfb_observation.settle_window_count),
+                            window_end_ms=int(cfb_observation.settle_window_end_ms),
+                            window_start_ms=int(getattr(cfb_observation, "settle_window_start_ms", 0) or 0),
+                        )
+                    except Exception:
+                        _auth_window = None
+
                 sd_state = build_settlement_state(
                     ticker=ticker,
                     asset=asset,
@@ -8917,6 +8939,7 @@ class LeanAgent15m:
                     rti_history=rti_history,
                     source="cf_rti",
                     settlement_reference=settlement_reference,
+                    authoritative_window=_auth_window,
                 )
                 # Resolve volatility once so the distribution and the decision
                 # engine consume the same final vol (env override, realized, or

@@ -122,6 +122,16 @@ class CfbRtiObservation:
     raw_value: Optional[str] = None
     retained_digits: Optional[int] = None
     market_settlement_digits: Optional[int] = None
+    # 2026-11-24: Kalshi's authoritative quarter-hour settlement accumulator
+    # (``last_60s_windowed_average_15min`` on cfbenchmarks_value).  Present on
+    # observations only during the final minute before :00/:15/:30/:45 close.
+    # ``settle_window_avg_decimal`` is the running banked average;
+    # ``settle_window_count`` the second-indexed print count (:01->1 ... close->60);
+    # the *_ms fields bound the accumulation window for expiry alignment checks.
+    settle_window_avg_decimal: Optional[Decimal] = None
+    settle_window_count: Optional[int] = None
+    settle_window_start_ms: Optional[int] = None
+    settle_window_end_ms: Optional[int] = None
     # Internal pipeline diagnostics (monotonic clocks only)
     processing_ts_mono_ns: Optional[int] = None
     processing_age_ms: Optional[int] = None
@@ -560,6 +570,23 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         except (TypeError, ValueError):
             event_loop_lag_ms = None
 
+    # Authoritative quarter-hour settlement accumulator (final minute only).
+    settle_window_avg_decimal: Optional[Decimal] = None
+    _sw_raw = data.get("last_60s_average_15min")
+    if _sw_raw is not None:
+        _sw_parsed = parse_price(_sw_raw)
+        if _sw_parsed is not None and _sw_parsed.is_finite() and _sw_parsed > 0:
+            settle_window_avg_decimal = _sw_parsed
+    settle_window_count: Optional[int] = None
+    _swc = data.get("last_60s_window_size")
+    if _swc is not None:
+        try:
+            settle_window_count = int(_swc)
+        except (TypeError, ValueError):
+            settle_window_count = None
+    settle_window_start_ms = _parse_timestamp(data.get("last_60s_window_start_ms"))
+    settle_window_end_ms = _parse_timestamp(data.get("last_60s_window_end_ms"))
+
     return CfbRtiObservation(
         asset=asset,
         cfb_symbol=cfb_symbol,
@@ -580,6 +607,10 @@ def _parse_response_payload(asset: str, cfb_symbol: str, data: Dict[str, Any]) -
         execution_eligible=execution_eligible,
         price_source_health="healthy" if execution_eligible else "suspect",
         event_loop_lag_ms=event_loop_lag_ms,
+        settle_window_avg_decimal=settle_window_avg_decimal,
+        settle_window_count=settle_window_count,
+        settle_window_start_ms=settle_window_start_ms,
+        settle_window_end_ms=settle_window_end_ms,
     )
 
 

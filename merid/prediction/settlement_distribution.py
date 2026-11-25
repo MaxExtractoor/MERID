@@ -27,6 +27,21 @@ _MAX_FUTURE_REFERENCE_SKEW_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
+class AuthoritativeSettlementWindow:
+    """Kalshi's own running settlement accumulator (final minute only).
+
+    Sourced from ``last_60s_windowed_average_15min`` on the authenticated
+    ``cfbenchmarks_value`` channel: the exact banked average + second-indexed
+    print count the contract settles on, streamed live during (close-60s, close].
+    """
+
+    observed_avg: Decimal  # running banked average over the accumulation window
+    observed_count: int    # second-indexed prints banked (:01->1 ... close->60)
+    window_end_ms: int     # accumulation window close boundary (unix ms)
+    window_start_ms: int = 0  # accumulation window open boundary (unix ms)
+
+
+@dataclass(frozen=True)
 class SettlementState:
     """Snapshot of the settlement-relevant state at a decision instant."""
 
@@ -48,6 +63,10 @@ class SettlementState:
     phase: str  # "pre_window", "in_window", "expired", "invalid"
     source: str
     settlement_reference: str
+    # Authoritative banked-settlement inputs from Kalshi's own accumulator.
+    # When populated and window-aligned they supersede the reconstructed
+    # ``observed_samples`` inside ``compute_settlement_distribution``.
+    authoritative_window: Optional[AuthoritativeSettlementWindow] = None
 
 
 @dataclass(frozen=True)
@@ -223,8 +242,15 @@ def build_settlement_state(
     rti_history: Optional[Sequence[Any]] = None,
     source: str = "cf_rti",
     settlement_reference: str = "cfb_rti_live",
+    authoritative_window: Optional[AuthoritativeSettlementWindow] = None,
 ) -> SettlementState:
-    """Build a SettlementState from the current CF RTI state and history."""
+    """Build a SettlementState from the current CF RTI state and history.
+
+    ``authoritative_window`` carries Kalshi's own running settlement
+    accumulator when the feed provides it (final minute only); it is retained
+    on the state for ``compute_settlement_distribution`` to prefer over the
+    reconstructed per-second slots.
+    """
 
     expiry_dt = _to_utc_datetime(expiry_ts)
     now_dt = _to_utc_datetime(now_ts)
@@ -250,6 +276,7 @@ def build_settlement_state(
             phase="invalid",
             source=source,
             settlement_reference=settlement_reference,
+            authoritative_window=authoritative_window,
         )
 
     window_start_dt = expiry_dt - timedelta(seconds=int(_SETTLEMENT_WINDOW_SECONDS))
@@ -302,7 +329,42 @@ def build_settlement_state(
         phase=phase,
         source=source,
         settlement_reference=settlement_reference,
+        authoritative_window=authoritative_window,
     )
+
+
+def _validated_authoritative_window(
+    state: SettlementState, window_s: int
+) -> Optional[Tuple[Decimal, int]]:
+    """Return ``(observed_avg, observed_count)`` from Kalshi's own settlement
+    accumulator when it is present, sane, and aligned to this market's expiry.
+
+    The field only exists during the final minute before a quarter-hour close,
+    so presence already implies the right epoch; the window-end check guards
+    against a stale frame from the previous close.  Returns ``None`` on any
+    inconsistency — callers then fall back to per-second slot reconstruction.
+    """
+    auth = getattr(state, "authoritative_window", None)
+    if auth is None:
+        return None
+    try:
+        count = int(auth.observed_count)
+        avg = auth.observed_avg
+        end_ms = int(auth.window_end_ms)
+    except Exception:
+        return None
+    if count <= 0 or count > window_s:
+        return None
+    if avg is None or not avg.is_finite() or avg <= 0:
+        return None
+    if state.expiry_ts is None or end_ms <= 0:
+        return None
+    end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=timezone.utc)
+    # window_end_ts_exclusive bounds the accumulation window's close edge; it
+    # should sit within ~2s of this market's expiry (quarter-hour close).
+    if abs((end_dt - state.expiry_ts).total_seconds()) > 2.0:
+        return None
+    return avg, count
 
 
 def compute_settlement_distribution(
@@ -364,40 +426,57 @@ def compute_settlement_distribution(
         raise ValueError("Future settlement reference")
     schedule = [state.expiry_ts - timedelta(seconds=i) for i in range(59, -1, -1)]
     expected_samples = {ts for ts in schedule if ts <= _future_ref_ts}
-    actual_samples = dict(state.observed_samples)
-    if (len(actual_samples) != state.observed_count
-            or len(state.observed_samples) != state.observed_count
-            or any(not v.is_finite() or v <= 0 for v in actual_samples.values())
-            or sum(actual_samples.values(), Decimal("0")) != state.observed_sum
-            or not set(actual_samples).issubset(expected_samples)):
-        raise ValueError("Incomplete or inconsistent elapsed settlement samples")
-    # Bounded forward-fill for dropped feed frames: a missing elapsed slot is
-    # filled with the nearest already-realized value (previous observed second,
-    # else the next observed second).  All values are historical, so this is
-    # causal; exceeding the bound fails closed.
-    missing_slots = sorted(expected_samples - set(actual_samples))
-    filled_count = 0
-    if missing_slots:
-        if len(missing_slots) > max_missing_samples:
+
+    # 2026-11-24: Kalshi's own ``last_60s_windowed_average_15min`` accumulator
+    # supersedes per-second slot reconstruction when present and aligned — it
+    # is the exact banked average + second-indexed count the contract settles
+    # on, immune to dropped feed frames, slot-mapping error, and the
+    # cold-start gap that failed every in-window build at TTE~59s.
+    _auth = _validated_authoritative_window(state, int(window_s))
+    if _auth is not None:
+        _auth_avg, _auth_count = _auth
+        observed_sum = _auth_avg * _auth_count
+        observed_count = _auth_count
+        filled_count = 0
+    else:
+        actual_samples = dict(state.observed_samples)
+        if (len(actual_samples) != state.observed_count
+                or len(state.observed_samples) != state.observed_count
+                or any(not v.is_finite() or v <= 0 for v in actual_samples.values())
+                or sum(actual_samples.values(), Decimal("0")) != state.observed_sum
+                or not set(actual_samples).issubset(expected_samples)):
             raise ValueError("Incomplete or inconsistent elapsed settlement samples")
-        ordered = sorted(actual_samples.items())
-        for slot in missing_slots:
-            fill_val = None
-            for ts, v in reversed(ordered):
-                if ts < slot:
-                    fill_val = v
-                    break
-            if fill_val is None:
-                for ts, v in ordered:
-                    if ts > slot:
+        # Bounded forward-fill for dropped feed frames: a missing elapsed slot is
+        # filled with the nearest already-realized value (previous observed second,
+        # else the next observed second).  All values are historical, so this is
+        # causal; exceeding the bound fails closed.
+        missing_slots = sorted(expected_samples - set(actual_samples))
+        filled_count = 0
+        if missing_slots:
+            if len(missing_slots) > max_missing_samples:
+                raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+            ordered = sorted(actual_samples.items())
+            for slot in missing_slots:
+                fill_val = None
+                for ts, v in reversed(ordered):
+                    if ts < slot:
                         fill_val = v
                         break
-            if fill_val is None:
-                raise ValueError("Incomplete or inconsistent elapsed settlement samples")
-            actual_samples[slot] = fill_val
-            filled_count += 1
-    observed_sum = sum(actual_samples.values(), Decimal("0")) if actual_samples else state.observed_sum
-    observed_count = len(actual_samples)
+                if fill_val is None:
+                    for ts, v in ordered:
+                        if ts > slot:
+                            fill_val = v
+                            break
+                if fill_val is None:
+                    raise ValueError("Incomplete or inconsistent elapsed settlement samples")
+                actual_samples[slot] = fill_val
+                filled_count += 1
+        observed_sum = sum(actual_samples.values(), Decimal("0")) if actual_samples else state.observed_sum
+        observed_count = len(actual_samples)
+    # Reported observed_count: real banked prints only — the authoritative
+    # count when Kalshi's accumulator is used, else the reconstructed count
+    # (forward-fills excluded, matching prior semantics).
+    _reported_obs_count = _auth[1] if _auth is not None else state.observed_count
     offsets = [(ts - state.now_ts).total_seconds() for ts in schedule if ts > state.now_ts]
     variance_seconds = math.fsum(
         (2 * (len(offsets) - i) - 1) * u for i, u in enumerate(offsets)
@@ -417,7 +496,7 @@ def compute_settlement_distribution(
             std=std,
             z_score=z,
             p_yes_raw=p_yes,
-            observed_count=state.observed_count,
+            observed_count=_reported_obs_count,
             remaining_count=0,
             seconds_to_expiry=0.0,
             phase="expired",
@@ -480,7 +559,7 @@ def compute_settlement_distribution(
         std=std,
         z_score=z,
         p_yes_raw=p_yes,
-        observed_count=state.observed_count,
+        observed_count=_reported_obs_count,
         remaining_count=n_rem,
         seconds_to_expiry=tte,
         phase="in_window",
