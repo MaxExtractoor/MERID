@@ -98,6 +98,78 @@ class TestDeadTickerExclusion:
         assert lrs.live_entries_enabled()
 
 
+class TestPreWindowExclusion:
+    """2026-11-24: next-window books sit idle (empty book, no deltas) for
+    ~15min before their trading window opens.  Their untrusted marks are
+    idle-book staleness, not upstream degradation — counting them halted
+    entries at every :00/:15/:30/:45 rollover once they accrued >_HALT_S.
+    Pre-window books (tte > _BOOK_UNTRUSTED_PREWINDOW_S) must have their
+    sustained clock refreshed, not counted."""
+
+    def test_prewindow_books_do_not_halt(self, store, tmp_path, monkeypatch):
+        lrs = _live_runtime(tmp_path, monkeypatch)
+        lrs.transition("STARTING", "lifespan_entry")
+        lrs.transition("PREFLIGHT_RUNNING", "live_config_resolved")
+        lrs.complete_preflight(auto_enable=True, preflight_context={})
+        assert lrs.live_entries_enabled()
+
+        old = time.monotonic() - 9999.0
+        # Two next-window books, untrusted far beyond the halt horizon.
+        for t in ("KXBTC15M-NEXT", "KXETH15M-NEXT"):
+            store._states[t] = _state(t, 1500.0)  # 25min to expiry -> pre-window
+            store._untrusted_since[t] = old
+
+        store._maybe_escalate_session_book_untrusted()
+
+        assert lrs.live_entries_enabled()
+        # Clock refreshed to ~now, not counted as sustained.
+        for t in ("KXBTC15M-NEXT", "KXETH15M-NEXT"):
+            assert time.monotonic() - store._untrusted_since[t] < 60.0
+
+    def test_inwindow_books_still_halt(self, store, tmp_path, monkeypatch):
+        lrs = _live_runtime(tmp_path, monkeypatch)
+        lrs.transition("STARTING", "lifespan_entry")
+        lrs.transition("PREFLIGHT_RUNNING", "live_config_resolved")
+        lrs.complete_preflight(auto_enable=True, preflight_context={})
+        assert lrs.live_entries_enabled()
+
+        old = time.monotonic() - 9999.0
+        for t in ("KXBTC15M-CUR", "KXETH15M-CUR"):
+            store._states[t] = _state(t, 600.0)  # inside the 15m window
+            store._untrusted_since[t] = old
+
+        store._maybe_escalate_session_book_untrusted()
+
+        assert lrs.state == "LIVE_ENTRIES_HALTED"
+
+    def test_prewindow_clock_restarts_at_window_entry(
+        self, store, tmp_path, monkeypatch
+    ):
+        """A book untrusted pre-window gets a fresh 300s once its window
+        opens — pre-window idle time must not carry into the halt count."""
+        lrs = _live_runtime(tmp_path, monkeypatch)
+        lrs.transition("STARTING", "lifespan_entry")
+        lrs.transition("PREFLIGHT_RUNNING", "live_config_resolved")
+        lrs.complete_preflight(auto_enable=True, preflight_context={})
+        assert lrs.live_entries_enabled()
+
+        ticker = "KXSOL15M-NEXT"
+        store._states[ticker] = _state(ticker, 1500.0)
+        store._untrusted_since[ticker] = time.monotonic() - 9999.0
+
+        # First eval while pre-window: refresh, no halt.
+        store._maybe_escalate_session_book_untrusted()
+        assert lrs.live_entries_enabled()
+        refreshed = store._untrusted_since[ticker]
+
+        # Book crosses into its window (tte=890 < 900) still untrusted.
+        store._states[ticker].seconds_to_expiry = 890.0
+        store._maybe_escalate_session_book_untrusted()
+        # Since was refreshed moments ago -> nowhere near the 300s horizon.
+        assert lrs.live_entries_enabled()
+        assert store._untrusted_since[ticker] == refreshed
+
+
 class TestRecovery:
     def test_healed_book_alone_does_not_release_entries(self, store, tmp_path, monkeypatch):
         lrs = _live_runtime(tmp_path, monkeypatch)

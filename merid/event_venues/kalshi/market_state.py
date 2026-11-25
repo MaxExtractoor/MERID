@@ -350,6 +350,20 @@ _BOOK_UNTRUSTED_HALT_MIN_TICKERS = int(os.getenv("MERID_BOOK_UNTRUSTED_HALT_MIN_
 # lag burst; the dict scan + potential state transition only needs seconds-scale
 # cadence.
 _BOOK_UNTRUSTED_EVAL_S = float(os.getenv("MERID_BOOK_UNTRUSTED_EVAL_S", "30"))
+# Pre-window exclusion (2026-11-24): a 15m contract's book is subscribed well
+# before its trading window opens (expiry - 900s).  Until the window starts the
+# contract has no live strike/flow, so its book legitimately sits empty and
+# stale — every snapshot arrives empty (EMPTY-BOOK-REJECTION) and no delta ever
+# re-attests it.  Those idle books accumulated >_HALT_S of untrusted time and
+# tripped this session halt at every :00/:15/:30/:45 rollover (observed
+# 2026-11-24: KX*15M-...1930-30 books untrusted ~359s -> halt at 19:15:00,
+# recovery 19:15:15 once real flow arrived).  A book that cannot be traded yet
+# is not evidence of shared-upstream degradation; per-ticker gates still block
+# it independently.  While tte > this horizon the sustained clock is refreshed
+# so only in-window untrusted time counts.  ``<= 0`` disables the exclusion.
+_BOOK_UNTRUSTED_PREWINDOW_S = float(
+    os.getenv("MERID_BOOK_UNTRUSTED_PREWINDOW_S", "900")
+)
 
 # ── Bridge-lag freshness budgets ────────────────────────────────────────────
 # A sequence-contiguous delta stream can still be execution-useless when
@@ -2014,6 +2028,19 @@ class KalshiMarketStateStore:
                 # window close that left a book untrusted (observed
                 # 2026-10-30: halts at :05/:20/:35 past each 15m close).
                 self._untrusted_since.pop(ticker, None)
+                continue
+            if (
+                _BOOK_UNTRUSTED_PREWINDOW_S > 0
+                and tte is not None
+                and tte > _BOOK_UNTRUSTED_PREWINDOW_S
+            ):
+                # Pre-window book (expiry still beyond the 15m window): it
+                # cannot be traded by any lane yet, so its untrusted mark is
+                # idle-book staleness, not upstream degradation.  Refresh the
+                # timestamp so the sustained clock restarts at window entry —
+                # otherwise idle pre-window time carries a >_HALT_S head start
+                # and halts entries at every rollover.
+                self._untrusted_since[ticker] = now
                 continue
             if since <= horizon:
                 sustained[ticker] = round(now - since, 1)
