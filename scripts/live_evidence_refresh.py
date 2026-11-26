@@ -11,10 +11,10 @@ Schedule it out-of-process (Windows Task Scheduler, cron, etc.) at a
 cadence well inside the evidence FRESH tier, e.g. every 12h:
 
     schtasks /create /tn "MERID live evidence refresh" /sc hourly /mo 12 ^
-        /tr "C:\\Dev\\MERID\\.venv\\Scripts\\python.exe C:\\Dev\\MERID\\scripts\\refresh_live_evidence.py"
+        /tr "C:\\Dev\\MERID\\.venv\\Scripts\\python.exe C:\\Dev\\MERID\\scripts\\live_evidence_refresh.py"
 
 Usage:
-    python scripts/refresh_live_evidence.py [--hours 48] [--db data/decision_audit.db]
+    python scripts/live_evidence_refresh.py [--hours 48] [--db data/decision_audit.db]
 """
 
 import argparse
@@ -22,7 +22,6 @@ import json
 import os
 import sys
 import time
-from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,8 +39,8 @@ def main():
     from merid.execution.decision_audit_ledger import DecisionAuditLedger
 
     t0 = time.time()
-    fake = SimpleNamespace(db_path=args.db)
-    DecisionAuditLedger._refresh_live_entry_evidence(fake, t0, args.hours)
+    ledger = DecisionAuditLedger(db_path=args.db)
+    ledger._refresh_live_entry_evidence(t0, args.hours)
     elapsed = time.time() - t0
     print(f"refresh completed in {elapsed:.1f}s")
 
