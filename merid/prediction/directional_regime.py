@@ -2373,6 +2373,45 @@ def record_pinned_fav_submission(
         return count
 
 
+def refund_pinned_fav_submission(
+    path: Optional[str] = None, now: Optional[float] = None
+) -> int:
+    """Refund one pinned-fav emission that died before venue submission.
+
+    2026-11-26 (operator-directed): pre-submission rejects — router
+    kill-switch, band-floor, slot-allocation, reprice — consumed the daily
+    emission budget without ever becoming an order (zero capital at risk,
+    zero fill information).  Observed 2026-11-25: 480 emissions -> 8 venue
+    submissions -> the lane went dark on rejects, not on trading.  The
+    counter now tracks venue-bound orders: the emission increment stays
+    race-free at decision time and the router refunds each attempt that
+    terminalizes REJECTED without an exchange request ever being sent.
+    Clamped at 0; returns the new count.
+    """
+    now = time.time() if now is None else float(now)
+    p = path or pinned_fav_state_path()
+    day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+    with _pinned_fav_counter_lock:
+        try:
+            count = max(0, _pinned_fav_count_for_day(p, day) - 1)
+        except (OSError, ValueError, TypeError, KeyError):
+            return 0
+        directory = os.path.dirname(p) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, delete=False
+            ) as f:
+                tmp = f.name
+                json.dump({"date": day, "count": count}, f)
+            os.replace(tmp, p)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+        return count
+
+
 # ---------------------------------------------------------------------------
 # Late-edge probe (2026-11-13): bounded TTE-floor exception lane
 # ---------------------------------------------------------------------------

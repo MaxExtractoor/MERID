@@ -411,6 +411,30 @@ def _finalize_attempt_store_for_result(
             result_status or "none",
             payload.get("route_reason"),
         )
+        # 2026-11-26 (operator-directed): a pinned_fav emission that dies
+        # before any exchange request was sent consumed the daily emission
+        # budget without becoming an order — refund it.  PERSISTED->REJECTED
+        # is exactly the "no exchange request sent" transition; venue-bound
+        # outcomes (SUBMITTING/SUBMISSION_UNKNOWN/ACKNOWLEDGED/FILLED) keep
+        # their count.
+        if target == "REJECTED" and record.status == "PERSISTED":
+            try:
+                _lane = (
+                    ((payload.get("admitting_economics") or {}).get("admitting_lane"))
+                    or ((payload.get("order") or {}).get("decision_lane"))
+                    or ((payload.get("execution_contract") or {}).get("admission_lane"))
+                )
+                if _lane == "pinned_fav":
+                    from merid.prediction.directional_regime import (
+                        refund_pinned_fav_submission,
+                    )
+                    refund_pinned_fav_submission()
+                    logger.info(
+                        "[PF-BUDGET-REFUND] attempt_id=%s pre-submit reject refunded",
+                        order_attempt_id,
+                    )
+            except Exception as _refund_exc:
+                logger.debug("[PF-BUDGET-REFUND] non-fatal: %s", _refund_exc)
     except Exception as exc:
         logger.debug("[ORDER-ATTEMPT-STATUS] finalize failed (non-fatal): %s", exc)
 
