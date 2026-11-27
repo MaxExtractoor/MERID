@@ -163,7 +163,7 @@ MERID_PINNED_FAV_MAX_CONTRACTS=6
 MERID_PINNED_FAV_MIN_EV_CENTS=-3.0    MAKER_MIN_EV_CENTS=-3.0
 MERID_PINNED_FAV_LATE_TTE_S=150       MID_MIN_EV_CENTS=0.0
 MERID_PINNED_FAV_MIN_TTE_S=45         MAKER_MIN_TTE_S=45
-MERID_PINNED_FAV_DAILY_MAX=480   MAKER_MIN_P=0.90
+MERID_PINNED_FAV_DAILY_MAX=1440   MAKER_MIN_P=0.90
 ```
 
 **2026-11-23 operator-directed un-quarantine (90–96c).** LO lowered
@@ -2712,7 +2712,15 @@ counterfactual evidence — rollback =0.  Live on next restart.
 
 **Open items:** (a) hpl chase floor is `entry−14` for no-edge — a 95¢
 lock can sell at 81¢; consider latch-relative giveback bound after
-shadow data; (b) `MERID_PINNED_FAV_DAILY_MAX=480` exhausted again
-2026-11-27 (~15:55 UTC) — second straight day, lane dark until UTC
-midnight; (c) pf_fade/locked-book/taker-shadow telemetry accumulating
+shadow data; (b) ~~`MERID_PINNED_FAV_DAILY_MAX=480` exhausted again
+2026-11-27~~ **RESOLVED 2026-11-27 (operator-directed):** cap raised
+480→1440 — third consecutive daily exhaustion (~15:55 UTC each).
+Measured burn ≈30 counter-emissions/hr ≈ ~720/day for 24h; the 480
+figure counts decision emissions (~5.85 per emitting window, 82 windows,
+max 5 venue-path attempts/window on 11-27), not orders.  1440 ≈ 2× the
+24h projection restores the 2026-10-20 "ceiling, not quota" intent;
+probe bound preserved via ≤6ct/order, band/TTE/p/EV gates, moneyness
+caps, financial brakes, cycle drawdown.  Rollback = 480; if 1440 ever
+exhausts, next lever is per-window emission dedup, not another bump;
+(c) pf_fade/locked-book/taker-shadow telemetry accumulating
 for the 48-72h calibration pass.
