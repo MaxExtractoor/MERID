@@ -3,5 +3,7 @@
   "manual_emergency_halt": false,
   "reason": null,
   "details": null,
-  "activated_at": null
+  "activated_at": null,
+  "peak_equity_usd": 16.7031,
+  "consecutive_losses": 0
 }
