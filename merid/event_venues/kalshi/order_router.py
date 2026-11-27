@@ -5382,6 +5382,119 @@ def _entry_refresh_grace_allowed(intent: "OrderIntent", age_ms: float) -> bool:
         return False
 
 
+def _pinned_fav_submit_gate_reason(
+    intent: "OrderIntent",
+    side_book: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Last-moment pinned_fav submit gates (2026-11-27, post DOGE@93 loss).
+
+    pf entries are admitted on empirical pin persistence, but realized
+    losses cluster on fills into an active underlying fade: the Kalshi
+    book lags the CF-RTI settlement index by seconds, so a resting
+    favorite bid is picked off while spot already moves against it
+    (KXDOGE15M-26NOV261915-15 YES@93 filled into a -0.2%/80s dump,
+    -530c).  Three independent checks, all env-gated via
+    ``directional_regime``:
+
+    * ``pf_fade`` — adverse-signed RTI fast-leg return >=
+      ``MERID_PINNED_FAV_FADE_BP``; mode ``MERID_PINNED_FAV_FADE_VETO``
+      (off|shadow|enforce, default shadow until calibrated on telemetry).
+    * ``pf_locked_book`` — fresh side-aware BBO crossed/locked
+      (``bid >= ask``): no valid spread to price a passive entry
+      against; ``MERID_PINNED_FAV_LOCKED_BOOK_VETO`` (default enforce —
+      book coherence, not an edge claim).
+    * ``pf_decision_stale`` — decision age >
+      ``MERID_PINNED_FAV_MAX_DECISION_AGE_S`` (default 30s; <=0 disables).
+
+    Returns a reject reason string when a gate fires in enforce mode,
+    ``None`` otherwise.  Shadow-mode verdicts are logged here and the
+    order proceeds.
+    """
+    try:
+        from merid.prediction import directional_regime as _drg
+    except Exception:
+        return None
+
+    # --- pf_fade: settlement-index fast leg moving against the held side ---
+    _fade_mode = _drg.pinned_fav_fade_veto_mode()
+    if _fade_mode not in ("off", "0", "false", "no"):
+        try:
+            _asset = None
+            _tk = (getattr(intent, "ticker", "") or "").upper()
+            for _p in ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"):
+                if _tk.startswith(_p):
+                    _asset = _p[2:].replace("15M", "")
+                    break
+            if _asset:
+                _adv = _drg.pinned_fav_fade_return(
+                    _asset, getattr(intent, "side", "") or ""
+                )
+                _thr = _drg.pinned_fav_fade_bp() / 10000.0
+                if _adv is not None and _thr > 0.0 and _adv >= _thr:
+                    _det = (
+                        f"pf_fade:adv_ret={_adv:+.5f}>=thr={_thr:.5f}"
+                        f":asset={_asset}"
+                    )
+                    if _fade_mode in ("enforce", "1", "true", "yes", "on"):
+                        return _det
+                    logger.info(
+                        "[PF-SUBMIT-GATE-SHADOW] ticker=%s intent_id=%s "
+                        "gate=%s side=%s px=%s — would veto (mode=shadow)",
+                        getattr(intent, "ticker", None),
+                        getattr(intent, "intent_id", None),
+                        _det, getattr(intent, "side", None),
+                        getattr(intent, "price_cents", None),
+                    )
+        except Exception:
+            pass
+
+    # --- pf_locked_book: fresh side-aware BBO crossed/locked ---
+    _lb_mode = _drg.pinned_fav_locked_book_mode()
+    if _lb_mode not in ("off", "0", "false", "no") and isinstance(side_book, dict):
+        try:
+            _bb = side_book.get("bid_cents")
+            _ba = side_book.get("ask_cents")
+            if (
+                isinstance(_bb, (int, float))
+                and isinstance(_ba, (int, float))
+                and math.isfinite(float(_bb))
+                and math.isfinite(float(_ba))
+                and 0.0 < float(_ba) <= float(_bb)
+            ):
+                _det = f"pf_locked_book:bid={_bb}>=ask={_ba}"
+                if _lb_mode in ("enforce", "1", "true", "yes", "on"):
+                    return _det
+                logger.info(
+                    "[PF-SUBMIT-GATE-SHADOW] ticker=%s intent_id=%s "
+                    "gate=%s side=%s px=%s — would veto (mode=shadow)",
+                    getattr(intent, "ticker", None),
+                    getattr(intent, "intent_id", None),
+                    _det, getattr(intent, "side", None),
+                    getattr(intent, "price_cents", None),
+                )
+        except Exception:
+            pass
+
+    # --- pf_decision_stale: decision->submit age bound ---
+    try:
+        _max_age = _drg.pinned_fav_max_decision_age_s()
+    except Exception:
+        _max_age = 0.0
+    if _max_age and _max_age > 0.0:
+        try:
+            _snap = getattr(intent, "snapshot_ts", None)
+            if _snap:
+                _age = _time.time() - float(_snap)
+                if _age > _max_age:
+                    return (
+                        f"pf_decision_stale:age={_age:.1f}s"
+                        f">max={_max_age:.0f}s"
+                    )
+        except Exception:
+            pass
+    return None
+
+
 async def _revalidate_entry_economics(
     intent: "OrderIntent", *, mode: "TradingMode", t0: float
 ) -> Optional["OrderResult"]:
@@ -5493,6 +5606,17 @@ async def _revalidate_entry_economics(
     )
     if not isinstance(_exec_px, int) or _exec_px <= 0:
         return _rej("stale_decision_refresh_failed:no_exec_price")
+
+    # 2026-11-27 (pf fade/book gates): pinned_fav candidates get the same
+    # last-moment vetoes here as at pre-submit — the revalidation book is
+    # ~seconds fresher than decision time and caught the DOGE locked-book
+    # (bid=ask=93) that the later pre-submit snapshot had already un-locked.
+    # Shadow-mode verdicts log and continue; enforce returns via _rej so the
+    # standard provenance + pf emission refund paths apply.
+    if str(getattr(intent, "decision_lane", "") or "") == "pinned_fav":
+        _pf_gate_reason = _pinned_fav_submit_gate_reason(intent, _side_book)
+        if _pf_gate_reason is not None:
+            return _rej(f"pf_submit_gate:{_pf_gate_reason}")
 
     _sel_px = getattr(intent, "selected_outcome_price_cents", None) or getattr(
         intent, "price_cents", None
@@ -18298,6 +18422,7 @@ async def _route_live(
         # REST snapshot and require the wire price to be strictly passive —
         # otherwise reprice once inside the edge budget or reject.
         if effective_post_only and not _is_exit_order(intent):
+            _ps_side = None
             try:
                 _ps_book: Optional[Dict[str, Any]] = None
                 _ps_age_ms = float("inf")
@@ -18403,6 +18528,29 @@ async def _route_live(
                     "[PRE-SUBMIT-PASSIVITY] check skipped for %s: %s",
                     intent.ticker, _ps_err,
                 )
+
+            # 2026-11-27 (pf fade/book gates): pinned_fav last-moment vetoes —
+            # RTI fast-leg fade (shadow until calibrated), locked/crossed book
+            # (enforce), pf-scoped decision-age bound.  Runs for every pf
+            # post-only submit regardless of revalidation age; rejects refund
+            # the lane emission counter via the standard pre-submit path.
+            if str(getattr(intent, "decision_lane", "") or "") == "pinned_fav":
+                _pf_gate_reason = _pinned_fav_submit_gate_reason(intent, _ps_side)
+                if _pf_gate_reason is not None:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[PF-SUBMIT-GATE] ticker=%s intent_id=%s reason=%s "
+                        "— pinned_fav entry vetoed at last-moment gate",
+                        intent.ticker, intent.intent_id, _pf_gate_reason,
+                    )
+                    _release_gate_record(intent, f"pf_submit_gate:{_pf_gate_reason}")
+                    _release_allocated_slot(intent)
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"pf_submit_gate:{_pf_gate_reason}",
+                        latency_ms=round(latency, 2),
+                    )
 
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.

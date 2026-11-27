@@ -2791,3 +2791,92 @@ def record_late_edge_probe_submission(
             if tmp and os.path.exists(tmp):
                 os.remove(tmp)
         return count
+
+
+# ---------------------------------------------------------------------------
+# pinned_fav fade/book submit gates + resting RTI-fade cancel (2026-11-27)
+# ---------------------------------------------------------------------------
+#
+# Postmortem KXDOGE15M-26NOV261915-15: a pf YES@93 maker entry filled ~12s
+# after submit into a -0.2%/80s DOGE spot dump (emergency exit @5c, -530c).
+# The Kalshi book lagged the CF-RTI settlement index — the same lead-lag the
+# FollowSM Polymarket Up/Down study measured at 44-227ms during taker
+# sweeps.  The realized-loss mechanism is *resting-fill into an active
+# fade*, so the defense has two layers sharing one signal:
+#
+# 1. ``pinned_fav_fade_return`` — adverse-signed fast-leg RTI return,
+#    consumed by the submit-time veto (order_router pre-submit gate) and
+#    the resting-order cancel (resting_order_monitor).
+# 2. Submit gates (router, pf + post-only only): ``pf_fade`` (shadow
+#    default until calibrated), ``pf_locked_book`` (enforce default —
+#    book coherence, not an edge claim), ``pf_decision_stale`` (30s).
+# 3. Resting cancel (monitor, pf lane only): mode env off|shadow|enforce.
+
+
+def pinned_fav_fade_return(asset: str, side: str) -> Optional[float]:
+    """Adverse-signed settlement-index fast-leg return for a pf held side.
+
+    Returns the CF-RTI log return over the fast leg (10s, falling back to
+    30s when the 10s pair is unavailable) signed so that *positive means
+    moving against the held side*: a YES entry is hurt by falling spot
+    (``-rti_ret``), a NO entry by rising spot (``+rti_ret``).  ``None``
+    when RTI history is unavailable — callers fail open, matching every
+    other microstructure gate in this module.  Assumes a buy-side entry
+    (the only shape the pf lane emits); sell-side callers must flip the
+    sign themselves.
+    """
+    try:
+        from merid.data.cf_rti_adapter import get_rti_return
+    except Exception:
+        return None
+    ret: Optional[float] = None
+    for _lb in (10.0, 30.0):
+        try:
+            ret = get_rti_return(str(asset).upper(), _lb)
+        except Exception:
+            ret = None
+        if ret is not None:
+            break
+    if ret is None:
+        return None
+    try:
+        ret_f = float(ret)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ret_f):
+        return None
+    _held = str(side or "").lower()
+    _held_no = "no" in _held and "yes" not in _held
+    return ret_f if _held_no else -ret_f
+
+
+def pinned_fav_fade_veto_mode() -> str:
+    """off|shadow|enforce for the submit-time RTI fade veto (default shadow)."""
+    return os.environ.get("MERID_PINNED_FAV_FADE_VETO", "shadow").strip().lower()
+
+
+def pinned_fav_fade_bp() -> float:
+    """Adverse fast-leg magnitude in basis points that trips the fade veto."""
+    return _env_float("MERID_PINNED_FAV_FADE_BP", 10.0)
+
+
+def pinned_fav_locked_book_mode() -> str:
+    """off|shadow|enforce for the locked/crossed-book submit veto."""
+    return os.environ.get(
+        "MERID_PINNED_FAV_LOCKED_BOOK_VETO", "enforce"
+    ).strip().lower()
+
+
+def pinned_fav_max_decision_age_s() -> float:
+    """pf-scoped decision->submit age bound in seconds; <=0 disables."""
+    return _env_float("MERID_PINNED_FAV_MAX_DECISION_AGE_S", 30.0)
+
+
+def resting_pf_fade_mode() -> str:
+    """off|shadow|enforce for the resting-order RTI fade cancel."""
+    return os.environ.get("MERID_RESTING_PF_FADE_MODE", "shadow").strip().lower()
+
+
+def resting_pf_fade_bp() -> float:
+    """Adverse fast-leg magnitude (bp) that trips the resting fade cancel."""
+    return _env_float("MERID_RESTING_PF_FADE_BP", 10.0)

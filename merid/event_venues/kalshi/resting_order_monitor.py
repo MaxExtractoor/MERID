@@ -1140,6 +1140,81 @@ class RestingOrderMonitor:
                     record.kalshi_order_id, _tox_exc,
                 )
 
+            # 4c. pinned_fav RTI-fade cancel (2026-11-27): the lane's realized
+            # losses cluster on resting fills into an active underlying fade —
+            # the Kalshi book lags CF-RTI by seconds, so the toxic-mid rule
+            # (which needs the mid to break the limit first) fires too late.
+            # The settlement-index fast leg leads: cancel the resting pf bid
+            # when it moves against the held side beyond
+            # MERID_RESTING_PF_FADE_BP.  Mode MERID_RESTING_PF_FADE_MODE =
+            # off|shadow|enforce (default shadow until calibrated).
+            if (record.decision_lane or "") == "pinned_fav":
+                try:
+                    import os as _os_pf
+                    _pf_mode = _os_pf.environ.get(
+                        "MERID_RESTING_PF_FADE_MODE", "shadow"
+                    ).strip().lower()
+                    if _pf_mode not in ("off", "0", "false", "no"):
+                        from merid.prediction.directional_regime import (
+                            pinned_fav_fade_return as _pf_fade_ret,
+                            resting_pf_fade_bp as _pf_fade_bp_fn,
+                        )
+                        _pf_asset = (record.asset or "").strip().upper()
+                        if not _pf_asset and record.ticker:
+                            import re as _re_pf
+                            _m_pf = _re_pf.match(
+                                r"KX([A-Z]+?)15M", (record.ticker or "").upper()
+                            )
+                            if _m_pf:
+                                _pf_asset = _m_pf.group(1)
+                        _pf_side = (
+                            (record.side or "") + " " + (record.action or "")
+                        ).lower()
+                        # pf emits buy-side entries only; anything else keeps
+                        # the order (fail-open) rather than guessing direction.
+                        _pf_is_buy = "buy" in _pf_side
+                        if _pf_asset and _pf_is_buy:
+                            _adv = _pf_fade_ret(_pf_asset, record.side or "")
+                            _thr = _pf_fade_bp_fn() / 10000.0
+                            if (
+                                _adv is not None
+                                and _thr > 0.0
+                                and _adv >= _thr
+                            ):
+                                _det = (
+                                    f"pf_rti_fade:adv_ret={_adv:+.5f}"
+                                    f">=thr={_thr:.5f}:asset={_pf_asset}"
+                                )
+                                if _pf_mode in ("enforce", "1", "true", "yes", "on"):
+                                    logger.warning(
+                                        "[RESTING-PF-FADE-CANCEL] kalshi_order_id=%s "
+                                        "ticker=%s side=%s limit=%dc %s — RTI fast leg "
+                                        "adverse, cancelling resting pf entry",
+                                        record.kalshi_order_id, record.ticker,
+                                        record.side, record.price_cents, _det,
+                                    )
+                                    return RecheckResult(
+                                        intent_id=record.intent_id,
+                                        ticker=record.ticker,
+                                        action="cancel",
+                                        reason=_det,
+                                        current_regime=regime,
+                                        current_vol_tier=window_vol_tier,
+                                        model_quality_good=model_quality_good,
+                                    )
+                                logger.info(
+                                    "[RESTING-PF-FADE-SHADOW] kalshi_order_id=%s "
+                                    "ticker=%s side=%s limit=%dc %s — would cancel "
+                                    "(mode=shadow)",
+                                    record.kalshi_order_id, record.ticker,
+                                    record.side, record.price_cents, _det,
+                                )
+                except Exception as _pf_exc:
+                    logger.debug(
+                        "[RESTING_ORDER_MONITOR] pf-fade check failed for %s: %s",
+                        record.kalshi_order_id, _pf_exc,
+                    )
+
             # 5. Market order fallback check (NEW)
             if self._fallback_enabled and self._fallback_engine and _FALLBACK_AVAILABLE:
                 try:

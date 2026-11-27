@@ -2563,3 +2563,64 @@ required edge, lane EV floors, `MERID_ENTRY_TRAP_DROP_C` hard veto,
 exempt/flat-exempt lane sets.  Regression coverage:
 `tests/test_entry_trap_guard.py::TestPinnedFavStickyPWidening`,
 `tests/test_entry_execution_hardening.py::test_dynamic_threshold_formula_ceiling`.
+
+### pinned_fav adverse-selection gates (2026-11-27, post DOGE@93 loss)
+
+Postmortem `KXDOGE15M-26NOV261915-15`: pf YES@93 maker entry filled ~12s
+after submit into a −0.2%/80s DOGE spot dump (emergency exit @5c,
+−530c).  The Kalshi book lagged the CF-RTI settlement index by seconds —
+the resting favorite bid was picked off mid-collapse.  Every guard that
+could have stopped it is intentionally bypassed in this lane (EV floor
+−8c, p≥0.85, microstructure edge gate), so the defense is three
+pf-scoped last-moment gates, all sharing
+`directional_regime.pinned_fav_fade_return` (adverse-signed RTI fast-leg
+return: 10s leg, 30s fallback; positive = spot moving against the held
+side; fail-open on missing data):
+
+- **`pf_fade` submit veto** — `MERID_PINNED_FAV_FADE_VETO`
+  (off|shadow|enforce, **default shadow**) +
+  `MERID_PINNED_FAV_FADE_BP` (default 10bp).  Wired twice in
+  `order_router`: inside `_revalidate_entry_economics` (pf intents that
+  require revalidation) and in the pre-submit block for every pf
+  post-only submit.  Shadow verdicts log `[PF-SUBMIT-GATE-SHADOW]`;
+  enforce returns `pf_submit_gate:pf_fade:...` and the standard
+  PERSISTED→REJECTED refund path returns the daily emission budget.
+  Research basis: FollowSM/Polymarket Up/Down study — prediction-market
+  books reprice 44–227ms after spot taker sweeps; spot leads, book
+  follows.  NBER Kalshi VPIN paper explicitly does NOT validate
+  broad-based crypto books or the 93–96c cohort — textbook VPIN was
+  rejected; RTI velocity is the leading indicator already consumed via
+  `rti_feature_snapshot`.
+- **`pf_locked_book` submit veto** —
+  `MERID_PINNED_FAV_LOCKED_BOOK_VETO` (**default enforce**): refuse pf
+  post-only entries when the fresh side-aware BBO is crossed/locked
+  (`bid >= ask`) — no valid spread to price a passive entry against;
+  the DOGE revalidation book was exactly 93/93.  Book coherence, not
+  an edge claim, so it does not conflict with the measured bookflow
+  exemption.
+- **`pf_decision_stale`** —
+  `MERID_PINNED_FAV_MAX_DECISION_AGE_S` (default 30s, ≤0 disables):
+  pf-scoped decision→submit age bound (global bounds are 120s — too
+  loose for 15-min binaries).  Trims pipeline stalls; does NOT bound
+  the resting window (that is the monitor's job).
+- **Resting-order RTI fade cancel** — `MERID_RESTING_PF_FADE_MODE`
+  (off|shadow|enforce, **default shadow**) +
+  `MERID_RESTING_PF_FADE_BP` (default 10bp) in
+  `resting_order_monitor` step 4c, pf `decision_lane` records only,
+  buy-side entries only (fail-open otherwise).  This is the actual
+  DOGE mechanism: pull the resting bid when the settlement-index fast
+  leg turns adverse BEFORE the book mid breaks the limit — the existing
+  toxic-mid rule needed `mid <= limit − 1c` and fired too late.
+
+Rollout per house rule (counterfactual-measured changes; new edge
+claims ship shadow first): `pf_fade` and the resting cancel collect
+`[PF-SUBMIT-GATE-SHADOW]` / `[RESTING-PF-FADE-SHADOW]` telemetry;
+enforce flip (`MERID_PINNED_FAV_FADE_VETO=enforce`,
+`MERID_RESTING_PF_FADE_MODE=enforce`) only after ~24–48h of shadow
+verdicts are reconciled against fill markouts.  `pf_locked_book` and
+`pf_decision_stale` enforce immediately — coherence/hygiene, not edge
+claims.  Knobs live in `.env` (~line 1849) and read via
+`directional_regime` env helpers; the running process picks them up on
+next restart (code changes require restart regardless).  Regression
+coverage: `tests/test_pinned_fav_fade_gates.py` (20 cases — sign
+convention, fail-open, each gate's off/shadow/enforce semantics).
