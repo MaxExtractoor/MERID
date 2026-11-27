@@ -2885,9 +2885,29 @@ def _run_exit_price_guard(
                 # position settled 0.  Edge claims keep
                 # _chase_floor == _profit_floor, so their pricing is
                 # unchanged.
-                limit_cents = max(
-                    1, min(99, max(_chase_floor, _lock_floor - _lock_sweep))
-                )
+                #
+                # 2026-11-27: price the primary lock AT the latched
+                # threshold, not threshold - sweep.  For pf entries the
+                # sweep repriced the IOC to ~entry (threshold 98 - sweep 3
+                # = 95 = a 95c pf entry), the exit guard's worst-case-at-
+                # limit math saw -4c net and rejected every attempt, the
+                # market reversed, and the chase ladder then sold below
+                # entry (XRP YES@95 -> -26c realized on a recovered
+                # winner).  A limit is a bound, not a price: with bid >=
+                # threshold the IOC still fills at best bid, so pricing
+                # at threshold can only improve the fill.  Set
+                # MERID_HARD_LOCK_PRIMARY_AT_THRESHOLD=0 to restore the
+                # legacy threshold-sweep pricing.
+                if os.environ.get(
+                    "MERID_HARD_LOCK_PRIMARY_AT_THRESHOLD", "1"
+                ).strip().lower() in ("1", "true", "yes", "on"):
+                    limit_cents = max(
+                        1, min(99, max(_chase_floor, _lock_floor))
+                    )
+                else:
+                    limit_cents = max(
+                        1, min(99, max(_chase_floor, _lock_floor - _lock_sweep))
+                    )
         record["lock_threshold_cents"] = _lock_floor
         record["lock_sweep_cents"] = _lock_sweep
         record["lock_chase_sweep_cents"] = _lock_chase_sweep

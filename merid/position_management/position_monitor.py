@@ -496,6 +496,135 @@ def _settlement_guard_sell_justified(
         return False
 
 
+# ── 2026-11-27 premature-loss-sale gates ────────────────────────────────────
+# Two exit paths used to convert recoverable dips into realized losses:
+#
+# 1. ``_emit_exit_intent`` rewrote ANY trigger inside T-120s to
+#    SETTLEMENT_GUARD and forced a full close.  settlement_guard is
+#    LOSS_SELL_EXEMPT (no breakeven floor) and ``mandatory_closeout`` skips
+#    the premium-vs-hold EV gate in loop_15m — so a trigger the breakeven
+#    floor had suppressed seconds earlier (ratchet_trim at 84-94c < entry
+#    93c) became an unconditional market dump at the bottom of the dip.
+#    Live evidence 2026-11-27: BTC NO@93 sold @80-84c at T-113s -> settled
+#    NO (+79c forgone); ETH NO@95 sold @94c at T-116s -> mid recovered 96c.
+#
+# 2. The hard-profit-lock chase sold below entry on no-edge claims down to
+#    entry-14c regardless of the model — XRP YES@95 latched at bid 98,
+#    primary lock IOC priced at entry (guard max-loss rejected it 8x),
+#    market reversed, chase sold @89-91c -> -26c realized on a position the
+#    model still rated 92-98% (markouts recovered to ~94-97c post-exit).
+#
+# Both paths now share one arbiter: ``_pre_settlement_sell_allowed`` —
+# sell only when the market pays a premium over the calibrated hold value
+# (the same test ``_settlement_guard_sell_justified`` applies at the guard
+# sites), or when the held-side bid is in the deep-tail salvage zone where
+# capitulation overrides a possibly-stale model.  Everything else rides to
+# settlement — free, no fee, no spread.
+_CLOSEOUT_REWRITE_UNCONDITIONAL_REASONS = frozenset({
+    # State repair / terminal handling / operator / capital-protection —
+    # these exits exist to fix broken state or satisfy a mandate, not to
+    # make an economic sell-vs-hold decision.
+    "risk",
+    "stale_data",
+    "manual",
+    "market_expired",
+    "market_closed",
+    "loss_cap",
+    "hard_stop",
+    "settlement_guard",
+    "expiry_liquidation",
+    "auto_exit_99c",
+    "emergency",
+    "hard_risk",
+    "operational_risk",
+    "position_mismatch",
+    "reconciliation",
+    "reconcile",
+    "external_exit",
+    "position_monitor_manual",
+    "time_exit",
+    "scheduled_closeout",
+    "market_settlement",
+    "settlement",
+})
+
+
+def _exit_reason_value(exit_reason: Any) -> str:
+    """Normalize an ExitReason enum or raw string to its lowercase value."""
+    try:
+        return str(getattr(exit_reason, "value", exit_reason) or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _closeout_rewrite_is_unconditional(exit_reason: Any) -> bool:
+    """True when the T-120s closeout rewrite may emit without the EV arbiter."""
+    return _exit_reason_value(exit_reason) in _CLOSEOUT_REWRITE_UNCONDITIONAL_REASONS
+
+
+def _closeout_rewrite_ev_gate_enabled() -> bool:
+    return os.environ.get("MERID_CLOSEOUT_REWRITE_EV_GATE", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _exit_deep_tail_max_bid_cents() -> int:
+    """Held-side bid at/below which a pre-settlement sale is unconditional salvage.
+
+    A 93-96c favorite trading <=40c is capitulation, not a contested dip —
+    selling salvages real money against a likely-zero settlement even when
+    the model is stale-high.  Above this bound the sell-vs-hold arbiter
+    decides.  ``MERID_EXIT_DEEP_TAIL_MAX_BID_CENTS=0`` disables the bypass
+    (arbiter-only).
+    """
+    try:
+        return max(0, int(os.environ.get("MERID_EXIT_DEEP_TAIL_MAX_BID_CENTS", "40")))
+    except Exception:
+        return 40
+
+
+def _pre_settlement_sell_allowed(
+    position: "Position",
+    snapshot: Optional["ExitPriceSnapshot"],
+    seconds_to_expiry: Optional[float],
+) -> bool:
+    """Shared sell-vs-hold arbiter for pre-settlement/near-expiry exits.
+
+    Returns True when selling now beats riding to settlement:
+      - held-side executable bid <= deep-tail bound (capitulation salvage), or
+      - ``_settlement_guard_sell_justified`` finds a trusted eval where the
+        market pays a premium over the calibrated hold value.
+
+    Fails toward HOLD (False): an unjustified sale at expiry donates
+    spread+fee and forfeits the settlement payoff — the premature-loss
+    defect this gate exists to prevent.
+    """
+    try:
+        tail_max = _exit_deep_tail_max_bid_cents()
+        if tail_max > 0 and snapshot is not None:
+            _bid = getattr(snapshot, "own_side_bid_cents", None)
+            try:
+                _bid_i = int(_bid) if _bid is not None else None
+            except (TypeError, ValueError):
+                _bid_i = None
+            if _bid_i is not None and 0 < _bid_i <= tail_max:
+                return True
+    except Exception:
+        pass
+    try:
+        return _settlement_guard_sell_justified(
+            position, snapshot, float(seconds_to_expiry or 0.0)
+        )
+    except Exception:
+        return False
+
+
+def _hard_lock_chase_ev_gate_enabled() -> bool:
+    return os.environ.get("MERID_HARD_LOCK_CHASE_EV_GATE", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 # 2026-09-25 → 2026-10-08 repair: mid-trade exits are EV-gated ONLY when the
 # shared taxonomy classifies their reason DISCRETIONARY.  On a 0/100 binary
 # the expected value of holding to settlement is the (calibrated) held-side
@@ -5701,7 +5830,48 @@ class PositionMonitor:
                     and _lock_bid >= _chase_floor
                     and _chase_attempts < _hard_lock_chase_max_attempts()
                 )
-                if _chase_possible:
+                # 2026-11-27: a chase bid BELOW entry is a loss-zone salvage
+                # sell — the XRP YES@95 failure (latched at 98, primary lock
+                # repriced to entry and guard-rejected, market reversed,
+                # chase sold 89-91c -> -26c on a recovered winner).  Loss-zone
+                # chases now need the shared sell-vs-hold arbiter (or a
+                # deep-tail bid) instead of firing mechanically; the lock
+                # obligation stays latched and re-evaluates next quote.
+                # Profit-zone chases (bid >= entry) stay mechanical.
+                _chase_gate_blocked = False
+                if _chase_possible and _hard_lock_chase_ev_gate_enabled():
+                    try:
+                        _entry_px = int(
+                            getattr(position, "avg_entry_price_cents", 0) or 0
+                        )
+                    except (TypeError, ValueError):
+                        _entry_px = 0
+                    if _entry_px > 0 and _lock_bid < _entry_px:
+                        _chase_gate_blocked = not _pre_settlement_sell_allowed(
+                            position,
+                            snapshot,
+                            _closeout_seconds_remaining(position, snapshot),
+                        )
+                        _chase_possible = _chase_possible and not _chase_gate_blocked
+                if _chase_gate_blocked:
+                    _hl_last_gate_log = float(
+                        _lock_pending.get("chase_gate_last_log_ts", 0.0) or 0.0
+                    )
+                    if (time.time() - _hl_last_gate_log) >= 30.0:
+                        _lock_pending["chase_gate_last_log_ts"] = time.time()
+                        logger.info(
+                            "[HARD-LOCK-CHASE-HOLD] position=%s market=%s "
+                            "latched_bid=%sc current_bid=%sc entry=%sc - "
+                            "loss-zone chase suppressed: sell not justified "
+                            "vs calibrated hold (or above deep-tail bound); "
+                            "obligation stays latched",
+                            position.position_id[:8],
+                            position.market_id,
+                            _lock_pending.get("trigger_bid_cents"),
+                            _lock_bid,
+                            _entry_px,
+                        )
+                elif _chase_possible:
                     if self._is_exit_intent_in_flight(position.position_id):
                         # A dispatched lock/chase IOC still owns the
                         # obligation — do not stack a second order while it
@@ -7995,7 +8165,34 @@ class PositionMonitor:
         from merid.event_venues.kalshi.settlement_aligned_exit import pre_settlement_closeout_due
         lane = _position_decision_lane(position)
         is_settle_conv = (lane == "settlement_convergence")
-        if not is_settle_conv and pre_settlement_closeout_due(_closeout_seconds_remaining(position, snapshot)):
+        _closeout_remaining = _closeout_seconds_remaining(position, snapshot)
+        if not is_settle_conv and pre_settlement_closeout_due(_closeout_remaining):
+            # 2026-11-27: economic triggers inside T-120s must clear the
+            # sell-vs-hold arbiter before the unconditional settlement_guard
+            # rewrite may fire — the rewrite bypasses the breakeven floor
+            # (LOSS_SELL_EXEMPT) and the loop_15m premium-vs-hold EV gate,
+            # which is how a suppressed 84c ratchet_trim became an 80c dump
+            # on a position that settled at 100c.  State-repair/terminal/
+            # capital reasons keep unconditional closeout semantics.
+            if (
+                _closeout_rewrite_ev_gate_enabled()
+                and not _closeout_rewrite_is_unconditional(exit_reason)
+                and not _pre_settlement_sell_allowed(
+                    position, snapshot, _closeout_remaining
+                )
+            ):
+                logger.info(
+                    "[CLOSEOUT-HOLD] position=%s market=%s reason=%s "
+                    "tte=%.1fs - sell not justified vs calibrated hold "
+                    "(or below deep-tail bound); riding to settlement "
+                    "instead of unconditional closeout dump",
+                    getattr(position, "position_id", "?")[:8]
+                    if getattr(position, "position_id", None) else "?",
+                    getattr(position, "market_id", "?"),
+                    _exit_reason_value(exit_reason),
+                    float(_closeout_remaining or 0.0),
+                )
+                return
             exit_reason = ExitReason.SETTLEMENT_GUARD
             contracts_to_close = None
         if _exit_policy_disabled() and exit_reason not in (

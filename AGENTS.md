@@ -2724,3 +2724,74 @@ caps, financial brakes, cycle drawdown.  Rollback = 480; if 1440 ever
 exhausts, next lever is per-window emission dedup, not another bump;
 (c) pf_fade/locked-book/taker-shadow telemetry accumulating
 for the 48-72h calibration pass.
+
+### Premature-loss-sale gates — closeout rewrite + hpl chase EV arbitration (2026-11-27, post 3-loss audit)
+
+Three consecutive realized losses on the 18:50 UTC relaunch traced to
+EMERGENCY-classified exits bypassing the sell-vs-hold arbiter:
+
+- **BTC `KXBTC15M-26NOV271630-30` ~−40..−65¢ forgone:** pf NO@93 held;
+  `ratchet_trim` loss-sells were correctly suppressed all session by the
+  `[BREAKEVEN-FLOOR]` (84–92c exits < 93c entry).  At T-120s a
+  `settlement_guard`/`expiry_liquidation` candidate rewrote through
+  `_emit_exit_intent` to an **unconditional** `SETTLEMENT_GUARD` full
+  close — `mandatory_closeout` in `loop_15m` skipped the
+  premium-vs-hold EV gate and `is_forced` skipped the profit floor.
+  Sold NO ~80–85c vs entry 93c; market settled `no` → would have paid
+  100c.  EV evals showed `net_sell=78.96–84.2` vs `p_cal=97`,
+  `conservative_hold=90` — the sale was never justified.
+- **XRP `KXXRP15M-26NOV271645-45` ~−26..−36¢:** pf YES@95;
+  `hard_profit_lock` latched at bid ≥98, but the primary-lock IOC priced
+  at `threshold − MERID_HARD_LOCK_SWEEP_CENTS` = 95c = **entry** — the
+  exit guard's worst-case-at-limit math saw −4c net and rejected ~8×,
+  then approved a lowered 89c limit; chase ladder sold 89–91c → realized
+  loss on a "profit lock".  Market recovered (markouts ~94–97c).
+- **ETH `KXETH15M-26NOV271645-45` ~−6..−12¢:** pf NO@95;
+  `settlement_guard`/`expiry_liquidation` at T-116s sold ~93–94c vs
+  `net_sell=93.73` vs `p_cal=94`, `conservative_hold=87`.
+
+**Root cause:** `expiry_liquidation`/`hard_profit_lock` classify
+EMERGENCY in `settlement_aligned_exit.py` → `BYPASS_EMERGENCY`, never
+EV-gated; and the T-120s rewrite converted *any* trigger — including
+ones the breakeven floor had just suppressed — into an unconditional
+`settlement_guard` market dump (`LOSS_SELL_EXEMPT`, no floor).
+
+**Fixes shipped (env-gated, rollback documented in `.env`):**
+
+1. `MERID_CLOSEOUT_REWRITE_EV_GATE=1` — inside
+   `position_monitor._emit_exit_intent`, economic exit reasons (ratchet
+   trim/floor, trail, take-profit family, scale_out, time/edge/candle/
+   signal/model-invalidation/continuation stops, adaptive timing,
+   hard_profit_lock, …) must clear `_pre_settlement_sell_allowed` before
+   the `SETTLEMENT_GUARD` rewrite may emit: sell only when the market
+   pays a premium over calibrated hold (same test as
+   `_settlement_guard_sell_justified`) or the held-side bid is in the
+   deep-tail salvage zone.  Suppressed triggers log `[CLOSEOUT-HOLD]`
+   and ride to settlement.  Unconditional reasons (risk, stale_data,
+   manual, market_expired/closed, loss_cap, hard_stop, settlement_guard,
+   expiry_liquidation, auto_exit_99c, emergency/hard_risk/
+   operational_risk, position_mismatch, reconciliation, external_exit,
+   position_monitor_manual, time_exit, scheduled_closeout,
+   market_settlement) keep legacy unconditional closeout.
+2. `MERID_HARD_LOCK_CHASE_EV_GATE=1` — hpl chase bids **below entry**
+   (loss-zone salvage) must clear the same arbiter; a hold verdict keeps
+   the lock obligation latched (no attempt consumed, 30s-throttled
+   `[HARD-LOCK-CHASE-HOLD]` log) instead of terminalizing.  Profit-zone
+   chases (bid ≥ entry) stay mechanical.
+3. `MERID_HARD_LOCK_PRIMARY_AT_THRESHOLD=1` — the primary-lock IOC now
+   prices at the latched threshold, not `threshold − sweep` (= entry for
+   pf claims → guard-rejected → chase-at-loss).  A limit is a bound, not
+   a price: with bid ≥ threshold the IOC fills at best bid anyway.
+   `=0` restores legacy sweep pricing.
+4. `MERID_EXIT_DEEP_TAIL_MAX_BID_CENTS=40` (0=off) — shared capitulation
+   bypass for both gates: held-side bid ≤ bound ⇒ unconditional salvage
+   regardless of model staleness (a 93–96c favorite at ≤40c is contested
+   territory, not a recoverable dip).
+
+**Verification:** `_verify_closeout_gates.py` — 69 assertions pass
+(standalone runner; pytest still hangs under live load).  Rollback =
+set the three gate flags to 0 / `MERID_EXIT_DEEP_TAIL_MAX_BID_CENTS=0`.
+**Watch:** `[CLOSEOUT-HOLD]`/`[HARD-LOCK-CHASE-HOLD]` volumes and the
+settled-PnL delta on the next loss cohort; if holds strand recoverable
+salvage, tighten `MERID_EXIT_DEEP_TAIL_MAX_BID_CENTS` upward, not the
+gate off.
