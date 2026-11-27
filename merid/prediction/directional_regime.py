@@ -2867,6 +2867,13 @@ def pinned_fav_locked_book_mode() -> str:
     ).strip().lower()
 
 
+def pinned_fav_locked_book_min_s() -> float:
+    """Seconds a locked/crossed BBO must persist across gate evaluations
+    before it counts as a *persistent* lock (enforce trigger alongside the
+    RTI-fade coincidence).  <=0 disables the persistence trigger."""
+    return _env_float("MERID_PINNED_FAV_LOCKED_BOOK_MIN_S", 2.0)
+
+
 def pinned_fav_max_decision_age_s() -> float:
     """pf-scoped decision->submit age bound in seconds; <=0 disables."""
     return _env_float("MERID_PINNED_FAV_MAX_DECISION_AGE_S", 30.0)

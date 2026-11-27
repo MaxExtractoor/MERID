@@ -33,17 +33,20 @@ def _env(monkeypatch):
         "MERID_PINNED_FAV_FADE_VETO": "shadow",
         "MERID_PINNED_FAV_FADE_BP": "10",
         "MERID_PINNED_FAV_LOCKED_BOOK_VETO": "enforce",
+        "MERID_PINNED_FAV_LOCKED_BOOK_MIN_S": "2.0",
         "MERID_PINNED_FAV_MAX_DECISION_AGE_S": "30",
         "MERID_RESTING_PF_FADE_MODE": "shadow",
         "MERID_RESTING_PF_FADE_BP": "10",
     }.items():
         monkeypatch.setenv(key, value)
+    orr._PF_LOCKED_BOOK_SEEN.clear()
 
 
 def _intent(**kw):
     d = dict(
         ticker="KXDOGE15M-26NOV261915-15",
         side="BUY_YES",
+        action="buy",
         price_cents=93,
         snapshot_ts=time.time(),
         intent_id="test_intent",
@@ -108,18 +111,46 @@ def test_fade_return_fail_open_on_adapter_error(monkeypatch):
 # _pinned_fav_submit_gate_reason — the three submit gates
 # ---------------------------------------------------------------------------
 
-def test_locked_book_enforce_rejects():
+def test_locked_book_enforce_rejects_with_fade(monkeypatch):
+    """Refined semantics: locked book + adverse RTI fade = the DOGE
+    signature -> enforce reject."""
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: 0.0025)
     r = orr._pinned_fav_submit_gate_reason(
         _intent(), {"bid_cents": 93, "ask_cents": 93}
     )
-    assert r is not None and r.startswith("pf_locked_book")
+    assert r is not None and r.startswith("pf_locked_book") and "fade=" in r
 
 
-def test_crossed_book_enforce_rejects():
+def test_locked_book_benign_passes_shadow(monkeypatch):
+    """A bare lock (no adverse fade, first sighting) is the WS conflation
+    artifact -> shadow telemetry, order proceeds."""
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: None)
+    assert (
+        orr._pinned_fav_submit_gate_reason(
+            _intent(), {"bid_cents": 93, "ask_cents": 93}
+        )
+        is None
+    )
+
+
+def test_locked_book_persistence_enforce_rejects(monkeypatch):
+    """A lock persisting >= MERID_PINNED_FAV_LOCKED_BOOK_MIN_S across gate
+    evaluations rejects even without an adverse fade."""
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: None)
+    it = _intent()
+    book = {"bid_cents": 93, "ask_cents": 93}
+    key = f"{it.ticker}|{it.side}|93|93"
+    orr._PF_LOCKED_BOOK_SEEN[key] = time.time() - 10.0
+    r = orr._pinned_fav_submit_gate_reason(it, book)
+    assert r is not None and r.startswith("pf_locked_book") and "persist=" in r
+
+
+def test_crossed_book_enforce_rejects_with_fade(monkeypatch):
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: 0.003)
     r = orr._pinned_fav_submit_gate_reason(
         _intent(), {"bid_cents": 94, "ask_cents": 93}
     )
-    assert r is not None and r.startswith("pf_locked_book")
+    assert r is not None and r.startswith("pf_locked_book") and "fade=" in r
 
 
 def test_normal_book_passes():
@@ -133,6 +164,7 @@ def test_normal_book_passes():
 
 def test_locked_book_off_mode_passes(monkeypatch):
     monkeypatch.setenv("MERID_PINNED_FAV_LOCKED_BOOK_VETO", "off")
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: 0.0025)
     assert (
         orr._pinned_fav_submit_gate_reason(
             _intent(), {"bid_cents": 93, "ask_cents": 93}
@@ -141,8 +173,9 @@ def test_locked_book_off_mode_passes(monkeypatch):
     )
 
 
-def test_locked_book_shadow_mode_passes(monkeypatch):
+def test_locked_book_shadow_mode_passes_even_with_fade(monkeypatch):
     monkeypatch.setenv("MERID_PINNED_FAV_LOCKED_BOOK_VETO", "shadow")
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: 0.0025)
     assert (
         orr._pinned_fav_submit_gate_reason(
             _intent(), {"bid_cents": 93, "ask_cents": 93}
@@ -153,6 +186,17 @@ def test_locked_book_shadow_mode_passes(monkeypatch):
 
 def test_missing_book_fails_open():
     assert orr._pinned_fav_submit_gate_reason(_intent(), None) is None
+
+
+def test_sell_side_never_gated():
+    """Exits must never be vetoed by entry-side signals."""
+    assert (
+        orr._pinned_fav_submit_gate_reason(
+            _intent(action="sell", side="SELL_YES"),
+            {"bid_cents": 93, "ask_cents": 93},
+        )
+        is None
+    )
 
 
 def test_stale_decision_rejects():
@@ -215,13 +259,14 @@ def test_fade_favorable_move_passes(monkeypatch):
     )
 
 
-def test_gate_helper_is_lane_agnostic_but_callers_scope():
+def test_gate_helper_is_lane_agnostic_but_callers_scope(monkeypatch):
     """The helper itself does not check decision_lane — callers do.
     Verify a non-pf intent still evaluates (callers gate on lane)."""
+    monkeypatch.setattr(dr, "pinned_fav_fade_return", lambda a, s: 0.0025)
     r = orr._pinned_fav_submit_gate_reason(
         _intent(decision_lane="settlement_convergence"),
         {"bid_cents": 93, "ask_cents": 93},
     )
-    # locked-book gate fires on book state alone; lane scoping is the
+    # locked+fade fires on book state alone; lane scoping is the
     # caller's responsibility (documented in the helper docstring).
     assert r is not None and r.startswith("pf_locked_book")

@@ -2592,12 +2592,23 @@ side; fail-open on missing data):
   rejected; RTI velocity is the leading indicator already consumed via
   `rti_feature_snapshot`.
 - **`pf_locked_book` submit veto** —
-  `MERID_PINNED_FAV_LOCKED_BOOK_VETO` (**default enforce**): refuse pf
-  post-only entries when the fresh side-aware BBO is crossed/locked
-  (`bid >= ask`) — no valid spread to price a passive entry against;
-  the DOGE revalidation book was exactly 93/93.  Book coherence, not
-  an edge claim, so it does not conflict with the measured bookflow
-  exemption.
+  `MERID_PINNED_FAV_LOCKED_BOOK_VETO` (**default enforce**), REFINED
+  2026-11-27 after the post-restart audit: a bare `bid >= ask` is mostly
+  the Kalshi WS conflation artifact (docs.kalshi.com orderbook-updates:
+  "between flushes, public levels can lag your own orders, and the book
+  can appear locked or crossed") — 18/23 post-restart pf rejects were
+  transient phantom locks across all five assets (SOL 7, XRP 5, BTC 2,
+  ETH 2, DOGE 2).  Enforce now requires the lock to coincide with an
+  adverse RTI fast leg (`pinned_fav_fade_return >= FADE_BP` — the DOGE
+  signature: locked book + dumping spot) OR persist >=
+  `MERID_PINNED_FAV_LOCKED_BOOK_MIN_S` (default 2.0s, ≤0 disables) across
+  independent gate evaluations (`_PF_LOCKED_BOOK_SEEN` first-seen
+  tracker, keyed by ticker+side+levels).  Benign locks downgrade to
+  `[PF-SUBMIT-GATE-SHADOW]` telemetry (`fade_hit`/`lock_age` fields) so
+  the phantom-lock rate stays measurable.  Reject detail carries the
+  trigger: `pf_locked_book:bid>=ask:fade=+x` or `:persist=Ns`.  Buy-side
+  entries only — sell-side intents return early (exits are never vetoed
+  by entry-side signals).
 - **`pf_decision_stale`** —
   `MERID_PINNED_FAV_MAX_DECISION_AGE_S` (default 30s, ≤0 disables):
   pf-scoped decision→submit age bound (global bounds are 120s — too

@@ -5382,6 +5382,39 @@ def _entry_refresh_grace_allowed(intent: "OrderIntent", age_ms: float) -> bool:
         return False
 
 
+# 2026-11-27 (locked-book refinement): first-seen timestamps for locked BBOs,
+# keyed by ticker+side+levels so a lock at a new price resets the clock.  The
+# Kalshi WS conflation window can display a transient locked/crossed book for
+# a fraction of a second (docs.kalshi.com orderbook-updates: "the book can
+# appear locked or crossed" between flushes) — a lock that persists across
+# independent gate evaluations (revalidation ~seconds before pre-submit) is
+# the real repricing-collapse signature.  Transient state only; bounded.
+_PF_LOCKED_BOOK_SEEN: Dict[str, float] = {}
+_PF_LOCKED_BOOK_SEEN_MAX = 256
+_PF_LOCKED_BOOK_SEEN_TTL_S = 120.0
+
+
+def _pf_locked_book_note(key: str, now: float) -> float:
+    """Record/refresh a locked-book observation; return its age in seconds.
+
+    Age is measured from the FIRST sighting of this exact locked level so a
+    lock that persists across gate calls accumulates; a changed level is a
+    new key and restarts at zero.  Entries older than the TTL are evicted on
+    write to bound memory across a long-lived process.
+    """
+    if len(_PF_LOCKED_BOOK_SEEN) >= _PF_LOCKED_BOOK_SEEN_MAX:
+        for _k in [k for k, t in _PF_LOCKED_BOOK_SEEN.items()
+                   if now - t > _PF_LOCKED_BOOK_SEEN_TTL_S]:
+            _PF_LOCKED_BOOK_SEEN.pop(_k, None)
+        if len(_PF_LOCKED_BOOK_SEEN) >= _PF_LOCKED_BOOK_SEEN_MAX:
+            _PF_LOCKED_BOOK_SEEN.clear()
+    _first = _PF_LOCKED_BOOK_SEEN.get(key)
+    if _first is None:
+        _PF_LOCKED_BOOK_SEEN[key] = now
+        return 0.0
+    return max(0.0, now - _first)
+
+
 def _pinned_fav_submit_gate_reason(
     intent: "OrderIntent",
     side_book: Optional[Dict[str, Any]],
@@ -5400,9 +5433,13 @@ def _pinned_fav_submit_gate_reason(
       ``MERID_PINNED_FAV_FADE_BP``; mode ``MERID_PINNED_FAV_FADE_VETO``
       (off|shadow|enforce, default shadow until calibrated on telemetry).
     * ``pf_locked_book`` — fresh side-aware BBO crossed/locked
-      (``bid >= ask``): no valid spread to price a passive entry
-      against; ``MERID_PINNED_FAV_LOCKED_BOOK_VETO`` (default enforce —
-      book coherence, not an edge claim).
+      (``bid >= ask``).  REFINED 2026-11-27: a bare lock is mostly the WS
+      conflation artifact (18/23 post-restart rejects were transient
+      phantom locks, all five assets), so enforce now requires the lock
+      to coincide with an adverse RTI fast leg (the DOGE signature) or
+      persist >= ``MERID_PINNED_FAV_LOCKED_BOOK_MIN_S`` across gate
+      evaluations; benign locks downgrade to shadow telemetry.
+      ``MERID_PINNED_FAV_LOCKED_BOOK_VETO`` (off|shadow|enforce).
     * ``pf_decision_stale`` — decision age >
       ``MERID_PINNED_FAV_MAX_DECISION_AGE_S`` (default 30s; <=0 disables).
 
@@ -5415,38 +5452,51 @@ def _pinned_fav_submit_gate_reason(
     except Exception:
         return None
 
+    # Buy-side entries only — an exit stamped with the lane must never be
+    # vetoed by an entry-side signal (sign would be wrong).
+    if (getattr(intent, "action", "") or "").lower() != "buy":
+        return None
+
+    # Resolve the asset and the adverse-signed RTI fast-leg return ONCE —
+    # shared by the pf_fade veto and the locked-book fade-coincidence
+    # trigger.  None propagates as fail-open for every consumer.
+    _asset: Optional[str] = None
+    _adv: Optional[float] = None
+    _thr = 0.0
+    try:
+        _tk = (getattr(intent, "ticker", "") or "").upper()
+        for _p in ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"):
+            if _tk.startswith(_p):
+                _asset = _p[2:].replace("15M", "")
+                break
+        if _asset:
+            _adv = _drg.pinned_fav_fade_return(
+                _asset, getattr(intent, "side", "") or ""
+            )
+            _thr = _drg.pinned_fav_fade_bp() / 10000.0
+    except Exception:
+        _asset, _adv, _thr = None, None, 0.0
+    _fade_hit = (
+        _adv is not None and _thr > 0.0 and float(_adv) >= _thr
+    )
+
     # --- pf_fade: settlement-index fast leg moving against the held side ---
     _fade_mode = _drg.pinned_fav_fade_veto_mode()
-    if _fade_mode not in ("off", "0", "false", "no"):
-        try:
-            _asset = None
-            _tk = (getattr(intent, "ticker", "") or "").upper()
-            for _p in ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"):
-                if _tk.startswith(_p):
-                    _asset = _p[2:].replace("15M", "")
-                    break
-            if _asset:
-                _adv = _drg.pinned_fav_fade_return(
-                    _asset, getattr(intent, "side", "") or ""
-                )
-                _thr = _drg.pinned_fav_fade_bp() / 10000.0
-                if _adv is not None and _thr > 0.0 and _adv >= _thr:
-                    _det = (
-                        f"pf_fade:adv_ret={_adv:+.5f}>=thr={_thr:.5f}"
-                        f":asset={_asset}"
-                    )
-                    if _fade_mode in ("enforce", "1", "true", "yes", "on"):
-                        return _det
-                    logger.info(
-                        "[PF-SUBMIT-GATE-SHADOW] ticker=%s intent_id=%s "
-                        "gate=%s side=%s px=%s — would veto (mode=shadow)",
-                        getattr(intent, "ticker", None),
-                        getattr(intent, "intent_id", None),
-                        _det, getattr(intent, "side", None),
-                        getattr(intent, "price_cents", None),
-                    )
-        except Exception:
-            pass
+    if _fade_mode not in ("off", "0", "false", "no") and _fade_hit:
+        _det = (
+            f"pf_fade:adv_ret={_adv:+.5f}>=thr={_thr:.5f}"
+            f":asset={_asset}"
+        )
+        if _fade_mode in ("enforce", "1", "true", "yes", "on"):
+            return _det
+        logger.info(
+            "[PF-SUBMIT-GATE-SHADOW] ticker=%s intent_id=%s "
+            "gate=%s side=%s px=%s — would veto (mode=shadow)",
+            getattr(intent, "ticker", None),
+            getattr(intent, "intent_id", None),
+            _det, getattr(intent, "side", None),
+            getattr(intent, "price_cents", None),
+        )
 
     # --- pf_locked_book: fresh side-aware BBO crossed/locked ---
     _lb_mode = _drg.pinned_fav_locked_book_mode()
@@ -5462,15 +5512,38 @@ def _pinned_fav_submit_gate_reason(
                 and 0.0 < float(_ba) <= float(_bb)
             ):
                 _det = f"pf_locked_book:bid={_bb}>=ask={_ba}"
-                if _lb_mode in ("enforce", "1", "true", "yes", "on"):
-                    return _det
+                # Refined triggers: adverse RTI fade (DOGE signature) or a
+                # lock persisting across independent gate evaluations.
+                _min_persist = _drg.pinned_fav_locked_book_min_s()
+                _lock_age = 0.0
+                if _min_persist and _min_persist > 0.0:
+                    try:
+                        _lk = (
+                            f"{getattr(intent, 'ticker', '')}|"
+                            f"{getattr(intent, 'side', '')}|{_bb}|{_ba}"
+                        )
+                        _lock_age = _pf_locked_book_note(_lk, _time.time())
+                    except Exception:
+                        _lock_age = 0.0
+                _persistent = _min_persist > 0.0 and _lock_age >= _min_persist
+                _enforce_hit = _fade_hit or _persistent
+                if _lb_mode in ("enforce", "1", "true", "yes", "on") and _enforce_hit:
+                    _why = []
+                    if _fade_hit:
+                        _why.append(f"fade={_adv:+.5f}")
+                    if _persistent:
+                        _why.append(f"persist={_lock_age:.1f}s")
+                    return f"{_det}:{'+'.join(_why)}"
+                # Benign lock (neither trigger): shadow telemetry only.
                 logger.info(
                     "[PF-SUBMIT-GATE-SHADOW] ticker=%s intent_id=%s "
-                    "gate=%s side=%s px=%s — would veto (mode=shadow)",
+                    "gate=%s side=%s px=%s fade_hit=%s lock_age=%.1fs "
+                    "— benign locked book, order proceeds",
                     getattr(intent, "ticker", None),
                     getattr(intent, "intent_id", None),
                     _det, getattr(intent, "side", None),
                     getattr(intent, "price_cents", None),
+                    _fade_hit, _lock_age,
                 )
         except Exception:
             pass
