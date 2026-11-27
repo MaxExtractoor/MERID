@@ -2887,3 +2887,41 @@ def resting_pf_fade_mode() -> str:
 def resting_pf_fade_bp() -> float:
     """Adverse fast-leg magnitude (bp) that trips the resting fade cancel."""
     return _env_float("MERID_RESTING_PF_FADE_BP", 10.0)
+
+
+# ---------------------------------------------------------------------------
+# pf_taker shadow qualification (2026-11-27, post-restart missed-entry audit)
+#
+# 24h touchability replay: 23/24 unfilled pf resting orders never had their
+# side-aware ask reach the limit (min gap 0.4-3.4c) — the favorite ran away
+# and the passive bid was never marketable.  Internal calibration (3d, 58
+# settled pf fills): 94.8% win rate at avg 94.0c => taker EV is positive
+# ONLY at ask <= ~94c (breakeven 94.39% at 94c incl. taker fee); >=95c is
+# negative.  DOGE's realized cohort is 77.8% (the -870c pin-break) — taker
+# is negative at any price >= 78c there.  The shadow detector logs every pf
+# candidate whose taker alternative would have cleared the edge screen so
+# the enforce decision is counterfactual-measured, per house rule.
+# ---------------------------------------------------------------------------
+
+
+def pf_taker_shadow_enabled() -> bool:
+    """off|on for the pf taker-alternative shadow telemetry (default on —
+    pure measurement, no orders)."""
+    return _env_flag("MERID_PF_TAKER_SHADOW", True)
+
+
+def pf_taker_max_ask_cents() -> float:
+    """Max side-aware ask (cents) for the taker alternative to qualify."""
+    return _env_float("MERID_PF_TAKER_MAX_ASK", 94.0)
+
+
+def pf_taker_min_edge_cents() -> float:
+    """Min taker EV per contract (cents) for the shadow to qualify:
+    p_sel*100 - ask - taker_fee >= this."""
+    return _env_float("MERID_PF_TAKER_MIN_EDGE_CENTS", 0.5)
+
+
+def pf_taker_exclude_assets() -> str:
+    """Comma-separated assets excluded from the taker shadow (default DOGE —
+    77.8% realized win rate makes taker negative at any in-band price)."""
+    return os.environ.get("MERID_PF_TAKER_EXCLUDE_ASSETS", "DOGE")

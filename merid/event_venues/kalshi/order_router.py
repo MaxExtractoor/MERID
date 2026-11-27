@@ -5415,6 +5415,140 @@ def _pf_locked_book_note(key: str, now: float) -> float:
     return max(0.0, now - _first)
 
 
+_PF_TAKER_SHADOW_PATH = "logs/pf_taker_shadow.jsonl"
+
+
+def _pf_taker_fee_cents_per_ct(price_cents: float) -> float:
+    """Kalshi taker fee per contract in cents at ``price_cents``:
+    0.07 * P * (1-P) dollars/contract = 7 * P * (1-P) cents/contract
+    (un-rounded; the venue rounds up per order — sub-centicent, immaterial
+    at 1-6 contract pf sizes)."""
+    p = price_cents / 100.0
+    return 7.0 * p * (1.0 - p)
+
+
+def _pf_taker_shadow_note(
+    intent: "OrderIntent",
+    side_book: Optional[Dict[str, Any]],
+) -> None:
+    """Shadow-only taker qualification telemetry for pf candidates
+    (2026-11-27, post-restart missed-entry audit).
+
+    24h touchability replay: 23/24 unfilled pf resting orders never had
+    their side-aware ask reach the limit — the favorite ran away and the
+    passive bid was never marketable.  Internal calibration (3d, 58
+    settled pf fills): 94.8% win rate at avg 94.0c => taker EV is
+    positive only at ask <= ~94c; >=95c is negative.  DOGE's realized
+    cohort is 77.8% — taker negative at any in-band price there.
+
+    For every pf buy candidate whose maker gates just passed, evaluate
+    the taker alternative at the fresh side-aware ask:
+
+        EV/ct = p_sel*100 - ask_cents - taker_fee >= MERID_PF_TAKER_MIN_EDGE_CENTS
+
+    and log ``[PF-TAKER-SHADOW]`` + append ``logs/pf_taker_shadow.jsonl``
+    when it qualifies (ask <= MERID_PF_TAKER_MAX_ASK, asset not in
+    MERID_PF_TAKER_EXCLUDE_ASSETS).  Pure measurement — no order is ever
+    submitted; the enforce decision is counterfactual-measured per house
+    rule.  Never raises.
+    """
+    try:
+        from merid.prediction import directional_regime as _drg
+    except Exception:
+        return
+    try:
+        if not _drg.pf_taker_shadow_enabled():
+            return
+        if str(getattr(intent, "decision_lane", "") or "") != "pinned_fav":
+            return
+        if (getattr(intent, "action", "") or "").lower() != "buy":
+            return
+        if not isinstance(side_book, dict):
+            return
+        _ask = side_book.get("ask_cents")
+        if not isinstance(_ask, (int, float)):
+            return
+        try:
+            _ask_f = float(_ask)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(_ask_f) or not (0.0 < _ask_f <= _drg.pf_taker_max_ask_cents()):
+            return
+        _tk = (getattr(intent, "ticker", "") or "").upper()
+        _asset: Optional[str] = None
+        for _p in ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"):
+            if _tk.startswith(_p):
+                _asset = _p[2:].replace("15M", "")
+                break
+        if not _asset:
+            return
+        _excl = {
+            a.strip().upper()
+            for a in _drg.pf_taker_exclude_assets().split(",")
+            if a.strip()
+        }
+        if _asset in _excl:
+            return
+        _p_sel = getattr(intent, "p_selected", None)
+        if _p_sel is None:
+            return
+        try:
+            _p_sel_f = float(_p_sel)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(_p_sel_f) or not (0.0 < _p_sel_f < 1.0):
+            return
+        _count = float(
+            getattr(intent, "count_fp", None)
+            or getattr(intent, "count", None)
+            or 0.0
+        )
+        if not math.isfinite(_count) or _count <= 0.0:
+            _count = 1.0
+        _fee_c = _pf_taker_fee_cents_per_ct(_ask_f)
+        _ev_c = _p_sel_f * 100.0 - _ask_f - _fee_c
+        if _ev_c < _drg.pf_taker_min_edge_cents():
+            return
+        _fade: Optional[float] = None
+        try:
+            _fade = _drg.pinned_fav_fade_return(
+                _asset, getattr(intent, "side", "") or ""
+            )
+        except Exception:
+            _fade = None
+        _rec = {
+            "ts": _time.time(),
+            "iso": datetime.now(timezone.utc).isoformat(),
+            "ticker": getattr(intent, "ticker", None),
+            "asset": _asset,
+            "side": getattr(intent, "side", None),
+            "limit_px": getattr(intent, "price_cents", None),
+            "taker_ask": _ask_f,
+            "count": _count,
+            "p_sel": _p_sel_f,
+            "taker_fee_c_per_ct": round(_fee_c, 4),
+            "taker_ev_c_per_ct": round(_ev_c, 4),
+            "fade_ret": _fade,
+            "intent_id": getattr(intent, "intent_id", None),
+        }
+        try:
+            with open(_PF_TAKER_SHADOW_PATH, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps(_rec) + "\n")
+        except Exception:
+            pass
+        logger.info(
+            "[PF-TAKER-SHADOW] ticker=%s asset=%s side=%s limit=%sc ask=%.1fc "
+            "p_sel=%.4f fee=%.3fc ev=%.3fc/ct fade=%s — taker alternative "
+            "qualified (shadow, no order)",
+            _tk, _asset, getattr(intent, "side", None),
+            getattr(intent, "price_cents", None), _ask_f, _p_sel_f,
+            _fee_c, _ev_c,
+            f"{_fade:+.5f}" if _fade is not None else "n/a",
+        )
+    except Exception:
+        pass
+
+
 def _pinned_fav_submit_gate_reason(
     intent: "OrderIntent",
     side_book: Optional[Dict[str, Any]],
@@ -18624,6 +18758,10 @@ async def _route_live(
                         reason=f"pf_submit_gate:{_pf_gate_reason}",
                         latency_ms=round(latency, 2),
                     )
+                # 2026-11-27: gates passed — shadow the taker alternative on
+                # the same fresh side-aware book before the maker order rests
+                # (logs/pf_taker_shadow.jsonl; measurement only, no order).
+                _pf_taker_shadow_note(intent, _ps_side)
 
         # Submit through the normalized execution port.  A timeout here means
         # the ack was lost in flight: the order MAY be live on the exchange.

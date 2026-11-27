@@ -270,3 +270,85 @@ def test_gate_helper_is_lane_agnostic_but_callers_scope(monkeypatch):
     # locked+fade fires on book state alone; lane scoping is the
     # caller's responsibility (documented in the helper docstring).
     assert r is not None and r.startswith("pf_locked_book")
+
+
+# ---------------------------------------------------------------------------
+# _pf_taker_shadow_note — shadow-only taker qualification (measurement)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _shadow_log(tmp_path, monkeypatch):
+    p = tmp_path / "pf_taker_shadow.jsonl"
+    monkeypatch.setattr(orr, "_PF_TAKER_SHADOW_PATH", str(p))
+    return p
+
+
+def _shadow_records(p):
+    import json as _json
+    if not p.exists():
+        return []
+    return [_json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+
+
+def test_taker_shadow_qualifies_at_94_ask_with_edge(_shadow_log, monkeypatch):
+    # p_sel=0.96, ask=94 -> EV = 96 - 94 - 0.3948 = +1.61c >= 0.5 -> qualify
+    it = _intent(ticker="KXXRP15M-1", p_selected=0.96, count_fp=5.0)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93, "ask_cents": 94})
+    recs = _shadow_records(_shadow_log)
+    assert len(recs) == 1
+    assert recs[0]["taker_ask"] == 94.0
+    assert recs[0]["taker_ev_c_per_ct"] > 0.5
+    assert recs[0]["asset"] == "XRP"
+
+
+def test_taker_shadow_excludes_doge_by_default(_shadow_log, monkeypatch):
+    it = _intent(p_selected=0.99, count_fp=5.0)  # DOGE ticker in fixture
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93, "ask_cents": 94})
+    assert _shadow_records(_shadow_log) == []
+
+
+def test_taker_shadow_qualifies_for_xrp(_shadow_log, monkeypatch):
+    it = _intent(ticker="KXXRP15M-26NOV270100-00", p_selected=0.96,
+                 count_fp=5.0)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93, "ask_cents": 94})
+    recs = _shadow_records(_shadow_log)
+    assert len(recs) == 1 and recs[0]["asset"] == "XRP"
+
+
+def test_taker_shadow_rejects_ask_above_cap(_shadow_log, monkeypatch):
+    it = _intent(ticker="KXXRP15M-1", p_selected=0.999, count_fp=5.0)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 94, "ask_cents": 95})
+    assert _shadow_records(_shadow_log) == []
+
+
+def test_taker_shadow_rejects_when_edge_below_floor(_shadow_log, monkeypatch):
+    # p_sel=0.94, ask=94 -> EV = 94 - 94 - 0.3948 = -0.39c < 0.5 -> no
+    it = _intent(ticker="KXXRP15M-1", p_selected=0.94, count_fp=5.0)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93, "ask_cents": 94})
+    assert _shadow_records(_shadow_log) == []
+
+
+def test_taker_shadow_disabled(_shadow_log, monkeypatch):
+    monkeypatch.setenv("MERID_PF_TAKER_SHADOW", "0")
+    it = _intent(ticker="KXXRP15M-1", p_selected=0.99, count_fp=5.0)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93, "ask_cents": 94})
+    assert _shadow_records(_shadow_log) == []
+
+
+def test_taker_shadow_ignores_non_pf_and_sell(_shadow_log, monkeypatch):
+    orr._pf_taker_shadow_note(
+        _intent(decision_lane="settlement_convergence", p_selected=0.99,
+                ticker="KXXRP15M-1"),
+        {"bid_cents": 93, "ask_cents": 94})
+    orr._pf_taker_shadow_note(
+        _intent(action="sell", side="SELL_YES", p_selected=0.99,
+                ticker="KXXRP15M-1"),
+        {"bid_cents": 93, "ask_cents": 94})
+    assert _shadow_records(_shadow_log) == []
+
+
+def test_taker_shadow_fails_open_on_missing_book(_shadow_log, monkeypatch):
+    it = _intent(ticker="KXXRP15M-1", p_selected=0.99)
+    orr._pf_taker_shadow_note(it, None)
+    orr._pf_taker_shadow_note(it, {"bid_cents": 93})  # no ask
+    assert _shadow_records(_shadow_log) == []

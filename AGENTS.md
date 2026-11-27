@@ -2633,5 +2633,39 @@ verdicts are reconciled against fill markouts.  `pf_locked_book` and
 claims.  Knobs live in `.env` (~line 1849) and read via
 `directional_regime` env helpers; the running process picks them up on
 next restart (code changes require restart regardless).  Regression
-coverage: `tests/test_pinned_fav_fade_gates.py` (20 cases — sign
-convention, fail-open, each gate's off/shadow/enforce semantics).
+coverage: `tests/test_pinned_fav_fade_gates.py` (sign convention,
+fail-open, each gate's off/shadow/enforce semantics, taker-shadow
+qualification).
+
+**Locked-book refinement + pf_taker shadow (2026-11-27, post-restart
+audit, commit c010d54d + taker-shadow commit):** the bare
+`bid >= ask` check rejected 18/23 post-restart pf submits across all
+five assets (SOL 7, XRP 5, BTC 2, ETH 2, DOGE 2) — Kalshi WS docs
+confirm the book "can appear locked or crossed" between conflation
+flushes, so most were transient phantom locks.  Enforce now requires
+locked AND (adverse RTI fast leg ≥ `MERID_PINNED_FAV_FADE_BP` — the
+DOGE signature) OR (persist ≥ `MERID_PINNED_FAV_LOCKED_BOOK_MIN_S`
+default 2.0s across gate evaluations via `_PF_LOCKED_BOOK_SEEN`
+first-seen tracker); benign locks log `[PF-SUBMIT-GATE-SHADOW]` with
+`fade_hit`/`lock_age`.  Buy-side guard: sell-side intents return early.
+
+**pf_taker shadow qualification** (`order_router._pf_taker_shadow_note`,
+wired at the pre-submit gate site only — freshest book, no duplicates):
+24h touchability replay showed 23/24 unfilled pf orders never had their
+ask reach the limit (min gap 0.4–3.4¢) — favorites ran away; internal
+3d calibration (58 settled pf fills) = 94.8% win rate at avg 94.0¢ ⇒
+taker EV positive ONLY at ask ≤ ~94¢ (breakeven 94.39% incl. 0.39¢
+taker fee at 94¢), ≥95¢ negative; DOGE realized cohort 77.8% ⇒ taker
+negative at any in-band price.  For every pf buy candidate whose maker
+gates passed, the detector evaluates the taker alternative
+`EV/ct = p_sel·100 − ask − 7·P·(1−P) ≥ MERID_PF_TAKER_MIN_EDGE_CENTS`
+(default 0.5¢) at `ask ≤ MERID_PF_TAKER_MAX_ASK` (default 94¢), asset
+∉ `MERID_PF_TAKER_EXCLUDE_ASSETS` (default DOGE), and logs
+`[PF-TAKER-SHADOW]` + appends `logs/pf_taker_shadow.jsonl` (ts, ticker,
+asset, side, limit_px, taker_ask, count, p_sel, fee, EV, fade_ret).
+`MERID_PF_TAKER_SHADOW=1` default on — pure measurement, NO order is
+ever submitted.  Enforce decision after ~48–72h shadow + settlement
+join against `settlement_outcomes.jsonl`.  Per-asset fade-threshold
+vol-normalization (BTC p99=18.7bp vs SOL p99=30.6bp on 10s legs) is a
+known open item for the shadow-calibration pass — flat 10bp currently
+fires 1.6–3.7% of ticks depending on asset.
