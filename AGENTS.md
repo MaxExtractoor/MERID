@@ -2669,3 +2669,50 @@ join against `settlement_outcomes.jsonl`.  Per-asset fade-threshold
 vol-normalization (BTC p99=18.7bp vs SOL p99=30.6bp on 10s legs) is a
 known open item for the shadow-calibration pass — flat 10bp currently
 fires 1.6–3.7% of ticks depending on asset.
+
+### Post-restart loss dissection + tail-drop catastrophe cap (2026-11-27)
+
+Full-day counterfactual audit (`logs/exit_counterfactuals.jsonl`, 24
+exited episodes since the 01:32 UTC restart): realized net ≈ −145¢ on
+three negative episodes; exits **net +669¢** overall (saves +1168¢ on
+ETH NO@93→91/+568, DOGE NO@76→78/+486, XRP YES@94→24/+114 vs forgone
+−499¢ across ~16 small early exits).  The two "could-have-won" losses:
+
+- **SOL `KXSOL15M-26NOV271100-00` −153¢ (−195¢ forgone vs hold +42¢):**
+  pf NO@93 entry; NO bid dropped 93→~79 in <60s; the 2026-11-25
+  `MERID_NO_EDGE_LOSS_SALVAGE_IGNORE_DISABLE=1` carve-out re-armed the
+  14¢ no-edge drop floor under `MERID_DISABLE_LOSS_STOPS=1`, firing
+  `LOSS_CAP` at TTE ~257s — sold ~69-74¢ (`executable_exit_cents=74` vs
+  `fair_value_cents=90`, a ~16¢ below-fair sale into a book/model
+  dislocation) on a position that settled NO.  **Second identical fire**
+  (SOL NO@93, 2026-11-25 23:09, exec 78/fair 88) also forgone −69¢ — the
+  carve-out is 0-for-2 since re-arm, both pf NO@93 recoveries.
+- **XRP `KXXRP15M-26NOV270230-30` −12¢ (−41¢ forgone vs hold +29¢):**
+  pf YES@95; `hard_profit_lock` latched at bid ≥98 (pf gain = entry+3),
+  market reversed, the chase ladder sold ~86-94¢ avg 93.67¢ — below
+  entry — then it settled YES.  hpl is net-positive overall (the two
+  catastrophic saves above ARE hpl exits); left unchanged, flagged for
+  shadow measurement of a latch-relative chase floor.
+- **XRP `KXXRP15M-26NOV270245-45` −356¢: NOT an exit bug** — pf YES@94
+  undercut-fill into a collapse; `settlement_guard` @24¢ saved +114¢ vs
+  riding to 0.  Entry-side adverse selection (pf_fade shadow gate
+  already shipped covers this signature).
+
+**Fix shipped:** `MERID_TAIL_LOSS_DROP_MAX_BID_CENTS` (default 50, 0 =
+off) — catastrophe cap on the no-edge *drop* trigger in
+`position_monitor._check_position`: a drop breach may only emit when the
+held-side bid ≤ cap.  The 14¢ floor was sized for 40-70¢ quota/probe
+entries; on pf 93-96¢ entries it fires at 79-82¢ — still a strong
+favorite, not tail risk.  Absolute `floor_cents=18` backstop unaffected;
+applied post-debounce so breach observations keep accruing (fires
+immediately when the bid reaches the cap).  Suppressions log
+`[TAIL-DROP-MAXBID]` (60s throttle).  **Partial reversal of the
+2026-11-25 "exit ~80-82¢ on pin break" directive**, amended on the new
+counterfactual evidence — rollback =0.  Live on next restart.
+
+**Open items:** (a) hpl chase floor is `entry−14` for no-edge — a 95¢
+lock can sell at 81¢; consider latch-relative giveback bound after
+shadow data; (b) `MERID_PINNED_FAV_DAILY_MAX=480` exhausted again
+2026-11-27 (~15:55 UTC) — second straight day, lane dark until UTC
+midnight; (c) pf_fade/locked-book/taker-shadow telemetry accumulating
+for the 48-72h calibration pass.

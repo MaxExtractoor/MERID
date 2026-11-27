@@ -866,6 +866,26 @@ def _tail_floor_min_obs() -> int:
         return 2
 
 
+def _tail_loss_drop_max_bid_cents() -> int:
+    """Highest held-side bid at which the no-edge *drop* trigger may emit.
+
+    2026-11-27: the no-edge drop floor (entry - 14c) was sized for quota/
+    probe entries in the 40-70c band, where a 14c drop IS tail risk.  For
+    pinned-fav entries at 93-96c the same 14c floor lands at 79-82c — still
+    a strong favorite, not a catastrophe — and both post-rearm LOSS_CAP
+    fires (SOL NO@93 x2, 2026-11-25/27) sold ~74-87c on positions that
+    settled in-the-money (-69c/-195c forgone vs hold).  Requiring the bid
+    to reach this cap (default 50c — genuinely contested territory) keeps
+    the salvage for real collapses while letting mid-window dips recover;
+    the absolute ``floor_cents`` backstop is unaffected.  ``0`` disables
+    the cap and restores the entry-relative-only trigger.
+    """
+    try:
+        return max(0, int(os.getenv("MERID_TAIL_LOSS_DROP_MAX_BID_CENTS", "50")))
+    except (TypeError, ValueError):
+        return 50
+
+
 def _tail_floor_fire_allowed(position: Any, cfg: Dict[str, Any], now: float) -> bool:
     """Whether the tail-loss floor may emit a candidate right now.
 
@@ -5050,6 +5070,39 @@ class PositionMonitor:
                     _floor_hit = False
             else:
                 position.tail_floor_breach_obs = 0
+            # 2026-11-27: catastrophe cap on the drop trigger.  A no-edge
+            # drop breach at a still-favored bid (pf 93-96c entries floor
+            # at 79-82c) is a recoverable dip, not tail risk — both
+            # post-rearm fires sold into recoveries.  Suppress the drop
+            # path until the held-side bid reaches the cap; the absolute
+            # floor (<=floor_cents) still owns true collapses.  Applied
+            # after the debounce so breach observations keep accruing —
+            # when the bid finally reaches the cap the trigger fires on
+            # the next eval without re-debouncing.
+            _drop_max_bid = _tail_loss_drop_max_bid_cents()
+            if (
+                _drop_hit
+                and not _floor_hit
+                and _drop_max_bid > 0
+                and current_price_cents is not None
+                and current_price_cents > _drop_max_bid
+            ):
+                _cap_log_at = float(
+                    getattr(position, "tail_drop_maxbid_logged_at", 0.0) or 0.0
+                )
+                if time.time() - _cap_log_at >= 60.0:
+                    position.tail_drop_maxbid_logged_at = time.time()
+                    logger.info(
+                        "[TAIL-DROP-MAXBID] position=%s side=%s bid=%dc "
+                        "entry=%dc cap=%dc - drop salvage suppressed above "
+                        "cap; rides to recovery, deeper breach, or floor",
+                        position.position_id[:8],
+                        position.side.value,
+                        current_price_cents,
+                        _entry_px,
+                        _drop_max_bid,
+                    )
+                _drop_hit = False
             if _drop_hit or _floor_hit:
                 # 2026-11-09: settlement-aware model-disagreement hold.
                 # A persistent price breach that the *settlement* model
